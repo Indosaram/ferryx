@@ -123,3 +123,80 @@ export function calculateEdgePath(
   return `M ${x1} ${y1} C ${x1 + dx} ${cy1}, ${x2 - dx} ${cy2}, ${x2} ${y2}`;
 }
 
+export type Camera = {
+  readonly x: number;
+  readonly y: number;
+  readonly scale: number;
+};
+
+export const MAX_SCALE = 3.0;
+export const MIN_SCALE_FLOOR = 0.1;
+
+export function calculateFitCamera(
+  viewportWidth: number,
+  viewportHeight: number,
+  contentWidth: number,
+  contentHeight: number,
+): Camera {
+  if (viewportWidth <= 0 || viewportHeight <= 0 || contentWidth <= 0 || contentHeight <= 0) {
+    return { x: 0, y: 0, scale: 1 };
+  }
+  const margin = Math.min(24, viewportWidth / 4, viewportHeight / 4);
+  const fitScale = Math.min(
+    1,
+    (viewportWidth - 2 * margin) / contentWidth,
+    (viewportHeight - 2 * margin) / contentHeight,
+  );
+  const x = (viewportWidth - contentWidth * fitScale) / 2;
+  const y = (viewportHeight - contentHeight * fitScale) / 2;
+  return { x, y, scale: fitScale };
+}
+
+export function calculateEffectiveMinScale(fitScale: number): number {
+  return Math.min(MIN_SCALE_FLOOR, fitScale);
+}
+
+export function calculateZoomAtAnchor(
+  camera: Camera,
+  requestedScale: number,
+  anchor: { readonly x: number; readonly y: number },
+  minScale: number,
+  maxScale = MAX_SCALE,
+): Camera {
+  const { x, y, scale: s } = camera;
+  if (s <= 0) return camera;
+
+  let sNew = requestedScale;
+  if (s < minScale) {
+    if (requestedScale <= s) return camera;
+    sNew = Math.min(minScale, requestedScale);
+  } else if (s > maxScale) {
+    if (requestedScale >= s) return camera;
+    sNew = Math.max(maxScale, requestedScale);
+  } else {
+    sNew = Math.max(minScale, Math.min(maxScale, requestedScale));
+  }
+
+  if (sNew === s) return camera;
+
+  const tNewX = anchor.x - (sNew / s) * (anchor.x - x);
+  const tNewY = anchor.y - (sNew / s) * (anchor.y - y);
+
+  return { x: tNewX, y: tNewY, scale: sNew };
+}
+
+export function normalizeWheelDeltaPixels(
+  deltaY: number,
+  deltaMode: number,
+  viewportHeight: number,
+): number {
+  if (deltaMode === 1) {
+    return deltaY * 16;
+  }
+  if (deltaMode === 2) {
+    return deltaY * Math.max(1, viewportHeight);
+  }
+  return deltaY;
+}
+
+

@@ -1,4 +1,13 @@
-import React, { useSyncExternalStore } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
+import { Minus, Plus } from "lucide-react";
+
 import type { DagNodeSnapshot, DagRunSnapshot } from "../../lib/dagTypes";
 import { deriveDagRunCounts } from "../../lib/dagTypes";
 import { dagStore } from "../../state/dagStore";
@@ -7,12 +16,18 @@ import { DagNodeCard } from "./DagNodeCard";
 import {
   CARD_HEIGHT,
   CARD_WIDTH,
+  calculateFitCamera,
+  calculateEffectiveMinScale,
   calculateNodePosition,
+  calculateZoomAtAnchor,
   GAP_X,
   GAP_Y,
+  MAX_SCALE,
+  normalizeWheelDeltaPixels,
   PAD_X,
   PAD_Y,
 } from "./dagViewUtils";
+import type { Camera } from "./dagViewUtils";
 
 export type DagGraphViewProps = {
   readonly runId?: string | null;
@@ -30,7 +45,7 @@ export function DagGraphView({
 }: DagGraphViewProps): JSX.Element {
   const storeState = useSyncExternalStore(dagStore.subscribe, () => dagStore.getState());
 
-  const activeRun: DagRunSnapshot | null = React.useMemo(() => {
+  const activeRun: DagRunSnapshot | null = useMemo(() => {
     if (propSnapshot) return propSnapshot;
 
     if (runId) {
@@ -52,6 +67,530 @@ export function DagGraphView({
     return null;
   }, [propSnapshot, runId, projectPath, storeState]);
 
+  // Viewport & camera refs / state
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const cameraRef = useRef<Camera>({ x: 0, y: 0, scale: 1 });
+  const [camera, setCameraState] = useState<Camera>({ x: 0, y: 0, scale: 1 });
+
+  const setCamera = useCallback((next: Camera) => {
+    cameraRef.current = next;
+    setCameraState(next);
+  }, []);
+
+  const lastDimensionsRef = useRef<{ width: number; height: number } | null>(null);
+  const currentRunIdRef = useRef<string | null>(null);
+
+  // Gesture tracking refs
+  const activePointersRef = useRef<Map<number, { clientX: number; clientY: number }>>(new Map());
+  const primaryPointerIdRef = useRef<number | null>(null);
+  const pinchBaselineRef = useRef<{
+    s0: number;
+    d0: number;
+    anchorX: number;
+    anchorY: number;
+  } | null>(null);
+  const hasDraggedRef = useRef<boolean>(false);
+
+  const cancelGesture = useCallback(() => {
+    const viewport = viewportRef.current;
+    if (viewport && primaryPointerIdRef.current !== null) {
+      try {
+        viewport.releasePointerCapture(primaryPointerIdRef.current);
+      } catch {
+        // ignore
+      }
+    }
+    for (const [pointerId] of activePointersRef.current) {
+      if (viewport) {
+        try {
+          viewport.releasePointerCapture(pointerId);
+        } catch {
+          // ignore
+        }
+      }
+    }
+    activePointersRef.current.clear();
+    primaryPointerIdRef.current = null;
+    pinchBaselineRef.current = null;
+    hasDraggedRef.current = false;
+  }, []);
+
+  // Compute graph geometry
+  const {
+    waves,
+    counts,
+    nodeMap,
+    bottleneckMap,
+    criticalPath,
+    criticalPathSet,
+    nodePositions,
+    contentWidth,
+    contentHeight,
+  } = useMemo(() => {
+    if (!activeRun) {
+      return {
+        waves: [],
+        counts: { total: 0, completed: 0, running: 0, failed: 0, cancelled: 0, skipped: 0 },
+        nodeMap: new Map<string, DagNodeSnapshot>(),
+        bottleneckMap: new Map<string, number>(),
+        criticalPath: [],
+        criticalPathSet: new Set<string>(),
+        nodePositions: new Map<string, { x: number; y: number }>(),
+        contentWidth: 0,
+        contentHeight: 0,
+      };
+    }
+
+    const runNodes = activeRun.nodes;
+    const rawWaves = [...activeRun.waves].sort((a, b) => a.index - b.index);
+
+    const assignedNodeIds = new Set<string>();
+    rawWaves.forEach((wave) => {
+      wave.nodeIds.forEach((id) => assignedNodeIds.add(id));
+    });
+    const unassignedNodeIds = runNodes
+      .filter((n) => !assignedNodeIds.has(n.id))
+      .map((n) => n.id);
+
+    const computedWaves = [...rawWaves];
+    if (unassignedNodeIds.length > 0) {
+      computedWaves.push({
+        index: rawWaves.length > 0 ? Math.max(...rawWaves.map((w) => w.index)) + 1 : 0,
+        nodeIds: unassignedNodeIds,
+      });
+    }
+
+    const runCounts = activeRun.counts || deriveDagRunCounts(runNodes);
+    const nMap = new Map<string, DagNodeSnapshot>(runNodes.map((n) => [n.id, n]));
+    const bMap = new Map<string, number>(
+      (activeRun.bottlenecks || []).map((b) => [b.nodeId, b.blockedCount]),
+    );
+    const cPath = activeRun.criticalPath || [];
+    const cpSet = new Set<string>(cPath);
+
+    const positions = new Map<string, { x: number; y: number }>();
+    let maxCol = 0;
+    let maxRow = 0;
+
+    computedWaves.forEach((wave, colIndex) => {
+      maxCol = Math.max(maxCol, colIndex);
+      wave.nodeIds.forEach((nodeId, rowIndex) => {
+        maxRow = Math.max(maxRow, rowIndex);
+        positions.set(nodeId, calculateNodePosition(colIndex, rowIndex));
+      });
+    });
+
+    const width = PAD_X * 2 + (maxCol + 1) * CARD_WIDTH + maxCol * GAP_X;
+    const height = PAD_Y * 2 + (maxRow + 1) * CARD_HEIGHT + maxRow * GAP_Y;
+
+    return {
+      waves: computedWaves,
+      counts: runCounts,
+      nodeMap: nMap,
+      bottleneckMap: bMap,
+      criticalPath: cPath,
+      criticalPathSet: cpSet,
+      nodePositions: positions,
+      contentWidth: width,
+      contentHeight: height,
+    };
+  }, [activeRun]);
+
+  const fitScale = useMemo(() => {
+    if (!lastDimensionsRef.current || contentWidth <= 0 || contentHeight <= 0) return 1;
+    return calculateFitCamera(
+      lastDimensionsRef.current.width,
+      lastDimensionsRef.current.height,
+      contentWidth,
+      contentHeight,
+    ).scale;
+  }, [contentWidth, contentHeight]);
+
+  const effectiveMinScale = calculateEffectiveMinScale(fitScale);
+
+  // Run switch vs same-run update effect
+  useEffect(() => {
+    const runIdValue = activeRun?.runId ?? null;
+    if (runIdValue !== currentRunIdRef.current) {
+      currentRunIdRef.current = runIdValue;
+      cancelGesture();
+      if (runIdValue && lastDimensionsRef.current && contentWidth > 0 && contentHeight > 0) {
+        const fitCam = calculateFitCamera(
+          lastDimensionsRef.current.width,
+          lastDimensionsRef.current.height,
+          contentWidth,
+          contentHeight,
+        );
+        setCamera(fitCam);
+      }
+    }
+  }, [activeRun?.runId, cancelGesture, contentWidth, contentHeight, setCamera]);
+
+  // ResizeObserver effect
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const { width, height } = entry.contentRect;
+        if (width <= 0 || height <= 0) continue;
+
+        const prev = lastDimensionsRef.current;
+        lastDimensionsRef.current = { width, height };
+
+        cancelGesture();
+
+        if (!prev) {
+          // Initial positive measurement: fit camera
+          if (contentWidth > 0 && contentHeight > 0) {
+            const fitCam = calculateFitCamera(width, height, contentWidth, contentHeight);
+            setCamera(fitCam);
+          }
+        } else {
+          // Subsequent measurement: shift translation by half the delta
+          const deltaW = width - prev.width;
+          const deltaH = height - prev.height;
+          if (deltaW !== 0 || deltaH !== 0) {
+            const nextCam = {
+              ...cameraRef.current,
+              x: cameraRef.current.x + deltaW / 2,
+              y: cameraRef.current.y + deltaH / 2,
+            };
+            setCamera(nextCam);
+          }
+        }
+      }
+    });
+
+    observer.observe(viewport);
+    return () => {
+      observer.disconnect();
+    };
+  }, [cancelGesture, contentWidth, contentHeight, setCamera]);
+
+  // Viewport-scoped non-passive wheel listener
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+
+    const onWheel = (e: WheelEvent) => {
+      // Pure horizontal wheel leaves camera unchanged and is not a camera gesture
+      if (e.deltaY === 0 && e.deltaX !== 0) {
+        return;
+      }
+
+      e.preventDefault();
+      e.stopPropagation();
+
+      const rect = viewport.getBoundingClientRect();
+      const px = e.clientX - rect.left;
+      const py = e.clientY - rect.top;
+
+      const currentCam = cameraRef.current;
+      const deltaPixels = normalizeWheelDeltaPixels(e.deltaY, e.deltaMode, rect.height);
+      const clampedDelta = Math.max(-1000, Math.min(1000, deltaPixels));
+      const requestedScale = currentCam.scale * Math.exp(-0.002 * clampedDelta);
+
+      const currentFitScale =
+        lastDimensionsRef.current && contentWidth > 0 && contentHeight > 0
+          ? calculateFitCamera(
+              lastDimensionsRef.current.width,
+              lastDimensionsRef.current.height,
+              contentWidth,
+              contentHeight,
+            ).scale
+          : 1;
+      const minScale = calculateEffectiveMinScale(currentFitScale);
+
+      const nextCam = calculateZoomAtAnchor(
+        currentCam,
+        requestedScale,
+        { x: px, y: py },
+        minScale,
+        MAX_SCALE,
+      );
+      setCamera(nextCam);
+    };
+
+    viewport.addEventListener("wheel", onWheel, { passive: false });
+    return () => {
+      viewport.removeEventListener("wheel", onWheel);
+    };
+  }, [contentWidth, contentHeight, setCamera]);
+
+  // Window blur & visibilitychange listeners
+  useEffect(() => {
+    const onBlur = () => {
+      cancelGesture();
+    };
+    const onVisibilityChange = () => {
+      if (document.hidden) {
+        cancelGesture();
+      }
+    };
+
+    window.addEventListener("blur", onBlur);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("blur", onBlur);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      cancelGesture();
+    };
+  }, [cancelGesture]);
+
+  // Pointer event handlers
+  const onPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement | null;
+    if (
+      target &&
+      target.closest(
+        'button, a, input, textarea, select, [contenteditable="true"], [data-no-pan]',
+      )
+    ) {
+      return;
+    }
+
+    const pointerType = e.pointerType || "mouse";
+
+    if (pointerType === "mouse") {
+      if (e.button !== 0 || e.buttons !== 1) return;
+      if (primaryPointerIdRef.current !== null) return;
+      primaryPointerIdRef.current = e.pointerId;
+      activePointersRef.current.set(e.pointerId, { clientX: e.clientX, clientY: e.clientY });
+      hasDraggedRef.current = false;
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch {
+        // ignore
+      }
+      e.stopPropagation();
+    } else if (pointerType === "touch" || pointerType === "pen") {
+      if (activePointersRef.current.size >= 2) {
+        return;
+      }
+      activePointersRef.current.set(e.pointerId, { clientX: e.clientX, clientY: e.clientY });
+      hasDraggedRef.current = false;
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch {
+        // ignore
+      }
+
+      if (activePointersRef.current.size === 2) {
+        const pts = Array.from(activePointersRef.current.values());
+        const p1 = pts[0];
+        const p2 = pts[1];
+        const d0 = Math.hypot(p2.clientX - p1.clientX, p2.clientY - p1.clientY);
+        if (d0 >= 1 && viewportRef.current) {
+          const rect = viewportRef.current.getBoundingClientRect();
+          const m0x = (p1.clientX + p2.clientX) / 2 - rect.left;
+          const m0y = (p1.clientY + p2.clientY) / 2 - rect.top;
+          const cur = cameraRef.current;
+          pinchBaselineRef.current = {
+            s0: cur.scale,
+            d0,
+            anchorX: (m0x - cur.x) / cur.scale,
+            anchorY: (m0y - cur.y) / cur.scale,
+          };
+        } else {
+          pinchBaselineRef.current = null;
+        }
+      }
+      e.stopPropagation();
+    }
+  }, []);
+
+  const onPointerMove = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!activePointersRef.current.has(e.pointerId)) return;
+
+      const pointerType = e.pointerType || "mouse";
+
+      if (pointerType === "mouse") {
+        if (e.buttons !== 1) {
+          cancelGesture();
+          return;
+        }
+        const prev = activePointersRef.current.get(e.pointerId)!;
+        const dx = e.clientX - prev.clientX;
+        const dy = e.clientY - prev.clientY;
+        if (dx !== 0 || dy !== 0) {
+          hasDraggedRef.current = true;
+          activePointersRef.current.set(e.pointerId, { clientX: e.clientX, clientY: e.clientY });
+          const cur = cameraRef.current;
+          setCamera({ ...cur, x: cur.x + dx, y: cur.y + dy });
+        }
+        e.stopPropagation();
+      } else if (pointerType === "touch" || pointerType === "pen") {
+        if (activePointersRef.current.size === 1) {
+          const prev = activePointersRef.current.get(e.pointerId)!;
+          const dx = e.clientX - prev.clientX;
+          const dy = e.clientY - prev.clientY;
+          activePointersRef.current.set(e.pointerId, { clientX: e.clientX, clientY: e.clientY });
+          if (dx !== 0 || dy !== 0) {
+            hasDraggedRef.current = true;
+            const cur = cameraRef.current;
+            setCamera({ ...cur, x: cur.x + dx, y: cur.y + dy });
+          }
+        } else if (activePointersRef.current.size === 2) {
+          activePointersRef.current.set(e.pointerId, { clientX: e.clientX, clientY: e.clientY });
+          hasDraggedRef.current = true;
+          const pts = Array.from(activePointersRef.current.values());
+          const p1 = pts[0];
+          const p2 = pts[1];
+          const d1 = Math.hypot(p2.clientX - p1.clientX, p2.clientY - p1.clientY);
+
+          if (!viewportRef.current) return;
+          const rect = viewportRef.current.getBoundingClientRect();
+          const m1x = (p1.clientX + p2.clientX) / 2 - rect.left;
+          const m1y = (p1.clientY + p2.clientY) / 2 - rect.top;
+
+          if (!pinchBaselineRef.current && d1 >= 1) {
+            const cur = cameraRef.current;
+            pinchBaselineRef.current = {
+              s0: cur.scale,
+              d0: d1,
+              anchorX: (m1x - cur.x) / cur.scale,
+              anchorY: (m1y - cur.y) / cur.scale,
+            };
+          } else if (pinchBaselineRef.current) {
+            const base = pinchBaselineRef.current;
+            const currentFitScale =
+              lastDimensionsRef.current && contentWidth > 0 && contentHeight > 0
+                ? calculateFitCamera(
+                    lastDimensionsRef.current.width,
+                    lastDimensionsRef.current.height,
+                    contentWidth,
+                    contentHeight,
+                  ).scale
+                : 1;
+            const minScale = calculateEffectiveMinScale(currentFitScale);
+            const reqScale = base.s0 * (d1 / base.d0);
+            let sNew = reqScale;
+            if (sNew < minScale) sNew = minScale;
+            if (sNew > MAX_SCALE) sNew = MAX_SCALE;
+
+            const t1x = m1x - sNew * base.anchorX;
+            const t1y = m1y - sNew * base.anchorY;
+            setCamera({ x: t1x, y: t1y, scale: sNew });
+          }
+        }
+        e.stopPropagation();
+      }
+    },
+    [cancelGesture, contentHeight, contentWidth, setCamera],
+  );
+
+  const handlePointerEnd = useCallback((pointerId: number) => {
+    const viewport = viewportRef.current;
+    if (viewport) {
+      try {
+        viewport.releasePointerCapture(pointerId);
+      } catch {
+        // ignore
+      }
+    }
+    activePointersRef.current.delete(pointerId);
+    if (primaryPointerIdRef.current === pointerId) {
+      primaryPointerIdRef.current = null;
+    }
+    if (activePointersRef.current.size === 1) {
+      pinchBaselineRef.current = null;
+      const [remId, remPt] = Array.from(activePointersRef.current.entries())[0];
+      activePointersRef.current.set(remId, { clientX: remPt.clientX, clientY: remPt.clientY });
+    } else if (activePointersRef.current.size === 0) {
+      pinchBaselineRef.current = null;
+    }
+  }, []);
+
+  const onPointerUp = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      handlePointerEnd(e.pointerId);
+    },
+    [handlePointerEnd],
+  );
+
+  const onPointerCancel = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      handlePointerEnd(e.pointerId);
+    },
+    [handlePointerEnd],
+  );
+
+  const onLostPointerCapture = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      handlePointerEnd(e.pointerId);
+    },
+    [handlePointerEnd],
+  );
+
+  const onClickCapture = useCallback((e: React.MouseEvent) => {
+    if (hasDraggedRef.current) {
+      e.stopPropagation();
+      e.preventDefault();
+      hasDraggedRef.current = false;
+    }
+  }, []);
+
+  // Camera buttons
+  const handleZoomIn = useCallback(() => {
+    const viewport = viewportRef.current;
+    const width = lastDimensionsRef.current?.width ?? viewport?.clientWidth ?? 1000;
+    const height = lastDimensionsRef.current?.height ?? viewport?.clientHeight ?? 700;
+    const center = { x: width / 2, y: height / 2 };
+    const minScale = calculateEffectiveMinScale(fitScale);
+    const nextCam = calculateZoomAtAnchor(
+      cameraRef.current,
+      cameraRef.current.scale * 1.2,
+      center,
+      minScale,
+      MAX_SCALE,
+    );
+    setCamera(nextCam);
+  }, [fitScale, setCamera]);
+
+  const handleZoomOut = useCallback(() => {
+    const viewport = viewportRef.current;
+    const width = lastDimensionsRef.current?.width ?? viewport?.clientWidth ?? 1000;
+    const height = lastDimensionsRef.current?.height ?? viewport?.clientHeight ?? 700;
+    const center = { x: width / 2, y: height / 2 };
+    const minScale = calculateEffectiveMinScale(fitScale);
+    const nextCam = calculateZoomAtAnchor(
+      cameraRef.current,
+      cameraRef.current.scale / 1.2,
+      center,
+      minScale,
+      MAX_SCALE,
+    );
+    setCamera(nextCam);
+  }, [fitScale, setCamera]);
+
+  const handleResetZoom = useCallback(() => {
+    const viewport = viewportRef.current;
+    const width = lastDimensionsRef.current?.width ?? viewport?.clientWidth ?? 1000;
+    const height = lastDimensionsRef.current?.height ?? viewport?.clientHeight ?? 700;
+    const center = { x: width / 2, y: height / 2 };
+    const minScale = calculateEffectiveMinScale(fitScale);
+    const nextCam = calculateZoomAtAnchor(
+      cameraRef.current,
+      1.0,
+      center,
+      minScale,
+      MAX_SCALE,
+    );
+    setCamera(nextCam);
+  }, [fitScale, setCamera]);
+
+  const handleFit = useCallback(() => {
+    const width = lastDimensionsRef.current?.width ?? viewportRef.current?.clientWidth ?? 0;
+    const height = lastDimensionsRef.current?.height ?? viewportRef.current?.clientHeight ?? 0;
+    if (width > 0 && height > 0 && contentWidth > 0 && contentHeight > 0) {
+      const fitCam = calculateFitCamera(width, height, contentWidth, contentHeight);
+      setCamera(fitCam);
+    }
+  }, [contentHeight, contentWidth, setCamera]);
+
   if (!activeRun) {
     return (
       <div
@@ -63,50 +602,6 @@ export function DagGraphView({
     );
   }
 
-  const nodes = activeRun.nodes;
-  const rawWaves = [...activeRun.waves].sort((a, b) => a.index - b.index);
-
-  // Unassigned nodes fallback (Bug 6): collect any nodes not partitioned into waves
-  const assignedNodeIds = new Set<string>();
-  rawWaves.forEach((wave) => {
-    wave.nodeIds.forEach((id) => assignedNodeIds.add(id));
-  });
-  const unassignedNodeIds = nodes
-    .filter((n) => !assignedNodeIds.has(n.id))
-    .map((n) => n.id);
-
-  const waves = [...rawWaves];
-  if (unassignedNodeIds.length > 0) {
-    waves.push({
-      index: rawWaves.length > 0 ? Math.max(...rawWaves.map((w) => w.index)) + 1 : 0,
-      nodeIds: unassignedNodeIds,
-    });
-  }
-
-  const counts = activeRun.counts || deriveDagRunCounts(nodes);
-
-  const nodeMap = new Map<string, DagNodeSnapshot>(nodes.map((n) => [n.id, n]));
-  const bottleneckMap = new Map<string, number>(
-    (activeRun.bottlenecks || []).map((b) => [b.nodeId, b.blockedCount]),
-  );
-  const criticalPath = activeRun.criticalPath || [];
-  const criticalPathSet = new Set<string>(criticalPath);
-
-  const nodePositions = new Map<string, { x: number; y: number }>();
-  let maxCol = 0;
-  let maxRow = 0;
-
-  waves.forEach((wave, colIndex) => {
-    maxCol = Math.max(maxCol, colIndex);
-    wave.nodeIds.forEach((nodeId, rowIndex) => {
-      maxRow = Math.max(maxRow, rowIndex);
-      nodePositions.set(nodeId, calculateNodePosition(colIndex, rowIndex));
-    });
-  });
-
-  const contentWidth = PAD_X * 2 + (maxCol + 1) * CARD_WIDTH + maxCol * GAP_X;
-  const contentHeight = PAD_Y * 2 + (maxRow + 1) * CARD_HEIGHT + maxRow * GAP_Y;
-
   return (
     <div
       className="relative flex h-full w-full flex-col overflow-hidden bg-background text-foreground select-none"
@@ -114,32 +609,93 @@ export function DagGraphView({
       data-run-id={activeRun.runId}
     >
       <div
-        className="flex h-9 shrink-0 items-center justify-between border-b border-border/40 bg-card/60 px-3 text-xs text-muted-foreground backdrop-blur-sm"
+        className="flex min-h-9 shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-border/40 bg-card/60 px-3 py-1.5 text-xs text-muted-foreground backdrop-blur-sm"
         data-testid="dag-header"
       >
-        <div className="flex items-center gap-2 min-w-0 font-medium">
+        <div className="flex min-w-0 items-center gap-2 font-medium">
           {showRunName && (
             <>
               <span className="truncate text-foreground">{activeRun.name}</span>
               <span className="text-muted-foreground/60">&mdash;</span>
             </>
           )}
-          <span className="shrink-0 text-muted-foreground font-mono">
+          <span className="shrink-0 font-mono text-muted-foreground">
             {counts.completed}/{counts.total} done, {counts.running} running
           </span>
         </div>
-        <div className="flex shrink-0 items-center gap-3 font-mono text-[10px]" data-testid="dag-legend">
-          <span className="text-indigo-500">▶ running</span>
-          <span className="text-foreground/60">✓ done</span>
-          <span className="text-muted-foreground">◌ waiting</span>
-          <span className="text-rose-500">✗ failed</span>
+        <div className="flex flex-wrap items-center gap-2">
+          <div
+            className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 font-mono text-[10px]"
+            data-testid="dag-legend"
+          >
+            <span className="text-indigo-500">▶ running</span>
+            <span className="text-foreground/60">✓ done</span>
+            <span className="text-muted-foreground">◌ waiting</span>
+            <span className="text-rose-500">✗ failed</span>
+          </div>
+          <div
+            className="flex shrink-0 items-center gap-1 rounded border border-border/60 bg-background/50 p-0.5"
+            data-testid="dag-controls"
+          >
+            <button
+              type="button"
+              aria-label="Zoom out"
+              aria-disabled={camera.scale <= effectiveMinScale ? "true" : undefined}
+              onClick={handleZoomOut}
+              className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring aria-disabled:cursor-default aria-disabled:opacity-35"
+            >
+              <Minus className="size-3" />
+            </button>
+            <button
+              type="button"
+              aria-label="Reset zoom to 100%"
+              onClick={handleResetZoom}
+              className="flex h-5 items-center justify-center rounded px-1.5 font-mono text-[10px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              {Math.round(camera.scale * 100)}%
+            </button>
+            <button
+              type="button"
+              aria-label="Zoom in"
+              aria-disabled={camera.scale >= MAX_SCALE ? "true" : undefined}
+              onClick={handleZoomIn}
+              className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring aria-disabled:cursor-default aria-disabled:opacity-35"
+            >
+              <Plus className="size-3" />
+            </button>
+            <button
+              type="button"
+              aria-label="Fit graph"
+              onClick={handleFit}
+              className="flex h-5 items-center justify-center rounded px-1.5 font-mono text-[10px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              Fit
+            </button>
+          </div>
         </div>
       </div>
 
-      <div className="relative flex-1 overflow-auto scrollbar-sleek">
+      <div
+        ref={viewportRef}
+        className="relative flex-1 min-h-0 min-w-0 overflow-hidden select-none"
+        style={{ touchAction: "none", overscrollBehavior: "none" }}
+        data-testid="dag-viewport"
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerCancel}
+        onLostPointerCapture={onLostPointerCapture}
+        onClickCapture={onClickCapture}
+      >
         <div
+          data-testid="dag-world"
           className="relative"
-          style={{ width: contentWidth, height: contentHeight, minWidth: "100%", minHeight: "100%" }}
+          style={{
+            transformOrigin: "0 0",
+            transform: `translate(${camera.x}px, ${camera.y}px) scale(${camera.scale})`,
+            width: contentWidth,
+            height: contentHeight,
+          }}
         >
           <DagEdgeLayer
             edges={activeRun.edges}
