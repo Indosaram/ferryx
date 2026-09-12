@@ -1,9 +1,13 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-import { selectGlobalUnreadBadgeCount, selectTabActivitySummaries, selectWorktreeActivitySummaries, workspaceReducer, type WorkspaceAction, type WorkspaceState } from "../state/workspaceStore";
+import { selectActivityNotificationTargets, type ActivityNotificationEvent, selectGlobalUnreadBadgeCount, selectTabActivitySummaries, selectWorktreeActivitySummaries, workspaceReducer, type WorkspaceAction, type WorkspaceState } from "../state/workspaceStore";
 import { TabBar } from "../components/TabBar";
 import { WorktreeList } from "../components/WorktreeList";
 import type { Worktree } from "../lib/types";
+import { NotificationCenterButton } from "../components/notification";
+import { NotificationCoordinator } from "../lib/notificationCoordinator";
+import { isNotificationTargetObserved, wireActivityRecording, type RecordingListener } from "../lib/notificationCenter/activityRecording";
+import { notificationCenterStore } from "../lib/notificationCenter/notificationCenterStore";
 
 const worktreeMain: Worktree = {
   path: "/repo/main",
@@ -27,6 +31,7 @@ const worktreeFeature: Worktree = {
 
 function initialState(): WorkspaceState {
   return {
+    workspaceId: "default",
     worktrees: [worktreeMain, worktreeFeature],
     activeWorktreePath: worktreeMain.path,
     sessions: {
@@ -84,7 +89,36 @@ function initialState(): WorkspaceState {
 export function ActivitySurfaceHarness() {
   const [state, setState] = useState<WorkspaceState>(initialState);
 
-  const dispatch = (action: WorkspaceAction) => setState((prev) => workspaceReducer(prev, action));
+  const stateRef = useRef(state);
+  const [coordinator] = useState(() => new NotificationCoordinator({
+    // This browser-only QA surface records pre-focus decisions without invoking native IPC.
+    isWindowFocused: () => true,
+  }));
+  const [activityListeners] = useState(() => new Set<RecordingListener<ActivityNotificationEvent>>());
+
+  useEffect(() => wireActivityRecording({
+    events: (listener) => {
+      activityListeners.add(listener);
+      return () => { activityListeners.delete(listener); };
+    },
+    isObserved: (target) => isNotificationTargetObserved(stateRef.current, target, true),
+    store: notificationCenterStore,
+  }), [activityListeners]);
+
+  const dispatch = (action: WorkspaceAction) => {
+    const previous = stateRef.current;
+    const next = workspaceReducer(previous, action);
+    stateRef.current = next;
+    setState(next);
+    // Mirror the workspace activity bus: derive real edges, then classify before recording.
+    for (const target of selectActivityNotificationTargets(next)) {
+      const previousState = previous.activityBySessionId?.[target.sessionId]?.state;
+      if (previousState === target.state) continue;
+      const event = { ...target, previousState };
+      const decision = coordinator.handleAgentStateChange({ ...event, nextState: event.state });
+      activityListeners.forEach((listener) => listener(event, decision));
+    }
+  };
 
   const title = (sessionId: string, tabId: string, value: string) =>
     dispatch({ type: "SESSION_TITLE_ACTIVITY", tabId, sessionId, title: value } as WorkspaceAction);
@@ -179,7 +213,12 @@ export function ActivitySurfaceHarness() {
       label: "screen rule: background idle after working (attention)",
       run: () => screen("session-bg", "tab-bg", "idle", "prompt_idle"),
     },
-    { id: "qa-reset", label: "reset", run: () => setState(initialState()) },
+    { id: "qa-reset", label: "reset", run: () => {
+      stateRef.current = initialState();
+      setState(stateRef.current);
+      coordinator.reset();
+      notificationCenterStore.clearAll();
+    } },
   ];
 
   return (
@@ -221,6 +260,21 @@ export function ActivitySurfaceHarness() {
           onSelect={() => undefined}
           onDelete={() => undefined}
         />
+      </div>
+
+      <div data-testid="harness-notifications" className="mt-4 flex max-w-xs items-center gap-2 border border-border p-2">
+        <NotificationCenterButton
+          store={notificationCenterStore}
+          isSessionNavigable={(sessionId: string) => Boolean(state.sessions[sessionId])}
+          onNavigateToSession={({ sessionId, revision }) => {
+            const tab = stateRef.current.layout.tabs.find((candidate) => "sessionId" in candidate && candidate.sessionId === sessionId);
+            if (!tab) return;
+            dispatch({ type: "ACTIVATE_TAB", tabId: tab.id } as WorkspaceAction);
+            const entry = notificationCenterStore.getSnapshot().entries.find((candidate) => candidate.sessionId === sessionId);
+            if (entry) notificationCenterStore.markEntriesRead([{ id: entry.id, expectedRevision: revision }]);
+          }}
+        />
+        <span className="text-xs text-muted-foreground">Notification center</span>
       </div>
 
       <pre data-testid="harness-state" className="mt-4 overflow-auto text-[10px] leading-tight text-muted-foreground">
