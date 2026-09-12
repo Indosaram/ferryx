@@ -20,6 +20,7 @@ import {
   calculateEffectiveMinScale,
   calculateNodePosition,
   calculateZoomAtAnchor,
+  clampScaleWithRecovery,
   GAP_X,
   GAP_Y,
   MAX_SCALE,
@@ -78,6 +79,12 @@ export function DagGraphView({
   }, []);
 
   const lastDimensionsRef = useRef<{ width: number; height: number } | null>(null);
+  const lastViewportElementRef = useRef<HTMLDivElement | null>(null);
+  const [viewportDimensions, setViewportDimensions] = useState<{ width: number; height: number } | null>(null);
+  const isZeroViewportRef = useRef(false);
+  const hasFittedCurrentRunRef = useRef(false);
+  const pendingFitRef = useRef(false);
+  const wasEmptyRef = useRef(true);
   const currentRunIdRef = useRef<string | null>(null);
 
   // Gesture tracking refs
@@ -92,7 +99,7 @@ export function DagGraphView({
   const hasDraggedRef = useRef<boolean>(false);
 
   const cancelGesture = useCallback(() => {
-    const viewport = viewportRef.current;
+    const viewport = viewportRef.current ?? lastViewportElementRef.current;
     if (viewport && primaryPointerIdRef.current !== null) {
       try {
         viewport.releasePointerCapture(primaryPointerIdRef.current);
@@ -196,35 +203,78 @@ export function DagGraphView({
     };
   }, [activeRun]);
 
+  const isRunEmpty = !activeRun || !activeRun.nodes || activeRun.nodes.length === 0;
+
   const fitScale = useMemo(() => {
-    if (!lastDimensionsRef.current || contentWidth <= 0 || contentHeight <= 0) return 1;
+    const dims = viewportDimensions ?? lastDimensionsRef.current;
+    if (!dims || dims.width <= 0 || dims.height <= 0 || contentWidth <= 0 || contentHeight <= 0) return 1;
     return calculateFitCamera(
-      lastDimensionsRef.current.width,
-      lastDimensionsRef.current.height,
+      dims.width,
+      dims.height,
       contentWidth,
       contentHeight,
     ).scale;
-  }, [contentWidth, contentHeight]);
+  }, [viewportDimensions, contentWidth, contentHeight]);
 
   const effectiveMinScale = calculateEffectiveMinScale(fitScale);
 
   // Run switch vs same-run update effect
   useEffect(() => {
     const runIdValue = activeRun?.runId ?? null;
+    const dims = lastDimensionsRef.current;
+    const isPositiveDims =
+      Boolean(dims && dims.width > 0 && dims.height > 0) &&
+      !isZeroViewportRef.current &&
+      !(viewportRef.current && (viewportRef.current.clientWidth <= 0 || viewportRef.current.clientHeight <= 0));
+
     if (runIdValue !== currentRunIdRef.current) {
       currentRunIdRef.current = runIdValue;
       cancelGesture();
-      if (runIdValue && lastDimensionsRef.current && contentWidth > 0 && contentHeight > 0) {
-        const fitCam = calculateFitCamera(
-          lastDimensionsRef.current.width,
-          lastDimensionsRef.current.height,
-          contentWidth,
-          contentHeight,
-        );
-        setCamera(fitCam);
+      hasFittedCurrentRunRef.current = false;
+      wasEmptyRef.current = isRunEmpty;
+
+      if (!isRunEmpty && contentWidth > 0 && contentHeight > 0) {
+        if (isPositiveDims && dims) {
+          const fitCam = calculateFitCamera(
+            dims.width,
+            dims.height,
+            contentWidth,
+            contentHeight,
+          );
+          setCamera(fitCam);
+          hasFittedCurrentRunRef.current = true;
+          pendingFitRef.current = false;
+        } else {
+          pendingFitRef.current = true;
+        }
+      } else {
+        pendingFitRef.current = false;
       }
+    } else if (wasEmptyRef.current && !isRunEmpty) {
+      // Same-run empty -> first-nonempty transition
+      wasEmptyRef.current = false;
+      cancelGesture();
+
+      if (contentWidth > 0 && contentHeight > 0) {
+        if (isPositiveDims && dims) {
+          const fitCam = calculateFitCamera(
+            dims.width,
+            dims.height,
+            contentWidth,
+            contentHeight,
+          );
+          setCamera(fitCam);
+          hasFittedCurrentRunRef.current = true;
+          pendingFitRef.current = false;
+        } else {
+          pendingFitRef.current = true;
+        }
+      }
+    } else if (isRunEmpty) {
+      wasEmptyRef.current = true;
+      hasFittedCurrentRunRef.current = false;
     }
-  }, [activeRun?.runId, cancelGesture, contentWidth, contentHeight, setCamera]);
+  }, [activeRun?.runId, cancelGesture, contentHeight, contentWidth, isRunEmpty, setCamera]);
 
   // ResizeObserver effect
   useEffect(() => {
@@ -234,18 +284,35 @@ export function DagGraphView({
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const { width, height } = entry.contentRect;
-        if (width <= 0 || height <= 0) continue;
+        if (width <= 0 || height <= 0) {
+          isZeroViewportRef.current = true;
+          continue;
+        }
 
+        isZeroViewportRef.current = false;
         const prev = lastDimensionsRef.current;
         lastDimensionsRef.current = { width, height };
+        setViewportDimensions({ width, height });
 
         cancelGesture();
 
-        if (!prev) {
+        const needsFit =
+          pendingFitRef.current ||
+          (!hasFittedCurrentRunRef.current && !isRunEmpty);
+
+        if (needsFit && contentWidth > 0 && contentHeight > 0) {
+          const fitCam = calculateFitCamera(width, height, contentWidth, contentHeight);
+          setCamera(fitCam);
+          hasFittedCurrentRunRef.current = !isRunEmpty;
+          pendingFitRef.current = false;
+        } else if (!prev) {
           // Initial positive measurement: fit camera
           if (contentWidth > 0 && contentHeight > 0) {
             const fitCam = calculateFitCamera(width, height, contentWidth, contentHeight);
             setCamera(fitCam);
+            if (!isRunEmpty) {
+              hasFittedCurrentRunRef.current = true;
+            }
           }
         } else {
           // Subsequent measurement: shift translation by half the delta
@@ -267,7 +334,7 @@ export function DagGraphView({
     return () => {
       observer.disconnect();
     };
-  }, [cancelGesture, contentWidth, contentHeight, setCamera]);
+  }, [cancelGesture, contentHeight, contentWidth, isRunEmpty, setCamera]);
 
   // Viewport-scoped non-passive wheel listener
   useEffect(() => {
@@ -339,13 +406,20 @@ export function DagGraphView({
     };
   }, [cancelGesture]);
 
+  // Unmount cleanup
+  useEffect(() => {
+    return () => {
+      cancelGesture();
+    };
+  }, [cancelGesture]);
+
   // Pointer event handlers
   const onPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement | null;
     if (
       target &&
       target.closest(
-        'button, a, input, textarea, select, [contenteditable="true"], [data-no-pan]',
+        'button, a, input, textarea, select, [contenteditable], [data-no-pan]',
       )
     ) {
       return;
@@ -456,20 +530,19 @@ export function DagGraphView({
             };
           } else if (pinchBaselineRef.current) {
             const base = pinchBaselineRef.current;
+            const dims = viewportDimensions ?? lastDimensionsRef.current;
             const currentFitScale =
-              lastDimensionsRef.current && contentWidth > 0 && contentHeight > 0
+              dims && dims.width > 0 && dims.height > 0 && contentWidth > 0 && contentHeight > 0
                 ? calculateFitCamera(
-                    lastDimensionsRef.current.width,
-                    lastDimensionsRef.current.height,
+                    dims.width,
+                    dims.height,
                     contentWidth,
                     contentHeight,
                   ).scale
                 : 1;
             const minScale = calculateEffectiveMinScale(currentFitScale);
             const reqScale = base.s0 * (d1 / base.d0);
-            let sNew = reqScale;
-            if (sNew < minScale) sNew = minScale;
-            if (sNew > MAX_SCALE) sNew = MAX_SCALE;
+            const sNew = clampScaleWithRecovery(base.s0, reqScale, minScale, MAX_SCALE);
 
             const t1x = m1x - sNew * base.anchorX;
             const t1y = m1y - sNew * base.anchorY;
@@ -479,7 +552,7 @@ export function DagGraphView({
         e.stopPropagation();
       }
     },
-    [cancelGesture, contentHeight, contentWidth, setCamera],
+    [cancelGesture, contentHeight, contentWidth, setCamera, viewportDimensions],
   );
 
   const handlePointerEnd = useCallback((pointerId: number) => {
@@ -536,8 +609,8 @@ export function DagGraphView({
   // Camera buttons
   const handleZoomIn = useCallback(() => {
     const viewport = viewportRef.current;
-    const width = lastDimensionsRef.current?.width ?? viewport?.clientWidth ?? 1000;
-    const height = lastDimensionsRef.current?.height ?? viewport?.clientHeight ?? 700;
+    const width = viewportDimensions?.width ?? lastDimensionsRef.current?.width ?? viewport?.clientWidth ?? 1000;
+    const height = viewportDimensions?.height ?? lastDimensionsRef.current?.height ?? viewport?.clientHeight ?? 700;
     const center = { x: width / 2, y: height / 2 };
     const minScale = calculateEffectiveMinScale(fitScale);
     const nextCam = calculateZoomAtAnchor(
@@ -548,12 +621,12 @@ export function DagGraphView({
       MAX_SCALE,
     );
     setCamera(nextCam);
-  }, [fitScale, setCamera]);
+  }, [fitScale, setCamera, viewportDimensions]);
 
   const handleZoomOut = useCallback(() => {
     const viewport = viewportRef.current;
-    const width = lastDimensionsRef.current?.width ?? viewport?.clientWidth ?? 1000;
-    const height = lastDimensionsRef.current?.height ?? viewport?.clientHeight ?? 700;
+    const width = viewportDimensions?.width ?? lastDimensionsRef.current?.width ?? viewport?.clientWidth ?? 1000;
+    const height = viewportDimensions?.height ?? lastDimensionsRef.current?.height ?? viewport?.clientHeight ?? 700;
     const center = { x: width / 2, y: height / 2 };
     const minScale = calculateEffectiveMinScale(fitScale);
     const nextCam = calculateZoomAtAnchor(
@@ -564,12 +637,12 @@ export function DagGraphView({
       MAX_SCALE,
     );
     setCamera(nextCam);
-  }, [fitScale, setCamera]);
+  }, [fitScale, setCamera, viewportDimensions]);
 
   const handleResetZoom = useCallback(() => {
     const viewport = viewportRef.current;
-    const width = lastDimensionsRef.current?.width ?? viewport?.clientWidth ?? 1000;
-    const height = lastDimensionsRef.current?.height ?? viewport?.clientHeight ?? 700;
+    const width = viewportDimensions?.width ?? lastDimensionsRef.current?.width ?? viewport?.clientWidth ?? 1000;
+    const height = viewportDimensions?.height ?? lastDimensionsRef.current?.height ?? viewport?.clientHeight ?? 700;
     const center = { x: width / 2, y: height / 2 };
     const minScale = calculateEffectiveMinScale(fitScale);
     const nextCam = calculateZoomAtAnchor(
@@ -580,16 +653,16 @@ export function DagGraphView({
       MAX_SCALE,
     );
     setCamera(nextCam);
-  }, [fitScale, setCamera]);
+  }, [fitScale, setCamera, viewportDimensions]);
 
   const handleFit = useCallback(() => {
-    const width = lastDimensionsRef.current?.width ?? viewportRef.current?.clientWidth ?? 0;
-    const height = lastDimensionsRef.current?.height ?? viewportRef.current?.clientHeight ?? 0;
+    const width = viewportDimensions?.width ?? lastDimensionsRef.current?.width ?? viewportRef.current?.clientWidth ?? 0;
+    const height = viewportDimensions?.height ?? lastDimensionsRef.current?.height ?? viewportRef.current?.clientHeight ?? 0;
     if (width > 0 && height > 0 && contentWidth > 0 && contentHeight > 0) {
       const fitCam = calculateFitCamera(width, height, contentWidth, contentHeight);
       setCamera(fitCam);
     }
-  }, [contentHeight, contentWidth, setCamera]);
+  }, [contentHeight, contentWidth, setCamera, viewportDimensions]);
 
   if (!activeRun) {
     return (
@@ -640,7 +713,7 @@ export function DagGraphView({
             <button
               type="button"
               aria-label="Zoom out"
-              aria-disabled={camera.scale <= effectiveMinScale ? "true" : undefined}
+              aria-disabled={camera.scale <= effectiveMinScale + 1e-6 ? "true" : "false"}
               onClick={handleZoomOut}
               className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring aria-disabled:cursor-default aria-disabled:opacity-35"
             >
@@ -657,7 +730,7 @@ export function DagGraphView({
             <button
               type="button"
               aria-label="Zoom in"
-              aria-disabled={camera.scale >= MAX_SCALE ? "true" : undefined}
+              aria-disabled={camera.scale >= MAX_SCALE - 1e-6 ? "true" : "false"}
               onClick={handleZoomIn}
               className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring aria-disabled:cursor-default aria-disabled:opacity-35"
             >

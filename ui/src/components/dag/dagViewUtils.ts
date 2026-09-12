@@ -156,6 +156,23 @@ export function calculateEffectiveMinScale(fitScale: number): number {
   return Math.min(MIN_SCALE_FLOOR, fitScale);
 }
 
+export function clampScaleWithRecovery(
+  currentScale: number,
+  requestedScale: number,
+  minScale: number,
+  maxScale = MAX_SCALE,
+): number {
+  if (currentScale < minScale) {
+    if (requestedScale <= currentScale) return currentScale;
+    return Math.min(minScale, requestedScale);
+  }
+  if (currentScale > maxScale) {
+    if (requestedScale >= currentScale) return currentScale;
+    return Math.max(maxScale, requestedScale);
+  }
+  return Math.max(minScale, Math.min(maxScale, requestedScale));
+}
+
 export function calculateZoomAtAnchor(
   camera: Camera,
   requestedScale: number,
@@ -166,17 +183,7 @@ export function calculateZoomAtAnchor(
   const { x, y, scale: s } = camera;
   if (s <= 0) return camera;
 
-  let sNew = requestedScale;
-  if (s < minScale) {
-    if (requestedScale <= s) return camera;
-    sNew = Math.min(minScale, requestedScale);
-  } else if (s > maxScale) {
-    if (requestedScale >= s) return camera;
-    sNew = Math.max(maxScale, requestedScale);
-  } else {
-    sNew = Math.max(minScale, Math.min(maxScale, requestedScale));
-  }
-
+  const sNew = clampScaleWithRecovery(s, requestedScale, minScale, maxScale);
   if (sNew === s) return camera;
 
   const tNewX = anchor.x - (sNew / s) * (anchor.x - x);

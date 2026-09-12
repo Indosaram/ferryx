@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 
 import "../index.css";
@@ -40,7 +40,7 @@ const qaSession: TerminalSession = {
   providerSession: null,
 };
 
-function buildStandaloneLayout(runId: string): LayoutState {
+function buildStandaloneLayout(runId: string, ratio = 0.5): LayoutState {
   const base = createLayoutState([
     { id: "tab-qa", kind: "terminal", label: "qa", sessionId: qaSession.id },
   ]);
@@ -55,7 +55,7 @@ function buildStandaloneLayout(runId: string): LayoutState {
           direction: "horizontal" as const,
           first: createLeafNode("leaf-qa-term"),
           second: createLeafNode("leaf-qa-dag", "dag"),
-          ratio: 0.5,
+          ratio,
         },
         sessionIdsByLeafId: {
           "leaf-qa-term": qaSession.id,
@@ -84,6 +84,7 @@ function seedStore(): void {
 function DagViewportQaHarness(): JSX.Element {
   const seededRef = useRef(false);
   const [standaloneRunId, setStandaloneRunId] = useState("qa-dag-a");
+  const [standaloneRatio, setStandaloneRatio] = useState(0.5);
 
   useEffect(() => {
     if (seededRef.current) return;
@@ -91,7 +92,14 @@ function DagViewportQaHarness(): JSX.Element {
     seedStore();
   }, []);
 
-  const layout = useMemo(() => buildStandaloneLayout(standaloneRunId), [standaloneRunId]);
+  const layout = useMemo(
+    () => buildStandaloneLayout(standaloneRunId, standaloneRatio),
+    [standaloneRunId, standaloneRatio],
+  );
+
+  const handleSetRatio = useCallback((_tabId: string, _path: string, ratio: number) => {
+    setStandaloneRatio(ratio);
+  }, []);
 
   const actionButton = (id: string, label: string, onClick: () => void) => (
     <button
@@ -145,7 +153,11 @@ function DagViewportQaHarness(): JSX.Element {
         data-testid="qa-standalone-host"
         className="flex h-[520px] w-full max-w-[640px] flex-col overflow-hidden rounded border border-border"
       >
-        <TerminalSplitView layout={layout} sessions={{ [qaSession.id]: qaSession }} />
+        <TerminalSplitView
+          layout={layout}
+          sessions={{ [qaSession.id]: qaSession }}
+          onSetRatio={handleSetRatio}
+        />
       </section>
     </div>
   );

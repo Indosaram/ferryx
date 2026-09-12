@@ -98,6 +98,44 @@ function movedBy(d, x, y, tol = 1) {
   return Math.abs(d.x - x) <= tol && Math.abs(d.y - y) <= tol;
 }
 
+function fitExpected(vp, worldW, worldH) {
+  const margin = Math.min(24, vp.width / 4, vp.height / 4);
+  const fitScale = Math.min(1, (vp.width - 2 * margin) / worldW, (vp.height - 2 * margin) / worldH);
+  const x = (vp.width - worldW * fitScale) / 2;
+  const y = (vp.height - worldH * fitScale) / 2;
+  return { x: +x.toFixed(2), y: +y.toFixed(2), scale: +fitScale.toFixed(6) };
+}
+
+function fitOk(geo, worldW, worldH) {
+  if (!geo || !geo.viewport || !geo.camera) return false;
+  const w = worldW ?? geo.contentWidth ?? 1160;
+  const h = worldH ?? geo.contentHeight ?? 284;
+  const expected = fitExpected(geo.viewport, w, h);
+  return (
+    Math.abs(geo.ctmScale - expected.scale) <= 0.02 &&
+    Math.abs(geo.camera.x - expected.x) <= 3 &&
+    Math.abs(geo.camera.y - expected.y) <= 3
+  );
+}
+
+function allInside(geo) {
+  if (!geo || !geo.viewport) return false;
+  const vp = geo.viewport;
+  const allPoints = [
+    ...(geo.cards || []).map((c) => ({ x: c.x, y: c.y })),
+    ...(geo.cards || []).map((c) => ({ x: c.x + c.width, y: c.y + c.height })),
+    ...(geo.endpoints || []),
+  ];
+  if (allPoints.length === 0) return true;
+  return allPoints.every(
+    (p) =>
+      p.x >= vp.x - 2 &&
+      p.x <= vp.x + vp.width + 2 &&
+      p.y >= vp.y - 2 &&
+      p.y <= vp.y + vp.height + 2,
+  );
+}
+
 function isIdentityTransform(t) {
   return t === "none" || t === "matrix(1, 0, 0, 1, 0, 0)";
 }
@@ -115,26 +153,56 @@ async function captureGeometry(page, host, cardTestId, edgeTestId) {
     if (!graphView) return null;
     const header = graphView.querySelector('[data-testid="dag-header"]');
     const svg = graphView.querySelector('svg[data-testid="dag-edge-layer"]');
-    const card = graphView.querySelector(`[data-testid="${cardTestId}"]`);
-    const path = svg ? svg.querySelector(`[data-testid="${edgeTestId}"]`) : null;
-    if (!header || !svg || !card || !path) return null;
+    const card = cardTestId ? graphView.querySelector(`[data-testid="${cardTestId}"]`) : null;
+    const path = svg && edgeTestId ? svg.querySelector(`[data-testid="${edgeTestId}"]`) : null;
+    if (!header || !svg) return null;
     const world = svg.parentElement;
     const viewport = world.parentElement;
     const rect = (el) => {
       const r = el.getBoundingClientRect();
       return { x: +r.x.toFixed(2), y: +r.y.toFixed(2), width: +r.width.toFixed(2), height: +r.height.toFixed(2) };
     };
-    const len = path.getTotalLength();
-    const mid = path.getPointAtLength(len / 2);
-    const ctm = path.getScreenCTM();
-    if (!ctm) return null;
-    const midScreen = new DOMPoint(mid.x, mid.y).matrixTransform(ctm);
+    let edgeEndpoint = { x: 0, y: 0 };
+    if (path) {
+      const len = path.getTotalLength();
+      const end = path.getPointAtLength(len);
+      const ctm = path.getScreenCTM();
+      if (ctm) {
+        const endScreen = new DOMPoint(end.x, end.y).matrixTransform(ctm);
+        edgeEndpoint = { x: +endScreen.x.toFixed(2), y: +endScreen.y.toFixed(2) };
+      }
+    }
+    const worldMatrix = new DOMMatrix(getComputedStyle(world).transform);
+    const paths = [...world.querySelectorAll('[data-testid^="dag-edge-"] path[data-testid]')];
+    const endpoints = paths.flatMap((p) => {
+      const ctm = p.getScreenCTM();
+      if (!ctm) return [];
+      return [0, p.getTotalLength()].map((t) => {
+        const pt = p.getPointAtLength(t);
+        const a = new DOMPoint(pt.x, pt.y).matrixTransform(ctm);
+        return { x: +a.x.toFixed(2), y: +a.y.toFixed(2) };
+      });
+    });
+    const cards = [...world.children].filter((e) => e.matches('[data-testid^="dag-node-"]')).map(rect);
+    const leaves = [...document.querySelectorAll('[data-testid="qa-standalone-host"] [data-testid="pane-leaf"]')].map((e) => ({
+      id: e.getAttribute("data-leaf-id"),
+      rect: rect(e),
+    }));
+    const seam = document.querySelector('[role="separator"]')?.getAttribute("aria-valuenow") ?? null;
+    const outBtn = root.querySelector('[aria-label="Zoom out"]');
+    const inBtn = root.querySelector('[aria-label="Zoom in"]');
+
     return {
       header: rect(header),
-      card: rect(card),
-      edgeEndpoint: { x: +midScreen.x.toFixed(2), y: +midScreen.y.toFixed(2) },
-      ctmScale: +ctm.a.toFixed(6),
-      ctmTranslate: { e: +ctm.e.toFixed(3), f: +ctm.f.toFixed(3) },
+      card: card ? rect(card) : null,
+      cards,
+      endpoints,
+      edgeEndpoint,
+      ctmScale: +worldMatrix.a.toFixed(6),
+      ctmTranslate: { e: +worldMatrix.e.toFixed(3), f: +worldMatrix.f.toFixed(3) },
+      camera: { x: worldMatrix.e, y: worldMatrix.f, scale: worldMatrix.a },
+      contentWidth: parseFloat(world.style.width) || 0,
+      contentHeight: parseFloat(world.style.height) || 0,
       worldTransform: getComputedStyle(world).transform,
       viewport: rect(viewport),
       world: rect(world),
@@ -145,6 +213,10 @@ async function captureGeometry(page, host, cardTestId, edgeTestId) {
         scrollY: window.scrollY,
         vvScale: window.visualViewport ? window.visualViewport.scale : null,
       },
+      leaves,
+      seam,
+      outAria: outBtn?.getAttribute("aria-disabled") ?? null,
+      inAria: inBtn?.getAttribute("aria-disabled") ?? null,
     };
   }, { scopeSel, cardTestId, edgeTestId });
 }
@@ -481,6 +553,8 @@ async function runHostGreen(browser, host, evidencePaths) {
 
     // 2. S1 Pan: Left-button drag on background
     const vp = geo0.viewport;
+    const centerX = vp.x + vp.width / 2;
+    const centerY = vp.y + vp.height / 2;
     const startX = vp.x + 100;
     const startY = vp.y + 100;
     const startTarget = await elementFromPointLabel(page, startX, startY);
@@ -538,8 +612,13 @@ async function runHostGreen(browser, host, evidencePaths) {
     const fitBtn = page.locator(`${scopeSel} [data-testid="dag-controls"] button[aria-label="Fit graph"]`);
     const resetBtn = page.locator(`${scopeSel} [data-testid="dag-controls"] button[aria-label="Reset zoom to 100%"]`);
 
-    await zoomOutBtn.click();
-    await zoomOutBtn.click();
+    // S1 Variant: Pan at exact 0.5x and 2.0x scales via controlled wheel
+    await resetBtn.click();
+    await settle(page);
+    await page.mouse.move(centerX, centerY);
+    const delta05 = -Math.log(0.5) / 0.002;
+    actions.push({ action: "mouse.wheel", deltaX: 0, deltaY: delta05, targetScale: 0.5 });
+    await page.mouse.wheel(0, delta05);
     await settle(page);
     const g05 = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
     await page.mouse.move(startX, startY);
@@ -549,12 +628,17 @@ async function runHostGreen(browser, host, evidencePaths) {
     await settle(page);
     const g05Pan = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
     checks.push(check("S1-pan-at-0.5x-moves-120-80", "behavioral", "pass",
-      movedBy(delta(g05.card, g05Pan.card), 120, 80),
-      { scale: g05.ctmScale, delta: delta(g05.card, g05Pan.card) }));
+      Math.abs(g05.ctmScale - 0.5) <= 0.05 &&
+      movedBy(delta(g05.card, g05Pan.card), 120, 80) &&
+      movedBy(delta(g05.edgeEndpoint, g05Pan.edgeEndpoint), 120, 80),
+      { scale: g05.ctmScale, cardDelta: delta(g05.card, g05Pan.card), edgeDelta: delta(g05.edgeEndpoint, g05Pan.edgeEndpoint) }));
 
     await resetBtn.click();
-    await zoomInBtn.click();
-    await zoomInBtn.click();
+    await settle(page);
+    await page.mouse.move(centerX, centerY);
+    const delta2x = -Math.log(2.0) / 0.002;
+    actions.push({ action: "mouse.wheel", deltaX: 0, deltaY: delta2x, targetScale: 2.0 });
+    await page.mouse.wheel(0, delta2x);
     await settle(page);
     const g2x = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
     await page.mouse.move(startX, startY);
@@ -564,15 +648,21 @@ async function runHostGreen(browser, host, evidencePaths) {
     await settle(page);
     const g2xPan = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
     checks.push(check("S1-pan-at-2x-moves-120-80", "behavioral", "pass",
-      movedBy(delta(g2x.card, g2xPan.card), 120, 80),
-      { scale: g2x.ctmScale, delta: delta(g2x.card, g2xPan.card) }));
+      Math.abs(g2x.ctmScale - 2.0) <= 0.05 &&
+      movedBy(delta(g2x.card, g2xPan.card), 120, 80) &&
+      movedBy(delta(g2x.edgeEndpoint, g2xPan.edgeEndpoint), 120, 80),
+      { scale: g2x.ctmScale, cardDelta: delta(g2x.card, g2xPan.card), edgeDelta: delta(g2x.edgeEndpoint, g2xPan.edgeEndpoint) }));
+
+    if (host === "standalone") {
+      const siblingUnchanged = JSON.stringify(g2xPan.leaves) === JSON.stringify(geo0.leaves);
+      checks.push(check("S1-standalone-sibling-leaves-unchanged-during-pan", "behavioral", "pass",
+        siblingUnchanged, { leaves: g2xPan.leaves }));
+    }
 
     await fitBtn.click();
     await settle(page);
 
     // 3. S2 Zoom: Wheel zoom in then out at viewport center
-    const centerX = vp.x + vp.width / 2;
-    const centerY = vp.y + vp.height / 2;
     const gz0 = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
     actions.push({ action: "mouse.move", x: centerX, y: centerY, target: await elementFromPointLabel(page, centerX, centerY) });
     await page.mouse.move(centerX, centerY);
@@ -589,30 +679,80 @@ async function runHostGreen(browser, host, evidencePaths) {
     const gz2 = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
     await shot(`${host}-after-wheel-out.png`);
 
+    const px = centerX - vp.x;
+    const py = centerY - vp.y;
+    const anchorError = {
+      x: gz1.camera.x + gz1.camera.scale * (px - gz0.camera.x) / gz0.camera.scale - px,
+      y: gz1.camera.y + gz1.camera.scale * (py - gz0.camera.y) / gz0.camera.scale - py,
+    };
+
     checks.push(check("S2-zoom-in-increases-scale", "behavioral", "pass",
       gz1.ctmScale > gz0.ctmScale + 1e-4,
       { scaleBefore: gz0.ctmScale, scaleAfter: gz1.ctmScale }));
+    checks.push(check("S2-zoom-anchor-world-point-stable", "behavioral", "pass",
+      Math.abs(anchorError.x) <= 1.0 && Math.abs(anchorError.y) <= 1.0,
+      { anchorError }));
     checks.push(check("S2-zoom-out-returns-scale", "behavioral", "pass",
       Math.abs(gz2.ctmScale - gz0.ctmScale) <= 1e-3,
       { expected: gz0.ctmScale, actual: gz2.ctmScale }));
-    checks.push(check("S2-zoom-anchor-world-point-stable", "behavioral", "pass",
-      movedBy(delta(gz0.edgeEndpoint, gz2.edgeEndpoint), 0, 0, 1),
-      { before: gz0.edgeEndpoint, after: gz2.edgeEndpoint }));
     checks.push(check("S2-document-and-visual-viewport-unchanged", "behavioral", "pass",
       gz1.document.scrollY === 0 && (gz1.document.vvScale === null || gz1.document.vvScale === 1),
       { afterWheelIn: gz1.document }));
 
+    // S2 Ctrl+wheel has identical scaling factor
+    await page.keyboard.down("Control");
+    actions.push({ action: "mouse.wheel", deltaX: 0, deltaY: -120, ctrlKey: true });
+    await page.mouse.wheel(0, -120);
+    await page.keyboard.up("Control");
+    await settle(page);
+    const gzCtrl = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
+    checks.push(check("S2-ctrl-wheel-same-factor", "behavioral", "pass",
+      Math.abs(gzCtrl.ctmScale / gz2.ctmScale - Math.exp(0.24)) <= 0.05,
+      { ratio: gzCtrl.ctmScale / gz2.ctmScale, expected: Math.exp(0.24) }));
+
+    // S2 Delta modes (0, 1, 2) normalized scaling
+    for (const mode of [0, 1, 2]) {
+      await fitBtn.click();
+      await settle(page);
+      const ga = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
+      const dy = mode === 0 ? -16 : mode === 1 ? -1 : -16 / ga.viewport.height;
+      await page.evaluate(async ({ scopeSel, mode, dy }) => {
+        const v = document.querySelector(scopeSel + ' [data-testid="dag-viewport"]');
+        const r = v.getBoundingClientRect();
+        v.dispatchEvent(new WheelEvent("wheel", {
+          bubbles: true,
+          cancelable: true,
+          clientX: r.x + r.width / 2,
+          clientY: r.y + r.height / 2,
+          deltaY: dy,
+          deltaMode: mode,
+        }));
+      }, { scopeSel, mode, dy });
+      await settle(page);
+      const gb = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
+      checks.push(check(`S2-wheel-deltaMode-${mode}-normalized`, "behavioral", "pass",
+        Math.abs(gb.ctmScale / ga.ctmScale - Math.exp(0.032)) <= 0.01,
+        { mode, ratio: gb.ctmScale / ga.ctmScale, expected: Math.exp(0.032) }));
+    }
+
     // S2 Horizontal wheel invariant
     const gh0 = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
     actions.push({ action: "mouse.wheel", deltaX: 120, deltaY: 0 });
-    await page.mouse.wheel(120, 0);
+    const wheelHorizontalAck = await page.evaluate(({ scopeSel }) => {
+      const v = document.querySelector(scopeSel + ' [data-testid="dag-viewport"]');
+      const r = v.getBoundingClientRect();
+      const e = new WheelEvent("wheel", { bubbles: true, cancelable: true, clientX: r.x + 100, clientY: r.y + 100, deltaX: 120, deltaY: 0 });
+      v.dispatchEvent(e);
+      return { defaultPrevented: e.defaultPrevented };
+    }, { scopeSel });
     await settle(page);
     const gh1 = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
     checks.push(check("S2-horizontal-wheel-camera-unchanged", "behavioral", "pass",
-      gh1.ctmScale === gh0.ctmScale && gh0.worldTransform === gh1.worldTransform,
-      { scaleBefore: gh0.ctmScale, scaleAfter: gh1.ctmScale }));
+      gh1.ctmScale === gh0.ctmScale && gh0.worldTransform === gh1.worldTransform && !wheelHorizontalAck.defaultPrevented,
+      { scaleBefore: gh0.ctmScale, scaleAfter: gh1.ctmScale, ack: wheelHorizontalAck }));
 
     // S2 Wheel clamp & no drift at max scale
+    await page.mouse.move(centerX, centerY);
     for (let i = 0; i < 15; i++) {
       await page.mouse.wheel(0, -300);
     }
@@ -629,6 +769,17 @@ async function runHostGreen(browser, host, evidencePaths) {
       gClamp1.ctmScale === gClamp0.ctmScale && movedBy(delta(gClamp0.card, gClamp1.card), 0, 0, 0.5),
       { before: gClamp0.card, after: gClamp1.card }));
 
+    // S2 Min scale clamp
+    await page.mouse.move(centerX, centerY);
+    for (let i = 0; i < 20; i++) {
+      await page.mouse.wheel(0, 300);
+    }
+    await settle(page);
+    const gMinClamp = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
+    checks.push(check("S2-zoom-clamp-min-scale", "behavioral", "pass",
+      gMinClamp.ctmScale <= 0.15 && gMinClamp.outAria === "true",
+      { scale: gMinClamp.ctmScale, outAria: gMinClamp.outAria }));
+
     await fitBtn.click();
     await settle(page);
 
@@ -644,8 +795,8 @@ async function runHostGreen(browser, host, evidencePaths) {
     await settle(page);
     const gFit = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
     checks.push(check("S3-controls-fit-graph", "behavioral", "pass",
-      gFit.ctmScale <= 1.0 && Number.isFinite(gFit.ctmScale) && Number.isFinite(gFit.world.x),
-      { scale: gFit.ctmScale, world: gFit.world }));
+      fitOk(gFit) && allInside(gFit),
+      { scale: gFit.ctmScale, world: gFit.world, allInside: allInside(gFit) }));
 
     await zoomInBtn.click();
     await settle(page);
@@ -677,39 +828,57 @@ async function runHostGreen(browser, host, evidencePaths) {
       isPlusFocused === true,
       { plusFocused: isPlusFocused }));
 
-    // Standalone fixture tests (big, tall, empty)
+    // Fit on Fixtures (big, tall, empty)
+    await page.evaluate(async () => {
+      const { dagStore } = await import("/src/state/dagStore.ts");
+      const f = await import("/src/devtools/dagViewportQaFixtures.ts");
+      dagStore.applySnapshot(f.QA_PROJECT_PATH, { ...f.buildBigDagRun(), runId: "qa-dag-a", rootSessionId: "qa-owner", updatedAt: "2026-09-12T12:30:00Z" });
+    });
+    await fitBtn.click();
+    await settle(page);
+    const gBig = await captureGeometry(page, host, FIXTURE_BIG.card, FIXTURE_BIG.edge);
+    checks.push(check("S3-fit-big-fixture", "behavioral", "pass",
+      gBig.ctmScale < 0.1 && fitOk(gBig, 29124, 144) && allInside(gBig),
+      { scale: gBig.ctmScale, allInside: allInside(gBig) }));
     if (host === "standalone") {
-      await page.locator('[data-testid="qa-load-big"]').click();
-      await page.locator(`${scopeSel} [data-testid="dag-node-n0"]`).waitFor({ state: "visible", timeout: PAGE_TIMEOUT_MS });
-      await fitBtn.click();
-      await settle(page);
-      const gBig = await captureGeometry(page, host, FIXTURE_BIG.card, FIXTURE_BIG.edge);
-      checks.push(check("S3-fit-big-fixture", "behavioral", "pass",
-        gBig.ctmScale < 0.1 && Number.isFinite(gBig.ctmScale),
-        { scale: gBig.ctmScale }));
       await shot("standalone-big-fit.png");
-
-      await page.locator('[data-testid="qa-load-tall"]').click();
-      await page.locator(`${scopeSel} [data-testid="dag-node-t0"]`).waitFor({ state: "visible", timeout: PAGE_TIMEOUT_MS });
-      await fitBtn.click();
-      await settle(page);
-      const gTall = await captureGeometry(page, host, FIXTURE_TALL.card, FIXTURE_TALL.edge);
-      checks.push(check("S3-fit-tall-fixture", "behavioral", "pass",
-        Number.isFinite(gTall.ctmScale),
-        { scale: gTall.ctmScale }));
-      await shot("standalone-tall-fit.png");
-
-      await page.locator('[data-testid="qa-load-empty"]').click();
-      await settle(page);
-      const emptyExists = await page.locator(`${scopeSel} [data-testid="dag-graph-view"]`).isVisible();
-      checks.push(check("S3-empty-fixture-handled", "behavioral", "pass",
-        emptyExists, { emptyExists }));
-
-      await page.locator('[data-testid="qa-load-a"]').click();
-      await page.locator(`${scopeSel} [data-testid="dag-node-a"]`).waitFor({ state: "visible", timeout: PAGE_TIMEOUT_MS });
-      await fitBtn.click();
-      await settle(page);
     }
+
+    await page.evaluate(async () => {
+      const { dagStore } = await import("/src/state/dagStore.ts");
+      const f = await import("/src/devtools/dagViewportQaFixtures.ts");
+      dagStore.applySnapshot(f.QA_PROJECT_PATH, { ...f.buildTallDagRun(), runId: "qa-dag-a", rootSessionId: "qa-owner", updatedAt: "2026-09-12T12:31:00Z" });
+    });
+    await fitBtn.click();
+    await settle(page);
+    const gTall = await captureGeometry(page, host, FIXTURE_TALL.card, FIXTURE_TALL.edge);
+    checks.push(check("S3-fit-tall-fixture", "behavioral", "pass",
+      fitOk(gTall, 284, 7044) && allInside(gTall),
+      { scale: gTall.ctmScale, allInside: allInside(gTall) }));
+    if (host === "standalone") {
+      await shot("standalone-tall-fit.png");
+    }
+
+    await page.evaluate(async () => {
+      const { dagStore } = await import("/src/state/dagStore.ts");
+      const f = await import("/src/devtools/dagViewportQaFixtures.ts");
+      dagStore.applySnapshot(f.QA_PROJECT_PATH, { ...f.buildEmptyDagRun(), runId: "qa-dag-a", rootSessionId: "qa-owner", updatedAt: "2026-09-12T12:32:00Z" });
+    });
+    await fitBtn.click();
+    await settle(page);
+    const gEmpty = await captureGeometry(page, host, null, null);
+    checks.push(check("S3-empty-fixture-handled", "behavioral", "pass",
+      gEmpty !== null && Number.isFinite(gEmpty.ctmScale),
+      { scale: gEmpty?.ctmScale }));
+
+    // Reset back to Fixture A
+    await page.evaluate(async () => {
+      const { dagStore } = await import("/src/state/dagStore.ts");
+      const f = await import("/src/devtools/dagViewportQaFixtures.ts");
+      dagStore.applySnapshot(f.QA_PROJECT_PATH, { ...f.buildQaDagRunA(), runId: "qa-dag-a", rootSessionId: "qa-owner", updatedAt: "2026-09-12T12:33:00Z" });
+    });
+    await fitBtn.click();
+    await settle(page);
 
     // 5. S4 Gesture Lifecycle: Drag across dialog boundary, release outside, move back
     await page.mouse.move(startX, startY);
@@ -738,14 +907,117 @@ async function runHostGreen(browser, host, evidencePaths) {
       movedBy(delta(gAfterMoveBack.card, gAfterRight.card), 0, 0, 1),
       { actual: delta(gAfterMoveBack.card, gAfterRight.card) }));
 
+    // Interruptions during active drag with pressed continuation
+    for (const interruption of ["blur", "hidden", "lostcapture", "cancel", "resize"]) {
+      await fitBtn.click();
+      await settle(page);
+      const gBefore = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
+      const vx = gBefore.viewport.x + 40;
+      const vy = gBefore.viewport.y + 60;
+      await page.mouse.move(vx, vy);
+      await page.evaluate(({ scopeSel }) => {
+        const v = document.querySelector(scopeSel + ' [data-testid="dag-viewport"]');
+        v.addEventListener("pointerdown", (e) => { window.__pid = e.pointerId; }, { once: true });
+      }, { scopeSel });
+      await page.mouse.down();
+      await page.mouse.move(vx + 10, vy + 10);
+      await settle(page);
+
+      await page.evaluate(async ({ scopeSel, interruption }) => {
+        const v = document.querySelector(scopeSel + ' [data-testid="dag-viewport"]');
+        if (interruption === "blur") window.dispatchEvent(new Event("blur"));
+        if (interruption === "hidden") {
+          Object.defineProperty(document, "hidden", { configurable: true, value: true });
+          document.dispatchEvent(new Event("visibilitychange"));
+          delete document.hidden;
+        }
+        if (interruption === "lostcapture") v.releasePointerCapture(window.__pid);
+        if (interruption === "cancel") {
+          v.dispatchEvent(new PointerEvent("pointercancel", { bubbles: true, pointerId: window.__pid, pointerType: "mouse" }));
+        }
+        if (interruption === "resize") {
+          await new Promise((resolve, reject) => {
+            const t = setTimeout(() => reject(new Error("resize timeout")), 3000);
+            const ob = new ResizeObserver((entries) => {
+              if (entries[0].contentRect.height === 120) {
+                ob.disconnect();
+                clearTimeout(t);
+                requestAnimationFrame(resolve);
+              }
+            });
+            ob.observe(v);
+            v.style.flex = "none";
+            v.style.height = "120px";
+          });
+        }
+      }, { scopeSel, interruption });
+      await settle(page);
+
+      const gInterrupted = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
+      // Subsequent pressed move must be inert
+      await page.mouse.move(vx + 20, vy + 20);
+      await page.mouse.up();
+      await page.mouse.move(vx + 30, vy + 30);
+      await settle(page);
+      const gAfterInterrupted = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
+
+      const held = await page.locator(`${scopeSel} [data-testid="dag-viewport"]`).evaluate((v) => v.hasPointerCapture(window.__pid));
+      checks.push(check(`S4-lifecycle-${interruption}-pressed-inert`, "behavioral", "pass",
+        Math.abs(gInterrupted.camera.x - gAfterInterrupted.camera.x) <= 0.5 &&
+        Math.abs(gInterrupted.camera.y - gAfterInterrupted.camera.y) <= 0.5 &&
+        !held,
+        { before: gInterrupted.camera, after: gAfterInterrupted.camera, captureHeld: held }));
+
+      if (interruption === "resize") {
+        await page.locator(`${scopeSel} [data-testid="dag-viewport"]`).evaluate((v) => {
+          v.style.flex = "";
+          v.style.height = "";
+        });
+        await settle(page);
+      }
+    }
+
+    // Contenteditable attribute variants all reject pan (B4)
+    for (const attr of ["", "plaintext-only", "false", "true"]) {
+      await fitBtn.click();
+      await settle(page);
+      await page.locator(`${scopeSel} [data-testid="dag-viewport"]`).evaluate((v, attr) => {
+        const d = document.createElement("div");
+        d.id = "qa-editable";
+        d.setAttribute("contenteditable", attr);
+        d.style.cssText = "position:absolute;left:20px;top:20px;width:80px;height:30px;background:red";
+        v.append(d);
+      }, attr);
+      const gBeforeEd = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
+      const bb = await page.locator("#qa-editable").boundingBox();
+      await page.mouse.move(bb.x + 10, bb.y + 10);
+      await page.mouse.down();
+      await page.mouse.move(bb.x + 30, bb.y + 20);
+      await page.mouse.up();
+      await settle(page);
+      const gAfterEd = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
+      checks.push(check(`S4-contenteditable-${attr || "empty"}-rejects-pan`, "behavioral", "pass",
+        Math.abs(gBeforeEd.camera.x - gAfterEd.camera.x) <= 0.5 &&
+        Math.abs(gBeforeEd.camera.y - gAfterEd.camera.y) <= 0.5,
+        { before: gBeforeEd.camera, after: gAfterEd.camera }));
+      await page.locator("#qa-editable").evaluate((e) => e.remove());
+    }
+
     // 6. S5 Touch / Pinch via Chrome DevTools Protocol
     const cdp = await context.newCDPSession(page);
+    await fitBtn.click();
+    await settle(page);
     const gP0 = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
     const p1x = Math.round(vp.x + 100);
     const p1y = Math.round(vp.y + 100);
     const p2x = Math.round(vp.x + 200);
     const p2y = Math.round(vp.y + 100);
 
+    // 1 -> 2 contact transition without jump
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [{ id: 1, x: p1x, y: p1y }],
+    });
     await cdp.send("Input.dispatchTouchEvent", {
       type: "touchStart",
       touchPoints: [
@@ -753,85 +1025,272 @@ async function runHostGreen(browser, host, evidencePaths) {
         { id: 2, x: p2x, y: p2y },
       ],
     });
-    // Move apart (distance = 160, ratio = 1.6)
+    await settle(page);
+    const gPStart = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
+    checks.push(check("S5-touch-add-second-no-jump", "behavioral", "pass",
+      Math.abs(gPStart.camera.x - gP0.camera.x) <= 0.5 && Math.abs(gPStart.camera.y - gP0.camera.y) <= 0.5,
+      { before: gP0.camera, after: gPStart.camera }));
+
+    // Exact 1.6 pinch ratio & midpoint anchor
+    const movedTouch = [
+      { id: 1, x: p1x - 10, y: p1y + 20 },
+      { id: 2, x: p1x + 150, y: p1y + 20 },
+    ];
     await cdp.send("Input.dispatchTouchEvent", {
       type: "touchMove",
-      touchPoints: [
-        { id: 1, x: p1x - 20, y: p1y + 20 },
-        { id: 2, x: p2x + 40, y: p2y + 20 },
-      ],
-    });
-    await cdp.send("Input.dispatchTouchEvent", {
-      type: "touchEnd",
-      touchPoints: [],
+      touchPoints: movedTouch,
     });
     await settle(page);
     const gP1 = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
-    checks.push(check("S5-cdp-pinch-zooms-scale", "behavioral", "pass",
-      gP1.ctmScale > gP0.ctmScale * 1.3,
-      { before: gP0.ctmScale, after: gP1.ctmScale }));
 
-    // 1 -> 2 -> 1 Touch transition:
-    // Contact 1 starts
+    const mx = p1x + 50 - vp.x;
+    const my = p1y - vp.y;
+    const pinchAnchorError = {
+      x: gP1.camera.x + gP1.camera.scale * (mx - gP0.camera.x) / gP0.camera.scale - (p1x + 70 - vp.x),
+      y: gP1.camera.y + gP1.camera.scale * (my - gP0.camera.y) / gP0.camera.scale - (p1y + 20 - vp.y),
+    };
+    checks.push(check("S5-pinch-exact-1.6-ratio-and-midpoint-anchor", "behavioral", "pass",
+      Math.abs(gP1.camera.scale / gP0.camera.scale - 1.6) <= 0.01 &&
+      Math.abs(pinchAnchorError.x) <= 1.0 &&
+      Math.abs(pinchAnchorError.y) <= 1.0,
+      { ratio: gP1.camera.scale / gP0.camera.scale, anchorError: pinchAnchorError }));
+
+    // Extra contact ignored during pinch
     await cdp.send("Input.dispatchTouchEvent", {
       type: "touchStart",
-      touchPoints: [{ id: 10, x: p1x, y: p1y }],
+      touchPoints: [...movedTouch, { id: 3, x: p1x + 50, y: p1y + 40 }],
     });
-    // Add Contact 2
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [...movedTouch, { id: 3, x: p1x + 70, y: p1y + 45 }],
+    });
+    await settle(page);
+    const gPExtra = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
+    checks.push(check("S5-pinch-extra-contact-ignored", "behavioral", "pass",
+      Math.abs(gPExtra.camera.scale - gP1.camera.scale) <= 0.001,
+      { before: gP1.camera, after: gPExtra.camera }));
+
+    // Lift contact 3 then contact 2, move survivor by (20, 10)
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: [{ id: 3, x: p1x + 70, y: p1y + 45 }],
+    });
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: [movedTouch[1]],
+    });
+    await settle(page);
+    const gBeforeSurvivor = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
+
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [{ id: 1, x: p1x - 10 + 20, y: p1y + 20 + 10 }],
+    });
+    await settle(page);
+    const gAfterSurvivor = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
+    checks.push(check("S5-pinch-survivor-pan-no-jump", "behavioral", "pass",
+      movedBy(delta(gBeforeSurvivor.camera, gAfterSurvivor.camera), 20, 10, 1),
+      { delta: delta(gBeforeSurvivor.camera, gAfterSurvivor.camera) }));
+
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await settle(page);
+
+    // Degenerate distance (<1px) deferred baseline
+    await fitBtn.click();
+    await settle(page);
+    const gD0 = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
+    await page.evaluate(({ scopeSel, p1x, p1y }) => {
+      const v = document.querySelector(scopeSel + ' [data-testid="dag-viewport"]');
+      v.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerId: 80, pointerType: "touch", clientX: p1x, clientY: p1y }));
+      v.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerId: 81, pointerType: "touch", clientX: p1x + 0.5, clientY: p1y }));
+      v.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 81, pointerType: "touch", clientX: p1x + 0.7, clientY: p1y }));
+    }, { scopeSel, p1x, p1y });
+    await settle(page);
+    const gD1 = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
+    await page.evaluate(({ scopeSel, p1x, p1y }) => {
+      const v = document.querySelector(scopeSel + ' [data-testid="dag-viewport"]');
+      v.dispatchEvent(new PointerEvent("pointercancel", { bubbles: true, pointerId: 80, pointerType: "touch" }));
+      v.dispatchEvent(new PointerEvent("pointercancel", { bubbles: true, pointerId: 81, pointerType: "touch" }));
+    }, { scopeSel, p1x, p1y });
+    await settle(page);
+    checks.push(check("S5-pinch-degenerate-deferred-baseline", "behavioral", "pass",
+      Math.abs(gD1.camera.scale - gD0.camera.scale) <= 0.001,
+      { scaleBefore: gD0.camera.scale, scaleAfter: gD1.camera.scale }));
+
+    // Outward pinch at newly raised minimum (B2 regression)
+    await page.evaluate(async () => {
+      const { dagStore } = await import("/src/state/dagStore.ts");
+      const f = await import("/src/devtools/dagViewportQaFixtures.ts");
+      dagStore.applySnapshot(f.QA_PROJECT_PATH, { ...f.buildBigDagRun(), runId: "qa-dag-a", rootSessionId: "qa-owner", updatedAt: "2026-09-12T12:40:00Z" });
+    });
+    await fitBtn.click();
+    await settle(page);
+    const gBigBeforeShrink = await captureGeometry(page, host, FIXTURE_BIG.card, FIXTURE_BIG.edge);
+
+    // Update to Fixture A under same runId (raises minimum to 0.1, current scale is <0.1)
+    await page.evaluate(async () => {
+      const { dagStore } = await import("/src/state/dagStore.ts");
+      const f = await import("/src/devtools/dagViewportQaFixtures.ts");
+      dagStore.applySnapshot(f.QA_PROJECT_PATH, { ...f.buildQaDagRunA(), runId: "qa-dag-a", rootSessionId: "qa-owner", updatedAt: "2026-09-12T12:41:00Z" });
+    });
+    await settle(page);
+    const gSmallRetained = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
+    checks.push(check("S6-topology-shrink-preserves-camera", "behavioral", "pass",
+      Math.abs(gSmallRetained.camera.scale - gBigBeforeShrink.camera.scale) <= 0.001,
+      { scaleBefore: gBigBeforeShrink.camera.scale, scaleAfter: gSmallRetained.camera.scale }));
+
+    // Outward pinch: distance 100 -> 90: scale must remain unchanged
+    const bpx = Math.round(vp.x + 30);
+    const bpy = Math.round(vp.y + 60);
     await cdp.send("Input.dispatchTouchEvent", {
       type: "touchStart",
       touchPoints: [
-        { id: 10, x: p1x, y: p1y },
-        { id: 11, x: p1x + 100, y: p1y },
+        { id: 51, x: bpx, y: bpy },
+        { id: 52, x: bpx + 100, y: bpy },
       ],
     });
-    // Lift Contact 2: Contact 2 is the ending touch point
-    await cdp.send("Input.dispatchTouchEvent", {
-      type: "touchEnd",
-      touchPoints: [{ id: 11, x: p1x + 100, y: p1y }],
-    });
-    await settle(page);
-    const gTouchBaseline = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
-
-    // Move remaining Contact 1 by (20, 10)
     await cdp.send("Input.dispatchTouchEvent", {
       type: "touchMove",
-      touchPoints: [{ id: 10, x: p1x + 20, y: p1y + 10 }],
+      touchPoints: [
+        { id: 51, x: bpx + 5, y: bpy },
+        { id: 52, x: bpx + 95, y: bpy },
+      ],
     });
     await settle(page);
-    const gTouchAfter = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
-    const transDelta = delta(gTouchBaseline.card, gTouchAfter.card);
-    checks.push(check("S5-touch-transition-no-jump", "behavioral", "pass",
-      movedBy(transDelta, 20, 10, 1),
-      { expected: { x: 20, y: 10 }, actual: transDelta }));
-
-    // Lift remaining Contact 1
-    await cdp.send("Input.dispatchTouchEvent", {
-      type: "touchEnd",
-      touchPoints: [{ id: 10, x: p1x + 20, y: p1y + 10 }],
-    });
+    const gAfterOutPinch = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
     await settle(page);
-
-    await fitBtn.click();
-    await settle(page);
+    checks.push(check("S5-pinch-outward-raised-minimum-recovery", "behavioral", "pass",
+      Math.abs(gAfterOutPinch.camera.scale - gSmallRetained.camera.scale) <= 0.001,
+      { scaleBefore: gSmallRetained.camera.scale, scaleAfter: gAfterOutPinch.camera.scale }));
 
     // 7. S6 Live state & host independence
+    // Custom camera status update retention
+    await resetBtn.click();
+    await page.mouse.move(startX, startY);
+    await page.mouse.down();
+    await page.mouse.move(startX + 60, startY + 40);
+    await page.mouse.up();
+    await settle(page);
     const gLive0 = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
+
     await page.locator('[data-testid="qa-update-status-a"]').dispatchEvent("click");
     await settle(page);
     const gLive1 = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
-    checks.push(check("S6-same-run-update-preserves-camera", "behavioral", "pass",
-      gLive1.ctmScale === gLive0.ctmScale && movedBy(delta(gLive0.card, gLive1.card), 0, 0, 1),
-      { scaleBefore: gLive0.ctmScale, scaleAfter: gLive1.ctmScale }));
+    checks.push(check("S6-same-run-status-update-preserves-camera", "behavioral", "pass",
+      Math.abs(gLive1.camera.scale - gLive0.camera.scale) <= 0.001 &&
+      movedBy(delta(gLive0.camera, gLive1.camera), 0, 0, 1),
+      { scaleBefore: gLive0.camera.scale, scaleAfter: gLive1.camera.scale }));
+
+    // Same-run empty -> first nonempty fits without user Fit (B1)
+    await page.evaluate(async () => {
+      const { dagStore } = await import("/src/state/dagStore.ts");
+      const f = await import("/src/devtools/dagViewportQaFixtures.ts");
+      dagStore.applySnapshot(f.QA_PROJECT_PATH, { ...f.buildEmptyDagRun(), runId: "qa-dag-a", rootSessionId: "qa-owner", updatedAt: "2026-09-12T12:50:00Z" });
+    });
+    await fitBtn.click();
+    await settle(page);
+    const gEmptyBefore = await captureGeometry(page, host, null, null);
+
+    await page.evaluate(async () => {
+      const { dagStore } = await import("/src/state/dagStore.ts");
+      const f = await import("/src/devtools/dagViewportQaFixtures.ts");
+      dagStore.applySnapshot(f.QA_PROJECT_PATH, { ...f.buildBigDagRun(), runId: "qa-dag-a", rootSessionId: "qa-owner", updatedAt: "2026-09-12T12:51:00Z" });
+    });
+    await settle(page);
+    const gNonEmptyAfter = await captureGeometry(page, host, FIXTURE_BIG.card, FIXTURE_BIG.edge);
+    checks.push(check("S6-empty-to-first-nonempty-fits-without-user-fit", "behavioral", "pass",
+      fitOk(gNonEmptyAfter, 29124, 144) && allInside(gNonEmptyAfter),
+      { emptyScale: gEmptyBefore?.camera.scale, fittedScale: gNonEmptyAfter.camera.scale, allInside: allInside(gNonEmptyAfter) }));
+
+    // Zero-size deferral recovery: 0x0 -> empty -> big -> positive fits (B1)
+    await page.evaluate(async ({ scopeSel }) => {
+      const v = document.querySelector(scopeSel + ' [data-testid="dag-viewport"]');
+      await new Promise((resolve, reject) => {
+        let t = setTimeout(() => { ob.disconnect(); reject(new Error("resize signal timeout")); }, 3000);
+        const ob = new ResizeObserver((entries) => {
+          const r = entries[0].contentRect;
+          if (r.width === 0 && r.height === 0) {
+            clearTimeout(t);
+            ob.disconnect();
+            requestAnimationFrame(resolve);
+          }
+        });
+        ob.observe(v);
+        v.style.flex = "none";
+        v.style.width = "0px";
+        v.style.height = "0px";
+      });
+    }, { scopeSel });
+    await settle(page);
+
+    await page.evaluate(async () => {
+      const { dagStore } = await import("/src/state/dagStore.ts");
+      const f = await import("/src/devtools/dagViewportQaFixtures.ts");
+      dagStore.applySnapshot(f.QA_PROJECT_PATH, { ...f.buildEmptyDagRun(), runId: "qa-dag-a", rootSessionId: "qa-owner", updatedAt: "2026-09-12T12:55:00Z" });
+    });
+    await settle(page);
+
+    await page.evaluate(async () => {
+      const { dagStore } = await import("/src/state/dagStore.ts");
+      const f = await import("/src/devtools/dagViewportQaFixtures.ts");
+      dagStore.applySnapshot(f.QA_PROJECT_PATH, { ...f.buildBigDagRun(), runId: "qa-dag-a", rootSessionId: "qa-owner", updatedAt: "2026-09-12T12:56:00Z" });
+    });
+    await settle(page);
+
+    await page.evaluate(async ({ scopeSel }) => {
+      const v = document.querySelector(scopeSel + ' [data-testid="dag-viewport"]');
+      await new Promise((resolve, reject) => {
+        let t = setTimeout(() => { ob.disconnect(); reject(new Error("resize signal timeout")); }, 3000);
+        const ob = new ResizeObserver((entries) => {
+          const r = entries[0].contentRect;
+          if (r.width === 200 && r.height === 200) {
+            clearTimeout(t);
+            ob.disconnect();
+            requestAnimationFrame(resolve);
+          }
+        });
+        ob.observe(v);
+        v.style.width = "200px";
+        v.style.height = "200px";
+      });
+    }, { scopeSel });
+    await settle(page);
+    const gZeroRecovery = await captureGeometry(page, host, FIXTURE_BIG.card, FIXTURE_BIG.edge);
+    checks.push(check("S6-zero-deferral-positive-recovery-fits", "behavioral", "pass",
+      fitOk(gZeroRecovery, 29124, 144),
+      { camera: gZeroRecovery.camera, expected: fitExpected(gZeroRecovery.viewport, 29124, 144) }));
+
+    // Restore viewport style
+    await page.evaluate(({ scopeSel }) => {
+      const v = document.querySelector(scopeSel + ' [data-testid="dag-viewport"]');
+      v.style.flex = "";
+      v.style.width = "";
+      v.style.height = "";
+    }, { scopeSel });
+    await settle(page);
+
+    // Reset back to Fixture A
+    await page.evaluate(async () => {
+      const { dagStore } = await import("/src/state/dagStore.ts");
+      const f = await import("/src/devtools/dagViewportQaFixtures.ts");
+      dagStore.applySnapshot(f.QA_PROJECT_PATH, { ...f.buildQaDagRunA(), runId: "qa-dag-a", rootSessionId: "qa-owner", updatedAt: "2026-09-12T13:00:00Z" });
+    });
+    await fitBtn.click();
+    await settle(page);
 
     // Resize viewport center world point stability
     const gBeforeResize = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
     await page.setViewportSize({ width: 1100, height: 800 });
     await settle(page);
     const gAfterResize = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
-    checks.push(check("S6-resize-viewport-center-stable", "behavioral", "pass",
-      gAfterResize.ctmScale === gBeforeResize.ctmScale,
-      { scaleBefore: gBeforeResize.ctmScale, scaleAfter: gAfterResize.ctmScale }));
+    const expectedShiftX = (gAfterResize.viewport.width - gBeforeResize.viewport.width) / 2;
+    const expectedShiftY = (gAfterResize.viewport.height - gBeforeResize.viewport.height) / 2;
+    checks.push(check("S6-resize-center-world-point-stable", "behavioral", "pass",
+      gAfterResize.ctmScale === gBeforeResize.ctmScale &&
+      Math.abs(gAfterResize.camera.x - gBeforeResize.camera.x - expectedShiftX) <= 1 &&
+      Math.abs(gAfterResize.camera.y - gBeforeResize.camera.y - expectedShiftY) <= 1,
+      { scaleBefore: gBeforeResize.ctmScale, scaleAfter: gAfterResize.ctmScale, expectedShiftX, expectedShiftY }));
     await page.setViewportSize({ width: 1280, height: 900 });
     await settle(page);
 
@@ -841,21 +1300,21 @@ async function runHostGreen(browser, host, evidencePaths) {
       await page.locator(`${scopeSel} [data-testid="dag-node-b-1"]`).waitFor({ state: "visible", timeout: PAGE_TIMEOUT_MS });
       await settle(page);
       const gRunB = await captureGeometry(page, host, "dag-node-b-1", "dag-edge-b-1-b-4");
-      checks.push(check("S6-modal-run-switch-fits-new-run", "behavioral", "pass",
-        gRunB.ctmScale <= 1.0 && Number.isFinite(gRunB.ctmScale),
-        { scale: gRunB.ctmScale }));
+      checks.push(check("S6-modal-tab-switch-fits-new-run", "behavioral", "pass",
+        fitOk(gRunB) && allInside(gRunB),
+        { scale: gRunB.ctmScale, allInside: allInside(gRunB) }));
 
-      // Focus trap (Tab / Shift+Tab)
-      for (let i = 0; i < 5; i++) {
-        await page.keyboard.press("Tab");
-      }
-      const isFocusedInModal = await page.evaluate(() => {
-        const modal = document.querySelector('[data-testid="dag-pane-modal"]');
-        return modal?.contains(document.activeElement) ?? false;
-      });
-      checks.push(check("S6-modal-focus-trap-retained", "behavioral", "pass",
-        isFocusedInModal === true,
-        { isFocusedInModal }));
+      // Focus loop: Tab and Shift+Tab wrapping
+      const firstBtn = page.locator(`${scopeSel} button`).first();
+      const lastBtn = page.locator(`${scopeSel} button`).last();
+      await firstBtn.focus();
+      await page.keyboard.press("Shift+Tab");
+      const wrappedBack = await lastBtn.evaluate((el) => el === document.activeElement);
+      await page.keyboard.press("Tab");
+      const wrappedForward = await firstBtn.evaluate((el) => el === document.activeElement);
+      checks.push(check("S6-modal-focus-trap-tab-and-shift-tab", "behavioral", "pass",
+        wrappedBack && wrappedForward,
+        { wrappedBack, wrappedForward }));
 
       // Escape key closes modal
       await page.keyboard.press("Escape");
@@ -864,14 +1323,43 @@ async function runHostGreen(browser, host, evidencePaths) {
       checks.push(check("S6-modal-escape-closes", "behavioral", "pass",
         modalClosed === true,
         { modalClosed }));
+
+      // Reopen modal twice and verify single wheel factor (no duplicate listeners)
+      for (let i = 0; i < 2; i++) {
+        await page.locator('[data-testid="qa-modal-host"] [data-testid="dag-pane-badge-button"]').click();
+        await page.locator(`${scopeSel} [data-testid="dag-world"]`).waitFor({ state: "visible", timeout: PAGE_TIMEOUT_MS });
+        await settle(page);
+        const gReopen0 = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
+        const vpr = gReopen0.viewport;
+        await page.mouse.move(vpr.x + vpr.width / 2, vpr.y + vpr.height / 2);
+        await page.mouse.wheel(0, -120);
+        await settle(page);
+        const gReopen1 = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
+        checks.push(check(`S6-modal-reopen-single-wheel-factor-${i}`, "behavioral", "pass",
+          Math.abs(gReopen1.ctmScale / gReopen0.ctmScale - Math.exp(0.24)) <= 0.05,
+          { ratio: gReopen1.ctmScale / gReopen0.ctmScale }));
+        await page.keyboard.press("Escape");
+        await settle(page);
+      }
     }
 
     if (host === "standalone") {
-      // Sibling terminal independent
-      const termSibling = await page.locator('[data-testid="qa-standalone-host"]').isVisible();
-      checks.push(check("S6-standalone-terminal-sibling-independent", "behavioral", "pass",
-        termSibling === true,
-        { termSibling }));
+      // Measurable split seam resize (B7)
+      const seam = page.locator('[role="separator"]');
+      const bb = await seam.boundingBox();
+      const gBeforeSeam = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
+      actions.push({ action: "seam-drag-start", x: bb.x + 0.5, y: bb.y + bb.height / 2 });
+      await page.mouse.move(bb.x + 0.5, bb.y + bb.height / 2);
+      await page.mouse.down();
+      actions.push({ action: "seam-drag-move", x: bb.x + 50, y: bb.y + bb.height / 2 });
+      await page.mouse.move(bb.x + 50, bb.y + bb.height / 2);
+      actions.push({ action: "seam-drag-up" });
+      await page.mouse.up();
+      await settle(page);
+      const gAfterSeam = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
+      checks.push(check("S6-standalone-split-seam-resize-changes-widths", "behavioral", "pass",
+        JSON.stringify(gBeforeSeam.leaves) !== JSON.stringify(gAfterSeam.leaves),
+        { before: gBeforeSeam.leaves, after: gAfterSeam.leaves }));
     }
   } catch (e) {
     scenarioError = String(e?.stack ?? e);
@@ -923,6 +1411,136 @@ async function runHostMobile(browser, host, evidencePaths) {
     checks.push(check("mobile-no-horizontal-page-overflow", "behavioral", "pass",
       bodyScrollWidth <= 395,
       { bodyScrollWidth }));
+
+    // Mobile S1 Pan
+    const fitBtn = page.locator(`${scopeSel} [data-testid="dag-controls"] button[aria-label="Fit graph"]`);
+    await fitBtn.click();
+    await settle(page);
+    const gMob0 = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
+    const mvp = gMob0.viewport;
+    await page.mouse.move(mvp.x + 50, mvp.y + 50);
+    await page.mouse.down();
+    await page.mouse.move(mvp.x + 100, mvp.y + 80);
+    await page.mouse.up();
+    await settle(page);
+    const gMobPan = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
+    checks.push(check("mobile-S1-pan-moves", "behavioral", "pass",
+      movedBy(delta(gMob0.card, gMobPan.card), 50, 30, 1),
+      { delta: delta(gMob0.card, gMobPan.card) }));
+
+    // Mobile S2 Zoom & Anchor
+    await fitBtn.click();
+    await settle(page);
+    const gMobZ0 = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
+    await page.mouse.move(mvp.x + mvp.width / 2, mvp.y + mvp.height / 2);
+    await page.mouse.wheel(0, -120);
+    await settle(page);
+    const gMobZ1 = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
+    checks.push(check("mobile-S2-zoom-increases", "behavioral", "pass",
+      gMobZ1.ctmScale > gMobZ0.ctmScale,
+      { before: gMobZ0.ctmScale, after: gMobZ1.ctmScale }));
+
+    // Mobile S3 Fit formula and containment
+    await fitBtn.click();
+    await settle(page);
+    const gMobFitA = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
+    checks.push(check("mobile-S3-fit-A", "behavioral", "pass",
+      fitOk(gMobFitA) && allInside(gMobFitA),
+      { scale: gMobFitA.ctmScale, allInside: allInside(gMobFitA) }));
+
+    // Mobile big fixture
+    await page.evaluate(async () => {
+      const { dagStore } = await import("/src/state/dagStore.ts");
+      const f = await import("/src/devtools/dagViewportQaFixtures.ts");
+      dagStore.applySnapshot(f.QA_PROJECT_PATH, { ...f.buildBigDagRun(), runId: "qa-dag-a", rootSessionId: "qa-owner", updatedAt: "2026-09-12T13:10:00Z" });
+    });
+    await fitBtn.click();
+    await settle(page);
+    const gMobBig = await captureGeometry(page, host, FIXTURE_BIG.card, FIXTURE_BIG.edge);
+    checks.push(check("mobile-S3-fit-big", "behavioral", "pass",
+      gMobBig.ctmScale < 0.1 && fitOk(gMobBig) && allInside(gMobBig),
+      { scale: gMobBig.ctmScale, allInside: allInside(gMobBig) }));
+
+    // Mobile tall fixture
+    await page.evaluate(async () => {
+      const { dagStore } = await import("/src/state/dagStore.ts");
+      const f = await import("/src/devtools/dagViewportQaFixtures.ts");
+      dagStore.applySnapshot(f.QA_PROJECT_PATH, { ...f.buildTallDagRun(), runId: "qa-dag-a", rootSessionId: "qa-owner", updatedAt: "2026-09-12T13:11:00Z" });
+    });
+    await fitBtn.click();
+    await settle(page);
+    const gMobTall = await captureGeometry(page, host, FIXTURE_TALL.card, FIXTURE_TALL.edge);
+    checks.push(check("mobile-S3-fit-tall", "behavioral", "pass",
+      fitOk(gMobTall) && allInside(gMobTall),
+      { scale: gMobTall.ctmScale, allInside: allInside(gMobTall) }));
+
+    // Mobile empty fixture
+    await page.evaluate(async () => {
+      const { dagStore } = await import("/src/state/dagStore.ts");
+      const f = await import("/src/devtools/dagViewportQaFixtures.ts");
+      dagStore.applySnapshot(f.QA_PROJECT_PATH, { ...f.buildEmptyDagRun(), runId: "qa-dag-a", rootSessionId: "qa-owner", updatedAt: "2026-09-12T13:12:00Z" });
+    });
+    await fitBtn.click();
+    await settle(page);
+    const gMobEmpty = await captureGeometry(page, host, null, null);
+    checks.push(check("mobile-S3-fit-empty", "behavioral", "pass",
+      gMobEmpty !== null && Number.isFinite(gMobEmpty.ctmScale),
+      { scale: gMobEmpty?.ctmScale }));
+
+    // Reset back to Fixture A
+    await page.evaluate(async () => {
+      const { dagStore } = await import("/src/state/dagStore.ts");
+      const f = await import("/src/devtools/dagViewportQaFixtures.ts");
+      dagStore.applySnapshot(f.QA_PROJECT_PATH, { ...f.buildQaDagRunA(), runId: "qa-dag-a", rootSessionId: "qa-owner", updatedAt: "2026-09-12T13:13:00Z" });
+    });
+    await fitBtn.click();
+    await settle(page);
+
+    // Mobile S5 CDP touch pinch (exact 1.6 ratio)
+    const cdp = await context.newCDPSession(page);
+    const px = Math.round(mvp.x + 30);
+    const py = Math.round(mvp.y + 60);
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [
+        { id: 1, x: px, y: py },
+        { id: 2, x: px + 100, y: py },
+      ],
+    });
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [
+        { id: 1, x: px - 10, y: py + 20 },
+        { id: 2, x: px + 150, y: py + 20 },
+      ],
+    });
+    await settle(page);
+    const gMobPinch = await captureGeometry(page, host, FIXTURE_A.card, FIXTURE_A.edge);
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await settle(page);
+    checks.push(check("mobile-S5-cdp-pinch-1.6", "behavioral", "pass",
+      Math.abs(gMobPinch.camera.scale / gMobFitA.camera.scale - 1.6) <= 0.05,
+      { ratio: gMobPinch.camera.scale / gMobFitA.camera.scale }));
+
+    // Mobile S6 empty -> first nonempty
+    await page.evaluate(async () => {
+      const { dagStore } = await import("/src/state/dagStore.ts");
+      const f = await import("/src/devtools/dagViewportQaFixtures.ts");
+      dagStore.applySnapshot(f.QA_PROJECT_PATH, { ...f.buildEmptyDagRun(), runId: "qa-dag-a", rootSessionId: "qa-owner", updatedAt: "2026-09-12T13:20:00Z" });
+    });
+    await fitBtn.click();
+    await settle(page);
+
+    await page.evaluate(async () => {
+      const { dagStore } = await import("/src/state/dagStore.ts");
+      const f = await import("/src/devtools/dagViewportQaFixtures.ts");
+      dagStore.applySnapshot(f.QA_PROJECT_PATH, { ...f.buildBigDagRun(), runId: "qa-dag-a", rootSessionId: "qa-owner", updatedAt: "2026-09-12T13:21:00Z" });
+    });
+    await settle(page);
+    const gMobNonEmpty = await captureGeometry(page, host, FIXTURE_BIG.card, FIXTURE_BIG.edge);
+    checks.push(check("mobile-S6-empty-to-first-nonempty-fits", "behavioral", "pass",
+      fitOk(gMobNonEmpty, 29124, 144) && allInside(gMobNonEmpty),
+      { scale: gMobNonEmpty.camera.scale, allInside: allInside(gMobNonEmpty) }));
 
     const shot = async (name) => {
       const path = join(evidenceDir, name);

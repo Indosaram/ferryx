@@ -121,7 +121,7 @@ Planning-session tier is LIGHT because this is a prose artifact. Execution is HE
   - Evidence: `E/baseline/{tests.log,results.json,actions.json,*.png,cleanup.md}` and `E/native/baseline.md`.
   - Commit: Y | `test(dag): add real-host viewport navigation harness`; baseline failures are expected runner mode, never committed failing default tests.
 
-- [x] 2. Implement the shared viewport camera with failing-first interaction tests
+- [ ] 2. Implement the shared viewport camera with failing-first interaction tests
   - Recommended task executor category: visual-engineering - one owner for React viewport and its gesture/state tests.
   - What to do / Must NOT do: First add new behavior tests in DagGraphView.test.tsx (or a colocated viewport test file), capture RED against current component. Implement binding camera contract in DagGraphView.tsx with small pure math functions in existing dagViewUtils.ts only if shared by event paths. Preserve DagNodeCard/DagEdgeLayer geometry. Do not create a generalized camera framework. Use existing IconButton/tokens; only update scoped design contract if required.
   - Parallelization: Wave 2 | Blocked by: 1 | Blocks: 3.

@@ -4,6 +4,7 @@ import {
   calculateEffectiveMinScale,
   calculateFitCamera,
   calculateZoomAtAnchor,
+  clampScaleWithRecovery,
   deriveActiveWaveIndex,
   formatRouteText,
   getNodeStateGlyph,
@@ -231,6 +232,23 @@ describe("dagViewUtils", () => {
       expect(overMax.scale).toBe(3.0);
       expect(overMax.x).toBe(atMax.x);
       expect(overMax.y).toBe(atMax.y);
+    });
+
+    it("clampScaleWithRecovery obeys direction-preserving recovery below min and above max", () => {
+      // Below minScale (0.1)
+      expect(clampScaleWithRecovery(0.05, 0.04, 0.1)).toBe(0.05); // outward: no-op
+      expect(clampScaleWithRecovery(0.05, 0.08, 0.1)).toBe(0.08); // inward: advances toward min
+      expect(clampScaleWithRecovery(0.05, 0.15, 0.1)).toBe(0.1); // inward past min: clamps to min
+
+      // Above maxScale (3.0)
+      expect(clampScaleWithRecovery(3.5, 3.8, 0.1, 3.0)).toBe(3.5); // outward (larger): no-op
+      expect(clampScaleWithRecovery(3.5, 3.2, 0.1, 3.0)).toBe(3.2); // inward: advances toward max
+      expect(clampScaleWithRecovery(3.5, 2.5, 0.1, 3.0)).toBe(3.0); // inward past max: clamps to max
+
+      // Within range
+      expect(clampScaleWithRecovery(1.0, 1.2, 0.1, 3.0)).toBe(1.2);
+      expect(clampScaleWithRecovery(1.0, 0.05, 0.1, 3.0)).toBe(0.1);
+      expect(clampScaleWithRecovery(1.0, 3.5, 0.1, 3.0)).toBe(3.0);
     });
 
     it("normalizeWheelDeltaPixels scales lines and pages properly", () => {

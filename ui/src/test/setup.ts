@@ -20,17 +20,44 @@ if (!globalThis.PointerEvent) {
   }
 }
 
-// Radix UI JSDOM stubs
+// Faithful pointer capture stubs for JSDOM
 if (typeof Element !== "undefined") {
-  if (!Element.prototype.hasPointerCapture) {
-    Element.prototype.hasPointerCapture = () => false;
-  }
-  if (!Element.prototype.setPointerCapture) {
-    Element.prototype.setPointerCapture = () => {};
-  }
-  if (!Element.prototype.releasePointerCapture) {
-    Element.prototype.releasePointerCapture = () => {};
-  }
+  const pointerCaptures = new Map<number, Element>();
+
+  Element.prototype.hasPointerCapture = function (pointerId: number) {
+    if (!this.isConnected && typeof document !== "undefined" && !document.contains(this)) {
+      if (pointerCaptures.get(pointerId) === this) {
+        pointerCaptures.delete(pointerId);
+        this.dispatchEvent(new PointerEvent("lostpointercapture", { bubbles: false, pointerId }));
+      }
+      return false;
+    }
+    return pointerCaptures.get(pointerId) === this;
+  };
+
+  Element.prototype.setPointerCapture = function (pointerId: number) {
+    if (!this.isConnected && typeof document !== "undefined" && !document.contains(this)) {
+      throw new DOMException("The element is not connected to the document.", "InvalidStateError");
+    }
+    const prev = pointerCaptures.get(pointerId);
+    if (prev && prev !== this) {
+      pointerCaptures.delete(pointerId);
+      prev.dispatchEvent(new PointerEvent("lostpointercapture", { bubbles: false, pointerId }));
+    }
+    pointerCaptures.set(pointerId, this);
+  };
+
+  Element.prototype.releasePointerCapture = function (pointerId: number) {
+    if (pointerCaptures.get(pointerId) === this) {
+      pointerCaptures.delete(pointerId);
+      this.dispatchEvent(new PointerEvent("lostpointercapture", { bubbles: false, pointerId }));
+    }
+  };
+
+  (globalThis as unknown as { __clearPointerCaptures?: () => void }).__clearPointerCaptures = () => {
+    pointerCaptures.clear();
+  };
+
   if (!Element.prototype.scrollIntoView) {
     Element.prototype.scrollIntoView = () => {};
   }
@@ -68,6 +95,8 @@ const { clearHmrWorkspaceState } = await import("../state/hmrWorkspaceState");
 const { clearWorkspaceSnapshot } = await import("../state/workspaceSnapshotCache");
 
 setupBeforeEach(() => {
+  const clearCaptures = (globalThis as unknown as { __clearPointerCaptures?: () => void }).__clearPointerCaptures;
+  if (clearCaptures) clearCaptures();
   clearHmrWorkspaceState();
   clearWorkspaceSnapshot();
   // jsdom has no media-query engine; tests that change density provide their own signals.
