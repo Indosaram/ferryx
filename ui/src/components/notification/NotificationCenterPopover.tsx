@@ -3,6 +3,7 @@ import {
   type KeyboardEvent,
   type ReactNode,
   type RefObject,
+  useCallback,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -17,6 +18,8 @@ import { notificationCenterStore, type NotificationCenterStore } from "../../lib
 import type { NotificationEntry } from "../../lib/notificationCenter/types";
 import { StatusDot, type StatusDotState } from "../ui/StatusDot";
 import { useNotificationCenter } from "./useNotificationCenter";
+
+export const POPOVER_WIDTH = 380;
 
 export function formatNotificationLocation(workspaceLabel?: string, worktreeLabel?: string): string {
   const ws = workspaceLabel?.trim();
@@ -87,16 +90,30 @@ export function NotificationCenterPopover({
     left: 8,
   });
 
-  useLayoutEffect(() => {
+  const updatePosition = useCallback(() => {
     if (!anchorRef?.current) return;
     const rect = anchorRef.current.getBoundingClientRect();
     const bottom = Math.max(8, window.innerHeight - rect.top + 6);
-    const left = Math.max(8, rect.left);
+    const popoverWidth =
+      modalRef.current?.getBoundingClientRect().width ||
+      modalRef.current?.offsetWidth ||
+      POPOVER_WIDTH;
+    const maxLeft = Math.max(8, window.innerWidth - popoverWidth - 8);
+    const left = Math.min(Math.max(8, rect.left), maxLeft);
     setPopoverStyle({ bottom, left });
   }, [anchorRef]);
 
+  useLayoutEffect(() => {
+    updatePosition();
+  }, [updatePosition]);
+
   useEffect(() => {
     if (!open) return;
+
+    const handleResize = () => {
+      updatePosition();
+    };
+    window.addEventListener("resize", handleResize);
 
     previousActiveElementRef.current = document.activeElement as HTMLElement | null;
     const focusTimer = setTimeout(() => {
@@ -139,11 +156,12 @@ export function NotificationCenterPopover({
 
     document.addEventListener("keydown", onKeyDown, true);
     return () => {
+      window.removeEventListener("resize", handleResize);
       clearTimeout(focusTimer);
       document.removeEventListener("keydown", onKeyDown, true);
       previousActiveElementRef.current?.focus();
     };
-  }, [open, onClose]);
+  }, [open, onClose, updatePosition]);
 
   if (!open) return null;
 
@@ -235,6 +253,7 @@ export function NotificationCenterPopover({
               };
 
               const handleRowKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+                if (e.target !== e.currentTarget) return;
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
                   handleRowClick();
