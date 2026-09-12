@@ -53,6 +53,14 @@ function builtPages(): Record<string, string> {
     }
   };
   walk(DIST);
+  expect(Object.keys(pages).sort()).toEqual([
+    "/404.html",
+    "/docs/architecture/index.html",
+    "/docs/introduction/index.html",
+    "/docs/shortcuts/index.html",
+    "/index.html",
+    "/privacy/index.html",
+  ]);
   return pages;
 }
 
@@ -180,7 +188,7 @@ describe("SEO — structured data", () => {
     }
   });
 
-  test("landing page declares SoftwareApplication with the fields Google requires", () => {
+  test("landing page declares SoftwareApplication with committed descriptive fields", () => {
     const html = readFileSync(path.join(DIST, "index.html"), "utf8");
     const apps = nodesOfType(html, "SoftwareApplication");
     expect(apps.length).toBe(1);
@@ -209,6 +217,8 @@ describe("SEO — structured data", () => {
   });
 
   test("docs and policy pages expose an ordered BreadcrumbList", () => {
+    // Escape regex metacharacters in origin and anchor boundary to prevent lookalike hostname bypass
+    const originPattern = new RegExp(`^${ORIGIN.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:/|$)`);
     for (const route of DOC_PAGES) {
       const html = readFileSync(path.join(DIST, route), "utf8");
       const crumbs = nodesOfType(html, "BreadcrumbList");
@@ -217,10 +227,11 @@ describe("SEO — structured data", () => {
       expect(Array.isArray(items)).toBe(true);
       expect(items.length, `${route} breadcrumb is too shallow`).toBeGreaterThanOrEqual(2);
       items.forEach((item, index) => {
+        expect(item["@type"], `${route} breadcrumb ${index} @type`).toBe("ListItem");
         expect(item.position, `${route} breadcrumb position ${index}`).toBe(index + 1);
         expect(item.name, `${route} breadcrumb ${index} has no name`).toBeTruthy();
         expect(String(item.item ?? ""), `${route} breadcrumb ${index} has no absolute item URL`).toMatch(
-          new RegExp(`^${ORIGIN}`),
+          originPattern,
         );
       });
     }
@@ -313,10 +324,13 @@ describe("SEO — Core Web Vitals signals", () => {
 
   test("below-the-fold islands defer hydration", () => {
     const html = readFileSync(path.join(DIST, "index.html"), "utf8");
-    for (const island of tags(html, "astro-island")) {
+    const belowFoldIslands = tags(html, "astro-island").filter((island) => {
       const componentUrl = attr(island, "component-url") ?? "";
-      const isBelowFold = /\/(Features|Benchmarks|Footer)\./.test(componentUrl);
-      if (!isBelowFold) continue;
+      return /\/(Features|Benchmarks|Footer)\./.test(componentUrl);
+    });
+    expect(belowFoldIslands.length).toBe(3);
+    for (const island of belowFoldIslands) {
+      const componentUrl = attr(island, "component-url") ?? "";
       expect(attr(island, "client"), `${componentUrl} still hydrates eagerly`).not.toBe("load");
     }
   });
@@ -354,7 +368,9 @@ describe("SEO — crawlable content and internal linking", () => {
 
     for (const route of ["/docs/introduction/index.html", "/docs/shortcuts/index.html"]) {
       const html = readFileSync(path.join(DIST, route), "utf8");
-      expect(html.includes("docs/architecture"), `${route} sidebar omits the architecture page`).toBe(true);
+      const sidebar = html.match(/<nav\b[^>]*\bclass="[^"]*\bsidebar\b[^"]*"[^>]*>[\s\S]*?<\/nav>/)?.[0] ?? "";
+      expect(sidebar, `${route} has no sidebar nav`).toBeTruthy();
+      expect(sidebar.includes("docs/architecture"), `${route} sidebar omits the architecture page`).toBe(true);
     }
   });
 

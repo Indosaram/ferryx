@@ -13,7 +13,7 @@ window.__seoErrors = [];
 addEventListener("error", (e) => window.__seoErrors.push("error: " + (e.message || e.type)));
 addEventListener("unhandledrejection", (e) => window.__seoErrors.push("rejection: " + String(e.reason)));
 const nativeError = console.error;
-console.error = (...args) => { window.__seoErrors.push("console: " + args.map(String).join(" ")); nativeError(...args); };
+console.error = (...args) => { window.__seoErrors.push("console: " + args.map((a) => { try { return typeof a === "object" && a !== null ? JSON.stringify(a, (k, v) => (v instanceof Error ? v.message : v)) : String(a); } catch { return String(a); } }).join(" ")); nativeError(...args); };
 </script>`;
 
 const server = Bun.serve({
@@ -78,6 +78,23 @@ const PROBE = `(() => {
   };
 })()`;
 
+// C5 requires the DownloadMenu to actually work, so drive it rather than just seeing it.
+const DOWNLOAD_MENU_CHECK = `new Promise((resolve) => {
+  window.scrollTo(0, 0);
+  const trigger = [...document.querySelectorAll("button[aria-expanded]")].find((b) => /platform/i.test(b.getAttribute("aria-label") || ""));
+  if (!trigger) { resolve({ triggerFound: false }); return; }
+  const before = trigger.getAttribute("aria-expanded");
+  trigger.click();
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    const after = trigger.getAttribute("aria-expanded");
+    const options = [...document.querySelectorAll("a[href], button")]
+      .filter((el) => el.offsetParent !== null && /\\.(dmg|exe|msi|appimage|deb|zip|tar\\.gz)\\b/i.test(el.textContent || ""))
+      .map((el) => el.textContent.trim().replace(/\\s+/g, " "));
+    trigger.click();
+    resolve({ triggerFound: true, expandedBefore: before, expandedAfter: after, optionCount: options.length, options: options.slice(0, 8) });
+  }));
+})`;
+
 const report = { url: origin, viewports: [] };
 
 for (const viewport of [
@@ -100,8 +117,9 @@ for (const viewport of [
   const bottom = path.join(evidenceDir, `landing-${viewport.name}-bottom.png`);
   await Bun.write(bottom, await view.screenshot());
 
+  const downloadMenu = await view.evaluate(DOWNLOAD_MENU_CHECK);
   const probe = await view.evaluate(PROBE);
-  report.viewports.push({ ...viewport, screenshots: [top, bottom], probe });
+  report.viewports.push({ ...viewport, screenshots: [top, bottom], downloadMenu, probe });
 }
 
 server.stop(true);
