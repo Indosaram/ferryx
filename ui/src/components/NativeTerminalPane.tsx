@@ -1743,6 +1743,21 @@ export function NativeTerminalPane({
     let isAttached = false;
     let presentationFrame: number | null = null;
 
+    // Presentation ownership is independent from live PTY readiness: a retained
+    // presentation (exited session on macOS) keeps the compositor surface on
+    // screen without a live PTY. The incoming render's layout effect already
+    // re-armed that owner here, so geometry tracking starts immediately while
+    // attaching stays impossible (attemptAttach requires a live owner below).
+    const retainedOwner = attachmentOwnerRef.current;
+    const isRetainedPresentation =
+      retainedOwner !== null && !retainedOwner.live && retainedOwner.sessionId === targetSessionId;
+    if (isRetainedPresentation) {
+      // Seed with the presented geometry so the retained surface is re-presented
+      // only when the pane's bounds actually change, not on every effect run.
+      lastGeometry = measureGeometry();
+      isAttached = true;
+    }
+
     const dispatchBounds = (nextGeometry: GeometryState) => {
       if (!isSubscribed) return;
       if (presentationFrame !== null) {
@@ -1827,12 +1842,18 @@ export function NativeTerminalPane({
                 ? `Failed to update native terminal bounds: ${error.code}: ${error.message}`
                 : "Failed to update native terminal bounds",
             );
-            // A surface that refuses geometry stays refusing it, so recovery has to
-            // rebuild the attachment rather than resend the same measurement.
+            // A live surface that refuses geometry stays refusing it, so recovery
+            // has to rebuild the attachment rather than resend the same measurement.
+            // A retained surface has no PTY left to attach: recovery can only
+            // re-present the kept frame with fresh geometry, never attach again.
             retryBoundsRef.current = () => {
               if (!isSubscribed) return;
               lastGeometry = null;
-              void attemptAttach(0, true);
+              if (attachmentOwnerRef.current?.live) {
+                void attemptAttach(0, true);
+              } else {
+                reportBounds();
+              }
             };
           }
         })
@@ -2059,6 +2080,21 @@ export function NativeTerminalPane({
       isComposingRef.current = false;
       if (inputRef.current) {
         inputRef.current.value = "";
+      }
+      // The incoming render's layout effects ran before this passive cleanup.
+      // When they re-armed this exact surface as a retained presentation (exited
+      // session on macOS), the pane still owns the compositor surface without a
+      // live PTY: keep the final frame and let the next effect run release it on
+      // replacement or true unmount. Detaching here would blank the retained
+      // frame and cascade a second detach once the cleared presentation unsets
+      // surfaceSessionId.
+      const nextOwner = attachmentOwnerRef.current;
+      if (nextOwner && !nextOwner.live && nextOwner.sessionId === targetSessionId) {
+        switchDebug("terminal.surface.detach.retained_handoff", {
+          localSessionId: sessionId,
+          backendSessionId: targetSessionId,
+        });
+        return;
       }
       void detachNativeTerminalLifecycle(targetSessionId, () =>
         invoke("cmd_native_terminal_detach", {
