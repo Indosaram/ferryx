@@ -108,6 +108,7 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
             | DaemonRequest::ListSessions
             | DaemonRequest::DescribeSession { .. }
             | DaemonRequest::DiscoverAgentSession { .. }
+            | DaemonRequest::ResetAgentState { .. }
             | DaemonRequest::LoadSession
             | DaemonRequest::RemoteSetActiveSelection { .. }
             | DaemonRequest::UpgradeBinary { .. }
@@ -132,6 +133,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::ListSessions => "listSessions",
         DaemonRequest::DescribeSession { .. } => "describeSession",
         DaemonRequest::DiscoverAgentSession { .. } => "discoverAgentSession",
+        DaemonRequest::ResetAgentState { .. } => "resetAgentState",
         DaemonRequest::Attach { .. } => "attach",
         DaemonRequest::SaveSession { .. } => "saveSession",
         DaemonRequest::LoadSession => "loadSession",
@@ -915,6 +917,21 @@ impl DaemonClient {
             DaemonResponse::Error { message } => Err(IpcError::internal(message)),
             _ => Err(IpcError::internal(
                 "Unexpected daemon agent-session discovery response",
+            )),
+        }
+    }
+
+    pub async fn reset_agent_state(&self, session_id: &str) -> Result<(), IpcError> {
+        match self
+            .send_request(DaemonRequest::ResetAgentState {
+                session_id: session_id.to_string(),
+            })
+            .await?
+        {
+            DaemonResponse::ResetAgentStateOk => Ok(()),
+            DaemonResponse::Error { message } => Err(IpcError::internal(message)),
+            _ => Err(IpcError::internal(
+                "Unexpected daemon reset agent state response",
             )),
         }
     }

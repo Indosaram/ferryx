@@ -189,6 +189,10 @@ pub enum DaemonRequest {
         agent_type: String,
     },
     #[serde(rename_all = "camelCase")]
+    ResetAgentState {
+        session_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
     Attach {
         session_id: String,
         after_sequence: Option<u64>,
@@ -301,6 +305,7 @@ pub enum DaemonResponse {
     DiscoverAgentSessionOk {
         provider_session_id: Option<String>,
     },
+    ResetAgentStateOk,
     #[serde(rename_all = "camelCase")]
     AttachOk {
         epoch: u64,

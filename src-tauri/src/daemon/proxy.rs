@@ -237,6 +237,21 @@ impl LegacyPeer {
         }
     }
 
+    pub async fn reset_agent_state(&self, session_id: &str) -> Result<(), String> {
+        match self
+            .send_request(&DaemonRequest::ResetAgentState {
+                session_id: session_id.to_string(),
+            })
+            .await?
+        {
+            DaemonResponse::ResetAgentStateOk => Ok(()),
+            DaemonResponse::Error { message } => Err(message),
+            other => Err(format!(
+                "Unexpected response for ResetAgentState: {other:?}"
+            )),
+        }
+    }
+
     pub(crate) async fn attach_and_stream<W>(
         &self,
         session_id: &str,

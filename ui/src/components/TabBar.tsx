@@ -29,6 +29,7 @@ type TabBarProps = {
   onCloseToLeft?: (id: string) => void;
   onRenameTab?: (id: string, newLabel: string) => void;
   onTogglePin?: (id: string, pinned: boolean) => void;
+  onResetAgentState?: (tabId: string) => void;
   /** Terminal-pane split. Intentionally separate from whole-tab group split. */
   onSplitRight?: (tabId: string) => void;
   onSplitDown?: (tabId: string) => void;
@@ -75,6 +76,7 @@ export function TabBar({
   onCloseToLeft,
   onRenameTab,
   onTogglePin,
+  onResetAgentState,
   onSplitRight,
   onSplitDown,
   onMoveTabToSplit,
@@ -299,6 +301,10 @@ export function TabBar({
       items.push({ kind: "item", id: "rename", label: "Rename tab" });
       actions["rename"] = () => handleStartRename(tab);
     }
+    if (canSplitTerminal && onResetAgentState) {
+      items.push({ kind: "item", id: "reset-agent-state", label: "Reset Agent State", icon: "refresh" });
+      actions["reset-agent-state"] = () => onResetAgentState(tab.id);
+    }
     items.push({ kind: "separator" });
     items.push({ kind: "item", id: "close", label: "Close tab", enabled: !tab.pinned });
     actions["close"] = () => {
@@ -317,7 +323,7 @@ export function TabBar({
       actions["close-left"] = () => onCloseToLeft(tab.id);
     }
     openMenu("cmd_native_tab_context_menu", items, { x: event.clientX, y: event.clientY }, actions);
-  }, [browserSettings, tabs, handleStartRename, onClose, onCloseOthers, onCloseToLeft, onCloseToRight, onDuplicateBrowser, onMoveTabToSplit, onSplitDown, onSplitRight, onTogglePin]);
+  }, [browserSettings, tabs, handleStartRename, onClose, onCloseOthers, onCloseToLeft, onCloseToRight, onDuplicateBrowser, onMoveTabToSplit, onResetAgentState, onSplitDown, onSplitRight, onTogglePin]);
 
   const handleCommitRename = useCallback((tabId: string) => {
     const cancelled = renameCancelledRef.current;

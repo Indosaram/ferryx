@@ -1152,6 +1152,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_cli_launcher_install,
         cmd_agents_detect,
         cmd_agent_session_discover,
+        cmd_agent_state_reset,
         cmd_browser_create,
         cmd_browser_navigate,
         cmd_browser_go_back,

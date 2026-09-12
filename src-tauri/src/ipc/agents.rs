@@ -4,6 +4,7 @@ use std::env;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use tauri::Manager;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,6 +29,18 @@ pub async fn cmd_agent_session_discover(
     daemon_client
         .discover_agent_session(&session_id, &agent_type)
         .await
+}
+
+#[tauri::command]
+pub async fn cmd_agent_state_reset<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    daemon_client: tauri::State<'_, std::sync::Arc<crate::daemon::client::DaemonClient>>,
+    session_id: String,
+) -> Result<(), super::IpcError> {
+    if let Some(host) = app.try_state::<crate::native_terminal::surface_host::NativeTerminalSurfaceHostState>() {
+        host.reset_agent_state::<R>(&session_id, Some(&app));
+    }
+    daemon_client.reset_agent_state(&session_id).await
 }
 
 pub(crate) fn discover_agent_session_id(root_pid: u32, agent_type: &str) -> Option<String> {

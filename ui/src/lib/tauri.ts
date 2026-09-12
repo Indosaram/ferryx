@@ -763,6 +763,13 @@ export async function discoverAgentProviderSession(sessionId: string, agentType:
   });
 }
 
+export async function resetAgentState(sessionId: string): Promise<void> {
+  if (!isTauri()) return;
+  await invokeCommand<void>("cmd_agent_state_reset", {
+    sessionId,
+  });
+}
+
 export type RemoteNetworkMode = "off" | "localNetwork" | "tailscale" | "relay";
 
 export type RemoteGatewayStatus = {
