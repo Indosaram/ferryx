@@ -478,18 +478,22 @@ pub fn run_daemon_headless(
     rt.block_on(async {
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let server = Arc::new(crate::daemon::server::DaemonServer::new());
-        if let Ok(initial) = crate::ipc::project::initial_project(server.workspace_registry()) {
-            tracing::info!(
-                workspace_id = %initial.workspace_id,
-                repo_root = %initial.repo_root.display(),
-                "Registered startup workspace for headless daemon"
-            );
-        }
         let server_clone = Arc::clone(&server);
         let server_task = tokio::spawn(async move {
             server_clone
                 .run_server_with_handover_and_readiness(handover_from, Some(ready_tx))
                 .await
+        });
+
+        let registry = server.workspace_registry().clone();
+        tokio::task::spawn_blocking(move || {
+            if let Ok(initial) = crate::ipc::project::initial_project(&registry) {
+                tracing::info!(
+                    workspace_id = %initial.workspace_id,
+                    repo_root = %initial.repo_root.display(),
+                    "Registered startup workspace for headless daemon"
+                );
+            }
         });
 
         // Wait for server to bind listener and initialize before emitting readiness signal

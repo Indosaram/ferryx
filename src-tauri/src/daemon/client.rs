@@ -327,6 +327,7 @@ pub struct DaemonClient {
     interactive_connection: Arc<Mutex<Option<ActiveConnection>>>,
     epoch: Arc<parking_lot::RwLock<Option<u64>>>,
     upgrade_requested: Arc<AtomicBool>,
+    spawn_lock: Arc<Mutex<()>>,
 }
 
 impl Default for DaemonClient {
@@ -343,6 +344,7 @@ impl DaemonClient {
             interactive_connection: Arc::new(Mutex::new(None)),
             epoch: Arc::new(parking_lot::RwLock::new(None)),
             upgrade_requested: Arc::new(AtomicBool::new(false)),
+            spawn_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -353,6 +355,7 @@ impl DaemonClient {
             interactive_connection: Arc::new(Mutex::new(None)),
             epoch: Arc::new(parking_lot::RwLock::new(None)),
             upgrade_requested: Arc::new(AtomicBool::new(false)),
+            spawn_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -478,20 +481,44 @@ impl DaemonClient {
         });
     }
 
+    async fn try_connect_existing_socket(&self) -> Result<DaemonStream, std::io::Error> {
+        if fs::symlink_metadata(&self.socket_path).is_ok()
+            && Self::validate_existing_socket_path(&self.socket_path).is_ok()
+        {
+            Self::connect_socket(&self.socket_path).await
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "daemon socket not found or invalid",
+            ))
+        }
+    }
+
     async fn connect_or_spawn(&self) -> Result<DaemonStream, IpcError> {
-        // Bounded retry loop for connection attempts (e.g. during rolling handover when old
-        // daemon unlinks the socket and new daemon binds it).
-        for attempt in 0..5 {
-            if fs::symlink_metadata(&self.socket_path).is_ok() {
-                if Self::validate_existing_socket_path(&self.socket_path).is_ok() {
-                    if let Ok(stream) = Self::connect_socket(&self.socket_path).await {
-                        return Ok(stream);
-                    }
+        // Fast path: if daemon is already running, connect immediately without sleep or spawn lock.
+        if let Ok(stream) = self.try_connect_existing_socket().await {
+            return Ok(stream);
+        }
+
+        // Bounded retry loop only if the socket file already exists on disk (e.g. during rolling handover when old
+        // daemon unlinks the socket and new daemon binds it). If no socket file exists, do not waste 200ms sleeping.
+        if fs::symlink_metadata(&self.socket_path).is_ok() {
+            for attempt in 0..5 {
+                if let Ok(stream) = self.try_connect_existing_socket().await {
+                    return Ok(stream);
+                }
+                if attempt < 4 {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
                 }
             }
-            if attempt < 4 {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
+        }
+
+        // Single-flight spawn lock: ensures only one task attempts to spawn the daemon process at a time.
+        let _spawn_guard = self.spawn_lock.lock().await;
+
+        // Re-check after acquiring the lock: a concurrent task may have just finished spawning the daemon.
+        if let Ok(stream) = self.try_connect_existing_socket().await {
+            return Ok(stream);
         }
 
         // Launch external ferryx --daemon binary with exact bounded readiness event
@@ -2507,5 +2534,14 @@ mod tests {
             None
         ));
         assert!(!should_request_upgrade(None, "2026.902.2", None, None));
+    }
+
+    #[tokio::test]
+    async fn test_daemon_client_has_spawn_lock_for_single_flight() {
+        let client = DaemonClient::new();
+        // Verifies the single-flight spawn_lock is instantiated and functions cleanly
+        let guard = client.spawn_lock.try_lock();
+        assert!(guard.is_ok(), "spawn_lock must be available on construction");
+        drop(guard);
     }
 }
