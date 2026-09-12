@@ -895,6 +895,18 @@ export async function buildHost({
         }
       }
 
+      // Pre-sign universal binaries with hardened runtime so Tauri bundler packages valid signed components
+      if (hostConfig.signingIdentity) {
+        for (const binName of ["ferryx", "ferryx-cli", "ferryx-relay"]) {
+          const targetBin = join(universalRel, binName);
+          if (existsSync(targetBin)) {
+            execFileSync("codesign", ["--force", "--options", "runtime", "--sign", hostConfig.signingIdentity, targetBin], {
+              stdio: "pipe",
+            });
+          }
+        }
+      }
+
       // Run Tauri bundling now that all universal binaries exist
       execFileSync(
         "bun",
@@ -1005,6 +1017,9 @@ export async function buildHost({
         execFileSync("xcrun", ["stapler", "validate", appPath], { stdio: "pipe" });
 
         if (dmgPath && existsSync(dmgPath)) {
+          if (hostConfig.signingIdentity) {
+            execFileSync("codesign", ["--force", "--sign", hostConfig.signingIdentity, dmgPath], { stdio: "pipe" });
+          }
           execFileSync(
             "xcrun",
             ["notarytool", "submit", dmgPath, "--keychain-profile", hostConfig.notaryProfile, "--wait"],
