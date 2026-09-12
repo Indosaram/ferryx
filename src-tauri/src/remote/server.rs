@@ -1,8 +1,6 @@
 use crate::remote::auth::{AuthError, DeviceAccessScope, DeviceInfo, DevicePermission};
 use crate::remote::backend::{RecoveryStream, RemoteRecoveryStatus, RemoteSessionBackend};
-#[cfg(feature = "native-terminal")]
 use crate::remote::mirror::RemoteTerminalMirror;
-#[cfg(feature = "native-terminal")]
 use crate::remote::protocol::RemoteGridFrame;
 use crate::remote::protocol::{
     ClientControlMessage, RemoteActiveDesktopSelection, RemoteCreateWorktreeRequest,
@@ -31,10 +29,8 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-#[cfg(feature = "native-terminal")]
 use std::time::Duration;
 use tokio::sync::broadcast;
-#[cfg(feature = "native-terminal")]
 use tokio::sync::mpsc;
 use tower_http::cors::{Any, CorsLayer};
 
@@ -1217,25 +1213,17 @@ async fn handle_terminal_socket(
         }
     }
     if render_grid {
-        #[cfg(feature = "native-terminal")]
-        {
-            handle_terminal_grid_socket(
-                socket,
-                session_id,
-                attachment,
-                device,
-                state,
-                recovery,
-                recovery_state,
-            )
-            .await;
-            return;
-        }
-        #[cfg(not(feature = "native-terminal"))]
-        {
-            let _ = (socket, session_id, attachment, device, state);
-            return;
-        }
+        handle_terminal_grid_socket(
+            socket,
+            session_id,
+            attachment,
+            device,
+            state,
+            recovery,
+            recovery_state,
+        )
+        .await;
+        return;
     }
 
     let (mut sender, mut receiver) = socket.split();
@@ -1442,13 +1430,11 @@ async fn ssh_control(
     }
 }
 
-#[cfg(feature = "native-terminal")]
 fn grid_text_message(frame: RemoteGridFrame) -> Message {
     let text = serde_json::to_string(&frame).expect("remote grid frame serializes");
     Message::Text(text.into())
 }
 
-#[cfg(feature = "native-terminal")]
 fn enqueue_grid_operation(
     mirror: &Arc<parking_lot::Mutex<RemoteTerminalMirror>>,
     outbound_tx: &mpsc::UnboundedSender<Message>,
@@ -1464,7 +1450,6 @@ fn enqueue_grid_operation(
     outbound_tx.send(grid_text_message(frame)).is_ok()
 }
 
-#[cfg(feature = "native-terminal")]
 async fn handle_terminal_grid_socket(
     socket: WebSocket,
     session_id: String,

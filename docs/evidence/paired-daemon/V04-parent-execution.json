@@ -1,0 +1,149 @@
+{
+  "base": "0ce84a11e7c7b0c671771f88cdb053d50731a1c0",
+  "worktree": "/Users/indo/code/project/orca-lite-wt/herdr-wave0-clean",
+  "environment": {
+    "CARGO_TARGET_DIR": "/Users/indo/code/project/orca-lite-wt/herdr-wave0-clean/src-tauri/target",
+    "CARGO_BUILD_JOBS": "4",
+    "features": "Each command below records its feature mode",
+    "unset": [
+      "A03_PRIVATE_ROOT",
+      "A03_CLI_BINARY",
+      "FERRYX_MACHINE_TOKEN",
+      "FERRYX_RELAY_URL"
+    ]
+  },
+  "commands": [
+    {
+      "log": "V04-headless-remote.log",
+      "command": "cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib remote:: -- --nocapture",
+      "exitCode": 0,
+      "passed": 210
+    },
+    {
+      "log": "V04-core-contracts.log",
+      "command": "cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --test ghostty_build_contract --test ghostty_build_info_ffi --test native_terminal_engine_contract --test native_terminal_capability_contract",
+      "exitCode": 0,
+      "passed": 49
+    },
+    {
+      "log": "V04-cpu-native.log",
+      "command": "cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib native_terminal:: -- --nocapture",
+      "exitCode": 0,
+      "passed": 23
+    },
+    {
+      "log": "V04-headless-binaries.log",
+      "command": "cargo build --locked --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli --bin ferryx-relay",
+      "exitCode": 0,
+      "passed": null
+    },
+    {
+      "log": "V04-a03-cli-regression.log",
+      "command": "cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib a03_ -- --nocapture",
+      "exitCode": 0,
+      "passed": 18
+    },
+    {
+      "log": "V04-default-remote.log",
+      "command": "cargo test --locked --manifest-path src-tauri/Cargo.toml --lib remote:: -- --nocapture",
+      "exitCode": 0,
+      "passed": 216
+    },
+    {
+      "log": "V04-default-native.log",
+      "command": "cargo test --locked --manifest-path src-tauri/Cargo.toml --lib native_terminal:: -- --nocapture",
+      "exitCode": 0,
+      "passed": 165
+    },
+    {
+      "log": "V04-default-desktop-link.log",
+      "command": "cargo build --locked --manifest-path src-tauri/Cargo.toml --bin ferryx",
+      "exitCode": 0,
+      "passed": null
+    }
+  ],
+  "source": [
+    {
+      "path": "src-tauri/Cargo.toml",
+      "sha256": "fb29881c005c5dfa63d9d203b4bd41fe1659278ff719c4429f1c460ed0fbc46b",
+      "ownership": "Feature semantics comment only; dependencies unchanged."
+    },
+    {
+      "path": "src-tauri/build.rs",
+      "sha256": "27ab1f42b37a3bb205d42dc72030c004081df51119c395e1f69d0d2cc0c8a10f",
+      "ownership": "Always invoke pinned Ghostty build helper; preserve errors and Windows manifests."
+    },
+    {
+      "path": "src-tauri/src/lib.rs",
+      "sha256": "747e0036d4d14c41f829e820fe4df98d175e72b92df22ed0cab36e53c46968aa",
+      "ownership": "Remove native_terminal umbrella feature gate only."
+    },
+    {
+      "path": "src-tauri/src/native_terminal/engine.rs",
+      "sha256": "67c7ef164354b9efa37069593787266e5309b23c1d13abfef981517f45616ed7",
+      "ownership": "Core viewport import path only."
+    },
+    {
+      "path": "src-tauri/src/native_terminal/mod.rs",
+      "sha256": "fd1f47771d00d7509e93e4eb59d470f23aa6eb6ea0decd4f78acb1fcfc9a4d78",
+      "ownership": "Retain feature gates on presentation modules/exports, expose real engine and viewport unconditionally."
+    },
+    {
+      "path": "src-tauri/src/native_terminal/scroll.rs",
+      "sha256": "96546523c6ff37211b5baaa6a7845ede1b62b67036fe8a9f990c612b5ac4dc69",
+      "ownership": "Move CPU VT types/functions to viewport.rs; retain presentation type re-exports, overlays and all existing tests."
+    },
+    {
+      "path": "src-tauri/src/native_terminal/selection.rs",
+      "sha256": "16bf8030d5750df01123d48b215c28573e909601504b100d42dfe43b04b26b9b",
+      "ownership": "Core query_scrollbar path only."
+    },
+    {
+      "path": "src-tauri/src/native_terminal/terminal.rs",
+      "sha256": "b1340ef00ad2e392d823616620e7f235bb1117d409a8d96b4914106ae75d14b5",
+      "ownership": "Core viewport import path only."
+    },
+    {
+      "path": "src-tauri/src/native_terminal/viewport.rs",
+      "sha256": "b2ecf6644495d22170d51ab962b5041c47986c45fda221ec39cfb71d2c50b1dc",
+      "ownership": "New file containing unchanged real Ghostty viewport types/functions extracted from scroll.rs."
+    },
+    {
+      "path": "src-tauri/src/remote/mirror.rs",
+      "sha256": "121138716ad315e303e67809472fad3575ed16c087a1e017a9b80681084ab8d3",
+      "ownership": "Remove presentation guards from existing real mirror; expand all nine existing CPU mirror tests to no-default builds, assertions unchanged."
+    },
+    {
+      "path": "src-tauri/src/remote/server.rs",
+      "sha256": "92a8783066a14d45d9819a37f47c02032985f28f126cbf8ecee3f46decd4a671",
+      "ownership": "Only grid imports/helpers/handler feature boundary and real-handler dispatch; preserve A03 auth, active selection, typed errors, recovery and tests."
+    }
+  ],
+  "diagnostics": {
+    "mod": "No diagnostics found",
+    "remainingRust": "Freshness timeout within3000ms; not claimed clean. Actual compiler builds/tests completed."
+  },
+  "cleanup": {
+    "fixturePid": 88160,
+    "cliPids": [
+      88212,
+      88426
+    ],
+    "reaped": true,
+    "psNoRows": true,
+    "canonicalDaemonTouched": false
+  },
+  "limitations": [
+    "No Linux/Windows runtime or native desktop pixel approval.",
+    "Existing View resize omission tracked separately as V06 with RED-first regression.",
+    "Existing unbounded grid queue and fixture timing tracked for A10/A23; no resource-bound claim.",
+    "Full UI still has3existing push stub failures.",
+    "No app launched; debug binary linked only."
+  ],
+  "featureGraph": {
+    "command": "cargo tree --locked --manifest-path src-tauri/Cargo.toml --no-default-features -e normal --depth 1",
+    "exitCode": 0,
+    "directOptionalPresentationDependenciesAbsent": true,
+    "note": "Full feature output was truncated; direct-depth graph independently confirmed no direct wgpu/raw-window-handle/winit/bytemuck/pollster. Tauri may transitively include raw-window-handle."
+  }
+}

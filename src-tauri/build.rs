@@ -33,11 +33,10 @@ fn main() {
             "cargo:rustc-link-arg-tests=/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' publicKeyToken='6595b64144ccf1df' language='*' processorArchitecture='*'"
         );
     }
-    if std::env::var_os("CARGO_FEATURE_NATIVE_TERMINAL").is_some() {
-        if let Err(err) = build_ghostty::build_ghostty_vt() {
-            eprintln!("\n[ghostty build error] {err}\n");
-            std::process::exit(1);
-        }
+    // The remote gateway needs real VT parsing even without native GPU presentation.
+    if let Err(err) = build_ghostty::build_ghostty_vt() {
+        eprintln!("\n[ghostty build error] {err}\n");
+        std::process::exit(1);
     }
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {

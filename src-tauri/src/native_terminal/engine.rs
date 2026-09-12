@@ -5,7 +5,7 @@ use super::cursor::CursorState;
 use super::error::NativeTerminalError;
 use super::key::KeyEvent;
 use super::mouse::MouseEvent;
-use super::scroll::{ScrollViewport, ScrollbarState};
+use super::viewport::{ScrollViewport, ScrollbarState};
 use super::snapshot::RenderSnapshot;
 
 /// Public abstract interface for a terminal emulator engine.

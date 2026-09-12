@@ -1,0 +1,214 @@
+   Compiling ferryx v2026.908.1 (/Users/indo/code/project/orca-lite-wt/herdr-wave0-clean/src-tauri)
+warning: unused import: `Manager`
+  --> src/ipc/notifications.rs:21:24
+   |
+21 | use tauri::{AppHandle, Manager, Runtime, State};
+   |                        ^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `scroll_daemon_client`
+   --> src/lib.rs:915:9
+    |
+915 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+    |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `app` is never read
+  --> src/ipc/notifications.rs:28:5
+   |
+27 | pub struct TauriNotificationBackend<R: Runtime> {
+   |            ------------------------ field in this struct
+28 |     app: AppHandle<R>,
+   |     ^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `GHOSTTY_TERMINAL_SCREEN_PRIMARY` is never used
+  --> src/native_terminal/sys/constants.rs:56:11
+   |
+56 | pub const GHOSTTY_TERMINAL_SCREEN_PRIMARY: c_int = 0;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `synchronized_output_deadline`, `expire_synchronized_output`, and `finish_synchronized_output` are never used
+   --> src/native_terminal/terminal.rs:169:19
+    |
+133 | impl NativeTerminal {
+    | ------------------- methods in this implementation
+...
+169 |     pub(crate) fn synchronized_output_deadline(&self) -> Option<tokio::time::Instant> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+173 |     pub(crate) fn expire_synchronized_output(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+184 |     pub(crate) fn finish_synchronized_output(&mut self) -> Result<(), NativeTerminalError> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `wait_and_reap` is never used
+   --> src/terminal/session.rs:270:19
+    |
+ 61 | impl PtySession {
+    | --------------- method in this implementation
+...
+270 |     pub(crate) fn wait_and_reap(&self) -> Result<Option<i32>, PtyError> {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src/worktree/manager.rs:81:19
+   |
+81 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+   --> src/worktree/manager.rs:88:8
+    |
+ 87 | impl WriterLeaseGuard {
+    | --------------------- associated items in this implementation
+ 88 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+    |        ^^^
+...
+ 96 |     pub(crate) fn canonical_path(&self) -> &Path {
+    |                   ^^^^^^^^^^^^^^
+...
+100 |     pub(crate) fn owner_id(&self) -> &str {
+    |                   ^^^^^^^^
+
+warning: method `acquire_writer_lease` is never used
+   --> src/worktree/manager.rs:333:19
+    |
+129 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+333 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib) generated 17 warnings (run `cargo fix --lib -p ferryx` to apply 2 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 29.65s
+     Running tests/ghostty_build_contract.rs (src-tauri/target/debug/deps/ghostty_build_contract-74cd2452168dba5a)
+
+running 19 tests
+test ghostty_build_info_ffi::test_fallible_abi_conversions_and_boundary ... ok
+test test_cargo_target_to_zig_target_mapping ... ok
+test test_compute_link_lib_stem ... ok
+test test_ghostty_vt_static_link_and_ffi_call ... ok
+test test_negative_ffi_invalid_key_returns_invalid_value ... ok
+test test_negative_submodule_verification_nonexistent_directory ... ok
+test test_unmapped_cargo_target_returns_structured_err ... ok
+test test_ghostty_link_directives_are_owned_by_build_script ... ok
+test test_safe_ghostty_build_info_helpers ... ok
+test test_ghostty_source_lock_matches_build_contract ... ok
+test test_negative_zig_verification_missing_binary ... ok
+test test_negative_submodule_verification_uninitialized_directory ... ok
+test test_resolve_static_lib_windows_and_unix ... ok
+Initialized empty Git repository in /private/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ghostty_contract_test_mismatched_sha/.git/
+test test_ghostty_submodule_pinned_sha_and_clean_state ... ok
+[main (root-commit) b0fb392] init
+ 1 file changed, 1 insertion(+)
+ create mode 100644 build.zig
+test test_negative_submodule_verification_mismatched_sha ... ok
+test test_negative_build_ghostty_vt_with_invalid_source_root ... ok
+test test_ghostty_zig_version_verification ... ok
+test test_negative_build_ghostty_vt_with_unmapped_target ... ok
+test test_negative_zig_verification_incompatible_version ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+
+     Running tests/ghostty_build_info_ffi.rs (src-tauri/target/debug/deps/ghostty_build_info_ffi-ea883972794771bf)
+
+running 1 test
+test test_fallible_abi_conversions_and_boundary ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/native_terminal_capability_contract.rs (src-tauri/target/debug/deps/native_terminal_capability_contract-d8aa25b0a763c92d)
+
+running 7 tests
+test configured_terminal_colors_and_palette_read_back ... ok
+test mouse_tracking_query_reflects_vt_modes ... ok
+test selection_helpers_install_and_copy_terminal_owned_text ... ok
+test paste_encoding_tracks_bracketed_paste_mode ... ok
+test scrollback_viewport_moves_to_top_and_returns_to_bottom ... ok
+test scrollback_retains_thousands_of_lines_and_obeys_configured_limit ... ok
+test grid_search_reports_screen_coordinates_and_absence ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/native_terminal_engine_contract.rs (src-tauri/target/debug/deps/native_terminal_engine_contract-e13eb6b461c385c6)
+
+running 22 tests
+test mouse_encoding::test_mouse_encode_rejects_infinity_coordinate ... ok
+test lifecycle_and_control::test_bell_event_observation_and_counter ... ok
+test lifecycle_and_control::test_terminal_creation_and_default_dimensions_via_trait ... ok
+test key_encoding::test_key_encode_rejects_pua_utf8_payload ... ok
+test key_encoding::test_key_encode_plain_and_mode_sensitive_arrow_keys ... ok
+test mouse_encoding::test_mouse_encode_disabled_and_sgr_enabled_tracking ... ok
+test key_encoding::test_key_encode_rejects_c0_control_utf8_payload ... ok
+test key_encoding::test_key_encode_rejects_del_utf8_payload ... ok
+test mouse_encoding::test_mouse_encode_rejects_nan_coordinate ... ok
+test lifecycle_and_control::test_title_update_and_query ... ok
+test mouse_encoding::test_mouse_encode_rejects_zero_cell_height ... ok
+test feed_and_snapshot::test_feed_ansi_text_and_snapshot_grid_and_cursor ... ok
+test screen_and_cursor::test_cursor_movement_sequences ... ok
+test mouse_encoding::test_mouse_encode_rejects_zero_cell_width ... ok
+test feed_and_snapshot::test_feed_unicode_cjk_emoji_combining_mark_no_truncation ... ok
+test screen_and_cursor::test_resize_reflow_preservation ... ok
+test feed_and_snapshot::test_render_snapshot_copied_data_outlives_mutations ... ok
+test screen_and_cursor::test_scrollback_after_enough_output ... ok
+test feed_and_snapshot::test_raw_pty_feed_allows_nul_bytes_and_remains_functional ... ok
+test lifecycle_and_control::test_terminal_resize ... ok
+test screen_and_cursor::test_alternate_screen_enter_exit_restoration ... ok
+test lifecycle_and_control::test_high_iteration_create_feed_snapshot_drop_lifecycle ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s

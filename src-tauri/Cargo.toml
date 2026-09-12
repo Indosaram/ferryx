@@ -48,6 +48,7 @@ tauri-build = { version = "2", features = [] }
 
 [features]
 default = ["native-terminal"]
+# Native GPU presentation is optional; real libghostty-vt parsing is always built.
 native-terminal = [
     "dep:wgpu",
     "dep:raw-window-handle",

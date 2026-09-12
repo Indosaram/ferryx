@@ -7,7 +7,6 @@ pub mod dag;
 pub mod ipc;
 #[cfg(target_os = "macos")]
 pub mod macos_file_drop;
-#[cfg(feature = "native-terminal")]
 pub mod native_terminal;
 pub mod notification;
 pub mod permissions;
