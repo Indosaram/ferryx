@@ -18,6 +18,8 @@ export function Navbar({ basePath }: { basePath: string }) {
             <img
               src={iconSrc}
               alt="Ferryx Logo"
+              width={28}
+              height={28}
               className="h-7 w-7 rounded-lg transition-transform group-hover:scale-105"
             />
             <span className="text-[15px] font-medium tracking-[-0.02em] text-ink">

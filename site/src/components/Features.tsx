@@ -7,6 +7,8 @@ import {
   ZeroElectronVisual,
 } from "@/components/FeatureVisuals";
 
+const basePath = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL : `${import.meta.env.BASE_URL}/`;
+
 export function Features() {
   const features = [
     {
@@ -87,6 +89,9 @@ export function Features() {
                   <p className="mt-4 text-[16px] leading-relaxed text-ink-soft">
                     {feature.description}
                   </p>
+                  {feature.eyebrow === 'Architecture' && (
+                    <a href={`${basePath}docs/architecture/`} className="mt-4 inline-flex items-center text-[14px] font-medium text-ink hover:text-ink-soft transition-colors">Read the architecture deep dive →</a>
+                  )}
                   <ul className="mt-6 flex flex-col gap-2.5">
                     {feature.points.map((point) => (
                       <li key={point} className="flex items-center gap-2.5 text-[14px] text-ink-soft">

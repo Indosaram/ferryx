@@ -2,6 +2,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
+import sitemap from '@astrojs/sitemap';
 import react from '@astrojs/react';
 import tailwind from '@astrojs/tailwind';
 
@@ -21,6 +22,9 @@ export default defineConfig({
     starlight({
       title: 'Ferryx Docs',
       logo: { src: './src/assets/ferryx-icon.png' },
+      favicon: '/favicon.ico',
+      disable404Route: true,
+      components: { Head: './src/components/StarlightHead.astro' },
       head: [
         { tag: 'meta', attrs: { property: 'og:image', content: socialImage } },
         { tag: 'meta', attrs: { property: 'og:image:width', content: '1200' } },
@@ -42,8 +46,13 @@ export default defineConfig({
           label: 'Reference',
           items: [{ label: 'Keyboard Shortcuts', slug: 'docs/shortcuts' }],
         },
+        {
+          label: 'Architecture',
+          items: [{ label: 'Technical Architecture', slug: 'docs/architecture' }],
+        },
       ],
     }),
+    sitemap({ lastmod: new Date(), changefreq: 'weekly', priority: 0.7 }),
     react(),
     tailwind({ applyBaseStyles: false }),
   ],

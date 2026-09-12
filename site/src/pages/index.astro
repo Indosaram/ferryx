@@ -12,12 +12,21 @@ const baseUrl = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_UR
 
 const title = 'Ferryx — Ultra-Lightweight Rust Native Ghostty AI Workspace';
 const description =
-  'Parallel agentic development with native Ghostty terminal engine, wgpu GPU rendering, Rust PTY host daemon, embedded browser split-tabs, and zero Electron overhead.';
+  'Parallel agentic development in a Rust-native workspace: libghostty terminal core, wgpu GPU rendering, embedded browser tabs, and zero Electron overhead.';
 const socialDescription =
   'Parallel agentic development. Zero Bloat. Native Ghostty terminal core, wgpu rendering & Rust multi-agent workspace.';
 // Crawlers reject relative social URLs, so resolve everything against the deployed origin.
 const canonical = new URL(baseUrl, Astro.site ?? Astro.url).href;
 const socialImage = new URL(`${baseUrl}og-image.png`, Astro.site ?? Astro.url).href;
+
+const structuredData = {
+  '@context': 'https://schema.org',
+  '@graph': [
+    { '@type': 'SoftwareApplication', name: 'Ferryx', applicationCategory: 'DeveloperApplication', operatingSystem: ['macOS', 'Windows', 'Linux'], url: canonical, description, image: socialImage, downloadUrl: 'https://github.com/Indosaram/ferryx/releases', offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD', availability: 'https://schema.org/InStock' } },
+    { '@type': 'WebSite', name: 'Ferryx', url: canonical, description, publisher: { '@id': 'https://github.com/Indosaram/ferryx' } },
+    { '@type': 'Organization', '@id': 'https://github.com/Indosaram/ferryx', name: 'Project Maho', url: 'https://github.com/Indosaram/ferryx', logo: new URL(`${baseUrl}apple-touch-icon.png`, Astro.site ?? Astro.url).href }
+  ]
+};
 ---
 
 <!doctype html>
@@ -33,8 +42,11 @@ const socialImage = new URL(`${baseUrl}og-image.png`, Astro.site ?? Astro.url).h
       document.documentElement.classList.toggle('dark', theme === 'dark');
       document.documentElement.style.colorScheme = theme;
     </script>
-    <link rel="icon" type="image/png" href={`${baseUrl}favicon.png`} />
-    <link rel="alternate icon" type="image/png" href={`${baseUrl}icon.png`} />
+    <link rel="icon" type="image/x-icon" href={`${baseUrl}favicon.ico`} />
+    <link rel="icon" type="image/png" sizes="32x32" href={`${baseUrl}favicon-32x32.png`} />
+    <link rel="apple-touch-icon" sizes="180x180" href={`${baseUrl}apple-touch-icon.png`} />
+    <link rel="manifest" href={`${baseUrl}site.webmanifest`} />
+    <link rel="sitemap" type="application/xml" href={`${baseUrl}sitemap-index.xml`} />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>{title}</title>
     <meta name="description" content={description} />
@@ -58,14 +70,22 @@ const socialImage = new URL(`${baseUrl}og-image.png`, Astro.site ?? Astro.url).h
     <meta name="twitter:description" content={socialDescription} />
     <meta name="twitter:image" content={socialImage} />
     <meta name="twitter:image:alt" content="Ferryx — parallel agentic development workspace" />
+    <script type="application/ld+json" set:html={JSON.stringify(structuredData)} />
 
     <meta name="theme-color" content="#f6f4f1" media="(prefers-color-scheme: light)" />
     <meta name="theme-color" content="#0b0b0d" media="(prefers-color-scheme: dark)" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
+      rel="preload"
+      as="style"
       href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
+    />
+    <link
       rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
+      media="print"
+      onload="this.media='all'"
     />
   </head>
   <body class="bg-page text-ink antialiased selection:bg-ink selection:text-page min-h-screen">
@@ -73,20 +93,26 @@ const socialImage = new URL(`${baseUrl}og-image.png`, Astro.site ?? Astro.url).h
       <Navbar client:load basePath={baseUrl} />
       <main class="flex-1">
         <Hero client:load />
-        <section id="preview" class="relative z-0 overflow-hidden pt-28 pb-8 sm:pb-12">
-          <div
-            class="absolute inset-x-0 top-0 h-[860px] bg-cover bg-center scale-105 blur-[1px]"
-            style={`background-image: url('${baseUrl}demo-bg.jpg');`}
-          />
-          <div class="absolute inset-x-0 top-0 h-[860px] bg-demo-wash" />
-          <div class="relative mx-auto max-w-5xl px-4 sm:px-6">
-            <LiveFerryxDemo client:only="react" />
+        <section id="preview" class="relative z-0 overflow-hidden pb-8 sm:pb-12">
+          <div class="relative mx-auto max-w-5xl px-4 sm:px-6 pt-24 pb-14 text-center">
+            <h2 class="text-[clamp(1.75rem,3.2vw,2.5rem)] font-medium tracking-[-0.03em] leading-[1.1] text-ink">The real workspace, running in your browser</h2>
+            <p class="mx-auto mt-4 max-w-2xl text-[15px] leading-relaxed text-ink-soft">This live preview mounts the genuine Ferryx sidebar, tab bar, and split terminal view against a mocked backend, so you can explore the multi-agent workspace layout before you install anything.</p>
+          </div>
+          <div class="relative">
+            <div
+              class="absolute inset-x-0 top-0 h-[860px] bg-cover bg-center scale-105 blur-[1px]"
+              style={`background-image: url('${baseUrl}demo-bg.jpg');`}
+            />
+            <div class="absolute inset-x-0 top-0 h-[860px] bg-demo-wash" />
+            <div class="relative mx-auto max-w-5xl px-4 sm:px-6 pt-20">
+              <LiveFerryxDemo client:only="react" />
+            </div>
           </div>
         </section>
-        <Features client:load />
-        <Benchmarks client:load />
+        <Features client:visible />
+        <Benchmarks client:visible />
       </main>
-      <Footer client:load basePath={baseUrl} />
+      <Footer client:visible basePath={baseUrl} />
     </div>
   </body>
 </html>

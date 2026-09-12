@@ -1,0 +1,56 @@
+---
+import '../index.css';
+
+const base = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL : `${import.meta.env.BASE_URL}/`;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Page not found | Ferryx</title>
+    <meta
+      name="description"
+      content="This Ferryx page does not exist. Head back to the Ferryx home page or open the documentation to find what you were looking for."
+    />
+    <meta name="robots" content="noindex, follow" />
+    <link rel="icon" type="image/x-icon" href={`${base}favicon.ico`} />
+    <link rel="icon" type="image/png" sizes="32x32" href={`${base}favicon-32x32.png`} />
+    <link rel="apple-touch-icon" sizes="180x180" href={`${base}apple-touch-icon.png`} />
+    <link rel="manifest" href={`${base}site.webmanifest`} />
+    <link rel="sitemap" type="application/xml" href={`${base}sitemap-index.xml`} />
+    <meta name="theme-color" content="#f6f4f1" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0b0b0d" media="(prefers-color-scheme: dark)" />
+    <script is:inline>
+      const stored = localStorage.getItem('ferryx.site.theme');
+      const theme = stored === 'dark' || stored === 'light'
+        ? stored
+        : (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+      document.documentElement.classList.toggle('dark', theme === 'dark');
+      document.documentElement.style.colorScheme = theme;
+    </script>
+  </head>
+  <body class="bg-page text-ink antialiased min-h-screen flex items-center justify-center p-6">
+    <main class="max-w-md w-full text-center">
+      <h1 class="text-3xl font-semibold tracking-tight">Page not found</h1>
+      <p class="mt-3 text-sm text-ink-soft">
+        This Ferryx page does not exist. Head back to the Ferryx home page or open the documentation to find what you were looking for.
+      </p>
+      <div class="mt-6 flex items-center justify-center gap-4">
+        <a
+          href={base}
+          class="rounded-md border border-line bg-page px-4 py-2 text-sm font-medium text-ink transition-colors hover:bg-page-raised"
+        >
+          Back to Ferryx
+        </a>
+        <a
+          href={`${base}docs/introduction/`}
+          class="rounded-md border border-line bg-page px-4 py-2 text-sm font-medium text-ink transition-colors hover:bg-page-raised"
+        >
+          Read the docs
+        </a>
+      </div>
+    </main>
+  </body>
+</html>
