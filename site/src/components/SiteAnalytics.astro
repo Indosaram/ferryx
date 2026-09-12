@@ -1,0 +1,11 @@
+---
+// Both tags stay out of the build unless configured, so forks, local builds and
+// preview builds ship no third-party requests and no verification token.
+const verification = import.meta.env.PUBLIC_GSC_VERIFICATION;
+const analyticsSrc = import.meta.env.PUBLIC_ANALYTICS_SRC;
+const analyticsDomain = import.meta.env.PUBLIC_ANALYTICS_DOMAIN;
+const analyticsEnabled = Boolean(analyticsSrc && analyticsDomain);
+---
+
+{verification && <meta name="google-site-verification" content={verification} />}
+{analyticsEnabled && <script is:inline defer src={analyticsSrc} data-domain={analyticsDomain}></script>}

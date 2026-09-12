@@ -6,6 +6,7 @@ import { Features } from '../components/Features';
 import { Benchmarks } from '../components/Benchmarks';
 import { Footer } from '../components/Footer';
 import LiveFerryxDemo from '../components/LiveFerryxDemo';
+import SiteAnalytics from '../components/SiteAnalytics.astro';
 import { THEME_STORAGE_KEY } from '../lib/theme';
 
 const baseUrl = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL : `${import.meta.env.BASE_URL}/`;
@@ -47,6 +48,7 @@ const structuredData = {
     <link rel="apple-touch-icon" sizes="180x180" href={`${baseUrl}apple-touch-icon.png`} />
     <link rel="manifest" href={`${baseUrl}site.webmanifest`} />
     <link rel="sitemap" type="application/xml" href={`${baseUrl}sitemap-index.xml`} />
+    <SiteAnalytics />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>{title}</title>
     <meta name="description" content={description} />
