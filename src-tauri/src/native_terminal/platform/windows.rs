@@ -10,8 +10,9 @@
 //!    scheduled for owner-thread destruction when the compositor target drops.
 //! 2. **Thread Affinity**: The child HWND is created and destroyed on the Tauri main thread,
 //!    which owns the parent window and pumps its message queue.
-//! 3. **Pointer Transparency**: `WM_NCHITTEST` answers `HTTRANSPARENT` so pointer input keeps
-//!    routing to the WebView2 chrome behind the child.
+//! 3. **Pointer Transparency**: The draw-only child is `WS_DISABLED`, so input skips it
+//!    even across WebView2 threads. `HTTRANSPARENT` alone only delegates hit testing
+//!    within the same thread.
 
 use std::ffi::c_void;
 use std::num::NonZeroIsize;
@@ -34,6 +35,7 @@ type Hwnd = *mut c_void;
 type Hinstance = *mut c_void;
 
 const WS_CHILD: u32 = 0x4000_0000;
+const WS_DISABLED: u32 = 0x0800_0000;
 const WS_CLIPSIBLINGS: u32 = 0x0400_0000;
 const WS_EX_NOACTIVATE: u32 = 0x0800_0000;
 const WS_EX_TRANSPARENT: u32 = 0x0000_0020;
@@ -233,17 +235,21 @@ impl WindowsCompositorTarget {
             NativeTerminalError::GpuPipelineError(format!("Failed to get display handle: {e}"))
         })?;
 
+        Self::from_parent_hwnd(parent_hwnd)
+    }
+
+    fn from_parent_hwnd(parent_hwnd: NonZeroIsize) -> Result<Self, NativeTerminalError> {
         // SAFETY: Passing a null module name returns the handle of the current process image.
         let instance = unsafe { GetModuleHandleW(std::ptr::null()) };
         ensure_child_class(instance)?;
 
-        // SAFETY: The class is registered above and the parent HWND comes from the live Tauri window.
+        // SAFETY: The class is registered above and the caller owns the live parent window.
         let child = unsafe {
             CreateWindowExW(
                 WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
                 CHILD_CLASS_NAME.as_ptr(),
                 std::ptr::null(),
-                WS_CHILD | WS_CLIPSIBLINGS,
+                WS_CHILD | WS_CLIPSIBLINGS | WS_DISABLED,
                 0,
                 0,
                 1,
@@ -352,6 +358,10 @@ impl Drop for WindowsCompositorTarget {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "windows_pointer_tests.rs"]
+mod pointer_tests;
 
 #[cfg(test)]
 mod tests {
