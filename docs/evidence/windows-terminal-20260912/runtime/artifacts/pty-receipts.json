@@ -1,0 +1,55 @@
+{
+  "baseline": "fa429aac",
+  "startup": {
+    "sessionId": "2a08ef6d-0036-4143-9c90-a80dbf91d10a",
+    "daemonEpoch": "1789218576561",
+    "historyStartSequence": "1",
+    "historyEndSequence": "16",
+    "history": "G1s2bhtbPzkwMDFoG1s/MTAwNGgbWz8yNWwbW20bW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLG1tIG10wO0M6XFByb2dyYW0gRmlsZXNcUG93ZXJTaGVsbFw3XHB3c2guZXhlBxtbPzI1aFBvd2VyU2hlbGwgNy42LjYNCuqwnOyduCDrsI8g7Iuc7Iqk7YWcIO2UhOuhnO2VhOydhCDroZzrk5ztlZjripQg642wIDEwMzdtc+qwgCDqsbjroLjsirXri4jri6QuDQobWzM2bRtbMW0NCm9yY2EtbGl0ZRtbbSBvbiAbWzM1bRtbMW3ugqAgbWFpbhtbbSAbWzMxbRtbMW1bP10bW20gdmlhIBtbMzFtG1sxbfCfpZ8gdjEuNC4wIBtbMzJtDQrina8bW20gG1s/MjVsG1s5M21lY2hvIBtbMzdtRkVSUllYX1dJTl9TVEFSVF9PSw0KG1s/MjVoG1ttRkVSUllYX1dJTl9TVEFSVF9PSw0KG1szNm0bWzFtDQpvcmNhLWxpdGUbW20gb24gG1szNW0bWzFt7oKgIG1haW4bW20gG1szMW0bWzFtWz9dG1ttIHZpYSAbWzMxbRtbMW3wn6WfIHYxLjQuMCAbWzMybQ0K4p2vG1ttIBtbPzI1bBtbOTNtZWNobyAbWzM3bUZFG1s5N20bWzJtG1szbVJSWVhfV0lOX1NUQVJUX09LG1s5OzEwSBtbPzI1aBtbPzI1bBtbbRtbOTNtG1s5OzNIZWNobyAbWzM3bUZFUlJZWF9XSU5fU1RBG1s5N20bWzJtG1szbVJUX09LG1s5OzIySBtbPzI1aBtbPzI1bBtbbRtbOTNtG1s5OzNIZWNobyAbWzM3bUZFUlJZWF9XSU5fU1RBUlRfT0sbW20NCkZFUlJZWF9XSU5fU1RBUlRfT0sNChtbPzI1aBtbMzZtG1sxbQ0Kb3JjYS1saXRlG1ttIG9uIBtbMzVtG1sxbe6CoCBtYWluG1ttIBtbMzFtG1sxbVs/XRtbbSB2aWEgG1szMW0bWzFt8J+lnyB2MS40LjAgG1szMm0NCuKdrxtbbSA="
+  },
+  "resize": {
+    "sessionId": "2a08ef6d-0036-4143-9c90-a80dbf91d10a",
+    "daemonEpoch": "1789218576561",
+    "historyStartSequence": "1",
+    "historyEndSequence": "44",
+    "history": "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"
+  },
+  "cmd": {
+    "sessionId": "4d7a10ef-f02b-4a35-af81-fdbbbff9dfe7",
+    "daemonEpoch": "1789218576561",
+    "historyStartSequence": "1",
+    "historyEndSequence": "31",
+    "history": "G1s2bhtbPzkwMDFoG1s/MTAwNGgbWz8yNWwbW20bW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sbW0gbXTA7QzpcV2luZG93c1xzeXN0ZW0zMlxjbWQuZXhlBxtbPzI1aBtbPzI1bE1pY3Jvc29mdCBXaW5kb3dzIFtWZXJzaW9uIDEwLjAuMjYyMDAuOTQ0NV0NCihjKSBNaWNyb3NvZnQgQ29ycG9yYXRpb24uIEFsbCByaWdodHMgcmVzZXJ2ZWQuG1s0OzFIQzpcVXNlcnNcc29va1xmZXJyeXgtcWEtcnQtc3QwMWEwOTU4YVxvcmNhLWxpdGU+G1s/MjVoZWNobyBGRVJSWVhfV0lOX1NIRUxMX09LDQobWz8yNWxGRVJSWVhfV0lOX1NIRUxMX09LG1s3OzFIQzpcVXNlcnNcc29va1xmZXJyeXgtcWEtcnQtc3QwMWEwOTU4YVxvcmNhLWxpdGU+G1s/MjVo"
+  },
+  "cmdPath": "actual current TabBar onAdd callback invoked with cmd; full plus-menu-to-cmd not proven",
+  "errors": [
+    [
+      "Native terminal IPC command failed",
+      "{\"command\":\"cmd_native_terminal_set_focus\",\"error\":{\"code\":\"INTERNAL_ERROR\",\"message\":\"Native terminal session 2a08ef6d-0036-4143-9c90-a80dbf91d10a has no attached surface\"}}"
+    ],
+    [
+      "Native terminal IPC command failed",
+      "{\"command\":\"cmd_native_terminal_set_focus\",\"error\":{\"code\":\"INTERNAL_ERROR\",\"message\":\"Native terminal session 2a08ef6d-0036-4143-9c90-a80dbf91d10a has no attached surface\"}}"
+    ],
+    [
+      "Native terminal IPC command failed",
+      "{\"command\":\"cmd_native_terminal_set_scrollbar_overlay\",\"error\":{\"code\":\"INTERNAL_ERROR\",\"message\":\"Requested value does not exist (NoValue)\",\"details\":{\"command\":\"cmd_native_terminal_set_scrollbar_overlay\",\"raw\":\"{\\\"code\\\":\\\"INTERNAL_ERROR\\\",\\\"message\\\":\\\"Requested value does not exist (NoValue)\\\"}\"}}}"
+    ],
+    [
+      "Native terminal IPC command failed",
+      "{\"command\":\"cmd_native_terminal_set_attention_frame\",\"error\":{\"code\":\"INTERNAL_ERROR\",\"message\":\"Requested value does not exist (NoValue)\",\"details\":{\"command\":\"cmd_native_terminal_set_attention_frame\",\"raw\":\"{\\\"code\\\":\\\"INTERNAL_ERROR\\\",\\\"message\\\":\\\"Requested value does not exist (NoValue)\\\"}\"}}}"
+    ],
+    [
+      "Native terminal IPC command failed",
+      "{\"command\":\"cmd_native_terminal_set_scrollbar_overlay\",\"error\":{\"code\":\"INTERNAL_ERROR\",\"message\":\"Requested value does not exist (NoValue)\",\"details\":{\"command\":\"cmd_native_terminal_set_scrollbar_overlay\",\"raw\":\"{\\\"code\\\":\\\"INTERNAL_ERROR\\\",\\\"message\\\":\\\"Requested value does not exist (NoValue)\\\"}\"}}}"
+    ],
+    [
+      "Native terminal IPC command failed",
+      "{\"command\":\"cmd_native_terminal_set_attention_frame\",\"error\":{\"code\":\"INTERNAL_ERROR\",\"message\":\"Requested value does not exist (NoValue)\",\"details\":{\"command\":\"cmd_native_terminal_set_attention_frame\",\"raw\":\"{\\\"code\\\":\\\"INTERNAL_ERROR\\\",\\\"message\\\":\\\"Requested value does not exist (NoValue)\\\"}\"}}}"
+    ],
+    [
+      "Native terminal IPC command failed",
+      "{\"command\":\"cmd_native_terminal_set_focus\",\"error\":{\"code\":\"INTERNAL_ERROR\",\"message\":\"Native terminal session 2a08ef6d-0036-4143-9c90-a80dbf91d10a has no attached surface\"}}"
+    ]
+  ]
+}
