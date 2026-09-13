@@ -372,6 +372,52 @@ describe("DagGraphView Camera and Viewport Interaction", () => {
       expect(sAfterPage / sBeforePage).toBeCloseTo(Math.exp(0.14), 4);
     });
 
+    it.each([
+      { deltaMode: 0, ctrlKey: false, deltaY: -112 },
+      { deltaMode: 0, ctrlKey: true, deltaY: -112 },
+      { deltaMode: 1, ctrlKey: false, deltaY: -7 },
+      { deltaMode: 1, ctrlKey: true, deltaY: -7 },
+      { deltaMode: 2, ctrlKey: false, deltaY: -0.16 },
+      { deltaMode: 2, ctrlKey: true, deltaY: -0.16 },
+    ])("deltaMode $deltaMode with ctrlKey $ctrlKey matches equivalent pixel zoom at an off-center anchor", ({ deltaMode, ctrlKey, deltaY }) => {
+      const { container } = render(<DagGraphView snapshot={sampleSnapshot} />);
+      const { viewport, world } = getElements(container);
+      mockViewportDimensions(viewport, 1000, 700);
+      const initial = parseTransform(world.style.transform);
+      const anchor = { x: 230, y: 170 };
+      const worldAnchor = {
+        x: (anchor.x - initial.x) / initial.scale,
+        y: (anchor.y - initial.y) / initial.scale,
+      };
+      // Independent contract oracle: -112 px = -7 lines * 16 = -0.16 pages * 700.
+      const equivalentPixels = -112;
+      const expectedScale = initial.scale * Math.exp(-0.002 * equivalentPixels);
+      const wheel = new WheelEvent("wheel", {
+        bubbles: true,
+        cancelable: true,
+        clientX: anchor.x,
+        clientY: anchor.y,
+        deltaY,
+        deltaMode,
+        ctrlKey,
+      });
+      const ancestorWheel = vi.fn();
+      container.addEventListener("wheel", ancestorWheel);
+      try {
+        expect(fireEvent(viewport, wheel)).toBe(false);
+        const zoomed = parseTransform(world.style.transform);
+        expect(zoomed.scale).toBeCloseTo(expectedScale, 8);
+        expect(zoomed.x).toBeCloseTo(anchor.x - expectedScale * worldAnchor.x, 8);
+        expect(zoomed.y).toBeCloseTo(anchor.y - expectedScale * worldAnchor.y, 8);
+        expect(zoomed.x + zoomed.scale * worldAnchor.x).toBeCloseTo(anchor.x, 8);
+        expect(zoomed.y + zoomed.scale * worldAnchor.y).toBeCloseTo(anchor.y, 8);
+        expect(wheel.defaultPrevented).toBe(true);
+        expect(ancestorWheel).not.toHaveBeenCalled();
+      } finally {
+        container.removeEventListener("wheel", ancestorWheel);
+      }
+    });
+
     it("pure horizontal wheel (deltaX != 0, deltaY == 0) does not change camera", () => {
       const { container } = render(<DagGraphView snapshot={sampleSnapshot} />);
       const { viewport, world } = getElements(container);
