@@ -81,8 +81,12 @@ impl DaemonLogging {
 
 pub(crate) fn report_failure(error: &anyhow::Error) {
     // One bounded report, never a retry loop into the desktop's undrained pipe.
+    // Use non-panicking write_all on locked stderr so broken pipes do not abort the process.
     let detail: String = error.to_string().chars().take(256).collect();
-    eprintln!("FERRYX_DAEMON_LOGGING_DISABLED: {detail}");
+    let message = format!("FERRYX_DAEMON_LOGGING_DISABLED: {detail}\n");
+    let mut stderr = io::stderr().lock();
+    let _ = stderr.write_all(message.as_bytes());
+    let _ = stderr.flush();
 }
 
 fn open_log() -> io::Result<std::fs::File> {

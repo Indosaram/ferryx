@@ -171,8 +171,12 @@ async fn delete_worktree<R: Runtime>(
     })
     .await?;
 
-    app.state::<crate::ipc::worktree_disk::WorktreeDiskScans>()
-        .remove_deleted(&event_workspace_id, &pruned.1);
+    if let Some(snapshot) = app
+        .state::<crate::ipc::worktree_disk::WorktreeDiskScans>()
+        .remove_deleted(&event_workspace_id, &pruned.1)
+    {
+        let _ = app.emit(crate::ipc::worktree_disk::WORKTREE_DISK_SCAN_PROGRESS_EVENT, snapshot);
+    }
 
     emit_worktree_changed(
         &app,
@@ -268,7 +272,7 @@ mod deletion_repair_tests {
     use super::*;
     use crate::ipc::worktree_disk::WorktreeDiskScans;
     use crate::worktree::{run_git, CreateWorktreeOptions};
-    use tauri::Manager;
+    use tauri::{Listener, Manager};
 
     // Copy existing objects; never create commits or mutate the source repository.
     fn fixture() -> (
@@ -277,8 +281,12 @@ mod deletion_repair_tests {
         WorktreeIdentity,
         Worktree,
     ) {
-        let dir =
-            tempfile::tempdir_in(std::env::var("TMPDIR").expect("worktree-local TMPDIR")).unwrap();
+        let target_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
+        let dir = std::env::var("TMPDIR")
+            .ok()
+            .and_then(|t| tempfile::tempdir_in(t).ok())
+            .or_else(|| tempfile::tempdir_in(&target_dir).ok())
+            .unwrap_or_else(|| tempfile::tempdir().unwrap());
         let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap();
@@ -436,6 +444,12 @@ mod deletion_repair_tests {
             .manage(scans.clone())
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .unwrap();
+        let (scan_event_tx, mut scan_event_rx) = tokio::sync::mpsc::unbounded_channel();
+        app.listen(crate::ipc::worktree_disk::WORKTREE_DISK_SCAN_PROGRESS_EVENT, move |event: tauri::Event| {
+            let snapshot: crate::ipc::worktree_disk::DiskScanSnapshot =
+                serde_json::from_str(event.payload()).unwrap();
+            scan_event_tx.send(snapshot).unwrap();
+        });
         cmd_worktree_delete_destructive(
             app.handle().clone(),
             app.state(),
@@ -447,6 +461,12 @@ mod deletion_repair_tests {
         )
         .await
         .unwrap();
+        let cancelled_event = tokio::time::timeout(std::time::Duration::from_secs(5), scan_event_rx.recv())
+            .await
+            .expect("delete must emit scan cancellation event")
+            .expect("event received");
+        assert_eq!(cancelled_event.status, crate::ipc::worktree_disk::DiskScanStatus::Cancelled);
+        assert_eq!(cancelled_event.scan_id, worker.scan_id);
         assert!(!wt.path.exists());
         assert!(
             scans

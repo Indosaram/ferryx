@@ -33,7 +33,7 @@ Line numbers refer to this worktree's checkout.
 | 21 | UI preferences and tokens stay in browser/webview localStorage | `ui/src/App.tsx:2826`, `ui/src/lib/terminalSettings.ts:316`, `ui/src/lib/remoteClient.ts:17` | AUTHORING NODE (PENDING LEAD REVIEW) |
 | 22 | Source builds activate native-terminal and require pinned Ghostty submodule | `src-tauri/Cargo.toml:49`, `src-tauri/native_terminal/build_ghostty.rs:6`, `:7` | AUTHORING NODE (PENDING LEAD REVIEW) |
 | 23 | Build without root workspace emits binaries to src-tauri/target/release | `src-tauri/Cargo.toml:175` | AUTHORING NODE (PENDING LEAD REVIEW) |
-| 24 | The readiness signal confirms the bound local listener and precedes gateway restoration | `src-tauri/src/daemon/server.rs:1493`, `:1498`, `src-tauri/src/cli.rs:503` | AUTHORING NODE (PENDING LEAD REVIEW) |
+| 24 | The readiness signal confirms the bound local listener and precedes gateway restoration | `src-tauri/src/daemon/server.rs:1493`, `:1498`, `src-tauri/src/cli.rs:536` | AUTHORING NODE (PENDING LEAD REVIEW) |
 | 25 | Gateway restoration failure logs a warning and does not terminate the daemon | `src-tauri/src/daemon/server.rs:1503` | AUTHORING NODE (PENDING LEAD REVIEW) |
 | 26 | The remote status CLI command reads persisted JSON and does not probe live health | `src-tauri/src/cli.rs:361`, `:362` | AUTHORING NODE (PENDING LEAD REVIEW) |
 | 27 | Runtime directory and socket ownership check process real UID via libc::getuid | `src-tauri/src/daemon/server.rs:135`, `:439` | AUTHORING NODE (PENDING LEAD REVIEW) |

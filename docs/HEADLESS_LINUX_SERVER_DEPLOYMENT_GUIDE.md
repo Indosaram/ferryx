@@ -189,7 +189,7 @@ Only after acquiring locks does the daemon clean up any stale canonical socket f
 When started with `--daemon`, the process initializes its runtime, binds `/tmp/rorca-<UID>/daemon.sock`, and restores previous session routes (`src-tauri/src/daemon/server.rs:1456-1492`).
 
 The daemon signals readiness over an internal oneshot channel (`src-tauri/src/daemon/server.rs:1493`).
-Next, the CLI wrapper awaits that signal on an independent Tokio task and prints this exact token to standard output (`src-tauri/src/cli.rs:503`):
+Next, the CLI wrapper awaits that signal on an independent Tokio task and prints this exact token to standard output (`src-tauri/src/cli.rs:536`):
 
 ```text
 FERRYX_DAEMON_READY
@@ -270,7 +270,7 @@ journalctl --user -u ferryx-daemon.service -b --no-pager
 ```
 
 You should see `FERRYX_DAEMON_READY` in the log stream.
-Headless daemon execution does not initialize a `tracing_subscriber` (`src-tauri/src/cli.rs:471-518`). Tracing log macros are silenced, so messages like `rorca daemon listening on ...` do not appear in the journal. Fatal startup errors appear on standard error (`src-tauri/src/main.rs:39`).
+Headless daemon execution initializes a dedicated, bounded file subscriber for agent-state diagnostics (`src-tauri/src/daemon/logging.rs:33-80`, `src-tauri/src/cli.rs:479`), capped at 1 MiB under `~/.ferryx/logs/daemon.log` or `$FERRYX_DATA_DIR/logs/daemon.log`. General daemon tracing log statements remain silenced to stdout/journald. Fatal startup errors appear on standard error (`src-tauri/src/main.rs:39`).
 
 ### Alternative: System-Wide Unit File
 
@@ -615,7 +615,7 @@ journalctl --user -u ferryx-daemon.service -f
 journalctl --user -u ferryx-daemon.service -b
 ```
 
-The headless daemon entry point does not initialize a `tracing_subscriber` (`src-tauri/src/cli.rs:471-518`). Tracing log statements are silenced. Journald captures the readiness token `FERRYX_DAEMON_READY` on stdout (`:503`) and fatal startup errors on stderr (`src-tauri/src/main.rs:39`).
+The headless daemon entry point initializes a filtered subscriber strictly for agent-state release events (`src-tauri/src/daemon/logging.rs:33-80`, `src-tauri/src/cli.rs:479`), recording to a private, bounded log file (`daemon.log`, max 1 MiB, mode 0600) rather than stdout. Journald captures the readiness token `FERRYX_DAEMON_READY` on stdout (`:536`) and fatal startup errors on stderr (`src-tauri/src/main.rs:39`).
 
 ### Storage Categories on Disk
 
@@ -712,7 +712,7 @@ mkdir -m 0700 /tmp/rorca-"$(id -u)"
 * In `localNetwork` mode, the resolver tests a route probe to `8.8.8.8:80` and falls back to inspecting network interfaces via `getifaddrs`. Lack of a default route does not force failure if an active interface has an IPv4 address.
 * In `tailscale` mode, the resolver scans for an address within the `100.64.0.0/10` CGNAT block (`100.64.0.0` through `100.127.255.255`). CGNAT detection does not prove that the Tailscale daemon is running or authenticated.
 
-The daemon continues running its local UDS client accept loop (`src-tauri/src/daemon/server.rs:1500-1515`). Remote gateway restoration failure does not terminate the daemon process. Headless mode does not initialize a tracing subscriber, so tracing warnings are silenced.
+The daemon continues running its local UDS client accept loop (`src-tauri/src/daemon/server.rs:1500-1515`). Remote gateway restoration failure does not terminate the daemon process. Headless mode filters tracing to agent-state release events only, so gateway restoration warnings are not sent to journald.
 
 **Resolution:**
 1. In LAN mode, verify that your host has an active non-loopback IPv4 address:
