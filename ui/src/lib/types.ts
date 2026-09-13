@@ -481,7 +481,13 @@ export type NativeTerminalScrollbarPayload = {
 export type WorktreeChangedPayload = {
   workspaceId: string;
   worktree: WorktreeIdentity;
-  kind: "created" | "deleted" | "destructivelyDeleted" | "dirtyChanged" | "pruned";
+  kind:
+    | "created"
+    | "deleted"
+    | "destructivelyDeleted"
+    | "dirtyChanged"
+    | "pruned"
+    | "updated";
 };
 
 export type NotificationSource =

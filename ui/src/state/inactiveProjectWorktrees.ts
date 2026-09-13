@@ -87,7 +87,12 @@ export function useInactiveProjectWorktrees(
 
       const isSsh = target.target?.kind === "ssh";
       if (!isSsh) {
+        // Rescan-emitted `created`/`updated` events carry worktrees the sidebar
+        // does not know about yet, so they must trigger a re-list too; only
+        // dirty-state noise is ignored.
         if (
+          payload.kind !== "created" &&
+          payload.kind !== "updated" &&
           payload.kind !== "deleted" &&
           payload.kind !== "destructivelyDeleted" &&
           payload.kind !== "pruned"

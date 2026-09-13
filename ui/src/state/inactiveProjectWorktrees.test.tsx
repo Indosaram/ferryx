@@ -241,6 +241,99 @@ describe("useInactiveProjectWorktrees", () => {
     expect(result.current[gitProject.workspaceId]).toEqual([]);
   });
 
+  it("re-lists an inactive project when the rescan reports an externally created worktree", async () => {
+    const externalWorktree: Worktree = {
+      path: "/Users/dev/orca-lite/.orca-worktrees/wt-agent-task",
+      head: "def456",
+      branch: "refs/heads/orca/orca-lite/agent-task",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+    let worktreeChangedHandler: WorktreeChangedHandler | null = null;
+    const services = createServices({
+      onWorktreeChanged: vi.fn(async (handler: WorktreeChangedHandler) => {
+        worktreeChangedHandler = handler;
+        return () => undefined;
+      }),
+      listWorktrees: vi.fn(async () => [mainWorktree]),
+    });
+
+    const { result } = renderHook(() =>
+      useInactiveProjectWorktrees([gitProject, plainProject], plainProject.workspaceId, [], services),
+    );
+
+    await settleServices(services);
+    expect(result.current[gitProject.workspaceId]).toEqual([mainWorktree]);
+
+    services.listWorktrees = vi.fn(async () => [mainWorktree, externalWorktree]);
+    act(() => { worktreeChangedHandler!({
+      workspaceId: gitProject.workspaceId,
+      kind: "created",
+      worktree: { wsId: "orca-lite", slug: "agent-task" },
+    }); });
+
+    await settleServices(services);
+    expect(result.current[gitProject.workspaceId]).toEqual([mainWorktree, externalWorktree]);
+  });
+
+  it("re-lists an inactive project when the rescan reports updated worktree metadata", async () => {
+    let worktreeChangedHandler: WorktreeChangedHandler | null = null;
+    const services = createServices({
+      onWorktreeChanged: vi.fn(async (handler: WorktreeChangedHandler) => {
+        worktreeChangedHandler = handler;
+        return () => undefined;
+      }),
+      listWorktrees: vi.fn(async () => [mainWorktree]),
+    });
+
+    const { result } = renderHook(() =>
+      useInactiveProjectWorktrees([gitProject, plainProject], plainProject.workspaceId, [], services),
+    );
+
+    await settleServices(services);
+    expect(result.current[gitProject.workspaceId]).toEqual([mainWorktree]);
+
+    const movedWorktree: Worktree = { ...mainWorktree, head: "fed987" };
+    services.listWorktrees = vi.fn(async () => [movedWorktree]);
+    act(() => { worktreeChangedHandler!({
+      workspaceId: gitProject.workspaceId,
+      kind: "updated",
+      worktree: { wsId: "orca-lite", slug: "main" },
+    }); });
+
+    await settleServices(services);
+    expect(result.current[gitProject.workspaceId]).toEqual([movedWorktree]);
+  });
+
+  it("ignores dirtyChanged events for local projects", async () => {
+    const services = createServices({
+      onWorktreeChanged: vi.fn(async (handler: WorktreeChangedHandler) => {
+        worktreeChangedHandlerRef = handler;
+        return () => undefined;
+      }),
+    });
+
+    const { result } = renderHook(() =>
+      useInactiveProjectWorktrees([gitProject, plainProject], plainProject.workspaceId, [], services),
+    );
+
+    await settleServices(services);
+    expect(result.current[gitProject.workspaceId]).toEqual([mainWorktree]);
+    const listWorktrees = services.listWorktrees as ReturnType<typeof vi.fn>;
+    const callsBefore = listWorktrees.mock.calls.length;
+
+    act(() => { worktreeChangedHandlerRef?.({
+      workspaceId: gitProject.workspaceId,
+      kind: "dirtyChanged",
+      worktree: { wsId: "orca-lite", slug: "main" },
+    }); });
+
+    await settleServices(services);
+    expect(listWorktrees.mock.calls.length).toBe(callsBefore);
+  });
+
   it("ignores worktree change events for projects it does not track", async () => {
     const onWorktreeChanged = vi.fn(async (handler: WorktreeChangedHandler) => {
       worktreeChangedHandlerRef = handler;

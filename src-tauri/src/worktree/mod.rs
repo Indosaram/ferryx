@@ -2,11 +2,13 @@ pub mod git;
 pub mod manager;
 pub mod model;
 pub mod registry;
+pub mod rescan;
 
 pub use git::*;
 pub use manager::*;
 pub use model::*;
 pub use registry::*;
+pub use rescan::*;
 
 #[cfg(test)]
 pub mod tests {
@@ -14,7 +16,7 @@ pub mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    fn setup_test_repo() -> (TempDir, WorktreeManager) {
+    pub(crate) fn setup_test_repo() -> (TempDir, WorktreeManager) {
         let temp_dir = TempDir::new().expect("failed to create temp dir");
         let repo_path = temp_dir.path();
         git::run_git(repo_path, &["init"]).expect("git init failed");

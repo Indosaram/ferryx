@@ -40,6 +40,7 @@ pub enum WorktreeChangeKind {
     #[serde(rename = "dirtyChanged")]
     DirtyChanged,
     Pruned,
+    Updated,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

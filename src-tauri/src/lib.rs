@@ -914,6 +914,10 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
     let native_terminal_surface_host = NativeTerminalSurfaceHostState::default();
     let setup_activations = Arc::clone(&notification_activations);
     let scroll_daemon_client = Arc::clone(&daemon_client);
+    // Consumed by the setup hook below, which spawns the periodic worktree
+    // rescan task; kept as a separate clone so `.manage(workspace_registry)`
+    // below still owns the managed instance.
+    let worktree_rescan_registry = workspace_registry.clone();
 
     // Exactly one canonical workspace is registered for the startup root; the
     // legacy `default` alias is intentionally not registered, and persisted
@@ -1033,6 +1037,10 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             ipc::native_menu::register_menu_event_forwarder(app.handle());
             start_remote_event_bridge(app.handle().clone(), Arc::clone(&bridge_daemon_client));
             install_notification_activation_routing(app, Arc::clone(&setup_activations))?;
+            crate::worktree::spawn_worktree_rescan_task(
+                app.handle().clone(),
+                worktree_rescan_registry,
+            );
             Ok(())
         })
         // Rust-side plugins only. The frontend uses rorca's own typed commands,

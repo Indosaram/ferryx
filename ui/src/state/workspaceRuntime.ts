@@ -245,7 +245,10 @@ export function useWorkspaceRuntime({
       switchDebug("workspace.runtime.initialize.start", { workspaceId });
       await servicesRef.current.ensureTerminalEvents();
       if (disposed) return;
-      unlistenWorktreeChanged = await servicesRef.current.onWorktreeChanged(() => {
+      unlistenWorktreeChanged = await servicesRef.current.onWorktreeChanged((payload) => {
+        // The rescan sweep emits events for every registered workspace; only
+        // this workspace's events concern this runtime.
+        if (payload.workspaceId !== workspaceId) return;
         switchDebug("worktree.changed.event", { workspaceId });
         void refreshWorktreesRef.current({ allowCreate: false });
       });
