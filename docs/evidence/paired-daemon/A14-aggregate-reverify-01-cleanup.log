@@ -1,0 +1,7 @@
+{
+  "foreground_commands": "completed and reaped",
+  "fixture": ".a14v1",
+  "sockets_remaining": [],
+  "source_delta": {},
+  "retained": "Node caches, empty fixture directories and marker files. apply_patch deletion of ignored marker returned exit 1; stopped cleanup, no blind retry or destructive workaround. Runtime fixture roots self-clean; integration log confirms task joins and TCP refusal."
+}

@@ -1,0 +1,106 @@
+    Blocking waiting for file lock on build directory
+   Compiling ferryx v2026.908.1 (/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/src-tauri)
+error[E0599]: no method named `json` found for struct `reqwest::Response` in the current scope
+  --> src/remote/../../tests/support/machine_input_fixture.rs:39:152
+   |
+38 |   ... = client.post(format!("{}/api/v1/workspace/projects", self.base)).bearer_auth(&self.token)
+   |  _______-
+39 | | ...requestId":uuid::Uuid::new_v4(),"repoPath":self.root.path()}).to_string()).send().await.unwrap().error_for_status().unwrap().json().aw...
+   | |                                                                                                                                -^^^^ method not found in `reqwest::Response`
+   | |________________________________________________________________________________________________________________________________|
+   |
+
+error[E0282]: type annotations needed
+  --> src/remote/../../tests/support/machine_input_fixture.rs:38:30
+   |
+38 |   ... = client.post(format!("{}/api/v1/workspace/projects", self.base)).bearer_auth(&self.token)
+   |  _______^
+39 | | ...requestId":uuid::Uuid::new_v4(),"repoPath":self.root.path()}).to_string()).send().await.unwrap().error_for_status().unwrap().json().await.un...
+   | |____________________________________________________________________________________________________________________________________________^ cannot infer type
+
+error[E0599]: no method named `json` found for struct `reqwest::Response` in the current scope
+  --> src/remote/../../tests/support/machine_input_fixture.rs:42:64
+   |
+40 | / ...   client.post(format!("{}/api/v1/sessions", self.base)).bearer_auth(&self.token)
+41 | | ...       .body(json!({"requestId":uuid::Uuid::new_v4(),"workspaceId":project["workspaceId"],"worktree":null,"inheritFromSessionId":null,...
+42 | | ...       .send().await.unwrap().error_for_status().unwrap().json().await.unwrap()
+   | |                                                             -^^^^ method not found in `reqwest::Response`
+   | |_____________________________________________________________|
+   |
+
+error[E0282]: type annotations needed
+  --> src/remote/../../tests/support/machine_input_fixture.rs:40:9
+   |
+40 | / ...   client.post(format!("{}/api/v1/sessions", self.base)).bearer_auth(&self.token)
+41 | | ...       .body(json!({"requestId":uuid::Uuid::new_v4(),"workspaceId":project["workspaceId"],"worktree":null,"inheritFromSessionId":null,...
+42 | | ...       .send().await.unwrap().error_for_status().unwrap().json().await.unwrap()
+   | |_________________________________________________________________________^ cannot infer type
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `token`
+    --> src/remote/auth.rs:1399:14
+     |
+1399 |         let (token, device) = auth
+     |              ^^^^^ help: if this is intentional, prefix it with an underscore: `_token`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `scroll_daemon_client`
+   --> src/lib.rs:916:9
+    |
+916 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+    |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+
+Some errors have detailed explanations: E0282, E0599.
+For more information about an error, try `rustc --explain E0282`.
+warning: `ferryx` (lib test) generated 10 warnings
+error: could not compile `ferryx` (lib test) due to 4 previous errors; 10 warnings emitted

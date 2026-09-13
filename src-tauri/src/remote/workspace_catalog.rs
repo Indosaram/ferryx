@@ -17,10 +17,17 @@ pub struct Catalog {
     pub version: u32,
     pub revision: Epoch,
     pub workspaces: BTreeMap<String, CatalogRow>,
+    /// Last observed Git state, committed with the revision that fences deletion.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub worktree_observations: BTreeMap<String, String>,
+    /// Atomic proof of the most recent catalog transaction, not a second journal.
+    /// The next commit is admitted only after this receipt reaches the journal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transaction: Option<super::machine_operation_journal::Record>,
 }
 
 impl Default for Catalog {
-    fn default() -> Self { Self { version: 1, revision: Epoch(0), workspaces: BTreeMap::new() } }
+    fn default() -> Self { Self { version: 1, revision: Epoch(0), workspaces: BTreeMap::new(), worktree_observations: BTreeMap::new(), transaction: None } }
 }
 
 pub(crate) fn load(path: &Path) -> Result<Catalog, String> {

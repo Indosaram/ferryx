@@ -277,7 +277,13 @@ async fn tauri_mock_terminal_attach_returns_base64_history_and_decimal_sequences
 #[tokio::test]
 async fn tauri_mock_worktree_commands_use_identity_contract() {
     let (repo, registry) = setup_workspace();
+    let (_dir, daemon_client, server_task) = setup_test_daemon().await;
+    daemon_client
+        .register_workspace("workspace-test", &repo.path().to_string_lossy())
+        .await
+        .expect("register daemon workspace");
     let app = tauri::test::mock_builder()
+        .manage(daemon_client)
         .manage(registry)
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("mock app");
@@ -345,6 +351,8 @@ async fn tauri_mock_worktree_commands_use_identity_contract() {
         .await
         .expect("final list");
     assert_eq!(final_list.len(), 1);
+    server_task.abort();
+    assert!(server_task.await.expect_err("daemon listener aborted").is_cancelled());
 }
 
 #[tokio::test]

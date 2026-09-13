@@ -1,3 +1,5 @@
+#[path = "machine_peer.rs"]
+mod machine_peer;
 use crate::daemon::agent_state::{AgentState, AgentStateHub, AgentStateSubscription};
 use crate::daemon::manifest::{get_manifest_path, HandoverManifest};
 use crate::daemon::protocol::{
@@ -654,9 +656,11 @@ impl SessionRouter {
     pub fn is_local_session(&self, session_id: &str) -> bool {
         self.terminal_service.get_session(session_id).is_some()
             || self.terminal_service.remote().contains(session_id)
+            || crate::terminal::paired_runtime::Runtime::owns(session_id)
     }
 
     pub fn find_legacy_peer_for_session(&self, session_id: &str) -> Option<Arc<LegacyPeer>> {
+        if crate::terminal::paired_runtime::Runtime::owns(session_id) { return None; }
         let peers = self.legacy_peers.read();
         peers
             .iter()

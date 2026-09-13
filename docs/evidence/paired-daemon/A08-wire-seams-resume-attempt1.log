@@ -1,0 +1,172 @@
+    Blocking waiting for file lock on build directory
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `token`
+    --> src/remote/auth.rs:1399:14
+     |
+1399 |         let (token, device) = auth
+     |              ^^^^^ help: if this is intentional, prefix it with an underscore: `_token`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `scroll_daemon_client`
+   --> src/lib.rs:915:9
+    |
+915 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+    |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+
+warning: field `app` is never read
+  --> src/ipc/notifications.rs:28:5
+   |
+27 | pub struct TauriNotificationBackend<R: Runtime> {
+   |            ------------------------ field in this struct
+28 |     app: AppHandle<R>,
+   |     ^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `GHOSTTY_TERMINAL_SCREEN_PRIMARY` is never used
+  --> src/native_terminal/sys/constants.rs:56:11
+   |
+56 | pub const GHOSTTY_TERMINAL_SCREEN_PRIMARY: c_int = 0;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `no_auth_query` is never used
+    --> src/remote/server.rs:2871:12
+     |
+2871 |         fn no_auth_query() -> AuthQuery {
+     |            ^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src/worktree/manager.rs:86:19
+   |
+86 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+   --> src/worktree/manager.rs:93:8
+    |
+ 92 | impl WriterLeaseGuard {
+    | --------------------- associated items in this implementation
+ 93 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+    |        ^^^
+...
+101 |     pub(crate) fn canonical_path(&self) -> &Path {
+    |                   ^^^^^^^^^^^^^^
+...
+105 |     pub(crate) fn owner_id(&self) -> &str {
+    |                   ^^^^^^^^
+
+warning: method `acquire_writer_lease` is never used
+   --> src/worktree/manager.rs:338:19
+    |
+134 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+338 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib test) generated 16 warnings (run `cargo fix --lib -p ferryx --tests` to apply 2 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 24.84s
+     Running unittests src/lib.rs (src-tauri/target/debug/deps/ferryx_lib-82e1988715e4a304)
+
+running 2 tests
+test remote::workspace_api::worktrees::wire_proof_tests::private_wire_owner ... ok
+
+running 1 test
+A08_WIRE_HANDSHAKE owner_pid=93318 exact=true socket=/tmp/a08-wire-ERHs2r/runtime/daemon.sock http=127.0.0.1:64907
+A08_WIRE_HTTP_REQUEST method=POST endpoint=http://127.0.0.1:64907/api/v1/workspace/worktrees body={"baseRef":"HEAD~1","requestId":"d074d223-9899-45a9-8e36-ff172c5510d0","workspaceId":"project-72e9df536fad4e039b5355a88a359e75","worktree":{"slug":"non-head","wsId":"project-72e9df536fad4e039b5355a88a359e75"}}
+A08_WIRE_HTTP_RESPONSE status=201 body={"bare":false,"branch":"refs/heads/orca/project-72e9df536fad4e039b5355a88a359e75/non-head","detached":false,"head":"dd1df0b29e54cd4e1bd06005b84e2f9dd7c36d5b","identity":{"slug":"non-head","wsId":"project-72e9df536fad4e039b5355a88a359e75"},"locked":null,"managed":true,"path":"/private/tmp/a08-wire-ERHs2r/repo/.orca-worktrees/project-72e9df536fad4e039b5355a88a359e75/non-head","prunable":null,"workspaceId":"project-72e9df536fad4e039b5355a88a359e75"}
+A08_WIRE_NON_HEAD first_http=201 base=dd1df0b29e54cd4e1bd06005b84e2f9dd7c36d5b original_head=a344b567db544af05069b13a8a7fdc2e39699ea5 actual_checkout_equal=true
+A08_WIRE_UDS_REQUEST {"baseRef":null,"type":"createWorktree","workspaceId":"project-72e9df536fad4e039b5355a88a359e75","worktree":{"slug":"local-prune","wsId":"project-72e9df536fad4e039b5355a88a359e75"}}
+A08_WIRE_UDS_RESPONSE {"type":"createWorktreeOk","worktree":{"bare":false,"branch":"refs/heads/orca/project-72e9df536fad4e039b5355a88a359e75/local-prune","detached":false,"head":"a344b567db544af05069b13a8a7fdc2e39699ea5","locked":null,"path":"/private/tmp/a08-wire-ERHs2r/repo/.orca-worktrees/project-72e9df536fad4e039b5355a88a359e75/local-prune","prunable":null}}
+A08_WIRE_UDS_REQUEST {"deleteBranch":true,"destructive":false,"type":"deleteWorktree","workspaceId":"project-72e9df536fad4e039b5355a88a359e75","worktree":{"slug":"local-prune","wsId":"project-72e9df536fad4e039b5355a88a359e75"}}
+A08_WIRE_UDS_RESPONSE {"error":{"code":"WORKTREE_REMOVED_PRUNE_FAILED","details":{"branchDeleted":false,"cause":{"code":"GIT_ERROR","details":{"command":"git worktree prune","exitCode":128,"stderr":"fatal: Expected git repo version <= 1, found 999"},"message":"Git command failed (git worktree prune): fatal: Expected git repo version <= 1, found 999 (exit code: Some(128))"},"path":"/private/tmp/a08-wire-ERHs2r/repo/.orca-worktrees/project-72e9df536fad4e039b5355a88a359e75/local-prune","pruned":false,"worktreeRemoved":true},"message":"Worktree '/private/tmp/a08-wire-ERHs2r/repo/.orca-worktrees/project-72e9df536fad4e039b5355a88a359e75/local-prune' was removed but prune failed: Git command failed (git worktree prune): fatal: Expected git repo version <= 1, found 999 (exit code: Some(128))"},"type":"worktreeError"}
+A08_WIRE_PRUNE legacy=false removed=true branch_preserved=true config_restored=true publication_received=true
+A08_WIRE_UDS_REQUEST {"baseRef":null,"type":"createWorktree","workspaceId":"project-72e9df536fad4e039b5355a88a359e75","worktree":{"slug":"legacy-prune","wsId":"project-72e9df536fad4e039b5355a88a359e75"}}
+A08_WIRE_UDS_RESPONSE {"type":"createWorktreeOk","worktree":{"bare":false,"branch":"refs/heads/orca/project-72e9df536fad4e039b5355a88a359e75/legacy-prune","detached":false,"head":"a344b567db544af05069b13a8a7fdc2e39699ea5","locked":null,"path":"/private/tmp/a08-wire-ERHs2r/repo/.orca-worktrees/project-72e9df536fad4e039b5355a88a359e75/legacy-prune","prunable":null}}
+A08_WIRE_HTTP_REQUEST method=DELETE endpoint=http://127.0.0.1:64907/api/v1/workspace/worktrees body={"deleteBranch":true,"workspaceId":"project-72e9df536fad4e039b5355a88a359e75","worktree":{"slug":"legacy-prune","wsId":"project-72e9df536fad4e039b5355a88a359e75"}}
+A08_WIRE_HTTP_RESPONSE status=403 body={"error":{"code":"MACHINE_ACCESS_REQUIRED","details":{},"message":"MACHINE_ACCESS_REQUIRED","requestId":"6834e0db-0d96-4569-9daa-0707e2fbf578","retryable":false}}
+
+thread 'remote::workspace_api::worktrees::wire_proof_tests::private_wire_owner' (418779) panicked at src/remote/workspace_api/worktree_wire_proof_tests.rs:161:17:
+assertion `left == right` failed
+  left: 403
+ right: 409
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+A08_WIRE_LISTENERS joined=true clients_joined=true tcp_refused=true uds_refused=true socket_removed=true failed=true
+
+thread 'remote::workspace_api::worktrees::wire_proof_tests::private_wire_owner' (418779) panicked at src/remote/workspace_api/worktree_wire_proof_tests.rs:209:13:
+called `Result::unwrap()` on an `Err` value: Any { .. }
+A08_WIRE_OWNER pid=93318 runtime_joined=true git_children=ECHILD failed=true
+test remote::workspace_api::worktrees::wire_proof_tests::private_wire_owner ... FAILED
+
+failures:
+
+failures:
+    remote::workspace_api::worktrees::wire_proof_tests::private_wire_owner
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 954 filtered out; finished in 1.32s
+
+A08_WIRE_PARENT owner_pid=93318 reaped=true status=exit status: 101 timeout=false root=/tmp/a08-wire-ERHs2r absent=true
+
+thread 'remote::workspace_api::worktrees::wire_proof_tests::non_head_and_partial_prune_wires' (418773) panicked at src/remote/workspace_api/worktree_wire_proof_tests.rs:36:5:
+assertion failed: !timed_out && status.success()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test remote::workspace_api::worktrees::wire_proof_tests::non_head_and_partial_prune_wires ... FAILED
+
+failures:
+
+failures:
+    remote::workspace_api::worktrees::wire_proof_tests::non_head_and_partial_prune_wires
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 953 filtered out; finished in 1.33s
+
+error: test failed, to rerun pass `--lib`

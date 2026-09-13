@@ -1,0 +1,13 @@
+75a00dcbdcdb9ce6dc01dfa231d0922a0ddaeeb7aea4d63e239621e78d8a263b  src-tauri/src/paired_host/inventory_tests.rs
+923e0872d4462dc93a47c9ed2dff7916728fa0f2d42ff145eb3c91e4c3879d84  src-tauri/src/paired_host/inventory.rs
+fa7153e9983272ad4591e9065b50afec1e1415f950254123e5fc777986c44162  src-tauri/src/paired_host/mod.rs
+d61cac717016aecc390ff9fedf3d78ae47bb03dd417f84346329e9c94dad7ba5  src-tauri/src/lib.rs
+0ad21b3583024a2c920b2bf328ece1dca4c7116b1e577e37dd5c7fdb2e172a2a  /Users/indo/code/project/orca-lite/.omo/plans/ferryx-herdr-cloud-multi-host-plan.md
+e53d9d310f22c2c5fc83de997618fca0e873dc3b141dd6e0f30ba0105480031e  docs/evidence/paired-daemon/A13-inventory-core-check-loopback.log
+b35d5e46395073dc34a288af878b420f8cb106d8a81766ce9ba8105c6c00ef0e  docs/evidence/paired-daemon/A13-inventory-core-check.log
+8101f80262d1dabca1bdd55db2b7f1c21e2ae9376e24c31267a402b258fcc017  docs/evidence/paired-daemon/A13-inventory-core-cleanup.log
+6774ad8d56d17a5406fb2312cb6b9b5094a5c5fb956423cfaf60cca963ee3574  docs/evidence/paired-daemon/A13-inventory-core-GREEN.log
+4ba76e84813487b472d9874d842c1754c9b885c0a2675518745aaaab75256a4a  docs/evidence/paired-daemon/A13-inventory-core-RED-generation.log
+9967ce00aaef2862e08483fa8e5e81e11f057c682a1a1480a05ccc30fe98a0ab  docs/evidence/paired-daemon/A13-inventory-core-RED-storage.log
+ddf1cb4639c8db4bd7c231887ce76839e3692839ddb7def61a539a5d48b7d9f2  docs/evidence/paired-daemon/A13-inventory-core-RED.log
+c50f89685fefe0660c749801a975d7a1b9d85d064baceda9f50d7dd2b4dae080  docs/evidence/paired-daemon/A13-inventory-core-run.sh

@@ -1,0 +1,5 @@
+COMMAND: src-tauri/target/debug/ferryx-relay --help
+ferryx-relay: unrecognized argument: --help
+
+EXIT: 2
+Source parse_args rejects --help before listener/state creation. This is a headless startup check, not help-command success.

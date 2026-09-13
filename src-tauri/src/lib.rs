@@ -9,9 +9,12 @@ pub mod ipc;
 pub mod macos_file_drop;
 pub mod native_terminal;
 pub mod notification;
+pub mod paired_host;
 pub mod permissions;
 pub mod remote;
 pub mod scoped_contracts;
+#[cfg(test)]
+mod rollout_tests;
 pub mod session;
 pub mod ssh;
 pub mod terminal;
@@ -1057,6 +1060,13 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
     let builder = builder.manage(native_terminal_surface_host);
 
     builder.invoke_handler(tauri::generate_handler![
+        crate::ipc::paired_host::paired_host_list,
+        crate::ipc::paired_host::paired_host_operation,
+        crate::ipc::paired_host::paired_host_capabilities,
+        crate::ipc::paired_host::paired_host_read,
+        crate::ipc::paired_host::paired_host_pair,
+        crate::ipc::paired_host::paired_host_migrate_legacy,
+        crate::ipc::paired_host::paired_host_forget,
         crate::ipc::updater::cmd_updater_managed_externally,
         crate::ipc::updater::cmd_distribution_channel,
         cmd_switch_debug_log,

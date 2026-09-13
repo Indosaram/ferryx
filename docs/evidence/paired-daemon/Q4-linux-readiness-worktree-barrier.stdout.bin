@@ -1,0 +1,3 @@
+
+running 1 test
+test remote::workspace_api::worktrees::authority_tests::interrupted_worktree_owner_child ... A08_GIT_COMPLETE_BEFORE_PUBLICATION

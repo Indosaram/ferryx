@@ -1,0 +1,4 @@
+owner=8503 command=env PATH=/Users/indo/.local/bin:/Users/indo/.bun/bin:/opt/homebrew/bin:/usr/bin:/bin bun run --cwd ui test src/lib/pairedDaemonProject.test.ts src/lib/pairedDaemonContracts.test.ts src/state/remoteHostStore.test.ts 
+  PID  PPID    RSS ELAPSED COMMAND
+ 8503  8500     32   00:00 bun run --cwd ui test src/lib/pairedDaemonProject.test.ts src/lib/pairedDaemonContracts.test.ts src/state/remoteHostStore.test.ts
+exit=0 owner_reaped=true

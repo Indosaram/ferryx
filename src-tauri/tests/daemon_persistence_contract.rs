@@ -68,6 +68,27 @@ fn assert_private_command(command: &Command, root: &Path) {
 }
 
 #[test]
+fn a17_pre_v3_backup_is_required_and_never_replaced() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("session.json");
+    let legacy = PersistedWorkspaceSession { version: 2, ..Default::default() };
+    save_session_to_path(&path, &legacy).unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let backup = path.with_extension("json.pre-v3");
+    std::fs::create_dir(&backup).unwrap();
+    let v3 = PersistedWorkspaceSession { version: 3, ..legacy };
+    assert!(save_session_to_path(&path, &v3).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    std::fs::remove_dir(&backup).unwrap();
+    save_session_to_path(&path, &v3).unwrap();
+    assert_eq!(std::fs::read(&backup).unwrap(), original);
+    save_session_to_path(&path, &v3).unwrap();
+    assert_eq!(std::fs::read(&backup).unwrap(), original);
+    assert!(save_session_to_path(&path, &PersistedWorkspaceSession { version: 2, ..v3 }).is_err());
+    assert_eq!(load_session_from_path(&path).unwrap().unwrap().version, 3);
+}
+
+#[test]
 fn test_private_daemon_command_safety() {
     // No spawn or connect: mutation RED is safe even on a live-app workstation.
     let root = tempfile::Builder::new()

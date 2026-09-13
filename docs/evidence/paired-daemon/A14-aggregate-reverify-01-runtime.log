@@ -1,0 +1,6 @@
+$ node --version && command -v node && bun --version
+v22.23.0
+/Users/indo/.nvm/versions/node/v22.23.0/bin/node
+1.4.0
+
+EXIT_CODE=0

@@ -1,0 +1,20 @@
+$ vitest run --maxWorkers=1 src/lib/sessionPersistence.test.ts src/state/workspaceRestore.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+stderr | src/state/workspaceRestore.test.tsx > workspaceRestore coordinator > preloads mixed local and paired layouts while the local daemon is unavailable
+Remote restore deferred daemon reconciliation: Error: offline
+    at [90m/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/workspaceRestore.test.tsx:92:101
+    at Module.preloadWorkspaceSnapshots [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/workspaceRestore.ts:122:32[90m)[39m
+[90m    at processTicksAndRejections (node:internal/process/task_queues:103:5)[39m
+    at [90m/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/workspaceRestore.test.tsx:92:5
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:752:20
+
+ ✓ src/state/workspaceRestore.test.tsx (19 tests) 31ms
+ ✓ src/lib/sessionPersistence.test.ts (35 tests) 11ms
+
+ Test Files  2 passed (2)
+      Tests  54 passed (54)
+   Start at  15:38:58
+   Duration  1.32s (transform 181ms, setup 188ms, collect 239ms, tests 43ms, environment 435ms, prepare 54ms)
+

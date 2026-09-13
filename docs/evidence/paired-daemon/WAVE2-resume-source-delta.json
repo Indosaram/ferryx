@@ -1,0 +1,172 @@
+{
+  "src-tauri/Cargo.lock": {
+    "seed": "3bf80308ad89556f9a6904c8e13ad467906e27bb1875c87b1f6b19ee06ddffb5",
+    "current": "00d0c83c507bdc86356f59277b66aff241d1e7d2400cb3ad9e29439d48ac3f2a",
+    "changed": true
+  },
+  "src-tauri/Cargo.toml": {
+    "seed": "fb29881c005c5dfa63d9d203b4bd41fe1659278ff719c4429f1c460ed0fbc46b",
+    "current": "43371ac36a7868e8fdd28f4fe039ecc1e5813fc0a9e237d8d170230052fe7e34",
+    "changed": true
+  },
+  "src-tauri/src/daemon/a03_owner_cli_fixture.rs": {
+    "seed": "ce8e0210b2ca0ab512114ea76ddad5dd3f14b2b4a253b8fc3af5b02c3d0190e2",
+    "current": "ce8e0210b2ca0ab512114ea76ddad5dd3f14b2b4a253b8fc3af5b02c3d0190e2",
+    "changed": false
+  },
+  "src-tauri/src/daemon/client.rs": {
+    "seed": "ff4a8bb9198dee8d774721e4738405e0716a0f8e1ca85a86ae6aa5680b44a85f",
+    "current": "ff4a8bb9198dee8d774721e4738405e0716a0f8e1ca85a86ae6aa5680b44a85f",
+    "changed": false
+  },
+  "src-tauri/src/daemon/protocol.rs": {
+    "seed": "833afcbbe451b10cfe5ee0a9d02102386cec55999e751586e0d129f5b8b17163",
+    "current": "833afcbbe451b10cfe5ee0a9d02102386cec55999e751586e0d129f5b8b17163",
+    "changed": false
+  },
+  "src-tauri/src/daemon/server.rs": {
+    "seed": "cfe478dd02a7b643163c3ae1c4c89278faabae65440c24caff47dba7da7e99b1",
+    "current": "f4c02ae7589ec1589a75a0c2c19f9841ccd5dec252ebec3c4013bb580cb722ca",
+    "changed": true
+  },
+  "src-tauri/src/daemon/session_service.rs": {
+    "seed": "eff02a83f55f07774cea9c48706a923360bba6180945408fec57f552a0daeafd",
+    "current": "538a4c5c6f784c071b2e454bb1bfff8dde1d2a60ba283c13f3c299573de3d7ba",
+    "changed": true
+  },
+  "src-tauri/src/daemon/workspace_service.rs": {
+    "seed": "0083415853602390e6cc7b7d7aa07496a9fa1491da50f825630a0f494084431c",
+    "current": "434d2541a32acf3402cbc6a06ec93cb2b0907cf9fa4be49dd0596ef86fbc3dbd",
+    "changed": true
+  },
+  "src-tauri/src/ipc/error.rs": {
+    "seed": "e94ad81ba61a9e9cbc59d64c7d1378469e45664d3ccc3996bc84f0097d701d82",
+    "current": "e94ad81ba61a9e9cbc59d64c7d1378469e45664d3ccc3996bc84f0097d701d82",
+    "changed": false
+  },
+  "src-tauri/src/ipc/worktree.rs": {
+    "seed": "591f65074281005e8cf7d475999554eac73d7c15b185d32209e8128b5e1c55f9",
+    "current": "591f65074281005e8cf7d475999554eac73d7c15b185d32209e8128b5e1c55f9",
+    "changed": false
+  },
+  "src-tauri/src/remote/filesystem.rs": {
+    "seed": "6972c6ef1a17f2b3ccb1865b04fd44826ec182282d4d90d3deec518e1e98ab3b",
+    "current": "c0c3ff7b5258817c123b698da3802a4840d3500d852cde5d7d320b00ebaa3432",
+    "changed": true
+  },
+  "src-tauri/src/remote/filesystem_tests.rs": {
+    "seed": "d8e5d329e1f6b1f3d9049180fcc7ca0c08b219ad8aaa0bd9ee3c9b3a373dbeb8",
+    "current": "e7f8425ce165c84a9b48d69a9b9659224199ab804ac04607decf5fa3ef3d5c52",
+    "changed": true
+  },
+  "src-tauri/src/remote/machine_operation_journal.rs": {
+    "seed": "0862d1b5bdcf9e3a0a22800e290101bf7a0599ea58da3f3865ab1a577d6b63cf",
+    "current": "b024597a609ad344f9dec2a04a924bfe8413c4728608944717558fe2ae129108",
+    "changed": true
+  },
+  "src-tauri/src/remote/mod.rs": {
+    "seed": "db21688496000d96012919796b565c70a02aefc941d9b902b80ad933b15b605b",
+    "current": "85268e59fd948dbdb83c9e7285e9463633b82334478c804b885e84b19d0a4d09",
+    "changed": true
+  },
+  "src-tauri/src/remote/preference_http_tests.rs": {
+    "seed": "c605b6c844b37a764d1bf7d3b0aa2f7bf899b58c88eddfbeb017ddbf7ce5b301",
+    "current": "c605b6c844b37a764d1bf7d3b0aa2f7bf899b58c88eddfbeb017ddbf7ce5b301",
+    "changed": false
+  },
+  "src-tauri/src/remote/relay_server.rs": {
+    "seed": "89157d33216802f1f63dc85a4ba34807e58731ef697ef852578fa5517d2223f3",
+    "current": "fa3c6e39318f13ec6a2f5fe97dc96bf9cc171e13b33d9d90360c3d350aae4816",
+    "changed": true
+  },
+  "src-tauri/src/remote/server.rs": {
+    "seed": "4a762a4fd2cc68ee2ed7e810ba726fea9e8fd5bafba397aa32ca35d5b7e3b5ca",
+    "current": "559fb9f3f467c6fadec408da93f0e57ef6a13e3b42151e35b8837bad0b8c8e3f",
+    "changed": true
+  },
+  "src-tauri/src/remote/state.rs": {
+    "seed": "f646c3bfb45b2f5b4893781758f171f0cc29f74c9ea4cafe04f52dadece78c27",
+    "current": "847692b6b05e35b493b871763b8333e2ee4454ba1fdde9bc9bd35772a857967b",
+    "changed": true
+  },
+  "src-tauri/src/remote/workspace_api.rs": {
+    "seed": "ceb911a549905b57e4bbd333502190e1ef6a7a13cca458270843d2debff277a4",
+    "current": "c5486c5da0359f5e341617ac7c7483dc5f8537bc4ef9423e0a1539c892be1555",
+    "changed": true
+  },
+  "src-tauri/src/remote/workspace_api/worktree_authority_tests.rs": {
+    "seed": "6e5c092e24fe5115b0bd266651d1e8c5a5f4fdc06bfd5bb4e8c4cfa3b52861eb",
+    "current": "7b59dd041008806465e776521df9916e29bad2bba3ec2d403bc3feb9f10f2175",
+    "changed": true
+  },
+  "src-tauri/src/remote/workspace_api/worktrees.rs": {
+    "seed": "9eac20aa3f043708fec39daa513e1fd8ed777a5069f5a924e922cfdab2bcad33",
+    "current": "702488a1da896b284c050952980650bd1aaff85e30678c159ea44d36f6aa08d4",
+    "changed": true
+  },
+  "src-tauri/src/remote/workspace_api_tests.rs": {
+    "seed": "acd98884243be442d615efe39b614064a3ff71353596b22ae0403dd660938b1c",
+    "current": "0c30c7da1b1460bdbe555f3442c0919ca9e0361926a71ac4d1ee1b4548a84857",
+    "changed": true
+  },
+  "src-tauri/src/remote/workspace_catalog.rs": {
+    "seed": "e25dd4f78ba21cec19949bab6a1ff73b6719bac20c8773cc42d76efcde0e7683",
+    "current": "e25dd4f78ba21cec19949bab6a1ff73b6719bac20c8773cc42d76efcde0e7683",
+    "changed": false
+  },
+  "src-tauri/src/worktree/git.rs": {
+    "seed": "fa31173cea551b5edbbe8370814b5879bd1d6fb1cf70abbe9115bbc6b8c702a4",
+    "current": "fa31173cea551b5edbbe8370814b5879bd1d6fb1cf70abbe9115bbc6b8c702a4",
+    "changed": false
+  },
+  "src-tauri/src/worktree/git/drain.rs": {
+    "seed": "b412ca14686bd3da3cf1ae86bcc2ec0659901c9168c11ade88bb6a009167393a",
+    "current": "b412ca14686bd3da3cf1ae86bcc2ec0659901c9168c11ade88bb6a009167393a",
+    "changed": false
+  },
+  "src-tauri/src/worktree/git/unix.rs": {
+    "seed": "64097c49009b811b401326cb79b2324aa245cabe3d22191c4d33b208facdc0ea",
+    "current": "64097c49009b811b401326cb79b2324aa245cabe3d22191c4d33b208facdc0ea",
+    "changed": false
+  },
+  "src-tauri/src/worktree/git/windows.rs": {
+    "seed": "259acec0f1641933af900bfe94e33863e595b842d88d9b29a07e044e6506818c",
+    "current": "259acec0f1641933af900bfe94e33863e595b842d88d9b29a07e044e6506818c",
+    "changed": false
+  },
+  "src-tauri/src/worktree/manager.rs": {
+    "seed": "4776271ea9a2c5bacc1b2500651ee787c03dc96021813fe0aa35d61f2bf19798",
+    "current": "838bb13869c8bce7e704bbecbad224dd720452c3b9d4f53121af4d58970bea52",
+    "changed": true
+  },
+  "src-tauri/src/worktree/model.rs": {
+    "seed": "447fa2786cefb6a57ddd22de78f7dea3baea6a68436d99e170ca6f98c7c74e5d",
+    "current": "447fa2786cefb6a57ddd22de78f7dea3baea6a68436d99e170ca6f98c7c74e5d",
+    "changed": false
+  },
+  "src-tauri/tests/machine_worktree_legacy_bounds.rs": {
+    "seed": "0fce5030a530f10384584a7d148f7ee0834ac0e016d614a77f0d16ff3f65bf71",
+    "current": "0fce5030a530f10384584a7d148f7ee0834ac0e016d614a77f0d16ff3f65bf71",
+    "changed": false
+  },
+  "src-tauri/tests/machine_worktree_transports.rs": {
+    "seed": "94d227a022116031552f24a61c1dd60fd0a2567c4ac2aeaab22fc1596ae20451",
+    "current": "94d227a022116031552f24a61c1dd60fd0a2567c4ac2aeaab22fc1596ae20451",
+    "changed": false
+  },
+  "src-tauri/tests/machine_worktrees.rs": {
+    "seed": "ef0a128e4c0d41b776c3908a9165121abd2b5e732b2bc6b3c1050af1fdde70b4",
+    "current": "ef0a128e4c0d41b776c3908a9165121abd2b5e732b2bc6b3c1050af1fdde70b4",
+    "changed": false
+  },
+  "src-tauri/tests/relay_pairing_generation_regression.rs": {
+    "seed": "ea07bf77ac64e915e1001dcc701bb3789609f8257614e7188ce8e99161de12f0",
+    "current": "751b73e3b6257be8b9a705e5fdec4e2457f377496ef1d0299cdb138cf0e1df95",
+    "changed": true
+  },
+  "src-tauri/tests/worktree_safety.rs": {
+    "seed": "bdea33980f0641ed2dabffb474c6c31a03edf38498045aba11d485e3b05263cb",
+    "current": "bdea33980f0641ed2dabffb474c6c31a03edf38498045aba11d485e3b05263cb",
+    "changed": false
+  }
+}

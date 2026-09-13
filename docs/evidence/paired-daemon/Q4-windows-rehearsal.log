@@ -1,0 +1,6 @@
+﻿=== BUILD (frozen backend: lib + bins) ===
+BUILD_EXIT=0
+=== TEST paired_host suite (--test-threads=1) ===
+TEST_EXIT=
+test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 757 filtered out; finished in 12.96s
+REHEARSAL_DONE

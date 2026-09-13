@@ -1,0 +1,81 @@
+$ vitest run --maxWorkers=1 src/App.pairedDaemon.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+ ❯ src/App.pairedDaemon.test.tsx (2 tests | 1 failed) 146ms
+   ✓ App paired desktop shell > preserves paired ownership and reports disabled native support without local registration 59ms
+   × App paired desktop shell > keeps local tabs and the palette mounted when inventory selection changes 86ms
+     → expected "spy" to be called 4 times, but got 3 times
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/App.pairedDaemon.test.tsx > App paired desktop shell > keeps local tabs and the palette mounted when inventory selection changes
+AssertionError: expected "spy" to be called 4 times, but got 3 times
+ ❯ src/App.pairedDaemon.test.tsx:139:34
+    137|     expect(native.split).toBeTypeOf("function");
+    138|     await act(async () => { native.split!(); });
+    139|     expect(native.spawnTerminal).toHaveBeenCalledTimes(4);
+       |                                  ^
+    140|     expect(native.spawnTerminal).toHaveBeenLastCalledWith(expect.objec…
+    141|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 1 passed (2)
+   Start at  15:55:19
+   Duration  1.63s (transform 305ms, setup 114ms, collect 803ms, tests 146ms, environment 249ms, prepare 29ms)
+
+error: script "test" exited with code 1
+$ vitest run --maxWorkers=1 src/App.pairedDaemon.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+ ✓ src/App.pairedDaemon.test.tsx (2 tests) 141ms
+
+ Test Files  1 passed (1)
+      Tests  2 passed (2)
+   Start at  15:56:06
+   Duration  2.15s (transform 338ms, setup 185ms, collect 1.11s, tests 141ms, environment 308ms, prepare 35ms)
+
+
+FINAL RESTORED VALIDATION
+v22.22.3
+$ vitest run --maxWorkers=1 src/App.pairedDaemon.test.tsx src/App.remote.test.tsx src/App.pairedProjectContracts.test.ts src/lib/shortcuts.test.tsx src/remote/zeroConfigSecurityProbe.test.tsx src/remote/RemoteRouting.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+ ✓ src/App.pairedDaemon.test.tsx (2 tests) 146ms
+stderr | src/App.remote.test.tsx > App SSH project lifecycle > restores remote sessions after native startup and preserves their target in the next save
+SSH session reconciliation failed: {
+  code: [32m'UNKNOWN'[39m,
+  message: [32m"Cannot read properties of undefined (reading 'invoke')"[39m,
+  details: {
+    command: [32m'cmd_terminal_remote_status'[39m,
+    raw: [32m"TypeError: Cannot read properties of undefined (reading 'invoke')\n"[39m +
+      [32m'    at invoke (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/@tauri-apps/api/core.js:202:39)\n'[39m +
+      [32m'    at invokeCommand (/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/src/lib/tauri.ts:738:18)\n'[39m +
+      [32m'    at getTerminalRemoteStatus (/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/src/lib/tauri.ts:497:10)\n'[39m +
+      [32m'    at /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/src/lib/sshRec...'[39m
+  }
+}
+
+ ✓ src/App.remote.test.tsx (19 tests) 593ms
+ ✓ src/lib/shortcuts.test.tsx (63 tests) 129ms
+ ✓ src/remote/zeroConfigSecurityProbe.test.tsx (7 tests) 126ms
+ ✓ src/remote/RemoteRouting.test.tsx (6 tests) 74ms
+ ✓ src/App.pairedProjectContracts.test.ts (2 tests) 2ms
+
+ Test Files  6 passed (6)
+      Tests  99 passed (99)
+   Start at  15:58:02
+   Duration  5.68s (transform 482ms, setup 428ms, collect 2.21s, tests 1.07s, environment 1.07s, prepare 157ms)
+
+TEST_EXIT=0
+$ tsc && vite build
+src/lib/pairedWorktreeActions.ts(44,38): error TS18048: 'result.outcome.error' is possibly 'undefined'.
+src/lib/pairedWorktreeActions.ts(47,25): error TS2345: Argument of type '{ workspaceId: string; identity: { wsId: string; slug: string; } | null; path: string; head: string; branch: string | null; bare: boolean; detached: boolean; locked: string | null; prunable: string | null; managed: boolean; } | undefined' is not assignable to parameter of type '{ workspaceId: string; } & Omit<Worktree, "workspaceId">'.
+  Type 'undefined' is not assignable to type '{ workspaceId: string; } & Omit<Worktree, "workspaceId">'.
+    Type 'undefined' is not assignable to type '{ workspaceId: string; }'.
+BUILD_EXIT=2

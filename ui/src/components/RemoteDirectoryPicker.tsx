@@ -1,19 +1,20 @@
 import { ArrowUp, Folder, Home, LoaderCircle, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { cn } from "../lib/cn";
-import { listRemoteDirectories, type RemoteDirectoryListing } from "../lib/remoteDirectories";
+import { listRemoteDirectories, type RemoteDirectoryListing, type DirectorySource } from "../lib/remoteDirectories";
 import { toIpcError } from "../lib/tauri";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Switch } from "./ui/switch";
 
 interface RemoteDirectoryPickerProps {
-  readonly hostId: string;
+  readonly hostId?: string;
+  readonly source?: DirectorySource;
   readonly disabled: boolean;
   readonly onSelect: (path: string | null) => void;
 }
 
-export function RemoteDirectoryPicker({ hostId, disabled, onSelect }: RemoteDirectoryPickerProps) {
+export function RemoteDirectoryPicker({ hostId, source, disabled, onSelect }: RemoteDirectoryPickerProps) {
   const [pathInput, setPathInput] = useState("");
   const [listing, setListing] = useState<RemoteDirectoryListing | null>(null);
   const [loading, setLoading] = useState(true);
@@ -22,7 +23,9 @@ export function RemoteDirectoryPicker({ hostId, disabled, onSelect }: RemoteDire
   const [open, setOpen] = useState(true);
   const [active, setActive] = useState(-1);
   const [showHidden, setShowHidden] = useState(false);
-  const cache = useRef(new Map<string | null, Promise<RemoteDirectoryListing>>());
+  const remoteHidden = source ? showHidden : false;
+  const previousSource = useRef(source?.key);
+  const cache = useRef(new Map<string, Promise<RemoteDirectoryListing>>());
   const requestId = useRef(0);
   const requested = useRef({ path: null as string | null, prefix: "", replaceInput: true, suffix: "" });
   const pathField = useRef<HTMLInputElement>(null);
@@ -43,18 +46,21 @@ export function RemoteDirectoryPicker({ hostId, disabled, onSelect }: RemoteDire
     setPrefix(nextPrefix);
     setActive(-1);
     setOpen(true);
+    const includeHidden = remoteHidden || nextPrefix.startsWith(".");
+    const cacheKey = (value: string | null) => JSON.stringify([source?.key ?? hostId, value, source ? includeHidden : false]);
     let pending: Promise<RemoteDirectoryListing> | undefined;
     try {
       if (refresh) cache.current.clear();
-      pending = cache.current.get(path);
+      pending = cache.current.get(cacheKey(path));
       if (!pending) {
-        pending = listRemoteDirectories(hostId, path);
+        pending = source ? source.directories(path, includeHidden)
+          : listRemoteDirectories(hostId!, path);
         if (cache.current.size >= 32) cache.current.clear();
-        cache.current.set(path, pending);
+        cache.current.set(cacheKey(path), pending);
       }
       const result = await pending;
       if (id !== requestId.current) return;
-      cache.current.set(result.path, pending);
+      cache.current.set(cacheKey(result.path), pending);
       setListing(result);
       if (replaceInput) {
         setPathInput(suffix && !result.path.endsWith(suffix) ? result.path + suffix : result.path);
@@ -62,17 +68,21 @@ export function RemoteDirectoryPicker({ hostId, disabled, onSelect }: RemoteDire
       setLoading(false);
       onSelect(nextPrefix ? null : result.path);
     } catch (cause) {
-      if (cache.current.get(path) === pending) cache.current.delete(path);
+      if (cache.current.get(cacheKey(path)) === pending) cache.current.delete(cacheKey(path));
       if (id !== requestId.current) return;
       setError(toIpcError(cause).message);
       setLoading(false);
     }
-  }, [hostId, onSelect]);
+  }, [hostId, source, remoteHidden, onSelect]);
 
   useEffect(() => {
     cache.current.clear();
     setListing(null);
-    void load(null, "", true);
+    const previous = requested.current;
+    const retainPath = source && previousSource.current === source.key;
+    previousSource.current = source?.key;
+    void load(retainPath ? previous.path : null, retainPath ? previous.prefix : "",
+      retainPath ? previous.replaceInput : true, retainPath ? previous.suffix : "");
     return () => { requestId.current += 1; };
   }, [load]);
 

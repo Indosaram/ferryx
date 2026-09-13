@@ -1,0 +1,15 @@
+{
+  "src-tauri/src/paired_host/client.rs": "72ddcbcaf81585165cf2f9c45222b3b180a6e657aad53bb05b1368cb50fee718",
+  "src-tauri/src/paired_host/projects.rs": "0e7efc8dba2f7a7af4aad7959aec3709f6d0927d0f6678fd27b21d1a59e43c55",
+  "src-tauri/src/paired_host/client_tests.rs": "0411633aa276a15b8182def9943656d21618053977b290253c5cde399fff8d2d",
+  "src-tauri/src/paired_host/projects_tests.rs": "7c88ab4f78570c58cd702e6910e3d008b99986c2539a18d175a6d60d8e314be0",
+  "src-tauri/src/paired_host/mod.rs": "2c51a1c627385f9a53835c758820f54a18a99299689b2ec8d79181c246147f60",
+  "src-tauri/src/paired_host/service.rs": "0fbb184ace3ed7d47f4845d6efb0e10b5aae610abfce78fa466f2d51072194c1",
+  "ui/src/lib/pairedDaemonProject.ts": "9bf51ced8bd2db11e002d2667517ead9b985417f1e9dd7027acad93169254a3e",
+  "ui/src/lib/pairedDaemonProject.test.ts": "d98d5ee0f26bcc1517e00b3b900fe7798aa980b298f4372ef00b3aef8b872678",
+  "src-tauri/src/ipc/paired_host.rs": "89dbd3ff1ed7ec6ae264650e0d4caeae8cebd2a2773f4352ae8dae795b65c90f",
+  "src-tauri/src/daemon/protocol.rs": "7cc555bebfdd1c8e9d50bb74b2fdaa6f59930bcb7a0325dc52eb8f99a6ac8ede",
+  "src-tauri/src/daemon/client.rs": "a344737e6107004526a86460a28228fd4726ead06b5d04d7a417345e8ed52c5e",
+  "src-tauri/src/daemon/server.rs": "448ffe4e568f3062551aeb0eddba5e1553dff48eac2f8a26330fa094b11000cd",
+  "src-tauri/src/lib.rs": "06b3b7d4c68e0def91005e0eea7141f0ec8b24effb28a74878616c3d626b6e7d"
+}

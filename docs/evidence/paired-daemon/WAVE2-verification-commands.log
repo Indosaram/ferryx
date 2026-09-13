@@ -1,0 +1,141 @@
+$ git --no-pager status --short --ignore-submodules=all
+ M src-tauri/src/daemon/a03_owner_cli_fixture.rs
+ M src-tauri/src/daemon/client.rs
+ M src-tauri/src/daemon/protocol.rs
+ M src-tauri/src/daemon/server.rs
+ M src-tauri/src/daemon/session_service.rs
+ M src-tauri/src/daemon/workspace_service.rs
+ M src-tauri/src/ipc/error.rs
+ M src-tauri/src/ipc/worktree.rs
+ M src-tauri/src/remote/mod.rs
+ M src-tauri/src/remote/relay_server.rs
+ M src-tauri/src/remote/server.rs
+ M src-tauri/src/remote/state.rs
+ M src-tauri/src/remote/workspace_catalog.rs
+ M src-tauri/src/worktree/git.rs
+ M src-tauri/src/worktree/manager.rs
+ M src-tauri/src/worktree/model.rs
+ M src-tauri/tests/relay_pairing_generation_regression.rs
+ M src-tauri/tests/worktree_safety.rs
+?? docs/evidence/paired-daemon/A09-GREEN.log
+?? docs/evidence/paired-daemon/A09-RED.log
+?? docs/evidence/paired-daemon/A09-cleanup.log
+?? docs/evidence/paired-daemon/A09-implementation.md
+?? docs/evidence/paired-daemon/A10-implementation.md
+?? docs/evidence/paired-daemon/A10-wire-codec.md
+?? docs/evidence/paired-daemon/A11-joint-implementation.md
+?? docs/evidence/paired-daemon/A12-implementation.md
+?? src-tauri/src/remote/filesystem.rs
+?? src-tauri/src/remote/filesystem_tests.rs
+?? src-tauri/src/remote/machine_operation_journal.rs
+?? src-tauri/src/remote/preference_http_tests.rs
+?? src-tauri/src/remote/terminal_wire.rs
+?? src-tauri/src/remote/workspace_api.rs
+?? src-tauri/src/remote/workspace_api/
+?? src-tauri/src/remote/workspace_api_tests.rs
+?? src-tauri/src/worktree/git/
+?? src-tauri/tests/a10_terminal_wire_codec.rs
+?? src-tauri/tests/machine_sessions.rs
+?? src-tauri/tests/machine_worktree_legacy_bounds.rs
+?? src-tauri/tests/machine_worktree_transports.rs
+?? src-tauri/tests/machine_worktrees.rs
+?? ui/dist
+?? ui/node_modules
+
+EXIT 0
+
+$ git --no-pager diff --ignore-submodules=all --stat
+ src-tauri/src/daemon/a03_owner_cli_fixture.rs      |  38 +-
+ src-tauri/src/daemon/client.rs                     |  15 +
+ src-tauri/src/daemon/protocol.rs                   |  20 +
+ src-tauri/src/daemon/server.rs                     |  12 +
+ src-tauri/src/daemon/session_service.rs            |   2 +
+ src-tauri/src/daemon/workspace_service.rs          | 122 ++++-
+ src-tauri/src/ipc/error.rs                         |  26 +
+ src-tauri/src/ipc/worktree.rs                      |  56 +--
+ src-tauri/src/remote/mod.rs                        |   9 +
+ src-tauri/src/remote/relay_server.rs               | 295 +++++++++--
+ src-tauri/src/remote/server.rs                     | 293 ++++++++++-
+ src-tauri/src/remote/state.rs                      |   8 +
+ src-tauri/src/remote/workspace_catalog.rs          |   9 +-
+ src-tauri/src/worktree/git.rs                      | 538 ++++++++++++++++++++-
+ src-tauri/src/worktree/manager.rs                  |  38 +-
+ src-tauri/src/worktree/model.rs                    |   8 +
+ .../tests/relay_pairing_generation_regression.rs   | 224 ++++++++-
+ src-tauri/tests/worktree_safety.rs                 |  13 +
+ 18 files changed, 1599 insertions(+), 127 deletions(-)
+
+EXIT 0
+
+$ git --no-pager diff --ignore-submodules=all --check
+
+EXIT 0
+
+$ df -h .
+Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s5   926Gi   874Gi   133Mi   100%    9.3M  1.4M   87%   /System/Volumes/Data
+
+EXIT 0
+
+$ du -sh src-tauri/target
+6.2G	src-tauri/target
+
+EXIT 0
+
+$ CARGO_BUILD_JOBS=4 RUSTC_WRAPPER= CARGO_TARGET_DIR=/Users/indo/code/project/orca-lite-wt/herdr-wave2/src-tauri/target cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --test machine_catalog_persistence --test machine_worktrees --test machine_sessions --test machine_terminal_stream --test machine_events
+error: no test target named `machine_terminal_stream` in default-run packages
+help: available test targets:
+    a10_terminal_wire_codec
+    app_menu_contract
+    backend_hardening
+    clean_dev_resource_contract
+    daemon_handover_contract
+    daemon_persistence_contract
+    e2e_agent_workflow
+    ghostty_build_contract
+    ghostty_build_info_ffi
+    ipc_hardening_contract
+    machine_catalog_persistence
+    machine_sessions
+    machine_worktree_legacy_bounds
+    machine_worktree_transports
+    machine_worktrees
+    macos_dev_bundle_contract
+    native_terminal_capability_contract
+    native_terminal_child_surface_contract
+    native_terminal_composition_contract
+    native_terminal_drag_drop_coordinates
+    native_terminal_engine_contract
+    native_terminal_glyph_raster_contract
+    native_terminal_input_boundary_contract
+    native_terminal_macos_background
+    native_terminal_renderer_contract
+    native_terminal_surface_host_contract
+    native_terminal_wayland_subsurface_contract
+    paired_daemon_fixture
+    permissions_contract
+    platform_menu_contract
+    relay_pairing_generation_regression
+    remote_project_public_contract
+    rorca_native_contract
+    scoped_chat
+    scoped_control
+    scoped_design
+    scoped_history
+    scoped_push
+    scoped_ssh
+    session_persistence_integration
+    ssh_browse_live
+    ssh_posix_live
+    ssh_project_identity_live
+    ssh_windows_live
+    updater_config_contract
+    updater_endpoint_contract
+    windows_edge_probe_contract
+    windows_window_opacity_contract
+    worktree_safety
+    zero_config_final_audit
+    zero_config_gen4_audit
+    zero_config_gen5_regression
+
+EXIT 101

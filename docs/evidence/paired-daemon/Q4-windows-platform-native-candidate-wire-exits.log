@@ -1,0 +1,4 @@
+pty EXIT=101; WAITED=True
+relay EXIT=101; WAITED=True
+ssh EXIT=101; WAITED=True
+worktrees EXIT=0; WAITED=True

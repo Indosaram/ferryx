@@ -1,0 +1,96 @@
+{
+  "task": "st_01a097fc",
+  "baseline": "RESUME-01a097f8-seed.json (not HEAD)",
+  "scope": "A09-owned files only; concurrent lanes are excluded",
+  "files": [
+    {
+      "path": "src-tauri/src/daemon/server.rs",
+      "seedSha256": "cfe478dd02a7b643163c3ae1c4c89278faabae65440c24caff47dba7da7e99b1",
+      "currentSha256": "f4c02ae7589ec1589a75a0c2c19f9841ccd5dec252ebec3c4013bb580cb722ca",
+      "delta": "modified"
+    },
+    {
+      "path": "src-tauri/src/daemon/session_service.rs",
+      "seedSha256": "e16eaa317ad02282a235350cf55263533af989962613221ce1156f56fcf567c7",
+      "currentSha256": "f0d6c1903d36621637ad3d3a848678bdd19bb2679640297a0d794deee7e0d1cb",
+      "delta": "modified"
+    },
+    {
+      "path": "src-tauri/src/daemon/session_service_machine_tests.rs",
+      "seedSha256": null,
+      "currentSha256": "94d4682f569e0af22c808cf8789099a1fc2057cf445ef4ab33a0fa1dae90421e",
+      "delta": "added"
+    },
+    {
+      "path": "src-tauri/src/daemon/session_service_crash_tests.rs",
+      "seedSha256": null,
+      "currentSha256": "853c9e22c0866889804de48e0c61b9bcd2ca6e5e481b37dd82715c689fde0dcb",
+      "delta": "added"
+    },
+    {
+      "path": "src-tauri/src/remote/mod.rs",
+      "seedSha256": "db21688496000d96012919796b565c70a02aefc941d9b902b80ad933b15b605b",
+      "currentSha256": "aed91c03234290aae22b675f8bb718a868fe2862c76dcf2d54dcc3b63f7c0c9d",
+      "delta": "modified"
+    },
+    {
+      "path": "src-tauri/src/remote/server.rs",
+      "seedSha256": "4a762a4fd2cc68ee2ed7e810ba726fea9e8fd5bafba397aa32ca35d5b7e3b5ca",
+      "currentSha256": "45020de430da4a4cb94076453abc747b92bfed48c7867024241c784070688e05",
+      "delta": "modified"
+    },
+    {
+      "path": "src-tauri/src/remote/state.rs",
+      "seedSha256": "f646c3bfb45b2f5b4893781758f171f0cc29f74c9ea4cafe04f52dadece78c27",
+      "currentSha256": "847692b6b05e35b493b871763b8333e2ee4454ba1fdde9bc9bd35772a857967b",
+      "delta": "modified"
+    },
+    {
+      "path": "src-tauri/src/remote/session_api.rs",
+      "seedSha256": null,
+      "currentSha256": "bd6c98210e5de4375a82e6fe422d62be6550bf624d4d08d298162d6d00b276c4",
+      "delta": "added"
+    },
+    {
+      "path": "src-tauri/src/remote/machine_operation_journal.rs",
+      "seedSha256": "1a6da5d9b87b2f61e55792d159ac3d1d79f93309ea72de2bb21c98e1ae5afe06",
+      "currentSha256": "b024597a609ad344f9dec2a04a924bfe8413c4728608944717558fe2ae129108",
+      "delta": "modified"
+    },
+    {
+      "path": "src-tauri/src/terminal/service.rs",
+      "seedSha256": "2cb2a9709d469b4a66e097362c569a4ffb2926e7fbf470ab80e9bb02f8a45b5b",
+      "currentSha256": "ec0cfd4408d6b22760cfbb74056c71225d913c6c058d969e8cf8af439a846629",
+      "delta": "modified"
+    },
+    {
+      "path": "src-tauri/src/terminal/pty.rs",
+      "seedSha256": "d12528276e6b252eff8ad28e0aab8ed90643eda7a6bece75b39b5eec6030c6a9",
+      "currentSha256": "94176025baca3323f87cb754e89b46349ddfe9bb7d48a0613e01afc590b3af54",
+      "delta": "modified"
+    },
+    {
+      "path": "src-tauri/tests/machine_sessions.rs",
+      "seedSha256": "5f9b115e24891a5db19b21d3e4f9160e069e960584c4265ba6aec6d99821a411",
+      "currentSha256": "47fc67fea832a55118d3051f90bed9b702ba70219a2eba626f4372aeca34f6bd",
+      "delta": "modified"
+    }
+  ],
+  "preserved": [
+    {
+      "path": "src-tauri/Cargo.lock",
+      "sha256": "3bf80308ad89556f9a6904c8e13ad467906e27bb1875c87b1f6b19ee06ddffb5",
+      "matchesSeed": true
+    },
+    {
+      "path": "src-tauri/src/remote/terminal_wire.rs",
+      "sha256": "52a91ccdf54a3453bdbaee14b4cc93d8b1cb926b696bb19ebd93d44614a9f9b7",
+      "matchesSeed": true
+    },
+    {
+      "path": "src-tauri/tests/a10_terminal_wire_codec.rs",
+      "sha256": "849472b3276429ec1c828682b2cfa35b2d0308286e85fe838817bf45536ed894",
+      "matchesSeed": true
+    }
+  ]
+}

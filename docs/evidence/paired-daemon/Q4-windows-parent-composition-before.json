@@ -1,0 +1,6 @@
+{
+  "src-tauri/src/remote/filesystem_tests.rs": "e7f8425ce165c84a9b48d69a9b9659224199ab804ac04607decf5fa3ef3d5c52",
+  "src-tauri/src/remote/relay_server.rs": "cab279075297de1281462a72d746bc1703439a69df7b193c06ea7b51e5ead6b0",
+  "src-tauri/tests/worktree_safety.rs": "bdea33980f0641ed2dabffb474c6c31a03edf38498045aba11d485e3b05263cb",
+  "src-tauri/tests/relay_pairing_generation_regression.rs": "ffe40efd8cd7daed4601136aaa2f6c53b83de58bc15134240b57307500a228df"
+}

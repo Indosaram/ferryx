@@ -1,0 +1,10 @@
+86e911ad7f03f380eb1bee7b89e44af7f3599681b63b2daa137da1249b90ce82  src-tauri/src/remote/workspace_api/worktrees.rs
+4e43e15ec707fca796449db7996bb1104c615766bfc8df3927bacdac724e0909  src-tauri/src/remote/workspace_api/worktree_authority_tests.rs
+0affb2e1f6d36e5065133589b3addd2db3b3a87a4573baf1fa16b41e246d7620  docs/evidence/paired-daemon/A13-issuer-repeat-A08-publication-authority.log
+634063a98ca3950d9acdd2e3eb8c11492d91a9575f75859c84fdfdbafa0623cf  docs/evidence/paired-daemon/A13-issuer-repeat-A08-publication-build.log
+3a1255461ec14d37e8c70a908cafede61c01e76fe14fa59779eb752763c05bc2  docs/evidence/paired-daemon/A13-issuer-repeat-A08-publication-catalog.log
+04db4d67f040eb86ae9fbfc60f6099fe3abeb86aa7729d05b98274506502a1e6  docs/evidence/paired-daemon/A13-issuer-repeat-A08-publication-check.log
+912fa02e174388ad5340b1696344c93564f77065c31b19c3cdf64c0314d2a5c0  docs/evidence/paired-daemon/A13-issuer-repeat-A08-publication-GREEN.log
+fa893b836ddfe5060d28b9e123e620e9189802a90a2ef3bc3fd72af7bc067293  docs/evidence/paired-daemon/A13-issuer-repeat-A08-publication-machine-worktrees.log
+ca3e01334caf6ef64d8cf31c2c36090d68c7b528950ae90bc4db252e457d5ff2  docs/evidence/paired-daemon/A13-issuer-repeat-A08-publication-RED.log
+4d92aa92ca68346360de5e084f2e1e76ff7e6341889b9f4325d251ac9af31666  docs/evidence/paired-daemon/A13-issuer-repeat-A08-publication-strengthened-RED.log

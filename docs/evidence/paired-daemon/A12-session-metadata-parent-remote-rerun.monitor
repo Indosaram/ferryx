@@ -1,0 +1,4 @@
+owner=22081 command=bash -c cargo\ test\ --locked\ --manifest-path\ src-tauri/Cargo.toml\ --no-default-features\ --lib\ remote:: 
+  PID  PPID    RSS ELAPSED COMMAND
+22081 22078    256   00:00 bash -c cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib remote::
+exit=0 owner_reaped=true

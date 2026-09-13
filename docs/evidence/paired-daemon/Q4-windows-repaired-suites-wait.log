@@ -1,0 +1,230 @@
+build EXIT=0; WAITED=True
+clipboard EXIT=0; WAITED=True
+remote EXIT=101; WAITED=True
+integration EXIT=101; WAITED=True
+worktree EXIT=101; WAITED=True
+  left: 400
+ right: 201
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+R12 process phase=afterCatalog deleting=false pid=13384 reaped=true status=exit code: 101
+
+thread 'remote::workspace_api_tests::r12_real_kill_windows' (13140) panicked at src\remote\workspace_api_tests.rs:593:40:
+child barrier failed: signal=Ok(Ok(false)) kill=Ok(())
+test remote::workspace_api_tests::r12_real_kill_windows ... FAILED
+R12 real router auth_entries=16 health=200 revoked=401 sockets_closed=true listener_joined=true root_removed=true
+test remote::workspace_api_tests::r12_router_auth_admission ... ok
+R6 service-less cleanup: listener joined, connection refused, injected=false
+test remote::filesystem_tests::a06_service_less_typed_503_without_probe ... ok
+R6 service-less cleanup: listener joined, connection refused, injected=true
+R6 auth exact drain: entered=3 completed=3; completion channel closed before root removal
+test remote::filesystem_tests::r6_service_less_injected_failure ... ok
+R6 HTTP cleanup: listener joined, connection refused, private root removed
+R6 auth cleanup: workers=3 completed; listener joined/refused; root removed; injected=true
+test remote::filesystem_tests::r6_http_disconnect_retains_worker_slot ... ok
+test remote::filesystem_tests::r6_auth_routed_failure_cleanup ... ok
+R6 auth exact drain: entered=3 completed=3; completion channel closed before root removal
+R6 auth cleanup: workers=3 completed; listener joined/refused; root removed; injected=false
+test remote::filesystem_tests::r6_auth_routed_revocation ... ok
+
+thread 'remote::workspace_api::worktrees::authority_tests::owner_http_gate_and_eight_admissions' (13176) panicked at src\remote\workspace_api\worktree_authority_tests.rs:456:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+A08 gate fixture cleanup completed; errors=[]
+test remote::workspace_api::worktrees::authority_tests::owner_http_gate_and_eight_admissions ... FAILED
+R3 CLEANUP listener_joined=true connection_refused=true private_root_removed=true no_pty=true
+test remote::server::tests::r3_http_boundary_contract ... ok
+R6 auth: expected 504; deadline/retained admission or revoke-before-release verified
+R6 auth recovered admission: invalid=401 mirror=403 before malformed path; no-store
+
+thread 'remote::workspace_api_tests::r12_revocation_fences' (21068) panicked at src\remote\workspace_api_tests.rs:481:25:
+called `Result::unwrap()` on an `Err` value: Elapsed(())
+test remote::workspace_api_tests::r12_revocation_fences ... FAILED
+
+thread 'remote::workspace_api::worktrees::publication_tests::cancelled_publication_preserves_unknown_after_git' (15120) panicked at src\remote\workspace_api\worktrees.rs:327:29:
+called `Result::unwrap()` on an `Err` value: Elapsed(())
+test remote::workspace_api::worktrees::publication_tests::cancelled_publication_preserves_unknown_after_git ... FAILED
+
+thread 'remote::workspace_api_tests::r1_topology_after_gate_http' (20756) panicked at src\remote\workspace_api_tests.rs:46:77:
+called `Result::unwrap()` on an `Err` value: Elapsed(())
+R12 incomplete body sockets_closed=true gateway_joined=true root_removed=true
+test remote::workspace_api_tests::r12_router_incomplete_body ... ok
+R1 topology cleanup parent_git=true workers_drained=true gateway_joined=true removed=true
+test remote::workspace_api_tests::r1_topology_after_gate_http ... FAILED
+R6 auth exact drain: entered=18 completed=18; completion channel closed before root removal
+R6 auth cleanup: workers=18 completed; listener joined/refused; root removed; injected=false
+test remote::filesystem_tests::r6_auth_routed_deadline_admission ... ok
+
+failures:
+
+failures:
+    remote::filesystem_tests::a06_directory_http_home
+    remote::filesystem_tests::a06_http_send_failure_still_tears_down
+    remote::relay_server::tests::coordinator_pairs_through_relay_to_real_gateway
+    remote::relay_server::tests::test_relay_browser_ws_terminal_bridge_success
+    remote::server::tests::test_get_active_running_sessions_independent_of_desktop
+    remote::workspace_api::worktrees::authority_tests::followthrough_delete_publication_blocks_spawn
+    remote::workspace_api::worktrees::authority_tests::followthrough_prune_partial_replays_after_restart
+    remote::workspace_api::worktrees::authority_tests::followthrough_write_failures_non_head_and_prunable_preview
+    remote::workspace_api::worktrees::authority_tests::interrupted_git_transaction_restart_never_repeats
+    remote::workspace_api::worktrees::authority_tests::local_worktree_errors_survive_owner_wire_and_native_adapter
+    remote::workspace_api::worktrees::authority_tests::owner_http_gate_and_eight_admissions
+    remote::workspace_api::worktrees::publication_tests::cancelled_publication_preserves_unknown_after_git
+    remote::workspace_api_tests::a07_project_http_registration
+    remote::workspace_api_tests::r12_real_kill_windows
+    remote::workspace_api_tests::r12_revocation_fences
+    remote::workspace_api_tests::r1_topology_after_gate_http
+
+test result: FAILED. 156 passed; 16 failed; 0 ignored; 0 measured; 558 filtered out; finished in 12.12s
+
+error: test failed, to rerun pass `--lib`
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src\worktree\manager.rs:86:19
+   |
+86 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+   --> src\worktree\manager.rs:93:8
+    |
+ 92 | impl WriterLeaseGuard {
+    | --------------------- associated items in this implementation
+ 93 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+    |        ^^^
+...
+101 |     pub(crate) fn canonical_path(&self) -> &Path {
+    |                   ^^^^^^^^^^^^^^
+...
+105 |     pub(crate) fn owner_id(&self) -> &str {
+    |                   ^^^^^^^^
+
+warning: method `acquire_writer_lease` is never used
+   --> src\worktree\manager.rs:338:19
+    |
+134 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+338 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: linker stdout: C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\ferryx_lib.dll.lib ?쇱씠釉뚮윭由?諛?C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\ferryx_lib.dll.exp 媛쒖껜瑜??앹꽦?섍퀬 ?덉뒿?덈떎.
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `ferryx` (lib) generated 15 warnings (run `cargo fix --lib -p ferryx` to apply 4 suggestions)
+warning: unused variable: `services`
+   --> tests\machine_catalog_persistence.rs:165:13
+    |
+165 |         let services = restored.remote_state().machine_services.as_ref().unwrap();
+    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_services`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+error[E0277]: the size for values of type `str` cannot be known at compilation time
+   --> tests\machine_worktrees.rs:427:17
+    |
+427 |     if let Some(session) = owned_session { server.terminal_service().close_session(&session).await.unwrap(); }
+    |                 ^^^^^^^ doesn't have a size known at compile-time
+    |
+    = help: the trait `Sized` is not implemented for `str`
+    = note: all local variables must have a statically known size
+
+error[E0277]: the size for values of type `str` cannot be known at compilation time
+   --> tests\machine_worktrees.rs:427:12
+    |
+427 |     if let Some(session) = owned_session { server.terminal_service().close_session(&session).await.unwrap(); }
+    |            ^^^^^^^^^^^^^ doesn't have a size known at compile-time
+    |
+    = help: the trait `Sized` is not implemented for `str`
+note: required by a bound in `Some`
+   --> /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library\core\src\option.rs:605:4
+
+error[E0277]: the size for values of type `str` cannot be known at compilation time
+   --> tests\machine_worktrees.rs:131:29
+    |
+131 |     let mut owned_session = None;
+    |                             ^^^^ doesn't have a size known at compile-time
+    |
+    = help: the trait `Sized` is not implemented for `str`
+note: required by a bound in `None`
+   --> /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library\core\src\option.rs:601:4
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `ferryx` (test "machine_worktrees") due to 3 previous errors
+warning: build failed, waiting for other jobs to finish...
+warning: `ferryx` (test "machine_catalog_persistence") generated 1 warning (run `cargo fix --test "machine_catalog_persistence" -p ferryx` to apply 1 suggestion)
+     Running unittests src\lib.rs (C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\ferryx_lib-c12d60fa37477486.exe)
+
+running 40 tests
+test ssh::worktree::tests::red_create_remote_rejects_base_ref_option_injection ... ok
+test ssh::worktree::tests::red_derive_ws_segment_malformed_rejected ... ok
+test ssh::worktree::tests::red_malformed_porcelain_tolerated ... ok
+test ssh::worktree::tests::red_parse_porcelain_entries ... ok
+test ssh::worktree::tests::red_list_script_marker_framed_both_platforms ... ok
+test ssh::worktree::tests::red_porcelain_parsing_of_created_output ... ok
+test ssh::worktree::tests::red_path_inside_root_guard ... ok
+test worktree::git::local_budget_tests::a08_git_legacy_path_fidelity ... ok
+test ssh::worktree::tests::test_resolve_remote_spawn_root ... ok
+test ssh::worktree::tests::red_create_script_quoting_and_sanitized_branch ... ok
+test ssh::worktree::tests::red_create_remote_option_injection_async_guard ... ok
+test worktree::git::tests::git_path_argument_normalization_strips_windows_verbatim_prefixes ... ok
+test worktree::git::local_budget_tests::local_mutation_budget_is_scoped_and_preserves_remote_deadline ... ok
+test worktree::manager::host_scoped_session_id_tests::test_host_scoped_worktree_session_id ... ok
+test worktree::registry::tests::unregister_unknown_workspace_returns_false_without_revision_change ... ok
+test worktree::tests::branch_namespace_formatting_and_validation ... ok
+hint: Using 'master' as the name for the initial branch. This default branch name
+hint: will change to "main" in Git 3.0. To configure the initial branch name
+hint: to use in all of your new repositories, which will suppress this warning,
+hint: call:
+hint:
+hint: 	git config --global init.defaultBranch <name>
+hint:
+hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+hint: 'development'. The just-created branch can be renamed via this command:
+hint:
+hint: 	git branch -m <name>
+hint:
+hint: Disable this message with "git config set advice.defaultBranchName false"
+Initialized empty Git repository in C:/Users/sook/ferryx-herdr-q4-windows-01a097f8/temp/.tmpS2SxhX/.git/
+test worktree::registry::tests::unregister_rejects_unsafe_workspace_id ... ok
+test worktree::registry::tests::register_replaces_bogus_root_entry ... ok
+test worktree::registry::tests::register_unique_root_replaces_bogus_root_entry ... ok
+test worktree::registry::tests::unregister_removes_registered_workspace_and_bumps_revision ... ok
+test worktree::tests::parse_status_porcelain_v1_and_v2 ... ok
+test worktree::tests::parse_worktree_list_porcelain ... ok
+test worktree::registry::tests::unregister_is_idempotent_on_the_same_id ... ok
+test worktree::registry::tests::register_unique_root_disambiguates_conflicting_ids ... ok
+test worktree::tests::plain_folder_without_git_registers_and_guards_worktrees ... ok
+
+thread 'worktree::git::local_budget_tests::a08_git_real_legacy_worktree_path' (17892) panicked at src\worktree\git.rs:276:63:
+called `Result::unwrap()` on an `Err` value: GitError { command: "git worktree add -b feature -- C:\\Users\\sook\\ferryx-herdr-q4-windows-01a097f8\\temp\\.tmpmcPckd\\ leading \"占?trailing ", stderr: "Preparing worktree (new branch 'feature')\nfatal: could not create directory of '.git/worktrees/-leading-\"占?trailing-': Invalid argument", stdout: "", code: Some(128) }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test worktree::git::local_budget_tests::a08_git_real_legacy_worktree_path ... FAILED
+[master (root-commit) c4500ea] init
+test worktree::git::local_budget_tests::bounded_git_rejects_large_output_and_expired_or_revoked_admission ... ok
+test worktree::tests::worktree_manager_rejects_filesystem_root ... ok
+
+thread 'ssh::worktree::tests::red_posix_script_builders_executable_behavior' (1296) panicked at src\ssh\worktree.rs:577:9:
+create_script failed: 
+test ssh::worktree::tests::red_posix_script_builders_executable_behavior ... FAILED
+test worktree::tests::existing_target_and_missing_status_are_rejected ... ok
+test worktree::tests::registry_resolves_only_registered_workspace_identity ... ok
+test worktree::tests::worktree_manager_resolves_nested_git_directory_to_canonical_root ... ok
+test worktree::tests::resolve_worktree_by_path_and_identity ... ok
+test worktree::tests::create_find_and_list_worktree ... ok
+test worktree::git::local_budget_tests::local_budget_runs_existing_manager_create_delete ... ok
+test worktree::tests::safe_delete_clean_worktree ... ok
+test worktree::tests::safe_branch_delete_removes_merged_branch ... ok
+test worktree::tests::git_merge_base_is_ancestor_and_branch_merge_detection ... ok
+test worktree::tests::dirty_worktree_survives_force_remove_but_yields_to_explicit_destructive_delete ... ok
+test worktree::tests::multiple_worktrees_remain_isolated ... ok
+
+failures:
+
+failures:
+    ssh::worktree::tests::red_posix_script_builders_executable_behavior
+    worktree::git::local_budget_tests::a08_git_real_legacy_worktree_path
+
+test result: FAILED. 38 passed; 2 failed; 0 ignored; 0 measured; 690 filtered out; finished in 1.78s
+
+error: test failed, to rerun pass `--lib`

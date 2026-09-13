@@ -1,0 +1,95 @@
+COMMAND ["cargo", "build", "--locked", "--manifest-path", "src-tauri/Cargo.toml", "--no-default-features", "--lib", "--bin", "ferryx-cli", "--bin", "ferryx-relay"] SOURCE {"src-tauri/tests/machine_catalog_persistence.rs": {"before": "fd4cbb35061a5cae09ee4bd657907a7433c4966dd50cc88630316f2af78cc8f4", "after": "4d492f1010c3bc3b68b959fab94eb4a2cfece4be18fdb8359e570ed2a7ed9322"}, "src-tauri/src/remote/workspace_api_tests.rs": {"before": "acd98884243be442d615efe39b614064a3ff71353596b22ae0403dd660938b1c", "after": "0c30c7da1b1460bdbe555f3442c0919ca9e0361926a71ac4d1ee1b4548a84857"}, "src-tauri/src/remote/workspace_api/worktree_authority_tests.rs": {"before": "6e5c092e24fe5115b0bd266651d1e8c5a5f4fdc06bfd5bb4e8c4cfa3b52861eb", "after": "97538465d9f639c14f18004b09d20baa9e840f3ebd1f95b153f013b5d251f3c5"}}
+COMMAND_PID 315784
+   Compiling ferryx v2026.908.1 (/home/indo/ferryx-herdr-q4-linux-01a097f8/source/src-tauri)
+warning: unused import: `NotificationAuthorization`
+ --> src/notification/permission.rs:4:5
+  |
+4 |     NotificationAuthorization, NotificationPermissionRequestDto, NotificationPermissionStatusDto,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `scroll_daemon_client`
+   --> src/lib.rs:915:9
+    |
+915 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+    |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `GHOSTTY_TERMINAL_SCREEN_PRIMARY` is never used
+  --> src/native_terminal/sys/constants.rs:56:11
+   |
+56 | pub const GHOSTTY_TERMINAL_SCREEN_PRIMARY: c_int = 0;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: methods `synchronized_output_deadline`, `expire_synchronized_output`, and `finish_synchronized_output` are never used
+   --> src/native_terminal/terminal.rs:169:19
+    |
+133 | impl NativeTerminal {
+    | ------------------- methods in this implementation
+...
+169 |     pub(crate) fn synchronized_output_deadline(&self) -> Option<tokio::time::Instant> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+173 |     pub(crate) fn expire_synchronized_output(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+184 |     pub(crate) fn finish_synchronized_output(&mut self) -> Result<(), NativeTerminalError> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `home_dir` is never used
+  --> src/permissions/mod.rs:43:4
+   |
+43 | fn home_dir() -> Option<PathBuf> {
+   |    ^^^^^^^^
+
+warning: method `wait_and_reap` is never used
+   --> src/terminal/session.rs:270:19
+    |
+ 61 | impl PtySession {
+    | --------------- method in this implementation
+...
+270 |     pub(crate) fn wait_and_reap(&self) -> Result<Option<i32>, PtyError> {
+    |                   ^^^^^^^^^^^^^
+
+warning: function `with_local_worktree_budget` is never used
+   --> src/worktree/git.rs:115:15
+    |
+115 | pub(crate) fn with_local_worktree_budget<T>(work: impl FnOnce() -> T) -> T {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src/worktree/manager.rs:86:19
+   |
+86 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+   --> src/worktree/manager.rs:93:8
+    |
+ 92 | impl WriterLeaseGuard {
+    | --------------------- associated items in this implementation
+ 93 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+    |        ^^^
+...
+101 |     pub(crate) fn canonical_path(&self) -> &Path {
+    |                   ^^^^^^^^^^^^^^
+...
+105 |     pub(crate) fn owner_id(&self) -> &str {
+    |                   ^^^^^^^^
+
+warning: method `acquire_writer_lease` is never used
+   --> src/worktree/manager.rs:338:19
+    |
+134 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+338 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib) generated 10 warnings (run `cargo fix --lib -p ferryx` to apply 2 suggestions)
+    Finished `dev` profile [unoptimized] target(s) in 26.42s
+COMMAND_EXIT 0

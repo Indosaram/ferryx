@@ -1,0 +1,6 @@
+5916a5a04040ea3b4dd1e7efb2eb7db521156d219e646d3915bf355d37f1fc32  src-tauri/src/daemon/protocol.rs
+6f260618b6310b329986c164c3c7eb175bbd9481b5dbcfcf8c22519a38895f05  src-tauri/src/daemon/client.rs
+47e13ee08a8089325ca9d4bf253b0f2794b57af96e0223be8ba30ee4d1ee4668  src-tauri/src/daemon/server.rs
+0a996b54d8f34947b6e5973558733d15196f91aa0d00dfd92b294614c7e9d766  src-tauri/src/ipc/paired_host.rs
+c5112ebeaa49f49043681203b99b7a3424a71a4cd1222ebd7d5007a7fb1343c4  src-tauri/src/lib.rs
+61792592d0b0719ecf7e58dcac7b87204e1cf8e08736c5aa48787c5efe54154c  src-tauri/src/paired_host/native_operation_tests.rs

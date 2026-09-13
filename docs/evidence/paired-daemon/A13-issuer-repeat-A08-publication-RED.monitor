@@ -1,0 +1,2 @@
+owner=87921 command=cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib followthrough_ -- --nocapture 
+exit=101 owner_reaped=true

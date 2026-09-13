@@ -1,0 +1,6 @@
+pty EXIT=101; WAITED=True
+relay EXIT=101; WAITED=True
+worktrees EXIT=101; WAITED=True
+authority EXIT=0; WAITED=True
+git EXIT=101; WAITED=True
+catalog EXIT=0; WAITED=True

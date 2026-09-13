@@ -1,0 +1,81 @@
+{
+  "before": {
+    "src-tauri/src/remote/relay_server.rs": "0ccad7f19422b34ac8bedf3f3077b20af06b52370d52f8b12bd117116c541e57",
+    "src-tauri/src/remote/relay_client.rs": "386abd5a2c71c0889912d6790b74bbf77352e2b75fab7d9bf0ac3f48a8786c0e",
+    "src-tauri/tests/relay_pairing_generation_regression.rs": "5813c51e43b8c51eb222136de7f4afa44d93641c08959f7ab3eff1f5fb195a6c"
+  },
+  "environment": {
+    "HOME": "/tmp/a11-followthrough-clean-q3xaiv19/home",
+    "TMPDIR": "/tmp/a11-followthrough-clean-q3xaiv19/tmp",
+    "FERRYX_RUNTIME_DIR": "/tmp/a11-followthrough-clean-q3xaiv19/run",
+    "FERRYX_DATA_DIR": "/tmp/a11-followthrough-clean-q3xaiv19/data",
+    "FERRYX_SESSION_DIR": "/tmp/a11-followthrough-clean-q3xaiv19/sessions",
+    "XDG_CONFIG_HOME": "/tmp/a11-followthrough-clean-q3xaiv19/config",
+    "XDG_DATA_HOME": "/tmp/a11-followthrough-clean-q3xaiv19/xdgdata",
+    "XDG_CACHE_HOME": "/tmp/a11-followthrough-clean-q3xaiv19/cache",
+    "FERRYX_AGENT_STATE_SOCKET": "/tmp/a11-followthrough-clean-q3xaiv19/agent/state.sock",
+    "CARGO_HOME": "/Users/indo/.cargo",
+    "RUSTUP_HOME": "/Users/indo/.rustup",
+    "CARGO_TARGET_DIR": "/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/src-tauri/target",
+    "CARGO_BUILD_JOBS": "2",
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0",
+    "CARGO_INCREMENTAL": "0",
+    "RUSTC_WRAPPER": "",
+    "DYLD_LIBRARY_PATH": "/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/src-tauri/target/debug/build/ferryx-9c36d5e2f5b8a328/out/ghostty_vt/lib"
+  },
+  "commands": [
+    {
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--manifest-path",
+        "/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/src-tauri/Cargo.toml",
+        "--no-default-features",
+        "--test",
+        "relay_pairing_generation_regression",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit": 0
+    },
+    {
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--manifest-path",
+        "/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/src-tauri/Cargo.toml",
+        "--no-default-features",
+        "--lib",
+        "remote::relay_server::tests::a11_expired_ticket_wire_boundary",
+        "--",
+        "--nocapture"
+      ],
+      "exit": 0
+    },
+    {
+      "command": [
+        "cargo",
+        "check",
+        "--locked",
+        "--manifest-path",
+        "/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/src-tauri/Cargo.toml",
+        "--no-default-features",
+        "--bin",
+        "ferryx-cli",
+        "--bin",
+        "ferryx-relay"
+      ],
+      "exit": 101
+    }
+  ],
+  "after": {
+    "src-tauri/src/remote/relay_server.rs": "0ccad7f19422b34ac8bedf3f3077b20af06b52370d52f8b12bd117116c541e57",
+    "src-tauri/src/remote/relay_client.rs": "386abd5a2c71c0889912d6790b74bbf77352e2b75fab7d9bf0ac3f48a8786c0e",
+    "src-tauri/tests/relay_pairing_generation_regression.rs": "5813c51e43b8c51eb222136de7f4afa44d93641c08959f7ab3eff1f5fb195a6c"
+  },
+  "supervisorRemoved": true
+}

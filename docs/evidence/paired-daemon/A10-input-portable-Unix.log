@@ -1,0 +1,131 @@
+   Compiling ferryx v2026.908.1 (/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/src-tauri)
+error[E0432]: unresolved import `super::server`
+ --> src/remote/machine_owner_socket.rs:2:12
+  |
+2 | use super::server::{machine_socket_error, AuthQuery};
+  |            ^^^^^^ could not find `server` in `super`
+
+warning: unused import: `Manager`
+  --> src/ipc/notifications.rs:21:24
+   |
+21 | use tauri::{AppHandle, Manager, Runtime, State};
+   |                        ^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0282]: type annotations needed
+  --> src/remote/machine_owner_socket.rs:23:9
+   |
+23 |         tokio_tungstenite::client_async(request, stream).await.map_err(|error| match error {
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ cannot infer type
+
+error[E0282]: type annotations needed
+  --> src/remote/machine_owner_socket.rs:31:73
+   |
+31 |         result = tokio::time::timeout(Duration::from_secs(10), dial) => result.map_err(|_| machine_socket_error("TIMEOUT"))??,
+   |                                                                         ^^^^^^ cannot infer type
+
+error[E0282]: type annotations needed
+  --> src/remote/machine_owner_socket.rs:35:42
+   |
+35 |         let (mut upstream, mut output) = owner.split();
+   |                                          ^^^^^ cannot infer type
+
+error[E0282]: type annotations needed
+  --> src/remote/machine_owner_socket.rs:42:76
+   |
+42 |                 if !matches!(tokio::time::timeout(Duration::from_secs(10), upstream.send(message)).await, Ok(Ok(()))) { break; }
+   |                                                                            ^^^^^^^^ cannot infer type
+
+error[E0282]: type annotations needed
+  --> src/remote/machine_owner_socket.rs:46:43
+   |
+46 |             while let Some(Ok(message)) = output.next().await {
+   |                                           ^^^^^^ cannot infer type
+
+error[E0004]: non-exhaustive patterns: `&DaemonRequest::MachineSessionDetail { .. }` and `&DaemonRequest::MachineGateway` not covered
+   --> src/daemon/client.rs:118:11
+    |
+118 |     match req {
+    |           ^^^ patterns `&DaemonRequest::MachineSessionDetail { .. }` and `&DaemonRequest::MachineGateway` not covered
+    |
+note: `DaemonRequest` defined here
+   --> src/daemon/protocol.rs:124:10
+    |
+124 | pub enum DaemonRequest {
+    |          ^^^^^^^^^^^^^
+...
+131 |     MachineSessionDetail { session_id: String },
+    |     -------------------- not covered
+132 |     MachineGateway,
+    |     -------------- not covered
+    = note: the matched value is of type `&DaemonRequest`
+help: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern, a match arm with multiple or-patterns as shown, or multiple match arms
+    |
+155 ~         DaemonRequest::Shutdown => "shutdown",
+156 ~         &DaemonRequest::MachineSessionDetail { .. } | &DaemonRequest::MachineGateway => todo!(),
+    |
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `scroll_daemon_client`
+   --> src/lib.rs:915:9
+    |
+915 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+    |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+Some errors have detailed explanations: E0004, E0282, E0432.
+For more information about an error, try `rustc --explain E0004`.
+warning: `ferryx` (lib) generated 10 warnings
+error: could not compile `ferryx` (lib) due to 7 previous errors; 10 warnings emitted
+EXIT=101

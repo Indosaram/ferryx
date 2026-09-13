@@ -1,0 +1,332 @@
+COMMAND: cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib paired_host_operation_tests -- --nocapture
+   Compiling ferryx v2026.908.1 (/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/src-tauri)
+error[E0277]: `?` couldn't convert the error: `ipc::error::IpcError: StdError` is not satisfied
+  --> src/daemon/../paired_host/native_operation_tests.rs:26:17
+   |
+22 |           let server = crate::ipc::run_blocking(move || {
+   |  ______________________-
+23 | |             let mut server = DaemonServer::new_with_paths(Some(data.join("config")), Some(data.join("auth")));
+24 | |             server.paired_hosts = crate::paired_host::service::PairedHostService::open_test_loopback(data);
+25 | |             Ok(Arc::new(server))
+26 | |         }).await?;
+   | |                -^ the trait `StdError` is not implemented for `ipc::error::IpcError`
+   | |________________|
+   |                  this has type `Result<_, ipc::error::IpcError>`
+   |
+note: `ipc::error::IpcError` needs to implement `StdError`
+  --> src/ipc/error.rs:67:1
+   |
+67 | pub struct IpcError {
+   | ^^^^^^^^^^^^^^^^^^^
+   = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+   = note: required for `anyhow::Error` to implement `std::convert::From<ipc::error::IpcError>`
+
+error[E0277]: `?` couldn't convert the error: `ipc::error::IpcError: StdError` is not satisfied
+  --> src/daemon/../paired_host/native_operation_tests.rs:44:17
+   |
+40 |           let (server, identity) = crate::ipc::run_blocking(move || {
+   |  __________________________________-
+41 | |             let server = DaemonServer::new_with_paths(Some(data.join("config")), Some(data.join("auth")));
+42 | |             let identity = crate::remote::auth::load_or_generate_machine_identity(&data).map_err(crate::ipc::IpcError::internal)?;
+43 | |             Ok((server, identity))
+44 | |         }).await?;
+   | |                -^ the trait `StdError` is not implemented for `ipc::error::IpcError`
+   | |________________|
+   |                  this has type `Result<_, ipc::error::IpcError>`
+   |
+note: `ipc::error::IpcError` needs to implement `StdError`
+  --> src/ipc/error.rs:67:1
+   |
+67 | pub struct IpcError {
+   | ^^^^^^^^^^^^^^^^^^^
+   = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+   = note: required for `anyhow::Error` to implement `std::convert::From<ipc::error::IpcError>`
+
+error[E0308]: mismatched types
+   --> src/daemon/../paired_host/native_operation_tests.rs:63:32
+    |
+ 63 |             .with_auth_manager(state.auth_manager.clone());
+    |              ----------------- ^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `AuthManager`, found `Arc<AuthManager>`
+    |              |
+    |              arguments to this method are incorrect
+    |
+    = note: expected struct `auth::AuthManager`
+               found struct `std::sync::Arc<auth::AuthManager>`
+note: method defined here
+   --> src/remote/relay_client.rs:348:12
+    |
+348 |     pub fn with_auth_manager(mut self, auth: AuthManager) -> Self {
+    |            ^^^^^^^^^^^^^^^^^           -----------------
+
+error[E0277]: the trait bound `std::string::String: std::convert::From<std::io::Error>` is not satisfied
+  --> src/daemon/../paired_host/native_operation_tests.rs:97:50
+   |
+97 | ...e || crate::remote::relay_server::RelayState::new_with_key_store(vec![], relay_path).map_err(crate::ipc::IpcError::internal)).await?;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `std::convert::From<std::io::Error>` is not implemented for `std::string::String`
+   |
+   = help: the following other types implement trait `std::convert::From<T>`:
+             `std::string::String` implements `std::convert::From<&mut str>`
+             `std::string::String` implements `std::convert::From<&std::string::String>`
+             `std::string::String` implements `std::convert::From<&str>`
+             `std::string::String` implements `std::convert::From<AssetKey>`
+             `std::string::String` implements `std::convert::From<Box<str>>`
+             `std::string::String` implements `std::convert::From<Uuid>`
+             `std::string::String` implements `std::convert::From<char>`
+             `std::string::String` implements `std::convert::From<std::borrow::Cow<'_, str>>`
+             `std::string::String` implements `std::convert::From<tauri::Url>`
+   = note: required for `std::io::Error` to implement `Into<std::string::String>`
+note: required by a bound in `ipc::error::IpcError::internal`
+  --> src/ipc/error.rs:88:35
+   |
+88 |     pub fn internal(message: impl Into<String>) -> Self {
+   |                                   ^^^^^^^^^^^^ required by this bound in `IpcError::internal`
+
+error[E0277]: the trait bound `std::string::String: std::convert::From<std::io::Error>` is not satisfied
+  --> src/daemon/../paired_host/native_operation_tests.rs:97:138
+   |
+97 | ...p_err(crate::ipc::IpcError::internal)).await?;
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `std::convert::From<std::io::Error>` is not implemented for `std::string::String`
+   |
+   = help: the following other types implement trait `std::convert::From<T>`:
+             `std::string::String` implements `std::convert::From<&mut str>`
+             `std::string::String` implements `std::convert::From<&std::string::String>`
+             `std::string::String` implements `std::convert::From<&str>`
+             `std::string::String` implements `std::convert::From<AssetKey>`
+             `std::string::String` implements `std::convert::From<Box<str>>`
+             `std::string::String` implements `std::convert::From<Uuid>`
+             `std::string::String` implements `std::convert::From<char>`
+             `std::string::String` implements `std::convert::From<std::borrow::Cow<'_, str>>`
+             `std::string::String` implements `std::convert::From<tauri::Url>`
+   = note: required for `std::io::Error` to implement `Into<std::string::String>`
+note: required by a bound in `ipc::error::IpcError::internal`
+  --> src/ipc/error.rs:88:35
+   |
+88 |     pub fn internal(message: impl Into<String>) -> Self {
+   |                                   ^^^^^^^^^^^^ required by this bound in `IpcError::internal`
+
+error[E0277]: `?` couldn't convert the error: `ipc::error::IpcError: StdError` is not satisfied
+  --> src/daemon/../paired_host/native_operation_tests.rs:97:176
+   |
+97 | ... = crate::ipc::run_blocking(move || crate::remote::relay_server::RelayState::new_with_key_store(vec![], relay_path).map_err(crate::ipc::IpcError::internal)).await?;
+   |       ---------------------------------------------------------------------------------------------------------------------------------------------------------------^ the trait `StdError` is not implemented for `ipc::error::IpcError`
+   |       |
+   |       this has type `Result<_, ipc::error::IpcError>`
+   |
+note: `ipc::error::IpcError` needs to implement `StdError`
+  --> src/ipc/error.rs:67:1
+   |
+67 | pub struct IpcError {
+   | ^^^^^^^^^^^^^^^^^^^
+   = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+   = note: required for `anyhow::Error` to implement `std::convert::From<ipc::error::IpcError>`
+
+error[E0277]: `?` couldn't convert the error: `ipc::error::IpcError: StdError` is not satisfied
+   --> src/daemon/../paired_host/native_operation_tests.rs:107:86
+    |
+107 |     crate::ipc::run_blocking(move || { fs::create_dir(path).unwrap(); Ok(()) }).await?;
+    |     ---------------------------------------------------------------------------------^ the trait `StdError` is not implemented for `ipc::error::IpcError`
+    |     |
+    |     this has type `Result<_, ipc::error::IpcError>`
+    |
+note: `ipc::error::IpcError` needs to implement `StdError`
+   --> src/ipc/error.rs:67:1
+    |
+ 67 | pub struct IpcError {
+    | ^^^^^^^^^^^^^^^^^^^
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+    = note: required for `anyhow::Error` to implement `std::convert::From<ipc::error::IpcError>`
+
+error[E0277]: the trait bound `std::string::String: std::convert::From<std::io::Error>` is not satisfied
+   --> src/daemon/../paired_host/native_operation_tests.rs:117:50
+    |
+117 |     let bytes = crate::ipc::run_blocking(move || fs::read(private_path).map_err(crate::ipc::IpcError::internal)).await?;
+    |                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `std::convert::From<std::io::Error>` is not implemented for `std::string::String`
+    |
+    = help: the following other types implement trait `std::convert::From<T>`:
+              `std::string::String` implements `std::convert::From<&mut str>`
+              `std::string::String` implements `std::convert::From<&std::string::String>`
+              `std::string::String` implements `std::convert::From<&str>`
+              `std::string::String` implements `std::convert::From<AssetKey>`
+              `std::string::String` implements `std::convert::From<Box<str>>`
+              `std::string::String` implements `std::convert::From<Uuid>`
+              `std::string::String` implements `std::convert::From<char>`
+              `std::string::String` implements `std::convert::From<std::borrow::Cow<'_, str>>`
+              `std::string::String` implements `std::convert::From<tauri::Url>`
+    = note: required for `std::io::Error` to implement `Into<std::string::String>`
+note: required by a bound in `ipc::error::IpcError::internal`
+   --> src/ipc/error.rs:88:35
+    |
+ 88 |     pub fn internal(message: impl Into<String>) -> Self {
+    |                                   ^^^^^^^^^^^^ required by this bound in `IpcError::internal`
+
+error[E0277]: the trait bound `std::string::String: std::convert::From<std::io::Error>` is not satisfied
+   --> src/daemon/../paired_host/native_operation_tests.rs:117:81
+    |
+117 |     let bytes = crate::ipc::run_blocking(move || fs::read(private_path).map_err(crate::ipc::IpcError::internal)).await?;
+    |                                                                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `std::convert::From<std::io::Error>` is not implemented for `std::string::String`
+    |
+    = help: the following other types implement trait `std::convert::From<T>`:
+              `std::string::String` implements `std::convert::From<&mut str>`
+              `std::string::String` implements `std::convert::From<&std::string::String>`
+              `std::string::String` implements `std::convert::From<&str>`
+              `std::string::String` implements `std::convert::From<AssetKey>`
+              `std::string::String` implements `std::convert::From<Box<str>>`
+              `std::string::String` implements `std::convert::From<Uuid>`
+              `std::string::String` implements `std::convert::From<char>`
+              `std::string::String` implements `std::convert::From<std::borrow::Cow<'_, str>>`
+              `std::string::String` implements `std::convert::From<tauri::Url>`
+    = note: required for `std::io::Error` to implement `Into<std::string::String>`
+note: required by a bound in `ipc::error::IpcError::internal`
+   --> src/ipc/error.rs:88:35
+    |
+ 88 |     pub fn internal(message: impl Into<String>) -> Self {
+    |                                   ^^^^^^^^^^^^ required by this bound in `IpcError::internal`
+
+error[E0277]: `?` couldn't convert the error: `ipc::error::IpcError: StdError` is not satisfied
+   --> src/daemon/../paired_host/native_operation_tests.rs:117:119
+    |
+117 |     let bytes = crate::ipc::run_blocking(move || fs::read(private_path).map_err(crate::ipc::IpcError::internal)).await?;
+    |                 ------------------------------------------------------------------------------------------------------^ the trait `StdError` is not implemented for `ipc::error::IpcError`
+    |                 |
+    |                 this has type `Result<_, ipc::error::IpcError>`
+    |
+note: `ipc::error::IpcError` needs to implement `StdError`
+   --> src/ipc/error.rs:67:1
+    |
+ 67 | pub struct IpcError {
+    | ^^^^^^^^^^^^^^^^^^^
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+    = note: required for `anyhow::Error` to implement `std::convert::From<ipc::error::IpcError>`
+
+error[E0277]: the trait bound `std::string::String: std::convert::From<std::io::Error>` is not satisfied
+   --> src/daemon/../paired_host/native_operation_tests.rs:131:50
+    |
+131 | ...e || crate::remote::relay_server::RelayState::new_with_key_store(vec![], relay_path).map_err(crate::ipc::IpcError::internal)).await?;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `std::convert::From<std::io::Error>` is not implemented for `std::string::String`
+    |
+    = help: the following other types implement trait `std::convert::From<T>`:
+              `std::string::String` implements `std::convert::From<&mut str>`
+              `std::string::String` implements `std::convert::From<&std::string::String>`
+              `std::string::String` implements `std::convert::From<&str>`
+              `std::string::String` implements `std::convert::From<AssetKey>`
+              `std::string::String` implements `std::convert::From<Box<str>>`
+              `std::string::String` implements `std::convert::From<Uuid>`
+              `std::string::String` implements `std::convert::From<char>`
+              `std::string::String` implements `std::convert::From<std::borrow::Cow<'_, str>>`
+              `std::string::String` implements `std::convert::From<tauri::Url>`
+    = note: required for `std::io::Error` to implement `Into<std::string::String>`
+note: required by a bound in `ipc::error::IpcError::internal`
+   --> src/ipc/error.rs:88:35
+    |
+ 88 |     pub fn internal(message: impl Into<String>) -> Self {
+    |                                   ^^^^^^^^^^^^ required by this bound in `IpcError::internal`
+
+error[E0277]: the trait bound `std::string::String: std::convert::From<std::io::Error>` is not satisfied
+   --> src/daemon/../paired_host/native_operation_tests.rs:131:138
+    |
+131 | ...p_err(crate::ipc::IpcError::internal)).await?;
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `std::convert::From<std::io::Error>` is not implemented for `std::string::String`
+    |
+    = help: the following other types implement trait `std::convert::From<T>`:
+              `std::string::String` implements `std::convert::From<&mut str>`
+              `std::string::String` implements `std::convert::From<&std::string::String>`
+              `std::string::String` implements `std::convert::From<&str>`
+              `std::string::String` implements `std::convert::From<AssetKey>`
+              `std::string::String` implements `std::convert::From<Box<str>>`
+              `std::string::String` implements `std::convert::From<Uuid>`
+              `std::string::String` implements `std::convert::From<char>`
+              `std::string::String` implements `std::convert::From<std::borrow::Cow<'_, str>>`
+              `std::string::String` implements `std::convert::From<tauri::Url>`
+    = note: required for `std::io::Error` to implement `Into<std::string::String>`
+note: required by a bound in `ipc::error::IpcError::internal`
+   --> src/ipc/error.rs:88:35
+    |
+ 88 |     pub fn internal(message: impl Into<String>) -> Self {
+    |                                   ^^^^^^^^^^^^ required by this bound in `IpcError::internal`
+
+error[E0277]: `?` couldn't convert the error: `ipc::error::IpcError: StdError` is not satisfied
+   --> src/daemon/../paired_host/native_operation_tests.rs:131:176
+    |
+131 | ... = crate::ipc::run_blocking(move || crate::remote::relay_server::RelayState::new_with_key_store(vec![], relay_path).map_err(crate::ipc::IpcError::internal)).await?;
+    |       ---------------------------------------------------------------------------------------------------------------------------------------------------------------^ the trait `StdError` is not implemented for `ipc::error::IpcError`
+    |       |
+    |       this has type `Result<_, ipc::error::IpcError>`
+    |
+note: `ipc::error::IpcError` needs to implement `StdError`
+   --> src/ipc/error.rs:67:1
+    |
+ 67 | pub struct IpcError {
+    | ^^^^^^^^^^^^^^^^^^^
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+    = note: required for `anyhow::Error` to implement `std::convert::From<ipc::error::IpcError>`
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `token`
+    --> src/remote/auth.rs:1399:14
+     |
+1399 |         let (token, device) = auth
+     |              ^^^^^ help: if this is intentional, prefix it with an underscore: `_token`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `scroll_daemon_client`
+   --> src/lib.rs:916:9
+    |
+916 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+    |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+
+Some errors have detailed explanations: E0277, E0308.
+For more information about an error, try `rustc --explain E0277`.
+warning: `ferryx` (lib test) generated 10 warnings
+error: could not compile `ferryx` (lib test) due to 13 previous errors; 10 warnings emitted
+
+EXIT: 101

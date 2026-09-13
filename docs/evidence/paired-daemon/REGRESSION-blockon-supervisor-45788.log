@@ -1,0 +1,8 @@
+RUN full /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/docs/evidence/paired-daemon/REGRESSION-blockon-full-45790.log
+RESULT {'label': 'full', 'exit': 101, 'seconds': 296.5285404160022, 'log': '/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/docs/evidence/paired-daemon/REGRESSION-blockon-full-45790.log'}
+RUN paired-host /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/docs/evidence/paired-daemon/REGRESSION-blockon-paired-host-45790.log
+RESULT {'label': 'paired-host', 'exit': 0, 'seconds': 34.65678850000404, 'log': '/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/docs/evidence/paired-daemon/REGRESSION-blockon-paired-host-45790.log'}
+RUN check-lib /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/docs/evidence/paired-daemon/REGRESSION-blockon-check-lib-45790.log
+RESULT {'label': 'check-lib', 'exit': 0, 'seconds': 11.72544970799936, 'log': '/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/docs/evidence/paired-daemon/REGRESSION-blockon-check-lib-45790.log'}
+RUN check-bins /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/docs/evidence/paired-daemon/REGRESSION-blockon-check-bins-45790.log
+RESULT {'label': 'check-bins', 'exit': 0, 'seconds': 0.7022629999992205, 'log': '/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/docs/evidence/paired-daemon/REGRESSION-blockon-check-bins-45790.log'}

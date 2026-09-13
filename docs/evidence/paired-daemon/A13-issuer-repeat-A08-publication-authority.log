@@ -1,0 +1,217 @@
+   Compiling ferryx v2026.908.1 (/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/src-tauri)
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `token`
+    --> src/remote/auth.rs:1399:14
+     |
+1399 |         let (token, device) = auth
+     |              ^^^^^ help: if this is intentional, prefix it with an underscore: `_token`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `scroll_daemon_client`
+   --> src/lib.rs:916:9
+    |
+916 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+    |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+
+warning: method `machine_sessions` is never used
+   --> src/daemon/session_service.rs:366:19
+    |
+227 | impl DaemonSessionService {
+    | ------------------------- method in this implementation
+...
+366 |     pub(crate) fn machine_sessions(&self, epoch: crate::scoped_contracts::Epoch) -> Result<crate::remote::machine_protocol::Sessions, Str...
+    |                   ^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `app` is never read
+  --> src/ipc/notifications.rs:28:5
+   |
+27 | pub struct TauriNotificationBackend<R: Runtime> {
+   |            ------------------------ field in this struct
+28 |     app: AppHandle<R>,
+   |     ^^^
+
+warning: constant `GHOSTTY_TERMINAL_SCREEN_PRIMARY` is never used
+  --> src/native_terminal/sys/constants.rs:56:11
+   |
+56 | pub const GHOSTTY_TERMINAL_SCREEN_PRIMARY: c_int = 0;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `Observation` is never constructed
+  --> src/remote/machine_input_probe.rs:13:19
+   |
+13 | pub(super) struct Observation(pub watch::Receiver<Progress>, String);
+   |                   ^^^^^^^^^^^
+
+warning: associated function `register` is never used
+  --> src/remote/machine_input_probe.rs:15:12
+   |
+14 | impl Observation {
+   | ---------------- associated function in this implementation
+15 |     pub fn register(id: &str) -> Self {
+   |            ^^^^^^^^
+
+warning: function `no_auth_query` is never used
+    --> src/remote/server.rs:3113:12
+     |
+3113 |         fn no_auth_query() -> AuthQuery {
+     |            ^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src/worktree/manager.rs:86:19
+   |
+86 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+   --> src/worktree/manager.rs:93:8
+    |
+ 92 | impl WriterLeaseGuard {
+    | --------------------- associated items in this implementation
+ 93 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+    |        ^^^
+...
+101 |     pub(crate) fn canonical_path(&self) -> &Path {
+    |                   ^^^^^^^^^^^^^^
+...
+105 |     pub(crate) fn owner_id(&self) -> &str {
+    |                   ^^^^^^^^
+
+warning: method `acquire_writer_lease` is never used
+   --> src/worktree/manager.rs:338:19
+    |
+134 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+338 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib test) generated 19 warnings (run `cargo fix --lib -p ferryx --tests` to apply 2 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 29.83s
+     Running unittests src/lib.rs (src-tauri/target/debug/deps/ferryx_lib-fede6191c14a3d71)
+
+running 15 tests
+test remote::workspace_api::worktrees::wire_proof_tests::private_wire_owner ... ok
+test remote::workspace_api::worktrees::authority_tests::interrupted_worktree_owner_child ... ok
+test remote::workspace_api::worktrees::authority_tests::local_worktree_error_wire_roundtrip ... ok
+A08 request_drop pid=96983 active_child_reaped=true worker_joined=true private_root_removed=true
+test remote::workspace_api::child_tests::request_drop_interrupts_active_worktree_git ... ok
+
+running 1 test
+R12 child output_limit=65536 timeout=TIMEOUT both_children_waited=true
+test remote::workspace_api::child_tests::r12_child_output_and_deadline ... ok
+A08_WIRE_HANDSHAKE owner_pid=96953 exact=true socket=/tmp/a08-wire-kPLqqR/runtime/daemon.sock http=127.0.0.1:55315
+A08_WIRE_HTTP_REQUEST method=POST endpoint=http://127.0.0.1:55315/api/v1/workspace/worktrees body={"baseRef":"HEAD~1","requestId":"c042b776-d4c5-41f2-861f-de8447015ad2","workspaceId":"wire-proof","worktree":{"slug":"non-head","wsId":"wire-proof"}}
+A08_TYPED_RESULT case=locked wire={"error":{"code":"WORKTREE_LOCKED","details":{"path":"/private/tmp/a08-typed-owner-nhYsCr/repo/.orca-worktrees/typed/locked","reason":"typed fixture lock"},"message":"Worktree '/private/tmp/a08-typed-owner-nhYsCr/repo/.orca-worktrees/typed/locked' is locked: typed fixture lock"},"type":"worktreeError"} native={"code":"WORKTREE_LOCKED","details":{"path":"/private/tmp/a08-typed-owner-nhYsCr/repo/.orca-worktrees/typed/locked","reason":"typed fixture lock"},"message":"Worktree '/private/tmp/a08-typed-owner-nhYsCr/repo/.orca-worktrees/typed/locked' is locked: typed fixture lock"}
+A08 queued symlink replacement managed_child=false HTTP=400 outside_sentinel_untouched=true
+A08 publication journal_failure=false baseline=1 durable=1 receipt=None
+A08_WIRE_HTTP_RESPONSE status=201 body={"bare":false,"branch":"refs/heads/orca/wire-proof/non-head","detached":false,"head":"cfd412e0b8e00a217622122c05adfb22c20f3ae9"A08 typed dirty delete: serialized owner -> native adapter exact code/message/path/count/files; target preserved; worker joined/root removed
+,"identity":{"slug":"non-head","wsIdtest remote::workspace_api::worktrees::authority_tests::local_worktree_errors_survive_owner_wire_and_native_adapter ... ok
+":"wire-proof"},"locked":null,"managed":true,"path":"/private/tmp/a08-wire-kPLqqR/repo/.orca-worktrees/wire-proof/non-head","prunable":null,"workspaceId":"wire-proof"}
+A08_WIRE_NON_HEAD first_http=201 base=cfd412e0b8e00a217622122c05adfb22c20f3ae9 original_head=899708d1466656dcc9afe7d29f8b766f34e2520c actual_checkout_equal=true
+A08 publication revoke=false git_target_exists=true catalog_unchanged=true outcome_unknown=true workers_drained=true private_root_removed=true
+A08_WIRE_UDS_REQUEST {"baseRef":null,"type":"createWorktree","workspaceId":"wire-proof","worktree":{"slug":"local-prune","wsId":"wire-proof"}}
+A08 interrupted owner pid=97050 replay=false status=signal: 9 (SIGKILL) reaped=true
+A08 queued symlink replacement managed_child=true HTTP=409 outside_sentinel_untouched=true
+A08 interrupted owner pid=97634 replay=true status=exit status: 0 reaped=true
+A08 interrupted Git transaction private_root_removed=true
+test remote::workspace_api::worktrees::authority_tests::interrupted_git_transaction_restart_never_repeats ... ok
+A08 followthrough journal_failure=false request=baa77bd8-9edd-482a-94c1-241debd4eead workspace=project-b03b61ba054b48a4bdc9b1ed8da9a0a4 non_head=cfd412e0b8e00a217622122c05adfb22c20f3ae9 restart_no_repeat=true prunable_preview=200 dirty_inspection=unavailable
+A08 gate fixture cleanup completed; errors=[]
+A08 shared owner IPC + seven HTTP slots=8 ninth=429 queued revoke=401x7 local=201 only_one_git_target=true listeners_workers_joined=true private_root_removed=true
+test remote::workspace_api::worktrees::authority_tests::owner_http_gate_and_eight_admissions ... ok
+A08 followthrough write failure private_root_removed=true
+A08 ACTIVE owner=97063 git=97372 hook=97436 cwd=/private/tmp/a13-issuer.T8HfiTO2/tmp/.tmpmmgvD2/repo/.orca-worktrees/project-e647e05c0b644006ab092d10099538a3/interrupted
+A08_WIRE_UDS_RESPONSE {"type":"createWorktreeOk","worktree":{"bare":false,"branch":"refs/heads/orca/wire-proof/local-prune","detached":false,"head":"899708d1466656dcc9afe7d29f8b766f34e2520c","locked":null,"path":"/private/tmp/a08-wire-kPLqqR/repo/.orca-worktrees/wire-proof/local-prune","prunable":null}}
+A08_WIRE_UDS_REQUEST {"deleteBranch":true,"destructive":false,"type":"deleteWorktree","workspaceId":"wire-proof","worktree":{"slug":"local-prune","wsId":"wire-proof"}}
+A08 ACTIVE owner_reaped=true git_group=97372 fixture_cleanup_signal=SIGKILL hook_eof=true (nonchildren not waitpid-reapable)
+A08 interrupted owner pid=97063 replay=false status=signal: 9 (SIGKILL) reaped=true
+A08 delete-vs-spawn request=698e72c5-7de3-4193-a2eb-e41951d17bb1 spawn_observed_at_shared_gate=true blocked_until_delete_publication=true spawn_refused=true workers_joined=true root_removed=true
+test remote::workspace_api::worktrees::authority_tests::followthrough_delete_publication_blocks_spawn ... ok
+A08 interrupted owner pid=97769 replay=true status=exit status: 0 reaped=true
+A08 followthrough prune request=6ff65a00-914c-462b-a1e7-e1ddd6f90169 workspace=project-0597471932954d1e9070e388553646c6 original_result_replayed=true restart=true
+A08 interrupted Git transaction private_root_removed=true
+test remote::workspace_api::worktrees::authority_tests::followthrough_owner_crash_while_git_active ... ok
+A08 followthrough prune workers_awaited=true private_root_removed=true
+test remote::workspace_api::worktrees::authority_tests::followthrough_prune_partial_replays_after_restart ... ok
+A08_WIRE_UDS_RESPONSE {"error":{"code":"WORKTREE_REMOVED_PRUNE_FAILED","details":{"branchDeleted":false,"cause":{"code":"GIT_ERROR","details":{"command":"git worktree prune","exitCode":128,"stderr":"fatal: Expected git repo version <= 1, found 999"},"message":"Git command failed (git worktree prune): fatal: Expected git repo version <= 1, found 999 (exit code: Some(128))"},"path":"/private/tmp/a08-wire-kPLqqR/repo/.orca-worktrees/wire-proof/local-prune","pruned":false,"worktreeRemoved":true},"message":"Worktree '/private/tmp/a08-wire-kPLqqR/repo/.orca-worktrees/wire-proof/local-prune' was removed but prune failed: Git command failed (git worktree prune): fatal: Expected git repo version <= 1, found 999 (exit code: Some(128))"},"type":"worktreeError"}
+A08_WIRE_PRUNE legacy=false removed=true branch_preserved=true config_restored=true publication_received=true
+A08_WIRE_UDS_REQUEST {"baseRef":null,"type":"createWorktree","workspaceId":"wire-proof","worktree":{"slug":"legacy-prune","wsId":"wire-proof"}}
+A08 publication revoke=true git_target_exists=true catalog_unchanged=true outcome_unknown=true workers_drained=true private_root_removed=true
+test remote::workspace_api::worktrees::publication_tests::cancelled_publication_preserves_unknown_after_git ... ok
+A08_TYPED_RESULT case=partial wire={"error":{"code":"WORKTREE_REMOVED_BRANCH_RETAINED","details":{"branch":"orca/typed/partial","branchDeleted":false,"cause":{"code":"GIT_ERROR","details":{"command":"git branch -D -- orca/typed/partial","exitCode":1,"stderr":"error: could not delete reference refs/heads/orca/typed/partial: cannot lock ref 'refs/heads/orca/typed/partial': Unable to create '/private/tmp/a08-typed-owner-nhYsCr/repo/.git/refs/heads/orca/typed/partial.lock': File exists.\n\nAnother git process seems to be running in this repository, e.g.\nan editor opened by 'git commit'. Please make sure all processes\nare terminated then try again. If it still fails, a git process\nmay have crashed in this repository earlier:\nremove the file manually to continue."},"message":"Git command failed (git branch -D -- orca/typed/partial): error: could not delete reference refs/heads/orca/typed/partial: cannot lock ref 'refs/heads/orca/typed/partial': Unable to create '/private/tmp/a08-typed-owner-nhYsCr/repo/.git/refs/heads/orca/typed/partial.lock': File exists.\n\nAnother git process seems to be running in this repository, e.g.\nan editor opened by 'git commit'. Please make sure all processes\nare terminated then try again. If it still fails, a git process\nmay have crashed in this repository earlier:\nremove the file manually to continue. (exit code: Some(1))"},"path":"/private/tmp/a08-typed-owner-nhYsCr/repo/.orca-worktrees/typed/partial","worktreeRemoved":true},"message":"Worktree '/private/tmp/a08-typed-owner-nhYsCr/repo/.orca-worktrees/typed/partial' was removed but branch 'orca/typed/partial' was retained: Git command failed (git branch -D -- orca/typed/partial): error: could not delete reference refs/heads/orca/typed/partial: cannot lock ref 'refs/heads/orca/typed/partial': Unable to create '/private/tmp/a08-typed-owner-nhYsCr/repo/.git/refs/heads/orca/typed/partial.lock': File exists.\n\nAnother git process seems to be running in this repository, e.g.\nan editor opened by 'git commit'. Please make sure all processes\nare terminated then try again. If it still fails, a git process\nmay have crashed in this repository earlier:\nremove the file manually to continue. (exit code: Some(1))"},"type":"worktreeError"} native={"code":"WORKTREE_REMOVED_BRANCH_RETAINED","details":{"branch":"orca/typed/partial","branchDeleted":false,"cause":{"code":"GIT_ERROR","details":{"command":"git branch -D -- orca/typed/partial","exitCode":1,"stderr":"error: could not delete reference refs/heads/orca/typed/partial: cannot lock ref 'refs/heads/orca/typed/partial': Unable to create '/private/tmp/a08-typed-owner-nhYsCr/repo/.git/refs/heads/orca/typed/partial.lock': File exists.\n\nAnother git process seems to be running in this repository, e.g.\nan editor opened by 'git commit'. Please make sure all processes\nare terminated then try again. If it still fails, a git process\nmay have crashed in this repository earlier:\nremove the file manually to continue."},"message":"Git command failed (git branch -D -- orca/typed/partial): error: could not delete reference refs/heads/orca/typed/partial: cannot lock ref 'refs/heads/orca/typed/partial': Unable to create '/private/tmp/a08-typed-owner-nhYsCr/repo/.git/refs/heads/orca/typed/partial.lock': File exists.\n\nAnother git process seems to be running in this repository, e.g.\nan editor opened by 'git commit'. Please make sure all processes\nare terminated then try again. If it still fails, a git process\nmay have crashed in this repository earlier:\nremove the file manually to continue. (exit code: Some(1))"},"path":"/private/tmp/a08-typed-owner-nhYsCr/repo/.orca-worktrees/typed/partial","worktreeRemoved":true},"message":"Worktree '/private/tmp/a08-typed-owner-nhYsCr/repo/.orca-worktrees/typed/partial' was removed but branch 'orca/typed/partial' was retained: Git command failed (git branch -D -- orca/typed/partial): error: could not delete reference refs/heads/orca/typed/partial: cannot lock ref 'refs/heads/orca/typed/partial': Unable to create '/private/tmp/a08-typed-owner-nhYsCr/repo/.git/refs/heads/orca/typed/partial.lock': File exists.\n\nAnother git process seems to be running in this repository, e.g.\nan editor opened by 'git commit'. Please make sure all processes\nare terminated then try again. If it still fails, a git process\nmay have crashed in this repository earlier:\nremove the file manually to continue. (exit code: Some(1))"}
+A08_WIRE_UDS_RESPONSE {"type":"createWorktreeOk","worktree":{"bare":false,"branch":"refs/heads/orca/wire-proof/legacy-prune","detached":false,"head":"899708d1466656dcc9afe7d29f8b766f34e2520c","locked":null,"path":"/private/tmp/a08-wire-kPLqqR/repo/.orca-worktrees/wire-proof/legacy-prune","prunable":null}}
+A08_WIRE_HTTP_REQUEST method=DELETE endpoint=http://127.0.0.1:55315/api/v1/workspace/worktrees body={"deleteBranch":true,"workspaceId":"wire-proof","worktree":{"slug":"legacy-prune","wsId":"wire-proof"}}
+A08 publication journal_failure=true baseline=1 durable=2 receipt=Some("321cd94d-420a-4875-8ef3-35d8d02c8f30")
+A08 followthrough journal_failure=true request=321cd94d-420a-4875-8ef3-35d8d02c8f30 workspace=project-f8d6108cd67c44f6a2bd65eca4776244 non_head=cfd412e0b8e00a217622122c05adfb22c20f3ae9 restart_no_repeat=true prunable_preview=200 dirty_inspection=unavailable
+A08 followthrough write failure private_root_removed=true
+test remote::workspace_api::worktrees::authority_tests::followthrough_write_failures_non_head_and_prunable_preview ... ok
+A08_WIRE_HTTP_RESPONSE status=409 body={"error":{"code":"WORKTREE_REMOVED_PRUNE_FAILED","details":{"branchDeleted":false,"pruned":false,"worktreeRemoved":true},"message":"WORKTREE_REMOVED_PRUNE_FAILED","requestId":"c36d23da-9f23-487a-b76c-9a8da70d204d","retryable":false}}
+A08_TYPED_ORIGINAL pid=98059 cwd=/private/tmp/a08-typed-owner-nhYsCr/repo/.orca-worktrees/typed/busy session=83be5b1e-7cd1-47f0-a631-8e7af0ae3e73
+A08_WIRE_PRUNE legacy=true removed=true branch_preserved=true config_restored=true publication_received=true
+A08_WIRE_LISTENERS joined=true clients_joined=true tcp_refused=true uds_refused=true socket_removed=true failed=false
+A08_WIRE_OWNER pid=96953 runtime_joined=true git_children=ECHILD failed=false
+test remote::workspace_api::worktrees::wire_proof_tests::private_wire_owner ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1008 filtered out; finished in 1.33s
+
+A08_WIRE_PARENT owner_pid=96953 reaped=true status=exit status: 0 timeout=false root=/tmp/a08-wire-kPLqqR absent=true
+test remote::workspace_api::worktrees::wire_proof_tests::non_head_and_partial_prune_wires ... ok
+A08_TYPED_RESULT case=busy wire={"error":{"code":"WORKTREE_BUSY","details":{"liveSessionIds":["83be5b1e-7cd1-47f0-a631-8e7af0ae3e73"],"path":"/private/tmp/a08-typed-owner-nhYsCr/repo/.orca-worktrees/typed/busy"},"message":"Worktree '/private/tmp/a08-typed-owner-nhYsCr/repo/.orca-worktrees/typed/busy' has live sessions"},"type":"worktreeError"} native={"code":"WORKTREE_BUSY","details":{"liveSessionIds":["83be5b1e-7cd1-47f0-a631-8e7af0ae3e73"],"path":"/private/tmp/a08-typed-owner-nhYsCr/repo/.orca-worktrees/typed/busy"},"message":"Worktree '/private/tmp/a08-typed-owner-nhYsCr/repo/.orca-worktrees/typed/busy' has live sessions"}
+A08_TYPED_PTY_CLEANUP pid=98059 absent=true already_reaped=true
+A08_TYPED_CLEANUP listener_joined=true socket_refused=true root=/tmp/a08-typed-owner-nhYsCr absent=true failed=false
+test remote::workspace_api::worktrees::authority_tests::typed_owner_repair_private_uds_and_native_adapter ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 994 filtered out; finished in 2.47s
+

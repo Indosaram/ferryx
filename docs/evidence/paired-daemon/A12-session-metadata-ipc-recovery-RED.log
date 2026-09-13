@@ -1,0 +1,133 @@
+   Compiling ferryx v2026.908.1 (/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/src-tauri)
+warning: unused import: `Manager`
+  --> src/ipc/notifications.rs:21:24
+   |
+21 | use tauri::{AppHandle, Manager, Runtime, State};
+   |                        ^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0277]: the `?` operator can only be applied to values that implement `Try`
+    --> src/remote/server.rs:1257:23
+     |
+1257 |         let session = services.sessions.validate_machine_target(&target)?;
+     |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `impl Future<Output = Result<Session, String>>`
+     |
+     = help: the trait `Try` is not implemented for `impl Future<Output = Result<Session, String>>`
+     = note: the full name for the type has been written to '/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/src-tauri/target/debug/deps/ferryx_lib.long-type-1993139983218415188.txt'
+     = note: consider using `--verbose` to print the full type name to the console
+help: consider `await`ing on the `Future`
+     |
+1257 |         let session = services.sessions.validate_machine_target(&target).await?;
+     |                                                                         ++++++
+
+error[E0277]: the `?` operator can only be applied to values that implement `Try`
+    --> src/remote/server.rs:1260:9
+     |
+1260 |         services.sessions.validate_machine_target(&target)?;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `impl Future<Output = Result<Session, String>>`
+     |
+     = help: the trait `Try` is not implemented for `impl Future<Output = Result<Session, String>>`
+     = note: the full name for the type has been written to '/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/src-tauri/target/debug/deps/ferryx_lib.long-type-2876935468041618161.txt'
+     = note: consider using `--verbose` to print the full type name to the console
+help: consider `await`ing on the `Future`
+     |
+1260 |         services.sessions.validate_machine_target(&target).await?;
+     |                                                           ++++++
+
+error[E0308]: mismatched types
+    --> src/remote/server.rs:1346:28
+     |
+1346 |                     if let Err(error) = services.sessions.validate_machine_target(target) { tracing::warn!(%error, "A11 temporary output ...
+     |                            ^^^^^^^^^^   ------------------------------------------------- this expression has type `impl Future<Output = Result<Session, String>>`
+     |                            |
+     |                            expected future, found `Result<_, _>`
+     |
+     = note: expected opaque type `impl futures_util::Future<Output = std::result::Result<machine_protocol::Session, std::string::String>>`
+                       found enum `std::result::Result<_, _>`
+     = note: the full name for the type has been written to '/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/src-tauri/target/debug/deps/ferryx_lib.long-type-11267747580610226795.txt'
+     = note: consider using `--verbose` to print the full type name to the console
+help: consider `await`ing on the `Future`
+     |
+1346 |                     if let Err(error) = services.sessions.validate_machine_target(target).await { tracing::warn!(%error, "A11 temporary output validation exit"); return; }
+     |                                                                                          ++++++
+
+error[E0308]: mismatched types
+    --> src/remote/server.rs:1384:20
+     |
+1384 |             if let Err(error) = services.sessions.validate_machine_target(target) { tracing::warn!(%error, "A11 temporary input validatio...
+     |                    ^^^^^^^^^^   ------------------------------------------------- this expression has type `impl Future<Output = Result<Session, String>>`
+     |                    |
+     |                    expected future, found `Result<_, _>`
+     |
+     = note: expected opaque type `impl futures_util::Future<Output = std::result::Result<machine_protocol::Session, std::string::String>>`
+                       found enum `std::result::Result<_, _>`
+     = note: the full name for the type has been written to '/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/src-tauri/target/debug/deps/ferryx_lib.long-type-17735753026876354843.txt'
+     = note: consider using `--verbose` to print the full type name to the console
+help: consider `await`ing on the `Future`
+     |
+1384 |             if let Err(error) = services.sessions.validate_machine_target(target).await { tracing::warn!(%error, "A11 temporary input validation exit"); return; }
+     |                                                                                  ++++++
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `scroll_daemon_client`
+   --> src/lib.rs:916:9
+    |
+916 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+    |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+Some errors have detailed explanations: E0277, E0308.
+For more information about an error, try `rustc --explain E0277`.
+warning: `ferryx` (lib) generated 10 warnings
+error: could not compile `ferryx` (lib) due to 4 previous errors; 10 warnings emitted

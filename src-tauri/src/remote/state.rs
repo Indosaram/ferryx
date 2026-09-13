@@ -277,6 +277,10 @@ pub struct RemoteGatewayState {
     pub(crate) identity_dir: Option<PathBuf>,
     #[cfg(test)]
     pub(crate) identity_probe: RwLock<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    pub(crate) browse_home: RwLock<Option<PathBuf>>,
+    #[cfg(test)]
+    pub(crate) browse_probe: RwLock<Option<Arc<dyn Fn() + Send + Sync>>>,
     pub session_backend: Arc<dyn RemoteSessionBackend>,
     /// Absent for legacy/test constructors. Presence enables no future API.
     pub machine_services: Option<Arc<crate::daemon::MachineServices>>,
@@ -415,6 +419,10 @@ impl RemoteGatewayState {
             identity_dir: auth_path.as_deref().and_then(|path| path.parent()).map(PathBuf::from),
             #[cfg(test)]
             identity_probe: RwLock::new(None),
+            #[cfg(test)]
+            browse_home: RwLock::new(None),
+            #[cfg(test)]
+            browse_probe: RwLock::new(None),
             auth_manager: Arc::new(AuthManager::with_persistence(auth_path)),
             daemon_epoch: AtomicU64::new(0),
             session_backend,
@@ -567,7 +575,23 @@ impl RemoteGatewayState {
         *self.snapshot_post_build_hook.write() = hook;
     }
 
-    pub fn set_active_selection(&self, selection: RemoteActiveDesktopSelection) {
+    pub fn set_active_selection(&self, mut selection: RemoteActiveDesktopSelection) {
+        // This broadcaster belongs to the legacy mirror. Machine ownership must
+        // also fence selection snapshots/events, not just the session list/socket.
+        if let Some(services) = &self.machine_services {
+            let Ok(catalog) = services.workspaces.catalog() else {
+                self.clear_active_selection();
+                return;
+            };
+            let private_workspace = |id: &str| catalog.workspaces.get(id).is_some_and(|row| !row.mirror_exposed);
+            if selection.session_id.as_deref().is_some_and(|id| services.sessions.machine_only(id))
+                || selection.workspace_id.as_deref().is_some_and(private_workspace) {
+                self.clear_active_selection();
+                return;
+            }
+            selection.terminal_tabs.retain(|tab| !tab.session_id.as_deref().is_some_and(|id| services.sessions.machine_only(id)));
+            selection.attention_inventory.retain(|entry| !private_workspace(&entry.workspace_id));
+        }
         let session_id = selection.session_id.clone();
         let payload = serde_json::to_value(&selection).unwrap_or(serde_json::Value::Null);
         *self.active_selection.write() = Some(selection);

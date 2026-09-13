@@ -1,0 +1,225 @@
+COMMAND ["cargo", "test", "--locked", "--manifest-path", "src-tauri/Cargo.toml", "--no-default-features", "--test", "machine_worktrees", "--test", "worktree_safety", "--test", "machine_worktree_legacy_bounds", "--test", "machine_worktree_transports", "--test", "relay_pairing_generation_regression", "--", "--nocapture"] ONLY_PREVIOUSLY_UNEXECUTED_TARGETS
+COMMAND_PID 309352
+   Compiling ferryx v2026.908.1 (/home/indo/ferryx-herdr-q4-linux-01a097f8/source/src-tauri)
+warning: unused import: `NotificationAuthorization`
+ --> src/notification/permission.rs:4:5
+  |
+4 |     NotificationAuthorization, NotificationPermissionRequestDto, NotificationPermissionStatusDto,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `scroll_daemon_client`
+   --> src/lib.rs:915:9
+    |
+915 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+    |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `GHOSTTY_TERMINAL_SCREEN_PRIMARY` is never used
+  --> src/native_terminal/sys/constants.rs:56:11
+   |
+56 | pub const GHOSTTY_TERMINAL_SCREEN_PRIMARY: c_int = 0;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: methods `synchronized_output_deadline`, `expire_synchronized_output`, and `finish_synchronized_output` are never used
+   --> src/native_terminal/terminal.rs:169:19
+    |
+133 | impl NativeTerminal {
+    | ------------------- methods in this implementation
+...
+169 |     pub(crate) fn synchronized_output_deadline(&self) -> Option<tokio::time::Instant> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+173 |     pub(crate) fn expire_synchronized_output(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+184 |     pub(crate) fn finish_synchronized_output(&mut self) -> Result<(), NativeTerminalError> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `home_dir` is never used
+  --> src/permissions/mod.rs:43:4
+   |
+43 | fn home_dir() -> Option<PathBuf> {
+   |    ^^^^^^^^
+
+warning: method `wait_and_reap` is never used
+   --> src/terminal/session.rs:270:19
+    |
+ 61 | impl PtySession {
+    | --------------- method in this implementation
+...
+270 |     pub(crate) fn wait_and_reap(&self) -> Result<Option<i32>, PtyError> {
+    |                   ^^^^^^^^^^^^^
+
+warning: function `with_local_worktree_budget` is never used
+   --> src/worktree/git.rs:115:15
+    |
+115 | pub(crate) fn with_local_worktree_budget<T>(work: impl FnOnce() -> T) -> T {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src/worktree/manager.rs:86:19
+   |
+86 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+   --> src/worktree/manager.rs:93:8
+    |
+ 92 | impl WriterLeaseGuard {
+    | --------------------- associated items in this implementation
+ 93 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+    |        ^^^
+...
+101 |     pub(crate) fn canonical_path(&self) -> &Path {
+    |                   ^^^^^^^^^^^^^^
+...
+105 |     pub(crate) fn owner_id(&self) -> &str {
+    |                   ^^^^^^^^
+
+warning: method `acquire_writer_lease` is never used
+   --> src/worktree/manager.rs:338:19
+    |
+134 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+338 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib) generated 10 warnings (run `cargo fix --lib -p ferryx` to apply 2 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 34.12s
+     Running tests/machine_worktree_legacy_bounds.rs (/home/indo/ferryx-herdr-q4-linux-01a097f8/target/debug/deps/machine_worktree_legacy_bounds-6c14999db8380896)
+
+running 2 tests
+test followthrough_service_less_readiness_failure_cleanup ... 
+thread 'followthrough_service_less_readiness_failure_cleanup' (310148) panicked at tests/machine_worktree_legacy_bounds.rs:63:43:
+A08_SERVICE_LESS_READY_FAILURE
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+A08 service-less injected readiness failure Git=310175 hook=310178 request_joined=true git_reaped=true
+A08 service-less legacy listener_joined=true private_root_removed=true
+A08 service-less legacy oversized=413 explicit_HEAD_create=200 delete=204
+ok
+test service_less_legacy_body_and_git_are_bounded ... A08 service-less live Git pid=310207 hook_pid=310210 revoke_http=401 hook_socket_eof=true direct_git_reaped=true
+A08 service-less legacy listener_joined=true private_root_removed=true
+A08 service-less legacy oversized=413 explicit_HEAD_create=200 delete=204
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
+
+     Running tests/machine_worktree_transports.rs (/home/indo/ferryx-herdr-q4-linux-01a097f8/target/debug/deps/machine_worktree_transports-19b05c837621fe07)
+
+running 2 tests
+test a08_transports_owned_process_lifecycle ... 
+running 1 test
+test a08_transports_private_child ... A08_TRANSPORT_OWNER pid=310214 cwd=/tmp/a08-transports-KO4kuh runtime=/tmp/a08-transports-KO4kuh/runtime socket=/tmp/a08-transports-KO4kuh/runtime/daemon.sock config=/tmp/a08-transports-KO4kuh/data/config.json auth=/tmp/a08-transports-KO4kuh/data/auth.json
+A08_TRANSPORT_REQUEST method=POST url=http://127.0.0.1:42665/host/a08-transport-owner/api/v1/workspace/projects body={"repoPath":"/tmp/a08-transports-KO4kuh/repo","requestId":"1e57e111-1545-4601-b0c5-07ca35b5d91f"}
+A08_TRANSPORT_RESPONSE status=201 body={"availability":"ready","gitBranch":"master","gitCommonDir":"/tmp/a08-transports-KO4kuh/repo/.git","gitHead":"6f48d8db1143db50e701919f732d296e29ed5835","gitRemote":null,"gitRoot":"/tmp/a08-transports-KO4kuh/repo","repoRoot":"/tmp/a08-transports-KO4kuh/repo","revision":"1","workspaceId":"project-ebd1df1b5d0740ebadee9f975aa4eb98"}
+A08_TRANSPORT_REQUEST method=POST url=http://127.0.0.1:42665/host/a08-transport-owner/api/v1/workspace/worktrees body={"baseRef":"HEAD","requestId":"8792fb5f-5874-48d6-af4b-44fd3a5673a0","workspaceId":"project-ebd1df1b5d0740ebadee9f975aa4eb98","worktree":{"slug":"relay-keep","wsId":"project-ebd1df1b5d0740ebadee9f975aa4eb98"}}
+A08_TRANSPORT_RESPONSE status=201 body={"bare":false,"branch":"refs/heads/orca/project-ebd1df1b5d0740ebadee9f975aa4eb98/relay-keep","detached":false,"head":"6f48d8db1143db50e701919f732d296e29ed5835","identity":{"slug":"relay-keep","wsId":"project-ebd1df1b5d0740ebadee9f975aa4eb98"},"locked":null,"managed":true,"path":"/tmp/a08-transports-KO4kuh/repo/.orca-worktrees/project-ebd1df1b5d0740ebadee9f975aa4eb98/relay-keep","prunable":null,"workspaceId":"project-ebd1df1b5d0740ebadee9f975aa4eb98"}
+A08_TRANSPORT_REQUEST method=GET url=http://127.0.0.1:42665/host/a08-transport-owner/api/v1/workspace/worktrees?workspaceId=project-ebd1df1b5d0740ebadee9f975aa4eb98 body=null
+A08_TRANSPORT_RESPONSE status=200 body={"revision":"2","worktrees":[{"bare":false,"branch":"refs/heads/master","detached":false,"head":"6f48d8db1143db50e701919f732d296e29ed5835","identity":null,"locked":null,"managed":false,"path":"/tmp/a08-transports-KO4kuh/repo","prunable":null,"workspaceId":"project-ebd1df1b5d0740ebadee9f975aa4eb98"},{"bare":false,"branch":"refs/heads/orca/project-ebd1df1b5d0740ebadee9f975aa4eb98/relay-keep","detached":false,"head":"6f48d8db1143db50e701919f732d296e29ed5835","identity":{"slug":"relay-keep","wsId":"project-ebd1df1b5d0740ebadee9f975aa4eb98"},"locked":null,"managed":true,"path":"/tmp/a08-transports-KO4kuh/repo/.orca-worktrees/project-ebd1df1b5d0740ebadee9f975aa4eb98/relay-keep","prunable":null,"workspaceId":"project-ebd1df1b5d0740ebadee9f975aa4eb98"}]}
+A08_TRANSPORT_REQUEST method=GET url=http://127.0.0.1:42665/host/a08-transport-owner/api/v1/workspace/worktrees/status?workspaceId=project-ebd1df1b5d0740ebadee9f975aa4eb98&wsId=project-ebd1df1b5d0740ebadee9f975aa4eb98&slug=relay-keep body=null
+A08_TRANSPORT_RESPONSE status=200 body={"branchDeletion":{"ahead":null,"behind":null,"branch":"orca/project-ebd1df1b5d0740ebadee9f975aa4eb98/relay-keep","head":"6f48d8db1143db50e701919f732d296e29ed5835","merged":true,"upstream":null},"dirtyCount":0,"dirtyFiles":[],"liveSessionIds":[],"locked":null,"prunable":null,"revision":"2"}
+A08_TRANSPORT_REQUEST method=DELETE url=http://127.0.0.1:42665/host/a08-transport-owner/api/v1/workspace/worktrees body={"deleteBranch":false,"expectedRevision":"2","requestId":"8f4050fe-532e-495e-9a5f-c43d6228ed04","workspaceId":"project-ebd1df1b5d0740ebadee9f975aa4eb98","worktree":{"slug":"relay-keep","wsId":"project-ebd1df1b5d0740ebadee9f975aa4eb98"}}
+A08_TRANSPORT_RESPONSE status=204 body=null
+A08_TRANSPORT_REQUEST method=POST url=http://127.0.0.1:42665/host/a08-transport-owner/api/v1/workspace/worktrees body={"baseRef":"HEAD","requestId":"9fe5d0bc-220f-4c55-99b4-1abe353f55ef","workspaceId":"project-ebd1df1b5d0740ebadee9f975aa4eb98","worktree":{"slug":"relay-delete","wsId":"project-ebd1df1b5d0740ebadee9f975aa4eb98"}}
+A08_TRANSPORT_RESPONSE status=201 body={"bare":false,"branch":"refs/heads/orca/project-ebd1df1b5d0740ebadee9f975aa4eb98/relay-delete","detached":false,"head":"6f48d8db1143db50e701919f732d296e29ed5835","identity":{"slug":"relay-delete","wsId":"project-ebd1df1b5d0740ebadee9f975aa4eb98"},"locked":null,"managed":true,"path":"/tmp/a08-transports-KO4kuh/repo/.orca-worktrees/project-ebd1df1b5d0740ebadee9f975aa4eb98/relay-delete","prunable":null,"workspaceId":"project-ebd1df1b5d0740ebadee9f975aa4eb98"}
+A08_TRANSPORT_REQUEST method=GET url=http://127.0.0.1:42665/host/a08-transport-owner/api/v1/workspace/worktrees?workspaceId=project-ebd1df1b5d0740ebadee9f975aa4eb98 body=null
+A08_TRANSPORT_RESPONSE status=200 body={"revision":"4","worktrees":[{"bare":false,"branch":"refs/heads/master","detached":false,"head":"6f48d8db1143db50e701919f732d296e29ed5835","identity":null,"locked":null,"managed":false,"path":"/tmp/a08-transports-KO4kuh/repo","prunable":null,"workspaceId":"project-ebd1df1b5d0740ebadee9f975aa4eb98"},{"bare":false,"branch":"refs/heads/orca/project-ebd1df1b5d0740ebadee9f975aa4eb98/relay-delete","detached":false,"head":"6f48d8db1143db50e701919f732d296e29ed5835","identity":{"slug":"relay-delete","wsId":"project-ebd1df1b5d0740ebadee9f975aa4eb98"},"locked":null,"managed":true,"path":"/tmp/a08-transports-KO4kuh/repo/.orca-worktrees/project-ebd1df1b5d0740ebadee9f975aa4eb98/relay-delete","prunable":null,"workspaceId":"project-ebd1df1b5d0740ebadee9f975aa4eb98"}]}
+A08_TRANSPORT_REQUEST method=GET url=http://127.0.0.1:42665/host/a08-transport-owner/api/v1/workspace/worktrees/status?workspaceId=project-ebd1df1b5d0740ebadee9f975aa4eb98&wsId=project-ebd1df1b5d0740ebadee9f975aa4eb98&slug=relay-delete body=null
+A08_TRANSPORT_RESPONSE status=200 body={"branchDeletion":{"ahead":null,"behind":null,"branch":"orca/project-ebd1df1b5d0740ebadee9f975aa4eb98/relay-delete","head":"6f48d8db1143db50e701919f732d296e29ed5835","merged":true,"upstream":null},"dirtyCount":0,"dirtyFiles":[],"liveSessionIds":[],"locked":null,"prunable":null,"revision":"4"}
+A08_TRANSPORT_REQUEST method=DELETE url=http://127.0.0.1:42665/host/a08-transport-owner/api/v1/workspace/worktrees body={"deleteBranch":true,"expectedRevision":"4","requestId":"bd85b1ff-5fcf-4df3-abcf-42748b232d6f","workspaceId":"project-ebd1df1b5d0740ebadee9f975aa4eb98","worktree":{"slug":"relay-delete","wsId":"project-ebd1df1b5d0740ebadee9f975aa4eb98"}}
+A08_TRANSPORT_RESPONSE status=204 body=null
+A08_TRANSPORT_REQUEST method=POST url=http://127.0.0.1:42665/host/a08-transport-owner/api/v1/workspace/worktrees body={"requestId":"f0f3f4a0-46bc-45f7-8bc5-ee6a5b9e75b5","workspaceId":"project-ebd1df1b5d0740ebadee9f975aa4eb98","worktree":{"slug":"relay-lost","wsId":"project-ebd1df1b5d0740ebadee9f975aa4eb98"}}
+A08_TRANSPORT_RESPONSE status=201 body={"bare":false,"branch":"refs/heads/orca/project-ebd1df1b5d0740ebadee9f975aa4eb98/relay-lost","detached":false,"head":"6f48d8db1143db50e701919f732d296e29ed5835","identity":{"slug":"relay-lost","wsId":"project-ebd1df1b5d0740ebadee9f975aa4eb98"},"locked":null,"managed":true,"path":"/tmp/a08-transports-KO4kuh/repo/.orca-worktrees/project-ebd1df1b5d0740ebadee9f975aa4eb98/relay-lost","prunable":null,"workspaceId":"project-ebd1df1b5d0740ebadee9f975aa4eb98"}
+A08_TRANSPORT_REQUEST method=GET url=http://127.0.0.1:42665/host/a08-transport-owner/api/v1/workspace/operations/f0f3f4a0-46bc-45f7-8bc5-ee6a5b9e75b5 body=null
+A08_TRANSPORT_RESPONSE status=200 body={"outcome":{"kind":"worktree","worktree":{"bare":false,"branch":"refs/heads/orca/project-ebd1df1b5d0740ebadee9f975aa4eb98/relay-lost","detached":false,"head":"6f48d8db1143db50e701919f732d296e29ed5835","identity":{"slug":"relay-lost","wsId":"project-ebd1df1b5d0740ebadee9f975aa4eb98"},"locked":null,"managed":true,"path":"/tmp/a08-transports-KO4kuh/repo/.orca-worktrees/project-ebd1df1b5d0740ebadee9f975aa4eb98/relay-lost","prunable":null,"workspaceId":"project-ebd1df1b5d0740ebadee9f975aa4eb98"}},"requestId":"f0f3f4a0-46bc-45f7-8bc5-ee6a5b9e75b5","state":"completed"}
+A08_TRANSPORT_REQUEST method=GET url=http://127.0.0.1:42665/host/a08-transport-owner/api/v1/workspace/worktrees?workspaceId=project-ebd1df1b5d0740ebadee9f975aa4eb98 body=null
+A08_TRANSPORT_RESPONSE status=200 body={"revision":"6","worktrees":[{"bare":false,"branch":"refs/heads/master","detached":false,"head":"6f48d8db1143db50e701919f732d296e29ed5835","identity":null,"locked":null,"managed":false,"path":"/tmp/a08-transports-KO4kuh/repo","prunable":null,"workspaceId":"project-ebd1df1b5d0740ebadee9f975aa4eb98"},{"bare":false,"branch":"refs/heads/orca/project-ebd1df1b5d0740ebadee9f975aa4eb98/relay-lost","detached":false,"head":"6f48d8db1143db50e701919f732d296e29ed5835","identity":{"slug":"relay-lost","wsId":"project-ebd1df1b5d0740ebadee9f975aa4eb98"},"locked":null,"managed":true,"path":"/tmp/a08-transports-KO4kuh/repo/.orca-worktrees/project-ebd1df1b5d0740ebadee9f975aa4eb98/relay-lost","prunable":null,"workspaceId":"project-ebd1df1b5d0740ebadee9f975aa4eb98"}]}
+A08_RELAY_LOST original={"bare":false,"branch":"refs/heads/orca/project-ebd1df1b5d0740ebadee9f975aa4eb98/relay-lost","detached":false,"head":"6f48d8db1143db50e701919f732d296e29ed5835","identity":{"slug":"relay-lost","wsId":"project-ebd1df1b5d0740ebadee9f975aa4eb98"},"locked":null,"managed":true,"path":"/tmp/a08-transports-KO4kuh/repo/.orca-worktrees/project-ebd1df1b5d0740ebadee9f975aa4eb98/relay-lost","prunable":null,"workspaceId":"project-ebd1df1b5d0740ebadee9f975aa4eb98"} same_device=true replay_equal=true journal_equal=true actual_target_count=1 forwarded_reply_bytes=0 intermediary_joined=true
+A08_UDS_REQUEST {"baseRef":"HEAD","type":"createWorktree","workspaceId":"project-ebd1df1b5d0740ebadee9f975aa4eb98","worktree":{"slug":"uds-owned","wsId":"project-ebd1df1b5d0740ebadee9f975aa4eb98"}}
+A08_UDS_RESPONSE {"type":"createWorktreeOk","worktree":{"bare":false,"branch":"refs/heads/orca/project-ebd1df1b5d0740ebadee9f975aa4eb98/uds-owned","detached":false,"head":"6f48d8db1143db50e701919f732d296e29ed5835","locked":null,"path":"/tmp/a08-transports-KO4kuh/repo/.orca-worktrees/project-ebd1df1b5d0740ebadee9f975aa4eb98/uds-owned","prunable":null}}
+A08_UDS_REQUEST {"deleteBranch":true,"type":"deleteWorktree","workspaceId":"project-ebd1df1b5d0740ebadee9f975aa4eb98","worktree":{"slug":"uds-owned","wsId":"project-ebd1df1b5d0740ebadee9f975aa4eb98"}}
+A08_UDS_RESPONSE {"error":{"code":"DIRTY_WORKTREE","details":{"count":1,"files":["dirty.txt"],"path":"/tmp/a08-transports-KO4kuh/repo/.orca-worktrees/project-ebd1df1b5d0740ebadee9f975aa4eb98/uds-owned"},"message":"Worktree at '/tmp/a08-transports-KO4kuh/repo/.orca-worktrees/project-ebd1df1b5d0740ebadee9f975aa4eb98/uds-owned' is dirty (1 uncommitted/untracked files); deletion forbidden for 1-writer-1-worktree isolation"},"type":"worktreeError"}
+A08_UDS_REQUEST {"deleteBranch":true,"type":"deleteWorktree","workspaceId":"project-ebd1df1b5d0740ebadee9f975aa4eb98","worktree":{"slug":"uds-owned","wsId":"project-ebd1df1b5d0740ebadee9f975aa4eb98"}}
+A08_UDS_RESPONSE {"pruned":true,"type":"deleteWorktreeOk"}
+A08_TRANSPORT_SUCCESS listeners_joined=true sockets_refused=true wrong_root_unchanged=true PTY_spawned=false
+A08_TRANSPORT_RUNTIME joined=true failed=false
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.96s
+
+A08_TRANSPORT_CLEANUP child_pid=310214 reaped=true exit=exit status: 0 private_root=/tmp/a08-transports-KO4kuh absent=true
+ok
+test a08_transports_private_child ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.96s
+
+     Running tests/machine_worktrees.rs (/home/indo/ferryx-herdr-q4-linux-01a097f8/target/debug/deps/machine_worktrees-19e1c7d0c428a871)
+
+running 2 tests
+test machine_worktree_http_contract ... A08 HTTP GET worktrees status=200 body={"revision":"2","worktrees":[{"bare":false,"branch":"refs/heads/master","detached":false,"head":"edd1282b4567e9e55e33e3454d777af6e6c2aa5d","identity":null,"locked":null,"managed":false,"path":"/home/indo/ferryx-herdr-q4-linux-01a097f8/qa/tmp/.tmp7dS4wN/repo space \"quote\" ü","prunable":null,"workspaceId":"project-f6cf839456b6468684d193e7a5f96cff"}]}
+A08 LOST_REPLY owner_status=201 forwarded_response_bytes=0 intermediary_joined=true
+A08 STALE_REVISION status=409 target_preserved=true refusal_replayed=true
+A08_OWNER pid=310454 cwd=/home/indo/ferryx-herdr-q4-linux-01a097f8/qa/tmp/.tmp7dS4wN/repo space "quote" ü/.orca-worktrees/project-f6cf839456b6468684d193e7a5f96cff/feature
+A08 OWNER close_complete=true session_removed=true pid=310454 absent=true already_reaped=true (shared owner fixture, not A09)
+A08 delete scenario=locked status=409 body={"error":{"code":"WORKTREE_LOCKED","message":"WORKTREE_LOCKED","retryable":false,"requestId":"df42606a-6b55-498a-b03e-aaee45573363","details":{}}}
+A08 delete scenario=unmerged status=409 body={"error":{"code":"UNMERGED_BRANCH","message":"UNMERGED_BRANCH","retryable":false,"requestId":"e0f9e6b5-6fbe-43db-949f-c849ab9867dd","details":{}}}
+A08 delete scenario=partial status=409 body={"error":{"code":"WORKTREE_REMOVED_BRANCH_RETAINED","message":"WORKTREE_REMOVED_BRANCH_RETAINED","retryable":false,"requestId":"d043cf9c-9b78-434d-a4b1-7efca6608547","details":{"branch":"orca/project-f6cf839456b6468684d193e7a5f96cff/partial","branchDeleted":false,"worktreeRemoved":true}}}
+A08 delete scenario=remove-branch status=204 body=
+A08 RESTART same_request_same_row=true managed_target_count=1
+A08 CLEANUP listener_joined=true private_root_removed=true
+ok
+test worktree_revision_survives_owner_restart ... A08 revision phase=initial listener_joined=true owner_dropped=true connection_refused=true
+A08 revision phase=unchanged listener_joined=true owner_dropped=true connection_refused=true
+A08 revision phase=changed listener_joined=true owner_dropped=true connection_refused=true
+A08 revision post_commit_change=true unchanged_restart_equal=true offline_clean_change_stale_delete=true private_root_removed=true
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.91s
+
+     Running tests/relay_pairing_generation_regression.rs (/home/indo/ferryx-herdr-q4-linux-01a097f8/target/debug/deps/relay_pairing_generation_regression-b41f78fd00fe49dc)
+
+running 6 tests
+test machine_http_transport ... R4 CLEANUP runtime/connection tasks joined; private directory explicitly removed; failed_scenario=false
+ok
+test machine_routes_reach_relay_admission ... R4 CLEANUP runtime/connection tasks joined; private directory explicitly removed; failed_scenario=false
+ok
+test r4_absolute_replacement_filename_direct_and_relay ... R4 real gateway: absolute U+FFFD direct=200 relay=200 equal; malformed direct=400 relay=400; preferences direct=200 relay=200
+R4 CLEANUP runtime/connection tasks joined; private directory explicitly removed; failed_scenario=false
+ok
+test r4_failure_path_joins_connections_and_removes_store ... 
+thread 'r4_failure_path_joins_connections_and_removes_store' (310911) panicked at tests/relay_pairing_generation_regression.rs:122:9:
+injected failure after live control registration
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+R4 CLEANUP runtime/connection tasks joined; private directory explicitly removed; failed_scenario=true
+R4 injected failure: panic propagated after runtime joined; store absent; listener refused
+ok
+test second_machine_first_pairing_is_not_blocked_by_an_unrelated_connection ... R4 CLEANUP runtime/connection tasks joined; private directory explicitly removed; failed_scenario=false
+ok
+test stale_registration_stops_being_claimable_after_control_replacement ... R4 CLEANUP runtime/connection tasks joined; private directory explicitly removed; failed_scenario=false
+R4 CLEANUP runtime/connection tasks joined; private directory explicitly removed; failed_scenario=false
+ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+
+     Running tests/worktree_safety.rs (/home/indo/ferryx-herdr-q4-linux-01a097f8/target/debug/deps/worktree_safety-2619025ca524ec50)
+
+running 9 tests
+test active_writer_blocks_delete ... ok
+test default_delete_rejects_clean_unmerged_branch ... ok
+test explicit_destructive_delete_removes_clean_unmerged_branch ... ok
+test five_concurrent_worktree_terminal_lifecycles_remain_isolated ... ok
+test pty_spawn_failure_does_not_claim_exclusive_writer ... ok
+test pty_worktree_ownership_clears_on_close_and_natural_exit ... ok
+test same_worktree_supports_multiple_interactive_pty_sessions ... ok
+test second_writer_is_rejected_and_release_allows_reacquire ... ok
+test unavailable_base_ref_leaves_no_managed_parent_directory ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.95s
+
+COMMAND_EXIT 0

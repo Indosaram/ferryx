@@ -1,0 +1,813 @@
+$ vitest run --maxWorkers=1 src/lib/sessionPersistence.test.ts
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+ ❯ src/lib/sessionPersistence.test.ts (34 tests | 4 failed) 18ms
+   × sessionPersistence v3 serialization and migration > preserves paired ownership and proxy identity despite local inventory absence 7ms
+     → expected { …(13) } to match object { target: { …(2) }, …(1) }
+(23 matching properties omitted from actual)
+   × sessionPersistence v3 serialization and migration > does not trust incomplete inventory as proof of local process death 1ms
+     → expected null to be 'backend-1' // Object.is equality
+   × sessionPersistence v3 serialization and migration > quarantines an invalid paired workspace without affecting another row 1ms
+     → expected { …(9) } to be null
+   ✓ sessionPersistence v3 serialization and migration > retains Git grouping metadata in session snapshots and subsequent saves 1ms
+   × sessionPersistence v3 serialization and migration > serializes typed terminal tabs, pane ownership, pinned/expanded state, and separate local/backend identities 1ms
+     → expected 2 to be 3 // Object.is equality
+   ✓ sessionPersistence v3 serialization and migration > does not serialize terminal sessions that no tab or pane references 0ms
+   ✓ sessionPersistence v3 serialization and migration > round-trips Orca-style split tab groups without changing either tab's pane ownership 1ms
+   ✓ sessionPersistence v3 serialization and migration > matches live native PTYs by backendSessionId instead of the frontend-local session id 0ms
+   ✓ sessionPersistence v3 serialization and migration > drops persisted terminal sessions that no restored tab or pane references 0ms
+   ✓ sessionPersistence v3 serialization and migration > round-trips explicit browser metadata rather than guessing browser kind from a pane tree 1ms
+   ✓ sessionPersistence v3 serialization and migration > migrates v1 worktree identity and legacy session identifiers 0ms
+   ✓ sessionPersistence v3 serialization and migration > maps a v1 pane tree with no per-leaf mapping by leafId rather than tab id 0ms
+   ✓ sessionPersistence v3 serialization and migration > round-trips multi-worktree workspace state with active and parked worktree layouts without session leakage 1ms
+   ✓ sessionPersistence v3 serialization and migration > deserializes existing v2 terminal sessionIdsByLeafId into terminal PaneContent for every leaf 0ms
+   ✓ sessionPersistence v3 serialization and migration > round-trips mixed terminal/browser content preserving tree, browser metadata, and terminal session ownership with runtime browserId policy 0ms
+   ✓ sessionPersistence v3 serialization and migration > persists decimal-string daemonEpoch and lastOutputSequence separately from local/backend IDs 0ms
+   ✓ sessionPersistence v3 serialization and migration > reconciles only when both daemon epoch and backendSessionId match current daemon ListSessions result 0ms
+   ✓ sessionPersistence v3 serialization and migration > marks sessions exited/lost on daemon epoch change without auto-respawn 0ms
+   ✓ sessionPersistence v3 serialization and migration > persists and restores activityBySessionId for active referenced tabs and drops orphan session activity 0ms
+   ✓ sessionPersistence v3 serialization and migration > preserves live working and waiting claims for surviving daemon sessions, but drops working claim for dead sessions 0ms
+   ✓ sessionPersistence v3 serialization and migration > marks session exited and settles working activity to done when daemon reports running: false 0ms
+   ✓ sessionPersistence v3 serialization and migration > restores activities with seen: true so startup does not trigger attention frames on any pane 0ms
+   ✓ sessionPersistence v3 serialization and migration > persists and restores agentType and agentSessionId across serialization and deserialization 0ms
+   ✓ sessionPersistence v3 serialization and migration > preserves agentType and agentSessionId when daemon epoch mismatch marks session exited and nulls backendSessionId 0ms
+   ✓ sessionPersistence v3 serialization and migration > loads legacy save files without agent fields without throwing and sets agentType/agentSessionId to null 0ms
+   ✓ sessionPersistence v3 serialization and migration > keeps live backend identity, pane leaf ownership, agent metadata, CWD, and output sequence across warm disk restore 0ms
+   ✓ sessionPersistence v3 serialization and migration > persists providerSession and never serializes transient reconnect locks or in-flight state 0ms
+   ✓ sessionPersistence v3 serialization and migration > falls back to activityBySessionId agentType during serialization and deserialization when session.agentType is unset 0ms
+   ✓ sessionPersistence v3 serialization and migration > migrateLegacyAgentType > migrates legacy gemini agent type to antigravity and preserves other inputs 0ms
+   ✓ sessionPersistence v3 serialization and migration > migrates legacy gemini agentType to antigravity and generates providerSession during restore 0ms
+   ✓ sessionPersistence v3 serialization and migration > migrates restored activityBySessionId agentType from gemini to antigravity while leaving non-legacy untouched 0ms
+   ✓ sessionPersistenceKey > changes when an agent rotates its conversation id inside the same pane 0ms
+   ✓ sessionPersistenceKey > is stable while nothing persistable changed 0ms
+   ✓ sessionPersistenceKey > still changes on backend rebinding and lifecycle transitions 0ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 4 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > preserves paired ownership and proxy identity despite local inventory absence
+AssertionError: expected { …(13) } to match object { target: { …(2) }, …(1) }
+(23 matching properties omitted from actual)
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  {[22m
+[32m-   "remoteWorkspaceId": "remote-root",[39m
+[2m    "target": {[22m
+[2m      "hostId": "host-a",[22m
+[2m      "kind": "pairedDaemon",[22m
+[2m    },[22m
+[2m  }[22m
+
+ ❯ src/lib/sessionPersistence.test.ts:101:43
+     99|     const project = { target: { kind: "pairedDaemon" as const, hostId:…
+    100|     const saved = serializeWorkspaceState(workspaceId, "/workspace/mai…
+    101|     expect(saved.workspaces[workspaceId]).toMatchObject(project);
+       |                                           ^
+    102|     const next = serializeWorkspaceState(workspaceId, "/workspace/main…
+    103|     expect(next.workspaces[workspaceId]).toMatchObject(project);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/4]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > does not trust incomplete inventory as proof of local process death
+AssertionError: expected null to be 'backend-1' // Object.is equality
+
+[32m- Expected:[39m 
+"backend-1"
+
+[31m+ Received:[39m 
+null
+
+ ❯ src/lib/sessionPersistence.test.ts:113:58
+    111|     const saved = serializeWorkspaceState("default", "/workspace/main"…
+    112|     const restored = deserializeWorkspaceState("default", saved, { com…
+    113|     expect(restored.sessions["sess-1"].backendSessionId).toBe("backend…
+       |                                                          ^
+    114|   });
+    115| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/4]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > quarantines an invalid paired workspace without affecting another row
+AssertionError: expected { …(9) } to be null
+
+[32m- Expected:[39m 
+null
+
+[31m+ Received:[39m 
+{
+  "activeWorktreePath": "/workspace/main",
+  "activityBySessionId": {},
+  "layout": {
+    "activeTabId": "tab-1",
+    "focusedGroupId": "group-default",
+    "layoutsByTabId": {
+      "tab-1": {
+        "activeLeafId": "leaf-2",
+        "contentsByLeafId": {
+          "leaf-1": {
+            "kind": "terminal",
+            "sessionId": "sess-1",
+          },
+          "leaf-2": {
+            "kind": "terminal",
+            "sessionId": "sess-3",
+          },
+        },
+        "expandedLeafId": "leaf-2",
+        "root": {
+          "direction": "horizontal",
+          "first": {
+            "leafId": "leaf-1",
+            "type": "leaf",
+          },
+          "ratio": 0.5,
+          "second": {
+            "leafId": "leaf-2",
+            "type": "leaf",
+          },
+          "type": "split",
+        },
+        "sessionIdsByLeafId": {
+          "leaf-1": "sess-1",
+          "leaf-2": "sess-3",
+        },
+      },
+      "tab-2": {
+        "activeLeafId": "leaf-feature",
+        "contentsByLeafId": {
+          "leaf-feature": {
+            "kind": "terminal",
+            "sessionId": "sess-2",
+          },
+        },
+        "expandedLeafId": null,
+        "root": {
+          "leafId": "leaf-feature",
+          "type": "leaf",
+        },
+        "sessionIdsByLeafId": {
+          "leaf-feature": "sess-2",
+        },
+      },
+    },
+    "nestedSplit": null,
+    "primaryTabId": "tab-1",
+    "secondaryTabId": null,
+    "split": "horizontal",
+    "tabGroupLayout": {
+      "groupId": "group-default",
+      "type": "group",
+    },
+    "tabGroups": {
+      "group-default": {
+        "activeTabId": "tab-1",
+        "id": "group-default",
+        "tabIds": [
+          "tab-1",
+          "tab-2",
+        ],
+      },
+    },
+    "tabs": [
+      {
+        "id": "tab-1",
+        "kind": "terminal",
+        "label": "main",
+        "pinned": true,
+        "sessionId": "sess-1",
+      },
+      {
+        "id": "tab-2",
+        "kind": "terminal",
+        "label": "feature",
+        "pinned": false,
+        "sessionId": "sess-2",
+      },
+    ],
+  },
+  "sessions": {
+    "sess-1": {
+      "agentSessionId": null,
+      "agentType": null,
+      "backendSessionId": "backend-1",
+      "cwd": "/workspace/main/packages/api",
+      "daemonEpoch": null,
+      "id": "sess-1",
+      "lastOutputSequence": null,
+      "lifecycle": "working",
+      "providerSession": null,
+      "reconnectError": null,
+      "reconnectLifecycle": "idle",
+      "reconnectRequestId": null,
+      "workspaceId": "daemon:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "worktree": null,
+      "worktreePath": "/workspace/main",
+    },
+    "sess-2": {
+      "agentSessionId": null,
+      "agentType": null,
+      "backendSessionId": "backend-2",
+      "cwd": "/workspace/main",
+      "daemonEpoch": null,
+      "id": "sess-2",
+      "lastOutputSequence": null,
+      "lifecycle": "working",
+      "providerSession": null,
+      "reconnectError": null,
+      "reconnectLifecycle": "idle",
+      "reconnectRequestId": null,
+      "workspaceId": "daemon:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "worktree": null,
+      "worktreePath": "/workspace/main",
+    },
+    "sess-3": {
+      "agentSessionId": null,
+      "agentType": null,
+      "backendSessionId": "backend-3",
+      "cwd": "/workspace/main/packages/web",
+      "daemonEpoch": null,
+      "id": "sess-3",
+      "lastOutputSequence": null,
+      "lifecycle": "working",
+      "providerSession": null,
+      "reconnectError": null,
+      "reconnectLifecycle": "idle",
+      "reconnectRequestId": null,
+      "workspaceId": "daemon:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "worktree": null,
+      "worktreePath": "/workspace/main",
+    },
+  },
+  "unreadTabIds": {},
+  "unreadWorktreePaths": {},
+  "workspaceId": "daemon:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "worktreeLayouts": {},
+  "worktrees": [
+    {
+      "bare": false,
+      "branch": "refs/heads/main",
+      "detached": false,
+      "head": "123456",
+      "locked": null,
+      "path": "/workspace/main",
+      "prunable": null,
+    },
+  ],
+}
+
+ ❯ src/lib/sessionPersistence.test.ts:120:53
+    118|     const badId = `daemon:${"b".repeat(64)}`;
+    119|     saved.workspaces[badId] = { ...saved.workspaces.default, workspace…
+    120|     expect(deserializeWorkspaceState(badId, saved)).toBeNull();
+       |                                                     ^
+    121|     expect(deserializeWorkspaceState("default", saved)).not.toBeNull();
+    122|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/4]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > serializes typed terminal tabs, pane ownership, pinned/expanded state, and separate local/backend identities
+AssertionError: expected 2 to be 3 // Object.is equality
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- 3[39m
+[31m+ 2[39m
+
+ ❯ src/lib/sessionPersistence.test.ts:139:32
+    137| 
+    138|     expect(serialized.version).toBe(WORKSPACE_SESSION_VERSION);
+    139|     expect(serialized.version).toBe(3);
+       |                                ^
+    140|     const workspace = serialized.workspaces.default;
+    141|     expect(workspace.repoRoot).toBe("/workspace/main");
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/4]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  4 failed | 30 passed (34)
+   Start at  15:33:41
+   Duration  883ms (transform 93ms, setup 143ms, collect 80ms, tests 18ms, environment 274ms, prepare 31ms)
+
+error: script "test" exited with code 1
+$ vitest run --maxWorkers=1 src/state/workspaceRestore.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+ ❯ src/state/workspaceRestore.test.tsx (19 tests | 6 failed) 1033ms
+   × workspaceRestore coordinator > preloads mixed local and paired layouts while the local daemon is unavailable 3ms
+     → offline
+   ✓ workspaceRestore coordinator > preserves newer HMR state and does not restore stale preloaded snapshot when recoveredFromHmr is true 7ms
+   ✓ workspaceRestore coordinator > preloads every persisted workspace snapshot before project switching 3ms
+   ✓ workspaceRestore coordinator > exposes preloaded tabs on the first render of a project switch 4ms
+   ✓ workspaceRestore coordinator > transitions from idle -> loading -> restored on successful disk restore 1ms
+   ✓ workspaceRestore coordinator > does not start restore when enabled is false, and runs restore when enabled becomes true 1ms
+   ✓ workspaceRestore coordinator > safely cancels in-flight restore on StrictMode unmount and allows second mount to complete 3ms
+   ✓ workspaceRestore coordinator > marks workspace as restored immediately on HMR recovery without disk read when no HMR state is registered 1ms
+   ✓ workspaceRestore coordinator > reconciles stale session to null backendId on HMR recovery when live daemon session list is empty 1ms
+   ✓ workspaceRestore coordinator > preserves live backendId on HMR recovery when daemon session remains live 1ms
+   ✓ workspaceRestore coordinator > restores again after the workspace was switched away and back 1ms
+   ✓ workspaceRestore coordinator > isolates restore status per workspace 0ms
+   ✓ workspaceRestore coordinator > transitions to failed status if loadSession throws an unhandled error 1ms
+   ✓ workspaceRestore coordinator > propagates daemon list failure instead of treating it as an empty live-session set 0ms
+   × workspaceRestore coordinator > restores SSH pane identity while the daemon list is temporarily unavailable 1002ms
+     → Test timed out in 1000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+   × workspaceRestore coordinator > keeps persisted backend mappings untouched and fails restore when daemon listing fails 2ms
+     → expected 'idle' to be 'failed' // Object.is equality
+   × workspaceRestore coordinator > reconciles sessions with daemon epoch and backend ID matching from live session query 0ms
+     → expected "spy" to be called 1 times, but got 0 times
+   × workspaceRestore coordinator > marks session as exited without auto-respawn when daemon epoch has changed 0ms
+     → expected "spy" to be called 1 times, but got 0 times
+   × workspaceRestore coordinator > preserves live backend session identity, agent metadata, and tab ownership without calling spawnTerminal 0ms
+     → expected "spy" to be called 1 times, but got 0 times
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 6 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/state/workspaceRestore.test.tsx > workspaceRestore coordinator > preloads mixed local and paired layouts while the local daemon is unavailable
+Error: offline
+ ❯ src/state/workspaceRestore.test.tsx:92:101
+     90|       ...paired.workspaces[pairedId], target: { kind: "pairedDaemon" a…
+     91|     } } };
+     92|     await preloadWorkspaceSnapshots(["local", pairedId], async () => p…
+       |                                                                                                     ^
+     93|     expect(getWorkspaceSnapshot(pairedId)?.sessions["sess-1"]).toMatch…
+     94|     expect(getWorkspaceSnapshot("local")?.layout.tabs[0].id).toBe("tab…
+ ❯ Module.preloadWorkspaceSnapshots src/state/workspaceRestore.ts:121:32
+ ❯ src/state/workspaceRestore.test.tsx:92:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/6]⎯
+
+ FAIL  src/state/workspaceRestore.test.tsx > workspaceRestore coordinator > restores SSH pane identity while the daemon list is temporarily unavailable
+Error: Test timed out in 1000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+ ❯ src/state/workspaceRestore.test.tsx:618:3
+    616|   });
+    617| 
+    618|   it("restores SSH pane identity while the daemon list is temporarily …
+       |   ^
+    619|     const workspaceId = "ssh:list-unavailable";
+    620|     const persisted = persistedSingleTerminal(workspaceId, "stable", "…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/6]⎯
+
+ FAIL  src/state/workspaceRestore.test.tsx > workspaceRestore coordinator > keeps persisted backend mappings untouched and fails restore when daemon listing fails
+AssertionError: expected 'idle' to be 'failed' // Object.is equality
+
+Expected: [32m"[7mfa[27mile[7md[27m"[39m
+Received: [31m"i[7md[27mle"[39m
+
+ ❯ src/state/workspaceRestore.test.tsx:661:52
+    659|     });
+    660| 
+    661|     expect(getWorkspaceRestoreStatus(workspaceId)).toBe("failed");
+       |                                                    ^
+    662|     expect(restoreWorkspace).not.toHaveBeenCalled();
+    663|     expect(tauriMocks.spawnTerminal).not.toHaveBeenCalled();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/6]⎯
+
+ FAIL  src/state/workspaceRestore.test.tsx > workspaceRestore coordinator > reconciles sessions with daemon epoch and backend ID matching from live session query
+AssertionError: expected "spy" to be called 1 times, but got 0 times
+ ❯ src/state/workspaceRestore.test.tsx:691:30
+    689|       await Promise.resolve();
+    690|     });
+    691|     expect(restoreWorkspace).toHaveBeenCalledTimes(1);
+       |                              ^
+    692|     const restored = restoreWorkspace.mock.calls[0][0] as WorkspaceSta…
+    693|     expect(restored.sessions["sess-1"]).toMatchObject({
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/6]⎯
+
+ FAIL  src/state/workspaceRestore.test.tsx > workspaceRestore coordinator > marks session as exited without auto-respawn when daemon epoch has changed
+AssertionError: expected "spy" to be called 1 times, but got 0 times
+ ❯ src/state/workspaceRestore.test.tsx:724:30
+    722|       await Promise.resolve();
+    723|     });
+    724|     expect(restoreWorkspace).toHaveBeenCalledTimes(1);
+       |                              ^
+    725|     const restored = restoreWorkspace.mock.calls[0][0] as WorkspaceSta…
+    726|     expect(restored.sessions["sess-1"]).toMatchObject({
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/6]⎯
+
+ FAIL  src/state/workspaceRestore.test.tsx > workspaceRestore coordinator > preserves live backend session identity, agent metadata, and tab ownership without calling spawnTerminal
+AssertionError: expected "spy" to be called 1 times, but got 0 times
+ ❯ src/state/workspaceRestore.test.tsx:827:30
+    825|     });
+    826| 
+    827|     expect(restoreWorkspace).toHaveBeenCalledTimes(1);
+       |                              ^
+    828|     const restored = restoreWorkspace.mock.calls[0][0] as WorkspaceSta…
+    829| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/6]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  6 failed | 13 passed (19)
+   Start at  15:35:06
+   Duration  2.08s (transform 181ms, setup 152ms, collect 233ms, tests 1.03s, environment 298ms, prepare 34ms)
+
+error: script "test" exited with code 1
+   Compiling ferryx v2026.908.1 (/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/src-tauri)
+warning: unused import: `Manager`
+  --> src/ipc/notifications.rs:21:24
+   |
+21 | use tauri::{AppHandle, Manager, Runtime, State};
+   |                        ^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `scroll_daemon_client`
+   --> src/lib.rs:916:9
+    |
+916 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+    |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `machine_sessions` is never used
+   --> src/daemon/session_service.rs:366:19
+    |
+227 | impl DaemonSessionService {
+    | ------------------------- method in this implementation
+...
+366 |     pub(crate) fn machine_sessions(&self, epoch: crate::scoped_contracts::Epoch) -> Result<crate::remote::machine_protocol::Sessions, Str...
+    |                   ^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `app` is never read
+  --> src/ipc/notifications.rs:28:5
+   |
+27 | pub struct TauriNotificationBackend<R: Runtime> {
+   |            ------------------------ field in this struct
+28 |     app: AppHandle<R>,
+   |     ^^^
+
+warning: constant `GHOSTTY_TERMINAL_SCREEN_PRIMARY` is never used
+  --> src/native_terminal/sys/constants.rs:56:11
+   |
+56 | pub const GHOSTTY_TERMINAL_SCREEN_PRIMARY: c_int = 0;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `synchronized_output_deadline`, `expire_synchronized_output`, and `finish_synchronized_output` are never used
+   --> src/native_terminal/terminal.rs:169:19
+    |
+133 | impl NativeTerminal {
+    | ------------------- methods in this implementation
+...
+169 |     pub(crate) fn synchronized_output_deadline(&self) -> Option<tokio::time::Instant> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+173 |     pub(crate) fn expire_synchronized_output(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+184 |     pub(crate) fn finish_synchronized_output(&mut self) -> Result<(), NativeTerminalError> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `wait_and_reap` is never used
+   --> src/terminal/session.rs:364:19
+    |
+ 73 | impl PtySession {
+    | --------------- method in this implementation
+...
+364 |     pub(crate) fn wait_and_reap(&self) -> Result<Option<i32>, PtyError> {
+    |                   ^^^^^^^^^^^^^
+
+warning: function `with_local_worktree_budget` is never used
+   --> src/worktree/git.rs:115:15
+    |
+115 | pub(crate) fn with_local_worktree_budget<T>(work: impl FnOnce() -> T) -> T {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src/worktree/manager.rs:86:19
+   |
+86 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+   --> src/worktree/manager.rs:93:8
+    |
+ 92 | impl WriterLeaseGuard {
+    | --------------------- associated items in this implementation
+ 93 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+    |        ^^^
+...
+101 |     pub(crate) fn canonical_path(&self) -> &Path {
+    |                   ^^^^^^^^^^^^^^
+...
+105 |     pub(crate) fn owner_id(&self) -> &str {
+    |                   ^^^^^^^^
+
+warning: method `acquire_writer_lease` is never used
+   --> src/worktree/manager.rs:338:19
+    |
+134 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+338 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib) generated 19 warnings (run `cargo fix --lib -p ferryx` to apply 2 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 20.56s
+     Running tests/daemon_persistence_contract.rs (src-tauri/target/debug/deps/daemon_persistence_contract-c8035f2d8290443f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+warning: unused import: `Manager`
+  --> src/ipc/notifications.rs:21:24
+   |
+21 | use tauri::{AppHandle, Manager, Runtime, State};
+   |                        ^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `scroll_daemon_client`
+   --> src/lib.rs:916:9
+    |
+916 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+    |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `machine_sessions` is never used
+   --> src/daemon/session_service.rs:366:19
+    |
+227 | impl DaemonSessionService {
+    | ------------------------- method in this implementation
+...
+366 |     pub(crate) fn machine_sessions(&self, epoch: crate::scoped_contracts::Epoch) -> Result<crate::remote::machine_protocol::Sessions, Str...
+    |                   ^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `app` is never read
+  --> src/ipc/notifications.rs:28:5
+   |
+27 | pub struct TauriNotificationBackend<R: Runtime> {
+   |            ------------------------ field in this struct
+28 |     app: AppHandle<R>,
+   |     ^^^
+
+warning: constant `GHOSTTY_TERMINAL_SCREEN_PRIMARY` is never used
+  --> src/native_terminal/sys/constants.rs:56:11
+   |
+56 | pub const GHOSTTY_TERMINAL_SCREEN_PRIMARY: c_int = 0;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `synchronized_output_deadline`, `expire_synchronized_output`, and `finish_synchronized_output` are never used
+   --> src/native_terminal/terminal.rs:169:19
+    |
+133 | impl NativeTerminal {
+    | ------------------- methods in this implementation
+...
+169 |     pub(crate) fn synchronized_output_deadline(&self) -> Option<tokio::time::Instant> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+173 |     pub(crate) fn expire_synchronized_output(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+184 |     pub(crate) fn finish_synchronized_output(&mut self) -> Result<(), NativeTerminalError> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `wait_and_reap` is never used
+   --> src/terminal/session.rs:364:19
+    |
+ 73 | impl PtySession {
+    | --------------- method in this implementation
+...
+364 |     pub(crate) fn wait_and_reap(&self) -> Result<Option<i32>, PtyError> {
+    |                   ^^^^^^^^^^^^^
+
+warning: function `with_local_worktree_budget` is never used
+   --> src/worktree/git.rs:115:15
+    |
+115 | pub(crate) fn with_local_worktree_budget<T>(work: impl FnOnce() -> T) -> T {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src/worktree/manager.rs:86:19
+   |
+86 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+   --> src/worktree/manager.rs:93:8
+    |
+ 92 | impl WriterLeaseGuard {
+    | --------------------- associated items in this implementation
+ 93 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+    |        ^^^
+...
+101 |     pub(crate) fn canonical_path(&self) -> &Path {
+    |                   ^^^^^^^^^^^^^^
+...
+105 |     pub(crate) fn owner_id(&self) -> &str {
+    |                   ^^^^^^^^
+
+warning: method `acquire_writer_lease` is never used
+   --> src/worktree/manager.rs:338:19
+    |
+134 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+338 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib) generated 19 warnings (run `cargo fix --lib -p ferryx` to apply 2 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.53s
+     Running tests/daemon_persistence_contract.rs (src-tauri/target/debug/deps/daemon_persistence_contract-c8035f2d8290443f)
+
+running 1 test
+test a17_pre_v3_backup_is_required_and_never_replaced ... FAILED
+
+failures:
+
+---- a17_pre_v3_backup_is_required_and_never_replaced stdout ----
+
+thread 'a17_pre_v3_backup_is_required_and_never_replaced' (2554388) panicked at tests/daemon_persistence_contract.rs:80:5:
+assertion failed: save_session_to_path(&path, &v3).is_err()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    a17_pre_v3_backup_is_required_and_never_replaced
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.06s
+
+error: test failed, to rerun pass `--test daemon_persistence_contract`
+$ vitest run --maxWorkers=1 src/lib/sessionPersistence.test.ts -t "projects paired targets"
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+ ❯ src/lib/sessionPersistence.test.ts (35 tests | 1 failed | 34 skipped) 8ms
+   ↓ sessionPersistence v3 serialization and migration > preserves paired ownership and proxy identity despite local inventory absence
+   × sessionPersistence v3 serialization and migration > projects paired targets without embedding credential fields 7ms
+     → expected '{"version":3,"timestamp":178928151777…' not to contain 'secret-sentinel'
+   ↓ sessionPersistence v3 serialization and migration > does not trust incomplete inventory as proof of local process death
+   ↓ sessionPersistence v3 serialization and migration > quarantines an invalid paired workspace without affecting another row
+   ↓ sessionPersistence v3 serialization and migration > retains Git grouping metadata in session snapshots and subsequent saves
+   ↓ sessionPersistence v3 serialization and migration > serializes typed terminal tabs, pane ownership, pinned/expanded state, and separate local/backend identities
+   ↓ sessionPersistence v3 serialization and migration > does not serialize terminal sessions that no tab or pane references
+   ↓ sessionPersistence v3 serialization and migration > round-trips Orca-style split tab groups without changing either tab's pane ownership
+   ↓ sessionPersistence v3 serialization and migration > matches live native PTYs by backendSessionId instead of the frontend-local session id
+   ↓ sessionPersistence v3 serialization and migration > drops persisted terminal sessions that no restored tab or pane references
+   ↓ sessionPersistence v3 serialization and migration > round-trips explicit browser metadata rather than guessing browser kind from a pane tree
+   ↓ sessionPersistence v3 serialization and migration > migrates v1 worktree identity and legacy session identifiers
+   ↓ sessionPersistence v3 serialization and migration > maps a v1 pane tree with no per-leaf mapping by leafId rather than tab id
+   ↓ sessionPersistence v3 serialization and migration > round-trips multi-worktree workspace state with active and parked worktree layouts without session leakage
+   ↓ sessionPersistence v3 serialization and migration > deserializes existing v2 terminal sessionIdsByLeafId into terminal PaneContent for every leaf
+   ↓ sessionPersistence v3 serialization and migration > round-trips mixed terminal/browser content preserving tree, browser metadata, and terminal session ownership with runtime browserId policy
+   ↓ sessionPersistence v3 serialization and migration > persists decimal-string daemonEpoch and lastOutputSequence separately from local/backend IDs
+   ↓ sessionPersistence v3 serialization and migration > reconciles only when both daemon epoch and backendSessionId match current daemon ListSessions result
+   ↓ sessionPersistence v3 serialization and migration > marks sessions exited/lost on daemon epoch change without auto-respawn
+   ↓ sessionPersistence v3 serialization and migration > persists and restores activityBySessionId for active referenced tabs and drops orphan session activity
+   ↓ sessionPersistence v3 serialization and migration > preserves live working and waiting claims for surviving daemon sessions, but drops working claim for dead sessions
+   ↓ sessionPersistence v3 serialization and migration > marks session exited and settles working activity to done when daemon reports running: false
+   ↓ sessionPersistence v3 serialization and migration > restores activities with seen: true so startup does not trigger attention frames on any pane
+   ↓ sessionPersistence v3 serialization and migration > persists and restores agentType and agentSessionId across serialization and deserialization
+   ↓ sessionPersistence v3 serialization and migration > preserves agentType and agentSessionId when daemon epoch mismatch marks session exited and nulls backendSessionId
+   ↓ sessionPersistence v3 serialization and migration > loads legacy save files without agent fields without throwing and sets agentType/agentSessionId to null
+   ↓ sessionPersistence v3 serialization and migration > keeps live backend identity, pane leaf ownership, agent metadata, CWD, and output sequence across warm disk restore
+   ↓ sessionPersistence v3 serialization and migration > persists providerSession and never serializes transient reconnect locks or in-flight state
+   ↓ sessionPersistence v3 serialization and migration > falls back to activityBySessionId agentType during serialization and deserialization when session.agentType is unset
+   ↓ sessionPersistence v3 serialization and migration > migrateLegacyAgentType > migrates legacy gemini agent type to antigravity and preserves other inputs
+   ↓ sessionPersistence v3 serialization and migration > migrates legacy gemini agentType to antigravity and generates providerSession during restore
+   ↓ sessionPersistence v3 serialization and migration > migrates restored activityBySessionId agentType from gemini to antigravity while leaving non-legacy untouched
+   ↓ sessionPersistenceKey > changes when an agent rotates its conversation id inside the same pane
+   ↓ sessionPersistenceKey > is stable while nothing persistable changed
+   ↓ sessionPersistenceKey > still changes on backend rebinding and lifecycle transitions
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > projects paired targets without embedding credential fields
+AssertionError: expected '{"version":3,"timestamp":178928151777…' not to contain 'secret-sentinel'
+
+Expected: [32m"secret-sentinel"[39m
+Received: [31m"{"version":3,"timestamp":1789281517778,"activeWorkspaceId":"daemon:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","workspaces":{"daemon:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa":{"workspaceId":"daemon:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","repoRoot":"/workspace/main","target":{"kind":"pairedDaemon","hostId":"host-a","deviceToken":"secret-sentinel"},"remoteWorkspaceId":"remote-root","worktrees":[{"path":"/workspace/main","branch":"main","head":"123456","isMain":true,"isLocked":false}],"activeWorktreePath":"/workspace/main","layout":{"splitMode":"horizontal","primaryTabId":"tab-1","secondaryTabId":null,"activeTabId":"tab-1","tabs":[{"id":"tab-1","kind":"terminal","label":"main","pinned":true,"terminal":{"primarySessionId":"sess-1","paneTree":{"type":"split","direction":"horizontal","first":{"type":"leaf","leafId":"leaf-1"},"second":{"type":"leaf","leafId":"leaf-2"},"ratio":0.5},"sessionIdsByLeafId":{"leaf-1":"sess-1","leaf-2":"sess-3"},"contentsByLeafId":{"leaf-1":{"kind":"terminal","sessionId":"sess-1"},"leaf-2":{"kind":"terminal","sessionId":"sess-3"}},"activeLeafId":"leaf-2","expandedLeafId":"leaf-2"}},{"id":"tab-2","kind":"terminal","label":"feature","pinned":false,"terminal":{"primarySessionId":"sess-2","paneTree":{"type":"leaf","leafId":"leaf-feature"},"sessionIdsByLeafId":{"leaf-feature":"sess-2"},"contentsByLeafId":{"leaf-feature":{"kind":"terminal","sessionId":"sess-2"}},"activeLeafId":"leaf-feature","expandedLeafId":null}}],"tabGroups":[{"id":"group-default","tabIds":["tab-1","tab-2"],"activeTabId":"tab-1"}],"tabGroupLayout":{"type":"group","groupId":"group-default"},"focusedGroupId":"group-default"},"terminalSessions":{"sess-1":{"localSessionId":"sess-1","backendSessionId":"backend-1","worktreePath":"/workspace/main","cwd":"/workspace/main/packages/api","daemonEpoch":null,"lastOutputSequence":null,"agentType":null,"agentSessionId":null,"providerSession":null,"createdAt":1789281517778},"sess-2":{"localSessionId":"sess-2","backendSessionId":"backend-2","worktreePath":"/workspace/main","cwd":"/workspace/main","daemonEpoch":null,"lastOutputSequence":null,"agentType":null,"agentSessionId":null,"providerSession":null,"createdAt":1789281517778},"sess-3":{"localSessionId":"sess-3","backendSessionId":"backend-3","worktreePath":"/workspace/main","cwd":"/workspace/main/packages/web","daemonEpoch":null,"lastOutputSequence":null,"agentType":null,"agentSessionId":null,"providerSession":null,"createdAt":1789281517778}}}}}"[39m
+
+ ❯ src/lib/sessionPersistence.test.ts:114:39
+    112|     const project = { target: { kind: "pairedDaemon" as const, hostId:…
+    113|     const saved = serializeWorkspaceState(workspaceId, "/workspace/mai…
+    114|     expect(JSON.stringify(saved)).not.toContain("secret-sentinel");
+       |                                       ^
+    115|   });
+    116| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 34 skipped (35)
+   Start at  15:38:36
+   Duration  997ms (transform 106ms, setup 170ms, collect 97ms, tests 8ms, environment 297ms, prepare 36ms)
+
+error: script "test" exited with code 1

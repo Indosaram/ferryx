@@ -532,7 +532,9 @@ mod tests {
     fn red_posix_script_builders_executable_behavior() {
         let dir = tempfile::tempdir().expect("tempdir");
         let repo_root_path = dir.path().canonicalize().expect("canonicalize");
-        let repo_root = repo_root_path.to_str().expect("repo root str");
+        let portable_root = crate::worktree::strip_verbatim_prefix(repo_root_path.to_str().expect("repo root str"));
+        let portable_root = if cfg!(windows) { portable_root.replace('\\', "/") } else { portable_root };
+        let repo_root = portable_root.as_str();
 
         let init_status = std::process::Command::new("git")
             .args(["init", repo_root])
@@ -570,20 +572,28 @@ mod tests {
             None,
         );
 
-        let create_output = std::process::Command::new("bash")
+        let bash = if cfg!(windows) {
+            let git = std::env::split_paths(&std::env::var_os("PATH").expect("PATH"))
+                .map(|dir| dir.join("git.exe"))
+                .find(|path| path.is_file()).expect("Git for Windows on PATH");
+            git.parent().unwrap().parent().unwrap().join("bin/bash.exe")
+        } else { std::path::PathBuf::from("bash") };
+        let create_output = std::process::Command::new(&bash)
             .args(["-c", &create_script])
             .output()
             .expect("run create_script");
         assert!(
             create_output.status.success(),
-            "create_script failed: {}",
+            "create_script failed: status={:?} stdout={} stderr={}",
+            create_output.status,
+            String::from_utf8_lossy(&create_output.stdout),
             String::from_utf8_lossy(&create_output.stderr)
         );
 
         let marker = format!("FERRYX_WT_LIST_V1_{}", uuid::Uuid::new_v4().simple());
         let list_script = worktree_list_script(RemotePlatform::Posix, repo_root, &marker);
 
-        let list_output = std::process::Command::new("bash")
+        let list_output = std::process::Command::new(&bash)
             .args(["-c", &list_script])
             .output()
             .expect("run list_script");

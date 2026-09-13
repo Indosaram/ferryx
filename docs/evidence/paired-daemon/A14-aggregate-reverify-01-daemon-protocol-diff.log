@@ -1,0 +1,92 @@
+diff --git a/src-tauri/src/daemon/protocol.rs b/src-tauri/src/daemon/protocol.rs
+index 95400e28..82925022 100644
+--- a/src-tauri/src/daemon/protocol.rs
++++ b/src-tauri/src/daemon/protocol.rs
+@@ -127,6 +127,14 @@ pub enum DaemonRequest {
+         version: u32,
+     },
+     Ping,
++    #[serde(rename_all = "camelCase")]
++    MachineSessionDetail { session_id: String },
++    #[serde(rename_all = "camelCase")]
++    MachineSessionMetadata { target: crate::remote::machine_protocol::RemoteTerminalTarget, report: AgentStateReport },
++    MachineGateway,
++    #[serde(rename_all = "camelCase")]
++    MachineMetadataSubscribe { target: crate::remote::machine_protocol::RemoteTerminalTarget },
++
+     #[serde(rename_all = "camelCase")]
+     RegisterWorkspace {
+         workspace_id: String,
+@@ -137,6 +145,20 @@ pub enum DaemonRequest {
+         workspace_id: String,
+     },
+     #[serde(rename_all = "camelCase")]
++    CreateWorktree {
++        workspace_id: String,
++        worktree: WorktreeIdentity,
++        base_ref: Option<String>,
++    },
++    #[serde(rename_all = "camelCase")]
++    DeleteWorktree {
++        workspace_id: String,
++        worktree: WorktreeIdentity,
++        delete_branch: bool,
++        #[serde(default)]
++        destructive: bool,
++    },
++    #[serde(rename_all = "camelCase")]
+     Spawn {
+         client_request_id: String,
+         workspace_id: String,
+@@ -201,6 +223,13 @@ pub enum DaemonRequest {
+     ClearSession,
+     RemoteGetStatus,
+     GetCapabilities,
++    PairedHostList,
++    PairedHostOperation { request: crate::paired_host::client::OperationRequest },
++    PairedHostRead { request: crate::paired_host::inventory::MigrationReceipt },
++    PairedHostPair { request: crate::paired_host::service::PairRequest },
++    PairedHostMigrateLegacy { request: crate::paired_host::service::MigrationRequest },
++    #[serde(rename_all = "camelCase")]
++    PairedHostForget { host_id: String, expected_generation: crate::scoped_contracts::Epoch },
+     /// Separate variant: an old daemon rejects machine issuance instead of
+     /// ignoring an unknown scope field and accidentally issuing a mirror PIN.
+     RemoteCreateMachinePairingCode,
+@@ -246,6 +275,14 @@ pub enum DaemonRequest {
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ #[serde(tag = "type", rename_all = "camelCase")]
+ pub enum DaemonResponse {
++    PairedHostOperationOk { response: crate::paired_host::client::OperationResponse },
++    PairedHostOperationError { error: crate::paired_host::client::ClientError },
++    PairedHostListOk { hosts: Vec<crate::paired_host::inventory::HostView> },
++    PairedHostPairOk { host: crate::paired_host::inventory::HostView },
++    PairedHostReadOk { host: crate::paired_host::inventory::HostView },
++    PairedHostMigrateLegacyOk { receipt: crate::paired_host::inventory::MigrationReceipt },
++    PairedHostForgetOk,
++    PairedHostError { error: crate::paired_host::service::ServiceError },
+     #[serde(rename_all = "camelCase")]
+     HandshakeOk {
+         version: u32,
+@@ -267,6 +304,12 @@ pub enum DaemonResponse {
+     RegisterWorkspaceOk,
+     UnregisterWorkspaceOk,
+     #[serde(rename_all = "camelCase")]
++    CreateWorktreeOk { worktree: crate::worktree::Worktree },
++    #[serde(rename_all = "camelCase")]
++    DeleteWorktreeOk { pruned: bool },
++    #[serde(rename_all = "camelCase")]
++    WorktreeError { error: crate::ipc::IpcError },
++    #[serde(rename_all = "camelCase")]
+     SpawnOk {
+         session_id: String,
+         epoch: u64,
+@@ -288,6 +331,9 @@ pub enum DaemonResponse {
+     #[serde(rename_all = "camelCase")]
+     RemoteSessionError { failure: crate::terminal::remote::RemoteFailure },
+     RetryRemoteSessionOk,
++    #[serde(rename_all = "camelCase")]
++    MachineSessionDetailOk { detail: crate::remote::machine_protocol::SessionDetail },
++    MachineGatewayOk,
+     WriteOk,
+     ResizeOk,
+     SignalOk,

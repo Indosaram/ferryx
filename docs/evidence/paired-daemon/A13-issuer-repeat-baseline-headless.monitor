@@ -1,0 +1,2 @@
+owner=34046 command=src-tauri/target/debug/deps/ferryx_lib-fede6191c14a3d71 daemon::server::a03_owner_cli_fixture::a03_private_owner_cli_surface --exact --nocapture 
+exit=134 owner_reaped=true

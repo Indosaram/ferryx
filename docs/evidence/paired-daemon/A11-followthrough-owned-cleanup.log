@@ -1,0 +1,3 @@
+Supervisor removed: /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/a11-followthrough-owned-jj99l1p4
+exists=False
+No supervisor background jobs were launched; cargo commands waited synchronously. Fixture runtime/PTYS/listener cleanup receipts are in final log.

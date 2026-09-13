@@ -1,12 +1,22 @@
 use crate::ipc::{run_blocking, IpcError};
 use crate::worktree::{
-    BranchDeletionPreview, CreateWorktreeOptions, DirtyState, WorkspaceRegistry, Worktree,
+    BranchDeletionPreview, DirtyState, WorkspaceRegistry, Worktree,
     WorktreeIdentity,
 };
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Runtime, State};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State};
+use crate::daemon::{DaemonClient, protocol::{DaemonRequest, DaemonResponse}};
+use std::sync::Arc;
 
 pub const WORKTREE_CHANGED_EVENT: &str = "worktree_changed";
+
+pub(crate) fn worktree_response(response: DaemonResponse) -> Result<DaemonResponse, IpcError> {
+    match response {
+        DaemonResponse::WorktreeError { error } => Err(error),
+        DaemonResponse::Error { message } => Err(IpcError::internal(message)),
+        response => Ok(response),
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -119,19 +129,14 @@ pub async fn cmd_worktree_create<R: Runtime>(
     let event_workspace_id = workspace_id.clone();
     let event_identity = identity.clone();
 
-    let created = run_blocking(move || {
-        let manager = registry.manager(&workspace_id).map_err(IpcError::from)?;
-        let target = manager
-            .worktree_path_for(&identity.ws_id, &identity.slug)
-            .map_err(IpcError::from)?;
-        let mut options =
-            CreateWorktreeOptions::new(identity.ws_id.clone(), identity.slug.clone(), target);
-        if let Some(base_ref) = request.base_ref {
-            options = options.with_base_ref(base_ref);
-        }
-        manager.create_worktree(options).map_err(IpcError::from)
-    })
-    .await?;
+    WorkspaceRegistry::validate_workspace_id(&workspace_id).map_err(IpcError::from)?;
+    let created = match worktree_response(app.state::<Arc<DaemonClient>>().send_request(DaemonRequest::CreateWorktree {
+        workspace_id, worktree: identity, base_ref: request.base_ref,
+    }).await?)? {
+        DaemonResponse::CreateWorktreeOk { worktree } => worktree,
+        _ => return Err(IpcError::internal("Unexpected worktree response")),
+    };
+    registry.bump_revision();
 
     emit_worktree_changed(
         &app,
@@ -155,19 +160,14 @@ async fn delete_worktree<R: Runtime>(
     let event_workspace_id = workspace_id.clone();
     let event_identity = identity.clone();
 
-    let pruned = run_blocking(move || {
-        let (manager, worktree) = registry
-            .resolve_worktree(&workspace_id, &identity)
-            .map_err(IpcError::from)?;
-        manager
-            .delete_worktree_and_branch_with_prune_status(
-                &worktree.path,
-                delete_branch,
-                destructive,
-            )
-            .map_err(IpcError::from)
-    })
-    .await?;
+    WorkspaceRegistry::validate_workspace_id(&workspace_id).map_err(IpcError::from)?;
+    let pruned = match worktree_response(app.state::<Arc<DaemonClient>>().send_request(DaemonRequest::DeleteWorktree {
+        workspace_id, worktree: identity, delete_branch, destructive,
+    }).await?)? {
+        DaemonResponse::DeleteWorktreeOk { pruned } => pruned,
+        _ => return Err(IpcError::internal("Unexpected worktree response")),
+    };
+    registry.bump_revision();
 
     emit_worktree_changed(
         &app,

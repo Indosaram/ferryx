@@ -1,4 +1,6 @@
 #![cfg(unix)]
+#[path = "support/machine_retirement.rs"]
+mod machine_retirement;
 use ferryx_lib::daemon::protocol::{
     DaemonRequest, DaemonResponse, DaemonSessionDetails, DaemonStreamMessage,
     DAEMON_PROTOCOL_VERSION,

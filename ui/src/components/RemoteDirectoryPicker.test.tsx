@@ -24,6 +24,26 @@ beforeEach(() => remote.listRemoteDirectories.mockReset());
 afterEach(cleanup);
 
 describe("remote path autocomplete", () => {
+  it("routes generic sources through keyboard/IME navigation and discards old generations", async () => {
+    const directories = vi.fn(async (path: string | null) => listing(path ?? "/home/paired", ["秘密 folder"]));
+    const onSelect = vi.fn();
+    const source = { key: "paired:7", directories };
+    let rendered!: ReturnType<typeof render>;
+    await act(async () => { rendered = render(<RemoteDirectoryPicker source={source} disabled={false} onSelect={onSelect} />); });
+    const input = screen.getByRole("combobox");
+    fireEvent.compositionStart(input);
+    fireEvent.change(input, { target: { value: "/home/paired/秘" } });
+    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+    expect(directories).toHaveBeenCalledTimes(1);
+    await act(async () => { fireEvent.compositionEnd(input); });
+    await act(async () => { fireEvent.keyDown(input, { key: "Tab" }); });
+    expect(onSelect).toHaveBeenLastCalledWith("/home/paired/秘密 folder");
+    const next = { key: "paired:8", directories: vi.fn(async () => listing("/new/home")) };
+    await act(async () => { rendered.rerender(<RemoteDirectoryPicker source={next} disabled={false} onSelect={onSelect} />); });
+    expect(next.directories).toHaveBeenCalledWith(null, false);
+    expect(input).toHaveValue("/new/home");
+    expect(remote.listRemoteDirectories).not.toHaveBeenCalled();
+  });
   it("loads children when a separator is typed without submitting navigation", async () => {
     const { input, onSelect } = await mount();
     expect(input).toHaveValue("/home/dev");

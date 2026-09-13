@@ -1,0 +1,2 @@
+owner=83034 command=src-tauri/target/debug/ferryx-cli --help 
+exit=1 owner_reaped=true

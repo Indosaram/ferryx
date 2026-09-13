@@ -1,0 +1,4 @@
+owner=27324 command=cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib native_daemon_relay_inventory_roundtrip -- --nocapture 
+  PID  PPID    RSS ELAPSED COMMAND
+27324 27319    704   00:00 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib native_daemon_relay_inventory_roundtrip -- --nocapture
+exit=0 owner_reaped=true

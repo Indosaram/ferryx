@@ -1,0 +1,168 @@
+paths EXIT=0; WAITED=True
+project EXIT=0; WAITED=True
+directories EXIT=0; WAITED=True
+identity EXIT=0; WAITED=True
+relay EXIT=0; WAITED=True
+pty EXIT=101; WAITED=True
+worktrees EXIT=101; WAITED=True
+candidate-focused-directories.log
+1188 |     static FERRYX_DATA_DIR_LOCK: Mutex<()> = Mutex::new(());
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `RestoreFerryxDataDir` is never constructed
+    --> src\lib.rs:1190:12
+     |
+1190 |     struct RestoreFerryxDataDir(Option<OsString>);
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib test) generated 26 warnings (run `cargo fix --lib -p ferryx --tests` to apply 13 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 1.05s
+     Running unittests src\lib.rs (C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\ferryx_lib-c12d60fa37477486.exe)
+
+running 1 test
+HTTP native browse: hidden=false, entries=2, truncated=false
+HTTP native browse: hidden=false, entries=0, truncated=false
+HTTP native browse: hidden=true, entries=6, truncated=false
+HTTP native browse: hidden=false, entries=0, truncated=false
+test remote::filesystem_tests::a06_directory_http_home ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 729 filtered out; finished in 0.70s
+
+candidate-focused-identity.log
+warning: static `FERRYX_DATA_DIR_LOCK` is never used
+    --> src\lib.rs:1188:12
+     |
+1188 |     static FERRYX_DATA_DIR_LOCK: Mutex<()> = Mutex::new(());
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `RestoreFerryxDataDir` is never constructed
+    --> src\lib.rs:1190:12
+     |
+1190 |     struct RestoreFerryxDataDir(Option<OsString>);
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib test) generated 26 warnings (run `cargo fix --lib -p ferryx --tests` to apply 13 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 1.06s
+     Running unittests src\lib.rs (C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\ferryx_lib-c12d60fa37477486.exe)
+
+running 1 test
+A08 typed dirty delete: serialized owner -> native adapter exact code/message/path/count/files; target preserved; worker joined/root removed
+test remote::workspace_api::worktrees::authority_tests::local_worktree_errors_survive_owner_wire_and_native_adapter ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 729 filtered out; finished in 0.75s
+
+candidate-focused-paths.log
+warning: method `acquire_writer_lease` is never used
+   --> src\worktree\manager.rs:338:19
+    |
+134 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+338 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: linker stdout: C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\ferryx_lib.dll.lib ?쇱씠釉뚮윭由?諛?C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\ferryx_lib.dll.exp 媛쒖껜瑜??앹꽦?섍퀬 ?덉뒿?덈떎.
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `ferryx` (lib) generated 15 warnings (run `cargo fix --lib -p ferryx` to apply 4 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 52.45s
+     Running tests\q4_windows_paths.rs (C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\q4_windows_paths-b3ef6a26c3b1896b.exe)
+
+running 1 test
+test git_inventory_and_manager_share_native_identity ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+
+candidate-focused-project.log
+    --> src\lib.rs:1188:12
+     |
+1188 |     static FERRYX_DATA_DIR_LOCK: Mutex<()> = Mutex::new(());
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `RestoreFerryxDataDir` is never constructed
+    --> src\lib.rs:1190:12
+     |
+1190 |     struct RestoreFerryxDataDir(Option<OsString>);
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib test) generated 26 warnings (run `cargo fix --lib -p ferryx --tests` to apply 13 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 54.77s
+     Running unittests src\lib.rs (C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\ferryx_lib-c12d60fa37477486.exe)
+
+running 1 test
+A07 HTTP register/replay/digest-conflict/root-refusal/list/unregister disk-preserved
+A07 cleanup HTTP task joined; temporary root removed; injected=false; root=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\temp\.tmpE1Y2q3
+test remote::workspace_api_tests::a07_project_http_registration ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 729 filtered out; finished in 0.63s
+
+candidate-focused-pty.log
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib test) generated 26 warnings (run `cargo fix --lib -p ferryx --tests` to apply 13 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 0.96s
+     Running unittests src\lib.rs (C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\ferryx_lib-c12d60fa37477486.exe)
+
+running 1 test
+
+thread 'remote::relay_server::tests::coordinator_pairs_through_relay_to_real_gateway' (21552) panicked at src\remote\relay_server.rs:3385:10:
+terminal output arrived before the deadline: Elapsed(())
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+R4 PTY: executed marker received; owned sessions explicitly closed; listeners/reverse joined; private workspace removed
+test remote::relay_server::tests::coordinator_pairs_through_relay_to_real_gateway ... FAILED
+
+failures:
+
+failures:
+    remote::relay_server::tests::coordinator_pairs_through_relay_to_real_gateway
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 729 filtered out; finished in 20.63s
+
+error: test failed, to rerun pass `--lib`
+candidate-focused-relay.log
+
+warning: static `FERRYX_DATA_DIR_LOCK` is never used
+    --> src\lib.rs:1188:12
+     |
+1188 |     static FERRYX_DATA_DIR_LOCK: Mutex<()> = Mutex::new(());
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `RestoreFerryxDataDir` is never constructed
+    --> src\lib.rs:1190:12
+     |
+1190 |     struct RestoreFerryxDataDir(Option<OsString>);
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib test) generated 26 warnings (run `cargo fix --lib -p ferryx --tests` to apply 13 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 1.05s
+     Running unittests src\lib.rs (C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\ferryx_lib-c12d60fa37477486.exe)
+
+running 1 test
+test remote::relay_server::tests::test_relay_browser_ws_terminal_bridge_success ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 729 filtered out; finished in 0.03s
+
+candidate-focused-worktrees.log
+
+thread 'tokio-rt-worker' (9220) panicked at tests\machine_worktrees.rs:111:36:
+called `Result::unwrap()` on an `Err` value: Os { code: 123, kind: InvalidFilename, message: "?뚯씪 ?대쫫, ?붾젆?곕━ ?대쫫 ?먮뒗 蹂쇰ⅷ ?덉씠釉?援щЦ???섎せ?섏뿀?듬땲??" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'machine_worktree_http_contract' (13592) panicked at tests\machine_worktrees.rs:121:14:
+called `Result::unwrap()` on an `Err` value: JoinError::Panic(Id(1), "called `Result::unwrap()` on an `Err` value: Os { code: 123, kind: InvalidFilename, message: \"?뚯씪 ?대쫫, ?붾젆?곕━ ?대쫫 ?먮뒗 蹂쇰ⅷ ?덉씠釉?援щЦ???섎せ?섏뿀?듬땲??\" }", ...)
+test machine_worktree_http_contract ... FAILED
+A08 revision phase=initial listener_joined=true owner_dropped=true connection_refused=true
+A08 revision phase=unchanged listener_joined=true owner_dropped=true connection_refused=true
+A08 revision phase=changed listener_joined=true owner_dropped=true connection_refused=true
+A08 revision post_commit_change=true unchanged_restart_equal=true offline_clean_change_stale_delete=true private_root_removed=true
+test worktree_revision_survives_owner_restart ... ok
+
+failures:
+
+failures:
+    machine_worktree_http_contract
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.52s
+
+error: test failed, to rerun pass `--test machine_worktrees`

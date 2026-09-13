@@ -1,0 +1,631 @@
+    Blocking waiting for file lock on build directory
+   Compiling ferryx v2026.908.1 (/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/src-tauri)
+warning: unused import: `Manager`
+  --> src/ipc/notifications.rs:21:24
+   |
+21 | use tauri::{AppHandle, Manager, Runtime, State};
+   |                        ^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `scroll_daemon_client`
+   --> src/lib.rs:916:9
+    |
+916 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+    |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `machine_sessions` is never used
+   --> src/daemon/session_service.rs:345:19
+    |
+221 | impl DaemonSessionService {
+    | ------------------------- method in this implementation
+...
+345 |     pub(crate) fn machine_sessions(&self, epoch: crate::scoped_contracts::Epoch) -> Result<crate::remote::machine_protocol::Sessions, Str...
+    |                   ^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `app` is never read
+  --> src/ipc/notifications.rs:28:5
+   |
+27 | pub struct TauriNotificationBackend<R: Runtime> {
+   |            ------------------------ field in this struct
+28 |     app: AppHandle<R>,
+   |     ^^^
+
+warning: constant `GHOSTTY_TERMINAL_SCREEN_PRIMARY` is never used
+  --> src/native_terminal/sys/constants.rs:56:11
+   |
+56 | pub const GHOSTTY_TERMINAL_SCREEN_PRIMARY: c_int = 0;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `synchronized_output_deadline`, `expire_synchronized_output`, and `finish_synchronized_output` are never used
+   --> src/native_terminal/terminal.rs:169:19
+    |
+133 | impl NativeTerminal {
+    | ------------------- methods in this implementation
+...
+169 |     pub(crate) fn synchronized_output_deadline(&self) -> Option<tokio::time::Instant> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+173 |     pub(crate) fn expire_synchronized_output(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+184 |     pub(crate) fn finish_synchronized_output(&mut self) -> Result<(), NativeTerminalError> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `FILE_NAME` is never used
+ --> src/paired_host/inventory.rs:9:7
+  |
+9 | const FILE_NAME: &str = "paired-hosts.v1.json";
+  |       ^^^^^^^^^
+
+warning: enum `InventoryError` is never used
+  --> src/paired_host/inventory.rs:12:17
+   |
+12 | pub(crate) enum InventoryError {
+   |                 ^^^^^^^^^^^^^^
+
+warning: type alias `Result` is never used
+  --> src/paired_host/inventory.rs:28:6
+   |
+28 | type Result<T> = std::result::Result<T, InventoryError>;
+   |      ^^^^^^
+
+warning: enum `GrantScope` is never used
+  --> src/paired_host/inventory.rs:32:17
+   |
+32 | pub(crate) enum GrantScope { Mirror, Machine }
+   |                 ^^^^^^^^^^
+
+warning: enum `AuthStatus` is never used
+  --> src/paired_host/inventory.rs:36:17
+   |
+36 | pub(crate) enum AuthStatus { Paired, NeedsMachineGrant, Revoked, Unknown }
+   |                 ^^^^^^^^^^
+
+warning: struct `HostView` is never constructed
+  --> src/paired_host/inventory.rs:41:19
+   |
+41 | pub(crate) struct HostView {
+   |                   ^^^^^^^^
+
+warning: struct `Pairing` is never constructed
+  --> src/paired_host/inventory.rs:53:19
+   |
+53 | pub(crate) struct Pairing {
+   |                   ^^^^^^^
+
+warning: struct `LegacyCredential` is never constructed
+  --> src/paired_host/inventory.rs:63:19
+   |
+63 | pub(crate) struct LegacyCredential {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: struct `MigrationReceipt` is never constructed
+  --> src/paired_host/inventory.rs:70:19
+   |
+70 | pub(crate) struct MigrationReceipt {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: struct `Record` is never constructed
+  --> src/paired_host/inventory.rs:77:8
+   |
+77 | struct Record {
+   |        ^^^^^^
+
+warning: struct `Disk` is never constructed
+  --> src/paired_host/inventory.rs:89:8
+   |
+89 | struct Disk {
+   |        ^^^^
+
+warning: struct `CredentialLease` is never constructed
+  --> src/paired_host/inventory.rs:99:19
+   |
+99 | pub(crate) struct CredentialLease {
+   |                   ^^^^^^^^^^^^^^^
+
+warning: methods `cancellation`, `generation`, `host_id`, and `token` are never used
+   --> src/paired_host/inventory.rs:113:12
+    |
+110 | impl CredentialLease {
+    | -------------------- methods in this implementation
+...
+113 |     pub fn cancellation(&self) -> watch::Receiver<bool> { self.cancelled.clone() }
+    |            ^^^^^^^^^^^^
+114 |     pub fn generation(&self) -> Epoch { self.generation }
+    |            ^^^^^^^^^^
+115 |     pub fn host_id(&self) -> &str { &self.host_id }
+    |            ^^^^^^^
+116 |     /// Native HTTP code alone receives the token. Never return it through IPC.
+117 |     pub fn token(&self) -> Result<&str> {
+    |            ^^^^^
+
+warning: struct `Inventory` is never constructed
+   --> src/paired_host/inventory.rs:125:19
+    |
+125 | pub(crate) struct Inventory {
+    |                   ^^^^^^^^^
+
+warning: function `normalize_origin` is never used
+   --> src/paired_host/inventory.rs:138:15
+    |
+138 | pub(crate) fn normalize_origin(input: &str) -> Result<String> {
+    |               ^^^^^^^^^^^^^^^^
+
+warning: function `normalize_origin_policy` is never used
+   --> src/paired_host/inventory.rs:141:4
+    |
+141 | fn normalize_origin_policy(input: &str, loopback_http: bool) -> Result<String> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `valid_text` is never used
+   --> src/paired_host/inventory.rs:166:4
+    |
+166 | fn valid_text(value: &str, max: usize) -> bool {
+    |    ^^^^^^^^^^
+
+warning: function `host_key` is never used
+   --> src/paired_host/inventory.rs:169:4
+    |
+169 | fn host_key(origin: &str, machine: &str) -> Result<String> {
+    |    ^^^^^^^^
+
+warning: function `pairing_record` is never used
+   --> src/paired_host/inventory.rs:183:4
+    |
+183 | fn pairing_record(pairing: &Pairing, generation: Epoch) -> Result<(String, Record)> {
+    |    ^^^^^^^^^^^^^^
+
+warning: function `load` is never used
+   --> src/paired_host/inventory.rs:197:4
+    |
+197 | fn load(path: &Path) -> Result<Disk> {
+    |    ^^^^
+
+warning: multiple associated items are never used
+   --> src/paired_host/inventory.rs:228:12
+    |
+227 | impl Inventory {
+    | -------------- associated items in this implementation
+228 |     pub fn open(private_data_dir: &Path) -> Result<Self> {
+    |            ^^^^
+...
+233 |     pub fn list(&self) -> Vec<HostView> {
+    |            ^^^^
+...
+241 |     pub fn validate_generation(&self, id: &str, generation: Epoch) -> Result<()> {
+    |            ^^^^^^^^^^^^^^^^^^^
+...
+248 |     pub fn set_online(&mut self, id: &str, generation: Epoch, online: bool) -> Result<()> {
+    |            ^^^^^^^^^^
+...
+253 |     pub fn capture(&mut self, id: &str, generation: Epoch) -> Result<CredentialLease> {
+    |            ^^^^^^^
+...
+261 |     fn invalidate(&mut self, id: &str) {
+    |        ^^^^^^^^^^
+...
+265 |     fn fence(&mut self) {
+    |        ^^^^^
+...
+269 |     fn commit(&mut self, candidate: Disk, id: &str) -> Result<()> {
+    |        ^^^^^^
+...
+289 |     fn next_generation(&self, id: &str) -> Result<Epoch> {
+    |        ^^^^^^^^^^^^^^^
+...
+294 |     pub fn pair(&mut self, pairing: &Pairing) -> Result<HostView> {
+    |            ^^^^
+...
+303 |     pub fn forget(&mut self, id: &str, generation: Epoch) -> Result<()> {
+    |            ^^^^^^
+...
+311 |     pub fn mark_auth_unavailable(&mut self, id: &str, generation: Epoch, revoked: bool) -> Result<()> {
+    |            ^^^^^^^^^^^^^^^^^^^^^
+...
+324 |     pub fn migrate_copy(&mut self, legacy: &LegacyCredential) -> Result<MigrationReceipt> {
+    |            ^^^^^^^^^^^^
+
+warning: method `wait_and_reap` is never used
+   --> src/terminal/session.rs:364:19
+    |
+ 73 | impl PtySession {
+    | --------------- method in this implementation
+...
+364 |     pub(crate) fn wait_and_reap(&self) -> Result<Option<i32>, PtyError> {
+    |                   ^^^^^^^^^^^^^
+
+warning: function `with_local_worktree_budget` is never used
+   --> src/worktree/git.rs:115:15
+    |
+115 | pub(crate) fn with_local_worktree_budget<T>(work: impl FnOnce() -> T) -> T {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src/worktree/manager.rs:86:19
+   |
+86 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+   --> src/worktree/manager.rs:93:8
+    |
+ 92 | impl WriterLeaseGuard {
+    | --------------------- associated items in this implementation
+ 93 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+    |        ^^^
+...
+101 |     pub(crate) fn canonical_path(&self) -> &Path {
+    |                   ^^^^^^^^^^^^^^
+...
+105 |     pub(crate) fn owner_id(&self) -> &str {
+    |                   ^^^^^^^^
+
+warning: method `acquire_writer_lease` is never used
+   --> src/worktree/manager.rs:338:19
+    |
+134 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+338 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib) generated 40 warnings (run `cargo fix --lib -p ferryx` to apply 2 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 28.40s
+     Running tests/machine_catalog_persistence.rs (src-tauri/target/debug/deps/machine_catalog_persistence-9847bc72e73de522)
+
+running 4 tests
+test catalog_owner_process ... ok
+READY isolated service root=/tmp/a12-workspace-green.LUeUXD/tmp/.tmpSGY9pa
+IPC cleanup client_joined=true handler_joined=true duplex_closed=true injected=false
+OWNER readiness=Ping/Pong pid=82740 command=register
+NORMALIZATION trimmed identity; unchanged revision; explicit exposure promotion verified
+NORMALIZATION CLEANUP root=/tmp/a12-workspace-green.LUeUXD/tmp/.tmpYaeVyZ absent=true
+test normalized_registration_is_idempotent ... ok
+IPC cleanup client_joined=true handler_joined=true duplex_closed=true injected=false
+IPC cleanup client_joined=true handler_joined=true duplex_closed=true injected=false
+OWNER cleanup pid=82740 reaped=true status=exit status: 0 sockets=[] command=register
+RESTART isolated service
+IPC cleanup client_joined=true handler_joined=true duplex_closed=true injected=false
+OWNER readiness=Ping/Pong pid=83064 command=restore
+OWNER cleanup pid=83064 reaped=true status=exit status: 0 sockets=[] command=restore
+CONCURRENT aliases canonical id=project-c0462a353dfb4e6aa8ffb12958493f63 mirror_exposed=false
+PERMISSIONS catalog=600 parent=700
+IPC cleanup client_joined=true handler_joined=true duplex_closed=true injected=false
+OWNER readiness=Ping/Pong pid=83121 command=inject
+OWNER cleanup pid=83121 reaped=true status=signal: 9 (SIGKILL) sockets=[] command=inject
+RESTORE invalid root retained without overwrite
+RESTORE missing row retained without recreation
+
+thread 'tokio-rt-worker' (1732196) panicked at tests/machine_catalog_persistence.rs:23:13:
+injected IPC assertion after Pong
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+IPC cleanup client_joined=true handler_joined=true duplex_closed=true injected=true
+WRITE_FAILURE rename target directory: no success or published revision; mutations fenced
+OWNER CLEANUP root=/tmp/a12-workspace-green.LUeUXD/tmp/.tmp9ZNRii absent=true
+test isolated_owner_restart_and_failure_cleanup ... ok
+QUARANTINE invalid/newer catalog preserved; mutation refused
+QUARANTINE invalid/newer catalog preserved; mutation refused
+CLEANUP root=/tmp/a12-workspace-green.LUeUXD/tmp/.tmpSGY9pa absent=true daemon_pids=[] sockets=[]
+test registration_survives_isolated_service_restart ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+     Running tests/machine_events.rs (src-tauri/target/debug/deps/machine_events-96a1656f4ab718d8)
+
+running 1 test
+A12 real WS projectRegistered canonical identity matches HTTP201; sequence newer than snapshot
+A12 real mirror WS receives ordered barrier only, no machine path payload
+A12 native watcher missing/ready availability events preserve registered identity
+[main (root-commit) 89a8b32] base
+A12 HTTP-created/deleted worktree records equal real WS committed payloads
+A12 external Git checkout triggers debounced authoritative branch snapshot without polling HTTP
+A12 receiver-before-snapshot overlap=70 committed local registrations; real WS lag resnapshot=71; reconnect retains original PTY Arc/target; explicit close reaped; unsubscribe observed
+A12 unsubscribe while snapshot admission blocked cancels before permit release; watches dropped
+A12 cleanup: listener joined/refused; all owned PTYs closed; private root removed
+test machine_events_begin_with_authoritative_snapshot ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.32s
+
+     Running tests/machine_prunable_preview.rs (src-tauri/target/debug/deps/machine_prunable_preview-9bf13b7f5afef91c)
+
+running 1 test
+A08 HTTP missing locked=false status=200 body={"branchDeletion":{"ahead":null,"behind":null,"branch":"orca/project-a4a549b725714cb5859051c9754cabfd/missing","head":"82cb381435206df8b114910e32ea4d58601f943e","merged":false,"upstream":null},"branchDeletionError":null,"dirtyCount":null,"dirtyFiles":null,"dirtyInspection":"unavailable","liveSessionIds":["89d3435c-a4c0-4ad3-b9bf-0dc46ce138ba"],"locked":null,"prunable":"gitdir file points to non-existent location","revision":"3"}
+A08 HTTP missing DELETE guarded=404 locked=false
+A08 HTTP symlink preview refused=400 Bad Request
+A08 HTTP symlink preview refused=400 Bad Request
+A08 HTTP symlink preview refused=400 Bad Request
+A08 HTTP unavailable branch preview={"branchDeletion":null,"branchDeletionError":"INVALID_WORKTREE","dirtyCount":null,"dirtyFiles":null,"dirtyInspection":"unavailable","liveSessionIds":["89d3435c-a4c0-4ad3-b9bf-0dc46ce138ba"],"locked":null,"prunable":"gitdir file points to non-existent location","revision":"6"}
+A08 HTTP missing locked=true status=200 body={"branchDeletion":{"ahead":null,"behind":null,"branch":"orca/project-a4a549b725714cb5859051c9754cabfd/locked","head":"82cb381435206df8b114910e32ea4d58601f943e","merged":false,"upstream":null},"branchDeletionError":null,"dirtyCount":null,"dirtyFiles":null,"dirtyInspection":"unavailable","liveSessionIds":["d5a7bc4d-57ed-4667-a397-ad13749d8201"],"locked":"A08 lock","prunable":null,"revision":"8"}
+A08 HTTP missing DELETE guarded=404 locked=true
+A08 HTTP symlink preview refused=400 Bad Request
+A08 HTTP symlink preview refused=400 Bad Request
+A08 HTTP symlink preview refused=400 Bad Request
+A08 HTTP unavailable branch preview={"branchDeletion":null,"branchDeletionError":"INVALID_WORKTREE","dirtyCount":null,"dirtyFiles":null,"dirtyInspection":"unavailable","liveSessionIds":["d5a7bc4d-57ed-4667-a397-ad13749d8201"],"locked":"A08 lock","prunable":null,"revision":"9"}
+A08 cleanup session=89d3435c-a4c0-4ad3-b9bf-0dc46ce138ba close_awaited=true session_absent=true
+A08 cleanup session=d5a7bc4d-57ed-4667-a397-ad13749d8201 close_awaited=true session_absent=true
+A08 cleanup listener_joined=true connection_refused=true owner_dropped=true private_root_removed=true owned_sessions_closed=true
+test missing_checkout_rich_preview_http ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.98s
+
+     Running tests/machine_worktree_transports.rs (src-tauri/target/debug/deps/machine_worktree_transports-57926cbf7fd4d996)
+
+running 2 tests
+test a08_transports_private_child ... ok
+
+running 1 test
+A08_TRANSPORT_OWNER pid=91987 cwd=/private/tmp/a08-transports-fspNbG runtime=/tmp/a08-transports-fspNbG/runtime socket=/tmp/a08-transports-fspNbG/runtime/daemon.sock config=/tmp/a08-transports-fspNbG/data/config.json auth=/tmp/a08-transports-fspNbG/data/auth.json
+A08_TRANSPORT_REQUEST method=POST url=http://127.0.0.1:55406/host/a08-transport-owner/api/v1/workspace/projects body={"repoPath":"/tmp/a08-transports-fspNbG/repo","requestId":"b8fba430-ce33-4068-ac05-1f5c622731a9"}
+A08_TRANSPORT_RESPONSE status=201 body={"availability":"ready","gitBranch":"main","gitCommonDir":"/private/tmp/a08-transports-fspNbG/repo/.git","gitHead":"5083b25066e9d6100cc1aeda84d68a1270d32d61","gitRemote":null,"gitRoot":"/private/tmp/a08-transports-fspNbG/repo","repoRoot":"/private/tmp/a08-transports-fspNbG/repo","revision":"1","workspaceId":"project-22c6121dc77a40b4b0685502735dc175"}
+A08_TRANSPORT_REQUEST method=POST url=http://127.0.0.1:55406/host/a08-transport-owner/api/v1/workspace/worktrees body={"baseRef":"HEAD","requestId":"64f9d178-32a4-4e52-9055-679024a7c4d9","workspaceId":"project-22c6121dc77a40b4b0685502735dc175","worktree":{"slug":"relay-keep","wsId":"project-22c6121dc77a40b4b0685502735dc175"}}
+A08_TRANSPORT_RESPONSE status=201 body={"bare":false,"branch":"refs/heads/orca/project-22c6121dc77a40b4b0685502735dc175/relay-keep","detached":false,"head":"5083b25066e9d6100cc1aeda84d68a1270d32d61","identity":{"slug":"relay-keep","wsId":"project-22c6121dc77a40b4b0685502735dc175"},"locked":null,"managed":true,"path":"/private/tmp/a08-transports-fspNbG/repo/.orca-worktrees/project-22c6121dc77a40b4b0685502735dc175/relay-keep","prunable":null,"workspaceId":"project-22c6121dc77a40b4b0685502735dc175"}
+A08_TRANSPORT_REQUEST method=GET url=http://127.0.0.1:55406/host/a08-transport-owner/api/v1/workspace/worktrees?workspaceId=project-22c6121dc77a40b4b0685502735dc175 body=null
+A08_TRANSPORT_RESPONSE status=200 body={"revision":"2","worktrees":[{"bare":false,"branch":"refs/heads/main","detached":false,"head":"5083b25066e9d6100cc1aeda84d68a1270d32d61","identity":null,"locked":null,"managed":false,"path":"/private/tmp/a08-transports-fspNbG/repo","prunable":null,"workspaceId":"project-22c6121dc77a40b4b0685502735dc175"},{"bare":false,"branch":"refs/heads/orca/project-22c6121dc77a40b4b0685502735dc175/relay-keep","detached":false,"head":"5083b25066e9d6100cc1aeda84d68a1270d32d61","identity":{"slug":"relay-keep","wsId":"project-22c6121dc77a40b4b0685502735dc175"},"locked":null,"managed":true,"path":"/private/tmp/a08-transports-fspNbG/repo/.orca-worktrees/project-22c6121dc77a40b4b0685502735dc175/relay-keep","prunable":null,"workspaceId":"project-22c6121dc77a40b4b0685502735dc175"}]}
+A08_TRANSPORT_REQUEST method=GET url=http://127.0.0.1:55406/host/a08-transport-owner/api/v1/workspace/worktrees/status?workspaceId=project-22c6121dc77a40b4b0685502735dc175&wsId=project-22c6121dc77a40b4b0685502735dc175&slug=relay-keep body=null
+A08_TRANSPORT_RESPONSE status=200 body={"branchDeletion":{"ahead":null,"behind":null,"branch":"orca/project-22c6121dc77a40b4b0685502735dc175/relay-keep","head":"5083b25066e9d6100cc1aeda84d68a1270d32d61","merged":true,"upstream":null},"dirtyCount":0,"dirtyFiles":[],"liveSessionIds":[],"locked":null,"prunable":null,"revision":"2"}
+A08_TRANSPORT_REQUEST method=DELETE url=http://127.0.0.1:55406/host/a08-transport-owner/api/v1/workspace/worktrees body={"deleteBranch":false,"expectedRevision":"2","requestId":"8547776c-01e6-438b-a8e4-6bf1e3922858","workspaceId":"project-22c6121dc77a40b4b0685502735dc175","worktree":{"slug":"relay-keep","wsId":"project-22c6121dc77a40b4b0685502735dc175"}}
+A08_TRANSPORT_RESPONSE status=204 body=null
+A08_TRANSPORT_REQUEST method=POST url=http://127.0.0.1:55406/host/a08-transport-owner/api/v1/workspace/worktrees body={"baseRef":"HEAD","requestId":"013c08c9-a5a8-4aa0-893e-3ce72dfba8b5","workspaceId":"project-22c6121dc77a40b4b0685502735dc175","worktree":{"slug":"relay-delete","wsId":"project-22c6121dc77a40b4b0685502735dc175"}}
+A08_TRANSPORT_RESPONSE status=201 body={"bare":false,"branch":"refs/heads/orca/project-22c6121dc77a40b4b0685502735dc175/relay-delete","detached":false,"head":"5083b25066e9d6100cc1aeda84d68a1270d32d61","identity":{"slug":"relay-delete","wsId":"project-22c6121dc77a40b4b0685502735dc175"},"locked":null,"managed":true,"path":"/private/tmp/a08-transports-fspNbG/repo/.orca-worktrees/project-22c6121dc77a40b4b0685502735dc175/relay-delete","prunable":null,"workspaceId":"project-22c6121dc77a40b4b0685502735dc175"}
+A08_TRANSPORT_REQUEST method=GET url=http://127.0.0.1:55406/host/a08-transport-owner/api/v1/workspace/worktrees?workspaceId=project-22c6121dc77a40b4b0685502735dc175 body=null
+A08_TRANSPORT_RESPONSE status=200 body={"revision":"4","worktrees":[{"bare":false,"branch":"refs/heads/main","detached":false,"head":"5083b25066e9d6100cc1aeda84d68a1270d32d61","identity":null,"locked":null,"managed":false,"path":"/private/tmp/a08-transports-fspNbG/repo","prunable":null,"workspaceId":"project-22c6121dc77a40b4b0685502735dc175"},{"bare":false,"branch":"refs/heads/orca/project-22c6121dc77a40b4b0685502735dc175/relay-delete","detached":false,"head":"5083b25066e9d6100cc1aeda84d68a1270d32d61","identity":{"slug":"relay-delete","wsId":"project-22c6121dc77a40b4b0685502735dc175"},"locked":null,"managed":true,"path":"/private/tmp/a08-transports-fspNbG/repo/.orca-worktrees/project-22c6121dc77a40b4b0685502735dc175/relay-delete","prunable":null,"workspaceId":"project-22c6121dc77a40b4b0685502735dc175"}]}
+A08_TRANSPORT_REQUEST method=GET url=http://127.0.0.1:55406/host/a08-transport-owner/api/v1/workspace/worktrees/status?workspaceId=project-22c6121dc77a40b4b0685502735dc175&wsId=project-22c6121dc77a40b4b0685502735dc175&slug=relay-delete body=null
+A08_TRANSPORT_RESPONSE status=200 body={"branchDeletion":{"ahead":null,"behind":null,"branch":"orca/project-22c6121dc77a40b4b0685502735dc175/relay-delete","head":"5083b25066e9d6100cc1aeda84d68a1270d32d61","merged":true,"upstream":null},"dirtyCount":0,"dirtyFiles":[],"liveSessionIds":[],"locked":null,"prunable":null,"revision":"4"}
+A08_TRANSPORT_REQUEST method=DELETE url=http://127.0.0.1:55406/host/a08-transport-owner/api/v1/workspace/worktrees body={"deleteBranch":true,"expectedRevision":"4","requestId":"cab8c5ee-f6d7-4fbb-80cf-c0676315086b","workspaceId":"project-22c6121dc77a40b4b0685502735dc175","worktree":{"slug":"relay-delete","wsId":"project-22c6121dc77a40b4b0685502735dc175"}}
+A08_TRANSPORT_RESPONSE status=204 body=null
+A08_TRANSPORT_REQUEST method=POST url=http://127.0.0.1:55406/host/a08-transport-owner/api/v1/workspace/worktrees body={"requestId":"b4ce5b10-030d-4f9f-9f27-82a9eacda237","workspaceId":"project-22c6121dc77a40b4b0685502735dc175","worktree":{"slug":"relay-lost","wsId":"project-22c6121dc77a40b4b0685502735dc175"}}
+A08_TRANSPORT_RESPONSE status=201 body={"bare":false,"branch":"refs/heads/orca/project-22c6121dc77a40b4b0685502735dc175/relay-lost","detached":false,"head":"5083b25066e9d6100cc1aeda84d68a1270d32d61","identity":{"slug":"relay-lost","wsId":"project-22c6121dc77a40b4b0685502735dc175"},"locked":null,"managed":true,"path":"/private/tmp/a08-transports-fspNbG/repo/.orca-worktrees/project-22c6121dc77a40b4b0685502735dc175/relay-lost","prunable":null,"workspaceId":"project-22c6121dc77a40b4b0685502735dc175"}
+A08_TRANSPORT_REQUEST method=GET url=http://127.0.0.1:55406/host/a08-transport-owner/api/v1/workspace/operations/b4ce5b10-030d-4f9f-9f27-82a9eacda237 body=null
+A08_TRANSPORT_RESPONSE status=200 body={"outcome":{"kind":"worktree","worktree":{"bare":false,"branch":"refs/heads/orca/project-22c6121dc77a40b4b0685502735dc175/relay-lost","detached":false,"head":"5083b25066e9d6100cc1aeda84d68a1270d32d61","identity":{"slug":"relay-lost","wsId":"project-22c6121dc77a40b4b0685502735dc175"},"locked":null,"managed":true,"path":"/private/tmp/a08-transports-fspNbG/repo/.orca-worktrees/project-22c6121dc77a40b4b0685502735dc175/relay-lost","prunable":null,"workspaceId":"project-22c6121dc77a40b4b0685502735dc175"}},"requestId":"b4ce5b10-030d-4f9f-9f27-82a9eacda237","state":"completed"}
+A08_TRANSPORT_REQUEST method=GET url=http://127.0.0.1:55406/host/a08-transport-owner/api/v1/workspace/worktrees?workspaceId=project-22c6121dc77a40b4b0685502735dc175 body=null
+A08_TRANSPORT_RESPONSE status=200 body={"revision":"6","worktrees":[{"bare":false,"branch":"refs/heads/main","detached":false,"head":"5083b25066e9d6100cc1aeda84d68a1270d32d61","identity":null,"locked":null,"managed":false,"path":"/private/tmp/a08-transports-fspNbG/repo","prunable":null,"workspaceId":"project-22c6121dc77a40b4b0685502735dc175"},{"bare":false,"branch":"refs/heads/orca/project-22c6121dc77a40b4b0685502735dc175/relay-lost","detached":false,"head":"5083b25066e9d6100cc1aeda84d68a1270d32d61","identity":{"slug":"relay-lost","wsId":"project-22c6121dc77a40b4b0685502735dc175"},"locked":null,"managed":true,"path":"/private/tmp/a08-transports-fspNbG/repo/.orca-worktrees/project-22c6121dc77a40b4b0685502735dc175/relay-lost","prunable":null,"workspaceId":"project-22c6121dc77a40b4b0685502735dc175"}]}
+A08_RELAY_LOST original={"bare":false,"branch":"refs/heads/orca/project-22c6121dc77a40b4b0685502735dc175/relay-lost","detached":false,"head":"5083b25066e9d6100cc1aeda84d68a1270d32d61","identity":{"slug":"relay-lost","wsId":"project-22c6121dc77a40b4b0685502735dc175"},"locked":null,"managed":true,"path":"/private/tmp/a08-transports-fspNbG/repo/.orca-worktrees/project-22c6121dc77a40b4b0685502735dc175/relay-lost","prunable":null,"workspaceId":"project-22c6121dc77a40b4b0685502735dc175"} same_device=true replay_equal=true journal_equal=true actual_target_count=1 forwarded_reply_bytes=0 intermediary_joined=true
+A08_UDS_REQUEST {"baseRef":"HEAD","type":"createWorktree","workspaceId":"project-22c6121dc77a40b4b0685502735dc175","worktree":{"slug":"uds-owned","wsId":"project-22c6121dc77a40b4b0685502735dc175"}}
+A08_UDS_RESPONSE {"type":"createWorktreeOk","worktree":{"bare":false,"branch":"refs/heads/orca/project-22c6121dc77a40b4b0685502735dc175/uds-owned","detached":false,"head":"5083b25066e9d6100cc1aeda84d68a1270d32d61","locked":null,"path":"/private/tmp/a08-transports-fspNbG/repo/.orca-worktrees/project-22c6121dc77a40b4b0685502735dc175/uds-owned","prunable":null}}
+A08_UDS_REQUEST {"deleteBranch":true,"type":"deleteWorktree","workspaceId":"project-22c6121dc77a40b4b0685502735dc175","worktree":{"slug":"uds-owned","wsId":"project-22c6121dc77a40b4b0685502735dc175"}}
+A08_UDS_RESPONSE {"error":{"code":"DIRTY_WORKTREE","details":{"count":1,"files":["dirty.txt"],"path":"/private/tmp/a08-transports-fspNbG/repo/.orca-worktrees/project-22c6121dc77a40b4b0685502735dc175/uds-owned"},"message":"Worktree at '/private/tmp/a08-transports-fspNbG/repo/.orca-worktrees/project-22c6121dc77a40b4b0685502735dc175/uds-owned' is dirty (1 uncommitted/untracked files); deletion forbidden for 1-writer-1-worktree isolation"},"type":"worktreeError"}
+A08_UDS_REQUEST {"deleteBranch":true,"type":"deleteWorktree","workspaceId":"project-22c6121dc77a40b4b0685502735dc175","worktree":{"slug":"uds-owned","wsId":"project-22c6121dc77a40b4b0685502735dc175"}}
+A08_UDS_RESPONSE {"pruned":true,"type":"deleteWorktreeOk"}
+A08_TRANSPORT_SUCCESS listeners_joined=true sockets_refused=true wrong_root_unchanged=true PTY_spawned=false
+A08_TRANSPORT_RUNTIME joined=true failed=false
+test a08_transports_private_child ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 2.18s
+
+A08_TRANSPORT_CLEANUP child_pid=91987 reaped=true exit=exit status: 0 private_root=/tmp/a08-transports-fspNbG absent=true
+test a08_transports_owned_process_lifecycle ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.19s
+
+     Running tests/machine_worktrees.rs (src-tauri/target/debug/deps/machine_worktrees-5daeaa4ae8a6057c)
+
+running 2 tests
+A08 HTTP GET worktrees status=200 body={"revision":"2","worktrees":[{"bare":false,"branch":"refs/heads/main","detached":false,"head":"eb783fa4b2515ef492a54a318f0f22ae2f6e0ab2","identity":null,"locked":null,"managed":false,"path":"/private/tmp/a12-workspace-green.LUeUXD/tmp/.tmpKZlpcQ/repo space \"quote\" ü","prunable":null,"workspaceId":"project-a6fbdc1662e84b94948ac23f6714b29e"}]}
+A08 revision phase=initial listener_joined=true owner_dropped=true connection_refused=true
+A08 revision phase=unchanged listener_joined=true owner_dropped=true connection_refused=true
+A08 revision phase=changed listener_joined=true owner_dropped=true connection_refused=true
+A08 revision post_commit_change=true unchanged_restart_equal=true offline_clean_change_stale_delete=true private_root_removed=true
+test worktree_revision_survives_owner_restart ... ok
+A08 LOST_REPLY owner_status=201 forwarded_response_bytes=0 intermediary_joined=true
+A08 STALE_REVISION status=409 target_preserved=true refusal_replayed=true
+A08_OWNER pid=95727 cwd=/private/tmp/a12-workspace-green.LUeUXD/tmp/.tmpKZlpcQ/repo space "quote" ü/.orca-worktrees/project-a6fbdc1662e84b94948ac23f6714b29e/feature
+A08 OWNER close_complete=true session_removed=true pid=95727 absent=true already_reaped=true (shared owner fixture, not A09)
+A08 delete scenario=locked status=409 body={"error":{"code":"WORKTREE_LOCKED","message":"WORKTREE_LOCKED","retryable":false,"requestId":"e22f01d8-5780-4d39-9055-0223c2dc71bc","details":{}}}
+A08 delete scenario=unmerged status=409 body={"error":{"code":"UNMERGED_BRANCH","message":"UNMERGED_BRANCH","retryable":false,"requestId":"f1bc1fe2-fbc9-4f33-8b84-0fd3925a46e3","details":{}}}
+A08 delete scenario=partial status=409 body={"error":{"code":"WORKTREE_REMOVED_BRANCH_RETAINED","message":"WORKTREE_REMOVED_BRANCH_RETAINED","retryable":false,"requestId":"677ed3d4-5057-4677-8070-1f4d0970d89a","details":{"branch":"orca/project-a6fbdc1662e84b94948ac23f6714b29e/partial","branchDeleted":false,"worktreeRemoved":true}}}
+A08 delete scenario=remove-branch status=204 body=
+A08 RESTART same_request_same_row=true managed_target_count=1
+A08 CLEANUP listener_joined=true private_root_removed=true
+test machine_worktree_http_contract ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.51s
+
+   Compiling ferryx v2026.908.1 (/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/src-tauri)
+warning: unused import: `Manager`
+  --> src/ipc/notifications.rs:21:24
+   |
+21 | use tauri::{AppHandle, Manager, Runtime, State};
+   |                        ^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `scroll_daemon_client`
+   --> src/lib.rs:916:9
+    |
+916 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+    |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `machine_sessions` is never used
+   --> src/daemon/session_service.rs:345:19
+    |
+221 | impl DaemonSessionService {
+    | ------------------------- method in this implementation
+...
+345 |     pub(crate) fn machine_sessions(&self, epoch: crate::scoped_contracts::Epoch) -> Result<crate::remote::machine_protocol::Sessions, Str...
+    |                   ^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `app` is never read
+  --> src/ipc/notifications.rs:28:5
+   |
+27 | pub struct TauriNotificationBackend<R: Runtime> {
+   |            ------------------------ field in this struct
+28 |     app: AppHandle<R>,
+   |     ^^^
+
+warning: constant `GHOSTTY_TERMINAL_SCREEN_PRIMARY` is never used
+  --> src/native_terminal/sys/constants.rs:56:11
+   |
+56 | pub const GHOSTTY_TERMINAL_SCREEN_PRIMARY: c_int = 0;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `synchronized_output_deadline`, `expire_synchronized_output`, and `finish_synchronized_output` are never used
+   --> src/native_terminal/terminal.rs:169:19
+    |
+133 | impl NativeTerminal {
+    | ------------------- methods in this implementation
+...
+169 |     pub(crate) fn synchronized_output_deadline(&self) -> Option<tokio::time::Instant> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+173 |     pub(crate) fn expire_synchronized_output(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+184 |     pub(crate) fn finish_synchronized_output(&mut self) -> Result<(), NativeTerminalError> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `wait_and_reap` is never used
+   --> src/terminal/session.rs:364:19
+    |
+ 73 | impl PtySession {
+    | --------------- method in this implementation
+...
+364 |     pub(crate) fn wait_and_reap(&self) -> Result<Option<i32>, PtyError> {
+    |                   ^^^^^^^^^^^^^
+
+warning: function `with_local_worktree_budget` is never used
+   --> src/worktree/git.rs:115:15
+    |
+115 | pub(crate) fn with_local_worktree_budget<T>(work: impl FnOnce() -> T) -> T {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src/worktree/manager.rs:86:19
+   |
+86 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+   --> src/worktree/manager.rs:93:8
+    |
+ 92 | impl WriterLeaseGuard {
+    | --------------------- associated items in this implementation
+ 93 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+    |        ^^^
+...
+101 |     pub(crate) fn canonical_path(&self) -> &Path {
+    |                   ^^^^^^^^^^^^^^
+...
+105 |     pub(crate) fn owner_id(&self) -> &str {
+    |                   ^^^^^^^^
+
+warning: method `acquire_writer_lease` is never used
+   --> src/worktree/manager.rs:338:19
+    |
+134 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+338 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib) generated 19 warnings (run `cargo fix --lib -p ferryx` to apply 2 suggestions)
+    Finished `dev` profile [unoptimized] target(s) in 21.43s
+EXIT=0 supervisor_removed=/tmp/a12-workspace-green.LUeUXD

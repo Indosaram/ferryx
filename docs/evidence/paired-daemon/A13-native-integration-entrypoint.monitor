@@ -1,0 +1,3 @@
+owner=31020 command=src-tauri/target/debug/ferryx --help 
+  PID  PPID    RSS ELAPSED COMMAND
+31020 31017     32   00:00 src-tauri/target/debug/ferryx --help

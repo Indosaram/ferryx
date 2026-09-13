@@ -620,7 +620,7 @@ export function SshSection({ onOpenProject }: { onOpenProject?: (hostId: string)
 
                       {alreadyAdded ? (
                         <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground shrink-0">
-                          <Check className="size-3 text-emerald-500" /> Added
+                          <Check className="size-3 text-status-success" /> Added
                         </span>
                       ) : (
                         <Button

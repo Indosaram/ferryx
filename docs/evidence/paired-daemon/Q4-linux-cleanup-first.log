@@ -1,0 +1,7 @@
+SOURCE_AFTER_RUN baseline checked 34 mismatches []
+SOURCE_AFTER_RUN full checked 6827 mismatches ['src-tauri/gen/schemas/linux-schema.json']
+Traceback (most recent call last):
+  File "/home/indo/ferryx-herdr-q4-linux-01a097f8/cleanup.py", line 6, in <module>
+    print('SOURCE_AFTER_RUN',label,'checked',len(rows),'mismatches',bad);assert not bad
+                                                                                ^^^^^^^
+AssertionError

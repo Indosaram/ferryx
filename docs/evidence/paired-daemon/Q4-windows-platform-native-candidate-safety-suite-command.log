@@ -1,0 +1,1 @@
+cargo --config C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\cargo-qa.toml test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --test machine_catalog_persistence --test machine_worktrees --test worktree_safety --test machine_worktree_legacy_bounds --test machine_worktree_transports --test relay_pairing_generation_regression -- --nocapture

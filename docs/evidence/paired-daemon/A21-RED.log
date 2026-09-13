@@ -1,0 +1,245 @@
+v22.22.3
+$ vitest run --maxWorkers=1 src/lib/pairedActionBoundaries.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+ ❯ src/lib/pairedActionBoundaries.test.tsx (5 tests | 5 failed) 24ms
+   × desktop removal does not unregister a paired project on the remote daemon 3ms
+     → expected "spy" to not be called at all, but actually been called 1 times[90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m    Array [
+      "cmd_project_unregister",
+      Object {
+        "request": Object {
+          "workspaceId": "daemon:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        },
+      },
+    ]
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+   × paired clipboard images never enter SSH upload 1ms
+     → promise resolved "null" instead of rejecting
+   × paired shell recovery cannot spawn a local replacement 1ms
+     → expected "spy" to not be called at all, but actually been called 1 times[90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m    Array [
+      Object {
+        "clientRequestId": "shell-replacement-96562191-07e3-4d2f-ab95-0f5cdcd71356",
+        "cwd": "/srv/repo",
+        "startup": null,
+        "workspaceId": "daemon:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "worktree": null,
+      },
+    ]
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+   × paired agent recovery cannot validate or spawn through local provider APIs 2ms
+     → expected { code: 'UNKNOWN', …(2) } to match object { code: 'UNSUPPORTED_CAPABILITY' }
+(2 matching properties omitted from actual)
+   × paired recovery never mounts local terminal or DAG tooling while proxy support is absent 16ms
+     → expected <div data-testid="native"></div> to be null
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 5 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/pairedActionBoundaries.test.tsx > desktop removal does not unregister a paired project on the remote daemon
+AssertionError: expected "spy" to not be called at all, but actually been called 1 times[90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m    Array [
+      "cmd_project_unregister",
+      Object {
+        "request": Object {
+          "workspaceId": "daemon:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        },
+      },
+    ]
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+ ❯ src/lib/pairedActionBoundaries.test.tsx:18:29
+     16| it("desktop removal does not unregister a paired project on the remote…
+     17|   await unregisterProject({ workspaceId: session.workspaceId });
+     18|   expect(native.invoke).not.toHaveBeenCalled();
+       |                             ^
+     19| });
+     20| it("paired clipboard images never enter SSH upload", async () => {
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/5]⎯
+
+ FAIL  src/lib/pairedActionBoundaries.test.tsx > paired clipboard images never enter SSH upload
+AssertionError: promise resolved "null" instead of rejecting
+
+[32m- Expected:[39m 
+Error {
+  "message": "rejected promise",
+}
+
+[31m+ Received:[39m 
+null
+
+ ❯ src/lib/pairedActionBoundaries.test.tsx:21:64
+     19| });
+     20| it("paired clipboard images never enter SSH upload", async () => {
+     21|   await expect(pasteClipboardImageToRemote(session.workspaceId)).rejec…
+       |                                                                ^
+     22|   expect(native.invoke).not.toHaveBeenCalled();
+     23| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/5]⎯
+
+ FAIL  src/lib/pairedActionBoundaries.test.tsx > paired shell recovery cannot spawn a local replacement
+AssertionError: expected "spy" to not be called at all, but actually been called 1 times[90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m    Array [
+      Object {
+        "clientRequestId": "shell-replacement-96562191-07e3-4d2f-ab95-0f5cdcd71356",
+        "cwd": "/srv/repo",
+        "startup": null,
+        "workspaceId": "daemon:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "worktree": null,
+      },
+    ]
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+ ❯ src/lib/pairedActionBoundaries.test.tsx:27:21
+     25|   const spawn = vi.fn();
+     26|   await expect(replaceExitedShellSession(session.id, { getSessions: ()…
+     27|   expect(spawn).not.toHaveBeenCalled();
+       |                     ^
+     28| });
+     29| it("paired agent recovery cannot validate or spawn through local provi…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/5]⎯
+
+ FAIL  src/lib/pairedActionBoundaries.test.tsx > paired agent recovery cannot validate or spawn through local provider APIs
+AssertionError: expected { code: 'UNKNOWN', …(2) } to match object { code: 'UNSUPPORTED_CAPABILITY' }
+(2 matching properties omitted from actual)
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  {[22m
+[32m-   "code": "UNSUPPORTED_CAPABILITY",[39m
+[31m+   "code": "UNKNOWN",[39m
+[2m  }[22m
+
+ ❯ src/lib/pairedActionBoundaries.test.tsx:32:3
+     30|   const spawn = vi.fn();
+     31|   const agent = { ...session, agentType: "claude", providerSession: { …
+     32|   await expect(reconnectAgentSession(agent.id, { getSessions: () => ({…
+       |   ^
+     33|   expect(spawn).not.toHaveBeenCalled();
+     34| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/5]⎯
+
+ FAIL  src/lib/pairedActionBoundaries.test.tsx > paired recovery never mounts local terminal or DAG tooling while proxy support is absent
+AssertionError: expected <div data-testid="native"></div> to be null
+
+[32m- Expected:[39m 
+null
+
+[31m+ Received:[39m 
+<div
+  data-testid="native"
+/>
+
+ ❯ src/lib/pairedActionBoundaries.test.tsx:37:42
+     35| it("paired recovery never mounts local terminal or DAG tooling while p…
+     36|   render(<TerminalPane session={session} active onReconnect={vi.fn()} …
+     37|   expect(screen.queryByTestId("native")).toBeNull();
+       |                                          ^
+     38|   expect(screen.queryByTestId("dag")).toBeNull();
+     39|   expect(screen.queryByRole("button")).toBeNull();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/5]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  5 failed (5)
+   Start at  15:54:29
+   Duration  1.14s (transform 99ms, setup 113ms, collect 458ms, tests 24ms, environment 238ms, prepare 29ms)
+
+error: script "test" exited with code 1
+
+INTENTIONAL ASSERTION MUTATION: paired unavailable surface asserted null
+$ vitest run --maxWorkers=1 src/lib/pairedActionBoundaries.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+ ❯ src/lib/pairedActionBoundaries.test.tsx (5 tests | 1 failed) 18ms
+   ✓ desktop removal does not unregister a paired project on the remote daemon 1ms
+   ✓ paired clipboard images never enter SSH upload 1ms
+   ✓ paired shell recovery cannot spawn a local replacement 0ms
+   ✓ paired agent recovery cannot validate or spawn through local provider APIs 0ms
+   × paired recovery never mounts local terminal or DAG tooling while proxy support is absent 15ms
+     → expected <div …(3)><div>…(3)</div></div> to be null
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/pairedActionBoundaries.test.tsx > paired recovery never mounts local terminal or DAG tooling while proxy support is absent
+AssertionError: expected <div …(3)><div>…(3)</div></div> to be null
+
+[32m- Expected:[39m 
+null
+
+[31m+ Received:[39m 
+<div
+  class="flex h-full items-center justify-center p-6 text-center text-sm text-muted-foreground"
+  data-testid="paired-terminal-unavailable"
+  role="status"
+>
+  <div>
+    <h2
+      class="font-medium text-foreground"
+    >
+      Paired terminal unavailable
+    </h2>
+    <p>
+      Native remote terminal support is not available in this version. The saved pane is retained; no replacement shell has been started.
+    </p>
+    <p>
+      Reconnect and file or image actions are disabled. No Local or SSH fallback is used.
+    </p>
+  </div>
+</div>
+
+ ❯ src/lib/pairedActionBoundaries.test.tsx:40:61
+     38|   expect(screen.queryByTestId("dag")).toBeNull();
+     39|   expect(screen.queryByRole("button")).toBeNull();
+     40|   expect(screen.getByTestId("paired-terminal-unavailable")).toBeNull();
+       |                                                             ^
+     41| });
+     42| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 4 passed (5)
+   Start at  16:00:35
+   Duration  1.13s (transform 99ms, setup 131ms, collect 563ms, tests 18ms, environment 292ms, prepare 33ms)
+
+error: script "test" exited with code 1

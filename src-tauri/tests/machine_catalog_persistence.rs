@@ -43,7 +43,8 @@ fn catalog_owner_process() {
     let server = std::sync::Arc::new(DaemonServer::new_with_paths(Some(root.join("data/config")), Some(root.join("data/auth"))));
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(ipc_register(server.clone(), vec![], false));
-    println!("A05_READY"); std::io::stdout().flush().unwrap();
+    // Serial libtest prints its test-name prefix without a newline.
+    println!("\nA05_READY"); std::io::stdout().flush().unwrap();
     let mut command = String::new();
     std::io::stdin().lock().read_line(&mut command).unwrap();
     if command.trim() == "register" {

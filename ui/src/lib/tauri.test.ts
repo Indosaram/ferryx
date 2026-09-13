@@ -464,6 +464,7 @@ describe("Tauri IPC wrapper contract", () => {
         sessionId: "pty-1",
         tabId: "tab-1",
         terminalTabs: [{ id: "tab-1", label: "main" }],
+        attentionInventory: [],
       },
     });
 
@@ -484,6 +485,7 @@ describe("Tauri IPC wrapper contract", () => {
         sessionId: null,
         tabId: null,
         terminalTabs: [],
+        attentionInventory: [],
       },
     });
   });
@@ -514,6 +516,7 @@ describe("Tauri IPC wrapper contract", () => {
           { id: "tab-1", label: "main", activityState: "working", agentType: "claude" },
           { id: "tab-2", label: "feature", activityState: "waiting", agentType: "codex" },
         ],
+        attentionInventory: [],
       },
     });
   });
@@ -645,7 +648,7 @@ describe("probeNotificationDelivery", () => {
     // `sendTest`. Any other key is dropped, silently defaulting to false and sending nothing.
     expect(core.invoke).toHaveBeenCalledWith(
       "cmd_notification_probe_delivery",
-      { sendTest: true },
+      { sendTest: true, sound: "system" },
     );
   });
 });

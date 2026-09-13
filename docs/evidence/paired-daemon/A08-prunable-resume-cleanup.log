@@ -1,0 +1,6 @@
+A08-prunable-resume-RED.log
+A08 cleanup listener_joined=true connection_refused=true owner_dropped=true private_root_removed=true no_pty_spawned=true
+A08-prunable-resume-live-GREEN.log
+A08 cleanup session=f9047e63-fc81-4f4f-b5c5-43835f3152e2 close_awaited=true session_absent=true
+A08 cleanup session=6062249e-3c98-4954-aa9e-78f99af44ccd close_awaited=true session_absent=true
+A08 cleanup listener_joined=true connection_refused=true owner_dropped=true private_root_removed=true owned_sessions_closed=true

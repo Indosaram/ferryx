@@ -1,0 +1,81 @@
+[
+  {
+    "label": "remote",
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--manifest-path",
+      "src-tauri/Cargo.toml",
+      "--no-default-features",
+      "--lib",
+      "remote::",
+      "--",
+      "--nocapture"
+    ],
+    "pid": 296922,
+    "exit": 101
+  },
+  {
+    "label": "integration",
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--manifest-path",
+      "src-tauri/Cargo.toml",
+      "--no-default-features",
+      "--test",
+      "machine_catalog_persistence",
+      "--test",
+      "machine_worktrees",
+      "--test",
+      "worktree_safety",
+      "--test",
+      "machine_worktree_legacy_bounds",
+      "--test",
+      "machine_worktree_transports",
+      "--test",
+      "relay_pairing_generation_regression",
+      "--",
+      "--nocapture"
+    ],
+    "pid": 307620,
+    "exit": 101
+  },
+  {
+    "label": "worktree",
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--manifest-path",
+      "src-tauri/Cargo.toml",
+      "--no-default-features",
+      "--lib",
+      "worktree::",
+      "--",
+      "--nocapture"
+    ],
+    "pid": 308176,
+    "exit": 0
+  },
+  {
+    "label": "build",
+    "command": [
+      "cargo",
+      "build",
+      "--locked",
+      "--manifest-path",
+      "src-tauri/Cargo.toml",
+      "--no-default-features",
+      "--lib",
+      "--bin",
+      "ferryx-cli",
+      "--bin",
+      "ferryx-relay"
+    ],
+    "pid": 308733,
+    "exit": 0
+  }
+]

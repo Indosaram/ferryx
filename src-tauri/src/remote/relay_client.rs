@@ -152,6 +152,16 @@ impl PairingCoordinator {
             .as_secs();
         let (generation, pin, pairing_token) = {
             let mut generation = self.generation_id.write();
+            // An owner request replaces the previous offer, including after a
+            // redemption that does not send a control-channel state transition.
+            // Retire both local capabilities before publishing the next generation.
+            match self.state() {
+                PairingState::Ready | PairingState::Claimed | PairingState::Cancelled => {
+                    self.transition(PairingState::Expired)?;
+                }
+                PairingState::Created | PairingState::Registering
+                | PairingState::Consumed | PairingState::Expired => {}
+            }
             self.transition(PairingState::Registering)?;
             *generation = generation
                 .checked_add(1)
@@ -761,6 +771,10 @@ mod tests {
         assert_eq!(registration.pairing_token.len(), 32);
         assert!(u128::from_str_radix(&registration.pairing_token, 16).is_ok());
         assert!(coordinator.transition(PairingState::Consumed).is_err());
+        assert!(coordinator
+            .generate_pairing(Duration::from_secs(60))
+            .await
+            .is_err());
         release_tx.send(()).unwrap();
         let session = tokio::time::timeout(Duration::from_secs(5), generation)
             .await
@@ -770,10 +784,6 @@ mod tests {
         assert_eq!(session.pin, registration.pin);
         assert_eq!(session.pairing_token, registration.pairing_token);
         assert_eq!(coordinator.state(), PairingState::Ready);
-        assert!(coordinator
-            .generate_pairing(Duration::from_secs(60))
-            .await
-            .is_err());
         coordinator.transition(PairingState::Claimed).unwrap();
         coordinator.transition(PairingState::Consumed).unwrap();
         assert!(coordinator.transition(PairingState::Expired).is_err());
@@ -806,18 +816,26 @@ mod tests {
                     .unwrap();
             }
         });
+        let mut previous: Option<PairingSessionInfo> = None;
         for generation in 1..=4 {
-            coordinator
+            // Given an earlier offer, when the owner issues its replacement,
+            // then neither local credential from that offer remains redeemable.
+            let session = coordinator
                 .generate_pairing(Duration::from_secs(60))
                 .await
                 .unwrap();
+            if let Some(old) = previous {
+                assert!(coordinator.auth.exchange_pairing_code(&old.pin, "stale").is_err());
+                assert!(coordinator.auth.exchange_pairing_code(&old.pairing_token, "stale").is_err());
+            }
+            previous = Some(session);
             assert_eq!(*coordinator.generation_id.read(), generation);
             coordinator.expire_generation(generation - 1);
             assert_eq!(coordinator.state(), PairingState::Ready);
             if generation % 2 == 0 {
                 coordinator.transition(PairingState::Claimed).unwrap();
                 coordinator.transition(PairingState::Consumed).unwrap();
-            } else {
+            } else if generation == 3 {
                 coordinator.expire_generation(generation);
                 assert_eq!(coordinator.state(), PairingState::Expired);
             }

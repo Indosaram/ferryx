@@ -11,6 +11,7 @@ pub struct TerminalService {
     pty_manager: Arc<PtyManager>,
     output_hub: Arc<TerminalOutputHub>,
     remote: Arc<super::remote::RemoteRuntime>,
+    paired: Arc<super::paired_runtime::Runtime>,
 }
 
 impl Default for TerminalService {
@@ -26,10 +27,13 @@ impl TerminalService {
     pub fn new(pty_manager: Arc<PtyManager>, output_hub: Arc<TerminalOutputHub>) -> Self {
         Self {
             remote: Arc::new(super::remote::RemoteRuntime::new(output_hub.clone())),
+            paired: Arc::new(super::paired_runtime::Runtime::default()),
             pty_manager,
             output_hub,
         }
     }
+
+    pub fn paired(&self) -> &Arc<super::paired_runtime::Runtime> { &self.paired }
 
     pub fn remote(&self) -> &Arc<super::remote::RemoteRuntime> {
         &self.remote
@@ -42,6 +46,9 @@ impl TerminalService {
         generation: u64,
         data: Vec<u8>,
     ) -> Result<super::remote::RemoteOperation, PtyError> {
+        if super::paired_runtime::Runtime::owns(id) {
+            return self.paired.write(id, generation, data);
+        }
         if self.remote.contains(id) {
             return self
                 .remote
@@ -59,6 +66,9 @@ impl TerminalService {
         cols: u16,
         rows: u16,
     ) -> Result<super::remote::RemoteOperation, PtyError> {
+        if super::paired_runtime::Runtime::owns(id) {
+            return self.paired.resize(id, generation, cols, rows);
+        }
         if self.remote.contains(id) {
             return self
                 .remote
@@ -88,6 +98,21 @@ impl TerminalService {
         let (session_id, pty_rx) =
             self.pty_manager
                 .spawn_in_worktree(cmd, cols, rows, worktree_manager, worktree_path)?;
+        Ok(self.register_output(session_id, pty_rx, cols, rows))
+    }
+
+    pub(crate) fn spawn_in_worktree_with_id(
+        &self,
+        session_id: String,
+        cmd: CommandBuilder,
+        cols: u16,
+        rows: u16,
+        worktree_manager: &WorktreeManager,
+        worktree_path: &Path,
+    ) -> Result<(String, broadcast::Receiver<Vec<u8>>), PtyError> {
+        let (session_id, pty_rx) = self.pty_manager.spawn_in_worktree_with_id(
+            session_id, cmd, cols, rows, worktree_manager, worktree_path,
+        )?;
         Ok(self.register_output(session_id, pty_rx, cols, rows))
     }
 
@@ -178,7 +203,7 @@ impl TerminalService {
     }
 
     pub fn write_input(&self, session_id: &str, data: &[u8]) -> Result<(), PtyError> {
-        if self.remote.contains(session_id) {
+        if self.remote.contains(session_id) || super::paired_runtime::Runtime::owns(session_id) {
             return Err(PtyError::Other(
                 "Remote input requires write_input_operation and a generation".into(),
             ));
@@ -187,6 +212,9 @@ impl TerminalService {
     }
 
     pub fn resize(&self, session_id: &str, cols: u16, rows: u16) -> Result<(), PtyError> {
+        if super::paired_runtime::Runtime::owns(session_id) {
+            return Err(PtyError::Other("Paired resize requires a controller generation".into()));
+        }
         self.pty_manager.resize(session_id, cols, rows)?;
         // Single choke point for ALL resize callers (daemon request arm, remote gateway):
         // every PTY resize must leave a ledger marker or segmented replay misattributes
@@ -196,10 +224,16 @@ impl TerminalService {
     }
 
     pub fn signal(&self, session_id: &str, signal: TerminalSignal) -> Result<(), PtyError> {
+        if super::paired_runtime::Runtime::owns(session_id) {
+            return Err(PtyError::Other("Paired signal requires a controller generation".into()));
+        }
         self.pty_manager.signal(session_id, signal)
     }
 
     pub async fn close_session(&self, session_id: &str) -> Result<(), PtyError> {
+        if super::paired_runtime::Runtime::owns(session_id) {
+            return Err(PtyError::Other("Use paired CloseSession with a mutation request ID; detach does not close the remote PTY".into()));
+        }
         if self.remote.contains(session_id) {
             return self
                 .remote
@@ -211,9 +245,17 @@ impl TerminalService {
         self.pty_manager.close_session(session_id).await
     }
 
+    pub(crate) async fn close_machine_session(&self, session_id: &str,
+        authorize: Arc<dyn Fn() -> Result<(), String> + Send + Sync>) -> Result<(), PtyError> {
+        self.pty_manager.close_authorized(session_id, std::time::Duration::from_secs(5), authorize).await?;
+        self.output_hub.remove_session(session_id);
+        Ok(())
+    }
+
     pub fn list_sessions(&self) -> Vec<String> {
         let mut sessions = self.pty_manager.list_sessions();
         sessions.extend(self.remote.list());
+        sessions.extend(self.paired.list());
         sessions
     }
 

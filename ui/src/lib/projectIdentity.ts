@@ -18,7 +18,7 @@ export function hasValidProjectTarget(project: { workspaceId: string; target?: u
 }
 
 export function projectRootWorktree(project: RegisteredProject, hostLabel?: string): Worktree {
-  const isRemote = project.target?.kind === "ssh";
+  const isRemote = project.target?.kind === "ssh" || project.target?.kind === "pairedDaemon";
   const branch = project.gitBranch !== undefined ? project.gitBranch : null;
   const head = project.gitHead ?? "";
   const detached = Boolean(head && !branch);

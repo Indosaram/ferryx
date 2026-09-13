@@ -8,7 +8,10 @@ import {
   previewWorktreeDelete,
   toIpcError,
 } from "../lib/tauri";
-import { worktreeIdentity, type BranchDeletionPreview, type StructuredIpcError, type Worktree } from "../lib/types";
+import { createPairedWorktreeActions, pairedActionMessage } from "../lib/pairedWorktreeActions";
+import { PairedOperationError } from "../lib/pairedDaemonProject";
+import { isPairedWorkspaceId } from "../lib/remoteProject";
+import { worktreeIdentity, type RegisteredProject, type BranchDeletionPreview, type StructuredIpcError, type Worktree } from "../lib/types";
 
 export type WorktreeDeleteServices = {
   previewDelete: (worktree: Worktree) => Promise<BranchDeletionPreview>;
@@ -18,13 +21,19 @@ export type WorktreeDeleteServices = {
 
 type WorktreeDeleteDialogProps = {
   workspaceId?: string;
+  project?: RegisteredProject;
   worktree: Worktree;
   onClose: () => void;
   onDeleted: () => void;
   services?: WorktreeDeleteServices;
 };
 
-function createDefaultServices(workspaceId: string): WorktreeDeleteServices {
+function createDefaultServices(workspaceId: string, paired: boolean): WorktreeDeleteServices {
+  // Either ownership signal must prevent Local/SSH fallback without a paired project.
+  if (paired) {
+    const unsupported = async (): Promise<never> => { throw new PairedOperationError("PAIRED_OWNER_REQUIRED"); };
+    return { previewDelete: unsupported, deleteSafe: unsupported, deleteDestructive: unsupported };
+  }
   return {
     previewDelete: async (worktree) => {
       const identity = requireIdentity(worktree);
@@ -43,12 +52,17 @@ function createDefaultServices(workspaceId: string): WorktreeDeleteServices {
 
 export function WorktreeDeleteDialog({
   workspaceId = DEFAULT_WORKSPACE_ID,
+  project,
   worktree,
   onClose,
   onDeleted,
   services,
 }: WorktreeDeleteDialogProps) {
-  const resolvedServices = useMemo(() => services ?? createDefaultServices(workspaceId), [services, workspaceId]);
+  const paired = project?.target?.kind === "pairedDaemon" || isPairedWorkspaceId(workspaceId) || isPairedWorkspaceId(worktree.workspaceId);
+  const resolvedServices = useMemo(() => services ?? (project?.target?.kind === "pairedDaemon"
+    ? createPairedWorktreeActions(project) : createDefaultServices(worktree.workspaceId ?? workspaceId, paired)), [services, project, workspaceId, worktree.workspaceId, paired]);
+  const actionError = (cause: unknown): StructuredIpcError => cause instanceof PairedOperationError
+    ? { code: cause.code, message: pairedActionMessage(cause) } : toIpcError(cause);
   const [preview, setPreview] = useState<BranchDeletionPreview | null>(null);
   const [error, setError] = useState<StructuredIpcError | null>(null);
   const [destructiveRequired, setDestructiveRequired] = useState(false);
@@ -66,7 +80,7 @@ export function WorktreeDeleteDialog({
         if (!cancelled) setPreview(result);
       })
       .catch((cause) => {
-        if (!cancelled) setError(toIpcError(cause));
+        if (!cancelled) setError(actionError(cause));
       })
       .finally(() => {
         if (!cancelled) setBusy(false);
@@ -88,9 +102,9 @@ export function WorktreeDeleteDialog({
       await resolvedServices.deleteSafe(worktree);
       finishDelete();
     } catch (cause) {
-      const ipcError = toIpcError(cause);
+      const ipcError = actionError(cause);
       setError(ipcError);
-      setDestructiveRequired(ipcError.code === "UNMERGED_BRANCH" || ipcError.code === "DIRTY_WORKTREE");
+      setDestructiveRequired(!paired && (ipcError.code === "UNMERGED_BRANCH" || ipcError.code === "DIRTY_WORKTREE"));
     } finally {
       setBusy(false);
     }
@@ -103,7 +117,7 @@ export function WorktreeDeleteDialog({
       await resolvedServices.deleteDestructive(worktree);
       finishDelete();
     } catch (cause) {
-      setError(toIpcError(cause));
+      setError(actionError(cause));
     } finally {
       setBusy(false);
     }

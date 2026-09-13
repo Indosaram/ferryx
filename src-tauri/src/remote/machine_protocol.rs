@@ -178,6 +178,10 @@ pub struct Worktrees { pub revision: Epoch, pub worktrees: Vec<Worktree> }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
     pub target: RemoteTerminalTarget,
     #[serde(deserialize_with = "required")]
     pub workspace_id: String,

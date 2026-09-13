@@ -1,0 +1,24 @@
+--- a/src-tauri/src/clipboard_image.rs
++++ b/src-tauri/src/clipboard_image.rs
+@@ -72,6 +72,10 @@
+         OpenClipboard,
+     };
+     use windows_sys::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
++
++    // Standard Win32 clipboard formats, also needed without the native renderer.
++    const CF_DIB_ID: u32 = 8;
++    const CF_DIBV5_ID: u32 = 17;
+ 
+     struct ClipboardGuard;
+     impl Drop for ClipboardGuard {
+@@ -124,9 +128,7 @@
+         if format == 0 {
+             break;
+         }
+-        if format == crate::ipc::native_terminal::CF_DIB_ID
+-            || format == crate::ipc::native_terminal::CF_DIBV5_ID
+-        {
++        if format == CF_DIB_ID || format == CF_DIBV5_ID {
+             dib_format.get_or_insert(format);
+             continue;
+         }

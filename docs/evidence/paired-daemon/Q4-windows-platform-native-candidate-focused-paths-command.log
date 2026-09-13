@@ -1,0 +1,1 @@
+cargo --config C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\cargo-qa.toml test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --test q4_windows_paths -- --nocapture

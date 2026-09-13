@@ -1,0 +1,49 @@
+﻿**********************
+Windows PowerShell transcript start
+Start time: 20260913102621
+Username: DESKTOP-1LAPJMP\sook
+RunAs User: DESKTOP-1LAPJMP\sook
+Configuration Name: 
+Machine: DESKTOP-1LAPJMP (Microsoft Windows NT 10.0.26200.0)
+Host Application: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -File C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\repaired-cleanup.ps1
+Process ID: 2620
+PSVersion: 5.1.26100.9444
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.26100.9444
+BuildVersion: 10.0.26100.9444
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+Transcript started, output file is C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\repaired-cleanup-final.log
+REPAIRED_SOURCE_MATCH=969
+
+
+ProcessId       : 22356
+ParentProcessId : 20860
+Name            : pwsh.exe
+ExecutablePath  : c:\program files\powershell\7\pwsh.exe
+CommandLine     : "c:\program files\powershell\7\pwsh.exe" -c "powershell -NoProfile -File C:\Users\sook\ferryx-herdr-q
+                  4-windows-01a097f8\repaired-cleanup.ps1"
+
+OWNED_RUNTIME_PROCESSES=0
+build EXIT=0; WAITED=True
+clipboard EXIT=0; WAITED=True
+remote EXIT=101; WAITED=True
+integration EXIT=101; WAITED=True
+worktree EXIT=101; WAITED=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\runtime; ABSENT=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\data; ABSENT=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\sessions; ABSENT=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\home; ABSENT=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\config; ABSENT=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\cache; ABSENT=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\temp; ABSENT=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\appdata; ABSENT=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\localappdata; ABSENT=True
+Retained source/target/archive/bundle and tooling. No desktop or real clipboard action.
+**********************
+Windows PowerShell transcript end
+End time: 20260913102622
+**********************

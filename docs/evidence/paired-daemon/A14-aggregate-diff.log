@@ -1,0 +1,5 @@
+cwd=/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8
+command=git diff --check
+environment=A14-aggregate-environment.json (replacement environment)
+
+EXIT=0

@@ -1,0 +1,85 @@
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+ ❯ src/state/remoteHostStore.native.test.ts (4 tests | 4 failed) 8ms
+   × desktop never restores or serializes a bearer or treats it as authority 4ms
+     → expected '{"hosts":{"https://relay.example/host…' not to contain 'private-fixture-bearer'
+   × desktop token presence is not authentication authority 1ms
+     → expected 'paired' to be 'unknown' // Object.is equality
+   × desktop ordinary changes preserve legacy migration input until native confirmation 1ms
+     → expected '{"hosts":{"https://relay.example/host…' to be '{"hosts":{"https://relay.example/host…' // Object.is equality
+   × desktop rejects an older host generation after re-pair 1ms
+     → expected 'stale' to be 'Fixture' // Object.is equality
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 4 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/state/remoteHostStore.native.test.ts > desktop never restores or serializes a bearer or treats it as authority
+AssertionError: expected '{"hosts":{"https://relay.example/host…' not to contain 'private-fixture-bearer'
+
+Expected: [32m"private-fixture-bearer"[39m
+Received: [31m"{"hosts":{"https://relay.example/host/fixture-machine":{"hostId":"https://relay.example/host/fixture-machine","machineId":"fixture-machine","relayOrigin":"https://relay.example","name":"Fixture","displayName":"Fixture","address":"https://relay.example","transport":"relay","authStatus":"paired","online":false,"deviceToken":"private-fixture-bearer","lastSeenAt":null,"directHints":[]}},"activeHostId":null,"discovering":false}"[39m
+
+ ❯ src/state/remoteHostStore.native.test.ts:11:48
+      9|   localStorage.setItem(REMOTE_HOST_STORAGE_KEY, JSON.stringify({ hosts…
+     10|   const store = createRemoteHostStore();
+     11|   expect(JSON.stringify(store.getState())).not.toContain(legacy.device…
+       |                                                ^
+     12|   store.upsertHost(legacy);
+     13|   expect(store.getState().hosts[hostId]?.authStatus).not.toBe("paired"…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/4]⎯
+
+ FAIL  src/state/remoteHostStore.native.test.ts > desktop token presence is not authentication authority
+AssertionError: expected 'paired' to be 'unknown' // Object.is equality
+
+Expected: [32m"unknown"[39m
+Received: [31m"paired"[39m
+
+ ❯ src/state/remoteHostStore.native.test.ts:19:54
+     17|   const store = createRemoteHostStore();
+     18|   store.upsertHost(legacy);
+     19|   expect(store.getState().hosts[hostId]?.authStatus).toBe("unknown");
+       |                                                      ^
+     20| });
+     21| it("desktop ordinary changes preserve legacy migration input until nat…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/4]⎯
+
+ FAIL  src/state/remoteHostStore.native.test.ts > desktop ordinary changes preserve legacy migration input until native confirmation
+AssertionError: expected '{"hosts":{"https://relay.example/host…' to be '{"hosts":{"https://relay.example/host…' // Object.is equality
+
+Expected: [32m"{"hosts":{"https://relay.example/host/fixture-machine":{"hostId":"https://relay.example/host/fixture-machine","machineId":"fixture-machine","relayOrigin":"https://relay.example","name":"Fixture","displayName":"Fixture","address":"https://relay.example","transport":"relay","authStatus":"[7munknown[27m","online":false,"deviceToken":"private-fixture-bearer"[7m}}[27m}"[39m
+Received: [31m"{"hosts":{"https://relay.example/host/fixture-machine":{"hostId":"https://relay.example/host/fixture-machine","machineId":"fixture-machine","relayOrigin":"https://relay.example","name":"Fixture","displayName":"Fixture","address":"https://relay.example","transport":"relay","authStatus":"[7mpaired[27m","online":false,"deviceToken":"private-fixture-bearer"[7m,"lastSeenAt":null,"directHints":[]}},"activeHostId":null,"discovering":false[27m}"[39m
+
+ ❯ src/state/remoteHostStore.native.test.ts:26:57
+     24|   const store = createRemoteHostStore();
+     25|   store.setDiscovering(true);
+     26|   expect(localStorage.getItem(REMOTE_HOST_STORAGE_KEY)).toBe(original);
+       |                                                         ^
+     27| });
+     28| it("desktop rejects an older host generation after re-pair", () => {
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/4]⎯
+
+ FAIL  src/state/remoteHostStore.native.test.ts > desktop rejects an older host generation after re-pair
+AssertionError: expected 'stale' to be 'Fixture' // Object.is equality
+
+Expected: [32m"[7mFixtur[27me"[39m
+Received: [31m"[7mstal[27me"[39m
+
+ ❯ src/state/remoteHostStore.native.test.ts:32:48
+     30|   store.upsertHost({ ...legacy, deviceToken: null, generation: "9" } a…
+     31|   store.upsertHost({ ...legacy, deviceToken: null, generation: "8", na…
+     32|   expect(store.getState().hosts[hostId]?.name).toBe("Fixture");
+       |                                                ^
+     33| });
+     34| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/4]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  4 failed (4)
+   Start at  12:25:12
+   Duration  708ms (transform 37ms, setup 113ms, collect 14ms, tests 8ms, environment 252ms, prepare 32ms)
+

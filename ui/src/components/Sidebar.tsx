@@ -23,7 +23,7 @@ import {
   Settings2,
   Trash2,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { toast } from "sonner";
 
 import { combineActivitySummaries, resolveActivityIndicator, type ActivitySummary } from "../lib/activity";
@@ -32,6 +32,7 @@ import { workspaceName } from "../lib/branchFilter";
 import { projectRootWorktree } from "../lib/projectIdentity";
 import { groupProjects, isProjectGroupActive } from "../lib/projectGrouping";
 import { useSshHosts } from "../lib/sshHosts";
+import { remoteHostStore, type RemoteHostState } from "../state/remoteHostStore";
 import { resolveWorktreeOwnerId } from "../lib/worktreeOwnership";
 import { isMacShortcutPlatform } from "../lib/shortcuts";
 import {
@@ -200,6 +201,7 @@ export function Sidebar({
 
   const { hosts } = useSshHosts();
 
+  const remoteState = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
   const naturalWorktreesByProject = useMemo(
     () => groupWorktreesByProject(
       worktrees,
@@ -207,8 +209,9 @@ export function Sidebar({
       activeProjectId,
       inactiveProjectWorktrees,
       hosts,
+      remoteState,
     ),
-    [activeProjectId, hosts, inactiveProjectWorktrees, projects, worktrees],
+    [activeProjectId, hosts, inactiveProjectWorktrees, projects, worktrees, remoteState],
   );
   const worktreesByProject = useMemo(
     () => applyWorktreeOrder(naturalWorktreesByProject, worktreeOrder),
@@ -421,7 +424,7 @@ export function Sidebar({
                     }}
                     onCreateWorktree={() => onCreateWorktree(project)}
                     onRemoveProject={onRemoveProject ? () => onRemoveProject(project) : undefined}
-                    isStandaloneRemote={isStandaloneRemote}
+                    isStandaloneRemote={isStandaloneRemote || (project.target?.kind === "pairedDaemon" && group.memberProjects.length === 1)}
                   />
                 );
 
@@ -593,10 +596,11 @@ function ProjectHeader({
   isStandaloneRemote = true,
 }: ProjectHeaderProps) {
   const { hosts } = useSshHosts();
-  const remote = project.target?.kind === "ssh" ? project.target : null;
-  const hostLabel = remote
-    ? (hosts.find((host) => host.id === remote.hostId)?.label ?? project.hostLabel ?? remote.hostId)
-    : null;
+  const remoteState = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
+  const remote = project.target && project.target.kind !== "local" ? project.target : null;
+  const hostLabel = remote?.kind === "pairedDaemon"
+    ? (remoteState.hosts[remote.hostId]?.name ?? project.hostLabel ?? remote.hostId)
+    : remote ? (hosts.find((host) => host.id === remote.hostId)?.label ?? project.hostLabel ?? remote.hostId) : null;
   const folderName = remote
     ? (project.repoRoot.replace(/[\\/]+$/, "").split(/[\\/]/).filter(Boolean).at(-1) ?? "/")
     : project.workspaceId;
@@ -685,6 +689,7 @@ function ProjectHeader({
         >
           <Folder className="size-3.5 shrink-0" />
           <span className="min-w-0 flex-1 truncate">{projectLabel}</span>
+          {remote?.kind === "pairedDaemon" ? <span className="text-[10px] text-status-idle">{pairedConnectionStatus(remote.hostId, remoteState)}</span> : null}
           {activity.runningCount > 0 ? (
             <span
               data-testid="project-running-badge"
@@ -734,6 +739,16 @@ function ProjectHeader({
   );
 }
 
+function pairedConnectionStatus(hostId: string, state: RemoteHostState): string {
+  const host = state.hosts[hostId];
+  if (state.machineFeaturesEnabled === false) return "Disabled";
+  if (state.nativeStatus !== "ready") return "Unavailable";
+  if (!host) return "Unavailable";
+  if (host.authStatus === "revoked") return "Revoked";
+  if (host.authStatus !== "paired" || host.grantScope !== "machine") return "Re-pair required";
+  return host.online ? `Online (${host.transport})` : "Offline";
+}
+
 function projectAttentionState(activity: ActivitySummary): "waiting" | "done" | "unread" | null {
   if (activity.hasWaiting) return "waiting";
   if (activity.hasUnread) return "unread";
@@ -746,9 +761,9 @@ function summarizeProjectActivity(
   unreadWorktreePaths: Record<string, boolean> | undefined,
 ): ActivitySummary {
   const summaries = worktrees
-    .map((worktree) => activityByWorktreePath?.[worktree.path])
+    .map((worktree) => worktree.workspaceId?.startsWith("daemon:") ? undefined : activityByWorktreePath?.[worktree.path])
     .filter((summary): summary is ActivitySummary => Boolean(summary));
-  const hasUnread = worktrees.some((worktree) => Boolean(unreadWorktreePaths?.[worktree.path]));
+  const hasUnread = worktrees.some((worktree) => !worktree.workspaceId?.startsWith("daemon:") && Boolean(unreadWorktreePaths?.[worktree.path]));
   return combineActivitySummaries(summaries, hasUnread);
 }
 
@@ -763,6 +778,7 @@ function groupWorktreesByProject(
   activeProjectId: string | undefined,
   inactiveProjectWorktrees?: Record<string, Worktree[]>,
   hosts?: Array<{ id: string; label: string }>,
+  remoteState?: RemoteHostState,
 ) {
   const groups = groupProjects(projects);
   const grouped = new Map<string, Worktree[]>();
@@ -774,7 +790,7 @@ function groupWorktreesByProject(
       );
       if (member.workspaceId === activeProjectId && hasActiveWorktrees) return [];
       return (inactiveProjectWorktrees?.[member.workspaceId] ?? []).map((row) =>
-        member.workspaceId === primaryId || row.workspaceId
+        (member.workspaceId === primaryId && member.target?.kind !== "pairedDaemon") || row.workspaceId
           ? row
           : { ...row, workspaceId: member.workspaceId });
     });
@@ -852,15 +868,22 @@ function groupWorktreesByProject(
 
     for (const member of group.memberProjects) {
       const target = member.target;
-      if (target?.kind === "ssh") {
+      if (target?.kind === "ssh" || target?.kind === "pairedDaemon") {
         const existingIndex = bucket.findIndex(
           (candidate) =>
             candidate.path === member.repoRoot &&
             (candidate.workspaceId ?? project.workspaceId) === member.workspaceId,
         );
-        const hostLabel = hosts?.find((h) => h.id === target.hostId)?.label ?? member.hostLabel ?? target.hostId;
+        const hostLabel = (target.kind === "pairedDaemon" ? remoteState?.hosts[target.hostId]?.name : hosts?.find((h) => h.id === target.hostId)?.label) ?? member.hostLabel ?? target.hostId;
+        if (target.kind === "pairedDaemon") {
+          for (let i = 0; i < bucket.length; i++) {
+            if ((bucket[i].workspaceId ?? project.workspaceId) === member.workspaceId) {
+              bucket[i] = { ...bucket[i], workspaceId: member.workspaceId, hostLabel, hostSummary: remoteState ? pairedConnectionStatus(target.hostId, remoteState) : "Unavailable" };
+            }
+          }
+        }
         if (existingIndex === -1) {
-          bucket.push(projectRootWorktree(member, hostLabel));
+          bucket.push({ ...projectRootWorktree(member, hostLabel), ...(target.kind === "pairedDaemon" ? { hostSummary: remoteState ? pairedConnectionStatus(target.hostId, remoteState) : "Unavailable" } : {}) });
         } else {
           const row = bucket[existingIndex];
           const newBranch = member.gitBranch !== undefined ? member.gitBranch : row.branch;

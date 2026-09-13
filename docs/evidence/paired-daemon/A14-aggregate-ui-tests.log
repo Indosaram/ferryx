@@ -1,0 +1,605 @@
+cwd=/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8
+command=bun run --cwd ui test src/lib/pairedDaemonProject.test.ts src/lib/pairedDaemonContracts.test.ts src/state/remoteHostStore.test.ts
+environment=A14-aggregate-environment.json (replacement environment)
+$ vitest run --maxWorkers=1 src/lib/pairedDaemonProject.test.ts src/lib/pairedDaemonContracts.test.ts src/state/remoteHostStore.test.ts
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+stderr | src/lib/pairedDaemonProject.test.ts
+Unable to restore remote host inventory TypeError: storage.getItem is not a function
+    at readInventory [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:70:36[90m)[39m
+    at createRemoteHostStore [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:142:57[90m)[39m
+    at [90m/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:284:32
+[90m    at processTicksAndRejections (node:internal/process/task_queues:104:5)[39m
+    at VitestExecutor.runModule (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4mvite-node[24m/dist/client.mjs:397:4)
+    at VitestExecutor.directRequest (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4mvite-node[24m/dist/client.mjs:375:3)
+    at VitestExecutor.cachedRequest (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4mvite-node[24m/dist/client.mjs:189:11)
+    at VitestExecutor.dependencyRequest (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4mvite-node[24m/dist/client.mjs:239:10)
+    at [90m/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:2:1
+    at VitestExecutor.runModule (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4mvite-node[24m/dist/client.mjs:397:4)
+
+(node:98618) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > captures equal-path owners independently of selection and preserves Rust IDs
+Unable to restore remote host inventory TypeError: storage.getItem is not a function
+    at readInventory [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:70:36[90m)[39m
+    at createRemoteHostStore [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:142:57[90m)[39m
+    at setup [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:20:17[90m)[39m
+    at [90m/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:49:15
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:155:11
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:752:26
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1897:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1863:10)
+    at runTest (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1574:12)
+
+stderr | src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > rejects late registration after re-pair
+Unable to restore remote host inventory TypeError: storage.getItem is not a function
+    at readInventory [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:70:36[90m)[39m
+    at createRemoteHostStore [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:142:57[90m)[39m
+    at setup [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:20:17[90m)[39m
+    at [90m/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:70:15
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:863:59
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:155:11
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:752:26
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1897:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1863:10)
+
+stderr | src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > rejects late registration after forget
+Unable to restore remote host inventory TypeError: storage.getItem is not a function
+    at readInventory [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:70:36[90m)[39m
+    at createRemoteHostStore [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:142:57[90m)[39m
+    at setup [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:20:17[90m)[39m
+    at [90m/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:70:15
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:863:59
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:155:11
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:752:26
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1897:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1863:10)
+
+stderr | src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > rejects late registration after revoke
+Unable to restore remote host inventory TypeError: storage.getItem is not a function
+    at readInventory [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:70:36[90m)[39m
+    at createRemoteHostStore [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:142:57[90m)[39m
+    at setup [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:20:17[90m)[39m
+    at [90m/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:70:15
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:863:59
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:155:11
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:752:26
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1897:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1863:10)
+
+stderr | src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > requires native context and negotiated capabilities before dispatch
+Unable to restore remote host inventory TypeError: storage.getItem is not a function
+    at readInventory [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:70:36[90m)[39m
+    at createRemoteHostStore [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:142:57[90m)[39m
+    at setup [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:20:17[90m)[39m
+    at [90m/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:83:15
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:155:11
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:752:26
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1897:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1863:10)
+    at runTest (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1574:12)
+
+stderr | src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > rejects invalid capability generation
+Unable to restore remote host inventory TypeError: storage.getItem is not a function
+    at readInventory [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:70:36[90m)[39m
+    at createRemoteHostStore [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:142:57[90m)[39m
+    at setup [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:20:17[90m)[39m
+    at [90m/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:90:15
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:863:59
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:155:11
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:752:26
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1897:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1863:10)
+
+stderr | src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > rejects invalid capability hostId
+Unable to restore remote host inventory TypeError: storage.getItem is not a function
+    at readInventory [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:70:36[90m)[39m
+    at createRemoteHostStore [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:142:57[90m)[39m
+    at setup [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:20:17[90m)[39m
+    at [90m/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:90:15
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:863:59
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:155:11
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:752:26
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1897:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1863:10)
+
+stderr | src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > rejects invalid capability kind
+Unable to restore remote host inventory TypeError: storage.getItem is not a function
+    at readInventory [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:70:36[90m)[39m
+    at createRemoteHostStore [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:142:57[90m)[39m
+    at setup [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:20:17[90m)[39m
+    at [90m/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:90:15
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:863:59
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:155:11
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:752:26
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1897:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1863:10)
+
+stderr | src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > rejects invalid capability machineId
+Unable to restore remote host inventory TypeError: storage.getItem is not a function
+    at readInventory [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:70:36[90m)[39m
+    at createRemoteHostStore [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:142:57[90m)[39m
+    at setup [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:20:17[90m)[39m
+    at [90m/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:90:15
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:863:59
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:155:11
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:752:26
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1897:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1863:10)
+
+stderr | src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > rejects invalid capability unknownCapability
+Unable to restore remote host inventory TypeError: storage.getItem is not a function
+    at readInventory [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:70:36[90m)[39m
+    at createRemoteHostStore [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:142:57[90m)[39m
+    at setup [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:20:17[90m)[39m
+    at [90m/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:90:15
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:863:59
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:155:11
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:752:26
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1897:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1863:10)
+
+stderr | src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > rejects invalid remote ID "" before dispatch
+Unable to restore remote host inventory TypeError: storage.getItem is not a function
+    at readInventory [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:70:36[90m)[39m
+    at createRemoteHostStore [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:142:57[90m)[39m
+    at setup [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:20:17[90m)[39m
+    at [90m/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:102:15
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:863:59
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:155:11
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:752:26
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1897:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1863:10)
+
+stderr | src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > rejects invalid remote ID "../project" before dispatch
+Unable to restore remote host inventory TypeError: storage.getItem is not a function
+    at readInventory [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:70:36[90m)[39m
+    at createRemoteHostStore [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:142:57[90m)[39m
+    at setup [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:20:17[90m)[39m
+    at [90m/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:102:15
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:863:59
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:155:11
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:752:26
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1897:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1863:10)
+
+stderr | src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > rejects invalid remote ID "daemon:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" before dispatch
+Unable to restore remote host inventory TypeError: storage.getItem is not a function
+    at readInventory [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:70:36[90m)[39m
+    at createRemoteHostStore [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:142:57[90m)[39m
+    at setup [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:20:17[90m)[39m
+    at [90m/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:102:15
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:863:59
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:155:11
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:752:26
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1897:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1863:10)
+
+stderr | src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > rejects invalid remote ID "project/a" before dispatch
+Unable to restore remote host inventory TypeError: storage.getItem is not a function
+    at readInventory [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:70:36[90m)[39m
+    at createRemoteHostStore [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:142:57[90m)[39m
+    at setup [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:20:17[90m)[39m
+    at [90m/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:102:15
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:863:59
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:155:11
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:752:26
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1897:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1863:10)
+
+stderr | src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > rejects invalid remote ID "project\u0000a" before dispatch
+Unable to restore remote host inventory TypeError: storage.getItem is not a function
+    at readInventory [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:70:36[90m)[39m
+    at createRemoteHostStore [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:142:57[90m)[39m
+    at setup [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:20:17[90m)[39m
+    at [90m/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:102:15
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:863:59
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:155:11
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:752:26
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1897:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1863:10)
+
+stderr | src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > validates project mapping, metadata and desktop unavailable IDs
+Unable to restore remote host inventory TypeError: storage.getItem is not a function
+    at readInventory [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:70:36[90m)[39m
+    at createRemoteHostStore [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:142:57[90m)[39m
+    at setup [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:20:17[90m)[39m
+    at [90m/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:107:15
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:155:11
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:752:26
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1897:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1863:10)
+    at runTest (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1574:12)
+
+stderr | src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > preserves structured machine failure but drops raw native bodies without retry
+Unable to restore remote host inventory TypeError: storage.getItem is not a function
+    at readInventory [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:70:36[90m)[39m
+    at createRemoteHostStore [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:142:57[90m)[39m
+    at setup [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:20:17[90m)[39m
+    at [90m/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:118:15
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:155:11
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:752:26
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1897:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1863:10)
+    at runTest (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1574:12)
+
+stderr | src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > exposes directory, worktree, session and reconciliation parsers
+Unable to restore remote host inventory TypeError: storage.getItem is not a function
+    at readInventory [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:70:36[90m)[39m
+    at createRemoteHostStore [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:142:57[90m)[39m
+    at setup [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:20:17[90m)[39m
+    at [90m/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:126:15
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:155:11
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:752:26
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1897:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1863:10)
+    at runTest (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1574:12)
+
+stderr | src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > dispatches typed mutations and preserves native ambiguity for explicit reconciliation
+Unable to restore remote host inventory TypeError: storage.getItem is not a function
+    at readInventory [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:70:36[90m)[39m
+    at createRemoteHostStore [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:142:57[90m)[39m
+    at setup [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:20:17[90m)[39m
+    at [90m/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/pairedDaemonProject.test.ts:138:15
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:155:11
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:752:26
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1897:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1863:10)
+    at runTest (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:1574:12)
+
+ ❯ src/lib/pairedDaemonProject.test.ts (19 tests | 19 failed) 9ms
+   × paired desktop operation boundary > captures equal-path owners independently of selection and preserves Rust IDs 2ms
+     → storage?.getItem is not a function
+   × paired desktop operation boundary > rejects late registration after re-pair 0ms
+     → storage?.getItem is not a function
+   × paired desktop operation boundary > rejects late registration after forget 0ms
+     → storage?.getItem is not a function
+   × paired desktop operation boundary > rejects late registration after revoke 0ms
+     → storage?.getItem is not a function
+   × paired desktop operation boundary > requires native context and negotiated capabilities before dispatch 0ms
+     → storage?.getItem is not a function
+   × paired desktop operation boundary > rejects invalid capability generation 0ms
+     → storage?.getItem is not a function
+   × paired desktop operation boundary > rejects invalid capability hostId 0ms
+     → storage?.getItem is not a function
+   × paired desktop operation boundary > rejects invalid capability kind 0ms
+     → storage?.getItem is not a function
+   × paired desktop operation boundary > rejects invalid capability machineId 0ms
+     → storage?.getItem is not a function
+   × paired desktop operation boundary > rejects invalid capability unknownCapability 0ms
+     → storage?.getItem is not a function
+   × paired desktop operation boundary > rejects invalid remote ID "" before dispatch 0ms
+     → storage?.getItem is not a function
+   × paired desktop operation boundary > rejects invalid remote ID "../project" before dispatch 0ms
+     → storage?.getItem is not a function
+   × paired desktop operation boundary > rejects invalid remote ID "daemon:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" before dispatch 0ms
+     → storage?.getItem is not a function
+   × paired desktop operation boundary > rejects invalid remote ID "project/a" before dispatch 0ms
+     → storage?.getItem is not a function
+   × paired desktop operation boundary > rejects invalid remote ID "project\u0000a" before dispatch 0ms
+     → storage?.getItem is not a function
+   × paired desktop operation boundary > validates project mapping, metadata and desktop unavailable IDs 0ms
+     → storage?.getItem is not a function
+   × paired desktop operation boundary > preserves structured machine failure but drops raw native bodies without retry 0ms
+     → storage?.getItem is not a function
+   × paired desktop operation boundary > exposes directory, worktree, session and reconciliation parsers 0ms
+     → storage?.getItem is not a function
+   × paired desktop operation boundary > dispatches typed mutations and preserves native ambiguity for explicit reconciliation 0ms
+     → storage?.getItem is not a function
+stderr | src/state/remoteHostStore.test.ts
+Unable to restore remote host inventory TypeError: storage.getItem is not a function
+    at readInventory [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:70:36[90m)[39m
+    at createRemoteHostStore [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:142:57[90m)[39m
+    at [90m/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.ts:284:32
+[90m    at processTicksAndRejections (node:internal/process/task_queues:104:5)[39m
+    at VitestExecutor.runModule (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4mvite-node[24m/dist/client.mjs:397:4)
+    at VitestExecutor.directRequest (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4mvite-node[24m/dist/client.mjs:375:3)
+    at VitestExecutor.cachedRequest (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4mvite-node[24m/dist/client.mjs:189:11)
+    at VitestExecutor.dependencyRequest (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4mvite-node[24m/dist/client.mjs:239:10)
+    at [90m/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/remoteHostStore.test.ts:3:1
+    at VitestExecutor.runModule (file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4mvite-node[24m/dist/client.mjs:397:4)
+
+(node:98620) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/state/remoteHostStore.test.ts (13 tests | 13 failed) 3ms
+   × remoteHostStore > starts with no hosts, no active host, and discovery off 1ms
+     → localStorage.clear is not a function
+     → localStorage.clear is not a function
+   × remoteHostStore > sets the full host list, replacing any prior hosts 0ms
+     → localStorage.clear is not a function
+     → localStorage.clear is not a function
+   × remoteHostStore > upserts a host, adding new ones and updating existing ones by hostId 0ms
+     → localStorage.clear is not a function
+     → localStorage.clear is not a function
+   × remoteHostStore > removes a host by id and leaves others untouched 0ms
+     → localStorage.clear is not a function
+     → localStorage.clear is not a function
+   × remoteHostStore > falls back to local when the active remote host is removed 0ms
+     → localStorage.clear is not a function
+     → localStorage.clear is not a function
+   × remoteHostStore > switches activeHostId to a remote host and back to local (null) 0ms
+     → localStorage.clear is not a function
+     → localStorage.clear is not a function
+   × remoteHostStore > does not touch the hosts map when only switching the active host 0ms
+     → localStorage.clear is not a function
+     → localStorage.clear is not a function
+   × remoteHostStore > tracks latency and auth/online status per host 0ms
+     → localStorage.clear is not a function
+     → localStorage.clear is not a function
+   × remoteHostStore > selectActiveHost resolves the active host endpoint or null for local 0ms
+     → localStorage.clear is not a function
+     → localStorage.clear is not a function
+   × remoteHostStore > selectHostList returns hosts sorted by name 0ms
+     → localStorage.clear is not a function
+     → localStorage.clear is not a function
+   × remoteHostStore > toggles discovering state 0ms
+     → localStorage.clear is not a function
+     → localStorage.clear is not a function
+   × remoteHostStore > notifies subscribers on change and stops after unsubscribe 0ms
+     → localStorage.clear is not a function
+     → localStorage.clear is not a function
+   × remoteHostStore > reset restores initial state (empty hosts, local active, discovery off) 0ms
+     → localStorage.clear is not a function
+     → localStorage.clear is not a function
+ ✓ src/lib/pairedDaemonContracts.test.ts (78 tests) 7ms
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 32 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > captures equal-path owners independently of selection and preserves Rust IDs
+TypeError: storage?.getItem is not a function
+ ❯ normalizeHost src/state/remoteHostStore.ts:49:86
+     47|   // identify which machine on a shared relay it belongs to.
+     48|   const tokenKey = `ferryx_remote_token_${legacy?.hostId ?? hostId}`;
+     49|   const deviceToken = input.deviceToken !== undefined ? input.deviceTo…
+       |                                                                                      ^
+     50|   return {
+     51|     ...input,
+ ❯ mergeHost src/state/remoteHostStore.ts:210:18
+ ❯ src/state/remoteHostStore.ts:225:24
+ ❯ src/state/remoteHostStore.ts:224:37
+ ❯ setState src/state/remoteHostStore.ts:162:23
+ ❯ Object.setHosts src/state/remoteHostStore.ts:219:5
+ ❯ setup src/lib/pairedDaemonProject.test.ts:26:9
+ ❯ src/lib/pairedDaemonProject.test.ts:49:15
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/45]⎯
+
+ FAIL  src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > rejects late registration after re-pair
+ FAIL  src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > rejects late registration after forget
+ FAIL  src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > rejects late registration after revoke
+TypeError: storage?.getItem is not a function
+ ❯ normalizeHost src/state/remoteHostStore.ts:49:86
+     47|   // identify which machine on a shared relay it belongs to.
+     48|   const tokenKey = `ferryx_remote_token_${legacy?.hostId ?? hostId}`;
+     49|   const deviceToken = input.deviceToken !== undefined ? input.deviceTo…
+       |                                                                                      ^
+     50|   return {
+     51|     ...input,
+ ❯ mergeHost src/state/remoteHostStore.ts:210:18
+ ❯ src/state/remoteHostStore.ts:225:24
+ ❯ src/state/remoteHostStore.ts:224:37
+ ❯ setState src/state/remoteHostStore.ts:162:23
+ ❯ Object.setHosts src/state/remoteHostStore.ts:219:5
+ ❯ setup src/lib/pairedDaemonProject.test.ts:26:9
+ ❯ src/lib/pairedDaemonProject.test.ts:70:15
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/45]⎯
+
+ FAIL  src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > requires native context and negotiated capabilities before dispatch
+TypeError: storage?.getItem is not a function
+ ❯ normalizeHost src/state/remoteHostStore.ts:49:86
+     47|   // identify which machine on a shared relay it belongs to.
+     48|   const tokenKey = `ferryx_remote_token_${legacy?.hostId ?? hostId}`;
+     49|   const deviceToken = input.deviceToken !== undefined ? input.deviceTo…
+       |                                                                                      ^
+     50|   return {
+     51|     ...input,
+ ❯ mergeHost src/state/remoteHostStore.ts:210:18
+ ❯ src/state/remoteHostStore.ts:225:24
+ ❯ src/state/remoteHostStore.ts:224:37
+ ❯ setState src/state/remoteHostStore.ts:162:23
+ ❯ Object.setHosts src/state/remoteHostStore.ts:219:5
+ ❯ setup src/lib/pairedDaemonProject.test.ts:26:9
+ ❯ src/lib/pairedDaemonProject.test.ts:83:15
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/45]⎯
+
+ FAIL  src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > rejects invalid capability generation
+ FAIL  src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > rejects invalid capability hostId
+ FAIL  src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > rejects invalid capability kind
+ FAIL  src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > rejects invalid capability machineId
+ FAIL  src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > rejects invalid capability unknownCapability
+TypeError: storage?.getItem is not a function
+ ❯ normalizeHost src/state/remoteHostStore.ts:49:86
+     47|   // identify which machine on a shared relay it belongs to.
+     48|   const tokenKey = `ferryx_remote_token_${legacy?.hostId ?? hostId}`;
+     49|   const deviceToken = input.deviceToken !== undefined ? input.deviceTo…
+       |                                                                                      ^
+     50|   return {
+     51|     ...input,
+ ❯ mergeHost src/state/remoteHostStore.ts:210:18
+ ❯ src/state/remoteHostStore.ts:225:24
+ ❯ src/state/remoteHostStore.ts:224:37
+ ❯ setState src/state/remoteHostStore.ts:162:23
+ ❯ Object.setHosts src/state/remoteHostStore.ts:219:5
+ ❯ setup src/lib/pairedDaemonProject.test.ts:26:9
+ ❯ src/lib/pairedDaemonProject.test.ts:90:15
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/45]⎯
+
+ FAIL  src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > rejects invalid remote ID "" before dispatch
+ FAIL  src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > rejects invalid remote ID "../project" before dispatch
+ FAIL  src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > rejects invalid remote ID "daemon:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" before dispatch
+ FAIL  src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > rejects invalid remote ID "project/a" before dispatch
+ FAIL  src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > rejects invalid remote ID "project\u0000a" before dispatch
+TypeError: storage?.getItem is not a function
+ ❯ normalizeHost src/state/remoteHostStore.ts:49:86
+     47|   // identify which machine on a shared relay it belongs to.
+     48|   const tokenKey = `ferryx_remote_token_${legacy?.hostId ?? hostId}`;
+     49|   const deviceToken = input.deviceToken !== undefined ? input.deviceTo…
+       |                                                                                      ^
+     50|   return {
+     51|     ...input,
+ ❯ mergeHost src/state/remoteHostStore.ts:210:18
+ ❯ src/state/remoteHostStore.ts:225:24
+ ❯ src/state/remoteHostStore.ts:224:37
+ ❯ setState src/state/remoteHostStore.ts:162:23
+ ❯ Object.setHosts src/state/remoteHostStore.ts:219:5
+ ❯ setup src/lib/pairedDaemonProject.test.ts:26:9
+ ❯ src/lib/pairedDaemonProject.test.ts:102:15
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/45]⎯
+
+ FAIL  src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > validates project mapping, metadata and desktop unavailable IDs
+TypeError: storage?.getItem is not a function
+ ❯ normalizeHost src/state/remoteHostStore.ts:49:86
+     47|   // identify which machine on a shared relay it belongs to.
+     48|   const tokenKey = `ferryx_remote_token_${legacy?.hostId ?? hostId}`;
+     49|   const deviceToken = input.deviceToken !== undefined ? input.deviceTo…
+       |                                                                                      ^
+     50|   return {
+     51|     ...input,
+ ❯ mergeHost src/state/remoteHostStore.ts:210:18
+ ❯ src/state/remoteHostStore.ts:225:24
+ ❯ src/state/remoteHostStore.ts:224:37
+ ❯ setState src/state/remoteHostStore.ts:162:23
+ ❯ Object.setHosts src/state/remoteHostStore.ts:219:5
+ ❯ setup src/lib/pairedDaemonProject.test.ts:26:9
+ ❯ src/lib/pairedDaemonProject.test.ts:107:15
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/45]⎯
+
+ FAIL  src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > preserves structured machine failure but drops raw native bodies without retry
+TypeError: storage?.getItem is not a function
+ ❯ normalizeHost src/state/remoteHostStore.ts:49:86
+     47|   // identify which machine on a shared relay it belongs to.
+     48|   const tokenKey = `ferryx_remote_token_${legacy?.hostId ?? hostId}`;
+     49|   const deviceToken = input.deviceToken !== undefined ? input.deviceTo…
+       |                                                                                      ^
+     50|   return {
+     51|     ...input,
+ ❯ mergeHost src/state/remoteHostStore.ts:210:18
+ ❯ src/state/remoteHostStore.ts:225:24
+ ❯ src/state/remoteHostStore.ts:224:37
+ ❯ setState src/state/remoteHostStore.ts:162:23
+ ❯ Object.setHosts src/state/remoteHostStore.ts:219:5
+ ❯ setup src/lib/pairedDaemonProject.test.ts:26:9
+ ❯ src/lib/pairedDaemonProject.test.ts:118:15
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/45]⎯
+
+ FAIL  src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > exposes directory, worktree, session and reconciliation parsers
+TypeError: storage?.getItem is not a function
+ ❯ normalizeHost src/state/remoteHostStore.ts:49:86
+     47|   // identify which machine on a shared relay it belongs to.
+     48|   const tokenKey = `ferryx_remote_token_${legacy?.hostId ?? hostId}`;
+     49|   const deviceToken = input.deviceToken !== undefined ? input.deviceTo…
+       |                                                                                      ^
+     50|   return {
+     51|     ...input,
+ ❯ mergeHost src/state/remoteHostStore.ts:210:18
+ ❯ src/state/remoteHostStore.ts:225:24
+ ❯ src/state/remoteHostStore.ts:224:37
+ ❯ setState src/state/remoteHostStore.ts:162:23
+ ❯ Object.setHosts src/state/remoteHostStore.ts:219:5
+ ❯ setup src/lib/pairedDaemonProject.test.ts:26:9
+ ❯ src/lib/pairedDaemonProject.test.ts:126:15
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[8/45]⎯
+
+ FAIL  src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > dispatches typed mutations and preserves native ambiguity for explicit reconciliation
+TypeError: storage?.getItem is not a function
+ ❯ normalizeHost src/state/remoteHostStore.ts:49:86
+     47|   // identify which machine on a shared relay it belongs to.
+     48|   const tokenKey = `ferryx_remote_token_${legacy?.hostId ?? hostId}`;
+     49|   const deviceToken = input.deviceToken !== undefined ? input.deviceTo…
+       |                                                                                      ^
+     50|   return {
+     51|     ...input,
+ ❯ mergeHost src/state/remoteHostStore.ts:210:18
+ ❯ src/state/remoteHostStore.ts:225:24
+ ❯ src/state/remoteHostStore.ts:224:37
+ ❯ setState src/state/remoteHostStore.ts:162:23
+ ❯ Object.setHosts src/state/remoteHostStore.ts:219:5
+ ❯ setup src/lib/pairedDaemonProject.test.ts:26:9
+ ❯ src/lib/pairedDaemonProject.test.ts:138:15
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[9/45]⎯
+
+ FAIL  src/state/remoteHostStore.test.ts > remoteHostStore > starts with no hosts, no active host, and discovery off
+ FAIL  src/state/remoteHostStore.test.ts > remoteHostStore > sets the full host list, replacing any prior hosts
+ FAIL  src/state/remoteHostStore.test.ts > remoteHostStore > upserts a host, adding new ones and updating existing ones by hostId
+ FAIL  src/state/remoteHostStore.test.ts > remoteHostStore > removes a host by id and leaves others untouched
+ FAIL  src/state/remoteHostStore.test.ts > remoteHostStore > falls back to local when the active remote host is removed
+ FAIL  src/state/remoteHostStore.test.ts > remoteHostStore > switches activeHostId to a remote host and back to local (null)
+ FAIL  src/state/remoteHostStore.test.ts > remoteHostStore > does not touch the hosts map when only switching the active host
+ FAIL  src/state/remoteHostStore.test.ts > remoteHostStore > tracks latency and auth/online status per host
+ FAIL  src/state/remoteHostStore.test.ts > remoteHostStore > selectActiveHost resolves the active host endpoint or null for local
+ FAIL  src/state/remoteHostStore.test.ts > remoteHostStore > selectHostList returns hosts sorted by name
+ FAIL  src/state/remoteHostStore.test.ts > remoteHostStore > toggles discovering state
+ FAIL  src/state/remoteHostStore.test.ts > remoteHostStore > notifies subscribers on change and stops after unsubscribe
+ FAIL  src/state/remoteHostStore.test.ts > remoteHostStore > reset restores initial state (empty hosts, local active, discovery off)
+TypeError: localStorage.clear is not a function
+ ❯ src/state/remoteHostStore.test.ts:26:18
+     24|   let store: RemoteHostStore;
+     25|   beforeEach(() => {
+     26|     localStorage.clear();
+       |                  ^
+     27|     store = createRemoteHostStore();
+     28|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[10/45]⎯
+
+ FAIL  src/state/remoteHostStore.test.ts > remoteHostStore > starts with no hosts, no active host, and discovery off
+ FAIL  src/state/remoteHostStore.test.ts > remoteHostStore > sets the full host list, replacing any prior hosts
+ FAIL  src/state/remoteHostStore.test.ts > remoteHostStore > upserts a host, adding new ones and updating existing ones by hostId
+ FAIL  src/state/remoteHostStore.test.ts > remoteHostStore > removes a host by id and leaves others untouched
+ FAIL  src/state/remoteHostStore.test.ts > remoteHostStore > falls back to local when the active remote host is removed
+ FAIL  src/state/remoteHostStore.test.ts > remoteHostStore > switches activeHostId to a remote host and back to local (null)
+ FAIL  src/state/remoteHostStore.test.ts > remoteHostStore > does not touch the hosts map when only switching the active host
+ FAIL  src/state/remoteHostStore.test.ts > remoteHostStore > tracks latency and auth/online status per host
+ FAIL  src/state/remoteHostStore.test.ts > remoteHostStore > selectActiveHost resolves the active host endpoint or null for local
+ FAIL  src/state/remoteHostStore.test.ts > remoteHostStore > selectHostList returns hosts sorted by name
+ FAIL  src/state/remoteHostStore.test.ts > remoteHostStore > toggles discovering state
+ FAIL  src/state/remoteHostStore.test.ts > remoteHostStore > notifies subscribers on change and stops after unsubscribe
+ FAIL  src/state/remoteHostStore.test.ts > remoteHostStore > reset restores initial state (empty hosts, local active, discovery off)
+TypeError: localStorage.clear is not a function
+ ❯ src/state/remoteHostStore.test.ts:31:18
+     29| 
+     30|   afterEach(() => {
+     31|     localStorage.clear();
+       |                  ^
+     32|   });
+     33| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[11/45]⎯
+
+
+ Test Files  2 failed | 1 passed (3)
+      Tests  32 failed | 78 passed (110)
+   Start at  14:14:50
+   Duration  1.36s (transform 59ms, setup 185ms, collect 58ms, tests 19ms, environment 497ms, prepare 86ms)
+
+error: script "test" exited with code 1
+
+EXIT=1

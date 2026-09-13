@@ -1,0 +1,23 @@
+vite v6.4.3 building for production...
+transforming...
+✓ 1883 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                                        3.08 kB │ gzip:   1.10 kB
+dist/assets/crush-DHElXcRZ.png                         5.46 kB
+dist/assets/droid-BhrKLgQ8.svg                         6.30 kB │ gzip:   2.88 kB
+dist/assets/antigravity-DgAQAdn3.svg                   7.63 kB │ gzip:   1.72 kB
+dist/assets/gjc-CmlXGg4z.png                          22.73 kB
+dist/assets/geist-variable-CrgPqtmy.woff2             69.44 kB
+dist/assets/ferryx-icon-OXRkkUvz.png                 805.82 kB
+dist/assets/index-DglER3B1.css                        78.14 kB │ gzip:  14.20 kB
+dist/assets/server-D8-A74RM.js                         0.51 kB │ gzip:   0.32 kB
+dist/assets/card-BW5hSAnO.js                           2.08 kB │ gzip:   0.87 kB
+dist/assets/PermissionsOnboardingDialog-Cj8-e0wD.js    6.21 kB │ gzip:   1.83 kB
+dist/assets/browser-BzX371wt.js                       25.78 kB │ gzip:  10.13 kB
+dist/assets/RemoteApp-CGafxFkV.js                     61.06 kB │ gzip:  18.03 kB
+dist/assets/sonner-BQeu0J4u.js                        96.55 kB │ gzip:  32.05 kB
+dist/assets/index-DvJEa8eI.js                        187.38 kB │ gzip:  60.03 kB
+dist/assets/SettingsDialog-DpjzZk_O.js               192.31 kB │ gzip:  57.36 kB
+dist/assets/App-CB9nMBB8.js                          480.15 kB │ gzip: 139.68 kB
+✓ built in 2.16s

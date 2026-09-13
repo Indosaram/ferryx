@@ -16,23 +16,22 @@ type DragEnd = (event: {
 }) => void;
 
 const dndHarness = vi.hoisted(() => ({
-  props: null as null | { onDragStart?: DragStart; onDragEnd?: DragEnd },
+  props: null as null | { onDragStart?: DragStart; onDragEnd?: DragEnd; sensors?: unknown },
   sensors: [] as Array<{ sensor: unknown; options?: unknown }>,
 }));
 
 vi.mock("@dnd-kit/core", () => ({
-  DndContext: (props: { children: ReactNode; onDragStart?: DragStart; onDragEnd?: DragEnd }) => {
+  DndContext: (props: { children: ReactNode; onDragStart?: DragStart; onDragEnd?: DragEnd; sensors?: unknown }) => {
     dndHarness.props = props;
+    if (Array.isArray(props.sensors)) {
+      dndHarness.sensors = props.sensors as Array<{ sensor: unknown; options?: unknown }>;
+    }
     return props.children;
   },
   DragOverlay: ({ children }: { children: ReactNode }) => children,
   KeyboardSensor: function KeyboardSensor() {},
   PointerSensor: function PointerSensor() {},
-  useSensor: (sensor: unknown, options?: unknown) => {
-    const descriptor = { sensor, options };
-    dndHarness.sensors.push(descriptor);
-    return descriptor;
-  },
+  useSensor: (sensor: unknown, options?: unknown) => ({ sensor, options }),
   useSensors: (...sensors: unknown[]) => sensors,
 }));
 

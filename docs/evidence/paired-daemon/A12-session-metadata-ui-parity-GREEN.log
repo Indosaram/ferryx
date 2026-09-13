@@ -1,0 +1,12 @@
+$ vitest run --maxWorkers=1 src/lib/pairedDaemonContracts.test.ts src/lib/pairedDaemonParity.test.ts
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+ ✓ src/lib/pairedDaemonContracts.test.ts (78 tests) 7ms
+ ✓ src/lib/pairedDaemonParity.test.ts (2143 tests) 81ms
+
+ Test Files  2 passed (2)
+      Tests  2221 passed (2221)
+   Start at  14:04:38
+   Duration  1.11s (transform 47ms, setup 162ms, collect 55ms, tests 88ms, environment 376ms, prepare 52ms)
+

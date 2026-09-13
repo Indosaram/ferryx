@@ -1,0 +1,666 @@
+COMMAND cargo run --locked --manifest-path src-tauri/Cargo.toml --no-default-features --example r9_eager_upload_probe
+ENV CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 RUSTC_WRAPPER= CARGO_TARGET_DIR=$PWD/src-tauri/target
+   Compiling ferryx v2026.908.1 (/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/src-tauri)
+warning: unused import: `Manager`
+  --> src/ipc/notifications.rs:21:24
+   |
+21 | use tauri::{AppHandle, Manager, Runtime, State};
+   |                        ^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `scroll_daemon_client`
+   --> src/lib.rs:915:9
+    |
+915 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+    |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `app` is never read
+  --> src/ipc/notifications.rs:28:5
+   |
+27 | pub struct TauriNotificationBackend<R: Runtime> {
+   |            ------------------------ field in this struct
+28 |     app: AppHandle<R>,
+   |     ^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `GHOSTTY_TERMINAL_SCREEN_PRIMARY` is never used
+  --> src/native_terminal/sys/constants.rs:56:11
+   |
+56 | pub const GHOSTTY_TERMINAL_SCREEN_PRIMARY: c_int = 0;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `synchronized_output_deadline`, `expire_synchronized_output`, and `finish_synchronized_output` are never used
+   --> src/native_terminal/terminal.rs:169:19
+    |
+133 | impl NativeTerminal {
+    | ------------------- methods in this implementation
+...
+169 |     pub(crate) fn synchronized_output_deadline(&self) -> Option<tokio::time::Instant> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+173 |     pub(crate) fn expire_synchronized_output(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+184 |     pub(crate) fn finish_synchronized_output(&mut self) -> Result<(), NativeTerminalError> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `wait_and_reap` is never used
+   --> src/terminal/session.rs:270:19
+    |
+ 61 | impl PtySession {
+    | --------------- method in this implementation
+...
+270 |     pub(crate) fn wait_and_reap(&self) -> Result<Option<i32>, PtyError> {
+    |                   ^^^^^^^^^^^^^
+
+warning: function `with_local_worktree_budget` is never used
+   --> src/worktree/git.rs:115:15
+    |
+115 | pub(crate) fn with_local_worktree_budget<T>(work: impl FnOnce() -> T) -> T {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src/worktree/manager.rs:86:19
+   |
+86 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+   --> src/worktree/manager.rs:93:8
+    |
+ 92 | impl WriterLeaseGuard {
+    | --------------------- associated items in this implementation
+ 93 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+    |        ^^^
+...
+101 |     pub(crate) fn canonical_path(&self) -> &Path {
+    |                   ^^^^^^^^^^^^^^
+...
+105 |     pub(crate) fn owner_id(&self) -> &str {
+    |                   ^^^^^^^^
+
+warning: method `acquire_writer_lease` is never used
+   --> src/worktree/manager.rs:338:19
+    |
+134 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+338 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib) generated 18 warnings (run `cargo fix --lib -p ferryx` to apply 2 suggestions)
+    Finished `dev` profile [unoptimized] target(s) in 20.41s
+     Running `src-tauri/target/debug/examples/r9_eager_upload_probe`
+{"case":"","event":"grant","permission":"control","scope":"machine","seq":0}
+{"case":"","event":"grant","permission":"control","scope":"mirror","seq":1}
+{"auth":"machine","case":"POST-65537-machine-raw-eager","event":"case_start","expected":413,"method":"POST","mode":"raw-eager","seq":2,"size":65537}
+{"case":"POST-65537-machine-raw-eager","event":"raw_connect","local":"127.0.0.1:49312","seq":3}
+{"accepted_bytes":65537,"case":"POST-65537-machine-raw-eager","event":"raw_body_write","seq":4}
+{"boundary":"full_upload","case":"POST-65537-machine-raw-eager","event":"raw_half_close","seq":5}
+{"accepted_bytes":65537,"attempted_bytes":65537,"case":"POST-65537-machine-raw-eager","event":"raw_upload_outcome","outcome":"Ok(Ok(()))","seq":6}
+{"case":"POST-65537-machine-raw-eager","connection":1,"event":"server_accept","peer":"127.0.0.1:49312","seq":7}
+{"bytes":24,"case":"POST-65537-machine-raw-eager","connection":1,"event":"server_read","outcome":"Ok(())","seq":8}
+{"bytes":16360,"case":"POST-65537-machine-raw-eager","connection":1,"event":"server_read","outcome":"Ok(())","seq":9}
+{"bytes":16384,"case":"POST-65537-machine-raw-eager","connection":1,"event":"server_read","outcome":"Ok(())","seq":10}
+{"bytes":32768,"case":"POST-65537-machine-raw-eager","connection":1,"event":"server_read","outcome":"Ok(())","seq":11}
+{"bytes":230,"case":"POST-65537-machine-raw-eager","connection":1,"event":"server_read","outcome":"Ok(())","seq":12}
+{"bytes":0,"case":"POST-65537-machine-raw-eager","connection":1,"event":"server_read","outcome":"Ok(())","seq":13}
+{"case":"POST-65537-machine-raw-eager","connection":1,"event":"server_socket_drop","seq":14}
+{"bytes":0,"case":"POST-65537-machine-raw-eager","event":"raw_read","seq":15}
+{"case":"POST-65537-machine-raw-eager","complete_valid_http_bytes":false,"event":"raw_response_outcome","outcome":"Ok(Ok(()))","received_http_without_read_error":false,"seq":16,"wire":""}
+{"case":"POST-65537-machine-raw-eager","event":"raw_case","seq":17,"transport_and_http_valid":false}
+{"auth":"machine","case":"POST-65537-machine-raw-staged","event":"case_start","expected":413,"method":"POST","mode":"raw-staged","seq":18,"size":65537}
+{"case":"POST-65537-machine-raw-staged","event":"raw_connect","local":"127.0.0.1:49313","seq":19}
+{"case":"POST-65537-machine-raw-staged","connection":2,"event":"server_accept","peer":"127.0.0.1:49313","seq":20}
+{"accepted_bytes":65537,"case":"POST-65537-machine-raw-staged","event":"raw_body_write","seq":21}
+{"accepted_bytes":65537,"attempted_bytes":65537,"case":"POST-65537-machine-raw-staged","event":"raw_upload_outcome","outcome":"Ok(Ok(()))","seq":22}
+{"bytes":24,"case":"POST-65537-machine-raw-staged","connection":2,"event":"server_read","outcome":"Ok(())","seq":23}
+{"bytes":16360,"case":"POST-65537-machine-raw-staged","connection":2,"event":"server_read","outcome":"Ok(())","seq":24}
+{"bytes":16384,"case":"POST-65537-machine-raw-staged","connection":2,"event":"server_read","outcome":"Ok(())","seq":25}
+{"bytes":32768,"case":"POST-65537-machine-raw-staged","connection":2,"event":"server_read","outcome":"Ok(())","seq":26}
+{"bytes":230,"case":"POST-65537-machine-raw-staged","connection":2,"event":"server_read","outcome":"Ok(())","seq":27}
+{"case":"POST-65537-machine-raw-staged","connection":2,"event":"server_write","outcome":"Ok(350)","seq":28,"wire":"HTTP/1.1 413 Payload Too Large\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 150\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"PAYLOAD_TOO_LARGE\",\"message\":\"PAYLOAD_TOO_LARGE\",\"retryable\":false,\"requestId\":\"1dcd45b1-b691-4a8e-9678-4db7d324a1ef\",\"details\":{}}}"}
+{"case":"POST-65537-machine-raw-staged","connection":2,"event":"server_shutdown","outcome":"Ok(())","seq":29}
+{"case":"POST-65537-machine-raw-staged","connection":2,"event":"server_socket_drop","seq":30}
+{"bytes":350,"case":"POST-65537-machine-raw-staged","event":"raw_read","seq":31}
+{"bytes":0,"case":"POST-65537-machine-raw-staged","event":"raw_read","seq":32}
+{"case":"POST-65537-machine-raw-staged","complete_valid_http_bytes":true,"event":"raw_response_outcome","outcome":"Ok(Ok(()))","received_http_without_read_error":true,"seq":33,"wire":"HTTP/1.1 413 Payload Too Large\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 150\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"PAYLOAD_TOO_LARGE\",\"message\":\"PAYLOAD_TOO_LARGE\",\"retryable\":false,\"requestId\":\"1dcd45b1-b691-4a8e-9678-4db7d324a1ef\",\"details\":{}}}"}
+{"boundary":"after_response","case":"POST-65537-machine-raw-staged","event":"raw_half_close","outcome":"Ok(Ok(()))","seq":34}
+{"case":"POST-65537-machine-raw-staged","event":"raw_case","seq":35,"transport_and_http_valid":true}
+{"auth":"machine","case":"POST-65537-machine-reqwest-fresh","event":"case_start","expected":413,"method":"POST","mode":"reqwest-fresh","seq":36,"size":65537}
+{"case":"POST-65537-machine-reqwest-fresh","connection":3,"event":"server_accept","peer":"127.0.0.1:49314","seq":37}
+{"bytes":24,"case":"POST-65537-machine-reqwest-fresh","connection":3,"event":"server_read","outcome":"Ok(())","seq":38}
+{"bytes":16360,"case":"POST-65537-machine-reqwest-fresh","connection":3,"event":"server_read","outcome":"Ok(())","seq":39}
+{"bytes":16384,"case":"POST-65537-machine-reqwest-fresh","connection":3,"event":"server_read","outcome":"Ok(())","seq":40}
+{"bytes":32768,"case":"POST-65537-machine-reqwest-fresh","connection":3,"event":"server_read","outcome":"Ok(())","seq":41}
+{"bytes":224,"case":"POST-65537-machine-reqwest-fresh","connection":3,"event":"server_read","outcome":"Ok(())","seq":42}
+{"case":"POST-65537-machine-reqwest-fresh","connection":3,"event":"server_write","outcome":"Ok(331)","seq":43,"wire":"HTTP/1.1 413 Payload Too Large\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 150\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"PAYLOAD_TOO_LARGE\",\"message\":\"PAYLOAD_TOO_LARGE\",\"retryable\":false,\"requestId\":\"a73174ab-661a-4509-9634-4a10be54c25a\",\"details\":{}}}"}
+{"body":"{\"error\":{\"code\":\"PAYLOAD_TOO_LARGE\",\"message\":\"PAYLOAD_TOO_LARGE\",\"retryable\":false,\"requestId\":\"a73174ab-661a-4509-9634-4a10be54c25a\",\"details\":{}}}","case":"POST-65537-machine-reqwest-fresh","event":"reqwest_outcome","headers":"{\"content-type\": \"application/json\", \"cache-control\": \"no-store\", \"access-control-allow-origin\": \"*\", \"content-length\": \"150\", \"date\": \"Sun, 13 Sep 2026 00:09:02 GMT\"}","received_http":true,"seq":44,"status":413,"valid":true}
+{"bytes":0,"case":"POST-65537-machine-reqwest-fresh","connection":3,"event":"server_read","outcome":"Ok(())","seq":45}
+{"case":"POST-65537-machine-reqwest-fresh","connection":3,"event":"server_shutdown","outcome":"Ok(())","seq":46}
+{"case":"POST-65537-machine-reqwest-fresh","connection":3,"event":"server_socket_drop","seq":47}
+{"auth":"machine","case":"POST-65537-machine-reqwest-pooled","event":"case_start","expected":413,"method":"POST","mode":"reqwest-pooled","seq":48,"size":65537}
+{"case":"POST-65537-machine-reqwest-pooled","connection":4,"event":"server_accept","peer":"127.0.0.1:49315","seq":49}
+{"bytes":24,"case":"POST-65537-machine-reqwest-pooled","connection":4,"event":"server_read","outcome":"Ok(())","seq":50}
+{"bytes":43,"case":"POST-65537-machine-reqwest-pooled","connection":4,"event":"server_read","outcome":"Ok(())","seq":51}
+{"case":"POST-65537-machine-reqwest-pooled","connection":4,"event":"server_write","outcome":"Ok(173)","seq":52,"wire":"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\naccess-control-allow-origin: *\r\ncontent-length: 33\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"status\":\"ok\",\"version\":\"0.1.0\"}"}
+{"case":"POST-65537-machine-reqwest-pooled","event":"pool_prime_completed","seq":53,"status":200}
+{"bytes":16317,"case":"POST-65537-machine-reqwest-pooled","connection":4,"event":"server_read","outcome":"Ok(())","seq":54}
+{"bytes":16384,"case":"POST-65537-machine-reqwest-pooled","connection":4,"event":"server_read","outcome":"Ok(())","seq":55}
+{"bytes":32768,"case":"POST-65537-machine-reqwest-pooled","connection":4,"event":"server_read","outcome":"Ok(())","seq":56}
+{"bytes":291,"case":"POST-65537-machine-reqwest-pooled","connection":4,"event":"server_read","outcome":"Ok(())","seq":57}
+{"case":"POST-65537-machine-reqwest-pooled","connection":4,"event":"server_write","outcome":"Ok(331)","seq":58,"wire":"HTTP/1.1 413 Payload Too Large\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 150\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"PAYLOAD_TOO_LARGE\",\"message\":\"PAYLOAD_TOO_LARGE\",\"retryable\":false,\"requestId\":\"30b05188-846e-49bb-921f-dde1a19adecb\",\"details\":{}}}"}
+{"body":"{\"error\":{\"code\":\"PAYLOAD_TOO_LARGE\",\"message\":\"PAYLOAD_TOO_LARGE\",\"retryable\":false,\"requestId\":\"30b05188-846e-49bb-921f-dde1a19adecb\",\"details\":{}}}","case":"POST-65537-machine-reqwest-pooled","event":"reqwest_outcome","headers":"{\"content-type\": \"application/json\", \"cache-control\": \"no-store\", \"access-control-allow-origin\": \"*\", \"content-length\": \"150\", \"date\": \"Sun, 13 Sep 2026 00:09:02 GMT\"}","received_http":true,"seq":59,"status":413,"valid":true}
+{"auth":"mirror","case":"POST-65537-mirror-raw-eager","event":"case_start","expected":403,"method":"POST","mode":"raw-eager","seq":60,"size":65537}
+{"bytes":0,"case":"POST-65537-mirror-raw-eager","connection":4,"event":"server_read","outcome":"Ok(())","seq":61}
+{"case":"POST-65537-mirror-raw-eager","connection":4,"event":"server_shutdown","outcome":"Ok(())","seq":62}
+{"case":"POST-65537-mirror-raw-eager","connection":4,"event":"server_socket_drop","seq":63}
+{"case":"POST-65537-mirror-raw-eager","event":"raw_connect","local":"127.0.0.1:49316","seq":64}
+{"case":"POST-65537-mirror-raw-eager","connection":5,"event":"server_accept","peer":"127.0.0.1:49316","seq":65}
+{"accepted_bytes":65537,"case":"POST-65537-mirror-raw-eager","event":"raw_body_write","seq":66}
+{"boundary":"full_upload","case":"POST-65537-mirror-raw-eager","event":"raw_half_close","seq":67}
+{"accepted_bytes":65537,"attempted_bytes":65537,"case":"POST-65537-mirror-raw-eager","event":"raw_upload_outcome","outcome":"Ok(Ok(()))","seq":68}
+{"bytes":24,"case":"POST-65537-mirror-raw-eager","connection":5,"event":"server_read","outcome":"Ok(())","seq":69}
+{"bytes":16360,"case":"POST-65537-mirror-raw-eager","connection":5,"event":"server_read","outcome":"Ok(())","seq":70}
+{"case":"POST-65537-mirror-raw-eager","connection":5,"event":"server_write","outcome":"Ok(354)","seq":71,"wire":"HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 162\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"MACHINE_ACCESS_REQUIRED\",\"message\":\"MACHINE_ACCESS_REQUIRED\",\"retryable\":false,\"requestId\":\"6bdc3dbd-26e8-4013-a023-ed203bc8a5c2\",\"details\":{}}}"}
+{"bytes":16384,"case":"POST-65537-mirror-raw-eager","connection":5,"event":"server_read","outcome":"Ok(())","seq":72}
+{"case":"POST-65537-mirror-raw-eager","connection":5,"event":"server_shutdown","outcome":"Ok(())","seq":73}
+{"case":"POST-65537-mirror-raw-eager","connection":5,"event":"server_socket_drop","seq":74}
+{"bytes":354,"case":"POST-65537-mirror-raw-eager","event":"raw_read","seq":75}
+{"bytes":0,"case":"POST-65537-mirror-raw-eager","event":"raw_read","seq":76}
+{"case":"POST-65537-mirror-raw-eager","complete_valid_http_bytes":true,"event":"raw_response_outcome","outcome":"Ok(Ok(()))","received_http_without_read_error":true,"seq":77,"wire":"HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 162\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"MACHINE_ACCESS_REQUIRED\",\"message\":\"MACHINE_ACCESS_REQUIRED\",\"retryable\":false,\"requestId\":\"6bdc3dbd-26e8-4013-a023-ed203bc8a5c2\",\"details\":{}}}"}
+{"case":"POST-65537-mirror-raw-eager","event":"raw_case","seq":78,"transport_and_http_valid":true}
+{"auth":"mirror","case":"POST-65537-mirror-raw-staged","event":"case_start","expected":403,"method":"POST","mode":"raw-staged","seq":79,"size":65537}
+{"case":"POST-65537-mirror-raw-staged","event":"raw_connect","local":"127.0.0.1:49317","seq":80}
+{"case":"POST-65537-mirror-raw-staged","connection":6,"event":"server_accept","peer":"127.0.0.1:49317","seq":81}
+{"accepted_bytes":0,"attempted_bytes":0,"case":"POST-65537-mirror-raw-staged","event":"raw_upload_outcome","outcome":"Ok(Ok(()))","seq":82}
+{"bytes":24,"case":"POST-65537-mirror-raw-staged","connection":6,"event":"server_read","outcome":"Ok(())","seq":83}
+{"bytes":205,"case":"POST-65537-mirror-raw-staged","connection":6,"event":"server_read","outcome":"Ok(())","seq":84}
+{"case":"POST-65537-mirror-raw-staged","connection":6,"event":"server_write","outcome":"Ok(354)","seq":85,"wire":"HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 162\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"MACHINE_ACCESS_REQUIRED\",\"message\":\"MACHINE_ACCESS_REQUIRED\",\"retryable\":false,\"requestId\":\"f5513a7e-c961-4147-88f2-2f71402abe85\",\"details\":{}}}"}
+{"case":"POST-65537-mirror-raw-staged","connection":6,"event":"server_shutdown","outcome":"Ok(())","seq":86}
+{"case":"POST-65537-mirror-raw-staged","connection":6,"event":"server_socket_drop","seq":87}
+{"bytes":354,"case":"POST-65537-mirror-raw-staged","event":"raw_read","seq":88}
+{"bytes":0,"case":"POST-65537-mirror-raw-staged","event":"raw_read","seq":89}
+{"case":"POST-65537-mirror-raw-staged","complete_valid_http_bytes":true,"event":"raw_response_outcome","outcome":"Ok(Ok(()))","received_http_without_read_error":true,"seq":90,"wire":"HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 162\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"MACHINE_ACCESS_REQUIRED\",\"message\":\"MACHINE_ACCESS_REQUIRED\",\"retryable\":false,\"requestId\":\"f5513a7e-c961-4147-88f2-2f71402abe85\",\"details\":{}}}"}
+{"boundary":"after_response","case":"POST-65537-mirror-raw-staged","event":"raw_half_close","outcome":"Ok(Ok(()))","seq":91}
+{"case":"POST-65537-mirror-raw-staged","event":"raw_case","seq":92,"transport_and_http_valid":true}
+{"auth":"mirror","case":"POST-65537-mirror-reqwest-fresh","event":"case_start","expected":403,"method":"POST","mode":"reqwest-fresh","seq":93,"size":65537}
+{"case":"POST-65537-mirror-reqwest-fresh","connection":7,"event":"server_accept","peer":"127.0.0.1:49318","seq":94}
+{"bytes":24,"case":"POST-65537-mirror-reqwest-fresh","connection":7,"event":"server_read","outcome":"Ok(())","seq":95}
+{"bytes":16360,"case":"POST-65537-mirror-reqwest-fresh","connection":7,"event":"server_read","outcome":"Ok(())","seq":96}
+{"case":"POST-65537-mirror-reqwest-fresh","connection":7,"event":"server_write","outcome":"Ok(335)","seq":97,"wire":"HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 162\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"MACHINE_ACCESS_REQUIRED\",\"message\":\"MACHINE_ACCESS_REQUIRED\",\"retryable\":false,\"requestId\":\"e29eea72-151e-413f-a6bf-1bd86e92f428\",\"details\":{}}}"}
+{"bytes":16384,"case":"POST-65537-mirror-reqwest-fresh","connection":7,"event":"server_read","outcome":"Ok(())","seq":98}
+{"case":"POST-65537-mirror-reqwest-fresh","connection":7,"event":"server_shutdown","outcome":"Ok(())","seq":99}
+{"case":"POST-65537-mirror-reqwest-fresh","connection":7,"event":"server_socket_drop","seq":100}
+{"body":"{\"error\":{\"code\":\"MACHINE_ACCESS_REQUIRED\",\"message\":\"MACHINE_ACCESS_REQUIRED\",\"retryable\":false,\"requestId\":\"e29eea72-151e-413f-a6bf-1bd86e92f428\",\"details\":{}}}","case":"POST-65537-mirror-reqwest-fresh","event":"reqwest_outcome","headers":"{\"content-type\": \"application/json\", \"cache-control\": \"no-store\", \"access-control-allow-origin\": \"*\", \"content-length\": \"162\", \"date\": \"Sun, 13 Sep 2026 00:09:02 GMT\"}","received_http":true,"seq":101,"status":403,"valid":true}
+{"auth":"mirror","case":"POST-65537-mirror-reqwest-pooled","event":"case_start","expected":403,"method":"POST","mode":"reqwest-pooled","seq":102,"size":65537}
+{"case":"POST-65537-mirror-reqwest-pooled","connection":8,"event":"server_accept","peer":"127.0.0.1:49319","seq":103}
+{"bytes":24,"case":"POST-65537-mirror-reqwest-pooled","connection":8,"event":"server_read","outcome":"Ok(())","seq":104}
+{"bytes":43,"case":"POST-65537-mirror-reqwest-pooled","connection":8,"event":"server_read","outcome":"Ok(())","seq":105}
+{"case":"POST-65537-mirror-reqwest-pooled","connection":8,"event":"server_write","outcome":"Ok(173)","seq":106,"wire":"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\naccess-control-allow-origin: *\r\ncontent-length: 33\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"status\":\"ok\",\"version\":\"0.1.0\"}"}
+{"case":"POST-65537-mirror-reqwest-pooled","event":"pool_prime_completed","seq":107,"status":200}
+{"bytes":16317,"case":"POST-65537-mirror-reqwest-pooled","connection":8,"event":"server_read","outcome":"Ok(())","seq":108}
+{"case":"POST-65537-mirror-reqwest-pooled","connection":8,"event":"server_write","outcome":"Ok(335)","seq":109,"wire":"HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 162\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"MACHINE_ACCESS_REQUIRED\",\"message\":\"MACHINE_ACCESS_REQUIRED\",\"retryable\":false,\"requestId\":\"5a60dbf0-a80e-48f1-abd1-73d7a4659524\",\"details\":{}}}"}
+{"bytes":16384,"case":"POST-65537-mirror-reqwest-pooled","connection":8,"event":"server_read","outcome":"Ok(())","seq":110}
+{"case":"POST-65537-mirror-reqwest-pooled","connection":8,"event":"server_shutdown","outcome":"Ok(())","seq":111}
+{"case":"POST-65537-mirror-reqwest-pooled","connection":8,"event":"server_socket_drop","seq":112}
+{"body":"{\"error\":{\"code\":\"MACHINE_ACCESS_REQUIRED\",\"message\":\"MACHINE_ACCESS_REQUIRED\",\"retryable\":false,\"requestId\":\"5a60dbf0-a80e-48f1-abd1-73d7a4659524\",\"details\":{}}}","case":"POST-65537-mirror-reqwest-pooled","event":"reqwest_outcome","headers":"{\"content-type\": \"application/json\", \"cache-control\": \"no-store\", \"access-control-allow-origin\": \"*\", \"content-length\": \"162\", \"date\": \"Sun, 13 Sep 2026 00:09:02 GMT\"}","received_http":true,"seq":113,"status":403,"valid":true}
+{"auth":"anonymous","case":"POST-65537-anonymous-raw-eager","event":"case_start","expected":401,"method":"POST","mode":"raw-eager","seq":114,"size":65537}
+{"case":"POST-65537-anonymous-raw-eager","event":"raw_connect","local":"127.0.0.1:49320","seq":115}
+{"case":"POST-65537-anonymous-raw-eager","connection":9,"event":"server_accept","peer":"127.0.0.1:49320","seq":116}
+{"accepted_bytes":65537,"case":"POST-65537-anonymous-raw-eager","event":"raw_body_write","seq":117}
+{"boundary":"full_upload","case":"POST-65537-anonymous-raw-eager","event":"raw_half_close","seq":118}
+{"accepted_bytes":65537,"attempted_bytes":65537,"case":"POST-65537-anonymous-raw-eager","event":"raw_upload_outcome","outcome":"Ok(Ok(()))","seq":119}
+{"bytes":24,"case":"POST-65537-anonymous-raw-eager","connection":9,"event":"server_read","outcome":"Ok(())","seq":120}
+{"bytes":16360,"case":"POST-65537-anonymous-raw-eager","connection":9,"event":"server_read","outcome":"Ok(())","seq":121}
+{"case":"POST-65537-anonymous-raw-eager","connection":9,"event":"server_write","outcome":"Ok(335)","seq":122,"wire":"HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 140\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"UNAUTHORIZED\",\"message\":\"UNAUTHORIZED\",\"retryable\":false,\"requestId\":\"0765d575-236b-4325-af77-e3132cb0ad3a\",\"details\":{}}}"}
+{"bytes":16384,"case":"POST-65537-anonymous-raw-eager","connection":9,"event":"server_read","outcome":"Ok(())","seq":123}
+{"bytes":335,"case":"POST-65537-anonymous-raw-eager","event":"raw_read","seq":124}
+{"case":"POST-65537-anonymous-raw-eager","connection":9,"event":"server_shutdown","outcome":"Ok(())","seq":125}
+{"case":"POST-65537-anonymous-raw-eager","connection":9,"event":"server_socket_drop","seq":126}
+{"bytes":0,"case":"POST-65537-anonymous-raw-eager","event":"raw_read","seq":127}
+{"case":"POST-65537-anonymous-raw-eager","complete_valid_http_bytes":true,"event":"raw_response_outcome","outcome":"Ok(Ok(()))","received_http_without_read_error":true,"seq":128,"wire":"HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 140\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"UNAUTHORIZED\",\"message\":\"UNAUTHORIZED\",\"retryable\":false,\"requestId\":\"0765d575-236b-4325-af77-e3132cb0ad3a\",\"details\":{}}}"}
+{"case":"POST-65537-anonymous-raw-eager","event":"raw_case","seq":129,"transport_and_http_valid":true}
+{"auth":"anonymous","case":"POST-65537-anonymous-raw-staged","event":"case_start","expected":401,"method":"POST","mode":"raw-staged","seq":130,"size":65537}
+{"case":"POST-65537-anonymous-raw-staged","connection":10,"event":"server_accept","peer":"127.0.0.1:49321","seq":131}
+{"case":"POST-65537-anonymous-raw-staged","event":"raw_connect","local":"127.0.0.1:49321","seq":132}
+{"accepted_bytes":0,"attempted_bytes":0,"case":"POST-65537-anonymous-raw-staged","event":"raw_upload_outcome","outcome":"Ok(Ok(()))","seq":133}
+{"bytes":24,"case":"POST-65537-anonymous-raw-staged","connection":10,"event":"server_read","outcome":"Ok(())","seq":134}
+{"bytes":117,"case":"POST-65537-anonymous-raw-staged","connection":10,"event":"server_read","outcome":"Ok(())","seq":135}
+{"case":"POST-65537-anonymous-raw-staged","connection":10,"event":"server_write","outcome":"Ok(335)","seq":136,"wire":"HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 140\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"UNAUTHORIZED\",\"message\":\"UNAUTHORIZED\",\"retryable\":false,\"requestId\":\"a5374c59-7e1e-49b9-a410-7d478ed75a65\",\"details\":{}}}"}
+{"case":"POST-65537-anonymous-raw-staged","connection":10,"event":"server_shutdown","outcome":"Ok(())","seq":137}
+{"case":"POST-65537-anonymous-raw-staged","connection":10,"event":"server_socket_drop","seq":138}
+{"bytes":335,"case":"POST-65537-anonymous-raw-staged","event":"raw_read","seq":139}
+{"bytes":0,"case":"POST-65537-anonymous-raw-staged","event":"raw_read","seq":140}
+{"case":"POST-65537-anonymous-raw-staged","complete_valid_http_bytes":true,"event":"raw_response_outcome","outcome":"Ok(Ok(()))","received_http_without_read_error":true,"seq":141,"wire":"HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 140\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"UNAUTHORIZED\",\"message\":\"UNAUTHORIZED\",\"retryable\":false,\"requestId\":\"a5374c59-7e1e-49b9-a410-7d478ed75a65\",\"details\":{}}}"}
+{"boundary":"after_response","case":"POST-65537-anonymous-raw-staged","event":"raw_half_close","outcome":"Ok(Ok(()))","seq":142}
+{"case":"POST-65537-anonymous-raw-staged","event":"raw_case","seq":143,"transport_and_http_valid":true}
+{"auth":"anonymous","case":"POST-65537-anonymous-reqwest-fresh","event":"case_start","expected":401,"method":"POST","mode":"reqwest-fresh","seq":144,"size":65537}
+{"case":"POST-65537-anonymous-reqwest-fresh","connection":11,"event":"server_accept","peer":"127.0.0.1:49322","seq":145}
+{"bytes":24,"case":"POST-65537-anonymous-reqwest-fresh","connection":11,"event":"server_read","outcome":"Ok(())","seq":146}
+{"bytes":16360,"case":"POST-65537-anonymous-reqwest-fresh","connection":11,"event":"server_read","outcome":"Ok(())","seq":147}
+{"case":"POST-65537-anonymous-reqwest-fresh","connection":11,"event":"server_write","outcome":"Ok(316)","seq":148,"wire":"HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 140\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"UNAUTHORIZED\",\"message\":\"UNAUTHORIZED\",\"retryable\":false,\"requestId\":\"528aee80-4130-40f4-8a11-4b9663a59057\",\"details\":{}}}"}
+{"bytes":16384,"case":"POST-65537-anonymous-reqwest-fresh","connection":11,"event":"server_read","outcome":"Ok(())","seq":149}
+{"case":"POST-65537-anonymous-reqwest-fresh","connection":11,"event":"server_shutdown","outcome":"Ok(())","seq":150}
+{"case":"POST-65537-anonymous-reqwest-fresh","connection":11,"event":"server_socket_drop","seq":151}
+{"body":"{\"error\":{\"code\":\"UNAUTHORIZED\",\"message\":\"UNAUTHORIZED\",\"retryable\":false,\"requestId\":\"528aee80-4130-40f4-8a11-4b9663a59057\",\"details\":{}}}","case":"POST-65537-anonymous-reqwest-fresh","event":"reqwest_outcome","headers":"{\"content-type\": \"application/json\", \"cache-control\": \"no-store\", \"access-control-allow-origin\": \"*\", \"content-length\": \"140\", \"date\": \"Sun, 13 Sep 2026 00:09:02 GMT\"}","received_http":true,"seq":152,"status":401,"valid":true}
+{"auth":"anonymous","case":"POST-65537-anonymous-reqwest-pooled","event":"case_start","expected":401,"method":"POST","mode":"reqwest-pooled","seq":153,"size":65537}
+{"case":"POST-65537-anonymous-reqwest-pooled","connection":12,"event":"server_accept","peer":"127.0.0.1:49323","seq":154}
+{"bytes":24,"case":"POST-65537-anonymous-reqwest-pooled","connection":12,"event":"server_read","outcome":"Ok(())","seq":155}
+{"bytes":43,"case":"POST-65537-anonymous-reqwest-pooled","connection":12,"event":"server_read","outcome":"Ok(())","seq":156}
+{"case":"POST-65537-anonymous-reqwest-pooled","connection":12,"event":"server_write","outcome":"Ok(173)","seq":157,"wire":"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\naccess-control-allow-origin: *\r\ncontent-length: 33\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"status\":\"ok\",\"version\":\"0.1.0\"}"}
+{"case":"POST-65537-anonymous-reqwest-pooled","event":"pool_prime_completed","seq":158,"status":200}
+{"bytes":16317,"case":"POST-65537-anonymous-reqwest-pooled","connection":12,"event":"server_read","outcome":"Ok(())","seq":159}
+{"case":"POST-65537-anonymous-reqwest-pooled","connection":12,"event":"server_write","outcome":"Ok(316)","seq":160,"wire":"HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 140\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"UNAUTHORIZED\",\"message\":\"UNAUTHORIZED\",\"retryable\":false,\"requestId\":\"5c856528-4881-4ca7-a6b9-dcd45c8d5c4a\",\"details\":{}}}"}
+{"bytes":16384,"case":"POST-65537-anonymous-reqwest-pooled","connection":12,"event":"server_read","outcome":"Ok(())","seq":161}
+{"case":"POST-65537-anonymous-reqwest-pooled","connection":12,"event":"server_shutdown","outcome":"Ok(())","seq":162}
+{"case":"POST-65537-anonymous-reqwest-pooled","connection":12,"event":"server_socket_drop","seq":163}
+{"body":"{\"error\":{\"code\":\"UNAUTHORIZED\",\"message\":\"UNAUTHORIZED\",\"retryable\":false,\"requestId\":\"5c856528-4881-4ca7-a6b9-dcd45c8d5c4a\",\"details\":{}}}","case":"POST-65537-anonymous-reqwest-pooled","event":"reqwest_outcome","headers":"{\"content-type\": \"application/json\", \"cache-control\": \"no-store\", \"access-control-allow-origin\": \"*\", \"content-length\": \"140\", \"date\": \"Sun, 13 Sep 2026 00:09:02 GMT\"}","received_http":true,"seq":164,"status":401,"valid":true}
+{"auth":"machine","case":"POST-2097153-machine-raw-eager","event":"case_start","expected":413,"method":"POST","mode":"raw-eager","seq":165,"size":2097153}
+{"case":"POST-2097153-machine-raw-eager","connection":13,"event":"server_accept","peer":"127.0.0.1:49324","seq":166}
+{"case":"POST-2097153-machine-raw-eager","event":"raw_connect","local":"127.0.0.1:49324","seq":167}
+{"bytes":24,"case":"POST-2097153-machine-raw-eager","connection":13,"event":"server_read","outcome":"Ok(())","seq":168}
+{"bytes":207,"case":"POST-2097153-machine-raw-eager","connection":13,"event":"server_read","outcome":"Ok(())","seq":169}
+{"accepted_bytes":327212,"case":"POST-2097153-machine-raw-eager","event":"raw_body_write","seq":170}
+{"bytes":16153,"case":"POST-2097153-machine-raw-eager","connection":13,"event":"server_read","outcome":"Ok(())","seq":171}
+{"bytes":16384,"case":"POST-2097153-machine-raw-eager","connection":13,"event":"server_read","outcome":"Ok(())","seq":172}
+{"bytes":32768,"case":"POST-2097153-machine-raw-eager","connection":13,"event":"server_read","outcome":"Ok(())","seq":173}
+{"bytes":65536,"case":"POST-2097153-machine-raw-eager","connection":13,"event":"server_read","outcome":"Ok(())","seq":174}
+{"case":"POST-2097153-machine-raw-eager","connection":13,"event":"server_write","outcome":"Ok(350)","seq":175,"wire":"HTTP/1.1 413 Payload Too Large\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 150\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"PAYLOAD_TOO_LARGE\",\"message\":\"PAYLOAD_TOO_LARGE\",\"retryable\":false,\"requestId\":\"d79a3538-05ec-4849-9ba4-cff09f8a990d\",\"details\":{}}}"}
+{"accepted_bytes":490740,"case":"POST-2097153-machine-raw-eager","event":"raw_body_write","seq":176}
+{"bytes":32531,"case":"POST-2097153-machine-raw-eager","connection":13,"event":"server_read","outcome":"Ok(())","seq":177}
+{"accepted_bytes":507072,"case":"POST-2097153-machine-raw-eager","event":"raw_body_write","seq":178}
+{"case":"POST-2097153-machine-raw-eager","connection":13,"event":"server_shutdown","outcome":"Ok(())","seq":179}
+{"case":"POST-2097153-machine-raw-eager","connection":13,"event":"server_socket_drop","seq":180}
+{"accepted_bytes":818264,"case":"POST-2097153-machine-raw-eager","event":"raw_body_write","seq":181}
+{"bytes":350,"case":"POST-2097153-machine-raw-eager","event":"raw_read","seq":182}
+{"bytes":0,"case":"POST-2097153-machine-raw-eager","event":"raw_read","seq":183}
+{"case":"POST-2097153-machine-raw-eager","complete_valid_http_bytes":true,"event":"raw_response_outcome","outcome":"Ok(Ok(()))","received_http_without_read_error":true,"seq":184,"wire":"HTTP/1.1 413 Payload Too Large\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 150\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"PAYLOAD_TOO_LARGE\",\"message\":\"PAYLOAD_TOO_LARGE\",\"retryable\":false,\"requestId\":\"d79a3538-05ec-4849-9ba4-cff09f8a990d\",\"details\":{}}}"}
+{"accepted_bytes":818264,"attempted_bytes":2097153,"case":"POST-2097153-machine-raw-eager","event":"raw_upload_outcome","outcome":"Ok(Err(Os { code: 32, kind: BrokenPipe, message: \"Broken pipe\" }))","seq":185}
+{"case":"POST-2097153-machine-raw-eager","event":"raw_case","seq":186,"transport_and_http_valid":false}
+{"auth":"machine","case":"POST-2097153-machine-raw-staged","event":"case_start","expected":413,"method":"POST","mode":"raw-staged","seq":187,"size":2097153}
+{"case":"POST-2097153-machine-raw-staged","event":"raw_connect","local":"127.0.0.1:49325","seq":188}
+{"case":"POST-2097153-machine-raw-staged","connection":14,"event":"server_accept","peer":"127.0.0.1:49325","seq":189}
+{"accepted_bytes":65537,"case":"POST-2097153-machine-raw-staged","event":"raw_body_write","seq":190}
+{"accepted_bytes":65537,"attempted_bytes":65537,"case":"POST-2097153-machine-raw-staged","event":"raw_upload_outcome","outcome":"Ok(Ok(()))","seq":191}
+{"bytes":24,"case":"POST-2097153-machine-raw-staged","connection":14,"event":"server_read","outcome":"Ok(())","seq":192}
+{"bytes":16360,"case":"POST-2097153-machine-raw-staged","connection":14,"event":"server_read","outcome":"Ok(())","seq":193}
+{"bytes":16384,"case":"POST-2097153-machine-raw-staged","connection":14,"event":"server_read","outcome":"Ok(())","seq":194}
+{"bytes":32768,"case":"POST-2097153-machine-raw-staged","connection":14,"event":"server_read","outcome":"Ok(())","seq":195}
+{"bytes":232,"case":"POST-2097153-machine-raw-staged","connection":14,"event":"server_read","outcome":"Ok(())","seq":196}
+{"case":"POST-2097153-machine-raw-staged","connection":14,"event":"server_write","outcome":"Ok(350)","seq":197,"wire":"HTTP/1.1 413 Payload Too Large\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 150\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"PAYLOAD_TOO_LARGE\",\"message\":\"PAYLOAD_TOO_LARGE\",\"retryable\":false,\"requestId\":\"9d933260-da70-4bcb-ba31-82a6c3053432\",\"details\":{}}}"}
+{"case":"POST-2097153-machine-raw-staged","connection":14,"event":"server_shutdown","outcome":"Ok(())","seq":198}
+{"case":"POST-2097153-machine-raw-staged","connection":14,"event":"server_socket_drop","seq":199}
+{"bytes":350,"case":"POST-2097153-machine-raw-staged","event":"raw_read","seq":200}
+{"bytes":0,"case":"POST-2097153-machine-raw-staged","event":"raw_read","seq":201}
+{"case":"POST-2097153-machine-raw-staged","complete_valid_http_bytes":true,"event":"raw_response_outcome","outcome":"Ok(Ok(()))","received_http_without_read_error":true,"seq":202,"wire":"HTTP/1.1 413 Payload Too Large\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 150\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"PAYLOAD_TOO_LARGE\",\"message\":\"PAYLOAD_TOO_LARGE\",\"retryable\":false,\"requestId\":\"9d933260-da70-4bcb-ba31-82a6c3053432\",\"details\":{}}}"}
+{"boundary":"after_response","case":"POST-2097153-machine-raw-staged","event":"raw_half_close","outcome":"Ok(Ok(()))","seq":203}
+{"case":"POST-2097153-machine-raw-staged","event":"raw_case","seq":204,"transport_and_http_valid":true}
+{"auth":"machine","case":"POST-2097153-machine-reqwest-fresh","event":"case_start","expected":413,"method":"POST","mode":"reqwest-fresh","seq":205,"size":2097153}
+{"case":"POST-2097153-machine-reqwest-fresh","connection":15,"event":"server_accept","peer":"127.0.0.1:49327","seq":206}
+{"bytes":24,"case":"POST-2097153-machine-reqwest-fresh","connection":15,"event":"server_read","outcome":"Ok(())","seq":207}
+{"bytes":16360,"case":"POST-2097153-machine-reqwest-fresh","connection":15,"event":"server_read","outcome":"Ok(())","seq":208}
+{"bytes":16384,"case":"POST-2097153-machine-reqwest-fresh","connection":15,"event":"server_read","outcome":"Ok(())","seq":209}
+{"bytes":32768,"case":"POST-2097153-machine-reqwest-fresh","connection":15,"event":"server_read","outcome":"Ok(())","seq":210}
+{"bytes":65536,"case":"POST-2097153-machine-reqwest-fresh","connection":15,"event":"server_read","outcome":"Ok(())","seq":211}
+{"case":"POST-2097153-machine-reqwest-fresh","connection":15,"event":"server_write","outcome":"Ok(331)","seq":212,"wire":"HTTP/1.1 413 Payload Too Large\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 150\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"PAYLOAD_TOO_LARGE\",\"message\":\"PAYLOAD_TOO_LARGE\",\"retryable\":false,\"requestId\":\"8cb16f0d-2346-42cd-b2e8-4d06f63897cb\",\"details\":{}}}"}
+{"bytes":131072,"case":"POST-2097153-machine-reqwest-fresh","connection":15,"event":"server_read","outcome":"Ok(())","seq":213}
+{"case":"POST-2097153-machine-reqwest-fresh","connection":15,"event":"server_shutdown","outcome":"Ok(())","seq":214}
+{"case":"POST-2097153-machine-reqwest-fresh","connection":15,"event":"server_socket_drop","seq":215}
+{"body":"{\"error\":{\"code\":\"PAYLOAD_TOO_LARGE\",\"message\":\"PAYLOAD_TOO_LARGE\",\"retryable\":false,\"requestId\":\"8cb16f0d-2346-42cd-b2e8-4d06f63897cb\",\"details\":{}}}","case":"POST-2097153-machine-reqwest-fresh","event":"reqwest_outcome","headers":"{\"content-type\": \"application/json\", \"cache-control\": \"no-store\", \"access-control-allow-origin\": \"*\", \"content-length\": \"150\", \"date\": \"Sun, 13 Sep 2026 00:09:02 GMT\"}","received_http":true,"seq":216,"status":413,"valid":true}
+{"auth":"machine","case":"POST-2097153-machine-reqwest-pooled","event":"case_start","expected":413,"method":"POST","mode":"reqwest-pooled","seq":217,"size":2097153}
+{"case":"POST-2097153-machine-reqwest-pooled","connection":16,"event":"server_accept","peer":"127.0.0.1:49328","seq":218}
+{"bytes":24,"case":"POST-2097153-machine-reqwest-pooled","connection":16,"event":"server_read","outcome":"Ok(())","seq":219}
+{"bytes":43,"case":"POST-2097153-machine-reqwest-pooled","connection":16,"event":"server_read","outcome":"Ok(())","seq":220}
+{"case":"POST-2097153-machine-reqwest-pooled","connection":16,"event":"server_write","outcome":"Ok(173)","seq":221,"wire":"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\naccess-control-allow-origin: *\r\ncontent-length: 33\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"status\":\"ok\",\"version\":\"0.1.0\"}"}
+{"case":"POST-2097153-machine-reqwest-pooled","event":"pool_prime_completed","seq":222,"status":200}
+{"bytes":16317,"case":"POST-2097153-machine-reqwest-pooled","connection":16,"event":"server_read","outcome":"Ok(())","seq":223}
+{"bytes":16384,"case":"POST-2097153-machine-reqwest-pooled","connection":16,"event":"server_read","outcome":"Ok(())","seq":224}
+{"bytes":32768,"case":"POST-2097153-machine-reqwest-pooled","connection":16,"event":"server_read","outcome":"Ok(())","seq":225}
+{"bytes":65536,"case":"POST-2097153-machine-reqwest-pooled","connection":16,"event":"server_read","outcome":"Ok(())","seq":226}
+{"case":"POST-2097153-machine-reqwest-pooled","connection":16,"event":"server_write","outcome":"Ok(331)","seq":227,"wire":"HTTP/1.1 413 Payload Too Large\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 150\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"PAYLOAD_TOO_LARGE\",\"message\":\"PAYLOAD_TOO_LARGE\",\"retryable\":false,\"requestId\":\"4698f021-df89-4e32-a057-7568d01714b4\",\"details\":{}}}"}
+{"bytes":131072,"case":"POST-2097153-machine-reqwest-pooled","connection":16,"event":"server_read","outcome":"Ok(())","seq":228}
+{"case":"POST-2097153-machine-reqwest-pooled","connection":16,"event":"server_shutdown","outcome":"Ok(())","seq":229}
+{"case":"POST-2097153-machine-reqwest-pooled","connection":16,"event":"server_socket_drop","seq":230}
+{"body":"{\"error\":{\"code\":\"PAYLOAD_TOO_LARGE\",\"message\":\"PAYLOAD_TOO_LARGE\",\"retryable\":false,\"requestId\":\"4698f021-df89-4e32-a057-7568d01714b4\",\"details\":{}}}","case":"POST-2097153-machine-reqwest-pooled","event":"reqwest_outcome","headers":"{\"content-type\": \"application/json\", \"cache-control\": \"no-store\", \"access-control-allow-origin\": \"*\", \"content-length\": \"150\", \"date\": \"Sun, 13 Sep 2026 00:09:02 GMT\"}","received_http":true,"seq":231,"status":413,"valid":true}
+{"auth":"mirror","case":"POST-2097153-mirror-raw-eager","event":"case_start","expected":403,"method":"POST","mode":"raw-eager","seq":232,"size":2097153}
+{"case":"POST-2097153-mirror-raw-eager","event":"raw_connect","local":"127.0.0.1:49329","seq":233}
+{"case":"POST-2097153-mirror-raw-eager","connection":17,"event":"server_accept","peer":"127.0.0.1:49329","seq":234}
+{"bytes":24,"case":"POST-2097153-mirror-raw-eager","connection":17,"event":"server_read","outcome":"Ok(())","seq":235}
+{"accepted_bytes":327212,"case":"POST-2097153-mirror-raw-eager","event":"raw_body_write","seq":236}
+{"bytes":16360,"case":"POST-2097153-mirror-raw-eager","connection":17,"event":"server_read","outcome":"Ok(())","seq":237}
+{"accepted_bytes":498880,"case":"POST-2097153-mirror-raw-eager","event":"raw_body_write","seq":238}
+{"accepted_bytes":801880,"case":"POST-2097153-mirror-raw-eager","event":"raw_body_write","seq":239}
+{"case":"POST-2097153-mirror-raw-eager","connection":17,"event":"server_write","outcome":"Ok(354)","seq":240,"wire":"HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 162\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"MACHINE_ACCESS_REQUIRED\",\"message\":\"MACHINE_ACCESS_REQUIRED\",\"retryable\":false,\"requestId\":\"7fcf8666-2cae-4209-81b8-6a72c8ccec57\",\"details\":{}}}"}
+{"bytes":16384,"case":"POST-2097153-mirror-raw-eager","connection":17,"event":"server_read","outcome":"Ok(())","seq":241}
+{"case":"POST-2097153-mirror-raw-eager","connection":17,"event":"server_shutdown","outcome":"Ok(())","seq":242}
+{"case":"POST-2097153-mirror-raw-eager","connection":17,"event":"server_socket_drop","seq":243}
+{"accepted_bytes":867208,"case":"POST-2097153-mirror-raw-eager","event":"raw_body_write","seq":244}
+{"accepted_bytes":883540,"case":"POST-2097153-mirror-raw-eager","event":"raw_body_write","seq":245}
+{"accepted_bytes":916204,"case":"POST-2097153-mirror-raw-eager","event":"raw_body_write","seq":246}
+{"accepted_bytes":1030528,"case":"POST-2097153-mirror-raw-eager","event":"raw_body_write","seq":247}
+{"accepted_bytes":1030528,"attempted_bytes":2097153,"case":"POST-2097153-mirror-raw-eager","event":"raw_upload_outcome","outcome":"Ok(Err(Os { code: 32, kind: BrokenPipe, message: \"Broken pipe\" }))","seq":248}
+{"bytes":354,"case":"POST-2097153-mirror-raw-eager","event":"raw_read","seq":249}
+{"case":"POST-2097153-mirror-raw-eager","complete_valid_http_bytes":true,"event":"raw_response_outcome","outcome":"Ok(Err(Os { code: 54, kind: ConnectionReset, message: \"Connection reset by peer\" }))","received_http_without_read_error":false,"seq":250,"wire":"HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 162\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"MACHINE_ACCESS_REQUIRED\",\"message\":\"MACHINE_ACCESS_REQUIRED\",\"retryable\":false,\"requestId\":\"7fcf8666-2cae-4209-81b8-6a72c8ccec57\",\"details\":{}}}"}
+{"case":"POST-2097153-mirror-raw-eager","event":"raw_case","seq":251,"transport_and_http_valid":false}
+{"auth":"mirror","case":"POST-2097153-mirror-raw-staged","event":"case_start","expected":403,"method":"POST","mode":"raw-staged","seq":252,"size":2097153}
+{"case":"POST-2097153-mirror-raw-staged","event":"raw_connect","local":"127.0.0.1:49331","seq":253}
+{"case":"POST-2097153-mirror-raw-staged","connection":18,"event":"server_accept","peer":"127.0.0.1:49331","seq":254}
+{"accepted_bytes":0,"attempted_bytes":0,"case":"POST-2097153-mirror-raw-staged","event":"raw_upload_outcome","outcome":"Ok(Ok(()))","seq":255}
+{"bytes":24,"case":"POST-2097153-mirror-raw-staged","connection":18,"event":"server_read","outcome":"Ok(())","seq":256}
+{"bytes":207,"case":"POST-2097153-mirror-raw-staged","connection":18,"event":"server_read","outcome":"Ok(())","seq":257}
+{"case":"POST-2097153-mirror-raw-staged","connection":18,"event":"server_write","outcome":"Ok(354)","seq":258,"wire":"HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 162\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"MACHINE_ACCESS_REQUIRED\",\"message\":\"MACHINE_ACCESS_REQUIRED\",\"retryable\":false,\"requestId\":\"9d426813-62dc-41ae-8f86-3b359fe58ea1\",\"details\":{}}}"}
+{"case":"POST-2097153-mirror-raw-staged","connection":18,"event":"server_shutdown","outcome":"Ok(())","seq":259}
+{"case":"POST-2097153-mirror-raw-staged","connection":18,"event":"server_socket_drop","seq":260}
+{"bytes":354,"case":"POST-2097153-mirror-raw-staged","event":"raw_read","seq":261}
+{"bytes":0,"case":"POST-2097153-mirror-raw-staged","event":"raw_read","seq":262}
+{"case":"POST-2097153-mirror-raw-staged","complete_valid_http_bytes":true,"event":"raw_response_outcome","outcome":"Ok(Ok(()))","received_http_without_read_error":true,"seq":263,"wire":"HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 162\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"MACHINE_ACCESS_REQUIRED\",\"message\":\"MACHINE_ACCESS_REQUIRED\",\"retryable\":false,\"requestId\":\"9d426813-62dc-41ae-8f86-3b359fe58ea1\",\"details\":{}}}"}
+{"boundary":"after_response","case":"POST-2097153-mirror-raw-staged","event":"raw_half_close","outcome":"Ok(Ok(()))","seq":264}
+{"case":"POST-2097153-mirror-raw-staged","event":"raw_case","seq":265,"transport_and_http_valid":true}
+{"auth":"mirror","case":"POST-2097153-mirror-reqwest-fresh","event":"case_start","expected":403,"method":"POST","mode":"reqwest-fresh","seq":266,"size":2097153}
+{"case":"POST-2097153-mirror-reqwest-fresh","connection":19,"event":"server_accept","peer":"127.0.0.1:49332","seq":267}
+{"bytes":24,"case":"POST-2097153-mirror-reqwest-fresh","connection":19,"event":"server_read","outcome":"Ok(())","seq":268}
+{"bytes":16360,"case":"POST-2097153-mirror-reqwest-fresh","connection":19,"event":"server_read","outcome":"Ok(())","seq":269}
+{"case":"POST-2097153-mirror-reqwest-fresh","connection":19,"event":"server_write","outcome":"Ok(335)","seq":270,"wire":"HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 162\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"MACHINE_ACCESS_REQUIRED\",\"message\":\"MACHINE_ACCESS_REQUIRED\",\"retryable\":false,\"requestId\":\"d32facd8-1e16-49e3-a8e0-565adc78e5fb\",\"details\":{}}}"}
+{"bytes":16384,"case":"POST-2097153-mirror-reqwest-fresh","connection":19,"event":"server_read","outcome":"Ok(())","seq":271}
+{"case":"POST-2097153-mirror-reqwest-fresh","connection":19,"event":"server_shutdown","outcome":"Ok(())","seq":272}
+{"case":"POST-2097153-mirror-reqwest-fresh","connection":19,"event":"server_socket_drop","seq":273}
+{"body":"{\"error\":{\"code\":\"MACHINE_ACCESS_REQUIRED\",\"message\":\"MACHINE_ACCESS_REQUIRED\",\"retryable\":false,\"requestId\":\"d32facd8-1e16-49e3-a8e0-565adc78e5fb\",\"details\":{}}}","case":"POST-2097153-mirror-reqwest-fresh","event":"reqwest_outcome","headers":"{\"content-type\": \"application/json\", \"cache-control\": \"no-store\", \"access-control-allow-origin\": \"*\", \"content-length\": \"162\", \"date\": \"Sun, 13 Sep 2026 00:09:02 GMT\"}","received_http":true,"seq":274,"status":403,"valid":true}
+{"auth":"mirror","case":"POST-2097153-mirror-reqwest-pooled","event":"case_start","expected":403,"method":"POST","mode":"reqwest-pooled","seq":275,"size":2097153}
+{"case":"POST-2097153-mirror-reqwest-pooled","connection":20,"event":"server_accept","peer":"127.0.0.1:49333","seq":276}
+{"bytes":24,"case":"POST-2097153-mirror-reqwest-pooled","connection":20,"event":"server_read","outcome":"Ok(())","seq":277}
+{"bytes":43,"case":"POST-2097153-mirror-reqwest-pooled","connection":20,"event":"server_read","outcome":"Ok(())","seq":278}
+{"case":"POST-2097153-mirror-reqwest-pooled","connection":20,"event":"server_write","outcome":"Ok(173)","seq":279,"wire":"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\naccess-control-allow-origin: *\r\ncontent-length: 33\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"status\":\"ok\",\"version\":\"0.1.0\"}"}
+{"case":"POST-2097153-mirror-reqwest-pooled","event":"pool_prime_completed","seq":280,"status":200}
+{"bytes":16317,"case":"POST-2097153-mirror-reqwest-pooled","connection":20,"event":"server_read","outcome":"Ok(())","seq":281}
+{"case":"POST-2097153-mirror-reqwest-pooled","connection":20,"event":"server_write","outcome":"Ok(335)","seq":282,"wire":"HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 162\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"MACHINE_ACCESS_REQUIRED\",\"message\":\"MACHINE_ACCESS_REQUIRED\",\"retryable\":false,\"requestId\":\"7d0320f0-3791-4f6a-9a86-e617605913b6\",\"details\":{}}}"}
+{"bytes":16384,"case":"POST-2097153-mirror-reqwest-pooled","connection":20,"event":"server_read","outcome":"Ok(())","seq":283}
+{"case":"POST-2097153-mirror-reqwest-pooled","connection":20,"event":"server_shutdown","outcome":"Ok(())","seq":284}
+{"case":"POST-2097153-mirror-reqwest-pooled","connection":20,"event":"server_socket_drop","seq":285}
+{"body":"{\"error\":{\"code\":\"MACHINE_ACCESS_REQUIRED\",\"message\":\"MACHINE_ACCESS_REQUIRED\",\"retryable\":false,\"requestId\":\"7d0320f0-3791-4f6a-9a86-e617605913b6\",\"details\":{}}}","case":"POST-2097153-mirror-reqwest-pooled","event":"reqwest_outcome","headers":"{\"content-type\": \"application/json\", \"cache-control\": \"no-store\", \"access-control-allow-origin\": \"*\", \"content-length\": \"162\", \"date\": \"Sun, 13 Sep 2026 00:09:02 GMT\"}","received_http":true,"seq":286,"status":403,"valid":true}
+{"auth":"anonymous","case":"POST-2097153-anonymous-raw-eager","event":"case_start","expected":401,"method":"POST","mode":"raw-eager","seq":287,"size":2097153}
+{"case":"POST-2097153-anonymous-raw-eager","connection":21,"event":"server_accept","peer":"127.0.0.1:49334","seq":288}
+{"case":"POST-2097153-anonymous-raw-eager","event":"raw_connect","local":"127.0.0.1:49334","seq":289}
+{"bytes":24,"case":"POST-2097153-anonymous-raw-eager","connection":21,"event":"server_read","outcome":"Ok(())","seq":290}
+{"accepted_bytes":327212,"case":"POST-2097153-anonymous-raw-eager","event":"raw_body_write","seq":291}
+{"bytes":16360,"case":"POST-2097153-anonymous-raw-eager","connection":21,"event":"server_read","outcome":"Ok(())","seq":292}
+{"case":"POST-2097153-anonymous-raw-eager","connection":21,"event":"server_write","outcome":"Ok(335)","seq":293,"wire":"HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 140\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"UNAUTHORIZED\",\"message\":\"UNAUTHORIZED\",\"retryable\":false,\"requestId\":\"36d4a097-c883-48ef-8111-08ea32a77044\",\"details\":{}}}"}
+{"bytes":16384,"case":"POST-2097153-anonymous-raw-eager","connection":21,"event":"server_read","outcome":"Ok(())","seq":294}
+{"accepted_bytes":507072,"case":"POST-2097153-anonymous-raw-eager","event":"raw_body_write","seq":295}
+{"case":"POST-2097153-anonymous-raw-eager","connection":21,"event":"server_shutdown","outcome":"Ok(())","seq":296}
+{"case":"POST-2097153-anonymous-raw-eager","connection":21,"event":"server_socket_drop","seq":297}
+{"accepted_bytes":801880,"case":"POST-2097153-anonymous-raw-eager","event":"raw_body_write","seq":298}
+{"bytes":335,"case":"POST-2097153-anonymous-raw-eager","event":"raw_read","seq":299}
+{"case":"POST-2097153-anonymous-raw-eager","complete_valid_http_bytes":true,"event":"raw_response_outcome","outcome":"Ok(Err(Os { code: 54, kind: ConnectionReset, message: \"Connection reset by peer\" }))","received_http_without_read_error":false,"seq":300,"wire":"HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 140\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"UNAUTHORIZED\",\"message\":\"UNAUTHORIZED\",\"retryable\":false,\"requestId\":\"36d4a097-c883-48ef-8111-08ea32a77044\",\"details\":{}}}"}
+{"accepted_bytes":801880,"attempted_bytes":2097153,"case":"POST-2097153-anonymous-raw-eager","event":"raw_upload_outcome","outcome":"Ok(Err(Os { code: 32, kind: BrokenPipe, message: \"Broken pipe\" }))","seq":301}
+{"case":"POST-2097153-anonymous-raw-eager","event":"raw_case","seq":302,"transport_and_http_valid":false}
+{"auth":"anonymous","case":"POST-2097153-anonymous-raw-staged","event":"case_start","expected":401,"method":"POST","mode":"raw-staged","seq":303,"size":2097153}
+{"case":"POST-2097153-anonymous-raw-staged","event":"raw_connect","local":"127.0.0.1:49335","seq":304}
+{"case":"POST-2097153-anonymous-raw-staged","connection":22,"event":"server_accept","peer":"127.0.0.1:49335","seq":305}
+{"accepted_bytes":0,"attempted_bytes":0,"case":"POST-2097153-anonymous-raw-staged","event":"raw_upload_outcome","outcome":"Ok(Ok(()))","seq":306}
+{"bytes":24,"case":"POST-2097153-anonymous-raw-staged","connection":22,"event":"server_read","outcome":"Ok(())","seq":307}
+{"bytes":119,"case":"POST-2097153-anonymous-raw-staged","connection":22,"event":"server_read","outcome":"Ok(())","seq":308}
+{"case":"POST-2097153-anonymous-raw-staged","connection":22,"event":"server_write","outcome":"Ok(335)","seq":309,"wire":"HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 140\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"UNAUTHORIZED\",\"message\":\"UNAUTHORIZED\",\"retryable\":false,\"requestId\":\"1b478c75-068c-493c-9aa6-51cd32e83b8c\",\"details\":{}}}"}
+{"case":"POST-2097153-anonymous-raw-staged","connection":22,"event":"server_shutdown","outcome":"Ok(())","seq":310}
+{"case":"POST-2097153-anonymous-raw-staged","connection":22,"event":"server_socket_drop","seq":311}
+{"bytes":335,"case":"POST-2097153-anonymous-raw-staged","event":"raw_read","seq":312}
+{"bytes":0,"case":"POST-2097153-anonymous-raw-staged","event":"raw_read","seq":313}
+{"case":"POST-2097153-anonymous-raw-staged","complete_valid_http_bytes":true,"event":"raw_response_outcome","outcome":"Ok(Ok(()))","received_http_without_read_error":true,"seq":314,"wire":"HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 140\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"UNAUTHORIZED\",\"message\":\"UNAUTHORIZED\",\"retryable\":false,\"requestId\":\"1b478c75-068c-493c-9aa6-51cd32e83b8c\",\"details\":{}}}"}
+{"boundary":"after_response","case":"POST-2097153-anonymous-raw-staged","event":"raw_half_close","outcome":"Ok(Ok(()))","seq":315}
+{"case":"POST-2097153-anonymous-raw-staged","event":"raw_case","seq":316,"transport_and_http_valid":true}
+{"auth":"anonymous","case":"POST-2097153-anonymous-reqwest-fresh","event":"case_start","expected":401,"method":"POST","mode":"reqwest-fresh","seq":317,"size":2097153}
+{"case":"POST-2097153-anonymous-reqwest-fresh","connection":23,"event":"server_accept","peer":"127.0.0.1:49336","seq":318}
+{"bytes":24,"case":"POST-2097153-anonymous-reqwest-fresh","connection":23,"event":"server_read","outcome":"Ok(())","seq":319}
+{"bytes":16360,"case":"POST-2097153-anonymous-reqwest-fresh","connection":23,"event":"server_read","outcome":"Ok(())","seq":320}
+{"case":"POST-2097153-anonymous-reqwest-fresh","connection":23,"event":"server_write","outcome":"Ok(316)","seq":321,"wire":"HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 140\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"UNAUTHORIZED\",\"message\":\"UNAUTHORIZED\",\"retryable\":false,\"requestId\":\"43ef9672-6d52-4be9-bb0a-9eb80551a8a2\",\"details\":{}}}"}
+{"bytes":16384,"case":"POST-2097153-anonymous-reqwest-fresh","connection":23,"event":"server_read","outcome":"Ok(())","seq":322}
+{"case":"POST-2097153-anonymous-reqwest-fresh","connection":23,"event":"server_shutdown","outcome":"Ok(())","seq":323}
+{"case":"POST-2097153-anonymous-reqwest-fresh","connection":23,"event":"server_socket_drop","seq":324}
+{"case":"POST-2097153-anonymous-reqwest-fresh","error_debug":"reqwest::Error { kind: Request, url: \"http://127.0.0.1:49311/api/v1/workspace/projects\", source: hyper_util::client::legacy::Error(SendRequest, hyper::Error(BodyWrite, Os { code: 32, kind: BrokenPipe, message: \"Broken pipe\" })) }","error_display":"error sending request for url (http://127.0.0.1:49311/api/v1/workspace/projects)","event":"reqwest_outcome","received_http":false,"seq":325}
+{"auth":"anonymous","case":"POST-2097153-anonymous-reqwest-pooled","event":"case_start","expected":401,"method":"POST","mode":"reqwest-pooled","seq":326,"size":2097153}
+{"case":"POST-2097153-anonymous-reqwest-pooled","connection":24,"event":"server_accept","peer":"127.0.0.1:49337","seq":327}
+{"bytes":24,"case":"POST-2097153-anonymous-reqwest-pooled","connection":24,"event":"server_read","outcome":"Ok(())","seq":328}
+{"bytes":43,"case":"POST-2097153-anonymous-reqwest-pooled","connection":24,"event":"server_read","outcome":"Ok(())","seq":329}
+{"case":"POST-2097153-anonymous-reqwest-pooled","connection":24,"event":"server_write","outcome":"Ok(173)","seq":330,"wire":"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\naccess-control-allow-origin: *\r\ncontent-length: 33\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"status\":\"ok\",\"version\":\"0.1.0\"}"}
+{"case":"POST-2097153-anonymous-reqwest-pooled","event":"pool_prime_completed","seq":331,"status":200}
+{"bytes":16317,"case":"POST-2097153-anonymous-reqwest-pooled","connection":24,"event":"server_read","outcome":"Ok(())","seq":332}
+{"case":"POST-2097153-anonymous-reqwest-pooled","connection":24,"event":"server_write","outcome":"Ok(316)","seq":333,"wire":"HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 140\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"UNAUTHORIZED\",\"message\":\"UNAUTHORIZED\",\"retryable\":false,\"requestId\":\"c8fad2dc-a043-47f1-a76f-49e536eef501\",\"details\":{}}}"}
+{"bytes":16384,"case":"POST-2097153-anonymous-reqwest-pooled","connection":24,"event":"server_read","outcome":"Ok(())","seq":334}
+{"case":"POST-2097153-anonymous-reqwest-pooled","connection":24,"event":"server_shutdown","outcome":"Ok(())","seq":335}
+{"case":"POST-2097153-anonymous-reqwest-pooled","connection":24,"event":"server_socket_drop","seq":336}
+{"body":"{\"error\":{\"code\":\"UNAUTHORIZED\",\"message\":\"UNAUTHORIZED\",\"retryable\":false,\"requestId\":\"c8fad2dc-a043-47f1-a76f-49e536eef501\",\"details\":{}}}","case":"POST-2097153-anonymous-reqwest-pooled","event":"reqwest_outcome","headers":"{\"content-type\": \"application/json\", \"cache-control\": \"no-store\", \"access-control-allow-origin\": \"*\", \"content-length\": \"140\", \"date\": \"Sun, 13 Sep 2026 00:09:02 GMT\"}","received_http":true,"seq":337,"status":401,"valid":true}
+{"auth":"machine","case":"DELETE-2097153-machine-raw-eager","event":"case_start","expected":413,"method":"DELETE","mode":"raw-eager","seq":338,"size":2097153}
+{"case":"DELETE-2097153-machine-raw-eager","event":"raw_connect","local":"127.0.0.1:49338","seq":339}
+{"case":"DELETE-2097153-machine-raw-eager","connection":25,"event":"server_accept","peer":"127.0.0.1:49338","seq":340}
+{"bytes":24,"case":"DELETE-2097153-machine-raw-eager","connection":25,"event":"server_read","outcome":"Ok(())","seq":341}
+{"bytes":16360,"case":"DELETE-2097153-machine-raw-eager","connection":25,"event":"server_read","outcome":"Ok(())","seq":342}
+{"accepted_bytes":327212,"case":"DELETE-2097153-machine-raw-eager","event":"raw_body_write","seq":343}
+{"accepted_bytes":498984,"case":"DELETE-2097153-machine-raw-eager","event":"raw_body_write","seq":344}
+{"accepted_bytes":515316,"case":"DELETE-2097153-machine-raw-eager","event":"raw_body_write","seq":345}
+{"accepted_bytes":801880,"case":"DELETE-2097153-machine-raw-eager","event":"raw_body_write","seq":346}
+{"bytes":16384,"case":"DELETE-2097153-machine-raw-eager","connection":25,"event":"server_read","outcome":"Ok(())","seq":347}
+{"bytes":32768,"case":"DELETE-2097153-machine-raw-eager","connection":25,"event":"server_read","outcome":"Ok(())","seq":348}
+{"bytes":65536,"case":"DELETE-2097153-machine-raw-eager","connection":25,"event":"server_read","outcome":"Ok(())","seq":349}
+{"accepted_bytes":834544,"case":"DELETE-2097153-machine-raw-eager","event":"raw_body_write","seq":350}
+{"case":"DELETE-2097153-machine-raw-eager","connection":25,"event":"server_write","outcome":"Ok(350)","seq":351,"wire":"HTTP/1.1 413 Payload Too Large\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 150\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"PAYLOAD_TOO_LARGE\",\"message\":\"PAYLOAD_TOO_LARGE\",\"retryable\":false,\"requestId\":\"57009273-434a-48d2-b989-e63bb67fe802\",\"details\":{}}}"}
+{"accepted_bytes":883540,"case":"DELETE-2097153-machine-raw-eager","event":"raw_body_write","seq":352}
+{"bytes":131072,"case":"DELETE-2097153-machine-raw-eager","connection":25,"event":"server_read","outcome":"Ok(())","seq":353}
+{"case":"DELETE-2097153-machine-raw-eager","connection":25,"event":"server_shutdown","outcome":"Ok(())","seq":354}
+{"case":"DELETE-2097153-machine-raw-eager","connection":25,"event":"server_socket_drop","seq":355}
+{"accepted_bytes":1112188,"case":"DELETE-2097153-machine-raw-eager","event":"raw_body_write","seq":356}
+{"accepted_bytes":1128520,"case":"DELETE-2097153-machine-raw-eager","event":"raw_body_write","seq":357}
+{"bytes":350,"case":"DELETE-2097153-machine-raw-eager","event":"raw_read","seq":358}
+{"case":"DELETE-2097153-machine-raw-eager","complete_valid_http_bytes":true,"event":"raw_response_outcome","outcome":"Ok(Err(Os { code: 54, kind: ConnectionReset, message: \"Connection reset by peer\" }))","received_http_without_read_error":false,"seq":359,"wire":"HTTP/1.1 413 Payload Too Large\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 150\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"PAYLOAD_TOO_LARGE\",\"message\":\"PAYLOAD_TOO_LARGE\",\"retryable\":false,\"requestId\":\"57009273-434a-48d2-b989-e63bb67fe802\",\"details\":{}}}"}
+{"accepted_bytes":1128520,"attempted_bytes":2097153,"case":"DELETE-2097153-machine-raw-eager","event":"raw_upload_outcome","outcome":"Ok(Err(Os { code: 32, kind: BrokenPipe, message: \"Broken pipe\" }))","seq":360}
+{"case":"DELETE-2097153-machine-raw-eager","event":"raw_case","seq":361,"transport_and_http_valid":false}
+{"auth":"machine","case":"DELETE-2097153-machine-raw-staged","event":"case_start","expected":413,"method":"DELETE","mode":"raw-staged","seq":362,"size":2097153}
+{"case":"DELETE-2097153-machine-raw-staged","event":"raw_connect","local":"127.0.0.1:49339","seq":363}
+{"case":"DELETE-2097153-machine-raw-staged","connection":26,"event":"server_accept","peer":"127.0.0.1:49339","seq":364}
+{"accepted_bytes":65537,"case":"DELETE-2097153-machine-raw-staged","event":"raw_body_write","seq":365}
+{"accepted_bytes":65537,"attempted_bytes":65537,"case":"DELETE-2097153-machine-raw-staged","event":"raw_upload_outcome","outcome":"Ok(Ok(()))","seq":366}
+{"bytes":24,"case":"DELETE-2097153-machine-raw-staged","connection":26,"event":"server_read","outcome":"Ok(())","seq":367}
+{"bytes":16360,"case":"DELETE-2097153-machine-raw-staged","connection":26,"event":"server_read","outcome":"Ok(())","seq":368}
+{"bytes":16384,"case":"DELETE-2097153-machine-raw-staged","connection":26,"event":"server_read","outcome":"Ok(())","seq":369}
+{"bytes":32768,"case":"DELETE-2097153-machine-raw-staged","connection":26,"event":"server_read","outcome":"Ok(())","seq":370}
+{"bytes":242,"case":"DELETE-2097153-machine-raw-staged","connection":26,"event":"server_read","outcome":"Ok(())","seq":371}
+{"case":"DELETE-2097153-machine-raw-staged","connection":26,"event":"server_write","outcome":"Ok(350)","seq":372,"wire":"HTTP/1.1 413 Payload Too Large\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 150\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"PAYLOAD_TOO_LARGE\",\"message\":\"PAYLOAD_TOO_LARGE\",\"retryable\":false,\"requestId\":\"c9501249-d3fd-435a-9f1e-9c155ae0c929\",\"details\":{}}}"}
+{"case":"DELETE-2097153-machine-raw-staged","connection":26,"event":"server_shutdown","outcome":"Ok(())","seq":373}
+{"case":"DELETE-2097153-machine-raw-staged","connection":26,"event":"server_socket_drop","seq":374}
+{"bytes":350,"case":"DELETE-2097153-machine-raw-staged","event":"raw_read","seq":375}
+{"bytes":0,"case":"DELETE-2097153-machine-raw-staged","event":"raw_read","seq":376}
+{"case":"DELETE-2097153-machine-raw-staged","complete_valid_http_bytes":true,"event":"raw_response_outcome","outcome":"Ok(Ok(()))","received_http_without_read_error":true,"seq":377,"wire":"HTTP/1.1 413 Payload Too Large\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 150\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"PAYLOAD_TOO_LARGE\",\"message\":\"PAYLOAD_TOO_LARGE\",\"retryable\":false,\"requestId\":\"c9501249-d3fd-435a-9f1e-9c155ae0c929\",\"details\":{}}}"}
+{"boundary":"after_response","case":"DELETE-2097153-machine-raw-staged","event":"raw_half_close","outcome":"Ok(Ok(()))","seq":378}
+{"case":"DELETE-2097153-machine-raw-staged","event":"raw_case","seq":379,"transport_and_http_valid":true}
+{"auth":"machine","case":"DELETE-2097153-machine-reqwest-fresh","event":"case_start","expected":413,"method":"DELETE","mode":"reqwest-fresh","seq":380,"size":2097153}
+{"case":"DELETE-2097153-machine-reqwest-fresh","connection":27,"event":"server_accept","peer":"127.0.0.1:49340","seq":381}
+{"bytes":24,"case":"DELETE-2097153-machine-reqwest-fresh","connection":27,"event":"server_read","outcome":"Ok(())","seq":382}
+{"bytes":16360,"case":"DELETE-2097153-machine-reqwest-fresh","connection":27,"event":"server_read","outcome":"Ok(())","seq":383}
+{"bytes":16384,"case":"DELETE-2097153-machine-reqwest-fresh","connection":27,"event":"server_read","outcome":"Ok(())","seq":384}
+{"bytes":32768,"case":"DELETE-2097153-machine-reqwest-fresh","connection":27,"event":"server_read","outcome":"Ok(())","seq":385}
+{"bytes":65536,"case":"DELETE-2097153-machine-reqwest-fresh","connection":27,"event":"server_read","outcome":"Ok(())","seq":386}
+{"case":"DELETE-2097153-machine-reqwest-fresh","connection":27,"event":"server_write","outcome":"Ok(331)","seq":387,"wire":"HTTP/1.1 413 Payload Too Large\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 150\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"PAYLOAD_TOO_LARGE\",\"message\":\"PAYLOAD_TOO_LARGE\",\"retryable\":false,\"requestId\":\"e131a4dd-8cf7-4b9c-bc4a-2d23e74ae22c\",\"details\":{}}}"}
+{"bytes":131072,"case":"DELETE-2097153-machine-reqwest-fresh","connection":27,"event":"server_read","outcome":"Ok(())","seq":388}
+{"case":"DELETE-2097153-machine-reqwest-fresh","connection":27,"event":"server_shutdown","outcome":"Ok(())","seq":389}
+{"case":"DELETE-2097153-machine-reqwest-fresh","connection":27,"event":"server_socket_drop","seq":390}
+{"body":"{\"error\":{\"code\":\"PAYLOAD_TOO_LARGE\",\"message\":\"PAYLOAD_TOO_LARGE\",\"retryable\":false,\"requestId\":\"e131a4dd-8cf7-4b9c-bc4a-2d23e74ae22c\",\"details\":{}}}","case":"DELETE-2097153-machine-reqwest-fresh","event":"reqwest_outcome","headers":"{\"content-type\": \"application/json\", \"cache-control\": \"no-store\", \"access-control-allow-origin\": \"*\", \"content-length\": \"150\", \"date\": \"Sun, 13 Sep 2026 00:09:02 GMT\"}","received_http":true,"seq":391,"status":413,"valid":true}
+{"auth":"machine","case":"DELETE-2097153-machine-reqwest-pooled","event":"case_start","expected":413,"method":"DELETE","mode":"reqwest-pooled","seq":392,"size":2097153}
+{"case":"DELETE-2097153-machine-reqwest-pooled","connection":28,"event":"server_accept","peer":"127.0.0.1:49341","seq":393}
+{"bytes":24,"case":"DELETE-2097153-machine-reqwest-pooled","connection":28,"event":"server_read","outcome":"Ok(())","seq":394}
+{"bytes":43,"case":"DELETE-2097153-machine-reqwest-pooled","connection":28,"event":"server_read","outcome":"Ok(())","seq":395}
+{"case":"DELETE-2097153-machine-reqwest-pooled","connection":28,"event":"server_write","outcome":"Ok(173)","seq":396,"wire":"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\naccess-control-allow-origin: *\r\ncontent-length: 33\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"status\":\"ok\",\"version\":\"0.1.0\"}"}
+{"case":"DELETE-2097153-machine-reqwest-pooled","event":"pool_prime_completed","seq":397,"status":200}
+{"bytes":16317,"case":"DELETE-2097153-machine-reqwest-pooled","connection":28,"event":"server_read","outcome":"Ok(())","seq":398}
+{"bytes":16384,"case":"DELETE-2097153-machine-reqwest-pooled","connection":28,"event":"server_read","outcome":"Ok(())","seq":399}
+{"bytes":32768,"case":"DELETE-2097153-machine-reqwest-pooled","connection":28,"event":"server_read","outcome":"Ok(())","seq":400}
+{"bytes":65536,"case":"DELETE-2097153-machine-reqwest-pooled","connection":28,"event":"server_read","outcome":"Ok(())","seq":401}
+{"case":"DELETE-2097153-machine-reqwest-pooled","connection":28,"event":"server_write","outcome":"Ok(331)","seq":402,"wire":"HTTP/1.1 413 Payload Too Large\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 150\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"PAYLOAD_TOO_LARGE\",\"message\":\"PAYLOAD_TOO_LARGE\",\"retryable\":false,\"requestId\":\"2f15d0c0-f7d1-47f5-a08e-19fed3741d6c\",\"details\":{}}}"}
+{"bytes":131072,"case":"DELETE-2097153-machine-reqwest-pooled","connection":28,"event":"server_read","outcome":"Ok(())","seq":403}
+{"case":"DELETE-2097153-machine-reqwest-pooled","connection":28,"event":"server_shutdown","outcome":"Ok(())","seq":404}
+{"case":"DELETE-2097153-machine-reqwest-pooled","connection":28,"event":"server_socket_drop","seq":405}
+{"body":"{\"error\":{\"code\":\"PAYLOAD_TOO_LARGE\",\"message\":\"PAYLOAD_TOO_LARGE\",\"retryable\":false,\"requestId\":\"2f15d0c0-f7d1-47f5-a08e-19fed3741d6c\",\"details\":{}}}","case":"DELETE-2097153-machine-reqwest-pooled","event":"reqwest_outcome","headers":"{\"content-type\": \"application/json\", \"cache-control\": \"no-store\", \"access-control-allow-origin\": \"*\", \"content-length\": \"150\", \"date\": \"Sun, 13 Sep 2026 00:09:02 GMT\"}","received_http":true,"seq":406,"status":413,"valid":true}
+{"auth":"mirror","case":"DELETE-2097153-mirror-raw-eager","event":"case_start","expected":403,"method":"DELETE","mode":"raw-eager","seq":407,"size":2097153}
+{"case":"DELETE-2097153-mirror-raw-eager","connection":29,"event":"server_accept","peer":"127.0.0.1:49342","seq":408}
+{"case":"DELETE-2097153-mirror-raw-eager","event":"raw_connect","local":"127.0.0.1:49342","seq":409}
+{"bytes":24,"case":"DELETE-2097153-mirror-raw-eager","connection":29,"event":"server_read","outcome":"Ok(())","seq":410}
+{"bytes":217,"case":"DELETE-2097153-mirror-raw-eager","connection":29,"event":"server_read","outcome":"Ok(())","seq":411}
+{"accepted_bytes":327212,"case":"DELETE-2097153-mirror-raw-eager","event":"raw_body_write","seq":412}
+{"bytes":16143,"case":"DELETE-2097153-mirror-raw-eager","connection":29,"event":"server_read","outcome":"Ok(())","seq":413}
+{"accepted_bytes":499036,"case":"DELETE-2097153-mirror-raw-eager","event":"raw_body_write","seq":414}
+{"accepted_bytes":515368,"case":"DELETE-2097153-mirror-raw-eager","event":"raw_body_write","seq":415}
+{"accepted_bytes":531700,"case":"DELETE-2097153-mirror-raw-eager","event":"raw_body_write","seq":416}
+{"case":"DELETE-2097153-mirror-raw-eager","connection":29,"event":"server_write","outcome":"Ok(354)","seq":417,"wire":"HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 162\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"MACHINE_ACCESS_REQUIRED\",\"message\":\"MACHINE_ACCESS_REQUIRED\",\"retryable\":false,\"requestId\":\"2972321e-f07d-471c-b125-f740df75e2af\",\"details\":{}}}"}
+{"bytes":16384,"case":"DELETE-2097153-mirror-raw-eager","connection":29,"event":"server_read","outcome":"Ok(())","seq":418}
+{"case":"DELETE-2097153-mirror-raw-eager","connection":29,"event":"server_shutdown","outcome":"Ok(())","seq":419}
+{"case":"DELETE-2097153-mirror-raw-eager","connection":29,"event":"server_socket_drop","seq":420}
+{"accepted_bytes":801639,"case":"DELETE-2097153-mirror-raw-eager","event":"raw_body_write","seq":421}
+{"bytes":354,"case":"DELETE-2097153-mirror-raw-eager","event":"raw_read","seq":422}
+{"case":"DELETE-2097153-mirror-raw-eager","complete_valid_http_bytes":true,"event":"raw_response_outcome","outcome":"Ok(Err(Os { code: 54, kind: ConnectionReset, message: \"Connection reset by peer\" }))","received_http_without_read_error":false,"seq":423,"wire":"HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 162\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"MACHINE_ACCESS_REQUIRED\",\"message\":\"MACHINE_ACCESS_REQUIRED\",\"retryable\":false,\"requestId\":\"2972321e-f07d-471c-b125-f740df75e2af\",\"details\":{}}}"}
+{"accepted_bytes":801639,"attempted_bytes":2097153,"case":"DELETE-2097153-mirror-raw-eager","event":"raw_upload_outcome","outcome":"Ok(Err(Os { code: 32, kind: BrokenPipe, message: \"Broken pipe\" }))","seq":424}
+{"case":"DELETE-2097153-mirror-raw-eager","event":"raw_case","seq":425,"transport_and_http_valid":false}
+{"auth":"mirror","case":"DELETE-2097153-mirror-raw-staged","event":"case_start","expected":403,"method":"DELETE","mode":"raw-staged","seq":426,"size":2097153}
+{"case":"DELETE-2097153-mirror-raw-staged","event":"raw_connect","local":"127.0.0.1:49343","seq":427}
+{"case":"DELETE-2097153-mirror-raw-staged","connection":30,"event":"server_accept","peer":"127.0.0.1:49343","seq":428}
+{"accepted_bytes":0,"attempted_bytes":0,"case":"DELETE-2097153-mirror-raw-staged","event":"raw_upload_outcome","outcome":"Ok(Ok(()))","seq":429}
+{"bytes":24,"case":"DELETE-2097153-mirror-raw-staged","connection":30,"event":"server_read","outcome":"Ok(())","seq":430}
+{"bytes":217,"case":"DELETE-2097153-mirror-raw-staged","connection":30,"event":"server_read","outcome":"Ok(())","seq":431}
+{"case":"DELETE-2097153-mirror-raw-staged","connection":30,"event":"server_write","outcome":"Ok(354)","seq":432,"wire":"HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 162\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"MACHINE_ACCESS_REQUIRED\",\"message\":\"MACHINE_ACCESS_REQUIRED\",\"retryable\":false,\"requestId\":\"6593bb76-bf1a-4f35-b29a-f6b7259ee8e3\",\"details\":{}}}"}
+{"case":"DELETE-2097153-mirror-raw-staged","connection":30,"event":"server_shutdown","outcome":"Ok(())","seq":433}
+{"case":"DELETE-2097153-mirror-raw-staged","connection":30,"event":"server_socket_drop","seq":434}
+{"bytes":354,"case":"DELETE-2097153-mirror-raw-staged","event":"raw_read","seq":435}
+{"bytes":0,"case":"DELETE-2097153-mirror-raw-staged","event":"raw_read","seq":436}
+{"case":"DELETE-2097153-mirror-raw-staged","complete_valid_http_bytes":true,"event":"raw_response_outcome","outcome":"Ok(Ok(()))","received_http_without_read_error":true,"seq":437,"wire":"HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 162\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"MACHINE_ACCESS_REQUIRED\",\"message\":\"MACHINE_ACCESS_REQUIRED\",\"retryable\":false,\"requestId\":\"6593bb76-bf1a-4f35-b29a-f6b7259ee8e3\",\"details\":{}}}"}
+{"boundary":"after_response","case":"DELETE-2097153-mirror-raw-staged","event":"raw_half_close","outcome":"Ok(Ok(()))","seq":438}
+{"case":"DELETE-2097153-mirror-raw-staged","event":"raw_case","seq":439,"transport_and_http_valid":true}
+{"auth":"mirror","case":"DELETE-2097153-mirror-reqwest-fresh","event":"case_start","expected":403,"method":"DELETE","mode":"reqwest-fresh","seq":440,"size":2097153}
+{"case":"DELETE-2097153-mirror-reqwest-fresh","connection":31,"event":"server_accept","peer":"127.0.0.1:49345","seq":441}
+{"bytes":24,"case":"DELETE-2097153-mirror-reqwest-fresh","connection":31,"event":"server_read","outcome":"Ok(())","seq":442}
+{"bytes":16360,"case":"DELETE-2097153-mirror-reqwest-fresh","connection":31,"event":"server_read","outcome":"Ok(())","seq":443}
+{"case":"DELETE-2097153-mirror-reqwest-fresh","connection":31,"event":"server_write","outcome":"Ok(335)","seq":444,"wire":"HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 162\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"MACHINE_ACCESS_REQUIRED\",\"message\":\"MACHINE_ACCESS_REQUIRED\",\"retryable\":false,\"requestId\":\"75b86c5e-7835-4ccc-8a97-aa32f06acd66\",\"details\":{}}}"}
+{"bytes":16384,"case":"DELETE-2097153-mirror-reqwest-fresh","connection":31,"event":"server_read","outcome":"Ok(())","seq":445}
+{"case":"DELETE-2097153-mirror-reqwest-fresh","connection":31,"event":"server_shutdown","outcome":"Ok(())","seq":446}
+{"case":"DELETE-2097153-mirror-reqwest-fresh","connection":31,"event":"server_socket_drop","seq":447}
+{"case":"DELETE-2097153-mirror-reqwest-fresh","error_debug":"reqwest::Error { kind: Request, url: \"http://127.0.0.1:49311/api/v1/workspace/projects/missing\", source: hyper_util::client::legacy::Error(SendRequest, hyper::Error(BodyWrite, Os { code: 54, kind: ConnectionReset, message: \"Connection reset by peer\" })) }","error_display":"error sending request for url (http://127.0.0.1:49311/api/v1/workspace/projects/missing)","event":"reqwest_outcome","received_http":false,"seq":448}
+{"auth":"mirror","case":"DELETE-2097153-mirror-reqwest-pooled","event":"case_start","expected":403,"method":"DELETE","mode":"reqwest-pooled","seq":449,"size":2097153}
+{"case":"DELETE-2097153-mirror-reqwest-pooled","connection":32,"event":"server_accept","peer":"127.0.0.1:49346","seq":450}
+{"bytes":24,"case":"DELETE-2097153-mirror-reqwest-pooled","connection":32,"event":"server_read","outcome":"Ok(())","seq":451}
+{"bytes":43,"case":"DELETE-2097153-mirror-reqwest-pooled","connection":32,"event":"server_read","outcome":"Ok(())","seq":452}
+{"case":"DELETE-2097153-mirror-reqwest-pooled","connection":32,"event":"server_write","outcome":"Ok(173)","seq":453,"wire":"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\naccess-control-allow-origin: *\r\ncontent-length: 33\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"status\":\"ok\",\"version\":\"0.1.0\"}"}
+{"case":"DELETE-2097153-mirror-reqwest-pooled","event":"pool_prime_completed","seq":454,"status":200}
+{"bytes":16317,"case":"DELETE-2097153-mirror-reqwest-pooled","connection":32,"event":"server_read","outcome":"Ok(())","seq":455}
+{"case":"DELETE-2097153-mirror-reqwest-pooled","connection":32,"event":"server_write","outcome":"Ok(335)","seq":456,"wire":"HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 162\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"MACHINE_ACCESS_REQUIRED\",\"message\":\"MACHINE_ACCESS_REQUIRED\",\"retryable\":false,\"requestId\":\"9e79c9fe-1312-481a-9c45-e7660df3c6d7\",\"details\":{}}}"}
+{"bytes":16384,"case":"DELETE-2097153-mirror-reqwest-pooled","connection":32,"event":"server_read","outcome":"Ok(())","seq":457}
+{"case":"DELETE-2097153-mirror-reqwest-pooled","connection":32,"event":"server_shutdown","outcome":"Ok(())","seq":458}
+{"case":"DELETE-2097153-mirror-reqwest-pooled","connection":32,"event":"server_socket_drop","seq":459}
+{"body":"{\"error\":{\"code\":\"MACHINE_ACCESS_REQUIRED\",\"message\":\"MACHINE_ACCESS_REQUIRED\",\"retryable\":false,\"requestId\":\"9e79c9fe-1312-481a-9c45-e7660df3c6d7\",\"details\":{}}}","case":"DELETE-2097153-mirror-reqwest-pooled","event":"reqwest_outcome","headers":"{\"content-type\": \"application/json\", \"cache-control\": \"no-store\", \"access-control-allow-origin\": \"*\", \"content-length\": \"162\", \"date\": \"Sun, 13 Sep 2026 00:09:02 GMT\"}","received_http":true,"seq":460,"status":403,"valid":true}
+{"auth":"anonymous","case":"DELETE-2097153-anonymous-raw-eager","event":"case_start","expected":401,"method":"DELETE","mode":"raw-eager","seq":461,"size":2097153}
+{"case":"DELETE-2097153-anonymous-raw-eager","connection":33,"event":"server_accept","peer":"127.0.0.1:49347","seq":462}
+{"case":"DELETE-2097153-anonymous-raw-eager","event":"raw_connect","local":"127.0.0.1:49347","seq":463}
+{"bytes":24,"case":"DELETE-2097153-anonymous-raw-eager","connection":33,"event":"server_read","outcome":"Ok(())","seq":464}
+{"bytes":129,"case":"DELETE-2097153-anonymous-raw-eager","connection":33,"event":"server_read","outcome":"Ok(())","seq":465}
+{"accepted_bytes":327212,"case":"DELETE-2097153-anonymous-raw-eager","event":"raw_body_write","seq":466}
+{"bytes":16231,"case":"DELETE-2097153-anonymous-raw-eager","connection":33,"event":"server_read","outcome":"Ok(())","seq":467}
+{"case":"DELETE-2097153-anonymous-raw-eager","connection":33,"event":"server_write","outcome":"Ok(335)","seq":468,"wire":"HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 140\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"UNAUTHORIZED\",\"message\":\"UNAUTHORIZED\",\"retryable\":false,\"requestId\":\"8685da8f-d167-4c37-8867-299d9f71058c\",\"details\":{}}}"}
+{"bytes":16384,"case":"DELETE-2097153-anonymous-raw-eager","connection":33,"event":"server_read","outcome":"Ok(())","seq":469}
+{"case":"DELETE-2097153-anonymous-raw-eager","connection":33,"event":"server_shutdown","outcome":"Ok(())","seq":470}
+{"case":"DELETE-2097153-anonymous-raw-eager","connection":33,"event":"server_socket_drop","seq":471}
+{"accepted_bytes":490740,"case":"DELETE-2097153-anonymous-raw-eager","event":"raw_body_write","seq":472}
+{"accepted_bytes":507072,"case":"DELETE-2097153-anonymous-raw-eager","event":"raw_body_write","seq":473}
+{"accepted_bytes":801880,"case":"DELETE-2097153-anonymous-raw-eager","event":"raw_body_write","seq":474}
+{"bytes":335,"case":"DELETE-2097153-anonymous-raw-eager","event":"raw_read","seq":475}
+{"accepted_bytes":801880,"attempted_bytes":2097153,"case":"DELETE-2097153-anonymous-raw-eager","event":"raw_upload_outcome","outcome":"Ok(Err(Os { code: 32, kind: BrokenPipe, message: \"Broken pipe\" }))","seq":476}
+{"case":"DELETE-2097153-anonymous-raw-eager","complete_valid_http_bytes":true,"event":"raw_response_outcome","outcome":"Ok(Err(Os { code: 54, kind: ConnectionReset, message: \"Connection reset by peer\" }))","received_http_without_read_error":false,"seq":477,"wire":"HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 140\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"UNAUTHORIZED\",\"message\":\"UNAUTHORIZED\",\"retryable\":false,\"requestId\":\"8685da8f-d167-4c37-8867-299d9f71058c\",\"details\":{}}}"}
+{"case":"DELETE-2097153-anonymous-raw-eager","event":"raw_case","seq":478,"transport_and_http_valid":false}
+{"auth":"anonymous","case":"DELETE-2097153-anonymous-raw-staged","event":"case_start","expected":401,"method":"DELETE","mode":"raw-staged","seq":479,"size":2097153}
+{"case":"DELETE-2097153-anonymous-raw-staged","connection":34,"event":"server_accept","peer":"127.0.0.1:49348","seq":480}
+{"case":"DELETE-2097153-anonymous-raw-staged","event":"raw_connect","local":"127.0.0.1:49348","seq":481}
+{"accepted_bytes":0,"attempted_bytes":0,"case":"DELETE-2097153-anonymous-raw-staged","event":"raw_upload_outcome","outcome":"Ok(Ok(()))","seq":482}
+{"bytes":24,"case":"DELETE-2097153-anonymous-raw-staged","connection":34,"event":"server_read","outcome":"Ok(())","seq":483}
+{"bytes":129,"case":"DELETE-2097153-anonymous-raw-staged","connection":34,"event":"server_read","outcome":"Ok(())","seq":484}
+{"case":"DELETE-2097153-anonymous-raw-staged","connection":34,"event":"server_write","outcome":"Ok(335)","seq":485,"wire":"HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 140\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"UNAUTHORIZED\",\"message\":\"UNAUTHORIZED\",\"retryable\":false,\"requestId\":\"be8ad91b-8ad2-4a3a-b7bd-8f668d6bb38e\",\"details\":{}}}"}
+{"case":"DELETE-2097153-anonymous-raw-staged","connection":34,"event":"server_shutdown","outcome":"Ok(())","seq":486}
+{"case":"DELETE-2097153-anonymous-raw-staged","connection":34,"event":"server_socket_drop","seq":487}
+{"bytes":335,"case":"DELETE-2097153-anonymous-raw-staged","event":"raw_read","seq":488}
+{"bytes":0,"case":"DELETE-2097153-anonymous-raw-staged","event":"raw_read","seq":489}
+{"case":"DELETE-2097153-anonymous-raw-staged","complete_valid_http_bytes":true,"event":"raw_response_outcome","outcome":"Ok(Ok(()))","received_http_without_read_error":true,"seq":490,"wire":"HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 140\r\nconnection: close\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"UNAUTHORIZED\",\"message\":\"UNAUTHORIZED\",\"retryable\":false,\"requestId\":\"be8ad91b-8ad2-4a3a-b7bd-8f668d6bb38e\",\"details\":{}}}"}
+{"boundary":"after_response","case":"DELETE-2097153-anonymous-raw-staged","event":"raw_half_close","outcome":"Ok(Ok(()))","seq":491}
+{"case":"DELETE-2097153-anonymous-raw-staged","event":"raw_case","seq":492,"transport_and_http_valid":true}
+{"auth":"anonymous","case":"DELETE-2097153-anonymous-reqwest-fresh","event":"case_start","expected":401,"method":"DELETE","mode":"reqwest-fresh","seq":493,"size":2097153}
+{"case":"DELETE-2097153-anonymous-reqwest-fresh","connection":35,"event":"server_accept","peer":"127.0.0.1:49349","seq":494}
+{"bytes":24,"case":"DELETE-2097153-anonymous-reqwest-fresh","connection":35,"event":"server_read","outcome":"Ok(())","seq":495}
+{"bytes":16360,"case":"DELETE-2097153-anonymous-reqwest-fresh","connection":35,"event":"server_read","outcome":"Ok(())","seq":496}
+{"case":"DELETE-2097153-anonymous-reqwest-fresh","connection":35,"event":"server_write","outcome":"Ok(316)","seq":497,"wire":"HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 140\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"UNAUTHORIZED\",\"message\":\"UNAUTHORIZED\",\"retryable\":false,\"requestId\":\"41d33d26-fce3-4349-a981-bbeff399630e\",\"details\":{}}}"}
+{"bytes":16384,"case":"DELETE-2097153-anonymous-reqwest-fresh","connection":35,"event":"server_read","outcome":"Ok(())","seq":498}
+{"case":"DELETE-2097153-anonymous-reqwest-fresh","connection":35,"event":"server_shutdown","outcome":"Ok(())","seq":499}
+{"case":"DELETE-2097153-anonymous-reqwest-fresh","connection":35,"event":"server_socket_drop","seq":500}
+{"body":"{\"error\":{\"code\":\"UNAUTHORIZED\",\"message\":\"UNAUTHORIZED\",\"retryable\":false,\"requestId\":\"41d33d26-fce3-4349-a981-bbeff399630e\",\"details\":{}}}","case":"DELETE-2097153-anonymous-reqwest-fresh","event":"reqwest_outcome","headers":"{\"content-type\": \"application/json\", \"cache-control\": \"no-store\", \"access-control-allow-origin\": \"*\", \"content-length\": \"140\", \"date\": \"Sun, 13 Sep 2026 00:09:02 GMT\"}","received_http":true,"seq":501,"status":401,"valid":true}
+{"auth":"anonymous","case":"DELETE-2097153-anonymous-reqwest-pooled","event":"case_start","expected":401,"method":"DELETE","mode":"reqwest-pooled","seq":502,"size":2097153}
+{"case":"DELETE-2097153-anonymous-reqwest-pooled","connection":36,"event":"server_accept","peer":"127.0.0.1:49350","seq":503}
+{"bytes":24,"case":"DELETE-2097153-anonymous-reqwest-pooled","connection":36,"event":"server_read","outcome":"Ok(())","seq":504}
+{"bytes":43,"case":"DELETE-2097153-anonymous-reqwest-pooled","connection":36,"event":"server_read","outcome":"Ok(())","seq":505}
+{"case":"DELETE-2097153-anonymous-reqwest-pooled","connection":36,"event":"server_write","outcome":"Ok(173)","seq":506,"wire":"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\naccess-control-allow-origin: *\r\ncontent-length: 33\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"status\":\"ok\",\"version\":\"0.1.0\"}"}
+{"case":"DELETE-2097153-anonymous-reqwest-pooled","event":"pool_prime_completed","seq":507,"status":200}
+{"bytes":16317,"case":"DELETE-2097153-anonymous-reqwest-pooled","connection":36,"event":"server_read","outcome":"Ok(())","seq":508}
+{"case":"DELETE-2097153-anonymous-reqwest-pooled","connection":36,"event":"server_write","outcome":"Ok(316)","seq":509,"wire":"HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncache-control: no-store\r\naccess-control-allow-origin: *\r\ncontent-length: 140\r\ndate: Sun, 13 Sep 2026 00:09:02 GMT\r\n\r\n{\"error\":{\"code\":\"UNAUTHORIZED\",\"message\":\"UNAUTHORIZED\",\"retryable\":false,\"requestId\":\"450980ee-dab6-48fd-b81a-228b95865421\",\"details\":{}}}"}
+{"bytes":16384,"case":"DELETE-2097153-anonymous-reqwest-pooled","connection":36,"event":"server_read","outcome":"Ok(())","seq":510}
+{"case":"DELETE-2097153-anonymous-reqwest-pooled","connection":36,"event":"server_shutdown","outcome":"Ok(())","seq":511}
+{"case":"DELETE-2097153-anonymous-reqwest-pooled","connection":36,"event":"server_socket_drop","seq":512}
+{"body":"{\"error\":{\"code\":\"UNAUTHORIZED\",\"message\":\"UNAUTHORIZED\",\"retryable\":false,\"requestId\":\"450980ee-dab6-48fd-b81a-228b95865421\",\"details\":{}}}","case":"DELETE-2097153-anonymous-reqwest-pooled","event":"reqwest_outcome","headers":"{\"content-type\": \"application/json\", \"cache-control\": \"no-store\", \"access-control-allow-origin\": \"*\", \"content-length\": \"140\", \"date\": \"Sun, 13 Sep 2026 00:09:02 GMT\"}","received_http":true,"seq":513,"status":401,"valid":true}
+{"case":"DELETE-2097153-anonymous-reqwest-pooled","connection_refused":true,"event":"listener_cleanup","graceful":true,"joined":true,"no_pty":true,"seq":514}
+{"event":"runtime_cleanup","joined":true,"outcome":"Ok(())"}
+{"event":"child_cleanup","pid":98064,"reaped":true,"status":"exit status: 0"}
+{"event":"root_cleanup","exit_zero_means":"diagnostic completion only; inspect all HTTP and transport failures","removed":true}
+MONITOR_EXIT=0

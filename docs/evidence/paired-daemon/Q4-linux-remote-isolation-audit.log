@@ -1,0 +1,21 @@
+src-tauri/src/session/mod.rs:296:                repo_root: PathBuf::from("/tmp/repo"),
+src-tauri/src/session/mod.rs:298:                    path: "/tmp/repo".to_string(),
+src-tauri/src/session/mod.rs:304:                active_worktree_path: Some("/tmp/repo".to_string()),
+src-tauri/src/session/mod.rs:319:                        worktree_path: Some("/tmp/repo".to_string()),
+src-tauri/src/session/mod.rs:360:            PathBuf::from("/tmp/repo")
+src-tauri/src/remote/workspace_api_tests.rs:562:                .env("HOME", &root).env("FERRYX_DATA_DIR", root.join("data")).env("FERRYX_RUNTIME_DIR", root.join("runtime"))
+src-tauri/src/remote/workspace_api/worktree_authority_tests.rs:589:                .env("A08_INTERRUPTED_ROOT", root.path()).env("HOME", root.path()).env("FERRYX_DATA_DIR", root.path().join("data")).env("FERRYX_RUNTIME_DIR", root.path().join("runtime"))
+src-tauri/src/daemon/a03_owner_cli_fixture.rs:53:    command.env("HOME", root.join("home"))
+src-tauri/src/daemon/a03_owner_cli_fixture.rs:54:        .env("FERRYX_DATA_DIR", root.join("data"))
+src-tauri/src/daemon/a03_owner_cli_fixture.rs:55:        .env("FERRYX_RUNTIME_DIR", root.join("runtime"))
+src-tauri/src/daemon/a03_owner_cli_fixture.rs:252:                .env("HOME", private_root.join("home"))
+src-tauri/src/daemon/a03_owner_cli_fixture.rs:253:                .env("FERRYX_DATA_DIR", private_root.join("data"))
+src-tauri/src/daemon/a03_owner_cli_fixture.rs:254:                .env("FERRYX_RUNTIME_DIR", private_root.join("runtime"))
+src-tauri/src/daemon/a03_owner_cli_fixture.rs:275:    for key in ["HOME", "FERRYX_DATA_DIR", "FERRYX_RUNTIME_DIR"] {
+src-tauri/src/remote/preference_http_tests.rs:1://! Real HTTP regression; HOME changes belong only to a private child process.
+src-tauri/src/remote/preference_http_tests.rs:20:        .env("HOME", root.path())
+src-tauri/src/remote/preference_http_tests.rs:21:        .env("XDG_CONFIG_HOME", root.path().join(".config"))
+src-tauri/src/remote/preference_http_tests.rs:35:    // Given: real auth grants and the unchanged native loader in private HOME.
+src-tauri/src/remote/preference_http_tests.rs:36:    let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+src-tauri/src/remote/preference_http_tests.rs:81:                text.replace(home.to_str().unwrap(), "<PRIVATE_HOME>"));
+src-tauri/src/remote/resize_security_tests.rs:39:    command.env("HOME", private.path());

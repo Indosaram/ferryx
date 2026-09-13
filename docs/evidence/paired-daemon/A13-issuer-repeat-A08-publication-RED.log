@@ -1,0 +1,163 @@
+    Blocking waiting for file lock on build directory
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `token`
+    --> src/remote/auth.rs:1399:14
+     |
+1399 |         let (token, device) = auth
+     |              ^^^^^ help: if this is intentional, prefix it with an underscore: `_token`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `scroll_daemon_client`
+   --> src/lib.rs:916:9
+    |
+916 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+    |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+
+warning: method `machine_sessions` is never used
+   --> src/daemon/session_service.rs:366:19
+    |
+227 | impl DaemonSessionService {
+    | ------------------------- method in this implementation
+...
+366 |     pub(crate) fn machine_sessions(&self, epoch: crate::scoped_contracts::Epoch) -> Result<crate::remote::machine_protocol::Sessions, Str...
+    |                   ^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `app` is never read
+  --> src/ipc/notifications.rs:28:5
+   |
+27 | pub struct TauriNotificationBackend<R: Runtime> {
+   |            ------------------------ field in this struct
+28 |     app: AppHandle<R>,
+   |     ^^^
+
+warning: constant `GHOSTTY_TERMINAL_SCREEN_PRIMARY` is never used
+  --> src/native_terminal/sys/constants.rs:56:11
+   |
+56 | pub const GHOSTTY_TERMINAL_SCREEN_PRIMARY: c_int = 0;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `no_auth_query` is never used
+    --> src/remote/server.rs:3102:12
+     |
+3102 |         fn no_auth_query() -> AuthQuery {
+     |            ^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src/worktree/manager.rs:86:19
+   |
+86 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+   --> src/worktree/manager.rs:93:8
+    |
+ 92 | impl WriterLeaseGuard {
+    | --------------------- associated items in this implementation
+ 93 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+    |        ^^^
+...
+101 |     pub(crate) fn canonical_path(&self) -> &Path {
+    |                   ^^^^^^^^^^^^^^
+...
+105 |     pub(crate) fn owner_id(&self) -> &str {
+    |                   ^^^^^^^^
+
+warning: method `acquire_writer_lease` is never used
+   --> src/worktree/manager.rs:338:19
+    |
+134 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+338 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib test) generated 17 warnings (run `cargo fix --lib -p ferryx --tests` to apply 2 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 25.79s
+     Running unittests src/lib.rs (src-tauri/target/debug/deps/ferryx_lib-fede6191c14a3d71)
+
+running 4 tests
+A08 followthrough journal_failure=false request=f91aa308-204e-4731-991b-54e07412ee6b workspace=project-49cf8fe72fe94169a3f01aed5c49dcf5 non_head=aca480b74dafb13cab4105bc16425c1a1168ea05 restart_no_repeat=true prunable_preview=200 dirty_inspection=unavailable
+A08 followthrough write failure private_root_removed=true
+A08 delete-vs-spawn request=d1b3f9e8-a1f8-4b1b-a326-0d4eb7f4e1f1 spawn_observed_at_shared_gate=true blocked_until_delete_publication=true spawn_refused=true workers_joined=true root_removed=true
+test remote::workspace_api::worktrees::authority_tests::followthrough_delete_publication_blocks_spawn ... ok
+A08 followthrough prune request=4c403e8b-f5a1-46a2-9666-6a7eb6f5a139 workspace=project-65ed3760485a44ad821e3e5c6f1a5544 original_result_replayed=true restart=true
+A08 followthrough prune workers_awaited=true private_root_removed=true
+test remote::workspace_api::worktrees::authority_tests::followthrough_prune_partial_replays_after_restart ... ok
+A08 ACTIVE owner=88124 git=88274 hook=88298 cwd=/private/tmp/a13-issuer.Mft0RyzD/tmp/.tmpnTM7WX/repo/.orca-worktrees/project-c8214be55e0344769dd10d57aa70a30a/interrupted
+A08 ACTIVE owner_reaped=true git_group=88274 fixture_cleanup_signal=SIGKILL hook_eof=true (nonchildren not waitpid-reapable)
+A08 interrupted owner pid=88124 replay=false status=signal: 9 (SIGKILL) reaped=true
+A08 interrupted owner pid=88455 replay=true status=exit status: 0 reaped=true
+A08 interrupted Git transaction private_root_removed=true
+test remote::workspace_api::worktrees::authority_tests::followthrough_owner_crash_while_git_active ... ok
+
+thread 'remote::workspace_api::worktrees::authority_tests::followthrough_write_failures_non_head_and_prunable_preview' (2165208) panicked at src/remote/workspace_api/worktree_authority_tests.rs:124:13:
+assertion `left == right` failed: only durable catalog publication emits an event
+  left: false
+ right: true
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+A08 followthrough write failure private_root_removed=true
+
+thread 'remote::workspace_api::worktrees::authority_tests::followthrough_write_failures_non_head_and_prunable_preview' (2165208) panicked at src/remote/workspace_api/worktree_authority_tests.rs:147:16:
+called `Result::unwrap()` on an `Err` value: Any { .. }
+test remote::workspace_api::worktrees::authority_tests::followthrough_write_failures_non_head_and_prunable_preview ... FAILED
+
+failures:
+
+failures:
+    remote::workspace_api::worktrees::authority_tests::followthrough_write_failures_non_head_and_prunable_preview
+
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 1002 filtered out; finished in 0.85s
+
+error: test failed, to rerun pass `--lib`

@@ -40,6 +40,8 @@ async function boot() {
 
   if (isTauriApp) {
     void bootTrace("app.import.start");
+    const { bootstrapPairedHostInventory } = await import("./lib/pairedHostInventory");
+    void bootstrapPairedHostInventory();
     const { default: App } = await import("./App");
     void bootTrace("app.imported");
     ReactDOM.createRoot(el).render(

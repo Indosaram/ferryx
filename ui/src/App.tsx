@@ -1,5 +1,6 @@
 import { PanelLeft } from "lucide-react";
-import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { remoteHostStore } from "./state/remoteHostStore";
 
 import { STARTUP_TIMEOUT_MS } from "./lib/startupTimeout";
 import { withTimeout } from "./lib/withTimeout";
@@ -847,6 +848,8 @@ function WorkspaceApp({
   // successful registration enriches hostLabel/branch fields via setProjects).
   // Key the effect on stable target identity so equivalent projects do not
   // re-register behind the user's back.
+  const pairedMachineFeaturesEnabled = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState).machineFeaturesEnabled === true;
+  const pairedTerminalsUnavailable = activeProject.target?.kind === "pairedDaemon" && !pairedMachineFeaturesEnabled;
   const activeProjectTargetKey = activeProject.target?.kind === "ssh"
     ? `ssh:${activeProject.target.hostId}`
     : activeProject.target?.kind ?? "none";
@@ -871,7 +874,12 @@ function WorkspaceApp({
       repoRoot: activeProject.repoRoot,
       registrationAttempt,
     });
-    const registration = activeProject.target?.kind === "ssh"
+    // Paired references are already registered by their owning daemon. Their
+    // paths must never be canonicalized or registered on this desktop.
+    if (activeProject.target?.kind === "pairedDaemon" && !pairedMachineFeaturesEnabled) return;
+    const registration = activeProject.target?.kind === "pairedDaemon"
+      ? Promise.resolve(activeProject)
+      : activeProject.target?.kind === "ssh"
       ? registerRemoteProject({
           workspaceId: activeProject.workspaceId,
           hostId: activeProject.target.hostId,
@@ -973,7 +981,7 @@ function WorkspaceApp({
         workspaceId: activeProject.workspaceId,
       });
     };
-  }, [activeProject.repoRoot, activeProject.workspaceId, activeProjectTargetKey, projects.length, registrationAttempt, refreshWorktrees, reportRuntimeError]);
+  }, [activeProject.repoRoot, activeProject.workspaceId, activeProjectTargetKey, pairedMachineFeaturesEnabled, projects.length, registrationAttempt, refreshWorktrees, reportRuntimeError]);
 
   // A failed registration leaves the runtime gated, so retry when the window
   // regains focus rather than staying empty until the app restarts.
@@ -1170,6 +1178,8 @@ function WorkspaceApp({
   const [searchLeafId, setSearchLeafId] = useState<string | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(loadSidebarOpen);
   const [deleteTarget, setDeleteTarget] = useState<Worktree | null>(null);
+  const deleteOwnerId = deleteTarget ? resolveWorktreeOwnerId(deleteTarget, projects, activeProject.workspaceId) : undefined;
+  const deleteOwnerProject = projects.find((p) => p.workspaceId === deleteOwnerId);
   const [pendingTabClose, setPendingTabClose] = useState<{ id: string; label: string } | null>(null);
   const [worktreeStatuses, setWorktreeStatuses] = useState<Record<string, DirtyState | undefined>>({});
   const [pendingWorktreePath, setPendingWorktreePath] = useState<string | null>(null);
@@ -1566,6 +1576,7 @@ function WorkspaceApp({
   );
 
   const handleAddTerminalTab = useCallback((shell?: string) => {
+    if (activeProjectRef.current.target?.kind === "pairedDaemon" && remoteHostStore.getState().machineFeaturesEnabled !== true) return;
     if (activeProjectRef.current.target?.kind === "ssh" && registeredProjectIdRef.current !== activeProjectRef.current.workspaceId) return;
     const activeWt = activeWorktreeRef.current;
     if (!activeWt) return;
@@ -1689,6 +1700,7 @@ function WorkspaceApp({
 
   const handleSplitActive = useCallback(
     (direction: PaneDirection) => {
+      if (activeProjectRef.current.target?.kind === "pairedDaemon" && remoteHostStore.getState().machineFeaturesEnabled !== true) return;
       const currentState = stateRef.current;
       const activeTab = currentState.layout.tabs.find((tab) => tab.id === currentState.layout.activeTabId) ?? currentState.layout.tabs[0];
       if (!activeTab || activeTab.kind === "browser") return;
@@ -1908,6 +1920,7 @@ function WorkspaceApp({
 
   const handleSplitPane = useCallback(
     (tabId: string, leafId: string, direction: PaneDirection, options?: { position?: "first" | "second" }) => {
+      if (activeProjectRef.current.target?.kind === "pairedDaemon" && remoteHostStore.getState().machineFeaturesEnabled !== true) return;
       if (activeProjectRef.current.target?.kind === "ssh" && registeredProjectIdRef.current !== activeProjectRef.current.workspaceId) return;
       void splitPane(tabId, leafId, direction, options).catch(reportRuntimeError);
     },
@@ -2285,6 +2298,9 @@ function WorkspaceApp({
       )}
 
       <main className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background">
+        {pairedTerminalsUnavailable ? <div role="alert" className="px-4 py-3 text-sm text-muted-foreground">
+          Paired daemon terminal support is unavailable. Enable paired projects in Settings with a compatible native proxy. Saved tabs and panes are preserved.
+        </div> : null}
         {projects.length === 0 ? (
           <div
             data-testid="no-projects-view"
@@ -2443,10 +2459,8 @@ function WorkspaceApp({
       ) : null}
       {deleteTarget ? (
         <WorktreeDeleteDialog
-          workspaceId={
-            resolveWorktreeOwnerId(deleteTarget, projects, activeProject.workspaceId) ??
-            activeProject.workspaceId
-          }
+          workspaceId={deleteOwnerId ?? activeProject.workspaceId}
+          project={deleteOwnerProject}
           worktree={deleteTarget}
           onClose={handleCloseDeleteTarget}
           onDeleted={() => {
@@ -2457,8 +2471,8 @@ function WorkspaceApp({
             });
             if (activeWorktree?.path === deleteTarget.path) {
               const remaining = state.worktrees.filter((w) => w.path !== deleteTarget.path);
-              const ownerId = resolveWorktreeOwnerId(deleteTarget, projects, activeProject.workspaceId);
-              const ownerProject = projects.find((p) => p.workspaceId === ownerId);
+              const ownerId = deleteOwnerId;
+              const ownerProject = deleteOwnerProject;
               const fallback =
                 (ownerProject ? remaining.find((w) => w.path === ownerProject.repoRoot) : undefined) ??
                 (ownerProject

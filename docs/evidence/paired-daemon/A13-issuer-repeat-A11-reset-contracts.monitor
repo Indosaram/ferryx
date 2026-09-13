@@ -1,0 +1,2 @@
+owner=83096 command=cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib -- --nocapture a10_controller_generation a10_real_socket_reservation socket_ticket relay_server::tests relay_client::tests 
+exit=101 owner_reaped=true

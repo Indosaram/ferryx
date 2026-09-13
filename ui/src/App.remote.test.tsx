@@ -372,7 +372,7 @@ describe("App SSH project lifecycle", () => {
     await mount();
     expect(native.spawnTerminal).not.toHaveBeenCalled();
     await act(async () => { registration.resolve(registered); await registration.promise; });
-    expect(native.spawnTerminal).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: remote.workspaceId, cwd: remote.repoRoot }));
+    expect(native.spawnTerminal).not.toHaveBeenCalled();
     expect(native.registerProject).not.toHaveBeenCalled();
     expect(JSON.parse(localStorage.getItem(PROJECTS_STORAGE_KEY)!).find((project: RegisteredProject) => project.workspaceId === remote.workspaceId).target).toEqual(remote.target);
     expect(native.closeGuard).not.toBeNull();
@@ -380,5 +380,6 @@ describe("App SSH project lifecycle", () => {
     expect(native.saveSession).toHaveBeenCalled();
     const latest = native.saveSession.mock.calls.at(-1)![0];
     expect(latest.workspaces[remote.workspaceId].target).toEqual(remote.target);
+    expect(latest.workspaces[remote.workspaceId].terminalSessions["saved-session"].backendSessionId).toBe("old-backend");
   });
 });

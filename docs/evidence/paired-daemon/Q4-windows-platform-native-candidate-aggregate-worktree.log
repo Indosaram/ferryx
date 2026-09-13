@@ -1,0 +1,263 @@
+warning: unused import: `AgentState`
+ --> src\daemon\server.rs:2:34
+  |
+2 | use crate::daemon::agent_state::{AgentState, AgentStateHub, AgentStateSubscription};
+  |                                  ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `crate::daemon::protocol::AgentProviderSessionKey`
+  --> src\daemon\server.rs:18:5
+   |
+18 | use crate::daemon::protocol::AgentProviderSessionKey;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tempfile::TempDir`
+   --> src\ipc\cli_install.rs:278:9
+    |
+278 |     use tempfile::TempDir;
+    |         ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `NotificationAuthorization`
+ --> src\notification\permission.rs:4:5
+  |
+4 |     NotificationAuthorization, NotificationPermissionRequestDto, NotificationPermissionStatusDto,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::*`
+    --> src\lib.rs:1182:9
+     |
+1182 |     use super::*;
+     |         ^^^^^^^^
+
+warning: unused import: `crate::daemon::client::DaemonClient`
+    --> src\lib.rs:1183:9
+     |
+1183 |     use crate::daemon::client::DaemonClient;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::remote::auth::DevicePermission`
+    --> src\lib.rs:1184:9
+     |
+1184 |     use crate::remote::auth::DevicePermission;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `token`
+    --> src\remote\auth.rs:1399:14
+     |
+1399 |         let (token, device) = auth
+     |              ^^^^^ help: if this is intentional, prefix it with an underscore: `_token`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `hook`
+   --> src\remote\workspace_api\worktree_authority_tests.rs:577:13
+    |
+577 |         let hook = root.path().join("repo/.git/hooks/post-checkout"); let port = ready.local_addr().unwrap().port();
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_hook`
+
+warning: unused variable: `port`
+   --> src\remote\workspace_api\worktree_authority_tests.rs:577:75
+    |
+577 |         let hook = root.path().join("repo/.git/hooks/post-checkout"); let port = ready.local_addr().unwrap().port();
+    |                                                                           ^^^^ help: if this is intentional, prefix it with an underscore: `_port`
+
+warning: unused variable: `child_pid`
+   --> src\ssh\bridge_tests.rs:639:9
+    |
+639 |     let child_pid = conn_cancel.child_id().expect("child PID must be known");
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_child_pid`
+
+warning: unused variable: `eof_pid`
+   --> src\ssh\bridge_tests.rs:687:9
+    |
+687 |     let eof_pid = conn_eof.child_id().expect("eof child PID");
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_eof_pid`
+
+warning: unused variable: `scroll_daemon_client`
+   --> src\lib.rs:915:9
+    |
+915 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+    |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+
+warning: associated function `parse_agent_state_report` is never used
+    --> src\daemon\server.rs:1060:8
+     |
+ 875 | impl DaemonServer {
+     | ----------------- associated function in this implementation
+...
+1060 |     fn parse_agent_state_report(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `contains` is never used
+   --> src\daemon\session_service.rs:129:19
+    |
+127 | impl SpawnError {
+    | --------------- method in this implementation
+128 |     #[cfg(test)]
+129 |     pub(super) fn contains(&self, needle: &str) -> bool {
+    |                   ^^^^^^^^
+
+warning: methods `expire_spawn_request_for_test`, `spawn_cache_len_for_test`, `provider_claim_len_for_test`, and `reserve_provider_claim_for_test` are never used
+   --> src\daemon\session_service.rs:876:19
+    |
+164 | impl DaemonSessionService {
+    | ------------------------- methods in this implementation
+...
+876 |     pub(super) fn expire_spawn_request_for_test(&self, client_request_id: &str) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+887 |     pub(super) fn spawn_cache_len_for_test(&self) -> usize {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+892 |     pub(super) fn provider_claim_len_for_test(&self) -> usize {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+897 |     pub(super) fn reserve_provider_claim_for_test(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `GHOSTTY_TERMINAL_SCREEN_PRIMARY` is never used
+  --> src\native_terminal\sys\constants.rs:56:11
+   |
+56 | pub const GHOSTTY_TERMINAL_SCREEN_PRIMARY: c_int = 0;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `home_dir` is never used
+  --> src\permissions\mod.rs:43:4
+   |
+43 | fn home_dir() -> Option<PathBuf> {
+   |    ^^^^^^^^
+
+warning: function `no_auth_query` is never used
+    --> src\remote\server.rs:2862:12
+     |
+2862 |         fn no_auth_query() -> AuthQuery {
+     |            ^^^^^^^^^^^^^
+
+warning: methods `next_snapshot_build` and `set_snapshot_post_build_hook` are never used
+   --> src\remote\state.rs:569:19
+    |
+324 | impl RemoteGatewayState {
+    | ----------------------- methods in this implementation
+...
+569 |     pub(crate) fn next_snapshot_build(&self) -> impl std::future::Future<Output = ()> + '_ {
+    |                   ^^^^^^^^^^^^^^^^^^^
+...
+574 |     pub(crate) fn set_snapshot_post_build_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `wait_and_reap` is never used
+   --> src\terminal\session.rs:270:19
+    |
+ 61 | impl PtySession {
+    | --------------- method in this implementation
+...
+270 |     pub(crate) fn wait_and_reap(&self) -> Result<Option<i32>, PtyError> {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src\worktree\manager.rs:86:19
+   |
+86 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+   --> src\worktree\manager.rs:93:8
+    |
+ 92 | impl WriterLeaseGuard {
+    | --------------------- associated items in this implementation
+ 93 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+    |        ^^^
+...
+101 |     pub(crate) fn canonical_path(&self) -> &Path {
+    |                   ^^^^^^^^^^^^^^
+...
+105 |     pub(crate) fn owner_id(&self) -> &str {
+    |                   ^^^^^^^^
+
+warning: method `acquire_writer_lease` is never used
+   --> src\worktree\manager.rs:338:19
+    |
+134 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+338 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: static `FERRYX_DATA_DIR_LOCK` is never used
+    --> src\lib.rs:1188:12
+     |
+1188 |     static FERRYX_DATA_DIR_LOCK: Mutex<()> = Mutex::new(());
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `RestoreFerryxDataDir` is never constructed
+    --> src\lib.rs:1190:12
+     |
+1190 |     struct RestoreFerryxDataDir(Option<OsString>);
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib test) generated 26 warnings (run `cargo fix --lib -p ferryx --tests` to apply 13 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 1.08s
+     Running unittests src\lib.rs (C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\ferryx_lib-c12d60fa37477486.exe)
+
+running 40 tests
+test ssh::worktree::tests::red_create_remote_rejects_base_ref_option_injection ... ok
+test ssh::worktree::tests::red_derive_ws_segment_malformed_rejected ... ok
+test ssh::worktree::tests::red_malformed_porcelain_tolerated ... ok
+test ssh::worktree::tests::red_parse_porcelain_entries ... ok
+test ssh::worktree::tests::red_list_script_marker_framed_both_platforms ... ok
+test ssh::worktree::tests::red_porcelain_parsing_of_created_output ... ok
+test ssh::worktree::tests::red_path_inside_root_guard ... ok
+test ssh::worktree::tests::red_create_script_quoting_and_sanitized_branch ... ok
+test ssh::worktree::tests::test_resolve_remote_spawn_root ... ok
+test worktree::git::local_budget_tests::a08_git_legacy_path_fidelity ... ok
+test ssh::worktree::tests::red_create_remote_option_injection_async_guard ... ok
+test worktree::git::tests::git_path_argument_normalization_strips_windows_verbatim_prefixes ... ok
+test worktree::git::local_budget_tests::local_mutation_budget_is_scoped_and_preserves_remote_deadline ... ok
+test worktree::manager::host_scoped_session_id_tests::test_host_scoped_worktree_session_id ... ok
+test worktree::registry::tests::unregister_unknown_workspace_returns_false_without_revision_change ... ok
+test worktree::tests::branch_namespace_formatting_and_validation ... ok
+hint: Using 'master' as the name for the initial branch. This default branch name
+hint: will change to "main" in Git 3.0. To configure the initial branch name
+hint: to use in all of your new repositories, which will suppress this warning,
+hint: call:
+hint:
+hint: 	git config --global init.defaultBranch <name>
+hint:
+hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+hint: 'development'. The just-created branch can be renamed via this command:
+hint:
+hint: 	git branch -m <name>
+hint:
+hint: Disable this message with "git config set advice.defaultBranchName false"
+Initialized empty Git repository in C:/Users/sook/ferryx-herdr-q4-windows-01a097f8/temp/.tmpEGqBeg/.git/
+test worktree::registry::tests::register_replaces_bogus_root_entry ... ok
+test worktree::registry::tests::unregister_is_idempotent_on_the_same_id ... ok
+test worktree::registry::tests::register_unique_root_replaces_bogus_root_entry ... ok
+test worktree::registry::tests::unregister_removes_registered_workspace_and_bumps_revision ... ok
+test worktree::tests::parse_status_porcelain_v1_and_v2 ... ok
+test worktree::tests::parse_worktree_list_porcelain ... ok
+test worktree::registry::tests::unregister_rejects_unsafe_workspace_id ... ok
+test worktree::tests::plain_folder_without_git_registers_and_guards_worktrees ... ok
+test worktree::registry::tests::register_unique_root_disambiguates_conflicting_ids ... ok
+test worktree::git::local_budget_tests::bounded_git_rejects_large_output_and_expired_or_revoked_admission ... ok
+[master (root-commit) 7bfd7a4] init
+test worktree::git::local_budget_tests::a08_git_real_legacy_worktree_path ... ok
+test worktree::tests::worktree_manager_rejects_filesystem_root ... ok
+test worktree::tests::existing_target_and_missing_status_are_rejected ... ok
+test worktree::tests::registry_resolves_only_registered_workspace_identity ... ok
+test ssh::worktree::tests::red_posix_script_builders_executable_behavior ... ok
+test worktree::tests::worktree_manager_resolves_nested_git_directory_to_canonical_root ... ok
+test worktree::tests::resolve_worktree_by_path_and_identity ... ok
+test worktree::tests::create_find_and_list_worktree ... ok
+test worktree::git::local_budget_tests::local_budget_runs_existing_manager_create_delete ... ok
+test worktree::tests::safe_delete_clean_worktree ... ok
+test worktree::tests::safe_branch_delete_removes_merged_branch ... ok
+test worktree::tests::git_merge_base_is_ancestor_and_branch_merge_detection ... ok
+test worktree::tests::dirty_worktree_survives_force_remove_but_yields_to_explicit_destructive_delete ... ok
+test worktree::tests::multiple_worktrees_remain_isolated ... ok
+
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 690 filtered out; finished in 1.92s
+

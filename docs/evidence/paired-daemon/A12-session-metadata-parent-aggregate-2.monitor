@@ -1,0 +1,4 @@
+owner=18629 command=bash -c cargo\ test\ --locked\ --manifest-path\ src-tauri/Cargo.toml\ --no-default-features\ --lib\ remote::\ \&\&\ cargo\ test\ --locked\ --manifest-path\ src-tauri/Cargo.toml\ --no-default-features\ --test\ machine_worktrees\ \&\&\ cargo\ check\ --locked\ --manifest-path\ src-tauri/Cargo.toml\ --no-default-features\ --bin\ ferryx-cli\ --bin\ ferryx-relay 
+  PID  PPID    RSS ELAPSED COMMAND
+18629 18626    112   00:00 bash -c cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib remote:: && cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --test machine_worktrees && cargo check --locked --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli --bin ferryx-relay
+exit=101 owner_reaped=true

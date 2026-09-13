@@ -1,0 +1,281 @@
+warning: unused import: `AgentState`
+ --> src\daemon\server.rs:2:34
+  |
+2 | use crate::daemon::agent_state::{AgentState, AgentStateHub, AgentStateSubscription};
+  |                                  ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `crate::daemon::protocol::AgentProviderSessionKey`
+  --> src\daemon\server.rs:18:5
+   |
+18 | use crate::daemon::protocol::AgentProviderSessionKey;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tempfile::TempDir`
+   --> src\ipc\cli_install.rs:278:9
+    |
+278 |     use tempfile::TempDir;
+    |         ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `NotificationAuthorization`
+ --> src\notification\permission.rs:4:5
+  |
+4 |     NotificationAuthorization, NotificationPermissionRequestDto, NotificationPermissionStatusDto,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::*`
+    --> src\lib.rs:1182:9
+     |
+1182 |     use super::*;
+     |         ^^^^^^^^
+
+warning: unused import: `crate::daemon::client::DaemonClient`
+    --> src\lib.rs:1183:9
+     |
+1183 |     use crate::daemon::client::DaemonClient;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::remote::auth::DevicePermission`
+    --> src\lib.rs:1184:9
+     |
+1184 |     use crate::remote::auth::DevicePermission;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `token`
+    --> src\remote\auth.rs:1399:14
+     |
+1399 |         let (token, device) = auth
+     |              ^^^^^ help: if this is intentional, prefix it with an underscore: `_token`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `hook`
+   --> src\remote\workspace_api\worktree_authority_tests.rs:577:13
+    |
+577 |         let hook = root.path().join("repo/.git/hooks/post-checkout"); let port = ready.local_addr().unwrap().port();
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_hook`
+
+warning: unused variable: `port`
+   --> src\remote\workspace_api\worktree_authority_tests.rs:577:75
+    |
+577 |         let hook = root.path().join("repo/.git/hooks/post-checkout"); let port = ready.local_addr().unwrap().port();
+    |                                                                           ^^^^ help: if this is intentional, prefix it with an underscore: `_port`
+
+warning: unused variable: `child_pid`
+   --> src\ssh\bridge_tests.rs:639:9
+    |
+639 |     let child_pid = conn_cancel.child_id().expect("child PID must be known");
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_child_pid`
+
+warning: unused variable: `eof_pid`
+   --> src\ssh\bridge_tests.rs:687:9
+    |
+687 |     let eof_pid = conn_eof.child_id().expect("eof child PID");
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_eof_pid`
+
+warning: unused variable: `scroll_daemon_client`
+   --> src\lib.rs:915:9
+    |
+915 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+    |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+
+warning: associated function `parse_agent_state_report` is never used
+    --> src\daemon\server.rs:1060:8
+     |
+ 875 | impl DaemonServer {
+     | ----------------- associated function in this implementation
+...
+1060 |     fn parse_agent_state_report(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `contains` is never used
+   --> src\daemon\session_service.rs:129:19
+    |
+127 | impl SpawnError {
+    | --------------- method in this implementation
+128 |     #[cfg(test)]
+129 |     pub(super) fn contains(&self, needle: &str) -> bool {
+    |                   ^^^^^^^^
+
+warning: methods `expire_spawn_request_for_test`, `spawn_cache_len_for_test`, `provider_claim_len_for_test`, and `reserve_provider_claim_for_test` are never used
+   --> src\daemon\session_service.rs:876:19
+    |
+164 | impl DaemonSessionService {
+    | ------------------------- methods in this implementation
+...
+876 |     pub(super) fn expire_spawn_request_for_test(&self, client_request_id: &str) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+887 |     pub(super) fn spawn_cache_len_for_test(&self) -> usize {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+892 |     pub(super) fn provider_claim_len_for_test(&self) -> usize {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+897 |     pub(super) fn reserve_provider_claim_for_test(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `GHOSTTY_TERMINAL_SCREEN_PRIMARY` is never used
+  --> src\native_terminal\sys\constants.rs:56:11
+   |
+56 | pub const GHOSTTY_TERMINAL_SCREEN_PRIMARY: c_int = 0;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `home_dir` is never used
+  --> src\permissions\mod.rs:43:4
+   |
+43 | fn home_dir() -> Option<PathBuf> {
+   |    ^^^^^^^^
+
+warning: function `no_auth_query` is never used
+    --> src\remote\server.rs:2862:12
+     |
+2862 |         fn no_auth_query() -> AuthQuery {
+     |            ^^^^^^^^^^^^^
+
+warning: methods `next_snapshot_build` and `set_snapshot_post_build_hook` are never used
+   --> src\remote\state.rs:569:19
+    |
+324 | impl RemoteGatewayState {
+    | ----------------------- methods in this implementation
+...
+569 |     pub(crate) fn next_snapshot_build(&self) -> impl std::future::Future<Output = ()> + '_ {
+    |                   ^^^^^^^^^^^^^^^^^^^
+...
+574 |     pub(crate) fn set_snapshot_post_build_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `wait_and_reap` is never used
+   --> src\terminal\session.rs:270:19
+    |
+ 61 | impl PtySession {
+    | --------------- method in this implementation
+...
+270 |     pub(crate) fn wait_and_reap(&self) -> Result<Option<i32>, PtyError> {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src\worktree\manager.rs:86:19
+   |
+86 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+   --> src\worktree\manager.rs:93:8
+    |
+ 92 | impl WriterLeaseGuard {
+    | --------------------- associated items in this implementation
+ 93 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+    |        ^^^
+...
+101 |     pub(crate) fn canonical_path(&self) -> &Path {
+    |                   ^^^^^^^^^^^^^^
+...
+105 |     pub(crate) fn owner_id(&self) -> &str {
+    |                   ^^^^^^^^
+
+warning: method `acquire_writer_lease` is never used
+   --> src\worktree\manager.rs:338:19
+    |
+134 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+338 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: static `FERRYX_DATA_DIR_LOCK` is never used
+    --> src\lib.rs:1188:12
+     |
+1188 |     static FERRYX_DATA_DIR_LOCK: Mutex<()> = Mutex::new(());
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `RestoreFerryxDataDir` is never constructed
+    --> src\lib.rs:1190:12
+     |
+1190 |     struct RestoreFerryxDataDir(Option<OsString>);
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib test) generated 26 warnings (run `cargo fix --lib -p ferryx --tests` to apply 13 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 1.07s
+     Running unittests src\lib.rs (C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\ferryx_lib-c12d60fa37477486.exe)
+
+running 19 tests
+test remote::workspace_api::worktrees::authority_tests::interrupted_worktree_owner_child ... ok
+test remote::workspace_api_tests::r12_crash_owner ... ok
+test remote::workspace_api::worktrees::authority_tests::local_worktree_error_wire_roundtrip ... ok
+
+thread 'remote::workspace_api_tests::a07_http_request_failure_joins_fixture' (21516) panicked at src\remote\workspace_api_tests.rs:151:58:
+called `Result::unwrap()` on an `Err` value: reqwest::Error { kind: Builder, url: "invalid-a07://fixture", source: BadScheme }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+A07 cleanup HTTP task joined; temporary root removed; injected=true; root=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\temp\.tmpRlqKNn
+test remote::workspace_api_tests::a07_http_request_failure_joins_fixture ... ok
+test remote::workspace_api_tests::a07_journal_restart_and_device_scope ... ok
+R12 phase=prepare revoked=401 rows=0 workers_finished=true removed=true
+R12 mutation_capacity=429 list_probe_global_gate_free=true cancelled_worker_slot_retained=true worker_finished=true removed=true
+test remote::workspace_api_tests::r12_list_gate_and_admission ... ok
+R12 real router auth_entries=16 health=200 revoked=401 sockets_closed=true listener_joined=true root_removed=true
+test remote::workspace_api_tests::r12_router_auth_admission ... ok
+R12 phase=beforeGate revoked=401 rows=0 workers_finished=true removed=true
+R12 signal phase=afterCatalog deleting=false pid=22336 R12_WINDOW
+R12 process phase=afterCatalog deleting=false pid=22336 reaped=true status=exit code: 1
+R12 signal phase=replay deleting=false pid=20500 R12_REPLAY project-a1410498e7124cd6a7d0c44cc02f3d72 1
+R12 process phase=replay deleting=false pid=20500 reaped=true status=exit code: 0
+R1 topology git pid=416 reaped=true parent_git=true
+R12 phase=beforeCommit revoked=401 rows=0 workers_finished=true removed=true
+R12 signal phase=afterCatalog deleting=true pid=12668 R12_WINDOW
+R12 process phase=afterCatalog deleting=true pid=12668 reaped=true status=exit code: 1
+R1 topology parent_git=true status=400 rows=0 revision=0 body={"error":{"code":"INVALID_PATH","message":"INVALID_PATH","retryable":false,"requestId":"a86cfed3-2881-45c0-9017-ca5ff7dace2b","details":{}}}
+R1 topology cleanup parent_git=true workers_drained=true gateway_joined=true removed=true
+R12 signal phase=replay deleting=true pid=16896 R12_REPLAY unregister 204
+R12 process phase=replay deleting=true pid=16896 reaped=true status=exit code: 0
+R12 kill-window=afterCatalog same_device_request_replay=201 revision=1 removed=true
+R12 phase=beforeResponse revoked=401 rows=1 workers_finished=true removed=true
+R12 phase=listProbe revoked=401 rows=0 workers_finished=true removed=true
+test remote::workspace_api_tests::r12_revocation_fences ... ok
+R1 topology git pid=1952 reaped=true parent_git=false
+R12 signal phase=afterJournal deleting=false pid=4312 R12_WINDOW
+R12 process phase=afterJournal deleting=false pid=4312 reaped=true status=exit code: 1
+R12 signal phase=replay deleting=false pid=10900 R12_REPLAY project-54525ddc48fe4cbab3643908390bd0c3 1
+R12 process phase=replay deleting=false pid=10900 reaped=true status=exit code: 0
+R12 signal phase=afterJournal deleting=true pid=1940 R12_WINDOW
+R12 process phase=afterJournal deleting=true pid=1940 reaped=true status=exit code: 1
+R12 signal phase=replay deleting=true pid=17452 R12_REPLAY unregister 204
+R12 process phase=replay deleting=true pid=17452 reaped=true status=exit code: 0
+R12 kill-window=afterJournal same_device_request_replay=201 revision=1 removed=true
+test remote::workspace_api_tests::r12_real_kill_windows ... ok
+R1 topology parent_git=false status=201 rows=1 revision=1 body={"workspaceId":"project-89e3453a04004fa4888bace9c8374a33","repoRoot":"\\\\?\\C:\\Users\\sook\\ferryx-herdr-q4-windows-01a097f8\\temp\\.tmpTqPYw7\\parent\\plain","gitRoot":"\\\\?\\C:\\Users\\sook\\ferryx-herdr-q4-windows-01a097f8\\temp\\.tmpTqPYw7\\parent\\plain","gitCommonDir":"C:/Users/sook/ferryx-herdr-q4-windows-01a097f8/temp/.tmpTqPYw7/parent/plain/.git","gitRemote":null,"gitBranch":"master","gitHead":null,"availability":"ready","revision":"1"}
+R1 topology cleanup parent_git=false workers_drained=true gateway_joined=true removed=true
+test remote::workspace_api_tests::r1_topology_after_gate_http ... ok
+A07 HTTP register/replay/digest-conflict/root-refusal/list/unregister disk-preserved
+A07 cleanup HTTP task joined; temporary root removed; injected=false; root=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\temp\.tmpFMkHb9
+test remote::workspace_api_tests::a07_project_http_registration ... ok
+A08 typed dirty delete: serialized owner -> native adapter exact code/message/path/count/files; target preserved; worker joined/root removed
+test remote::workspace_api::worktrees::authority_tests::local_worktree_errors_survive_owner_wire_and_native_adapter ... ok
+A08 interrupted owner pid=17876 replay=false status=exit code: 1 reaped=true
+A08 gate fixture cleanup completed; errors=[]
+A08 shared owner IPC + seven HTTP slots=8 ninth=429 queued revoke=401x7 local=201 only_one_git_target=true listeners_workers_joined=true private_root_removed=true
+test remote::workspace_api::worktrees::authority_tests::owner_http_gate_and_eight_admissions ... ok
+A08 publication revoke=false git_target_exists=true catalog_unchanged=true outcome_unknown=true workers_drained=true private_root_removed=true
+A08 interrupted owner pid=11256 replay=true status=exit code: 0 reaped=true
+A08 interrupted Git transaction private_root_removed=true
+test remote::workspace_api::worktrees::authority_tests::interrupted_git_transaction_restart_never_repeats ... ok
+A08 followthrough journal_failure=false request=f0c1922a-453e-4f7b-8be9-e73971e7413e workspace=project-ffb7f272bb674172880034e23d7eeb99 non_head=cd018760f2dddcd646595917b6f066077f272a73 restart_no_repeat=true prunable_preview=422
+A08 followthrough write failure private_root_removed=true
+A08 delete-vs-spawn request=0f8dfbd6-65a0-4ca6-832d-2cf9099930f5 spawn_observed_at_shared_gate=true blocked_until_delete_publication=true spawn_refused=true workers_joined=true root_removed=true
+test remote::workspace_api::worktrees::authority_tests::followthrough_delete_publication_blocks_spawn ... ok
+A08 followthrough prune request=6ba16f20-2100-4bf6-8a57-d60d08bdc88a workspace=project-17ad704d3c864efa98c95a3ee6debdc5 original_result_replayed=true restart=true
+A08 followthrough prune workers_awaited=true private_root_removed=true
+test remote::workspace_api::worktrees::authority_tests::followthrough_prune_partial_replays_after_restart ... ok
+A08 publication revoke=true git_target_exists=true catalog_unchanged=true outcome_unknown=true workers_drained=true private_root_removed=true
+test remote::workspace_api::worktrees::publication_tests::cancelled_publication_preserves_unknown_after_git ... ok
+A08 followthrough journal_failure=true request=443dc60c-3934-4141-9077-201104916e67 workspace=project-6f5bfaa370fb43768a1b9c2b37c9c5d9 non_head=845319cb1f2b3b637060c896182e626afba33e32 restart_no_repeat=true prunable_preview=422
+A08 followthrough write failure private_root_removed=true
+test remote::workspace_api::worktrees::authority_tests::followthrough_write_failures_non_head_and_prunable_preview ... ok
+R12 incomplete body sockets_closed=true gateway_joined=true root_removed=true
+test remote::workspace_api_tests::r12_router_incomplete_body ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 711 filtered out; finished in 10.13s
+

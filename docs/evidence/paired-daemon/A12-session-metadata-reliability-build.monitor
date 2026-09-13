@@ -1,0 +1,4 @@
+owner=90977 command=cargo build --locked --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli 
+  PID  PPID    RSS ELAPSED COMMAND
+90977 90974    160   00:00 cargo build --locked --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli
+exit=0 owner_reaped=true

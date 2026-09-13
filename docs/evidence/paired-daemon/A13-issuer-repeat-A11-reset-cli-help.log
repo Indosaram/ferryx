@@ -1,0 +1,2 @@
+Ferryx CLI is running in headless mode.
+Usage: ferryx-cli <pair|remote|browser|--daemon>

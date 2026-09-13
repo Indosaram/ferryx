@@ -1,0 +1,1 @@
+LSP paired_host directory: 9 Rust files, zero errors. One inactive-code hint at service.rs 205:20. git diff --check -- src-tauri/src/paired_host exit 0.

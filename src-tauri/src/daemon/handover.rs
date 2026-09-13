@@ -25,6 +25,29 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
+    #[tokio::test]
+    async fn cancelled_gateway_retains_close_operation_until_it_drains() {
+        // Given: the connection and its independently owned close task each retain retirement.
+        let root = tempfile::tempdir().expect("private fixture");
+        let manager = Arc::new(HandoverManager::new(root.path().join("daemon.sock")));
+        let terminals = Arc::new(TerminalService::default());
+        let connection = manager.retain_request(terminals.clone()).expect("connection guard");
+        let operation = manager.retain_request(terminals.clone()).expect("operation guard");
+        let (finish, finished) = tokio::sync::oneshot::channel();
+        let operation_task = tokio::spawn(async move {
+            finished.await.expect("release operation");
+            drop(operation);
+        });
+        // When: the HTTP connection is cancelled while durable close work is still live.
+        drop(connection);
+        manager.check_retirement_if_empty(&terminals);
+        // Then: cancellation leaves the independently owned operation retained.
+        assert_eq!(*manager.in_flight.lock(), 1);
+        finish.send(()).expect("finish operation");
+        operation_task.await.expect("operation joined");
+        assert_eq!(*manager.in_flight.lock(), 0);
+    }
+
     #[test]
     fn handover_commit_does_not_unlink_the_replacement_listener() {
         // Given: the blocking pool cannot run deferred socket cleanup yet.
@@ -134,12 +157,29 @@ mod tests {
     }
 }
 
+pub(crate) struct RetirementGuard {
+    manager: Arc<HandoverManager>,
+    terminals: Arc<TerminalService>,
+}
+
+impl Drop for RetirementGuard {
+    fn drop(&mut self) {
+        let mut requests = self.manager.in_flight.lock();
+        *requests -= 1;
+        if *requests == 0 {
+            self.manager.check_retirement_locked(&self.terminals);
+        }
+    }
+}
+
 pub struct HandoverManager {
     status: Arc<RwLock<HandoverStatus>>,
     legacy_socket_path: Arc<RwLock<Option<PathBuf>>>,
     canonical_lock_files: Arc<Mutex<Option<DaemonLockFiles>>>,
     canonical_socket_path: PathBuf,
     is_draining: Arc<AtomicBool>,
+    in_flight: Mutex<usize>,
+    retirement_action: RwLock<Arc<dyn Fn() + Send + Sync>>,
     client_abort_tx: broadcast::Sender<()>,
     commit_notify_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     commit_callbacks: Arc<Mutex<Vec<Box<dyn FnOnce() + Send + 'static>>>>,
@@ -154,10 +194,18 @@ impl HandoverManager {
             canonical_lock_files: Arc::new(Mutex::new(None)),
             canonical_socket_path,
             is_draining: Arc::new(AtomicBool::new(false)),
+            in_flight: Mutex::new(0),
+            retirement_action: RwLock::new(Arc::new(|| std::process::exit(0))),
             client_abort_tx,
             commit_notify_tx: Arc::new(Mutex::new(None)),
             commit_callbacks: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Override process termination for an in-process handover fixture.
+    /// Install before handing over; route cleanup still runs before this action.
+    pub fn set_retirement_action(&self, action: impl Fn() + Send + Sync + 'static) {
+        *self.retirement_action.write() = Arc::new(action);
     }
 
     pub fn subscribe_client_abort(&self) -> broadcast::Receiver<()> {
@@ -314,7 +362,19 @@ impl HandoverManager {
         Ok(())
     }
 
+    pub(crate) fn retain_request(self: &Arc<Self>, terminals: Arc<TerminalService>) -> Result<RetirementGuard, String> {
+        let mut requests = self.in_flight.lock();
+        if self.status() == HandoverStatus::Retired { return Err("HOST_UNAVAILABLE".into()); }
+        *requests = requests.checked_add(1).ok_or("CAPACITY_EXCEEDED")?;
+        Ok(RetirementGuard { manager: self.clone(), terminals })
+    }
+
     pub fn check_retirement_if_empty(&self, terminal_service: &Arc<TerminalService>) {
+        let requests = self.in_flight.lock();
+        if *requests == 0 { self.check_retirement_locked(terminal_service); }
+    }
+
+    fn check_retirement_locked(&self, terminal_service: &Arc<TerminalService>) {
         if self.is_draining() && terminal_service.list_sessions().is_empty() {
             self.retire();
         }
@@ -324,6 +384,7 @@ impl HandoverManager {
         *self.status.write() = HandoverStatus::Retired;
         self.is_draining.store(false, Ordering::SeqCst);
         let legacy_path = self.legacy_socket_path.write().take();
+        let retirement_action = self.retirement_action.read().clone();
         tokio::spawn(async move {
             let cleanup = crate::ipc::run_blocking(move || {
                 if let Some(path) = legacy_path {
@@ -344,7 +405,7 @@ impl HandoverManager {
                 tracing::warn!(%error, "Failed to clean up retired daemon route");
             }
             tracing::info!("Old daemon drained all active sessions and is retiring cleanly.");
-            std::process::exit(0);
+            retirement_action();
         });
     }
 }

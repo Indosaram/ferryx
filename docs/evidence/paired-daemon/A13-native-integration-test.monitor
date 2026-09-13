@@ -1,0 +1,4 @@
+owner=26168 command=cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib native_daemon_relay_inventory_roundtrip -- --nocapture 
+  PID  PPID    RSS ELAPSED COMMAND
+26168 26165   1792   00:00 bash /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/docs/evidence/paired-daemon/A13-native-integration-run.sh test cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib native_daemon_relay_inventory_roundtrip -- --nocapture
+exit=101 owner_reaped=true

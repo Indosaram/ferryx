@@ -32,6 +32,38 @@ use tokio::sync::Mutex;
 
 const DAEMON_READY_TOKEN: &str = "FERRYX_DAEMON_READY";
 
+#[cfg(all(test, unix))]
+mod paired_host_compatibility_tests {
+    use super::*;
+    #[tokio::test]
+    async fn old_daemon_unknown_capability_never_receives_upgrade_or_secret() {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("old.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let peer = async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new(); reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(serde_json::from_str::<DaemonRequest>(&line).unwrap(), DaemonRequest::Handshake { .. }));
+            writer.write_all(b"{\"type\":\"handshakeOk\",\"version\":3,\"pid\":1,\"epoch\":1,\"daemonVersion\":\"old\"}\n").await.unwrap();
+            line.clear(); reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(serde_json::from_str::<DaemonRequest>(&line).unwrap(), DaemonRequest::GetCapabilities));
+            writer.write_all(b"{\"type\":\"error\",\"message\":\"unknown request\"}\n").await.unwrap();
+            line.clear(); assert_eq!(reader.read_line(&mut line).await.unwrap(), 0, "client sent request after capability refusal");
+        };
+        let client = DaemonClient::new_with_socket(socket);
+        let action = client.paired_host_pair(crate::paired_host::service::PairRequest {
+            relay_origin: "https://relay.example".into(), pin: crate::paired_host::service::Secret("private-pin".into()), display_label: "host".into(),
+        });
+        let (_, result) = tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(peer, action) }).await.unwrap();
+        assert_eq!(result.unwrap_err().code, "PAIRED_HOST_UNAVAILABLE");
+        assert!(!client.upgrade_requested.load(Ordering::SeqCst));
+        let path = root.path().to_owned(); root.close().unwrap();
+        eprintln!("A13 old_daemon_unavailable=true no_upgrade=true no_secret_sent=true cleanup={}", !path.exists());
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonSpawnResult {
     pub session_id: String,
@@ -104,6 +136,7 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
         req,
         DaemonRequest::Handshake { .. }
             | DaemonRequest::Ping
+            | DaemonRequest::MachineSessionDetail { .. }
             | DaemonRequest::Spawn { .. }
             | DaemonRequest::ListSessions
             | DaemonRequest::DescribeSession { .. }
@@ -118,10 +151,16 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
     match req {
         DaemonRequest::Handshake { .. } => "handshake",
         DaemonRequest::Ping => "ping",
+        DaemonRequest::MachineSessionDetail { .. } => "machineSessionDetail",
+        DaemonRequest::MachineSessionMetadata { .. } => "machineSessionMetadata",
+        DaemonRequest::MachineGateway => "machineGateway",
+        DaemonRequest::MachineMetadataSubscribe { .. } => "machineMetadataSubscribe",
         DaemonRequest::RetryRemoteSession { .. } => "retryRemoteSession",
         DaemonRequest::RemoteSessionDetails { .. } => "remoteSessionDetails",
         DaemonRequest::RemoteWrite { .. } => "remoteWrite",
         DaemonRequest::RemoteResize { .. } => "remoteResize",
+        DaemonRequest::CreateWorktree { .. } => "createWorktree",
+        DaemonRequest::DeleteWorktree { .. } => "deleteWorktree",
         DaemonRequest::RegisterWorkspace { .. } => "registerWorkspace",
         DaemonRequest::UnregisterWorkspace { .. } => "unregisterWorkspace",
         DaemonRequest::Spawn { .. } => "spawn",
@@ -138,6 +177,14 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::ClearSession => "clearSession",
         DaemonRequest::RemoteGetStatus => "remoteGetStatus",
         DaemonRequest::GetCapabilities => "getCapabilities",
+        DaemonRequest::PairedHostList => "pairedHostList",
+        DaemonRequest::PairedTerminalReattach { .. } => "pairedTerminalReattach",
+        DaemonRequest::PairedTerminalDetach { .. } => "pairedTerminalDetach",
+        DaemonRequest::PairedHostOperation { .. } => "pairedHostOperation",
+        DaemonRequest::PairedHostRead { .. } => "pairedHostRead",
+        DaemonRequest::PairedHostPair { .. } => "pairedHostPair",
+        DaemonRequest::PairedHostMigrateLegacy { .. } => "pairedHostMigrateLegacy",
+        DaemonRequest::PairedHostForget { .. } => "pairedHostForget",
         DaemonRequest::RemoteCreateMachinePairingCode => "remoteCreateMachinePairingCode",
         DaemonRequest::RemoteConfigure { .. } => "remoteConfigure",
         DaemonRequest::RemoteCreatePairingCode { .. } => "remoteCreatePairingCode",
@@ -355,6 +402,117 @@ impl DaemonClient {
             interactive_connection: Arc::new(Mutex::new(None)),
             epoch: Arc::new(parking_lot::RwLock::new(None)),
             upgrade_requested: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    async fn paired_host_exchange(connection: &mut ActiveConnection, request: &DaemonRequest) -> crate::paired_host::service::Result<DaemonResponse> {
+        use crate::paired_host::service::ServiceError;
+        use tokio::io::AsyncReadExt;
+        let mut bytes = serde_json::to_vec(request).map_err(|_| ServiceError::unavailable())?;
+        if bytes.len() > 32 * 1024 { return Err(ServiceError::unavailable()); }
+        bytes.push(b'\n');
+        connection.writer.write_all(&bytes).await.map_err(|_| ServiceError::unavailable())?;
+        connection.writer.flush().await.map_err(|_| ServiceError::unavailable())?;
+        let mut response = Vec::new();
+        const LIMIT: usize = 1024 * 1024;
+        (&mut connection.reader).take((LIMIT + 1) as u64).read_until(b'\n', &mut response).await.map_err(|_| ServiceError::unavailable())?;
+        if response.len() > LIMIT || response.last() != Some(&b'\n') { return Err(ServiceError::unavailable()); }
+        serde_json::from_slice(&response).map_err(|_| ServiceError::unavailable())
+    }
+    /// Connect only: capability absence never triggers spawn, upgrade, or retry.
+    async fn paired_host_request(&self, request: DaemonRequest) -> crate::paired_host::service::Result<DaemonResponse> {
+        use crate::paired_host::service::ServiceError;
+        tokio::time::timeout(Duration::from_secs(35), async {
+            let socket_path = self.socket_path.clone();
+            crate::ipc::run_blocking(move || Self::validate_existing_socket_path(&socket_path)).await.map_err(|_| ServiceError::unavailable())?;
+            let stream = Self::connect_socket(&self.socket_path).await.map_err(|_| ServiceError::unavailable())?;
+            let (reader, writer) = stream.into_split();
+            let mut connection = ActiveConnection { reader: BufReader::new(reader), writer };
+            let handshake = Self::paired_host_exchange(&mut connection, &DaemonRequest::Handshake { version: DAEMON_PROTOCOL_VERSION }).await?;
+            if !matches!(handshake, DaemonResponse::HandshakeOk { version: DAEMON_PROTOCOL_VERSION, .. }) { return Err(ServiceError::unavailable()); }
+            let capabilities = Self::paired_host_exchange(&mut connection, &DaemonRequest::GetCapabilities).await?;
+            if !matches!(capabilities, DaemonResponse::CapabilitiesOk { capabilities } if capabilities.iter().any(|c| c == "pairedHostInventoryV1")) { return Err(ServiceError::unavailable()); }
+            match Self::paired_host_exchange(&mut connection, &request).await? {
+                DaemonResponse::PairedHostError { error } => Err(error),
+                response => Ok(response),
+            }
+        }).await.map_err(|_| ServiceError::unavailable())?
+    }
+    pub async fn paired_terminal_reattach(&self, descriptor: crate::terminal::paired_daemon::Descriptor) -> Result<(String, crate::scoped_contracts::Epoch), crate::paired_host::client::ClientError> {
+        use crate::paired_host::client::ClientError;
+        match self.paired_host_request(DaemonRequest::PairedTerminalReattach { descriptor }).await.map_err(|e| ClientError::local(&e.code))? {
+            DaemonResponse::PairedTerminalReattachOk { session_id, generation } => Ok((session_id, generation)),
+            DaemonResponse::PairedHostOperationError { error } => Err(error),
+            _ => Err(ClientError::local("PAIRED_PROXY_UNAVAILABLE")),
+        }
+    }
+    pub async fn paired_terminal_detach(&self, session_id: String) -> crate::paired_host::service::Result<()> {
+        match self.paired_host_request(DaemonRequest::PairedTerminalDetach { session_id }).await? {
+            DaemonResponse::CloseOk => Ok(()),
+            _ => Err(crate::paired_host::service::ServiceError::unavailable()),
+        }
+    }
+    pub async fn paired_host_list(&self) -> crate::paired_host::service::Result<Vec<crate::paired_host::inventory::HostView>> {
+        match self.paired_host_request(DaemonRequest::PairedHostList).await? {
+            DaemonResponse::PairedHostListOk { hosts } => Ok(hosts),
+            _ => Err(crate::paired_host::service::ServiceError::unavailable()),
+        }
+    }
+    pub async fn paired_host_operation(&self, request: crate::paired_host::client::OperationRequest) -> Result<crate::paired_host::client::OperationResponse, crate::paired_host::client::ClientError> {
+        use crate::paired_host::client::{ClientError, Operation};
+        let request_id = match &request.operation {
+            Operation::RegisterProject { request } => Some(request.request_id.clone()),
+            Operation::UnregisterProject { request, .. } => Some(request.request_id.clone()),
+            Operation::CreateWorktree { request } => Some(request.request_id.clone()),
+            Operation::DeleteWorktree { request } => Some(request.request_id.clone()),
+            Operation::CreateSession { request } => Some(request.request_id.clone()),
+            Operation::CloseSession { request, .. } => Some(request.request_id.clone()),
+            Operation::Capabilities | Operation::Directories { .. } | Operation::Projects
+            | Operation::Worktrees { .. } | Operation::WorktreeStatus { .. }
+            | Operation::Sessions { .. } | Operation::Session { .. } | Operation::Operation { .. } => None,
+        };
+        // IPC cannot establish whether the remote mutation committed. In particular,
+        // its retained 35s deadline can expire during the inner 40s HTTP attempt.
+        // Preserve reconciliation identity without retrying or changing daemon errors.
+        let transport_error = |error: crate::paired_host::service::ServiceError| ClientError {
+            code: error.code,
+            machine_error: None,
+            ambiguous: request_id.is_some(),
+            request_id: request_id.clone(),
+        };
+        match self.paired_host_request(DaemonRequest::PairedHostOperation { request }).await.map_err(&transport_error)? {
+            DaemonResponse::PairedHostOperationOk { response } => Ok(response),
+            DaemonResponse::PairedHostOperationError { error } => Err(error),
+            _ => Err(transport_error(crate::paired_host::service::ServiceError::unavailable())),
+        }
+    }
+    pub async fn paired_host_capabilities(&self) -> crate::paired_host::service::Result<serde_json::Value> {
+        // The connect-only path checks inventory support before forwarding this query.
+        self.paired_host_request(DaemonRequest::GetCapabilities).await?;
+        Ok(serde_json::json!({"pairedHostInventoryV1": true, "pairedDaemonProxyV1": false}))
+    }
+    pub async fn paired_host_read(&self, request: crate::paired_host::inventory::MigrationReceipt) -> crate::paired_host::service::Result<crate::paired_host::inventory::HostView> {
+        match self.paired_host_request(DaemonRequest::PairedHostRead { request }).await? {
+            DaemonResponse::PairedHostReadOk { host } => Ok(host),
+            _ => Err(crate::paired_host::service::ServiceError::unavailable()),
+        }
+    }
+    pub async fn paired_host_pair(&self, request: crate::paired_host::service::PairRequest) -> crate::paired_host::service::Result<crate::paired_host::inventory::HostView> {
+        match self.paired_host_request(DaemonRequest::PairedHostPair { request }).await? {
+            DaemonResponse::PairedHostPairOk { host } => Ok(host),
+            _ => Err(crate::paired_host::service::ServiceError::unavailable()),
+        }
+    }
+    pub async fn paired_host_migrate_legacy(&self, request: crate::paired_host::service::MigrationRequest) -> crate::paired_host::service::Result<crate::paired_host::inventory::MigrationReceipt> {
+        match self.paired_host_request(DaemonRequest::PairedHostMigrateLegacy { request }).await? {
+            DaemonResponse::PairedHostMigrateLegacyOk { receipt } => Ok(receipt),
+            _ => Err(crate::paired_host::service::ServiceError::unavailable()),
+        }
+    }
+    pub async fn paired_host_forget(&self, host_id: String, expected_generation: crate::scoped_contracts::Epoch) -> crate::paired_host::service::Result<()> {
+        match self.paired_host_request(DaemonRequest::PairedHostForget { host_id, expected_generation }).await? {
+            DaemonResponse::PairedHostForgetOk => Ok(()),
+            _ => Err(crate::paired_host::service::ServiceError::unavailable()),
         }
     }
 
@@ -2410,6 +2568,19 @@ mod tests {
         let err = parse_attach_error_response("Session ' not found".to_string(), "test-id");
         assert_eq!(err.code, IpcErrorCode::InternalError);
         assert!(err.details.is_none());
+    }
+
+    #[test]
+    fn worktree_mutations_are_never_blindly_resent() {
+        let worktree = crate::worktree::WorktreeIdentity { ws_id: "ws".into(), slug: "feature".into() };
+        for request in [
+            DaemonRequest::CreateWorktree { workspace_id: "ws".into(), worktree: worktree.clone(), base_ref: None },
+            DaemonRequest::DeleteWorktree { workspace_id: "ws".into(), worktree, delete_branch: false, destructive: false },
+        ] {
+            assert!(!request_is_retry_safe(&request));
+            let error = ambiguous_delivery_error(&request, &IpcError::internal("lost reply"));
+            assert_eq!(error.details.unwrap()["requestType"], request_type_name(&request));
+        }
     }
 
     #[test]

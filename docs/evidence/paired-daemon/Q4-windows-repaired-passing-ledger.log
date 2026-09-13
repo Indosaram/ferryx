@@ -1,0 +1,236 @@
+test ipc::project_remote::tests::remote_startup_cannot_use_local_shell_resolver ... ok
+test remote::auth::persistence_tests::canonical_auth_path_follows_the_canonical_remote_dir ... ok
+test ipc::project_remote::tests::remote_registration_wire_request_rejects_extra_execution_fields ... ok
+test remote::auth::security_tests::expired_pin_is_consumed_and_never_issues_a_token ... ok
+test remote::auth::security_tests::late_generated_pin_survives_failure_window_rollover ... ok
+test remote::auth::security_tests::new_window_discards_expired_codes_and_restores_pairing ... ok
+test remote::auth::tests::test_auth_credential_separation ... ok
+test remote::auth::tests::test_auth_store_resolves_under_the_same_dir_as_the_identity ... ok
+test remote::auth::security_tests::revocation_is_latched_and_registration_after_validation_cannot_miss_it ... ok
+test remote::auth::tests::test_cli_pair_approve ... ok
+test remote::auth::security_tests::concurrent_guesses_spend_exactly_five_failure_slots ... ok
+test remote::auth::tests::test_device_name_length_capped_and_list_devices_filters_idle ... ok
+test ipc::project_remote::tests::all_local_git_boundaries_reject_remote_namespace_even_without_loaded_metadata ... ok
+test remote::auth::tests::test_identity_dir_matches_the_shared_remote_state_dir ... ok
+test remote::auth::security_tests::valid_pairing_is_single_use_under_concurrent_exchange ... ok
+test remote::auth::tests::test_pairing_exchange_with_blank_name_stores_fallback ... ok
+test remote::auth::tests::test_repairing_view_pin_preserves_view_permission_on_replacement ... ok
+test remote::auth::persistence_tests::a_completed_write_leaves_a_fully_readable_store ... ok
+test remote::auth::persistence_tests::legacy_revoked_tombstones_are_pruned_when_the_store_is_loaded ... ok
+test remote::design_mode::tests::test_design_mode_snapshot_staging ... ok
+test remote::discovery::tailscale::tests::test_parse_status_json_invalid_input_errors ... ok
+test remote::auth::tests::test_device_idle_expiry ... ok
+test remote::auth::tests::test_repairing_with_same_installation_id_replaces_and_invalidates_old_token ... ok
+test remote::discovery::tailscale::tests::test_parse_status_json_skips_peers_without_ipv4 ... ok
+test remote::discovery::tailscale::tests::test_tailscale_peer_discovery ... ok
+test remote::auth::tests::test_store_without_installation_id_backward_compat ... ok
+test remote::filesystem_tests::a06_cancelled_worker_cannot_publish ... ok
+test remote::auth::security_tests::successful_pairing_does_not_reset_the_global_failure_budget ... ok
+test remote::auth::persistence_tests::validate_token_throttles_disk_persistence ... ok
+R6 empty scan: expired result truncated; cancellation after resolution returns TIMEOUT
+test remote::filesystem_tests::a06_native_bounds_and_query_contract ... ok
+test remote::auth::persistence_tests::revoked_devices_are_deleted_outright_and_never_reappear ... ok
+R6 auth: 1 real routed workers entered; unrelated health=200
+R6 auth injected disconnect: cancellation observed; blocked auth permit retained
+test remote::auth::tests::relay_capability_is_single_use_persisted_and_cancellable ... ok
+R6 auth: 16 real routed workers entered; unrelated health=200
+R6 injected service-less assertion failure
+test remote::auth::tests::test_machine_identity_persistence ... ok
+test remote::auth::tests::test_cli_pair_cross_process_persistence ... ok
+test remote::machine_protocol::tests::identity_is_host_qualified_and_preserves_large_epoch ... ok
+test remote::machine_protocol::tests::legacy_valid_ssh_targets_roundtrip_without_normalization ... ok
+test remote::machine_protocol::tests::lifecycle_and_descriptor_fixtures_roundtrip ... ok
+test remote::machine_protocol::tests::known_answer_full_hashes_match_shared_fixtures ... ok
+test remote::machine_protocol::tests::missing_metadata_and_unknown_targets_never_become_local ... ok
+test remote::machine_protocol::tests::malformed_epochs_and_oversized_json_are_rejected ... ok
+R6 auth: 1 real routed workers entered; unrelated health=200
+test remote::machine_protocol::tests::shared_fixtures_roundtrip_through_public_decoder ... ok
+test remote::machine_protocol::tests::shared_invalid_fixtures_are_rejected ... ok
+test remote::mirror::tests::clear_and_home_places_cursor_at_origin ... ok
+R6 auth recovered admission: invalid=401 mirror=403 before malformed path; no-store
+test remote::mirror::tests::feed_segments_replays_at_recorded_geometry_then_resizes ... ok
+test remote::mirror::tests::cjk_line_skips_wide_spacer_tails ... ok
+test remote::mirror::tests::flat_history_replay_corrupts_relative_to_segmented_replay ... ok
+test remote::mirror::tests::plain_ascii_line_produces_one_run ... ok
+test remote::mirror::tests::resize_returns_full_frame_with_new_dimensions ... ok
+test remote::mirror::tests::second_feed_only_emits_changed_line ... ok
+R6 auth: expected 401; deadline/retained admission or revoke-before-release verified
+test remote::mirror::tests::sgr_bold_red_maps_attrs_and_foreground ... ok
+test remote::mirror::tests::scroll_negative_reveals_older_content_and_positive_returns_toward_newest ... ok
+R6 HTTP disconnect: request dropped, cancellation=true, blocked fourth slot retained (429)
+test remote::protocol::tests::malformed_wire_values_are_rejected ... ok
+R6 HTTP completion: cancelled scan returned TIMEOUT, slot reusable
+test remote::protocol::tests::omitted_optional_fields_deserialize ... ok
+test remote::protocol::tests::control_handshake_wire_roundtrips ... ok
+test remote::protocol::tests::pairing_state_transition_matrix ... ok
+test remote::protocol::tests::pairing_state_wire_roundtrips ... ok
+test remote::protocol::tests::pairing_wire_roundtrips ... ok
+test remote::protocol::tests::proxy_wire_roundtrips ... ok
+test remote::protocol::tests::test_client_control_message_scroll_serde_roundtrip ... ok
+test remote::push::tests::test_web_push_payload_dispatch ... ok
+test remote::relay_client::tests::control_and_data_urls_are_built_from_relay_url ... ok
+test remote::auth::tests::test_machine_identity_sign_and_verify ... ok
+test remote::relay_client::tests::proxies_frames_between_data_channel_and_local_gateway ... ok
+test remote::relay_client::tests::test_pairing_coordinator_regenerates_and_ignores_old_expiry ... ok
+test remote::relay_client::tests::test_pairing_coordinator_rejects_wrong_ack_generation ... ok
+R6 auth recovered admission: invalid=401 mirror=403 before malformed path; no-store
+test ipc::project_remote::tests::local_registration_never_canonicalizes_a_remote_id_into_a_local_project ... ok
+test remote::relay_client::tests::test_relay_client_ed25519_auth_rejection ... ok
+test remote::relay_client::tests::test_relay_client_ed25519_auth_success ... ok
+test remote::relay_client::tests::to_ws_base_rewrites_https_and_trims_trailing_slash ... ok
+test remote::relay_client::tests::with_gateway_preserves_address_and_credentials ... ok
+test remote::relay_client::tests::test_pairing_coordinator_lifecycle_and_ack ... ok
+test remote::relay_server::tests::accepts_target_when_session_is_colon_scoped ... ok
+test remote::relay_client::tests::test_pairing_coordinator_timeout_or_rejection ... ok
+test remote::relay_server::tests::machine_query_admission ... ok
+test remote::relay_server::tests::protects_origin_when_gateway_sends_sensitive_headers ... ok
+test remote::relay_server::tests::r4_preference_route_not_intercepted_by_websocket ... ok
+test remote::relay_server::tests::r4_strict_utf8_query ... ok
+test remote::relay_server::tests::a_control_signature_minted_for_another_relay_is_refused ... ok
+test remote::relay_server::tests::rejects_registration_when_capability_format_is_invalid ... ok
+test remote::relay_server::tests::routes_session_when_path_is_colon_scoped ... ok
+test remote::machine_protocol::tests::expanded_shared_parity_fixtures ... ok
+test remote::relay_server::tests::test_http_response_framing ... ok
+test remote::relay_client::tests::test_pairing_coordinator_pin_can_be_redeemed_directly ... ok
+test remote::relay_server::tests::test_key_store_corruption_and_write_failure_fail_closed ... ok
+test remote::relay_server::tests::test_control_challenge_domain_separation ... ok
+R4 admission: 60 completed data-channel HTTP requests; two exact 429 boundaries; injected-window recovery; 100 waiting requests/503; cancellation registry=0
+test remote::relay_server::tests::r4_sustained_admission_and_cancel_cleanup ... ok
+test remote::relay_server::tests::test_relay_dispatch_rejects_a_replaced_control_channel ... ok
+test remote::relay_server::tests::test_relay_ed25519_control_handshake_success ... ok
+test remote::relay_server::tests::test_machine_ownership_survives_restart_and_private_enrollment ... ok
+test remote::relay_server::tests::test_relay_ed25519_stale_timestamp_rejected ... ok
+test remote::relay_server::tests::test_relay_generation_safe_cleanup_and_limits ... ok
+test remote::relay_server::tests::test_relay_admission_rate_limiting ... ok
+test remote::relay_server::tests::test_relay_ed25519_control_handshake_wrong_sig_rejected ... ok
+test remote::relay_server::tests::test_relay_pair_exchange_lockout_after_failures ... ok
+test remote::relay_server::tests::test_relay_key_store_merges_concurrent_enrollments_and_rejects_corrupt_records ... ok
+test remote::relay_server::tests::test_relay_pair_exchange_unknown_pin_returns_404 ... ok
+test remote::relay_server::tests::test_relay_pairing_claim_requires_the_live_control_identity ... ok
+test remote::relay_server::tests::test_relay_pairing_claim_uses_relay_generation_not_client_attempt_counter ... ok
+test remote::relay_server::tests::test_relay_register_pairing_caps_lease_lifetime ... ok
+test remote::relay_server::tests::test_relay_register_pairing_is_idempotent_for_identical_retries ... ok
+test remote::relay_server::tests::test_relay_multi_machine_concurrent_registration ... ok
+test remote::relay_server::tests::test_relay_reverse_tunnel_multiplex ... ok
+test remote::relay_server::tests::test_relay_socket_ticket_expired_rejected ... ok
+test remote::relay_server::tests::test_relay_socket_ticket_issuance_and_single_use ... ok
+test remote::relay_server::tests::test_relay_stream_half_is_bound_to_the_allocating_control_generation ... ok
+test remote::relay_server::tests::test_relay_unissued_session_rejected ... ok
+test remote::relay_server::tests::test_security_expired_pin_claim_rejected ... ok
+test remote::relay_server::tests::test_security_fleet_pin_brute_force_lockout ... ok
+test remote::relay_server::tests::test_relay_machine_hijack_with_different_key_fails ... ok
+test remote::relay_server::tests::test_relay_pair_exchange_success ... ok
+test remote::relay_server::tests::test_security_role_swap_prevention ... ok
+test remote::relay_server::tests::test_security_machine_id_hijack_rejection ... ok
+test remote::relay_server::tests::test_security_concurrent_two_daemon_isolation ... ok
+test remote::relay_server::tests::test_socket_ticket_cache_keeps_two_valid_tokens_for_one_machine ... ok
+test remote::server::attention_inventory_tests::remote_attention_inventory_keeps_other_projects_and_unseen_done ... ok
+test remote::relay_server::tests::test_socket_ticket_cold_cache_rejects_never_issued_bearer ... ok
+test remote::relay_server::tests::test_socket_ticket_expired_cache_rechecks_gateway_and_rejects_revoked_bearer ... ok
+test remote::server::preference_http_tests::ac09_private_http_child ... ok
+test remote::server::tests::a03_forged_exchange_fields_cannot_upgrade_mirror_authority ... ok
+test remote::server::tests::a03_absent_machine_service_is_private_and_unavailable ... ok
+test remote::server::tests::a03_machine_auth_errors_are_private_json ... ok
+test remote::relay_server::tests::test_socket_ticket_gateway_confirmed_bearer_is_granted_and_cached ... ok
+test remote::server::tests::relay_startup_connects_without_machine_token ... ok
+R3 POST workspace/projects bytes=65537 auth=true status=413 no_store=true expected=413/PAYLOAD_TOO_LARGE valid=true
+R3 body full POST workspace/projects bytes=65537 status=413 valid=true
+R3 body stream POST workspace/projects bytes=65537 status=413 valid=true
+R3 POST workspace/projects bytes=65537 auth=true status=403 no_store=true expected=403/MACHINE_ACCESS_REQUIRED valid=true
+R3 body full POST workspace/projects bytes=65537 status=403 valid=true
+R3 body stream POST workspace/projects bytes=65537 status=403 valid=true
+R3 POST workspace/projects bytes=65537 auth=false status=401 no_store=true expected=401/UNAUTHORIZED valid=true
+R3 body full POST workspace/projects bytes=65537 status=401 valid=true
+R3 body stream POST workspace/projects bytes=65537 status=401 valid=true
+R3 POST workspace/projects bytes=2097153 auth=true status=413 no_store=true expected=413/PAYLOAD_TOO_LARGE valid=true
+R3 body full POST workspace/projects bytes=2097153 status=413 valid=true
+R3 body stream POST workspace/projects bytes=2097153 status=413 valid=true
+R3 POST workspace/projects bytes=2097153 auth=true status=403 no_store=true expected=403/MACHINE_ACCESS_REQUIRED valid=true
+R3 body full POST workspace/projects bytes=2097153 status=403 valid=true
+R3 body stream POST workspace/projects bytes=2097153 status=403 valid=true
+R3 POST workspace/projects bytes=2097153 auth=false status=401 no_store=true expected=401/UNAUTHORIZED valid=true
+R3 body full POST workspace/projects bytes=2097153 status=401 valid=true
+R3 body stream POST workspace/projects bytes=2097153 status=401 valid=true
+R3 DELETE workspace/projects/missing bytes=2097153 auth=true status=413 no_store=true expected=413/PAYLOAD_TOO_LARGE valid=true
+R3 body full DELETE workspace/projects/missing bytes=2097153 status=413 valid=true
+R3 body stream DELETE workspace/projects/missing bytes=2097153 status=413 valid=true
+R3 DELETE workspace/projects/missing bytes=2097153 auth=true status=403 no_store=true expected=403/MACHINE_ACCESS_REQUIRED valid=true
+R3 body full DELETE workspace/projects/missing bytes=2097153 status=403 valid=true
+R3 body stream DELETE workspace/projects/missing bytes=2097153 status=403 valid=true
+R3 DELETE workspace/projects/missing bytes=2097153 auth=false status=401 no_store=true expected=401/UNAUTHORIZED valid=true
+R3 body full DELETE workspace/projects/missing bytes=2097153 status=401 valid=true
+R3 body stream DELETE workspace/projects/missing bytes=2097153 status=401 valid=true
+R3 DELETE workspace/projects/%FF bytes=0 auth=true status=400 no_store=true expected=400/INVALID_REQUEST valid=true
+R3 DELETE workspace/projects/%FF bytes=0 auth=true status=403 no_store=true expected=403/MACHINE_ACCESS_REQUIRED valid=true
+R3 DELETE workspace/projects/%FF bytes=0 auth=false status=401 no_store=true expected=401/UNAUTHORIZED valid=true
+R3 GET workspace/operations/%FF bytes=0 auth=true status=400 no_store=true expected=400/INVALID_REQUEST valid=true
+R3 GET workspace/operations/%FF bytes=0 auth=true status=403 no_store=true expected=403/MACHINE_ACCESS_REQUIRED valid=true
+R3 GET workspace/operations/%FF bytes=0 auth=false status=401 no_store=true expected=401/UNAUTHORIZED valid=true
+R3 POST unknown bytes=0 auth=true status=404 no_store=true expected=404/NOT_FOUND valid=true
+R3 POST unknown bytes=0 auth=true status=404 no_store=true expected=404/NOT_FOUND valid=true
+R3 POST unknown bytes=0 auth=false status=404 no_store=true expected=404/NOT_FOUND valid=true
+R3 DELETE unknown bytes=0 auth=true status=404 no_store=true expected=404/NOT_FOUND valid=true
+R3 DELETE unknown bytes=0 auth=true status=404 no_store=true expected=404/NOT_FOUND valid=true
+R3 DELETE unknown bytes=0 auth=false status=404 no_store=true expected=404/NOT_FOUND valid=true
+R3 PATCH workspace/projects bytes=0 auth=true status=405 no_store=true expected=405/METHOD_NOT_ALLOWED valid=true
+R3 PATCH workspace/projects bytes=0 auth=true status=405 no_store=true expected=405/METHOD_NOT_ALLOWED valid=true
+R3 PATCH workspace/projects bytes=0 auth=false status=405 no_store=true expected=405/METHOD_NOT_ALLOWED valid=true
+R3 classification HOST_UNAVAILABLE retryable=true expected=true
+R3 classification TIMEOUT retryable=true expected=true
+R3 classification MACHINE_SERVICE_UNAVAILABLE retryable=true expected=true
+R3 classification CAPACITY_EXCEEDED retryable=true expected=true
+R3 classification INVALID_REQUEST retryable=false expected=false
+R3 classification OPERATION_OUTCOME_UNKNOWN retryable=false expected=false
+R6 byte cap: created=800 retained=472 json_bytes=261747 next_bytes=554
+test remote::server::tests::a03_identity_runs_offthread_and_revocation_fences_response ... ok
+test remote::server::tests::test_listener_bind_loopback ... ok
+test remote::server::tests::test_push_auth ... ok
+test remote::state::tests::credentials_are_never_placed_in_a_shared_scratch_directory ... ok
+test remote::state::tests::daemon_default_state_is_off_and_uses_supplied_terminal_service ... ok
+test remote::state::tests::enabled_gateway_persists_config_and_restores_on_reopen ... ok
+test remote::state::tests::explicit_data_dir_override_wins_over_platform_home ... ok
+test remote::state::tests::persisted_enabled_config_file_loads_enabled_mode_with_unbound_initial_state ... ok
+test remote::state::tests::relay_pairing_coordinator_registers_the_pin_with_the_relay ... ok
+test remote::state::tests::relay_pairing_preserves_the_requested_permission ... ok
+test remote::state::tests::stopping_a_relay_clears_only_its_own_published_coordinator ... ok
+test remote::state::tests::test_interface_resolver_address_selection ... ok
+test remote::state::tests::test_interface_resolver_multihoming ... ok
+test remote::state::tests::test_interface_resolver_portable ... ok
+test remote::state::tests::test_relay_mode_configuration ... ok
+test remote::state::tests::windows_prefers_localappdata_and_accepts_userprofile ... ok
+test remote::server::preference_http_tests::ac09_private_http_child ... ok
+test remote::server::preference_http_tests::ac09_preferences_redact_paths_when_authenticated ... ok
+test remote::filesystem_tests::r6_empty_deadline_and_independent_bytes ... ok
+R4 PTY: executed marker received; owned sessions explicitly closed; listeners/reverse joined; private workspace removed
+test remote::workspace_api::worktrees::authority_tests::interrupted_worktree_owner_child ... ok
+test remote::workspace_api::worktrees::authority_tests::local_worktree_error_wire_roundtrip ... ok
+A08 followthrough prune workers_awaited=true private_root_removed=true
+test remote::workspace_api_tests::a07_http_request_failure_joins_fixture ... ok
+test remote::workspace_api_tests::a07_journal_restart_and_device_scope ... ok
+A08 interrupted owner pid=12596 replay=false status=exit code: 101 reaped=true
+A08 interrupted Git transaction private_root_removed=true
+test remote::workspace_api_tests::r12_crash_owner ... ok
+A08 followthrough write failure private_root_removed=true
+test remote::workspace_api_tests::r12_list_gate_and_admission ... ok
+test remote::workspace_api_tests::r12_router_auth_admission ... ok
+R6 service-less cleanup: listener joined, connection refused, injected=false
+test remote::filesystem_tests::a06_service_less_typed_503_without_probe ... ok
+R6 service-less cleanup: listener joined, connection refused, injected=true
+R6 auth exact drain: entered=3 completed=3; completion channel closed before root removal
+test remote::filesystem_tests::r6_service_less_injected_failure ... ok
+R6 HTTP cleanup: listener joined, connection refused, private root removed
+R6 auth cleanup: workers=3 completed; listener joined/refused; root removed; injected=true
+test remote::filesystem_tests::r6_http_disconnect_retains_worker_slot ... ok
+test remote::filesystem_tests::r6_auth_routed_failure_cleanup ... ok
+R6 auth exact drain: entered=3 completed=3; completion channel closed before root removal
+R6 auth cleanup: workers=3 completed; listener joined/refused; root removed; injected=false
+test remote::filesystem_tests::r6_auth_routed_revocation ... ok
+A08 gate fixture cleanup completed; errors=[]
+R3 CLEANUP listener_joined=true connection_refused=true private_root_removed=true no_pty=true
+test remote::server::tests::r3_http_boundary_contract ... ok
+R6 auth: expected 504; deadline/retained admission or revoke-before-release verified
+R6 auth recovered admission: invalid=401 mirror=403 before malformed path; no-store
+test remote::workspace_api_tests::r12_router_incomplete_body ... ok
+R6 auth exact drain: entered=18 completed=18; completion channel closed before root removal
+R6 auth cleanup: workers=18 completed; listener joined/refused; root removed; injected=false
+test remote::filesystem_tests::r6_auth_routed_deadline_admission ... ok

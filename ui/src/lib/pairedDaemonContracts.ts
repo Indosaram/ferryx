@@ -83,6 +83,8 @@ function session(value: unknown) {
   const v = object(value);
   return { target: decodeRemoteTarget(v.target), workspaceId: text(v.workspaceId), worktree: nullable(v.worktree, identity),
     cwd: text(v.cwd), cols: dimension(v.cols), rows: dimension(v.rows), running: bool(v.running), providerSession: nullable(v.providerSession, provider),
+    ...(v.title === undefined || v.title === null ? {} : { title: typeof v.title === "string" ? v.title : invalid() }),
+    ...(v.agentType === undefined || v.agentType === null ? {} : { agentType: typeof v.agentType === "string" ? v.agentType : invalid() }),
     startSequence: decodeU64(v.startSequence), endSequence: decodeU64(v.endSequence) };
 }
 export function decodePairedProject(value: unknown) {

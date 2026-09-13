@@ -11,6 +11,9 @@ use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
+#[path = "a13_issuer_repeat_fixture.rs"]
+mod issuer_repeat;
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Exchange {
@@ -85,13 +88,13 @@ async fn handshake(socket: &Path) -> anyhow::Result<()> {
     tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line)).await??;
     let response: DaemonResponse = serde_json::from_str(&line)?;
     ensure!(matches!(response, DaemonResponse::CapabilitiesOk { capabilities }
-        if capabilities == vec!["machinePairingV1"]), "local capabilities mismatch");
+        if capabilities == vec!["machinePairingV1", "pairedHostInventoryV1"]), "local capabilities mismatch");
     write.write_all(b"{\"type\":\"ping\"}\n").await?;
     line.clear();
     tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line)).await??;
     let response: DaemonResponse = serde_json::from_str(&line)?;
     ensure!(matches!(response, DaemonResponse::Pong), "legacy ping refused");
-    println!("A03 UDS protocol=3 exact_owner_pid={} capabilities=machinePairingV1 legacy_ping=pong", std::process::id());
+    println!("A03 UDS protocol=3 exact_owner_pid={} capabilities=machinePairingV1,pairedHostInventoryV1 legacy_ping=pong", std::process::id());
     Ok(())
 }
 
@@ -161,6 +164,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
         let exchange: Exchange = serde_json::from_slice(&response.bytes().await?)?;
         ensure!(exchange.device.access_scope == expected, "exchange scope upgraded");
         ensure!(exchange.device.permission == DevicePermission::Control, "permission mismatch");
+        issuer_repeat::repeat_after_redemption(binary, root, &relay_url).await?;
         let address = server.remote_state.bound_address.read().clone().context("gateway bound address")?;
         let gateway = format!("http://{address}");
         let capability_url = format!("{gateway}/api/v1/capabilities");
@@ -172,15 +176,41 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
         let _: crate::remote::machine_protocol::Capabilities = serde_json::from_value(value.clone())?;
         ensure!(value["machineId"] == exchange.machine_id, "machine identity changed");
         ensure!(value["accessScope"] == serde_json::to_value(expected)?, "capability scope mismatch");
-        ensure!(value["capabilities"] == serde_json::json!([]), "unimplemented service advertised");
+        let expected_capabilities = if machine { serde_json::json!(["directoryBrowseV1", "terminalCreateV1"]) } else { serde_json::json!([]) };
+        // machineWorkspaceV1 stays off until the aggregate R1/R2/R3 gate.
+        ensure!(value["capabilities"] == expected_capabilities, "machine capability contract mismatch");
         ensure!(!value.to_string().contains(&root.to_string_lossy().to_string()), "capability leaks private path");
         ensure!(client.get(&capability_url).bearer_auth("invalid-credential").send().await?.status() == 401,
             "malformed credential admitted");
-        for (method, path) in [(reqwest::Method::GET, "fs/directories"), (reqwest::Method::POST, "sessions")] {
-            let response = client.request(method, format!("{gateway}/api/v1/{path}"))
-                .bearer_auth(&exchange.token).send().await?;
-            ensure!(response.status().as_u16() == if machine { 503 } else { 403 }, "machine admission mismatch");
+        let browse_root = root.join("home/owner-browse");
+        std::fs::create_dir_all(browse_root.join("visible"))?;
+        std::fs::create_dir_all(browse_root.join(".hidden"))?;
+        std::fs::write(browse_root.join("sentinel"), b"unchanged")?;
+        let response = client.get(format!("{gateway}/api/v1/fs/directories"))
+            .query(&[("path", browse_root.to_str().context("private path encoding")?)])
+            .bearer_auth(&exchange.token).send().await?;
+        ensure!(response.status().as_u16() == if machine { 200 } else { 403 }, "directory admission mismatch");
+        ensure!(response.headers().get("cache-control").is_some_and(|v| v == "no-store"), "directory response cacheable");
+        let bytes = response.bytes().await?;
+        if machine {
+            let listing: crate::remote::machine_protocol::Directories = serde_json::from_slice(&bytes)?;
+            ensure!(Path::new(&listing.path) == browse_root.canonicalize()?, "directory root mismatch");
+            ensure!(Path::new(&listing.home_path) == root.join("home").canonicalize()?, "directory home mismatch");
+            ensure!(listing.parent_path.as_deref().map(Path::new) == Some(root.join("home").canonicalize()?.as_path()), "directory parent mismatch");
+            ensure!(!listing.truncated && listing.entries.len() == 1, "directory projection incomplete");
+            ensure!(listing.entries[0].name == "visible" && !listing.entries[0].hidden && Path::new(&listing.entries[0].path) == browse_root.join("visible").canonicalize()?, "directory entry mismatch");
+        } else {
+            let error: crate::remote::machine_protocol::ErrorEnvelope = serde_json::from_slice(&bytes)?;
+            ensure!(error.error.code == "MACHINE_ACCESS_REQUIRED", "mirror directory scope refusal mismatch");
+            ensure!(!String::from_utf8_lossy(&bytes).contains(browse_root.to_str().context("private path encoding")?), "mirror directory error leaks path");
         }
+        ensure!(std::fs::read(browse_root.join("sentinel"))? == b"unchanged", "browse changed sentinel");
+        let response = client.post(format!("{gateway}/api/v1/sessions"))
+            .bearer_auth(&exchange.token).send().await?;
+        ensure!(response.status().as_u16() == if machine { 400 } else { 403 }, "session admission mismatch");
+        let error: crate::remote::machine_protocol::ErrorEnvelope = serde_json::from_slice(&response.bytes().await?)?;
+        ensure!(error.error.code == if machine { "INVALID_REQUEST" } else { "MACHINE_ACCESS_REQUIRED" }, "session refusal mismatch");
+        println!("A03 DIRECTORY scope={expected:?} status={} native_projection_verified={} sentinel_unchanged=true sessions_status={}", if machine {200} else {403}, machine, if machine {400} else {403});
         ensure!(server.remote_state.auth_manager.revoke_device(&exchange.device.id), "revoke failed");
         let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed = Arc::clone(&probes);
@@ -192,7 +222,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
         ensure!(probes.load(std::sync::atomic::Ordering::SeqCst) == 0, "revoked request probed identity");
         handshake(&socket).await?;
         println!("A03 CAPABILITIES {value}");
-        println!("A03 SURFACE scope={expected:?} permission=Control relay_exchange=200 capabilities=200 anonymous=401 revoked=401 machine_capabilities=empty");
+        println!("A03 SURFACE scope={expected:?} permission=Control relay_exchange=200 capabilities=200 anonymous=401 revoked=401 machine_capabilities={expected_capabilities}");
         Ok::<_, anyhow::Error>(())
     }.await;
     let stopped = server.configure_gateway(RemoteGatewayConfig::default()).await;
@@ -215,6 +245,9 @@ fn a03_private_owner_cli_surface() -> anyhow::Result<()> {
     let Some(root) = std::env::var_os("A03_PRIVATE_ROOT") else {
         let root = tempfile::Builder::new().prefix("a03-cli-").tempdir_in("/tmp")?;
         let private_root = root.path().canonicalize()?;
+        for directory in ["home", "sessions", "runtime", "data", "xdg-config", "xdg-cache", "xdg-data", "tmp"] {
+            std::fs::create_dir(private_root.join(directory))?;
+        }
         let exe = std::env::current_exe()?;
         let binary = exe.parent().and_then(Path::parent).context("target debug directory")?.join("ferryx-cli");
         ensure!(binary.is_file(), "build ferryx-cli before the owner fixture");
@@ -222,12 +255,25 @@ fn a03_private_owner_cli_surface() -> anyhow::Result<()> {
         let result = runtime.block_on(async {
             let mut command = tokio::process::Command::new(exe);
             command.args(["daemon::server::a03_owner_cli_fixture::a03_private_owner_cli_surface", "--exact", "--nocapture"])
+                .env_clear().env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
                 .env("A03_PRIVATE_ROOT", &private_root).env("A03_CLI_BINARY", binary)
+                .env("FERRYX_SESSION_DIR", private_root.join("sessions"))
+                .env("FERRYX_AGENT_STATE_SOCKET", private_root.join("runtime/agent.sock"))
+                .env("XDG_CONFIG_HOME", private_root.join("xdg-config"))
+                .env("XDG_CACHE_HOME", private_root.join("xdg-cache"))
+                .env("XDG_DATA_HOME", private_root.join("xdg-data"))
+                .env("XDG_RUNTIME_DIR", private_root.join("runtime"))
+                .env("TMPDIR", private_root.join("tmp"))
+                .env("TMP", private_root.join("tmp"))
+                .env("TEMP", private_root.join("tmp"))
                 .env("HOME", private_root.join("home"))
                 .env("FERRYX_DATA_DIR", private_root.join("data"))
                 .env("FERRYX_RUNTIME_DIR", private_root.join("runtime"))
                 .env_remove("FERRYX_MACHINE_TOKEN").env_remove("FERRYX_RELAY_URL")
                 .kill_on_drop(true);
+            if let Some(libraries) = std::env::var_os("DYLD_FALLBACK_LIBRARY_PATH") {
+                command.env("DYLD_FALLBACK_LIBRARY_PATH", libraries);
+            }
             command.as_std_mut().process_group(0);
             let mut child = command.spawn()?;
             let pid = child.id().context("fixture child PID")?;

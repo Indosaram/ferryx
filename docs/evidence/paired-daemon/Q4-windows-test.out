@@ -1,0 +1,268 @@
+   Compiling ferryx v2026.908.1 (C:\Users\sook\ferryx-winbuild\orca-lite-r9\src-tauri)
+warning: unused import: `AgentState`
+ --> src\daemon\server.rs:4:34
+  |
+4 | use crate::daemon::agent_state::{AgentState, AgentStateHub, AgentStateSubscription};
+  |                                  ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `crate::daemon::protocol::AgentProviderSessionKey`
+  --> src\daemon\server.rs:20:5
+   |
+20 | use crate::daemon::protocol::AgentProviderSessionKey;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tempfile::TempDir`
+   --> src\ipc\cli_install.rs:278:9
+    |
+278 |     use tempfile::TempDir;
+    |         ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `NotificationAuthorization`
+ --> src\notification\permission.rs:4:5
+  |
+4 |     NotificationAuthorization, NotificationPermissionRequestDto, NotificationPermissionStatusDto,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::*`
+    --> src\lib.rs:1192:9
+     |
+1192 |     use super::*;
+     |         ^^^^^^^^
+
+warning: unused import: `crate::daemon::client::DaemonClient`
+    --> src\lib.rs:1193:9
+     |
+1193 |     use crate::daemon::client::DaemonClient;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::remote::auth::DevicePermission`
+    --> src\lib.rs:1194:9
+     |
+1194 |     use crate::remote::auth::DevicePermission;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `token`
+    --> src\remote\auth.rs:1399:14
+     |
+1399 |         let (token, device) = auth
+     |              ^^^^^ help: if this is intentional, prefix it with an underscore: `_token`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `hook`
+   --> src\remote\workspace_api\worktree_authority_tests.rs:614:13
+    |
+614 |         let hook = root.path().join("repo/.git/hooks/post-checkout"); let port = ready.local_addr().unwrap().port();
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_hook`
+
+warning: unused variable: `port`
+   --> src\remote\workspace_api\worktree_authority_tests.rs:614:75
+    |
+614 |         let hook = root.path().join("repo/.git/hooks/post-checkout"); let port = ready.local_addr().unwrap().port();
+    |                                                                           ^^^^ help: if this is intentional, prefix it with an underscore: `_port`
+
+warning: unused variable: `child_pid`
+   --> src\ssh\bridge_tests.rs:639:9
+    |
+639 |     let child_pid = conn_cancel.child_id().expect("child PID must be known");
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_child_pid`
+
+warning: unused variable: `eof_pid`
+   --> src\ssh\bridge_tests.rs:687:9
+    |
+687 |     let eof_pid = conn_eof.child_id().expect("eof child PID");
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_eof_pid`
+
+warning: unused variable: `scroll_daemon_client`
+   --> src\lib.rs:918:9
+    |
+918 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+    |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+
+warning: associated function `parse_agent_state_report` is never used
+    --> src\daemon\server.rs:1215:8
+     |
+1024 | impl DaemonServer {
+     | ----------------- associated function in this implementation
+...
+1215 |     fn parse_agent_state_report(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `contains` is never used
+   --> src\daemon\session_service.rs:154:19
+    |
+152 | impl SpawnError {
+    | --------------- method in this implementation
+153 |     #[cfg(test)]
+154 |     pub(super) fn contains(&self, needle: &str) -> bool {
+    |                   ^^^^^^^^
+
+warning: methods `machine_sessions`, `expire_spawn_request_for_test`, `spawn_cache_len_for_test`, `provider_claim_len_for_test`, and `reserve_provider_claim_for_test` are never used
+    --> src\daemon\session_service.rs:366:19
+     |
+ 227 | impl DaemonSessionService {
+     | ------------------------- methods in this implementation
+...
+ 366 |     pub(crate) fn machine_sessions(&self, epoch: crate::scoped_contracts::Epoch) -> Result<crate::remote::machine_protocol::Sessio...
+     |                   ^^^^^^^^^^^^^^^^
+...
+1311 |     pub(super) fn expire_spawn_request_for_test(&self, client_request_id: &str) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1322 |     pub(super) fn spawn_cache_len_for_test(&self) -> usize {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1327 |     pub(super) fn provider_claim_len_for_test(&self) -> usize {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1332 |     pub(super) fn reserve_provider_claim_for_test(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `GHOSTTY_TERMINAL_SCREEN_PRIMARY` is never used
+  --> src\native_terminal\sys\constants.rs:56:11
+   |
+56 | pub const GHOSTTY_TERMINAL_SCREEN_PRIMARY: c_int = 0;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `test_capture` is never used
+   --> src\paired_host\service.rs:186:25
+    |
+161 | impl PairedHostService {
+    | ---------------------- method in this implementation
+...
+186 |     pub(crate) async fn test_capture(&self, host: String, generation: Epoch) -> Result<inventory::CredentialLease> {
+    |                         ^^^^^^^^^^^^
+
+warning: function `home_dir` is never used
+  --> src\permissions\mod.rs:43:4
+   |
+43 | fn home_dir() -> Option<PathBuf> {
+   |    ^^^^^^^^
+
+warning: struct `Observation` is never constructed
+  --> src\remote\machine_input_probe.rs:13:19
+   |
+13 | pub(super) struct Observation(pub watch::Receiver<Progress>, String);
+   |                   ^^^^^^^^^^^
+
+warning: associated function `register` is never used
+  --> src\remote\machine_input_probe.rs:15:12
+   |
+14 | impl Observation {
+   | ---------------- associated function in this implementation
+15 |     pub fn register(id: &str) -> Self {
+   |            ^^^^^^^^
+
+warning: function `no_auth_query` is never used
+    --> src\remote\server.rs:3135:12
+     |
+3135 |         fn no_auth_query() -> AuthQuery {
+     |            ^^^^^^^^^^^^^
+
+warning: methods `next_snapshot_build` and `set_snapshot_post_build_hook` are never used
+   --> src\remote\state.rs:569:19
+    |
+324 | impl RemoteGatewayState {
+    | ----------------------- methods in this implementation
+...
+569 |     pub(crate) fn next_snapshot_build(&self) -> impl std::future::Future<Output = ()> + '_ {
+    |                   ^^^^^^^^^^^^^^^^^^^
+...
+574 |     pub(crate) fn set_snapshot_post_build_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `wait_and_reap` is never used
+   --> src\terminal\session.rs:372:19
+    |
+ 73 | impl PtySession {
+    | --------------- method in this implementation
+...
+372 |     pub(crate) fn wait_and_reap(&self) -> Result<Option<i32>, PtyError> {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src\worktree\manager.rs:86:19
+   |
+86 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+   --> src\worktree\manager.rs:93:8
+    |
+ 92 | impl WriterLeaseGuard {
+    | --------------------- associated items in this implementation
+ 93 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+    |        ^^^
+...
+101 |     pub(crate) fn canonical_path(&self) -> &Path {
+    |                   ^^^^^^^^^^^^^^
+...
+105 |     pub(crate) fn owner_id(&self) -> &str {
+    |                   ^^^^^^^^
+
+warning: method `acquire_writer_lease` is never used
+   --> src\worktree\manager.rs:338:19
+    |
+134 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+338 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: static `FERRYX_DATA_DIR_LOCK` is never used
+    --> src\lib.rs:1198:12
+     |
+1198 |     static FERRYX_DATA_DIR_LOCK: Mutex<()> = Mutex::new(());
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `RestoreFerryxDataDir` is never constructed
+    --> src\lib.rs:1200:12
+     |
+1200 |     struct RestoreFerryxDataDir(Option<OsString>);
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib test) generated 29 warnings (run `cargo fix --lib -p ferryx --tests` to apply 13 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 08s
+     Running unittests src\lib.rs (target\debug\deps\ferryx_lib-1106a058f882a89b.exe)
+
+running 33 tests
+test paired_host::client::tests::ambiguous_journal_never_repeats_mutation ... ok
+test paired_host::client::tests::capability_absence_fails_closed ... ok
+test paired_host::client::tests::gatefix_create_only_peer_receives_zero_socket_requests ... ok
+test paired_host::client::tests::gatefix_journal_error_uses_the_same_safe_projection ... ok
+test paired_host::client::tests::gatefix_remote_error_never_projects_bearer_text ... ok
+test paired_host::client::tests::generation_cancels_blocked_http_without_release ... ok
+test paired_host::client::tests::operation_requires_machine_workspace_capability ... ok
+test paired_host::client::tests::pending_mutation_response_retains_request_and_ambiguity ... ok
+test paired_host::client::tests::predecessor_epoch_and_additive_capabilities_are_preserved ... ok
+test paired_host::client::tests::real_http_non_json_redirect_and_body_limit ... ok
+test paired_host::client::tests::real_machine_catalog_replay_checks_digest_and_preserves_metadata ... ok
+test paired_host::client::tests::response_provenance_is_fenced_over_http ... ok
+test paired_host::client::tests::wrong_authenticated_machine_cannot_be_adopted ... ok
+test paired_host::inventory_tests::actual_write_failure_keeps_disk_and_legacy_authority_and_fences_leases ... ok
+test paired_host::inventory_tests::corrupt_unknown_newer_and_external_replacement_never_overwrite ... ok
+test paired_host::inventory_tests::fixture_loopback_store_roundtrips_but_production_fails_closed ... ok
+test paired_host::inventory_tests::migration_requires_host_proof_and_verified_copy_and_preserves_source ... ok
+test paired_host::inventory_tests::mirror_and_unknown_do_not_become_machine_authority ... ok
+test paired_host::inventory_tests::origin_normalization_is_identity_stable ... ok
+test paired_host::inventory_tests::public_http_and_userinfo_fail_closed ... ok
+test paired_host::inventory_tests::re_pair_forget_and_revoke_cancel_only_captured_host_across_restart ... ok
+test paired_host::inventory_tests::real_private_persistence_restart_and_secret_exclusion ... ok
+test paired_host::inventory_tests::test_loopback_is_explicit_and_not_a_production_origin ... ok
+test paired_host::projects::tests::metadata_and_unavailable_identity_are_lossless ... ok
+test paired_host::proxy_tests::a23_dropping_connected_proxy_releases_socket_and_hub ... ok
+test paired_host::proxy_tests::native_actor_delivers_controls_and_output_without_local_pty ... ok
+test paired_host::proxy_tests::native_registry_routes_paired_ids_without_local_fallback ... ok
+test paired_host::proxy_tests::paired_socket_decodes_output_and_fences_input_without_local_pty ... ok
+test paired_host::proxy_tests::spontaneous_eof_reaps_native_owner ... ok
+test paired_host::proxy_tests::spontaneous_remote_exit_reaps_native_owner ... ok
+test paired_host::service::native_transport_tests::paused_authenticated_response_cannot_adopt_after_repair_or_forget ... ok
+test paired_host::service::native_transport_tests::redirect_never_forwards_credential_and_failed_migration_preserves_source ... ok
+test paired_host::service::native_transport_tests::secret_debug_and_production_origin_policy ... ok
+
+test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 757 filtered out; finished in 12.96s
+

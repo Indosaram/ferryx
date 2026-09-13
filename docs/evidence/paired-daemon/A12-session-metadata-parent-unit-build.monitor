@@ -1,0 +1,4 @@
+owner=98550 command=bash -c cargo\ test\ --locked\ --manifest-path\ src-tauri/Cargo.toml\ --no-default-features\ --lib\ machine_event_snapshot_recovers_when_commit_overlaps_inventory\ --\ --nocapture\ \&\&\ cargo\ test\ --locked\ --manifest-path\ src-tauri/Cargo.toml\ --no-default-features\ --lib\ machine_protocol\ --\ --nocapture\ \&\&\ cargo\ build\ --locked\ --manifest-path\ src-tauri/Cargo.toml\ --no-default-features\ --bin\ ferryx-cli 
+  PID  PPID    RSS ELAPSED COMMAND
+98550 98547    144   00:00 bash -c cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib machine_event_snapshot_recovers_when_commit_overlaps_inventory -- --nocapture && cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib machine_protocol -- --nocapture && cargo build --locked --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli
+exit=101 owner_reaped=true

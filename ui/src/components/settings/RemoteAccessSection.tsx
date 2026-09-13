@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle, Radio, Trash2 } from "lucide-react";
+import { isTauri } from "@tauri-apps/api/core";
 
 import {
   createPairingCode,
@@ -13,6 +14,7 @@ import {
 } from "../../lib/tauri";
 
 import { SettingRow, SettingsHeading } from "./primitives";
+import { PairedMachinesSection } from "./PairedMachinesSection";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -265,7 +267,7 @@ export function RemoteAccessSection() {
       <SettingsHeading
         icon={<Radio />}
         title="Remote Access"
-        description="Access desktop terminal sessions from your phone. One switch turns remote access on; one QR code pairs any device, connecting through the relay and upgrading to a direct LAN or Tailscale path whenever it is reachable."
+        description="Access desktop terminal sessions from your phone. One switch turns remote access on; one QR code pairs any device, connecting through the relay and upgrading to a direct LAN or Tailscale path whenever it is reachable. Authorized browser profiles reconnect while Remote remains enabled; re-pair only after browser storage is cleared, a device is revoked, or a different browser profile/device is used."
       />
       <h2 id="settings-remote-heading" className="sr-only">
         Remote Access
@@ -471,6 +473,7 @@ export function RemoteAccessSection() {
           )}
         </Card>
       </div>
+      {isTauri() ? <PairedMachinesSection /> : null}
     </section>
   );
 }

@@ -124,6 +124,14 @@ pub struct BranchDeletionPreview {
 
 #[derive(Debug, Error)]
 pub enum WorktreeError {
+    #[error("Worktree '{path}' has live sessions")]
+    WorktreeBusy { path: PathBuf, live_session_ids: Vec<String> },
+    #[error("Worktree '{path}' is locked: {reason}")]
+    WorktreeLocked { path: PathBuf, reason: String },
+    #[error("Worktree '{path}' was removed but branch '{branch}' was retained: {source}")]
+    WorktreeRemovedBranchRetained { path: PathBuf, branch: String, source: Box<WorktreeError> },
+    #[error("Worktree '{path}' was removed but prune failed: {source}")]
+    WorktreeRemovedPruneFailed { path: PathBuf, source: Box<WorktreeError> },
     #[error("Local filesystem and Git operations are unsupported for direct SSH projects")]
     RemoteUnsupported,
 

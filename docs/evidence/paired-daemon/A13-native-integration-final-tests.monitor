@@ -1,0 +1,4 @@
+owner=29044 command=cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib paired_host -- --nocapture 
+  PID  PPID    RSS ELAPSED COMMAND
+29044 29041    112   00:00 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib paired_host -- --nocapture
+exit=0 owner_reaped=true

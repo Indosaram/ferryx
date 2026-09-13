@@ -1,0 +1,14 @@
+{
+  "src-tauri/tests/machine_worktrees.rs": "4fe6c1b483d9c0fc0573a084265c06072a3ead0fe43ba52760fb9dac92676104",
+  "src-tauri/tests/q4_windows_paths.rs": "3a74566f4b7988d869e0615e86ac97f9b0d7d9bb55fda25dcd7a251cd36ba1c8",
+  "src-tauri/tests/machine_catalog_persistence.rs": "4d492f1010c3bc3b68b959fab94eb4a2cfece4be18fdb8359e570ed2a7ed9322",
+  "src-tauri/src/worktree/git.rs": "2df70a1ef81bb3acf5afa40ebe76b12116b3e3de6d99aa4e5494b5b10ed62a94",
+  "src-tauri/src/ssh/worktree.rs": "13ffe729e3a915c147ab8a33a77a9c8cd12ce64c97e8aa50877fcaea59aba495",
+  "src-tauri/src/remote/relay_server.rs": "4f6f8611d4e13d7537697d619b2f36bc9cb8648332702d742b6e92c47ae2cd31",
+  "src-tauri/src/remote/workspace_api.rs": "a2a5a19ec90c2d7cd99ad661a54b693dcb1dae0dbd3f0911deff0029318b3d56",
+  "src-tauri/src/remote/workspace_api_tests.rs": "0c30c7da1b1460bdbe555f3442c0919ca9e0361926a71ac4d1ee1b4548a84857",
+  "src-tauri/src/remote/server.rs": "92f5e4b87478c1bad8f22b61ea6702b03998b2cf86d26b64669f70d038ac2c34",
+  "src-tauri/src/remote/filesystem_tests.rs": "805de3046fb4e6acea5545a665f8c93118be33c7a4fb063137e1ca51626ebee0",
+  "src-tauri/src/remote/workspace_api/worktrees.rs": "46fe10d8cb36dc9697f966edd8ed9905603701852a82c5792218182825ea1cf7",
+  "src-tauri/src/remote/workspace_api/worktree_authority_tests.rs": "97538465d9f639c14f18004b09d20baa9e840f3ebd1f95b153f013b5d251f3c5"
+}

@@ -135,8 +135,11 @@ describe("native terminal presentation retention", () => {
     expect(commands("cmd_native_terminal_send_input")).toHaveLength(1);
   });
 
-  it("retains a shown final frame on exit, blocks input, and releases it on unmount", async () => {
-    const view = render(<NativeTerminalPane session={session()} active />);
+  it.each([
+    {},
+    { daemonEpoch: "epoch-a", remoteGeneration: 7, remoteConnectionState: "connected" as const },
+  ])("retains a shown final frame on exit, blocks input, and releases it on unmount (%j)", async (identity) => {
+    const view = render(<NativeTerminalPane session={{ ...session(), ...identity }} active />);
     await act(async () => {});
     expect(commands("cmd_native_terminal_set_bounds")).toHaveLength(1);
     await act(async () => { view.rerender(<NativeTerminalPane session={session(null)} active />); });
@@ -152,6 +155,57 @@ describe("native terminal presentation retention", () => {
     expect(commands("cmd_native_terminal_detach")).toEqual([
       ["cmd_native_terminal_detach", { sessionId: "backend-a" }],
     ]);
+  });
+
+  it.each([
+    { daemonEpoch: "epoch-b", remoteGeneration: 1 },
+    { daemonEpoch: "epoch-a", remoteGeneration: 2 },
+  ])("rebinds the same backend ID and fences the previous attach completion (%j)", async (identity) => {
+    let finishAttach!: () => void;
+    const pendingAttach = new Promise<void>((resolve) => { finishAttach = resolve; });
+    bridge.invoke.mockImplementation(async (command) => {
+      if (command === "cmd_native_terminal_attach" && commands(command).length === 1) return pendingAttach;
+      return command === "cmd_native_terminal_set_bounds" ? PRESENTED : undefined;
+    });
+    const onUnavailable = vi.fn();
+    const view = render(<NativeTerminalPane session={{ ...session(), daemonEpoch: "epoch-a", remoteGeneration: 1 }} onBackendSessionUnavailable={onUnavailable} />);
+    expect(commands("cmd_native_terminal_attach")).toHaveLength(1);
+    await act(async () => {
+      view.rerender(<NativeTerminalPane session={{ ...session(), ...identity }} onBackendSessionUnavailable={onUnavailable} />);
+    });
+    expect(commands("cmd_native_terminal_set_bounds")).toHaveLength(0);
+    await act(async () => { finishAttach(); await pendingAttach; });
+    expect(commands("cmd_native_terminal_attach")).toHaveLength(2);
+    expect(commands("cmd_native_terminal_set_bounds")).toHaveLength(1);
+    expect(commands("cmd_native_terminal_detach")).toHaveLength(0);
+    expect(onUnavailable).not.toHaveBeenCalled();
+    expect(view.getByTestId("native-terminal-pane")).toHaveAttribute("data-native-terminal-presented", "true");
+  });
+
+  it.each([
+    { daemonEpoch: "epoch-b", remoteGeneration: 1 },
+    { daemonEpoch: "epoch-a", remoteGeneration: 2 },
+  ])("fences pending input recovery across a same-ID binding change (%j)", async (identity) => {
+    let rejectInput!: (error: unknown) => void;
+    const pendingInput = new Promise<never>((_resolve, reject) => { rejectInput = reject; });
+    bridge.invoke.mockImplementation(async (command) => {
+      if (command === "cmd_native_terminal_send_input") return pendingInput;
+      return command === "cmd_native_terminal_set_bounds" ? PRESENTED : undefined;
+    });
+    const view = render(<NativeTerminalPane session={{ ...session(), daemonEpoch: "epoch-a", remoteGeneration: 1 }} />);
+    await act(async () => {});
+    fireEvent.keyDown(view.getByTestId("native-terminal-focus-sink"), { key: "x", code: "KeyX" });
+    expect(commands("cmd_native_terminal_send_input")).toHaveLength(1);
+    await act(async () => {
+      view.rerender(<NativeTerminalPane session={{ ...session(), ...identity }} />);
+    });
+    expect(commands("cmd_native_terminal_attach")).toHaveLength(2);
+    await act(async () => {
+      rejectInput({ code: "SESSION_NOT_FOUND", message: "Gone", details: { inputWritten: false } });
+    });
+    expect(commands("cmd_native_terminal_attach")).toHaveLength(2);
+    expect(commands("cmd_native_terminal_send_input")).toHaveLength(1);
+    expect(view.queryByRole("alert")).toBeNull();
   });
 
   it("does not attach a cold exited pane and leaves an opaque fallback", async () => {

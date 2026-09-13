@@ -1,0 +1,76 @@
+$ vitest run --maxWorkers=1 src/components/Sidebar.paired.test.tsx src/state/inactiveProjectWorktrees.paired.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+ ❯ src/state/inactiveProjectWorktrees.paired.test.tsx (1 test | 1 failed) 10ms
+   × loads paired owners without local registration and preserves rows on partial or failed host refresh 9ms
+     → expected "spy" to not be called at all, but actually been called 1 times[90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m    Array [
+      Object {
+        "repoPath": "/srv/repo",
+        "workspaceId": "daemon:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      },
+    ]
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+ ❯ src/components/Sidebar.paired.test.tsx (1 test | 1 failed) 4ms
+   × keeps identical local, SSH and paired paths separate and selects explicit paired roots with machine status 4ms
+     → expected [ { groupId: 'repo', …(2) }, …(1) ] to have a length of 4 but got 2
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/Sidebar.paired.test.tsx > keeps identical local, SSH and paired paths separate and selects explicit paired roots with machine status
+AssertionError: expected [ { groupId: 'repo', …(2) }, …(1) ] to have a length of 4 but got 2
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- 4[39m
+[31m+ 2[39m
+
+ ❯ src/components/Sidebar.paired.test.tsx:17:50
+
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+ FAIL  src/state/inactiveProjectWorktrees.paired.test.tsx > loads paired owners without local registration and preserves rows on partial or failed host refresh
+AssertionError: expected "spy" to not be called at all, but actually been called 1 times[90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m    Array [
+      Object {
+        "repoPath": "/srv/repo",
+        "workspaceId": "daemon:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      },
+    ]
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+ ❯ src/state/inactiveProjectWorktrees.paired.test.tsx:23:40
+     21|   const hook = renderHook(() => useInactiveProjectWorktrees([project],…
+     22|   await act(async () => { await services.onWorktreeChanged.mock.result…
+     23|   expect(services.registerProject).not.toHaveBeenCalled();
+       |                                        ^
+     24|   expect(services.listWorktrees).not.toHaveBeenCalled();
+     25|   expect(adapter.worktrees).toHaveBeenCalledWith("repo");
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯
+
+
+ Test Files  2 failed (2)
+      Tests  2 failed (2)
+   Start at  15:37:49
+   Duration  1.15s (transform 106ms, setup 134ms, collect 376ms, tests 14ms, environment 330ms, prepare 54ms)
+
+error: script "test" exited with code 1

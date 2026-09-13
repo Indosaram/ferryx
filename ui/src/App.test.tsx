@@ -75,6 +75,14 @@ const native = {
   onNewTerminalTabMenu: vi.fn(),
   onCloseTabMenu: vi.fn(),
   onSelectWorktreeMenu: vi.fn(),
+  onSelectTabMenu: vi.fn(),
+  onNextTabMenu: vi.fn(),
+  onPrevTabMenu: vi.fn(),
+  onSplitRightMenu: vi.fn(),
+  onSplitDownMenu: vi.fn(),
+  onCommandPaletteMenu: vi.fn(),
+  onToggleSidebarMenu: vi.fn(),
+  onOpenSettingsMenu: vi.fn(),
   selectWorktreeMenuHandler: null as ((digit: number) => void) | null,
   onTerminalLifecycle: vi.fn().mockResolvedValue(() => {}),
   onTerminalOutput: vi.fn().mockResolvedValue(() => {}),
@@ -90,6 +98,7 @@ const native = {
 
 const updater = {
   checkForUpdate: vi.fn(),
+  startUpdatePolling: vi.fn(() => () => {}),
 };
 
 const workspace = {
@@ -184,6 +193,14 @@ vi.mock("./lib/tauri", () => ({
   onNewTerminalTabMenu: native.onNewTerminalTabMenu,
   onCloseTabMenu: native.onCloseTabMenu,
   onSelectWorktreeMenu: native.onSelectWorktreeMenu,
+  onSelectTabMenu: native.onSelectTabMenu,
+  onNextTabMenu: native.onNextTabMenu,
+  onPrevTabMenu: native.onPrevTabMenu,
+  onSplitRightMenu: native.onSplitRightMenu,
+  onSplitDownMenu: native.onSplitDownMenu,
+  onCommandPaletteMenu: native.onCommandPaletteMenu,
+  onToggleSidebarMenu: native.onToggleSidebarMenu,
+  onOpenSettingsMenu: native.onOpenSettingsMenu,
   onTerminalLifecycle: native.onTerminalLifecycle,
   onTerminalOutput: native.onTerminalOutput,
   publishFocusedTerminal: native.publishFocusedTerminal,
@@ -206,6 +223,7 @@ vi.mock("./lib/updater", async (importOriginal) => {
   return {
     ...actual,
     checkForUpdate: updater.checkForUpdate,
+    startUpdatePolling: updater.startUpdatePolling,
   };
 });
 
@@ -457,8 +475,17 @@ describe("App project workspace flow", () => {
       };
     });
     native.onRemoteSelectionRequested.mockReset();
+    native.onSelectTabMenu.mockReset().mockResolvedValue(() => {});
+    native.onNextTabMenu.mockReset().mockResolvedValue(() => {});
+    native.onPrevTabMenu.mockReset().mockResolvedValue(() => {});
+    native.onSplitRightMenu.mockReset().mockResolvedValue(() => {});
+    native.onSplitDownMenu.mockReset().mockResolvedValue(() => {});
+    native.onCommandPaletteMenu.mockReset().mockResolvedValue(() => {});
+    native.onToggleSidebarMenu.mockReset().mockResolvedValue(() => {});
+    native.onOpenSettingsMenu.mockReset().mockResolvedValue(() => {});
     updater.checkForUpdate.mockReset();
     updater.checkForUpdate.mockResolvedValue(undefined);
+    updater.startUpdatePolling.mockReset().mockReturnValue(() => {});
     native.remoteSelectionHandler = null;
     native.onRemoteSelectionRequested.mockImplementation(async (handler: (payload: any) => void) => {
       native.remoteSelectionHandler = handler;
@@ -717,12 +744,16 @@ describe("App project workspace flow", () => {
     expect(await screen.findByText("Active project my-project")).toBeInTheDocument();
   });
 
-  it("checks for a signed update when the native app starts", async () => {
+  it("starts update polling on native mount and stops it on unmount", () => {
     native.isTauriRuntime.mockReturnValue(true);
+    const disposer = vi.fn();
+    updater.startUpdatePolling.mockReturnValue(disposer);
 
-    render(<App />);
+    const { unmount } = render(<App />);
 
-    await waitFor(() => expect(updater.checkForUpdate).toHaveBeenCalledOnce());
+    expect(updater.startUpdatePolling).toHaveBeenCalledOnce();
+    unmount();
+    expect(disposer).toHaveBeenCalledOnce();
   });
 
   it("restores projects lost from WebView storage using the native session catalog", async () => {

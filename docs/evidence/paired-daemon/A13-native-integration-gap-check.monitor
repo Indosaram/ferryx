@@ -1,0 +1,4 @@
+owner=43484 command=cargo check --manifest-path src-tauri/Cargo.toml --no-default-features 
+  PID  PPID    RSS ELAPSED COMMAND
+43484 43481    112   00:00 cargo check --manifest-path src-tauri/Cargo.toml --no-default-features
+exit=0 owner_reaped=true

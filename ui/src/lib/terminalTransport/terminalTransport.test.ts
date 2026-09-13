@@ -28,7 +28,7 @@ describe("TerminalTransport abstractions", () => {
 
     expect(listSpy).toHaveBeenCalled();
     expect(sessions).toEqual([
-      { sessionId: "sess-100", worktreePath: "/repo/path", daemonEpoch: null },
+      { sessionId: "sess-100", worktreePath: "/repo/path", daemonEpoch: null, running: true },
     ]);
   });
 

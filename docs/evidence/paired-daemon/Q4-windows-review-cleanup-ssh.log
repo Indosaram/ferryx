@@ -1,0 +1,4 @@
+Windows PowerShell
+Copyright (C) Microsoft Corporation. All rights reserved.
+
+The argument 'C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\review-cleanup.ps1' to the -File parameter does not exist. Provide the path to an existing '.ps1' file as an argument to the -File parameter.

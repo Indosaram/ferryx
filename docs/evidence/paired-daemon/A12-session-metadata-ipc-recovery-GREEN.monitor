@@ -1,0 +1,4 @@
+owner=77752 command=cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --test machine_session_metadata -- --nocapture 
+  PID  PPID    RSS ELAPSED COMMAND
+77752 77749    160   00:00 cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --test machine_session_metadata -- --nocapture
+exit=0 owner_reaped=true

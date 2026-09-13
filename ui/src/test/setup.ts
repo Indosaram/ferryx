@@ -3,23 +3,25 @@ import "@testing-library/jest-dom/vitest";
 // NWSAPI delegates these native states back to jsdom's matches(), which itself
 // calls NWSAPI. Reject only recursive native delegation; the outer evaluation
 // still parses selectors and checks document.fullscreenElement normally.
-const originalMatches = Element.prototype.matches;
-const activeStateMatches = new WeakMap<Element, Set<string>>();
-Element.prototype.matches = function (selector: string): boolean {
-  if (selector !== ":modal" && selector !== ":fullscreen") {
-    return originalMatches.call(this, selector);
-  }
-  const active = activeStateMatches.get(this) ?? new Set<string>();
-  if (active.has(selector)) return false;
-  active.add(selector);
-  activeStateMatches.set(this, active);
-  try {
-    return originalMatches.call(this, selector);
-  } finally {
-    active.delete(selector);
-    if (active.size === 0) activeStateMatches.delete(this);
-  }
-};
+if (typeof Element !== "undefined") {
+  const originalMatches = Element.prototype.matches;
+  const activeStateMatches = new WeakMap<Element, Set<string>>();
+  Element.prototype.matches = function (selector: string): boolean {
+    if (selector !== ":modal" && selector !== ":fullscreen") {
+      return originalMatches.call(this, selector);
+    }
+    const active = activeStateMatches.get(this) ?? new Set<string>();
+    if (active.has(selector)) return false;
+    active.add(selector);
+    activeStateMatches.set(this, active);
+    try {
+      return originalMatches.call(this, selector);
+    } finally {
+      active.delete(selector);
+      if (active.size === 0) activeStateMatches.delete(this);
+    }
+  };
+}
 
 class ResizeObserverStub implements ResizeObserver {
   disconnect() {}

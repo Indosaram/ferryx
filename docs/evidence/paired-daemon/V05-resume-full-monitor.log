@@ -1,0 +1,5 @@
+status: exited_1 exit_code: 1
+JSON report written to /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/docs/evidence/paired-daemon/V05-resume-full.json
+error: script "test" exited with code 1
+
+V05_FULL_EXIT=1

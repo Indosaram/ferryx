@@ -153,7 +153,9 @@ export async function registerProject(request: { workspaceId: string; repoPath: 
   return invokeCommand<RegisteredProject>("cmd_project_register", { request });
 }
 
+/** Desktop removal only detaches paired references; remote unregister is an explicit typed mutation. */
 export async function unregisterProject(request: { workspaceId: string }) {
+  if (request.workspaceId.startsWith("daemon:")) return;
   if (!isTauri()) return;
   return invokeCommand<void>("cmd_project_unregister", { request });
 }

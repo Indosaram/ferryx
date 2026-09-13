@@ -1,0 +1,26 @@
+cwd=/Users/indo/code/project/orca-lite-wt/herdr-wave2
+free_bytes=44592922624
+seed_delta={}
+src-tauri/src/remote/terminal_wire.rs sha256=52a91ccdf54a3453bdbaee14b4cc93d8b1cb926b696bb19ebd93d44614a9f9b7
+src-tauri/tests/a10_terminal_wire_codec.rs sha256=849472b3276429ec1c828682b2cfa35b2d0308286e85fe838817bf45536ed894
+CARGO_BUILD_JOBS=4 RUSTC_WRAPPER= CARGO_TARGET_DIR=/Users/indo/code/project/orca-lite-wt/herdr-wave2/src-tauri/target
+$ rustc --version
+rustc 1.92.0 (ded5c06cf 2025-12-08)
+
+exit=0
+$ rustc --edition=2021 --test src-tauri/tests/a10_terminal_wire_codec.rs -L dependency=src-tauri/target/debug/deps --extern serde=src-tauri/target/debug/deps/libserde-20103001e2270c27.rlib --extern serde_json=src-tauri/target/debug/deps/libserde_json-bbb1dc538a584af2.rlib -o src-tauri/target/a10-wire-recovery-green
+
+exit=0
+$ src-tauri/target/a10-wire-recovery-green --nocapture
+
+running 5 tests
+test metadata_is_not_native_terminal_output ... ok
+test corpus::canonical_vectors ... ok
+test corpus::malformed_truncated_and_reset ... ok
+test corpus::allocation_bounds ... ok
+test corpus::a02_u64_and_all_fragment_boundaries ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+exit=0

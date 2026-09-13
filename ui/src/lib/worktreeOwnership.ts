@@ -44,10 +44,16 @@ export function resolveWorktreeOwnerId(
     return worktree.workspaceId;
   }
 
+  // Paired rows always carry desktop ownership; raw machine branch IDs and
+  // filesystem paths cannot identify a paired owner.
+  if (worktree.workspaceId?.startsWith("daemon:")) return undefined;
+  if (projects.some(project => project.workspaceId === fallbackProjectId && project.target?.kind === "pairedDaemon")) {
+    return fallbackProjectId;
+  }
   const remoteOwner = uniqueDeepestRemoteOwner(projects, worktree.path);
   if (remoteOwner) return remoteOwner.workspaceId;
 
-  const localProjects = projects.filter((project) => project.target?.kind !== "ssh");
+  const localProjects = projects.filter((project) => !project.target || project.target.kind === "local");
   const identityOwner = worktreeIdentity(worktree)?.wsId;
   if (
     identityOwner &&

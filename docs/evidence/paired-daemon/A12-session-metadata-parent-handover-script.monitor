@@ -1,0 +1,4 @@
+owner=33934 command=bash docs/evidence/paired-daemon/parent-owner-supervisor.sh 
+  PID  PPID    RSS ELAPSED COMMAND
+33934 33931    128   00:00 bash docs/evidence/paired-daemon/parent-owner-supervisor.sh
+exit=0 owner_reaped=true

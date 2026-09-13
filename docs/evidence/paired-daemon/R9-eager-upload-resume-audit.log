@@ -1,0 +1,6 @@
+{"run": "wire", "cases": 36, "staged_valid": 9, "reqwest_received_valid": 16, "reqwest_transport_failures": 2, "pooled_reuse_proven": 9, "accepted_and_dropped": 36, "all_reqwest_failures_after_complete_server_write": true}
+{"run": "final", "cases": 45, "staged_valid": 9, "reqwest_received_valid": 16, "reqwest_transport_failures": 2, "pooled_reuse_proven": 9, "accepted_and_dropped": 45, "all_reqwest_failures_after_complete_server_write": true}
+{"owned_pids_present": false, "private_roots_remaining": 0, "ps_exit": 1}
+{"scoped_diff_check_exit": 0}
+{"file": "src-tauri/examples/r9_eager_upload_probe.rs", "sha256": "2d5f7151fbfff64b13d544b287d53dd25046a3be85739126f8a01617299d2b4c"}
+{"file": "docs/evidence/paired-daemon/R9-eager-upload-resume.md", "sha256": "c32b1dd0d5e397d04ecbe03878a352087f1f40be795abcdaeaf46793df3a63da"}

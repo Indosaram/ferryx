@@ -1,0 +1,53 @@
+{
+  "baseline": "inherited composition, not HEAD; seed differences also include completed A09",
+  "files": [
+    {
+      "path": "src-tauri/src/daemon/session_service.rs",
+      "seedSha256": "e16eaa317ad02282a235350cf55263533af989962613221ce1156f56fcf567c7",
+      "currentSha256": "3b87998a3a199ad92c116184bfe9a4cc0c723117649bbf4d257503d3bd9771d4",
+      "ownedEdit": true
+    },
+    {
+      "path": "src-tauri/src/remote/mod.rs",
+      "seedSha256": "db21688496000d96012919796b565c70a02aefc941d9b902b80ad933b15b605b",
+      "currentSha256": "1ac52a07a6c0c408f0b2323f35808a5963a75c795a2717d7e916bcb315bdbbf6",
+      "ownedEdit": true
+    },
+    {
+      "path": "src-tauri/src/remote/server.rs",
+      "seedSha256": "4a762a4fd2cc68ee2ed7e810ba726fea9e8fd5bafba397aa32ca35d5b7e3b5ca",
+      "currentSha256": "58bb5f13af343235daa6a5b3a86fa2b8337090997307bd95a4e6810159469c81",
+      "ownedEdit": true
+    },
+    {
+      "path": "src-tauri/src/remote/protocol.rs",
+      "seedSha256": null,
+      "currentSha256": "15254425e1764c2aefb72cbe883aec27b6d8c4dbf07b880a8792acaa8260ce81",
+      "ownedEdit": true
+    },
+    {
+      "path": "src-tauri/src/remote/security_socket_tests.rs",
+      "seedSha256": null,
+      "currentSha256": "cc27b2be9be055ae11d0d93c671387f0c1dae427a7358374f2cb9410bb271cf9",
+      "ownedEdit": true
+    },
+    {
+      "path": "src-tauri/tests/machine_terminal_stream.rs",
+      "seedSha256": null,
+      "currentSha256": "a819600d1e2cb4ad4996eca1fd71d7ef371483143a6b6c8f8c18ec61bb2150ba",
+      "ownedEdit": true
+    },
+    {
+      "path": "src-tauri/src/remote/terminal_wire.rs",
+      "seedSha256": "52a91ccdf54a3453bdbaee14b4cc93d8b1cb926b696bb19ebd93d44614a9f9b7",
+      "currentSha256": "52a91ccdf54a3453bdbaee14b4cc93d8b1cb926b696bb19ebd93d44614a9f9b7",
+      "ownedEdit": false
+    },
+    {
+      "path": "src-tauri/Cargo.lock",
+      "seedSha256": "3bf80308ad89556f9a6904c8e13ad467906e27bb1875c87b1f6b19ee06ddffb5",
+      "currentSha256": "3bf80308ad89556f9a6904c8e13ad467906e27bb1875c87b1f6b19ee06ddffb5",
+      "ownedEdit": false
+    }
+  ]
+}

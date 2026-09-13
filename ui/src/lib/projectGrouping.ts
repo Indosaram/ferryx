@@ -40,8 +40,8 @@ export function getProjectFolderName(project: RegisteredProject): string {
 }
 
 export function matchesSameProject(a: RegisteredProject, b: RegisteredProject): boolean {
-  const hostA = a.target?.kind === "ssh" ? `ssh:${a.target.hostId}` : "local";
-  const hostB = b.target?.kind === "ssh" ? `ssh:${b.target.hostId}` : "local";
+  const hostA = a.target && a.target.kind !== "local" ? `${a.target.kind}:${a.target.hostId}` : "local";
+  const hostB = b.target && b.target.kind !== "local" ? `${b.target.kind}:${b.target.hostId}` : "local";
   if (hostA === hostB) {
     if (a.workspaceId === b.workspaceId) return true;
     if (a.gitCommonDir && b.gitCommonDir &&
@@ -76,7 +76,7 @@ export function groupProjects(projects: RegisteredProject[]): ProjectGroup[] {
         groups.splice(groups.indexOf(group), 1);
       }
       existing.memberProjects.push(project);
-      existing.primaryProject = existing.memberProjects.find((member) => member.target?.kind !== "ssh")
+      existing.primaryProject = existing.memberProjects.find((member) => !member.target || member.target.kind === "local")
         ?? existing.primaryProject;
       existing.groupId = existing.primaryProject.workspaceId;
     } else {

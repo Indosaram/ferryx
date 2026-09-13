@@ -93,7 +93,41 @@ function workspaceState(): WorkspaceState {
   };
 }
 
-describe("sessionPersistence v2 serialization and migration", () => {
+describe("sessionPersistence v3 serialization and migration", () => {
+  it("preserves paired ownership and proxy identity despite local inventory absence", () => {
+    const workspaceId = `daemon:${"a".repeat(64)}`;
+    const project = { target: { kind: "pairedDaemon" as const, hostId: "host-a" }, remoteWorkspaceId: "remote-root" };
+    const saved = serializeWorkspaceState(workspaceId, "/workspace/main", workspaceState(), null, project);
+    expect(saved.workspaces[workspaceId]).toMatchObject(project);
+    const next = serializeWorkspaceState(workspaceId, "/workspace/main", workspaceState(), saved);
+    expect(next.workspaces[workspaceId]).toMatchObject(project);
+    const restored = deserializeWorkspaceState(workspaceId, saved, [])!;
+    expect(restored.sessions["sess-1"]).toMatchObject({ backendSessionId: "backend-1", remoteConnectionState: "reconnecting" });
+    expect(restored.worktrees[0].workspaceId).toBe(workspaceId);
+    expect(restored.layout.layoutsByTabId["tab-1"].root).toEqual(workspaceState().layout.layoutsByTabId["tab-1"].root);
+  });
+
+  it("projects paired targets without embedding credential fields", () => {
+    const workspaceId = `daemon:${"a".repeat(64)}`;
+    const project = { target: { kind: "pairedDaemon" as const, hostId: "host-a", deviceToken: "secret-sentinel" }, remoteWorkspaceId: "remote-root" };
+    const saved = serializeWorkspaceState(workspaceId, "/workspace/main", workspaceState(), null, project);
+    expect(JSON.stringify(saved)).not.toContain("secret-sentinel");
+  });
+
+  it("does not trust incomplete inventory as proof of local process death", () => {
+    const saved = serializeWorkspaceState("default", "/workspace/main", workspaceState());
+    const restored = deserializeWorkspaceState("default", saved, { complete: false, sessions: [] })!;
+    expect(restored.sessions["sess-1"].backendSessionId).toBe("backend-1");
+  });
+
+  it("quarantines an invalid paired workspace without affecting another row", () => {
+    const saved = serializeWorkspaceState("default", "/workspace/main", workspaceState());
+    const badId = `daemon:${"b".repeat(64)}`;
+    saved.workspaces[badId] = { ...saved.workspaces.default, workspaceId: badId };
+    expect(deserializeWorkspaceState(badId, saved)).toBeNull();
+    expect(deserializeWorkspaceState("default", saved)).not.toBeNull();
+  });
+
   it("retains Git grouping metadata in session snapshots and subsequent saves", () => {
     const project = {
       gitRoot: "/workspace/main",
@@ -109,7 +143,7 @@ describe("sessionPersistence v2 serialization and migration", () => {
     const serialized = serializeWorkspaceState("default", "/workspace/main", workspaceState());
 
     expect(serialized.version).toBe(WORKSPACE_SESSION_VERSION);
-    expect(serialized.version).toBe(2);
+    expect(serialized.version).toBe(3);
     const workspace = serialized.workspaces.default;
     expect(workspace.repoRoot).toBe("/workspace/main");
     expect(workspace.layout.activeTabId).toBe("tab-1");

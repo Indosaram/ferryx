@@ -1,0 +1,546 @@
+COMMAND ["cargo", "test", "--locked", "--manifest-path", "src-tauri/Cargo.toml", "--no-default-features", "--lib", "remote::", "--", "--nocapture"] SOURCE {"src-tauri/tests/machine_catalog_persistence.rs": {"before": "fd4cbb35061a5cae09ee4bd657907a7433c4966dd50cc88630316f2af78cc8f4", "after": "4d492f1010c3bc3b68b959fab94eb4a2cfece4be18fdb8359e570ed2a7ed9322"}, "src-tauri/src/remote/workspace_api_tests.rs": {"before": "acd98884243be442d615efe39b614064a3ff71353596b22ae0403dd660938b1c", "after": "0c30c7da1b1460bdbe555f3442c0919ca9e0361926a71ac4d1ee1b4548a84857"}, "src-tauri/src/remote/workspace_api/worktree_authority_tests.rs": {"before": "6e5c092e24fe5115b0bd266651d1e8c5a5f4fdc06bfd5bb4e8c4cfa3b52861eb", "after": "97538465d9f639c14f18004b09d20baa9e840f3ebd1f95b153f013b5d251f3c5"}}
+COMMAND_PID 313886
+   Compiling ferryx v2026.908.1 (/home/indo/ferryx-herdr-q4-linux-01a097f8/source/src-tauri)
+warning: unused import: `NotificationAuthorization`
+ --> src/notification/permission.rs:4:5
+  |
+4 |     NotificationAuthorization, NotificationPermissionRequestDto, NotificationPermissionStatusDto,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `token`
+    --> src/remote/auth.rs:1399:14
+     |
+1399 |         let (token, device) = auth
+     |              ^^^^^ help: if this is intentional, prefix it with an underscore: `_token`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `scroll_daemon_client`
+   --> src/lib.rs:915:9
+    |
+915 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+    |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+
+warning: constant `GHOSTTY_TERMINAL_SCREEN_PRIMARY` is never used
+  --> src/native_terminal/sys/constants.rs:56:11
+   |
+56 | pub const GHOSTTY_TERMINAL_SCREEN_PRIMARY: c_int = 0;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `home_dir` is never used
+  --> src/permissions/mod.rs:43:4
+   |
+43 | fn home_dir() -> Option<PathBuf> {
+   |    ^^^^^^^^
+
+warning: function `no_auth_query` is never used
+    --> src/remote/server.rs:2862:12
+     |
+2862 |         fn no_auth_query() -> AuthQuery {
+     |            ^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src/worktree/manager.rs:86:19
+   |
+86 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+   --> src/worktree/manager.rs:93:8
+    |
+ 92 | impl WriterLeaseGuard {
+    | --------------------- associated items in this implementation
+ 93 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+    |        ^^^
+...
+101 |     pub(crate) fn canonical_path(&self) -> &Path {
+    |                   ^^^^^^^^^^^^^^
+...
+105 |     pub(crate) fn owner_id(&self) -> &str {
+    |                   ^^^^^^^^
+
+warning: method `acquire_writer_lease` is never used
+   --> src/worktree/manager.rs:338:19
+    |
+134 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+338 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib test) generated 9 warnings (run `cargo fix --lib -p ferryx --tests` to apply 3 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 30.50s
+     Running unittests src/lib.rs (/home/indo/ferryx-herdr-q4-linux-01a097f8/target/debug/deps/ferryx_lib-29d5e12f5ed6e1ba)
+
+running 254 tests
+test ipc::project_remote::tests::all_local_git_boundaries_reject_remote_namespace_even_without_loaded_metadata ... ok
+test ipc::project_remote::tests::local_registration_never_canonicalizes_a_remote_id_into_a_local_project ... ok
+test ipc::project_remote::tests::remote_registration_wire_request_rejects_extra_execution_fields ... ok
+test ipc::project_remote::tests::remote_startup_cannot_use_local_shell_resolver ... ok
+test remote::auth::persistence_tests::a_completed_write_leaves_a_fully_readable_store ... ok
+test remote::auth::persistence_tests::canonical_auth_path_follows_the_canonical_remote_dir ... ok
+test remote::auth::persistence_tests::concurrent_writers_never_observe_a_torn_store ... ok
+test remote::auth::persistence_tests::legacy_revoked_tombstones_are_pruned_when_the_store_is_loaded ... ok
+test remote::auth::persistence_tests::revoked_devices_are_deleted_outright_and_never_reappear ... ok
+test remote::auth::persistence_tests::the_store_is_written_owner_only_or_reports_an_error ... ok
+test remote::auth::persistence_tests::validate_token_throttles_disk_persistence ... ok
+test remote::auth::security_tests::concurrent_guesses_spend_exactly_five_failure_slots ... ok
+test remote::auth::security_tests::expired_pin_is_consumed_and_never_issues_a_token ... ok
+test remote::auth::security_tests::late_generated_pin_survives_failure_window_rollover ... ok
+test remote::auth::security_tests::new_window_discards_expired_codes_and_restores_pairing ... ok
+test remote::auth::security_tests::revocation_is_latched_and_registration_after_validation_cannot_miss_it ... ok
+test remote::auth::security_tests::successful_pairing_does_not_reset_the_global_failure_budget ... ok
+test remote::auth::security_tests::valid_pairing_is_single_use_under_concurrent_exchange ... ok
+test remote::auth::tests::relay_capability_is_single_use_persisted_and_cancellable ... ok
+test remote::auth::tests::test_auth_credential_separation ... ok
+test remote::auth::tests::test_auth_store_resolves_under_the_same_dir_as_the_identity ... ok
+test remote::auth::tests::test_cli_pair_approve ... ok
+test remote::auth::tests::test_cli_pair_cross_process_persistence ... ok
+test remote::auth::tests::test_device_idle_expiry ... ok
+test remote::auth::tests::test_device_name_length_capped_and_list_devices_filters_idle ... ok
+test remote::auth::tests::test_identity_dir_matches_the_shared_remote_state_dir ... ok
+test remote::auth::tests::test_machine_identity_persistence ... ok
+test remote::auth::tests::test_machine_identity_sign_and_verify ... ok
+test remote::auth::tests::test_pairing_exchange_with_blank_name_stores_fallback ... ok
+test remote::auth::tests::test_repairing_view_pin_preserves_view_permission_on_replacement ... ok
+test remote::auth::tests::test_repairing_with_same_installation_id_replaces_and_invalidates_old_token ... ok
+test remote::auth::tests::test_store_without_installation_id_backward_compat ... ok
+test remote::design_mode::tests::test_design_mode_snapshot_staging ... ok
+test remote::discovery::tailscale::tests::test_parse_status_json_invalid_input_errors ... ok
+test remote::discovery::tailscale::tests::test_parse_status_json_skips_peers_without_ipv4 ... ok
+test remote::discovery::tailscale::tests::test_tailscale_peer_discovery ... ok
+test remote::filesystem_tests::a06_cancelled_worker_cannot_publish ... ok
+test remote::filesystem_tests::a06_directory_http_home ... HTTP native browse: hidden=false, entries=2, truncated=false
+HTTP native browse: hidden=false, entries=0, truncated=false
+HTTP native browse: hidden=true, entries=7, truncated=true
+HTTP native browse: hidden=false, entries=0, truncated=false
+ok
+test remote::filesystem_tests::a06_http_send_failure_still_tears_down ... 
+thread 'remote::filesystem_tests::a06_http_send_failure_still_tears_down' (314169) panicked at src/remote/filesystem_tests.rs:227:18:
+called `Result::unwrap()` on an `Err` value: reqwest::Error { kind: Builder, source: http::Error(InvalidHeaderValue) }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+A06 injected send failure: listener joined, private fixture removed
+ok
+test remote::filesystem_tests::a06_native_bounds_and_query_contract ... ok
+test remote::filesystem_tests::a06_service_less_typed_503_without_probe ... R6 service-less cleanup: listener joined, connection refused, injected=false
+ok
+test remote::filesystem_tests::r6_auth_routed_deadline_admission ... R6 auth: 16 real routed workers entered; unrelated health=200
+R6 auth: expected 504; deadline/retained admission or revoke-before-release verified
+R6 auth recovered admission: invalid=401 mirror=403 before malformed path; no-store
+R6 auth exact drain: entered=18 completed=18; completion channel closed before root removal
+R6 auth cleanup: workers=18 completed; listener joined/refused; root removed; injected=false
+ok
+test remote::filesystem_tests::r6_auth_routed_failure_cleanup ... R6 auth: 1 real routed workers entered; unrelated health=200
+
+thread 'remote::filesystem_tests::r6_auth_routed_failure_cleanup' (314230) panicked at src/remote/filesystem_tests.rs:65:9:
+injected auth fixture failure
+R6 auth injected disconnect: cancellation observed; blocked auth permit retained
+R6 auth recovered admission: invalid=401 mirror=403 before malformed path; no-store
+R6 auth exact drain: entered=3 completed=3; completion channel closed before root removal
+R6 auth cleanup: workers=3 completed; listener joined/refused; root removed; injected=true
+ok
+test remote::filesystem_tests::r6_auth_routed_revocation ... R6 auth: 1 real routed workers entered; unrelated health=200
+R6 auth: expected 401; deadline/retained admission or revoke-before-release verified
+R6 auth recovered admission: invalid=401 mirror=403 before malformed path; no-store
+R6 auth exact drain: entered=3 completed=3; completion channel closed before root removal
+R6 auth cleanup: workers=3 completed; listener joined/refused; root removed; injected=false
+ok
+test remote::filesystem_tests::r6_empty_deadline_and_independent_bytes ... R6 empty scan: expired result truncated; cancellation after resolution returns TIMEOUT
+R6 byte cap: created=800 retained=471 json_bytes=261671 next_bytes=555
+ok
+test remote::filesystem_tests::r6_http_disconnect_retains_worker_slot ... R6 HTTP disconnect: request dropped, cancellation=true, blocked fourth slot retained (429)
+R6 HTTP completion: cancelled scan returned TIMEOUT, slot reusable
+R6 HTTP cleanup: listener joined, connection refused, private root removed
+ok
+test remote::filesystem_tests::r6_service_less_injected_failure ... 
+thread 'remote::filesystem_tests::r6_service_less_injected_failure' (314242) panicked at src/remote/filesystem_tests.rs:681:5:
+R6 injected service-less assertion failure
+R6 service-less cleanup: listener joined, connection refused, injected=true
+ok
+test remote::machine_protocol::tests::expanded_shared_parity_fixtures ... ok
+test remote::machine_protocol::tests::identity_is_host_qualified_and_preserves_large_epoch ... ok
+test remote::machine_protocol::tests::known_answer_full_hashes_match_shared_fixtures ... ok
+test remote::machine_protocol::tests::legacy_valid_ssh_targets_roundtrip_without_normalization ... ok
+test remote::machine_protocol::tests::lifecycle_and_descriptor_fixtures_roundtrip ... SURFACE {"hostId":"relay/machine-a","workspaceId":"daemon:f3fa4269ab5d5b3189945b790e708994534625e0166dc326e02aeca25537ac17","remoteWorkspaceId":"project-a","localProxyId":"daemon-session:c92715a3edd4d610415fd36294ee13f4393f93d772921dec49c43e923cdee909","worktree":null,"remoteTarget":{"machineId":"machine","daemonEpoch":"9007199254740993","sessionId":"pty-1"},"remoteCursor":"9007199254740995","nativeAttachment":{"daemonEpoch":"17","lastOutputSequence":"23"},"cols":120,"rows":36,"requestId":"3941b9de-b16d-4d9a-ae0a-118f90fd91f4","processStatus":"running","transportStatus":"disconnected"}
+ok
+test remote::machine_protocol::tests::malformed_epochs_and_oversized_json_are_rejected ... ok
+test remote::machine_protocol::tests::missing_metadata_and_unknown_targets_never_become_local ... ok
+test remote::machine_protocol::tests::shared_fixtures_roundtrip_through_public_decoder ... ok
+test remote::machine_protocol::tests::shared_invalid_fixtures_are_rejected ... ok
+test remote::mirror::tests::cjk_line_skips_wide_spacer_tails ... ok
+test remote::mirror::tests::clear_and_home_places_cursor_at_origin ... ok
+test remote::mirror::tests::feed_segments_replays_at_recorded_geometry_then_resizes ... ok
+test remote::mirror::tests::flat_history_replay_corrupts_relative_to_segmented_replay ... ok
+test remote::mirror::tests::plain_ascii_line_produces_one_run ... ok
+test remote::mirror::tests::resize_returns_full_frame_with_new_dimensions ... ok
+test remote::mirror::tests::scroll_negative_reveals_older_content_and_positive_returns_toward_newest ... ok
+test remote::mirror::tests::second_feed_only_emits_changed_line ... ok
+test remote::mirror::tests::sgr_bold_red_maps_attrs_and_foreground ... ok
+test remote::protocol::tests::control_handshake_wire_roundtrips ... ok
+test remote::protocol::tests::malformed_wire_values_are_rejected ... ok
+test remote::protocol::tests::omitted_optional_fields_deserialize ... ok
+test remote::protocol::tests::pairing_state_transition_matrix ... ok
+test remote::protocol::tests::pairing_state_wire_roundtrips ... ok
+test remote::protocol::tests::pairing_wire_roundtrips ... ok
+test remote::protocol::tests::proxy_wire_roundtrips ... ok
+test remote::protocol::tests::test_client_control_message_scroll_serde_roundtrip ... ok
+test remote::push::tests::test_web_push_payload_dispatch ... ok
+test remote::relay_client::tests::control_and_data_urls_are_built_from_relay_url ... ok
+test remote::relay_client::tests::proxies_frames_between_data_channel_and_local_gateway ... ok
+test remote::relay_client::tests::test_pairing_coordinator_lifecycle_and_ack ... ok
+test remote::relay_client::tests::test_pairing_coordinator_pin_can_be_redeemed_directly ... ok
+test remote::relay_client::tests::test_pairing_coordinator_regenerates_and_ignores_old_expiry ... ok
+test remote::relay_client::tests::test_pairing_coordinator_rejects_wrong_ack_generation ... ok
+test remote::relay_client::tests::test_pairing_coordinator_timeout_or_rejection ... ok
+test remote::relay_client::tests::test_relay_client_ed25519_auth_rejection ... ok
+test remote::relay_client::tests::test_relay_client_ed25519_auth_success ... ok
+test remote::relay_client::tests::to_ws_base_rewrites_https_and_trims_trailing_slash ... ok
+test remote::relay_client::tests::with_gateway_preserves_address_and_credentials ... ok
+test remote::relay_server::tests::a_control_signature_minted_for_another_relay_is_refused ... ok
+test remote::relay_server::tests::accepts_target_when_session_is_colon_scoped ... ok
+test remote::relay_server::tests::coordinator_pairs_through_relay_to_real_gateway ... R4 PTY: executed marker received; owned sessions explicitly closed; listeners/reverse joined; private workspace removed
+ok
+test remote::relay_server::tests::machine_query_admission ... ok
+test remote::relay_server::tests::protects_origin_when_gateway_sends_sensitive_headers ... ok
+test remote::relay_server::tests::r4_preference_route_not_intercepted_by_websocket ... ok
+test remote::relay_server::tests::r4_strict_utf8_query ... ok
+test remote::relay_server::tests::r4_sustained_admission_and_cancel_cleanup ... R4 admission: 60 completed data-channel HTTP requests; two exact 429 boundaries; injected-window recovery; 100 waiting requests/503; cancellation registry=0
+ok
+test remote::relay_server::tests::rejects_registration_when_capability_format_is_invalid ... ok
+test remote::relay_server::tests::routes_session_when_path_is_colon_scoped ... ok
+test remote::relay_server::tests::test_control_challenge_domain_separation ... ok
+test remote::relay_server::tests::test_http_response_framing ... ok
+test remote::relay_server::tests::test_key_store_corruption_and_write_failure_fail_closed ... ok
+test remote::relay_server::tests::test_machine_ownership_survives_restart_and_private_enrollment ... ok
+test remote::relay_server::tests::test_relay_admission_rate_limiting ... ok
+test remote::relay_server::tests::test_relay_browser_ws_terminal_bridge_success ... ok
+test remote::relay_server::tests::test_relay_dispatch_rejects_a_replaced_control_channel ... ok
+test remote::relay_server::tests::test_relay_ed25519_control_handshake_success ... ok
+test remote::relay_server::tests::test_relay_ed25519_control_handshake_wrong_sig_rejected ... ok
+test remote::relay_server::tests::test_relay_ed25519_stale_timestamp_rejected ... ok
+test remote::relay_server::tests::test_relay_generation_safe_cleanup_and_limits ... ok
+test remote::relay_server::tests::test_relay_key_store_merges_concurrent_enrollments_and_rejects_corrupt_records ... ok
+test remote::relay_server::tests::test_relay_machine_hijack_with_different_key_fails ... ok
+test remote::relay_server::tests::test_relay_multi_machine_concurrent_registration ... ok
+test remote::relay_server::tests::test_relay_pair_exchange_lockout_after_failures ... ok
+test remote::relay_server::tests::test_relay_pair_exchange_success ... ok
+test remote::relay_server::tests::test_relay_pair_exchange_unknown_pin_returns_404 ... ok
+test remote::relay_server::tests::test_relay_pairing_claim_requires_the_live_control_identity ... ok
+test remote::relay_server::tests::test_relay_pairing_claim_uses_relay_generation_not_client_attempt_counter ... ok
+test remote::relay_server::tests::test_relay_register_pairing_caps_lease_lifetime ... ok
+test remote::relay_server::tests::test_relay_register_pairing_is_idempotent_for_identical_retries ... ok
+test remote::relay_server::tests::test_relay_reverse_tunnel_multiplex ... ok
+test remote::relay_server::tests::test_relay_socket_ticket_expired_rejected ... ok
+test remote::relay_server::tests::test_relay_socket_ticket_issuance_and_single_use ... ok
+test remote::relay_server::tests::test_relay_stream_half_is_bound_to_the_allocating_control_generation ... ok
+test remote::relay_server::tests::test_relay_unissued_session_rejected ... ok
+test remote::relay_server::tests::test_security_concurrent_two_daemon_isolation ... ok
+test remote::relay_server::tests::test_security_expired_pin_claim_rejected ... ok
+test remote::relay_server::tests::test_security_fleet_pin_brute_force_lockout ... ok
+test remote::relay_server::tests::test_security_machine_id_hijack_rejection ... ok
+test remote::relay_server::tests::test_security_role_swap_prevention ... ok
+test remote::relay_server::tests::test_socket_ticket_cache_keeps_two_valid_tokens_for_one_machine ... ok
+test remote::relay_server::tests::test_socket_ticket_cold_cache_rejects_never_issued_bearer ... ok
+test remote::relay_server::tests::test_socket_ticket_expired_cache_rechecks_gateway_and_rejects_revoked_bearer ... ok
+test remote::relay_server::tests::test_socket_ticket_gateway_confirmed_bearer_is_granted_and_cached ... ok
+test remote::server::attention_inventory_tests::remote_attention_inventory_keeps_other_projects_and_unseen_done ... ok
+test remote::server::preference_http_tests::ac09_preferences_redact_paths_when_authenticated ... 
+running 1 test
+test remote::server::preference_http_tests::ac09_private_http_child ... AC09 fixture pid=314336 listener=127.0.0.1:34059
+AC09 Mirror/View HTTP 200 {"fontFamily":"AC09 Display Font, monospace","fontSize":19.0,"macosOptionAsAlt":true,"cursorStyle":"bar","theme":{"background":"#123456","foreground":"#abcdef","cursor":"#ffffff","cursorAccent":"#282c34","selectionBackground":"#52525299","selectionForeground":null,"black":"#1d1f21","red":"#cc6666","green":"#b5bd68","yellow":"#f0c674","blue":"#81a2be","magenta":"#b294bb","cyan":"#8abeb7","white":"#c5c8c6","brightBlack":"#666666","brightRed":"#d54e53","brightGreen":"#b9ca4a","brightYellow":"#e7c547","brightBlue":"#7aa6da","brightMagenta":"#c397d8","brightCyan":"#70c0b1","brightWhite":"#eaeaea","extendedAnsi":[]},"source":"ghostty","status":"imported","sourcePath":null,"defaultShell":null,"scrollback":4321}
+AC09 Mirror/Control HTTP 200 {"fontFamily":"AC09 Display Font, monospace","fontSize":19.0,"macosOptionAsAlt":true,"cursorStyle":"bar","theme":{"background":"#123456","foreground":"#abcdef","cursor":"#ffffff","cursorAccent":"#282c34","selectionBackground":"#52525299","selectionForeground":null,"black":"#1d1f21","red":"#cc6666","green":"#b5bd68","yellow":"#f0c674","blue":"#81a2be","magenta":"#b294bb","cyan":"#8abeb7","white":"#c5c8c6","brightBlack":"#666666","brightRed":"#d54e53","brightGreen":"#b9ca4a","brightYellow":"#e7c547","brightBlue":"#7aa6da","brightMagenta":"#c397d8","brightCyan":"#70c0b1","brightWhite":"#eaeaea","extendedAnsi":[]},"source":"ghostty","status":"imported","sourcePath":null,"defaultShell":null,"scrollback":4321}
+AC09 Machine/Control HTTP 200 {"fontFamily":"AC09 Display Font, monospace","fontSize":19.0,"macosOptionAsAlt":true,"cursorStyle":"bar","theme":{"background":"#123456","foreground":"#abcdef","cursor":"#ffffff","cursorAccent":"#282c34","selectionBackground":"#52525299","selectionForeground":null,"black":"#1d1f21","red":"#cc6666","green":"#b5bd68","yellow":"#f0c674","blue":"#81a2be","magenta":"#b294bb","cyan":"#8abeb7","white":"#c5c8c6","brightBlack":"#666666","brightRed":"#d54e53","brightGreen":"#b9ca4a","brightYellow":"#e7c547","brightBlue":"#7aa6da","brightMagenta":"#c397d8","brightCyan":"#70c0b1","brightWhite":"#eaeaea","extendedAnsi":[]},"source":"ghostty","status":"imported","sourcePath":null,"defaultShell":null,"scrollback":4321}
+AC09 anonymous HTTP 401 Unauthorized
+AC09 revoked Mirror/View HTTP 401 Unauthorized
+AC09 revoked Mirror/Control HTTP 401 Unauthorized
+AC09 revoked Machine/Control HTTP 401 Unauthorized
+AC09 CLEANUP listener_joined=true
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 927 filtered out; finished in 0.03s
+
+
+
+AC09 CLEANUP child_waited=true private_root_removed=true
+ok
+test remote::server::preference_http_tests::ac09_private_http_child ... ok
+test remote::server::tests::a03_absent_machine_service_is_private_and_unavailable ... ok
+test remote::server::tests::a03_forged_exchange_fields_cannot_upgrade_mirror_authority ... ok
+test remote::server::tests::a03_identity_runs_offthread_and_revocation_fences_response ... ok
+test remote::server::tests::a03_machine_auth_errors_are_private_json ... ok
+test remote::server::tests::r3_http_boundary_contract ... R3 POST workspace/projects bytes=65537 auth=true status=413 no_store=true expected=413/PAYLOAD_TOO_LARGE valid=true
+R3 body full POST workspace/projects bytes=65537 status=413 valid=true
+R3 body stream POST workspace/projects bytes=65537 status=413 valid=true
+R3 POST workspace/projects bytes=65537 auth=true status=403 no_store=true expected=403/MACHINE_ACCESS_REQUIRED valid=true
+R3 body full POST workspace/projects bytes=65537 status=403 valid=true
+R3 body stream POST workspace/projects bytes=65537 status=403 valid=true
+R3 POST workspace/projects bytes=65537 auth=false status=401 no_store=true expected=401/UNAUTHORIZED valid=true
+R3 body full POST workspace/projects bytes=65537 status=401 valid=true
+R3 body stream POST workspace/projects bytes=65537 status=401 valid=true
+R3 POST workspace/projects bytes=2097153 auth=true status=413 no_store=true expected=413/PAYLOAD_TOO_LARGE valid=true
+R3 body full POST workspace/projects bytes=2097153 status=413 valid=true
+R3 body stream POST workspace/projects bytes=2097153 status=413 valid=true
+R3 POST workspace/projects bytes=2097153 auth=true status=403 no_store=true expected=403/MACHINE_ACCESS_REQUIRED valid=true
+R3 body full POST workspace/projects bytes=2097153 status=403 valid=true
+R3 body stream POST workspace/projects bytes=2097153 status=403 valid=true
+R3 POST workspace/projects bytes=2097153 auth=false status=401 no_store=true expected=401/UNAUTHORIZED valid=true
+R3 body full POST workspace/projects bytes=2097153 status=401 valid=true
+R3 body stream POST workspace/projects bytes=2097153 status=401 valid=true
+R3 DELETE workspace/projects/missing bytes=2097153 auth=true status=413 no_store=true expected=413/PAYLOAD_TOO_LARGE valid=true
+R3 body full DELETE workspace/projects/missing bytes=2097153 status=413 valid=true
+R3 body stream DELETE workspace/projects/missing bytes=2097153 status=413 valid=true
+R3 DELETE workspace/projects/missing bytes=2097153 auth=true status=403 no_store=true expected=403/MACHINE_ACCESS_REQUIRED valid=true
+R3 body full DELETE workspace/projects/missing bytes=2097153 status=403 valid=true
+R3 body stream DELETE workspace/projects/missing bytes=2097153 status=403 valid=true
+R3 DELETE workspace/projects/missing bytes=2097153 auth=false status=401 no_store=true expected=401/UNAUTHORIZED valid=true
+R3 body full DELETE workspace/projects/missing bytes=2097153 status=401 valid=true
+R3 body stream DELETE workspace/projects/missing bytes=2097153 status=401 valid=true
+R3 DELETE workspace/projects/%FF bytes=0 auth=true status=400 no_store=true expected=400/INVALID_REQUEST valid=true
+R3 DELETE workspace/projects/%FF bytes=0 auth=true status=403 no_store=true expected=403/MACHINE_ACCESS_REQUIRED valid=true
+R3 DELETE workspace/projects/%FF bytes=0 auth=false status=401 no_store=true expected=401/UNAUTHORIZED valid=true
+R3 GET workspace/operations/%FF bytes=0 auth=true status=400 no_store=true expected=400/INVALID_REQUEST valid=true
+R3 GET workspace/operations/%FF bytes=0 auth=true status=403 no_store=true expected=403/MACHINE_ACCESS_REQUIRED valid=true
+R3 GET workspace/operations/%FF bytes=0 auth=false status=401 no_store=true expected=401/UNAUTHORIZED valid=true
+R3 POST unknown bytes=0 auth=true status=404 no_store=true expected=404/NOT_FOUND valid=true
+R3 POST unknown bytes=0 auth=true status=404 no_store=true expected=404/NOT_FOUND valid=true
+R3 POST unknown bytes=0 auth=false status=404 no_store=true expected=404/NOT_FOUND valid=true
+R3 DELETE unknown bytes=0 auth=true status=404 no_store=true expected=404/NOT_FOUND valid=true
+R3 DELETE unknown bytes=0 auth=true status=404 no_store=true expected=404/NOT_FOUND valid=true
+R3 DELETE unknown bytes=0 auth=false status=404 no_store=true expected=404/NOT_FOUND valid=true
+R3 PATCH workspace/projects bytes=0 auth=true status=405 no_store=true expected=405/METHOD_NOT_ALLOWED valid=true
+R3 PATCH workspace/projects bytes=0 auth=true status=405 no_store=true expected=405/METHOD_NOT_ALLOWED valid=true
+R3 PATCH workspace/projects bytes=0 auth=false status=405 no_store=true expected=405/METHOD_NOT_ALLOWED valid=true
+R3 classification HOST_UNAVAILABLE retryable=true expected=true
+R3 classification TIMEOUT retryable=true expected=true
+R3 classification MACHINE_SERVICE_UNAVAILABLE retryable=true expected=true
+R3 classification CAPACITY_EXCEEDED retryable=true expected=true
+R3 classification INVALID_REQUEST retryable=false expected=false
+R3 classification OPERATION_OUTCOME_UNKNOWN retryable=false expected=false
+R3 CLEANUP listener_joined=true connection_refused=true private_root_removed=true no_pty=true
+ok
+test remote::server::tests::relay_startup_connects_without_machine_token ... ok
+test remote::server::tests::test_get_active_running_sessions_independent_of_desktop ... ok
+test remote::server::tests::test_listener_bind_loopback ... ok
+test remote::server::tests::test_push_auth ... ok
+test remote::state::tests::credentials_are_never_placed_in_a_shared_scratch_directory ... ok
+test remote::state::tests::daemon_default_state_is_off_and_uses_supplied_terminal_service ... ok
+test remote::state::tests::enabled_gateway_persists_config_and_restores_on_reopen ... ok
+test remote::state::tests::explicit_data_dir_override_wins_over_platform_home ... ok
+test remote::state::tests::persisted_enabled_config_file_loads_enabled_mode_with_unbound_initial_state ... ok
+test remote::state::tests::relay_pairing_coordinator_registers_the_pin_with_the_relay ... ok
+test remote::state::tests::relay_pairing_preserves_the_requested_permission ... ok
+test remote::state::tests::stopping_a_relay_clears_only_its_own_published_coordinator ... ok
+test remote::state::tests::test_interface_resolver_address_selection ... ok
+test remote::state::tests::test_interface_resolver_multihoming ... ok
+test remote::state::tests::test_interface_resolver_portable ... ok
+test remote::state::tests::test_relay_mode_configuration ... ok
+test remote::state::tests::unix_resolves_under_home_and_ignores_windows_variables ... ok
+test remote::tests::machine_auth::a03_capabilities_require_authentication ... ok
+test remote::tests::machine_auth::a03_cli_requires_explicit_machine_purpose ... ok
+test remote::tests::machine_auth::a03_legacy_control_denies_directory_browsing ... ok
+test remote::tests::machine_auth::a03_legacy_control_denies_machine_creation ... ok
+test remote::tests::machine_auth::a03_machine_view_capability_cannot_issue_a_device ... ok
+test remote::tests::machine_auth::a03_machine_view_pin_cannot_issue_a_device ... ok
+test remote::tests::machine_auth::a03_mirror_view_issuance_preserves_view ... ok
+test remote::tests::machine_auth::a03_old_persisted_grants_remain_mirror ... ok
+test remote::tests::machine_auth::a03_owner_coordinator_rejects_machine_view_without_publication ... ok
+test remote::tests::machine_auth::a03_owner_machine_purpose_survives_persistence_and_exchange ... ok
+test remote::tests::machine_auth::a03_rejected_generation_cannot_redeem_machine_authority ... ok
+test remote::tests::machine_auth::a03_router_auth_error_is_typed_and_no_store ... ok
+test remote::tests::machine_auth::a03_router_scope_error_satisfies_a02_contract ... ok
+test remote::tests::scoped_remote_inventory_lists_registered_projects_without_desktop ... ok
+test remote::tests::security::pairing_budget_is_global_atomic_and_rotation_cannot_reset_it ... ok
+test remote::tests::security::resize::v06_view_resize_denied_grid_control_allowed ... {"event":"v06_fixture_started","grid":true,"pid":314428,"private_root":"/home/indo/ferryx-herdr-q4-linux-01a097f8/readiness-qa/tmp/.tmpWUqkfc","session_id":"c181ece9-85a2-4679-bc4a-4fc507117d7d"}
+{"event":"v06_fixture_cleanup","grid":true,"output_pump_joined":true,"pid":314428,"private_root":"/home/indo/ferryx-herdr-q4-linux-01a097f8/readiness-qa/tmp/.tmpWUqkfc","private_root_removed":true,"pty_close_ok":true,"pty_reaped":true,"session_id":"c181ece9-85a2-4679-bc4a-4fc507117d7d","session_removed":true}
+ok
+test remote::tests::security::resize::v06_view_resize_denied_raw_control_allowed ... {"event":"v06_fixture_started","grid":false,"pid":314435,"private_root":"/home/indo/ferryx-herdr-q4-linux-01a097f8/readiness-qa/tmp/.tmpN9fgRA","session_id":"8003804c-3ddd-4d0d-822f-4890b3090ad3"}
+{"event":"v06_fixture_cleanup","grid":false,"output_pump_joined":true,"pid":314435,"private_root":"/home/indo/ferryx-herdr-q4-linux-01a097f8/readiness-qa/tmp/.tmpN9fgRA","private_root_removed":true,"pty_close_ok":true,"pty_reaped":true,"session_id":"8003804c-3ddd-4d0d-822f-4890b3090ad3","session_removed":true}
+ok
+test remote::tests::security::revoke_self_and_control_management_keep_status_contract ... ok
+test remote::tests::security::sockets::a_permanent_device_token_in_the_query_string_is_rejected ... ok
+test remote::tests::security::sockets::gateway_issues_single_use_socket_tickets_and_rejects_a_replayed_one ... [CLIENT_FRAME] Binary len: 89
+ok
+test remote::tests::security::sockets::gateway_refuses_to_mint_a_socket_ticket_without_a_valid_bearer ... ok
+test remote::tests::security::sockets::gateway_socket_ticket_is_bound_to_its_requested_target ... ok
+test remote::tests::security::sockets::revoke_before_event_upgrade_is_not_lost ... [CLIENT_FRAME] Close
+ok
+test remote::tests::security::sockets::revoke_before_raw_upgrade_is_not_lost ... [CLIENT_FRAME] Close
+ok
+test remote::tests::security::sockets::revoke_cancels_pending_raw_input ... [CLIENT_FRAME] Binary len: 89
+[CLIENT_FRAME] Close
+ok
+test remote::tests::security::sockets::revoke_closes_all_event_sockets_only_for_that_device ... [CLIENT_FRAME] Text: {"event":"remote_active_selection_changed","payload":{"attentionInventory":[],"sessionId":"session","tabId":null,"terminalTabs":[],"workspaceId":null,"worktreeLabel":null,"worktreeSlug":null}}
+[CLIENT_FRAME] Text: {"event":"remote_active_selection_changed","payload":{"attentionInventory":[],"sessionId":"session","tabId":null,"terminalTabs":[],"workspaceId":null,"worktreeLabel":null,"worktreeSlug":null}}
+[CLIENT_FRAME] Text: {"event":"remote_active_selection_changed","payload":{"attentionInventory":[],"sessionId":"session","tabId":null,"terminalTabs":[],"workspaceId":null,"worktreeLabel":null,"worktreeSlug":null}}
+[CLIENT_FRAME] Close
+[CLIENT_FRAME] Close
+[CLIENT_FRAME] Text: {"event":"after_revoke","payload":{}}
+[CLIENT_FRAME] Close
+ok
+test remote::tests::security::sockets::revoke_closes_all_raw_sockets_only_for_that_device ... [CLIENT_FRAME] Binary len: 89
+[CLIENT_FRAME] Binary len: 89
+[CLIENT_FRAME] Binary len: 89
+[CLIENT_FRAME] Close
+[CLIENT_FRAME] Close
+[CLIENT_FRAME] Binary len: 58
+[CLIENT_FRAME] Close
+ok
+test remote::tests::security::sockets::revoke_during_raw_attachment_prevents_upgrade ... ok
+test remote::tests::security::sockets::ssh_reconnect_safety_web_raw_gap_order ... [CLIENT_FRAME] Binary len: 89
+[CLIENT_FRAME] Binary len: 108
+[CLIENT_FRAME] Binary len: 55
+ok
+test remote::tests::security::sockets::ssh_reconnect_safety_web_raw_status_input_probe ... [CLIENT_FRAME] Text: {"type":"remoteStatus","state":"connected","generation":"7"}
+[CLIENT_FRAME] Binary len: 89
+[CLIENT_FRAME] Text: {"type":"remoteStatus","state":"reconnecting","generation":"8"}
+[CLIENT_FRAME] Text: {"type":"remoteStatus","state":"disconnected","generation":"9"}
+[CLIENT_FRAME] Text: {"type":"remoteStatus","state":"connected","generation":"10"}
+[CLIENT_FRAME] Binary len: 51
+[CLIENT_FRAME] Text: {"type":"remoteStatus","state":"expired","generation":"11"}
+ok
+test remote::tests::security::static_portable_paths_and_assets ... ok
+test remote::tests::security::static_raw_traversal_is_rejected ... ok
+test remote::tests::security::static_symlinks_cannot_escape_dist ... ok
+test remote::tests::security::view_cannot_revoke_another_device ... ok
+test remote::tests::ssh::registered_ssh_project_can_be_selected_without_local_registration ... ok
+test remote::tests::ssh::registered_ssh_project_is_listed_without_a_focused_terminal ... ok
+test remote::tests::ssh::ssh_session_retains_its_workspace_in_remote_routing ... ok
+test remote::tests::test_active_desktop_terminal_contract_and_safe_selection_bridge ... ok
+test remote::tests::test_active_selection_change_is_broadcast_to_authenticated_event_clients ... ok
+test remote::tests::test_active_selection_is_visible_to_a_receiver_that_subscribes_afterwards ... ok
+test remote::tests::test_auth_manager_pairing_and_revocation ... ok
+test remote::tests::test_authenticated_event_clients_receive_selection_changes_after_the_snapshot ... ok
+test remote::tests::test_authenticated_event_clients_receive_the_current_active_selection_on_connect ... ok
+test remote::tests::test_concurrent_cold_snapshot_requests_coalesce_to_one_git_discovery ... ok
+test remote::tests::test_connected_terminal_websocket_closed_when_active_selection_changes ... ok
+test remote::tests::test_daemon_owned_remote_chain_end_to_end ... ok
+test remote::tests::test_daemon_pairing_and_revocation_authority ... ok
+test remote::tests::test_daemon_remote_worktree_selection_then_grid_terminal_control ... ok
+test remote::tests::test_derive_session_metadata_matches_workspace ... ok
+test remote::tests::test_desktop_ipc_active_selection_lifecycle ... ok
+test remote::tests::test_grid_render_attach_sends_full_frame_with_session_dimensions ... ok
+test remote::tests::test_grid_render_initial_frame_uses_requested_viewport_dimensions ... ok
+test remote::tests::test_grid_render_live_pty_output_emits_grid_frame_after_attach ... ok
+test remote::tests::test_grid_render_resize_returns_full_frame_with_requested_geometry ... ok
+test remote::tests::test_gui_remote_forwarding_and_no_gui_gateway_ownership ... ok
+test remote::tests::test_legacy_terminal_socket_emits_binary_snapshot_without_grid_text_frames ... ok
+test remote::tests::test_occupied_port_enable_does_not_persist_enabled_intent ... ok
+test remote::tests::test_remote_active_selection_safe_tab_descriptors_and_no_path_leakage ... ok
+test remote::tests::test_remote_gateway_legacy_peer_attach_write_output_exit_and_listing ... ok
+test remote::tests::test_remote_listener_persistence_and_startup_restoration_lifecycle ... ok
+test remote::tests::test_remote_select_workspace_with_tab_selector_and_primary_worktree ... ok
+test remote::tests::test_remote_server_health_and_lifecycle ... ok
+test remote::tests::test_remote_server_rejects_off_mode_without_binding ... ok
+test remote::tests::test_remote_server_serves_spa_index_html ... ok
+test remote::tests::test_remote_terminal_forced_lag_replays_with_explicit_gap_and_sequence_metadata ... ok
+test remote::tests::test_remote_terminal_tab_info_serializes_and_deserializes_session_id ... ok
+test remote::tests::test_repeated_workspace_state_reads_do_not_rerun_git_discovery_and_refresh_on_change ... ok
+test remote::tests::test_resolve_dist_dir_isolated_runtime_debug_fallback ... ok
+test remote::tests::test_resolve_dist_dir_packaged_macos_bundle_layout ... ok
+test remote::tests::test_resolve_dist_dir_packaged_windows_or_linux_bundle_layout ... ok
+test remote::tests::test_successful_enable_restores_and_disable_remains_off ... ok
+test remote::tests::test_terminal_preferences_requires_a_valid_unrevoked_remote_token ... ok
+test remote::tests::test_workspace_snapshot_refreshes_external_git_worktree_changes_after_interval ... ok
+test remote::tests::test_workspace_snapshot_started_before_revision_change_is_not_marked_current ... ok
+test remote::tests::test_workspace_state_agent_activity_and_worktree_attention_rollup ... ok
+test remote::workspace_api::child_tests::r12_child_output_and_deadline ... R12 child output_limit=65536 timeout=TIMEOUT both_children_waited=true
+ok
+test remote::workspace_api::child_tests::request_drop_interrupts_active_worktree_git ... A08 request_drop pid=314884 active_child_reaped=true worker_joined=true private_root_removed=true
+ok
+test remote::workspace_api::worktrees::authority_tests::followthrough_delete_publication_blocks_spawn ... A08 delete-vs-spawn request=8b5e2186-8fd8-440d-957f-2ea8e650cd41 spawn_observed_at_shared_gate=true blocked_until_delete_publication=true spawn_refused=true workers_joined=true root_removed=true
+ok
+test remote::workspace_api::worktrees::authority_tests::followthrough_owner_crash_while_git_active ... A08 ACTIVE owner=314939 git=314962 hook=314965 cwd=/home/indo/ferryx-herdr-q4-linux-01a097f8/readiness-qa/tmp/.tmpkaFKCz/repo/.orca-worktrees/project-2de8e1cc15d74e15815180895fe56f73/interrupted
+A08 ACTIVE owner_reaped=true git_group=314962 fixture_cleanup_signal=SIGKILL hook_eof=true (nonchildren not waitpid-reapable)
+A08 interrupted owner pid=314939 replay=false status=signal: 9 (SIGKILL) reaped=true
+A08 interrupted owner pid=314966 replay=true status=exit status: 0 reaped=true
+A08 interrupted Git transaction private_root_removed=true
+ok
+test remote::workspace_api::worktrees::authority_tests::followthrough_prune_partial_replays_after_restart ... A08 followthrough prune request=6f72315d-417c-41e0-9e37-850a260d7e1e workspace=project-1e0a0144560442cfbc0d9a94fa34a861 original_result_replayed=true restart=true
+A08 followthrough prune workers_awaited=true private_root_removed=true
+ok
+test remote::workspace_api::worktrees::authority_tests::followthrough_write_failures_non_head_and_prunable_preview ... A08 followthrough journal_failure=false request=745e13f0-e0fe-408e-81b3-33849326bf5c workspace=project-5eab7f3400d94e558324231848ebb8be non_head=9b5b70567a80d5f51e0d2ac40561ffbc8bd23040 restart_no_repeat=true prunable_preview=422
+A08 followthrough write failure private_root_removed=true
+A08 followthrough journal_failure=true request=8c3f00d2-8a8e-4cc3-9c16-53560945015d workspace=project-d2e5dc7045b14197b1b2bd90aafec41a non_head=9b5b70567a80d5f51e0d2ac40561ffbc8bd23040 restart_no_repeat=true prunable_preview=422
+A08 followthrough write failure private_root_removed=true
+ok
+test remote::workspace_api::worktrees::authority_tests::interrupted_git_transaction_restart_never_repeats ... A08 interrupted owner pid=315084 replay=false status=signal: 9 (SIGKILL) reaped=true
+A08 interrupted owner pid=315114 replay=true status=exit status: 0 reaped=true
+A08 interrupted Git transaction private_root_removed=true
+ok
+test remote::workspace_api::worktrees::authority_tests::interrupted_worktree_owner_child ... ok
+test remote::workspace_api::worktrees::authority_tests::local_worktree_error_wire_roundtrip ... ok
+test remote::workspace_api::worktrees::authority_tests::local_worktree_errors_survive_owner_wire_and_native_adapter ... A08 typed dirty delete: serialized owner -> native adapter exact code/message/path/count/files; target preserved; worker joined/root removed
+ok
+test remote::workspace_api::worktrees::authority_tests::owner_http_gate_and_eight_admissions ... A08 queued symlink replacement managed_child=false HTTP=400 outside_sentinel_untouched=true
+A08 queued symlink replacement managed_child=true HTTP=409 outside_sentinel_untouched=true
+A08 gate fixture cleanup completed; errors=[]
+A08 shared owner IPC + seven HTTP slots=8 ninth=429 queued revoke=401x7 local=201 only_one_git_target=true listeners_workers_joined=true private_root_removed=true
+ok
+test remote::workspace_api::worktrees::authority_tests::typed_owner_repair_private_uds_and_native_adapter ... A08_TYPED_RESULT case=locked wire={"error":{"code":"WORKTREE_LOCKED","details":{"path":"/tmp/a08-typed-owner-oTLahw/repo/.orca-worktrees/typed/locked","reason":"typed fixture lock"},"message":"Worktree '/tmp/a08-typed-owner-oTLahw/repo/.orca-worktrees/typed/locked' is locked: typed fixture lock"},"type":"worktreeError"} native={"code":"WORKTREE_LOCKED","details":{"path":"/tmp/a08-typed-owner-oTLahw/repo/.orca-worktrees/typed/locked","reason":"typed fixture lock"},"message":"Worktree '/tmp/a08-typed-owner-oTLahw/repo/.orca-worktrees/typed/locked' is locked: typed fixture lock"}
+A08_TYPED_RESULT case=partial wire={"error":{"code":"WORKTREE_REMOVED_BRANCH_RETAINED","details":{"branch":"orca/typed/partial","branchDeleted":false,"cause":{"code":"GIT_ERROR","details":{"command":"git branch -D -- orca/typed/partial","exitCode":1,"stderr":"error: could not delete reference refs/heads/orca/typed/partial: cannot lock ref 'refs/heads/orca/typed/partial': Unable to create '/tmp/a08-typed-owner-oTLahw/repo/.git/refs/heads/orca/typed/partial.lock': File exists.\n\nAnother git process seems to be running in this repository, or the lock file may be stale"},"message":"Git command failed (git branch -D -- orca/typed/partial): error: could not delete reference refs/heads/orca/typed/partial: cannot lock ref 'refs/heads/orca/typed/partial': Unable to create '/tmp/a08-typed-owner-oTLahw/repo/.git/refs/heads/orca/typed/partial.lock': File exists.\n\nAnother git process seems to be running in this repository, or the lock file may be stale (exit code: Some(1))"},"path":"/tmp/a08-typed-owner-oTLahw/repo/.orca-worktrees/typed/partial","worktreeRemoved":true},"message":"Worktree '/tmp/a08-typed-owner-oTLahw/repo/.orca-worktrees/typed/partial' was removed but branch 'orca/typed/partial' was retained: Git command failed (git branch -D -- orca/typed/partial): error: could not delete reference refs/heads/orca/typed/partial: cannot lock ref 'refs/heads/orca/typed/partial': Unable to create '/tmp/a08-typed-owner-oTLahw/repo/.git/refs/heads/orca/typed/partial.lock': File exists.\n\nAnother git process seems to be running in this repository, or the lock file may be stale (exit code: Some(1))"},"type":"worktreeError"} native={"code":"WORKTREE_REMOVED_BRANCH_RETAINED","details":{"branch":"orca/typed/partial","branchDeleted":false,"cause":{"code":"GIT_ERROR","details":{"command":"git branch -D -- orca/typed/partial","exitCode":1,"stderr":"error: could not delete reference refs/heads/orca/typed/partial: cannot lock ref 'refs/heads/orca/typed/partial': Unable to create '/tmp/a08-typed-owner-oTLahw/repo/.git/refs/heads/orca/typed/partial.lock': File exists.\n\nAnother git process seems to be running in this repository, or the lock file may be stale"},"message":"Git command failed (git branch -D -- orca/typed/partial): error: could not delete reference refs/heads/orca/typed/partial: cannot lock ref 'refs/heads/orca/typed/partial': Unable to create '/tmp/a08-typed-owner-oTLahw/repo/.git/refs/heads/orca/typed/partial.lock': File exists.\n\nAnother git process seems to be running in this repository, or the lock file may be stale (exit code: Some(1))"},"path":"/tmp/a08-typed-owner-oTLahw/repo/.orca-worktrees/typed/partial","worktreeRemoved":true},"message":"Worktree '/tmp/a08-typed-owner-oTLahw/repo/.orca-worktrees/typed/partial' was removed but branch 'orca/typed/partial' was retained: Git command failed (git branch -D -- orca/typed/partial): error: could not delete reference refs/heads/orca/typed/partial: cannot lock ref 'refs/heads/orca/typed/partial': Unable to create '/tmp/a08-typed-owner-oTLahw/repo/.git/refs/heads/orca/typed/partial.lock': File exists.\n\nAnother git process seems to be running in this repository, or the lock file may be stale (exit code: Some(1))"}
+A08_TYPED_ORIGINAL pid=315288 cwd=/tmp/a08-typed-owner-oTLahw/repo/.orca-worktrees/typed/busy session=98f17a88-24dd-4c60-8d85-4690ee4772dd
+A08_TYPED_RESULT case=busy wire={"error":{"code":"WORKTREE_BUSY","details":{"liveSessionIds":["98f17a88-24dd-4c60-8d85-4690ee4772dd"],"path":"/tmp/a08-typed-owner-oTLahw/repo/.orca-worktrees/typed/busy"},"message":"Worktree '/tmp/a08-typed-owner-oTLahw/repo/.orca-worktrees/typed/busy' has live sessions"},"type":"worktreeError"} native={"code":"WORKTREE_BUSY","details":{"liveSessionIds":["98f17a88-24dd-4c60-8d85-4690ee4772dd"],"path":"/tmp/a08-typed-owner-oTLahw/repo/.orca-worktrees/typed/busy"},"message":"Worktree '/tmp/a08-typed-owner-oTLahw/repo/.orca-worktrees/typed/busy' has live sessions"}
+A08_TYPED_PTY_CLEANUP pid=315288 absent=true already_reaped=true
+A08_TYPED_CLEANUP listener_joined=true socket_refused=true root=/tmp/a08-typed-owner-oTLahw absent=true failed=false
+ok
+test remote::workspace_api::worktrees::publication_tests::cancelled_publication_preserves_unknown_after_git ... A08 publication revoke=false git_target_exists=true catalog_unchanged=true outcome_unknown=true workers_drained=true private_root_removed=true
+A08 publication revoke=true git_target_exists=true catalog_unchanged=true outcome_unknown=true workers_drained=true private_root_removed=true
+ok
+test remote::workspace_api_tests::a07_http_request_failure_joins_fixture ... 
+thread 'remote::workspace_api_tests::a07_http_request_failure_joins_fixture' (315360) panicked at src/remote/workspace_api_tests.rs:151:58:
+called `Result::unwrap()` on an `Err` value: reqwest::Error { kind: Builder, url: "invalid-a07://fixture", source: BadScheme }
+A07 cleanup HTTP task joined; temporary root removed; injected=true; root=/home/indo/ferryx-herdr-q4-linux-01a097f8/readiness-qa/tmp/.tmpELrePN
+ok
+test remote::workspace_api_tests::a07_journal_restart_and_device_scope ... ok
+test remote::workspace_api_tests::a07_project_http_registration ... A07 HTTP register/replay/digest-conflict/root-refusal/list/unregister disk-preserved
+A07 cleanup HTTP task joined; temporary root removed; injected=false; root=/home/indo/ferryx-herdr-q4-linux-01a097f8/readiness-qa/tmp/.tmptrTzQp
+ok
+test remote::workspace_api_tests::r12_crash_owner ... ok
+test remote::workspace_api_tests::r12_list_gate_and_admission ... R12 mutation_capacity=429 list_probe_global_gate_free=true cancelled_worker_slot_retained=true worker_finished=true removed=true
+ok
+test remote::workspace_api_tests::r12_real_kill_windows ... R12 signal phase=afterCatalog deleting=false pid=315397 R12_WINDOW
+R12 process phase=afterCatalog deleting=false pid=315397 reaped=true status=signal: 9 (SIGKILL)
+R12 signal phase=replay deleting=false pid=315416 R12_REPLAY project-115254f429c54581900ce8985276fb50 1
+R12 process phase=replay deleting=false pid=315416 reaped=true status=exit status: 0
+R12 signal phase=afterCatalog deleting=true pid=315432 R12_WINDOW
+R12 process phase=afterCatalog deleting=true pid=315432 reaped=true status=signal: 9 (SIGKILL)
+R12 signal phase=replay deleting=true pid=315448 R12_REPLAY unregister 204
+R12 process phase=replay deleting=true pid=315448 reaped=true status=exit status: 0
+R12 kill-window=afterCatalog same_device_request_replay=201 revision=1 removed=true
+R12 signal phase=afterJournal deleting=false pid=315464 R12_WINDOW
+R12 process phase=afterJournal deleting=false pid=315464 reaped=true status=signal: 9 (SIGKILL)
+R12 signal phase=replay deleting=false pid=315483 R12_REPLAY project-56efb2a8727c4d3e87419857a9166524 1
+R12 process phase=replay deleting=false pid=315483 reaped=true status=exit status: 0
+R12 signal phase=afterJournal deleting=true pid=315499 R12_WINDOW
+R12 process phase=afterJournal deleting=true pid=315499 reaped=true status=signal: 9 (SIGKILL)
+R12 signal phase=replay deleting=true pid=315515 R12_REPLAY unregister 204
+R12 process phase=replay deleting=true pid=315515 reaped=true status=exit status: 0
+R12 kill-window=afterJournal same_device_request_replay=201 revision=1 removed=true
+ok
+test remote::workspace_api_tests::r12_revocation_fences ... R12 phase=prepare revoked=401 rows=0 workers_finished=true removed=true
+R12 phase=beforeGate revoked=401 rows=0 workers_finished=true removed=true
+R12 phase=beforeCommit revoked=401 rows=0 workers_finished=true removed=true
+R12 phase=beforeResponse revoked=401 rows=1 workers_finished=true removed=true
+R12 phase=listProbe revoked=401 rows=0 workers_finished=true removed=true
+ok
+test remote::workspace_api_tests::r12_router_auth_admission ... R12 real router auth_entries=16 health=200 revoked=401 sockets_closed=true listener_joined=true root_removed=true
+ok
+test remote::workspace_api_tests::r12_router_incomplete_body ... R12 incomplete body sockets_closed=true gateway_joined=true root_removed=true
+ok
+test remote::workspace_api_tests::r12_unreadable_root ... R12 cleanup removed=true
+ok
+test remote::workspace_api_tests::r1_topology_after_gate_http ... R1 topology git pid=315601 reaped=true parent_git=true
+R1 topology parent_git=true status=400 rows=0 revision=0 body={"error":{"code":"INVALID_PATH","message":"INVALID_PATH","retryable":false,"requestId":"7907191f-4d36-404d-9718-5075560afc57","details":{}}}
+R1 topology cleanup parent_git=true workers_drained=true gateway_joined=true removed=true
+R1 topology git pid=315606 reaped=true parent_git=false
+R1 topology parent_git=false status=201 rows=1 revision=1 body={"workspaceId":"project-ad7831b4c403402caef829cdb27fcd74","repoRoot":"/home/indo/ferryx-herdr-q4-linux-01a097f8/readiness-qa/tmp/.tmpoZBNAo/parent/plain","gitRoot":"/home/indo/ferryx-herdr-q4-linux-01a097f8/readiness-qa/tmp/.tmpoZBNAo/parent/plain","gitCommonDir":"/home/indo/ferryx-herdr-q4-linux-01a097f8/readiness-qa/tmp/.tmpoZBNAo/parent/plain/.git","gitRemote":null,"gitBranch":"master","gitHead":null,"availability":"ready","revision":"1"}
+R1 topology cleanup parent_git=false workers_drained=true gateway_joined=true removed=true
+ok
+
+test result: ok. 254 passed; 0 failed; 0 ignored; 0 measured; 674 filtered out; finished in 37.94s
+
+COMMAND_EXIT 0

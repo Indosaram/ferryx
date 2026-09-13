@@ -1,0 +1,13 @@
+status: completed exit_code: 0
+PLATFORM=Linux 7.1.9-arch1-2 x86_64
+CPUS=12
+Filesystem       1024-blocks      Used Available Capacity Mounted on
+/dev/mapper/root   974646272 346143916 626579668      36% /home
+/home/indo/.cargo/bin/cargo
+cargo 1.98.0 (797e8a9bc 2026-08-05)
+/home/indo/.cargo/bin/rustc
+rustc 1.98.0 (88d9e12ae 2026-08-18)
+/home/indo/.bun/bin/bun
+1.4.0
+/usr/bin/git
+git version 2.55.0

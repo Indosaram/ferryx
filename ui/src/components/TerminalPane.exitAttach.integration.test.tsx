@@ -145,7 +145,12 @@ describe("TerminalPane exit attach integration", () => {
       await vi.advanceTimersByTimeAsync(500);
     });
 
-    expect(handleUnavailable).toHaveBeenCalledWith("term-pane-1", "backend-dead-pty", "daemon-attach-not-found");
+    expect(handleUnavailable).toHaveBeenCalledWith(
+      "term-pane-1",
+      "backend-dead-pty",
+      "daemon-attach-not-found",
+      "backend-dead-pty::0:",
+    );
     expect(currentSession.lifecycle).toBe("exited");
     expect(currentSession.backendSessionId).toBeNull();
 

@@ -1,0 +1,4 @@
+LSP diagnostics (all severities), session evidence:
+pairedDaemonProject.ts: initial diagnostics identified optional inferred decoder fields; fixed by explicit property-defined guards. Subsequent query: No diagnostics found. After native ClientError alignment, two fresh-diagnostics requests timed out at 3000ms; final freshness is unverified.
+pairedDaemonProject.test.ts: final query No diagnostics found.
+Final bun run --cwd ui build ran tsc successfully (exit 0), providing complete final TypeScript validation.

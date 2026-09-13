@@ -1,0 +1,4 @@
+owner=43588 command=cargo build --manifest-path src-tauri/Cargo.toml --no-default-features 
+  PID  PPID    RSS ELAPSED COMMAND
+43588 43585    176   00:00 cargo build --manifest-path src-tauri/Cargo.toml --no-default-features
+exit=0 owner_reaped=true

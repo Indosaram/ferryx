@@ -1,0 +1,4 @@
+owner=21858 command=bash -c cargo\ test\ --locked\ --manifest-path\ src-tauri/Cargo.toml\ --no-default-features\ --lib\ remote::tests::test_active_desktop_terminal_contract_and_safe_selection_bridge\ --\ --exact\ --test-threads=1 
+  PID  PPID    RSS ELAPSED COMMAND
+21858 21855    704   00:00 bash -c cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib remote::tests::test_active_desktop_terminal_contract_and_safe_selection_bridge -- --exact --test-threads=1
+exit=0 owner_reaped=true

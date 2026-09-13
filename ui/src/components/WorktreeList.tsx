@@ -72,7 +72,7 @@ export const WorktreeRow = memo(function WorktreeRow({
     };
   }, []);
 
-  const isRemote = Boolean(worktree.workspaceId?.startsWith("ssh:"));
+  const isRemote = Boolean(worktree.workspaceId?.startsWith("ssh:") || worktree.workspaceId?.startsWith("daemon:"));
   const primary = !isRemote && isPrimaryWorktree(worktree);
   const canDelete = !primary && !isRemote;
   const managedSlug = worktreeIdentity(worktree)?.slug;
@@ -200,7 +200,7 @@ export const WorktreeRow = memo(function WorktreeRow({
             </span>
             {isRemote ? (
               <span className="truncate text-[10px] text-muted-foreground pl-3.5">
-                {worktree.path}
+                {worktree.path}{worktree.hostSummary ? ` - ${worktree.hostSummary}` : ""}
               </span>
             ) : null}
           </span>
@@ -298,10 +298,13 @@ export function WorktreeList({
         const active =
           worktree.path === activePath &&
           (!activeWorkspaceId || !effectiveWorkspaceId || effectiveWorkspaceId === activeWorkspaceId);
-        const agent = agentsByPath.get(worktree.path);
-        const status = statuses[worktree.path];
-        const summary = activityByWorktreePath?.[worktree.path];
-        const hasUnread = !active && Boolean(summary?.hasUnread || unreadWorktreePaths?.[worktree.path]);
+        // Paired terminal proxy is unavailable: path-only local terminal data
+        // must never light up a machine row with the same absolute path.
+        const paired = worktree.workspaceId?.startsWith("daemon:");
+        const agent = paired ? undefined : agentsByPath.get(worktree.path);
+        const status = paired ? undefined : statuses[worktree.path];
+        const summary = paired ? undefined : activityByWorktreePath?.[worktree.path];
+        const hasUnread = !paired && !active && Boolean(summary?.hasUnread || unreadWorktreePaths?.[worktree.path]);
 
         const rowProps: WorktreeRowProps = {
           worktree,

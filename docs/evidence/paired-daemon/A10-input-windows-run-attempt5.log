@@ -1,0 +1,43 @@
+SUCCESS: The process with PID 18124 (child process of PID 22712) has been terminated.
+SUCCESS: The process with PID 19500 (child process of PID 22712) has been terminated.
+SUCCESS: The process with PID 22712 (child process of PID 16380) has been terminated.
+SUCCESS: The process with PID 16380 (child process of PID 18928) has been terminated.
+SUCCESS: The process with PID 18928 (child process of PID 22952) has been terminated.
+SUCCESS: The process with PID 22952 (child process of PID 11068) has been terminated.
+WATCHDOG=124
+   Compiling ferryx-pty-input-native-proof v0.1.0 (C:\Users\sook\ferryx-a10-input-01a0983c\src-tauri\tests\pty-input-native)
+warning: methods `begin_closing`, `mark_exited`, `mark_failed`, and `output_receiver_closed` are never used
+   --> ..\..\src\terminal\session.rs:153:19
+    |
+ 73 | impl PtySession {
+    | --------------- methods in this implementation
+...
+153 |     pub(crate) fn begin_closing(&self) -> bool {
+    |                   ^^^^^^^^^^^^^
+...
+166 |     pub(crate) fn mark_exited(&self, code: Option<i32>) {
+    |                   ^^^^^^^^^^^
+...
+170 |     pub(crate) fn mark_failed(&self, reason: impl Into<String>) {
+    |                   ^^^^^^^^^^^
+...
+389 |     pub(crate) fn output_receiver_closed(&self) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `ferryx-pty-input-native-proof` (test "native") generated 1 warning
+    Finished `test` profile [unoptimized] target(s) in 1.14s
+     Running native.rs (target\debug\deps\native-fd513a3ee92bde05.exe)
+
+running 2 tests
+test child ... ok
+PTY_OUTPUT "\u{1b}[6n"
+PTY_OUTPUT "\u{1b}[?9001h\u{1b}[?1004h"
+PTY_OUTPUT "\u{1b}[m\u{1b}]0;C:\\Users\\sook\\ferryx-a10-input-01a0983c\\target\\debug\\deps\\native-fd513a3ee92bde05.exe\u{7}\u{1b}[?25h"
+PTY_OUTPUT "\r\nrunning 1 test\r\n"
+SATURATED pid=19500 accepted=8323072 cwd=C:\Users\sook\ferryx-a10-input-01a0983c\home
+DEADLINE_ARMED
+CLOCK_ADVANCED
+#< CLIXML
+<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="progress" RefId="0"><TN RefId="0"><T>System.Management.Automation.PSCustomObject</T><T>System.Object</T></TN><MS><I64 N="SourceId">1</I64><PR N="Record"><AV>Preparing modules for first use.</AV><AI>0</AI><Nil /><PI>-1</PI><PC>-1</PC><T>Completed</T><SR>-1</SR><SD> </SD></PR></MS></Obj><Obj S="progress" RefId="1"><TNRef RefId="0" /><MS><I64 N="SourceId">1</I64><PR N="Record"><AV>Preparing modules for first use.</AV><AI>0</AI><Nil /><PI>-1</PI><PC>-1</PC><T>Completed</T><SR>-1</SR><SD> </SD></PR></MS></Obj></Objs>
