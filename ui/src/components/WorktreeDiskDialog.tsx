@@ -198,44 +198,108 @@ export function WorktreeDiskDialog({
     }
   };
 
-  const activeScanIdRef = useRef<string | null>(null);
-
-  const startScan = async (refresh: boolean) => {
-    setError(null);
-    setCancelling(false);
-    try {
-      const initial = await resolvedServices.startScan(workspaceId, refresh);
-      activeScanIdRef.current = initial.scanId;
-      setSnapshot(initial);
-      if (initial.error) {
-        setError(initial.error);
-      }
-    } catch (cause) {
-      setError(toIpcError(cause));
-    }
-  };
+  const startScanRef = useRef<(refresh: boolean) => Promise<void>>(async () => {});
+  const cancelScanRef = useRef<() => Promise<void>>(async () => {});
+  const removeRowRef = useRef<(path: string) => void>(() => {});
+  const startScan = (refresh: boolean) => startScanRef.current(refresh);
 
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     let mounted = true;
+    let ready = false;
+    let pending = false;
+    let current: DiskScanSnapshot | null = null;
+    const earlyEvents = new Map<string, DiskScanSnapshot>();
+    const deletedPaths = new Set<string>();
+
+    // Terminal states are absorbing. Running counters only move forward; the
+    // start response is an older snapshot than events emitted by that command.
+    const advance = (previous: DiskScanSnapshot | undefined, next: DiskScanSnapshot) => {
+      if (!previous) return next;
+      if (previous.status !== "running") return previous;
+      if (next.status !== "running") return next;
+      const a = previous.progress;
+      const b = next.progress;
+      return b.completedWorktrees < a.completedWorktrees || b.scannedBytes < a.scannedBytes
+        || b.scannedFiles < a.scannedFiles || b.scannedEntries < a.scannedEntries ? previous : next;
+    };
+    const publish = (latest: DiskScanSnapshot) => {
+      current = { ...latest, rows: latest.rows.filter((row) => !deletedPaths.has(row.worktree.path)) };
+      setSnapshot(current);
+      setError(latest.status === "failed" ? latest.error : null);
+    };
+    removeRowRef.current = (path) => {
+      if (!mounted) return;
+      deletedPaths.add(path);
+      if (current) publish(current);
+    };
+    const cancelOwned = async (owned: DiskScanSnapshot | null) => {
+      if (owned?.status !== "running") return;
+      try {
+        await resolvedServices.cancelScan(workspaceId, owned.scanId);
+      } catch (cause) {
+        if (mounted && current?.scanId === owned.scanId) setError(toIpcError(cause));
+        else console.error("Failed to cancel worktree disk scan during teardown", cause);
+      }
+    };
+    const requestStart = async (refresh: boolean) => {
+      if (!mounted || !ready || pending) return;
+      pending = true;
+      earlyEvents.clear();
+      deletedPaths.clear();
+      setError(null);
+      setCancelling(false);
+      try {
+        const initial = await resolvedServices.startScan(workspaceId, refresh);
+        const latest = advance(initial, earlyEvents.get(initial.scanId) ?? initial);
+        if (!mounted) {
+          await cancelOwned(latest);
+          return;
+        }
+        publish(latest);
+      } catch (cause) {
+        if (mounted) setError(toIpcError(cause));
+        else console.error("Failed to start worktree disk scan after teardown", cause);
+      } finally {
+        pending = false;
+        earlyEvents.clear();
+      }
+    };
+    startScanRef.current = requestStart;
+    cancelScanRef.current = async () => {
+      const owned = current;
+      setCancelling(true);
+      await cancelOwned(owned);
+      if (mounted && current?.scanId === owned?.scanId) setCancelling(false);
+    };
+    setSnapshot(null);
+    setError(null);
 
     const setup = async () => {
       try {
-        unlisten = await resolvedServices.onScanProgress((latest) => {
+        const dispose = await resolvedServices.onScanProgress((latest) => {
           if (!mounted) return;
           if (latest.workspaceId !== workspaceId) return;
-          setSnapshot(latest);
-          activeScanIdRef.current = latest.scanId;
-          if (latest.error) {
-            setError(latest.error);
+          if (pending) {
+            earlyEvents.set(latest.scanId, advance(earlyEvents.get(latest.scanId), latest));
+          } else if (current?.scanId === latest.scanId) {
+            publish(advance(current, latest));
           }
         });
+        if (!mounted) {
+          dispose();
+          return;
+        }
+        unlisten = dispose;
       } catch (cause) {
         if (mounted) setError(toIpcError(cause));
+        else console.error("Failed to register worktree disk scan listener after teardown", cause);
+        return;
       }
 
       if (mounted) {
-        await startScan(false);
+        ready = true;
+        await requestStart(false);
       }
     };
 
@@ -244,6 +308,7 @@ export function WorktreeDiskDialog({
     return () => {
       mounted = false;
       unlisten?.();
+      void cancelOwned(current);
     };
   }, [workspaceId, resolvedServices]);
 
@@ -258,18 +323,7 @@ export function WorktreeDiskDialog({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [onClose, deletingRow]);
 
-  const handleCancelScan = async () => {
-    const scanId = snapshot?.scanId ?? activeScanIdRef.current;
-    if (!scanId) return;
-    setCancelling(true);
-    try {
-      await resolvedServices.cancelScan(workspaceId, scanId);
-    } catch (cause) {
-      setError(toIpcError(cause));
-    } finally {
-      setCancelling(false);
-    }
-  };
+  const handleCancelScan = () => cancelScanRef.current();
 
   const sortedRows = useMemo(() => {
     const rows = [...(snapshot?.rows ?? [])];
@@ -309,13 +363,7 @@ export function WorktreeDiskDialog({
       : 0;
 
   const handleRowDeleted = (deletedPath: string) => {
-    if (snapshot) {
-      const updatedRows = snapshot.rows.filter((r) => r.worktree.path !== deletedPath);
-      setSnapshot({
-        ...snapshot,
-        rows: updatedRows,
-      });
-    }
+    removeRowRef.current(deletedPath);
     setDeletingRow(null);
   };
 

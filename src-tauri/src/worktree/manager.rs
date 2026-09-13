@@ -1,6 +1,6 @@
 use crate::worktree::git::{
     git_branch_delete, git_branch_is_ancestor_of_head, git_status_porcelain, git_worktree_add,
-    git_worktree_list, git_worktree_prune, git_worktree_remove, inspect_worktree, run_git,
+    git_worktree_list, git_worktree_remove, inspect_worktree, run_git,
 };
 use crate::worktree::model::{
     BranchDeletionPreview, CreateWorktreeOptions, DirtyState, OrcaWorktreeInfo, Worktree,
@@ -521,6 +521,44 @@ impl WorktreeManager {
         git_status_porcelain(&canonical)
     }
 
+    /// Deletion-only resolution; ordinary consumers still require existing paths.
+    pub(crate) fn deletion_record(&self, path: &Path) -> Result<Worktree, WorktreeError> {
+        match fs::symlink_metadata(path) {
+            Ok(_) => {
+                return self
+                    .find_worktree(path)?
+                    .ok_or_else(|| WorktreeError::WorktreeNotFound { path: path.into() })
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        self.validate_new_worktree_path(path)?;
+        let mut ancestor = path.parent().unwrap();
+        loop {
+            match fs::symlink_metadata(ancestor) {
+                Ok(_) => {
+                    self.canonical_allowed_path(ancestor)?;
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    ancestor = ancestor.parent().unwrap()
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        for record in git_worktree_list(&self.repo_root)? {
+            if record.path != path || record.prunable.is_none() {
+                continue;
+            }
+            if let Some(info) = record.orca_info() {
+                if self.worktree_path_for(&info.ws_id, &info.slug)? == path {
+                    return Ok(record);
+                }
+            }
+        }
+        Err(WorktreeError::WorktreeNotFound { path: path.into() })
+    }
+
     pub fn observe_dirty_state(
         &self,
         worktree_path: &Path,
@@ -555,9 +593,19 @@ impl WorktreeManager {
         worktree_path: &Path,
         force: bool,
     ) -> Result<bool, WorktreeError> {
-        let canonical = self.canonical_worktree_path(worktree_path)?;
-        self.ensure_no_writer(&canonical)?;
-        let dirty_state = self.check_dirty(&canonical)?;
+        let canonical = self.deletion_record(worktree_path)?.path;
+        let missing = !canonical.try_exists()?;
+        if let Some(owner_id) = self.writer_leases.owner_canonical(&canonical) {
+            return Err(WorktreeError::WriterAlreadyActive {
+                path: canonical,
+                owner_id,
+            });
+        }
+        let dirty_state = if missing {
+            DirtyState::clean()
+        } else {
+            self.check_dirty(&canonical)?
+        };
         if !force && dirty_state.is_dirty {
             let count = dirty_state.files.len();
             let files = dirty_state
@@ -575,7 +623,8 @@ impl WorktreeManager {
         git_worktree_remove(&self.repo_root, &canonical, force)?;
         self.dirty_snapshots.lock().remove(&canonical);
         self.bump_revision();
-        Ok(git_worktree_prune(&self.repo_root).is_ok())
+        // Git remove targets this record; global prune would affect other records.
+        Ok(missing)
     }
 
     pub fn remove_worktree(&self, worktree_path: &Path, force: bool) -> Result<(), WorktreeError> {
@@ -612,12 +661,13 @@ impl WorktreeManager {
         &self,
         worktree_path: &Path,
     ) -> Result<BranchDeletionPreview, WorktreeError> {
-        let canonical = self.canonical_worktree_path(worktree_path)?;
-        let existing =
-            self.find_worktree(&canonical)?
-                .ok_or_else(|| WorktreeError::WorktreeNotFound {
-                    path: canonical.clone(),
-                })?;
+        let existing = self.deletion_record(worktree_path)?;
+        let missing = !existing.path.try_exists()?;
+        let dirty_state = if missing {
+            DirtyState::clean()
+        } else {
+            self.check_dirty(&existing.path)?
+        };
         let branch = existing
             .branch_short_name()
             .ok_or_else(|| WorktreeError::ParseError("Detached worktree has no branch".into()))?
@@ -661,6 +711,8 @@ impl WorktreeManager {
         };
 
         Ok(BranchDeletionPreview {
+            dirty_state,
+            missing,
             branch,
             head,
             upstream,
@@ -677,7 +729,13 @@ impl WorktreeManager {
         destructive: bool,
     ) -> Result<bool, WorktreeError> {
         let _delete_guard = self.delete_lock.lock();
-        self.ensure_no_writer(worktree_path)?;
+        let record = self.deletion_record(worktree_path)?;
+        if let Some(owner_id) = self.writer_leases.owner_canonical(&record.path) {
+            return Err(WorktreeError::WriterAlreadyActive {
+                path: record.path,
+                owner_id,
+            });
+        }
 
         let branch = if delete_branch {
             let preview = self.branch_deletion_preview(worktree_path)?;

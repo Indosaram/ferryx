@@ -45,6 +45,23 @@ struct WorkspaceScan {
 pub struct WorktreeDiskScans(Arc<Mutex<HashMap<String, WorkspaceScan>>>);
 
 impl WorktreeDiskScans {
+    pub(crate) fn remove_deleted(&self, workspace_id: &str, path: &std::path::Path) {
+        let mut scans = self.0.lock();
+        let Some(scan) = scans.get_mut(workspace_id) else {
+            return;
+        };
+        // Share publication's lock so an older worker cannot resurrect the row.
+        scan.cancelled.store(true, Ordering::Release);
+        if scan.current.status == DiskScanStatus::Running {
+            scan.current.status = DiskScanStatus::Cancelled;
+            scan.current.progress.current_path = None;
+        }
+        scan.current.rows.retain(|row| row.worktree.path != path);
+        if let Some(completed) = &mut scan.completed {
+            completed.rows.retain(|row| row.worktree.path != path);
+        }
+    }
+
     pub(crate) fn begin(
         &self,
         workspace_id: &str,

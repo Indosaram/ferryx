@@ -1,24 +1,17 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import "./worktree-disk-test-dom";
+import "@testing-library/jest-dom/vitest";
+import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { Worktree } from "../lib/types";
+import type { BranchDeletionPreview, Worktree } from "../lib/types";
 import { WorktreeDeleteDialog, type WorktreeDeleteServices } from "./WorktreeDeleteDialog";
 
-const native = vi.hoisted(() => ({
+const native = {
   previewWorktreeDelete: vi.fn(),
   deleteWorktree: vi.fn(),
   deleteWorktreeDestructive: vi.fn(),
-}));
-
-vi.mock("../lib/tauri", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../lib/tauri")>();
-  return {
-    ...actual,
-    previewWorktreeDelete: native.previewWorktreeDelete,
-    deleteWorktree: native.deleteWorktree,
-    deleteWorktreeDestructive: native.deleteWorktreeDestructive,
-  };
-});
+};
 
 const worktree: Worktree = {
   path: "/repo/feature",
@@ -30,13 +23,15 @@ const worktree: Worktree = {
   prunable: null,
 };
 
-const preview = {
+const preview: BranchDeletionPreview = {
   branch: "orca/ws-main/feature",
   head: "abc123def456",
   upstream: "origin/orca/ws-main/feature",
   merged: false,
   ahead: 2,
   behind: 1,
+  dirtyState: { isDirty: false, files: [] },
+  missing: false,
 };
 
 function createServices(overrides: Partial<WorktreeDeleteServices> = {}): WorktreeDeleteServices {
@@ -55,16 +50,68 @@ beforeEach(() => {
   native.previewWorktreeDelete.mockResolvedValue(preview);
   native.deleteWorktree.mockResolvedValue(undefined);
   native.deleteWorktreeDestructive.mockResolvedValue(undefined);
+  // Intercept only IPC: default services and native request routing stay real,
+  // with no module mocks that could leak into the disk/lifecycle suites in Bun.
+  mockIPC((command, args) => {
+    if (!args || !("request" in args)) throw new Error(`Missing IPC request: ${command}`);
+    switch (command) {
+      case "cmd_worktree_delete_preview": return native.previewWorktreeDelete(args?.request);
+      case "cmd_worktree_delete": return native.deleteWorktree(args?.request);
+      case "cmd_worktree_delete_destructive": return native.deleteWorktreeDestructive(args?.request);
+      default: throw new Error(`Unexpected IPC command: ${command}`);
+    }
+  });
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  clearMocks();
+});
 
 describe("WorktreeDeleteDialog", () => {
+  it("gates destructive deletion after preview rejection", async () => {
+    const services = createServices({ previewDelete: vi.fn(async () => { throw { code: "GIT_ERROR", message: "preview unavailable" }; }) });
+    await act(async () => {
+    await act(async () => {
+      render(<WorktreeDeleteDialog worktree={worktree} services={services} initialDirty onClose={vi.fn()} onDeleted={vi.fn()} />);
+    });
+    });
+    for (const button of screen.getAllByRole("button").filter((b) => b.textContent?.startsWith("Delete"))) {
+      expect(button).toBeDisabled();
+    await act(async () => { fireEvent.click(button); });
+    }
+    expect(services.deleteDestructive).not.toHaveBeenCalled();
+  });
+
+  it("uses fresh dirty and unmerged preview instead of cached clean props", async () => {
+    const services = createServices({ previewDelete: vi.fn(async () => ({ ...preview, dirtyState: { isDirty: true, files: [{ statusCode: "??", path: "fresh.txt" }] } })) });
+    await act(async () => { render(<WorktreeDeleteDialog worktree={worktree} services={services} dirtyFiles={[{ statusCode: " M", path: "stale.txt" }]} onClose={vi.fn()} onDeleted={vi.fn()} />); });
+    expect(screen.getByTestId("dirty-file-preview")).toHaveTextContent("fresh.txt");
+    expect(screen.getByTestId("dirty-file-preview")).not.toHaveTextContent("stale.txt");
+    expect(screen.getByRole("button", { name: "Delete worktree and discard changes permanently" })).toBeEnabled();
+  });
+
+  it("invalidates preview and refreshes current losses when safe deletion discovers new changes", async () => {
+    let resolveRefresh!: (value: typeof preview) => void;
+    const refreshed = new Promise<typeof preview>((resolve) => { resolveRefresh = resolve; });
+    const services = createServices({
+      previewDelete: vi.fn().mockResolvedValueOnce(preview).mockReturnValueOnce(refreshed),
+      deleteSafe: vi.fn(async () => { throw { code: "UNMERGED_BRANCH", message: "changed" }; }),
+    });
+    await act(async () => { render(<WorktreeDeleteDialog worktree={worktree} services={services} onClose={vi.fn()} onDeleted={vi.fn()} />); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Delete worktree and branch" })); });
+    expect(services.previewDelete).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("button", { name: "Delete unmerged branch permanently" })).toBeDisabled();
+    await act(async () => { resolveRefresh({ ...preview, dirtyState: { isDirty: true, files: [{ statusCode: "??", path: "new-loss.txt" }] } } as typeof preview); await refreshed; });
+    expect(screen.getByTestId("dirty-file-preview")).toHaveTextContent("new-loss.txt");
+  });
   it("shows branch safety metadata before safe deletion", async () => {
     const services = createServices();
     const onDeleted = vi.fn();
+    await act(async () => {
     render(<WorktreeDeleteDialog worktree={worktree} services={services} onClose={vi.fn()} onDeleted={onDeleted} />);
+    });
 
-    expect(await screen.findByText("orca/ws-main/feature")).toBeInTheDocument();
+    expect(screen.getByText("orca/ws-main/feature")).toBeInTheDocument();
     expect(screen.getByText("abc123def456")).toBeInTheDocument();
     expect(screen.getByText("origin/orca/ws-main/feature")).toBeInTheDocument();
     expect(screen.getByText(/not merged/i)).toBeInTheDocument();
@@ -72,8 +119,8 @@ describe("WorktreeDeleteDialog", () => {
     expect(screen.getByText(/1 behind/i)).toBeInTheDocument();
     expect(screen.getByTestId("worktree-delete-divergence")).toHaveAttribute("data-state", "upstream");
 
-    fireEvent.click(screen.getByRole("button", { name: "Delete worktree and branch" }));
-    await waitFor(() => expect(services.deleteSafe).toHaveBeenCalledWith(worktree));
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Delete worktree and branch" })); });
+    expect(services.deleteSafe).toHaveBeenCalledWith(worktree);
     expect(onDeleted).toHaveBeenCalledOnce();
   });
 
@@ -82,36 +129,40 @@ describe("WorktreeDeleteDialog", () => {
     const services = createServices({
       previewDelete: vi.fn(async () => ({ ...preview, upstream: null, ahead: null, behind: null })),
     });
+    await act(async () => {
     render(<WorktreeDeleteDialog worktree={selectedWorktree} services={services} onClose={vi.fn()} onDeleted={vi.fn()} />);
+    });
 
-    const path = await screen.findByTestId("worktree-delete-path");
+    const path = screen.getByTestId("worktree-delete-path");
     expect(path).toHaveTextContent(selectedWorktree.path);
     expect(path).toHaveClass("break-all");
     expect(screen.queryByText(/\? ahead · \? behind/)).not.toBeInTheDocument();
-    const divergence = await screen.findByTestId("worktree-delete-divergence");
+    const divergence = screen.getByTestId("worktree-delete-divergence");
     expect(divergence).toHaveAttribute("data-state", "no-upstream");
     expect(divergence).toHaveTextContent("No upstream");
   });
 
   it("scopes native preview and safe deletion to the selected registered workspace", async () => {
+    await act(async () => {
     render(
       <WorktreeDeleteDialog
         {...({ workspaceId: "project-a", worktree, onClose: vi.fn(), onDeleted: vi.fn() } as any)}
       />,
     );
+    });
 
-    await screen.findByText("orca/ws-main/feature");
+    screen.getByText("orca/ws-main/feature");
     expect(native.previewWorktreeDelete).toHaveBeenCalledWith({
       workspaceId: "project-a",
       worktree: { wsId: "ws-main", slug: "feature" },
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Delete worktree and branch" }));
-    await waitFor(() => expect(native.deleteWorktree).toHaveBeenCalledWith({
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Delete worktree and branch" })); });
+    expect(native.deleteWorktree).toHaveBeenCalledWith({
       workspaceId: "project-a",
       worktree: { wsId: "ws-main", slug: "feature" },
       deleteBranch: true,
-    }));
+    });
   });
 
   it("offers destructive deletion only for the UNMERGED_BRANCH error code", async () => {
@@ -120,14 +171,16 @@ describe("WorktreeDeleteDialog", () => {
         throw { code: "UNMERGED_BRANCH", message: "opaque backend wording", details: {} };
       }),
     });
+    await act(async () => {
     render(<WorktreeDeleteDialog worktree={worktree} services={services} onClose={vi.fn()} onDeleted={vi.fn()} />);
+    });
 
-    await screen.findByText("orca/ws-main/feature");
-    fireEvent.click(screen.getByRole("button", { name: "Delete worktree and branch" }));
-    expect(await screen.findByRole("button", { name: "Delete unmerged branch permanently" })).toBeInTheDocument();
+    screen.getByText("orca/ws-main/feature");
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Delete worktree and branch" })); });
+    expect(screen.getByRole("button", { name: "Delete unmerged branch permanently" })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Delete unmerged branch permanently" }));
-    await waitFor(() => expect(services.deleteDestructive).toHaveBeenCalledWith(worktree));
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Delete unmerged branch permanently" })); });
+    expect(services.deleteDestructive).toHaveBeenCalledWith(worktree);
   });
 
   it("offers destructive deletion for the DIRTY_WORKTREE error code", async () => {
@@ -136,14 +189,16 @@ describe("WorktreeDeleteDialog", () => {
         throw { code: "DIRTY_WORKTREE", message: "uncommitted changes", details: {} };
       }),
     });
+    await act(async () => {
     render(<WorktreeDeleteDialog worktree={worktree} services={services} onClose={vi.fn()} onDeleted={vi.fn()} />);
+    });
 
-    await screen.findByText("orca/ws-main/feature");
-    fireEvent.click(screen.getByRole("button", { name: "Delete worktree and branch" }));
-    expect(await screen.findByRole("button", { name: "Delete worktree and discard changes permanently" })).toBeInTheDocument();
+    screen.getByText("orca/ws-main/feature");
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Delete worktree and branch" })); });
+    expect(screen.getByRole("button", { name: "Delete worktree and discard changes permanently" })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Delete worktree and discard changes permanently" }));
-    await waitFor(() => expect(services.deleteDestructive).toHaveBeenCalledWith(worktree));
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Delete worktree and discard changes permanently" })); });
+    expect(services.deleteDestructive).toHaveBeenCalledWith(worktree);
   });
 
   it("names the files a destructive deletion will discard, with a count and a truncated remainder", async () => {
@@ -156,10 +211,12 @@ describe("WorktreeDeleteDialog", () => {
       ...Array.from({ length: 9 }, (_, i) => ({ statusCode: " M", path: `src/generated/file-${i}.ts` })),
     ];
     const services = createServices({
+      previewDelete: vi.fn().mockResolvedValueOnce(preview).mockResolvedValueOnce({ ...preview, dirtyState: { isDirty: true, files: dirtyFiles } }),
       deleteSafe: vi.fn(async () => {
         throw { code: "DIRTY_WORKTREE", message: "uncommitted changes", details: {} };
       }),
     });
+    await act(async () => {
     render(
       <WorktreeDeleteDialog
         worktree={worktree}
@@ -169,11 +226,12 @@ describe("WorktreeDeleteDialog", () => {
         onDeleted={vi.fn()}
       />,
     );
+    });
 
-    await screen.findByText("orca/ws-main/feature");
-    fireEvent.click(screen.getByRole("button", { name: "Delete worktree and branch" }));
+    screen.getByText("orca/ws-main/feature");
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Delete worktree and branch" })); });
 
-    const listing = await screen.findByTestId("dirty-file-preview");
+    const listing = screen.getByTestId("dirty-file-preview");
     expect(listing).toHaveTextContent("11 files will be discarded");
     // Specific paths, not a generic phrase.
     expect(listing).toHaveTextContent("src/main.rs");
@@ -189,14 +247,16 @@ describe("WorktreeDeleteDialog", () => {
         throw { code: "DIRTY_WORKTREE", message: "uncommitted changes", details: {} };
       }),
     });
+    await act(async () => {
     render(<WorktreeDeleteDialog worktree={worktree} services={services} onClose={vi.fn()} onDeleted={vi.fn()} />);
+    });
 
-    await screen.findByText("orca/ws-main/feature");
-    fireEvent.click(screen.getByRole("button", { name: "Delete worktree and branch" }));
+    screen.getByText("orca/ws-main/feature");
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Delete worktree and branch" })); });
 
     // The destructive path must still be offered; only the listing is absent.
     expect(
-      await screen.findByRole("button", { name: "Delete worktree and discard changes permanently" }),
+      screen.getByRole("button", { name: "Delete worktree and discard changes permanently" }),
     ).toBeInTheDocument();
     expect(screen.queryByTestId("dirty-file-preview")).not.toBeInTheDocument();
   });
@@ -207,11 +267,13 @@ describe("WorktreeDeleteDialog", () => {
         throw { code: "GIT_ERROR", message: "unmerged branch text must not drive UI", details: {} };
       }),
     });
+    await act(async () => {
     render(<WorktreeDeleteDialog worktree={worktree} services={services} onClose={vi.fn()} onDeleted={vi.fn()} />);
+    });
 
-    await screen.findByText("orca/ws-main/feature");
-    fireEvent.click(screen.getByRole("button", { name: "Delete worktree and branch" }));
-    await screen.findByText("GIT_ERROR");
+    screen.getByText("orca/ws-main/feature");
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Delete worktree and branch" })); });
+    screen.getByText("GIT_ERROR");
     expect(screen.queryByRole("button", { name: "Delete unmerged branch permanently" })).not.toBeInTheDocument();
   });
 });

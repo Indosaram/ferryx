@@ -114,6 +114,8 @@ impl CreateWorktreeOptions {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BranchDeletionPreview {
+    pub dirty_state: DirtyState,
+    pub missing: bool,
     pub branch: String,
     pub head: String,
     pub upstream: Option<String>,
