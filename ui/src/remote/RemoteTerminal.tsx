@@ -300,6 +300,7 @@ export function RemoteTerminal({
   const cellMeasureRef = useRef<HTMLSpanElement>(null);
   const inputSinkRef = useRef<HTMLTextAreaElement>(null);
   const isComposingRef = useRef(false);
+  const pendingCompositionInputRef = useRef<string | null>(null);
   const requestResizeRef = useRef<() => void>(() => {});
   const lastSentGeometryRef = useRef<GridGeometry | null>(null);
   const scheduledSocketRequestRef = useRef<SocketRequest | null>(null);
@@ -331,11 +332,12 @@ export function RemoteTerminal({
   }, []);
 
   useLayoutEffect(() => {
-    focusInput();
+    // Software keyboards must be opened by an explicit tap, not lifecycle work.
+    if (!window.matchMedia?.("(pointer: coarse)").matches) focusInput();
   }, [sessionId, activeTabId, focusInput]);
 
   useEffect(() => {
-    if (connected) {
+    if (connected && !window.matchMedia?.("(pointer: coarse)").matches) {
       focusInput();
     }
   }, [connected, focusInput]);
@@ -569,6 +571,17 @@ export function RemoteTerminal({
 
   const handleTouchEnd = (event: React.TouchEvent<HTMLDivElement>) => {
     if (event.touches.length === 0) {
+      // A fast final move can fall inside the throttle window. Drain whole rows
+      // before resetting the gesture, using the same bounded wire messages.
+      if (touchGestureRef.current === "scroll" && cellMetrics.height > 0) {
+        let remaining = Math.trunc(-accumulatedScrollDeltaYRef.current / cellMetrics.height);
+        const socket = socketRef.current;
+        while (remaining !== 0 && socket?.readyState === WebSocket.OPEN) {
+          const rows = Math.min(10, Math.max(-10, remaining));
+          socket.send(JSON.stringify({ type: "scroll", rows }));
+          remaining -= rows;
+        }
+      }
       if (!isPinchActiveRef.current && touchStartRef.current && touchGestureRef.current !== "scroll") {
         const changedTouch = event.changedTouches[0];
         const endX = changedTouch ? changedTouch.clientX : (touchLastRef.current?.x ?? touchStartRef.current.x);
@@ -582,6 +595,7 @@ export function RemoteTerminal({
           } else {
             onSwipePreviousTab?.();
           }
+        } else if (touchGestureRef.current === null && Math.abs(deltaX) <= 8 && Math.abs(deltaY) <= 8) {
           focusInput();
         }
       }
@@ -615,19 +629,28 @@ export function RemoteTerminal({
     isComposingRef.current = false;
     setPreedit(null);
     const sink = inputSinkRef.current;
-    const committed = data.length > 0 ? data : (sink?.value ?? "");
+    // Empty compositionend is cancellation, never a request to send preedit.
+    pendingCompositionInputRef.current = data;
     if (sink) sink.value = "";
-    sendText(committed);
+    sendText(data);
   };
 
   const handleSinkInput = (event: React.FormEvent<HTMLTextAreaElement>) => {
     const sink = event.currentTarget;
-    if (isComposingRef.current) {
+    const input = event.nativeEvent as InputEvent;
+    if (isComposingRef.current || input.isComposing) {
+      isComposingRef.current = true;
       setPreedit(sink.value);
       return;
     }
     const text = sink.value;
     sink.value = "";
+    const committed = pendingCompositionInputRef.current;
+    pendingCompositionInputRef.current = null;
+    // WebKit/Chromium can deliver the final insertion after compositionend.
+    // Consume only that matching insertion, not the next unrelated edit.
+    if (committed !== null && text === committed &&
+        (input.inputType === "insertFromComposition" || input.inputType === "insertText" || input.inputType === "insertCompositionText")) return;
     sendText(text);
   };
 
@@ -679,9 +702,14 @@ export function RemoteTerminal({
         ref={surfaceRef}
         data-testid="remote-terminal-grid"
         tabIndex={0}
-        onPointerDown={() => {
-          inputSinkRef.current?.focus();
+        onPointerDown={(event) => {
+          if (event.pointerType === "touch") return;
+          event.preventDefault();
+          focusInput();
         }}
+        // Suppress the native/compatibility mouse focus transfer to the grid.
+        // Touch focus belongs exclusively to the completed tap handler.
+        onMouseDown={(event) => event.preventDefault()}
         onWheel={handleWheel}
         onTouchStart={handleTouchStart}
         onTouchMove={handleTouchMove}
@@ -708,6 +736,7 @@ export function RemoteTerminal({
             inputSinkRef.current?.focus();
             return;
           }
+          pendingCompositionInputRef.current = null;
           const ctrlChordChar =
             event.ctrlKey && !event.metaKey && !event.altKey
               ? physicalChordChar(event.key, event.nativeEvent.code)
@@ -748,6 +777,9 @@ export function RemoteTerminal({
                 sendKey(`alt-${cased}`);
               }
             } else if (event.key.length === 1 && !event.altKey && !event.ctrlKey) {
+              // Let the editable element own printable input, including the key
+              // that starts composition before the browser reports isComposing.
+              if (event.target === inputSinkRef.current) return;
               if (event.key.charCodeAt(0) <= 0x7f) {
                 event.preventDefault();
                 sendKey(event.key);
@@ -784,6 +816,7 @@ export function RemoteTerminal({
           fontSize: `${activeFontSize}px`,
           lineHeight: 1,
           whiteSpace: "pre",
+          touchAction: "none",
         }}
       >
         {embedded && !connected ? (
@@ -816,19 +849,18 @@ export function RemoteTerminal({
           style={{
             left: 0,
             top: 0,
-            width: Math.max(1, cellMetrics.width),
-            height: Math.max(1, cellMetrics.height),
-            transform:
-              cellMetrics.width > 0 && cellMetrics.height > 0
-                ? `translate(${(grid?.cursor.x ?? 0) * cellMetrics.width}px, ${(grid?.cursor.y ?? 0) * cellMetrics.height}px)`
-                : undefined,
+            // Keep the OS editing anchor stationary through cursor/viewport
+            // updates; the separate preedit overlay follows the grid cursor.
+            width: 1,
+            height: 1,
             color: settings.theme.foreground,
             caretColor: "transparent",
             fontFamily: settings.fontFamily,
-            fontSize: `${activeFontSize}px`,
+            fontSize: `${Math.max(16, activeFontSize)}px`,
             lineHeight: 1,
           }}
           onCompositionStart={() => {
+            pendingCompositionInputRef.current = null;
             isComposingRef.current = true;
           }}
           onCompositionUpdate={(event) => {
@@ -839,9 +871,9 @@ export function RemoteTerminal({
           }}
           onInput={handleSinkInput}
           onBlur={() => {
-            if (isComposingRef.current) {
-              commitComposition("");
-            }
+            isComposingRef.current = false;
+            pendingCompositionInputRef.current = null;
+            setPreedit(null);
             const sink = inputSinkRef.current;
             if (sink) sink.value = "";
           }}
