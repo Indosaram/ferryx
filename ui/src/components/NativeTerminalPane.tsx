@@ -712,17 +712,24 @@ export function NativeTerminalPane({
       });
   }, [targetSessionId, updateImeAnchor, visible]);
 
+  const previousFocusOwnerRef = useRef({ active, targetSessionId: null as string | null });
   useEffect(() => {
+    const previousOwner = previousFocusOwnerRef.current;
+    previousFocusOwnerRef.current = { active, targetSessionId };
     if (!visible || !targetSessionId) return;
     if (active) {
       lastFocusedNativeTerminalSessionId = targetSessionId;
-      inputRef.current?.focus();
-      const frame = requestAnimationFrame(() => {
+      // Returning from an overlay is not a new pane activation. Respect the
+      // overlay's restored focus, including non-editable controls such as badges.
+      const focusInput = () => {
+        if (previousOwner.active && previousOwner.targetSessionId === targetSessionId &&
+            document.activeElement && document.activeElement !== document.body &&
+            document.activeElement !== inputRef.current) return;
         inputRef.current?.focus();
-      });
-      const timer = window.setTimeout(() => {
-        inputRef.current?.focus();
-      }, 40);
+      };
+      focusInput();
+      const frame = requestAnimationFrame(focusInput);
+      const timer = window.setTimeout(focusInput, 40);
       if (isTauri()) {
         sendFocus(true);
       }

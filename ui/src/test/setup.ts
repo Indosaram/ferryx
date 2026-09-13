@@ -20,17 +20,60 @@ if (!globalThis.PointerEvent) {
   }
 }
 
-// Radix UI JSDOM stubs
+// Deterministic capture delivery for JSDOM. Synthetic dispatch represents platform
+// pointer input here; capture is applied before DOM propagation. Disconnection
+// deliberately does not erase ownership: tests must observe explicit cleanup.
 if (typeof Element !== "undefined") {
-  if (!Element.prototype.hasPointerCapture) {
-    Element.prototype.hasPointerCapture = () => false;
+  const pointerCaptures = new Map<number, Element>();
+  const dispatchEvent = EventTarget.prototype.dispatchEvent;
+
+  function emitCaptureLoss(owner: Element, pointerId: number) {
+    // The MouseEvent fallback ignores PointerEventInit.pointerId.
+    const event = new PointerEvent("lostpointercapture", { bubbles: true, pointerId });
+    Object.defineProperty(event, "pointerId", { value: pointerId });
+    owner.dispatchEvent(event);
   }
-  if (!Element.prototype.setPointerCapture) {
-    Element.prototype.setPointerCapture = () => {};
-  }
-  if (!Element.prototype.releasePointerCapture) {
-    Element.prototype.releasePointerCapture = () => {};
-  }
+
+  EventTarget.prototype.dispatchEvent = function (event: Event) {
+    if ((event.type === "pointermove" || event.type === "pointerup" || event.type === "pointercancel") &&
+        "pointerId" in event && typeof event.pointerId === "number") {
+      const owner = pointerCaptures.get(event.pointerId);
+      const result = dispatchEvent.call(owner ?? this, event);
+      if (event.type !== "pointermove") {
+        pointerCaptures.get(event.pointerId)?.releasePointerCapture(event.pointerId);
+      }
+      return result;
+    }
+    return dispatchEvent.call(this, event);
+  };
+
+  Element.prototype.hasPointerCapture = function (pointerId: number) {
+    return pointerCaptures.get(pointerId) === this;
+  };
+
+  Element.prototype.setPointerCapture = function (pointerId: number) {
+    if (!this.isConnected && typeof document !== "undefined" && !document.contains(this)) {
+      throw new DOMException("The element is not connected to the document.", "InvalidStateError");
+    }
+    const prev = pointerCaptures.get(pointerId);
+    if (prev && prev !== this) {
+      pointerCaptures.delete(pointerId);
+      emitCaptureLoss(prev, pointerId);
+    }
+    pointerCaptures.set(pointerId, this);
+  };
+
+  Element.prototype.releasePointerCapture = function (pointerId: number) {
+    if (pointerCaptures.get(pointerId) === this) {
+      pointerCaptures.delete(pointerId);
+      emitCaptureLoss(this, pointerId);
+    }
+  };
+
+  (globalThis as unknown as { __clearPointerCaptures?: () => void }).__clearPointerCaptures = () => {
+    pointerCaptures.clear();
+  };
+
   if (!Element.prototype.scrollIntoView) {
     Element.prototype.scrollIntoView = () => {};
   }
@@ -68,6 +111,8 @@ const { clearHmrWorkspaceState } = await import("../state/hmrWorkspaceState");
 const { clearWorkspaceSnapshot } = await import("../state/workspaceSnapshotCache");
 
 setupBeforeEach(() => {
+  const clearCaptures = (globalThis as unknown as { __clearPointerCaptures?: () => void }).__clearPointerCaptures;
+  if (clearCaptures) clearCaptures();
   clearHmrWorkspaceState();
   clearWorkspaceSnapshot();
   // jsdom has no media-query engine; tests that change density provide their own signals.

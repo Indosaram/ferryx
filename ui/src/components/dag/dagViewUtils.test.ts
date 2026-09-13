@@ -1,9 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   calculateEdgePath,
+  calculateEffectiveMinScale,
+  calculateFitCamera,
+  calculateZoomAtAnchor,
+  clampScaleWithRecovery,
   deriveActiveWaveIndex,
   formatRouteText,
   getNodeStateGlyph,
+  normalizeWheelDeltaPixels,
 } from "./dagViewUtils";
 import type { DagNodeRoute, DagNodeState, DagRunSnapshot } from "../../lib/dagTypes";
 
@@ -178,6 +183,78 @@ describe("dagViewUtils", () => {
 
       expect(endY1).toBeLessThan(endY2);
       expect(endY2).toBeLessThan(endY3);
+    });
+  });
+
+  describe("Camera math functions", () => {
+    it("calculateFitCamera centers and bounds content within viewport with margin", () => {
+      const cam = calculateFitCamera(1000, 700, 1160, 284);
+      // margin = 24. fitScale = min(1, 952/1160, 652/284) = 952/1160 = 0.820689...
+      expect(cam.scale).toBeCloseTo(0.8207, 3);
+      expect(cam.x).toBeCloseTo(24, 1);
+      expect(cam.y).toBeGreaterThan(0);
+    });
+
+    it("calculateFitCamera does not upscale content smaller than viewport", () => {
+      const cam = calculateFitCamera(1000, 700, 200, 100);
+      expect(cam.scale).toBe(1.0);
+      expect(cam.x).toBe((1000 - 200) / 2);
+      expect(cam.y).toBe((700 - 100) / 2);
+    });
+
+    it("calculateFitCamera handles zero and negative dimensions safely", () => {
+      expect(calculateFitCamera(0, 700, 100, 100)).toEqual({ x: 0, y: 0, scale: 1 });
+      expect(calculateFitCamera(1000, 0, 100, 100)).toEqual({ x: 0, y: 0, scale: 1 });
+      expect(calculateFitCamera(1000, 700, 0, 100)).toEqual({ x: 0, y: 0, scale: 1 });
+    });
+
+    it("calculateEffectiveMinScale floors at min(0.1, fitScale)", () => {
+      expect(calculateEffectiveMinScale(0.5)).toBe(0.1);
+      expect(calculateEffectiveMinScale(0.05)).toBe(0.05);
+    });
+
+    it("calculateZoomAtAnchor maintains cursor anchor world coordinates", () => {
+      const initialCam = { x: 100, y: 50, scale: 1.0 };
+      const cursor = { x: 500, y: 350 };
+      // World point under cursor: wX = (500 - 100) / 1 = 400, wY = (350 - 50) / 1 = 300
+      const zoomed = calculateZoomAtAnchor(initialCam, 1.5, cursor, 0.1, 3.0);
+      expect(zoomed.scale).toBe(1.5);
+      const newScreenX = zoomed.x + 1.5 * 400;
+      const newScreenY = zoomed.y + 1.5 * 300;
+      expect(newScreenX).toBeCloseTo(cursor.x, 2);
+      expect(newScreenY).toBeCloseTo(cursor.y, 2);
+    });
+
+    it("calculateZoomAtAnchor clamps to limits without drift", () => {
+      const atMax = { x: 100, y: 50, scale: 3.0 };
+      const cursor = { x: 500, y: 350 };
+      const overMax = calculateZoomAtAnchor(atMax, 3.5, cursor, 0.1, 3.0);
+      expect(overMax.scale).toBe(3.0);
+      expect(overMax.x).toBe(atMax.x);
+      expect(overMax.y).toBe(atMax.y);
+    });
+
+    it("clampScaleWithRecovery obeys direction-preserving recovery below min and above max", () => {
+      // Below minScale (0.1)
+      expect(clampScaleWithRecovery(0.05, 0.04, 0.1)).toBe(0.05); // outward: no-op
+      expect(clampScaleWithRecovery(0.05, 0.08, 0.1)).toBe(0.08); // inward: advances toward min
+      expect(clampScaleWithRecovery(0.05, 0.15, 0.1)).toBe(0.1); // inward past min: clamps to min
+
+      // Above maxScale (3.0)
+      expect(clampScaleWithRecovery(3.5, 3.8, 0.1, 3.0)).toBe(3.5); // outward (larger): no-op
+      expect(clampScaleWithRecovery(3.5, 3.2, 0.1, 3.0)).toBe(3.2); // inward: advances toward max
+      expect(clampScaleWithRecovery(3.5, 2.5, 0.1, 3.0)).toBe(3.0); // inward past max: clamps to max
+
+      // Within range
+      expect(clampScaleWithRecovery(1.0, 1.2, 0.1, 3.0)).toBe(1.2);
+      expect(clampScaleWithRecovery(1.0, 0.05, 0.1, 3.0)).toBe(0.1);
+      expect(clampScaleWithRecovery(1.0, 3.5, 0.1, 3.0)).toBe(3.0);
+    });
+
+    it("normalizeWheelDeltaPixels scales lines and pages properly", () => {
+      expect(normalizeWheelDeltaPixels(10, 0, 800)).toBe(10);
+      expect(normalizeWheelDeltaPixels(2, 1, 800)).toBe(32);
+      expect(normalizeWheelDeltaPixels(1, 2, 800)).toBe(800);
     });
   });
 });
