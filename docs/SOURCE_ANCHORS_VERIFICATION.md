@@ -10,11 +10,11 @@ Line numbers refer to this worktree's checkout.
 
 | # | Claim (as written in the docs) | Source anchor | Status |
 |---|---|---|---|
-| 1 | The remote gateway port is fixed to `43821`; the daemon overwrites any custom port | `src-tauri/src/daemon/server.rs:2366` (`config.port = REMOTE_GATEWAY_PORT;`) | VERIFIED |
+| 1 | The remote gateway port is fixed to `43821`; the daemon overwrites any custom port | `src-tauri/src/daemon/server.rs:2444` (`config.port = REMOTE_GATEWAY_PORT;`) | VERIFIED |
 | 2 | The config parser accepts a `"port"` key for wire compatibility only | `src-tauri/src/remote/state.rs:57`, `:425`, `:869`; test assertion at `:1046` | VERIFIED |
 | 3 | The gateway never binds the wildcard address `0.0.0.0` | `src-tauri/src/remote/server.rs:2248` (explicit rationale comment), `:2309` | VERIFIED (see caveat below) |
 | 4 | A custom relay address can be supplied via `FERRYX_RELAY_URL` | `src-tauri/src/daemon/server.rs:1956`, `:2008`; `src-tauri/src/ipc/remote.rs:310` | VERIFIED |
-| 5 | `View`-permission clients can observe output but their input is discarded | `src-tauri/src/remote/server.rs:1479`, `:1852` (`can_control`), guards at `:963`, `:1090`, `:1136` | VERIFIED |
+| 5 | `View`-permission clients can observe output but their input is discarded | `src-tauri/src/remote/server.rs:1484`, `:1857` (`can_control`), guards at `:963`, `:1090`, `:1136` | VERIFIED |
 | 6 | Pairing codes expire after 60 seconds | `src-tauri/src/remote/auth.rs:196` (`PAIRING_EXPIRY = Duration::from_secs(60)`) | VERIFIED |
 | 7 | Pairing failure budget is 5 attempts | `src-tauri/src/remote/auth.rs:197` (`PAIRING_FAILURE_BUDGET: u8 = 5`) | VERIFIED |
 | 8 | Paired devices expire after 30 days idle | `src-tauri/src/remote/auth.rs:199` (`DEVICE_IDLE_EXPIRY_SECS = 30 * 24 * 60 * 60`) | VERIFIED |

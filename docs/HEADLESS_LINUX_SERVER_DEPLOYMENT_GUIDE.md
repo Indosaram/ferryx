@@ -323,7 +323,7 @@ Wildcard address scope: The production gateway listener binds loopback and resol
 
 ### Fixed Port Policy and Transport Protocol
 
-The remote gateway port is fixed in the source code to `43821` (`src-tauri/src/daemon/server.rs:2366`, `REMOTE_GATEWAY_PORT`). While the configuration parser accepts a `"port"` key for wire compatibility, the daemon overwrites custom values with `43821`.
+The remote gateway port is fixed in the source code to `43821` (`src-tauri/src/daemon/server.rs:2444`, `REMOTE_GATEWAY_PORT`). While the configuration parser accepts a `"port"` key for wire compatibility, the daemon overwrites custom values with `43821`.
 
 Direct connections to port 43821 on loopback or local networks use plain HTTP and WebSockets over standard TCP (`src-tauri/src/remote/server.rs:2209`).
 Ferryx does not terminate TLS on this internal listener (`:2225`). For untrusted networks, place a TLS-terminating reverse proxy in front of the server.
