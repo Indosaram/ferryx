@@ -1,5 +1,5 @@
 pub mod agent_extension;
-mod agent_state;
+pub(crate) mod agent_state;
 pub mod client;
 pub mod handover;
 pub mod launchd;

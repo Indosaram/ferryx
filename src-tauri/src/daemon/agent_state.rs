@@ -52,6 +52,38 @@ impl AgentStateHub {
         });
     }
 
+    pub(crate) fn release_manual(&self, session_id: &str) {
+        let mut retained = self.retained.lock();
+        let previous = retained.get(session_id).cloned();
+        let state = AgentState {
+            session_id: session_id.to_string(),
+            state: "idle".to_string(),
+            agent: previous.as_ref().and_then(|s| s.agent.clone()),
+            provider_session: previous.as_ref().and_then(|s| s.provider_session.clone()),
+        };
+        tracing::info!(session_id, reason = "manual_reset",
+            previous_state = ?previous.as_ref().map(|s| &s.state),
+            "agent activity released");
+        retained.insert(session_id.to_string(), state.clone());
+        let _ = self.tx.send(AgentStateUpdate { state, is_snapshot: false });
+    }
+
+    pub(crate) fn release_foreground(&self, session_id: &str) {
+        let mut retained = self.retained.lock();
+        let previous = retained.get(session_id).cloned();
+        let state = AgentState {
+            session_id: session_id.to_string(),
+            state: "idle".to_string(),
+            agent: previous.as_ref().and_then(|s| s.agent.clone()),
+            provider_session: previous.as_ref().and_then(|s| s.provider_session.clone()),
+        };
+        tracing::info!(session_id, reason = "foreground_agent_to_shell",
+            previous_state = ?previous.as_ref().map(|s| &s.state),
+            "agent activity released");
+        retained.insert(session_id.to_string(), state.clone());
+        let _ = self.tx.send(AgentStateUpdate { state, is_snapshot: false });
+    }
+
     /// The successor owns the report socket. Predecessor frames are only a quiet
     /// baseline; replaying their backlog through multiple attaches must not mint live edges.
     pub fn publish_legacy(&self, state: AgentState, _is_snapshot: bool) -> bool {
@@ -77,7 +109,6 @@ impl AgentStateHub {
         }
     }
 
-    #[cfg(test)]
     pub fn current(&self, session_id: &str) -> Option<AgentState> {
         self.retained
             .lock()
@@ -110,6 +141,66 @@ mod tests {
             agent: Some("omo".to_string()),
             provider_session: None,
         }
+    }
+
+    #[tokio::test]
+    async fn manual_reset_clears_state_and_recovers_on_next_transition() {
+        let hub = Arc::new(AgentStateHub::new(8));
+        hub.publish_canonical(state("s1", "working"));
+        let mut subscription = hub.subscribe("s1");
+        assert_eq!(hub.current("s1").unwrap().state, "working");
+
+        hub.release_manual("s1");
+
+        let update = tokio::time::timeout(
+            std::time::Duration::from_secs(1), subscription.receiver.recv()
+        ).await.expect("manual reset event").expect("state stream");
+        assert_eq!(update.state.state, "idle");
+        assert!(!update.is_snapshot);
+        assert_eq!(hub.current("s1").unwrap().state, "idle");
+
+        hub.publish_canonical(state("s1", "working"));
+        let next_update = tokio::time::timeout(
+            std::time::Duration::from_secs(1), subscription.receiver.recv()
+        ).await.expect("next transition event").expect("state stream");
+        assert_eq!(next_update.state.state, "working");
+        assert_eq!(hub.current("s1").unwrap().state, "working");
+    }
+
+    #[tokio::test]
+    async fn agent_to_shell_transition_releases_state() {
+        use crate::terminal::foreground::{Foreground, ProcessTransition};
+        let hub = Arc::new(AgentStateHub::new(8));
+        hub.publish_canonical(state("s1", "working"));
+        let mut subscription = hub.subscribe("s1");
+        let mut transition = ProcessTransition::default();
+        assert!(!transition.observe(Some(Foreground::Agent(42))));
+        if transition.observe(Some(Foreground::Shell)) {
+            hub.release_foreground("s1");
+        }
+        let update = tokio::time::timeout(
+            std::time::Duration::from_secs(1), subscription.receiver.recv()
+        ).await.expect("release event").expect("state stream");
+        assert_eq!(update.state.state, "idle");
+        assert!(!update.is_snapshot);
+        assert_eq!(hub.current("s1").unwrap().state, "idle");
+        assert!(!transition.observe(Some(Foreground::Shell)), "one release per edge");
+    }
+
+    #[test]
+    fn quiet_agent_with_no_output_and_live_process_is_not_released() {
+        use crate::terminal::foreground::{Foreground, ProcessTransition};
+        let hub = Arc::new(AgentStateHub::new(8));
+        hub.publish_canonical(state("s1", "working"));
+        let mut subscription = hub.subscribe("s1");
+        let mut transition = ProcessTransition::default();
+        for observation in [Some(Foreground::Agent(42)), None, Some(Foreground::Agent(42))] {
+            if transition.observe(observation) {
+                hub.release_foreground("s1");
+            }
+        }
+        assert_eq!(hub.current("s1"), Some(state("s1", "working")));
+        assert!(matches!(subscription.receiver.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
     }
 
     #[test]

@@ -96,6 +96,7 @@ type SidebarProps = {
   onSelectWorktree: (worktree: Worktree) => void;
   onCreateWorktree: (project?: RegisteredProject) => void;
   onDeleteWorktree?: (worktree: Worktree) => void;
+  onResetAgentState?: (worktree: Worktree) => void;
   onOpenCommandPalette?: () => void;
   onOpenSettings?: () => void;
   onToggle?: () => void;
@@ -124,6 +125,7 @@ export function Sidebar({
   onSelectWorktree,
   onCreateWorktree,
   onDeleteWorktree = () => undefined,
+  onResetAgentState,
   onOpenSettings,
   onToggle,
   onHide,
@@ -493,6 +495,7 @@ export function Sidebar({
                               project.gitRoot !== null && project.target?.kind !== "ssh" ? () => onCreateWorktree(project) : undefined
                             }
                             onDelete={onDeleteWorktree}
+                            onResetAgentState={onResetAgentState}
                             sortableWorkspaceId={group.groupId}
                             label={`${group.groupId} worktrees`}
                           />}

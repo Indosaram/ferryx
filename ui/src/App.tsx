@@ -128,7 +128,7 @@ import { clearHmrWorkspaceState, getHmrWorkspaceState } from "./state/hmrWorkspa
 import { clearWorkspaceSnapshot, getWorkspaceSnapshot, listWorkspaceSnapshots } from "./state/workspaceSnapshotCache";
 import { emptySidebarWorkspaceIds } from "./state/sidebarWorkspaceState";
 import { useWorkspaceRuntime } from "./state/workspaceRuntime";
-import { hasNavigableSession, selectGlobalUnreadBadgeCount, selectNotificationWorkspaceLabel, selectWorktreeActivitySummaries, useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
+import { getTabSessionIds, hasNavigableSession, selectGlobalUnreadBadgeCount, selectNotificationWorkspaceLabel, selectWorktreeActivitySummaries, useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
 
 export { ACTIVE_PROJECT_STORAGE_KEY, PROJECTS_STORAGE_KEY, SIDEBAR_OPEN_STORAGE_KEY };
 type InboxNavigationTarget = NotificationTarget & { revision?: number };
@@ -629,6 +629,8 @@ function WorkspaceApp({
     swapPanes,
     syncWorktrees,
     restoreWorkspace,
+    resetAgentState,
+    resetWorktreeAgentState,
     ensureSessionBackends,
     dispatchWorkspaceAction,
     markBackendSessionUnavailable,
@@ -661,6 +663,27 @@ function WorkspaceApp({
   const isNotificationObserved = useCallback((target: RecordingTarget) => isNotificationTargetObserved(
     stateRef.current, target, getNativeWindowFocused() ?? isWindowForegroundFocused(),
   ), []);
+
+  const handleResetTabAgentState = useCallback(
+    async (tabId: string) => {
+      const tab = state.layout.tabs.find((t) => t.id === tabId);
+      if (!tab || tab.kind === "browser") return;
+      const sessionIds = getTabSessionIds(state, tab.id);
+      for (const sessionId of sessionIds) {
+        await resetAgentState(sessionId);
+      }
+      toast.success("Agent state reset");
+    },
+    [state, resetAgentState],
+  );
+
+  const handleResetWorktreeAgentState = useCallback(
+    async (worktree: Worktree) => {
+      await resetWorktreeAgentState(worktree.path);
+      toast.success("Agent state reset");
+    },
+    [resetWorktreeAgentState],
+  );
 
   useEffect(() => wireActivityRecording({
     events: (record) => subscribeActivityNotification((event) => {
@@ -2492,6 +2515,7 @@ function WorkspaceApp({
           onSelectWorktree={handleSelectWorktree}
           onCreateWorktree={handleOpenCreateWorktree}
           onDeleteWorktree={setDeleteTarget}
+          onResetAgentState={handleResetWorktreeAgentState}
           onOpenSettings={handleOpenSettings}
           onNavigateToSession={handleNotificationTarget}
           isSessionNavigable={(workspaceId, sessionId) => {
@@ -2581,6 +2605,7 @@ function WorkspaceApp({
             onDetachPaneToTab={detachPaneToTab}
             onRenameTab={renameTab}
             onToggleTabPin={setTabPinned}
+            onResetAgentState={handleResetTabAgentState}
             onAddTab={handleAddTerminalTab}
             onAddBrowserTab={handleAddBrowserTab}
             onOpenSettings={handleOpenSettings}

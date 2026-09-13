@@ -402,6 +402,33 @@ describe("WorktreeList actions", () => {
     expect(deleteItem?.enabled).toBe(false);
   });
 
+  it("includes reset-agent-state in context menu and calls onResetAgentState", () => {
+    const onResetAgentState = vi.fn();
+    nativeMenu.openNativePopupMenu.mockResolvedValue(() => undefined);
+    render(
+      <WorktreeList
+        worktrees={[worktree]}
+        activePath=""
+        agents={[]}
+        statuses={{}}
+        onSelect={vi.fn()}
+        onDelete={vi.fn()}
+        onResetAgentState={onResetAgentState}
+      />,
+    );
+
+    const row = screen.getByText("feature").closest(".group\\/worktree-row")!;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 100 });
+
+    expect(nativeMenu.openNativePopupMenu).toHaveBeenCalledTimes(1);
+    const { items, onAction } = lastMenuCall();
+    const resetItem = items.find((item) => item.id === "reset-agent-state");
+    expect(resetItem?.label).toBe("Reset Agent State");
+
+    onAction("reset-agent-state");
+    expect(onResetAgentState).toHaveBeenCalledWith(worktree);
+  });
+
   it("displays managed slug for remote worktree with orca identity and renders + button", () => {
     const onCreateWorktree = vi.fn();
     const remoteWorktree: Worktree = {

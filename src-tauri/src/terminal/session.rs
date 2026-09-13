@@ -118,6 +118,21 @@ impl PtySession {
         self.master.lock().as_ref().and_then(|m| m.as_raw_fd())
     }
 
+    #[cfg(unix)]
+    pub(crate) fn foreground_process_group(&self) -> std::io::Result<Option<u32>> {
+        let master = self.master.lock();
+        let Some(fd) = master.as_ref().and_then(|m| m.as_raw_fd()) else {
+            return Ok(None);
+        };
+        // Hold the master lock across the syscall so teardown cannot recycle the fd.
+        let group = unsafe { libc::tcgetpgrp(fd) };
+        if group < 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(Some(group as u32))
+        }
+    }
+
     pub(crate) fn mark_running(&self) {
         let mut state = self.state.lock();
         if matches!(*state, PtySessionState::Starting) {

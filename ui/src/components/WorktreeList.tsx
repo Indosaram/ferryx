@@ -24,6 +24,7 @@ type WorktreeListProps = {
   readonly onSelect: (worktree: Worktree) => void;
   readonly onCreateWorktree?: (worktree: Worktree) => void;
   readonly onDelete: (worktree: Worktree) => void;
+  readonly onResetAgentState?: (worktree: Worktree) => void;
   readonly sortableWorkspaceId?: string;
   readonly label?: string;
 };
@@ -38,6 +39,7 @@ export type WorktreeRowProps = {
   readonly onSelect: (worktree: Worktree) => void;
   readonly onCreateWorktree?: (worktree: Worktree) => void;
   readonly onDelete: (worktree: Worktree) => void;
+  readonly onResetAgentState?: (worktree: Worktree) => void;
 };
 
 export function fileManagerActionLabel() {
@@ -62,6 +64,7 @@ export const WorktreeRow = memo(function WorktreeRow({
   onSelect,
   onCreateWorktree,
   onDelete,
+  onResetAgentState,
 }: WorktreeRowProps) {
   const menuUnlistenRef = useRef<(() => void) | null>(null);
 
@@ -96,6 +99,9 @@ export const WorktreeRow = memo(function WorktreeRow({
     if (worktree.branch) {
       items.push({ kind: "item", id: "copy-branch", label: "Copy Branch Name" });
     }
+    if (onResetAgentState) {
+      items.push({ kind: "item", id: "reset-agent-state", label: "Reset Agent State", icon: "refresh" });
+    }
     items.push({ kind: "separator" });
     items.push({ kind: "item", id: "delete", label: "Delete Worktree", enabled: canDelete, icon: "trash" });
     menuUnlistenRef.current?.();
@@ -115,6 +121,8 @@ export const WorktreeRow = memo(function WorktreeRow({
               toast.success("Copied branch name to clipboard");
             });
           }
+        } else if (id === "reset-agent-state") {
+          onResetAgentState?.(worktree);
         } else if (id === "delete") onDelete(worktree);
       },
     )
@@ -278,6 +286,7 @@ export function WorktreeList({
   onSelect,
   onCreateWorktree,
   onDelete,
+  onResetAgentState,
   sortableWorkspaceId,
   label = "Worktrees",
 }: WorktreeListProps) {
@@ -313,6 +322,7 @@ export function WorktreeList({
           onSelect,
           onCreateWorktree,
           onDelete,
+          onResetAgentState,
         };
 
         const rowKey = worktree.workspaceId ? `${worktree.workspaceId}:${worktree.path}` : worktree.path;
