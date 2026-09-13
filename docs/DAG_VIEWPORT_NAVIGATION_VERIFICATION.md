@@ -6,6 +6,53 @@
 Task 4의 최종 완료나 제품 인수 승인을 의미하지 않으며, 네이티브 입력 게이트가 차단된 상태에서 현재 후보의 검증 범위를 확정하기 위해 작성되었다.
 현재 종합 판정 상태는 PARTIAL이다.
 
+### 후속 네이티브 기동: 준비 완료, 입력 검증 대기
+
+2026-09-13 로컬 시각 18:02부터 Wave 3 작업트리에서 정확히
+`bun tauri dev`로 별도 검증용 앱을 기동했다.
+GUI PID 41685, 전용 데몬 PID 42625 및 전용 소켓 경로를 확인했다.
+설치된 기존 앱과 데몬은 이 실행의 정리 대상이 아니다.
+원본 경계 기록의 baseline/pre 응답은 동일한 백엔드 세션
+`6a0733d2-a7e7-40d3-81f9-0c5633f227c3`와 데몬 epoch
+`1789290215601`을 가리킨다.
+카메라에는 초기 Fit의 요청과 반영 결과가 기록되어 있다.
+
+독립 이미지 판독은 실제 DAG 패널과 옆 터미널, 임시
+`Native DAG QA (synthetic provider)` 컨트롤 및 앞쪽 권한 안내창을 확인했다.
+사용자도 해당 패널과 디버그 표기를 확인했다.
+이 실행의 호스트는 `standalone`이며 기존 DAG 팝업을 교체한 것이 아니다.
+팝업은 별도 네이티브 검증이 필요하다.
+
+현재까지 분석한 카메라 기록 128행에는 초기 Fit과 버튼을 누르지 않은
+포인터 이동만 있다. 실제 드래그, 휠, 물리 핀치, 입력 전후 격리 결과나
+터미널 양성 대조군을 통과한 것으로 처리하지 않는다.
+사용자에게 `Fresh pre → DAG 드래그 → Fresh post`를 요청했고,
+기록 변경 알림을 연결했다. 데스크톱 입력 자동화는 수행하지 않았다.
+SVG 좌표 독립 검증은 완료됐으며 계측 불일치를 확인했다.
+원본 commit 3에서 c-d 경로의 경계 사각형은 배율 약 0.40776을 반영하지만,
+`getScreenCTM()`으로 계산한 끝점은 배율을 반영하지 않고 해당 사각형 밖에 있다.
+별도 이미지 판독은 가리지 않은 c-d 연결선이 실제 카드 양쪽에 붙어 있음을
+확인했다. 이 프레임은 화면 정렬 불량보다 좌표 계측 불일치를 뒷받침한다.
+정확한 WebKit 원인은 미확정이며, 기록된 CTM 끝점은 네이티브 정렬 판정에
+사용하지 않는다. 다른 연결선이나 물리 제스처까지 통과한 것으로 확대하지 않는다.
+또한 원본 기록은 `siblingTerminalsSelected=false`이므로 빈 형제 터미널 배열을
+터미널 위치 불변의 증거로 사용할 수 없다.
+독립 분석: `/Users/indo/code/project/orca-lite-wt/dag-viewport-wave3/.omo/ulw-execute/native-live-geometry-audit-gjfNxhtV.md`.
+
+이 기동은 앞선 사전 점검의 미기동 상태만 갱신한다.
+C5/S7 및 과거·현재 S8을 해소하지 않는다.
+이후 감독 세션 `bash_254`가 시간 초과, 종료 코드 1로 끝났다.
+종료 직후 기록된 검증용 런처·프런트엔드·GUI·전용 데몬·셸 PID는 모두
+프로세스 목록에서 사라졌고 5173 리스너도 없었다.
+기존 설치 앱 680과 데몬 1010은 원래 시작 시각으로 유지됐다.
+최종 원본 기록은 여전히 baseline/pre 두 응답과 카메라 128행뿐이다.
+정상 Dispose 응답이나 개별 자식 종료 대기 결과를 확보한 것은 아니므로
+현재 프로세스 부재를 완전한 S8 통과로 바꾸지 않는다.
+죽은 실행의 파일 감시를 해제했으며, 앞선 창의 조작 안내는 더 이상 유효하지 않다.
+원본 증거는 보존하고, 다음 실행 전에 좌표 계측 수정과 감독 시간 제한을 해결한다.
+현재 실행의 소유권 및 원본 기록 위치:
+`/Users/indo/code/project/orca-lite-wt/dag-viewport-wave3/.omo/ulw-execute/native-live-gjfNxhtV.md`.
+
 판정의 세부 내역은 다음과 같다.
 
 - 브라우저 카메라 구현 및 영구 수정: 반영 완료. 통합 후보 커밋은 3a826a15988a57ca7f5346be9e3440674d350e01 (브랜치 dag-viewport-integration, 부모 커밋 165ce821d0dd58d091852c85ab60904d494c9591)이다.
@@ -88,7 +135,7 @@ ResizeObserver가 뷰포트 크기를 감시하며, 크기 변화 시 너비와 
   - 뷰포트 컨트롤 시각 검증: /Users/indo/code/project/orca-lite-wt/dag-viewport-wave2/.omo/evidence/dag-viewport-navigation/green/repair2/visual-verdict.md
   - 협소 레이아웃 수락 기록: /Users/indo/code/project/orca-lite-wt/dag-viewport-wave3/.omo/ulw-execute/narrow-layout-accepted.md
   - 영구 후보 보완 판정: /Users/indo/code/project/orca-lite-wt/dag-viewport-wave3/.omo/evidence/dag-viewport-navigation/permanent-browser/StrippedBrowserAcceptedVerdict.md
-- 한계: 네이티브 창 리사이즈 이벤트 연동은 네이티브 런타임 미실행으로 미검증.
+- 한계: 후속 네이티브 런타임은 기동했지만 실제 창 리사이즈 동작과 중심 보존은 미검증.
 
 요구사항 C4 (인접 영역 회귀 방지):
 - 상태: PARTIAL (브라우저 호스트 간섭 배제 ACCEPTED, 네이티브 터미널 격리 UNVERIFIED).
