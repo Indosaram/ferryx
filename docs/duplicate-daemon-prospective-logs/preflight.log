@@ -1,0 +1,58 @@
++ pwd
+/Users/indo/code/project/orca-lite-wt/sa-tests
++ printf 'exit=%s\n' 0
+exit=0
++ git rev-parse HEAD
+bb945b4b88b83f13f8c64be4402226bee7aa6a67
++ printf 'exit=%s\n' 0
+exit=0
++ git status --short
+ M ui/src/remote/input-latency-soak/REPORT.md
+?? docs/DUPLICATE_DAEMON_PROSPECTIVE_PROOF.md
+?? docs/FERRYX_AGENT_STATE_WATCHDOG_SCOPE_2026-09-12.md
+?? docs/FERRYX_ATTENTION_INBOX_SCOPE_2026-09-12.md
+?? docs/FERRYX_COMPETITIVE_SENTIMENT_ADOPTION_2026-09-12.md
+?? docs/FERRYX_WORKTREE_DISK_SCOPE_2026-09-12.md
+?? docs/TEST_EVIDENCE_RECOVERY.md
+?? docs/duplicate-daemon-prospective-logs/
+?? src-tauri/tests/zz_probe_bulk_selection.rs
+?? ui/node_modules
++ printf 'exit=%s\n' 0
+exit=0
++ git diff -- src-tauri/src/daemon/server.rs src-tauri/tests/daemon_duplicate_prevention.rs
++ printf 'exit=%s\n' 0
+exit=0
++ printf '\nBEFORE read-only process identity check\n'
+
+BEFORE read-only process identity check
++ ps -p 1010,21591 -o pid,ppid,lstart,command
+  PID  PPID STARTED                      COMMAND
+ 1010   680 Sun Sep 13 07:55:43 2026     /Applications/Ferryx.app/Contents/MacOS/ferryx --daemon
+21591 21210 Sun Sep 13 19:27:52 2026     /Users/indo/code/project/orca-lite-wt/dag-viewport-wave3/src-tauri/target/debug/Ferryx.app/Contents/MacOS/ferryx --daemon
++ printf 'exit=%s\n' 0
+exit=0
++ shasum -a 256 src-tauri/src/daemon/server.rs src-tauri/tests/daemon_duplicate_prevention.rs
+4e15ab78d29bdb333de14d7d9cd4e6e1f60b091b455cec453c3cf844103f6e9a  src-tauri/src/daemon/server.rs
+78bc2237187238bb0dfc3656cf9153ffcf4b6b57342fdac53e3e535b770b0c44  src-tauri/tests/daemon_duplicate_prevention.rs
++ printf 'exit=%s\n' 0
+exit=0
++ printf '\nNo mutation or Cargo command executed: native monitor unavailable in child tool interface.\n'
+
+No mutation or Cargo command executed: native monitor unavailable in child tool interface.
++ printf '\nAFTER read-only process identity check\n'
+
+AFTER read-only process identity check
++ ps -p 1010,21591 -o pid,ppid,lstart,command
+  PID  PPID STARTED                      COMMAND
+ 1010   680 Sun Sep 13 07:55:43 2026     /Applications/Ferryx.app/Contents/MacOS/ferryx --daemon
+21591 21210 Sun Sep 13 19:27:52 2026     /Users/indo/code/project/orca-lite-wt/dag-viewport-wave3/src-tauri/target/debug/Ferryx.app/Contents/MacOS/ferryx --daemon
++ printf 'exit=%s\n' 0
+exit=0
++ shasum -a 256 src-tauri/src/daemon/server.rs src-tauri/tests/daemon_duplicate_prevention.rs
+4e15ab78d29bdb333de14d7d9cd4e6e1f60b091b455cec453c3cf844103f6e9a  src-tauri/src/daemon/server.rs
+78bc2237187238bb0dfc3656cf9153ffcf4b6b57342fdac53e3e535b770b0c44  src-tauri/tests/daemon_duplicate_prevention.rs
++ printf 'exit=%s\n' 0
+exit=0
++ git diff --exit-code -- src-tauri/src/daemon/server.rs src-tauri/tests/daemon_duplicate_prevention.rs
++ printf 'exit=%s\n' 0
+exit=0

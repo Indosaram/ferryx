@@ -210,8 +210,10 @@ Ran 3 tests across 1 file. [8.00ms]
 
 This establishes the percentile assertion is not vacuous. It pins exact values over a
 shuffled ten-sample set (`[7,3,10,1,9,4,6,2,8,5]` → p50 5, p90 9, p95 10), asserts the input
-array is not reordered in place, and asserts `summarize([])` throws. Only p50 moved under the
-mutation, and the suite caught it.
+array is not reordered in place, and asserts `summarize([])` throws. For this ten-element
+vector, the mutation changes p50 from 5 to 6 AND p90 from 9 to 10; p95 and p99 remain 10.
+The excerpt above shows only p50, not the complete changed vector. This correction follows
+the selector and fixture arithmetic, not a new test run.
 
 The source file was restored from an in-memory copy and verified byte-identical; no
 `git restore`/`git checkout --` was used.
@@ -260,10 +262,14 @@ Checks at the same moment:
 | Leftover `fx-dup-*` fixtures | 0 |
 | Test output ever mentions `/tmp/rorca-501` | false |
 
-The last row matters most: the child cannot reach the live endpoint because `env_clear()`
-removes any variable that would point at it, and the captured output confirms the string never
-appears. The duplicate daemon exits 1 by losing a lock race inside the fixture directory, not
-by any signal — consistent with the source having zero `kill`/`SIGTERM`/`pkill` calls.
+The last row establishes only that the captured output lacks that path, not that no endpoint
+access occurred or was possible. `env_clear()` plus explicit fixture-local runtime/data/home
+overrides controls configured paths; production path resolution consumes those overrides.
+PID-checked fixture connections and protocol shutdown support isolation, but are not an OS
+sandbox or access trace. The listing/metadata comparison is not a file-content audit and
+cannot exclude transient access. In this recorded GREEN run the duplicate exits 1 without
+readiness; both owned children are reaped using protocol-only cleanup, consistent with the
+test source having no OS-signal calls.
 
 ## Mutation proofs for the other two tests (added by the supervising session)
 
@@ -294,8 +300,9 @@ Reverted; source restored byte-identical.
 
 ### 3. `daemon_duplicate_prevention`
 
-Forced the exact regression: downgrade the exclusive advisory lock to a shared one, which
-permits multiple holders, so a second daemon is no longer refused.
+Applied a mutation intended to force the exact regression: downgrade the exclusive advisory
+lock to a shared one, which permits multiple holders. The retained RED receipt does not
+identify the actual failure cause; see the recovery qualification below.
 
 Mutation in `src-tauri/src/daemon/server.rs:576`:
 
@@ -306,6 +313,14 @@ GREEN before: `test result: ok. 1 passed; 0 failed` (2.08s)
 RED with mutation (exit 101): `second_daemon_refuses_already_locked_socket_directory ... FAILED`
 Reverted; source restored byte-identical.
 
-Live-daemon safety across both runs: `/tmp/rorca-501/daemon.sock` mtime `1789253743`
-identical before and after; test output never mentions `/tmp/rorca-501`; daemon PID 1010
-(started Sun Sep 13 07:55:43 2026) unchanged.
+Recovery audit (2026-09-13): the original capture filtered and truncated the test output,
+omitting the assertion message and mutation cleanup result. Exit 101 alone does not prove
+the duplicate reached readiness rather than a timeout or cleanup failure. A later sweep,
+after restoration, records exit 0 and `1 passed; 0 failed`; it was not an immediate GREEN
+inside the mutation command. Exact source identities, command, retained excerpts, ordering,
+and the unrecovered diagnostic are in [TEST_EVIDENCE_RECOVERY.md](../../../../docs/TEST_EVIDENCE_RECOVERY.md).
+
+The original duplicate mutation capture records socket mtime `1789253743` before/after and
+PID 1010 (started Sun Sep 13 07:55:43 2026) afterwards. Its no-live-path output check was
+printed for the pre-mutation GREEN only, not the RED. These bounded observations do not
+prove absence of endpoint access or satisfy the original whole-run PID requirement.
