@@ -1071,10 +1071,13 @@ const PaneLeafView = React.memo(function PaneLeafView({
       data-tab-id={tab.id}
       data-dnd-type="pane-leaf"
       onPointerDown={(event) => {
+        // React portals bubble through this pane without belonging to its DOM surface.
+        if (!event.currentTarget.contains(event.target as Node)) return;
         if (isInteractiveTarget(event.target as HTMLElement | null)) return;
         focusPaneInput();
       }}
       onClick={(event) => {
+        if (!event.currentTarget.contains(event.target as Node)) return;
         if (isInteractiveTarget(event.target as HTMLElement | null)) return;
         focusPaneInput();
       }}

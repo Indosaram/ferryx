@@ -685,6 +685,10 @@ export function DagGraphView({
     );
   }
 
+  const paneWidth =
+    viewportDimensions?.width ?? lastDimensionsRef.current?.width ?? viewportRef.current?.clientWidth ?? 0;
+  const isCompact = paneWidth > 0 && paneWidth < 400;
+
   return (
     <div
       className="relative flex h-full w-full flex-col overflow-hidden bg-background text-foreground select-none"
@@ -692,24 +696,38 @@ export function DagGraphView({
       data-run-id={activeRun.runId}
     >
       <div
-        className="flex min-h-9 shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-border/40 bg-card/60 px-2 sm:px-3 py-1.5 text-xs text-muted-foreground backdrop-blur-sm"
+        className={
+          isCompact
+            ? "flex min-h-9 max-h-[60%] shrink-0 flex-col items-start justify-between gap-x-3 gap-y-1.5 border-b border-border/40 bg-card/60 px-2 py-1.5 text-xs text-muted-foreground backdrop-blur-sm overflow-hidden"
+            : "flex min-h-9 shrink-0 flex-row items-center justify-between gap-x-3 gap-y-1 border-b border-border/40 bg-card/60 px-2 sm:px-3 py-1.5 text-xs text-muted-foreground backdrop-blur-sm"
+        }
         data-testid="dag-header"
       >
-        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 font-medium">
-          {showRunName && (
-            <span className="flex min-w-0 items-center gap-1.5">
-              <span className="truncate text-foreground">{activeRun.name}</span>
-              <span className="text-muted-foreground/60">&mdash;</span>
+        <div
+          className={
+            isCompact
+              ? "flex min-h-0 min-w-0 max-w-full w-full flex-1 flex-col gap-x-3 gap-y-1 overflow-y-auto overflow-x-hidden scrollbar-none order-2"
+              : "flex min-w-0 flex-1 flex-row items-center gap-x-3 gap-y-1 overflow-visible order-1"
+          }
+        >
+          <div className="flex min-w-0 max-w-full flex-wrap items-center gap-x-2 gap-y-0.5 font-medium">
+            {showRunName && (
+              <span className="flex min-w-0 items-center gap-1.5">
+                <span className="truncate text-foreground">{activeRun.name}</span>
+                <span className="text-muted-foreground/60">&mdash;</span>
+              </span>
+            )}
+            <span className="inline-flex flex-wrap items-center gap-x-1 font-mono text-muted-foreground">
+              <span>{counts.completed}/{counts.total} done, </span>
+              <span>{counts.running} running</span>
             </span>
-          )}
-          <span className="inline-flex flex-wrap items-center gap-x-1 font-mono text-muted-foreground">
-            <span>{counts.completed}/{counts.total} done, </span>
-            <span>{counts.running} running</span>
-          </span>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
+          </div>
           <div
-            className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 font-mono text-[10px]"
+            className={
+              isCompact
+                ? "flex min-w-0 max-w-full flex-wrap items-center gap-x-2.5 gap-y-0.5 font-mono text-[10px]"
+                : "flex min-w-0 max-w-full flex-wrap items-center gap-x-2.5 gap-y-0.5 font-mono text-[10px] ml-auto"
+            }
             data-testid="dag-legend"
           >
             <span className="text-indigo-500">▶ running</span>
@@ -717,10 +735,16 @@ export function DagGraphView({
             <span className="text-muted-foreground">◌ waiting</span>
             <span className="text-rose-500">✗ failed</span>
           </div>
-          <div
-            className="flex shrink-0 items-center gap-1 rounded border border-border/60 bg-background/50 p-0.5"
-            data-testid="dag-controls"
-          >
+        </div>
+
+        <div
+          className={
+            isCompact
+              ? "flex shrink-0 max-w-full flex-wrap items-center gap-1 rounded border border-border/60 bg-background/50 p-0.5 order-1"
+              : "flex shrink-0 max-w-full flex-wrap items-center gap-1 rounded border border-border/60 bg-background/50 p-0.5 order-2"
+          }
+          data-testid="dag-controls"
+        >
             <button
               type="button"
               aria-label="Zoom out"
@@ -756,7 +780,6 @@ export function DagGraphView({
               Fit
             </button>
           </div>
-        </div>
       </div>
 
       <div

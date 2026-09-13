@@ -1031,5 +1031,82 @@ describe("DagGraphView Camera and Viewport Interaction", () => {
       expect(tZero.y).toBe(t0.y);
       expect(tZero.scale).toBe(t0.scale);
     });
+
+    it("measured width crossing 399 -> 400 -> 399 preserves camera scale, adjusts center translation by deltaW/2 without refitting, and keeps header structure intact", () => {
+      const { container } = render(<DagGraphView snapshot={sampleSnapshot} />);
+      const { viewport, world } = getElements(container);
+      const header = screen.getByTestId("dag-header");
+      const controls = screen.getByTestId("dag-controls");
+      const legend = screen.getByTestId("dag-legend");
+
+      // Initial layout at 399px width (compact mode)
+      triggerResize(viewport, 399, 600);
+      const t399 = parseTransform(world.style.transform);
+      expect(t399.scale).toBeGreaterThan(0);
+      expect(header).toContainElement(controls);
+      expect(header).toContainElement(legend);
+
+      // Resize crossing threshold to 400px width (wide mode)
+      triggerResize(viewport, 400, 600);
+      const t400 = parseTransform(world.style.transform);
+      expect(t400.scale).toBe(t399.scale);
+      expect(t400.x).toBeCloseTo(t399.x + 0.5, 2);
+      expect(t400.y).toBeCloseTo(t399.y, 2);
+      expect(header).toContainElement(controls);
+      expect(header).toContainElement(legend);
+
+      // Resize back across threshold to 399px width (compact mode)
+      triggerResize(viewport, 399, 600);
+      const tBack399 = parseTransform(world.style.transform);
+      expect(tBack399.scale).toBe(t399.scale);
+      expect(tBack399.x).toBeCloseTo(t399.x, 2);
+      expect(tBack399.y).toBeCloseTo(t399.y, 2);
+      expect(header).toContainElement(controls);
+      expect(header).toContainElement(legend);
+    });
+
+    it("header wheel and pointer inputs do not alter camera transform in either compact or wide mode", () => {
+      const { container } = render(<DagGraphView snapshot={sampleSnapshot} />);
+      const { viewport, world } = getElements(container);
+      const header = screen.getByTestId("dag-header");
+
+      // 1. Compact mode (width < 400)
+      triggerResize(viewport, 350, 600);
+      const tCompact0 = parseTransform(world.style.transform);
+
+      fireEvent.pointerDown(header, { pointerId: 1, button: 0, buttons: 1, clientX: 100, clientY: 20 });
+      fireEvent.pointerMove(header, { pointerId: 1, buttons: 1, clientX: 200, clientY: 50 });
+      fireEvent.pointerUp(header, { pointerId: 1, clientX: 200, clientY: 50 });
+
+      const tCompactAfterPointer = parseTransform(world.style.transform);
+      expect(tCompactAfterPointer.x).toBe(tCompact0.x);
+      expect(tCompactAfterPointer.y).toBe(tCompact0.y);
+      expect(tCompactAfterPointer.scale).toBe(tCompact0.scale);
+
+      fireEvent.wheel(header, { deltaY: -120, clientX: 100, clientY: 20 });
+      const tCompactAfterWheel = parseTransform(world.style.transform);
+      expect(tCompactAfterWheel.x).toBe(tCompact0.x);
+      expect(tCompactAfterWheel.y).toBe(tCompact0.y);
+      expect(tCompactAfterWheel.scale).toBe(tCompact0.scale);
+
+      // 2. Wide mode (width >= 400)
+      triggerResize(viewport, 800, 600);
+      const tWide0 = parseTransform(world.style.transform);
+
+      fireEvent.pointerDown(header, { pointerId: 2, button: 0, buttons: 1, clientX: 150, clientY: 20 });
+      fireEvent.pointerMove(header, { pointerId: 2, buttons: 1, clientX: 300, clientY: 50 });
+      fireEvent.pointerUp(header, { pointerId: 2, clientX: 300, clientY: 50 });
+
+      const tWideAfterPointer = parseTransform(world.style.transform);
+      expect(tWideAfterPointer.x).toBe(tWide0.x);
+      expect(tWideAfterPointer.y).toBe(tWide0.y);
+      expect(tWideAfterPointer.scale).toBe(tWide0.scale);
+
+      fireEvent.wheel(header, { deltaY: 200, clientX: 150, clientY: 20 });
+      const tWideAfterWheel = parseTransform(world.style.transform);
+      expect(tWideAfterWheel.x).toBe(tWide0.x);
+      expect(tWideAfterWheel.y).toBe(tWide0.y);
+      expect(tWideAfterWheel.scale).toBe(tWide0.scale);
+    });
   });
 });
