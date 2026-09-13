@@ -19,7 +19,7 @@ if (typeof window === "undefined") {
   globalThis.removeEventListener = dom.window.removeEventListener.bind(dom.window);
 }
 
-const { act, cleanup, fireEvent, render } = await import("@testing-library/react");
+const { act, cleanup, fireEvent, render, renderHook } = await import("@testing-library/react");
 const { afterEach, beforeEach, describe, expect, it, vi } = await import("vitest");
 await import("./test/setup");
 
@@ -64,6 +64,7 @@ const native = {
   listWorktrees: vi.fn().mockResolvedValue([]),
   registerProject: vi.fn(),
   signalTerminal: vi.fn(),
+  resetAgentState: vi.fn<(sessionId: string) => Promise<void>>(),
   saveSession: vi.fn().mockResolvedValue(undefined),
   loadSession: vi.fn().mockResolvedValue(null),
   clearSession: vi.fn().mockResolvedValue(undefined),
@@ -128,6 +129,7 @@ vi.mock("./lib/tauri", () => ({
   listWorktrees: native.listWorktrees,
   registerProject: native.registerProject,
   signalTerminal: native.signalTerminal,
+  resetAgentState: native.resetAgentState,
   saveSession: native.saveSession,
   loadSession: native.loadSession,
   clearSession: native.clearSession,
@@ -152,6 +154,10 @@ vi.mock("./lib/tauri", () => ({
   onOpenSettingsMenu: native.onOpenSettingsMenu,
   onSelectWorktreeMenu: native.onSelectWorktreeMenu,
   onTerminalLifecycle: native.onTerminalLifecycle,
+  onNativeTerminalTitle: async () => () => {},
+  onNativeTerminalBell: async () => () => {},
+  onNativeTerminalAgentState: async () => () => {},
+  onNativeTerminalFocus: async () => () => {},
   onTerminalOutput: native.onTerminalOutput,
   publishFocusedTerminal: native.publishFocusedTerminal,
   setBadgeCount: native.setBadgeCount,
@@ -166,6 +172,9 @@ vi.mock("./lib/tauri", () => ({
 }));
 
 const workspaceStoreModule = await import("./state/workspaceStore");
+const realUseWorkspaceStore = workspaceStoreModule.useWorkspaceStore;
+const { clearHmrWorkspaceState } = await import("./state/hmrWorkspaceState");
+const { toast } = await import("sonner");
 type ActivityNotificationTarget = import("./state/workspaceStore").ActivityNotificationTarget;
 type ActivityNotificationEvent = import("./state/workspaceStore").ActivityNotificationEvent;
 const activityListeners = new Set<(event: ActivityNotificationEvent) => void>();
@@ -234,6 +243,7 @@ vi.mock("./state/workspaceRuntime", () => ({
 
 let renderNotificationCenter = false;
 let sidebarProps: {
+  onResetAgentState?: (worktree: import("./lib/types").Worktree) => Promise<void>;
   onNavigateToSession?: (target: { workspaceId: string; sessionId: string; revision: number }) => void;
   isSessionNavigable?: (workspaceId: string, sessionId: string) => boolean;
 } = {};
@@ -257,8 +267,12 @@ vi.mock("./components/WorktreeDeleteDialog", () => ({
   WorktreeDeleteDialog: () => null,
 }));
 
+let terminalProps: { onResetAgentState?: (tabId: string) => Promise<void> } = {};
 vi.mock("./components/TerminalSplitView", () => ({
-  TerminalSplitView: () => <div data-testid="mock-terminal-split-view" />,
+  TerminalSplitView: (props: typeof terminalProps) => {
+    terminalProps = props;
+    return <div data-testid="mock-terminal-split-view" />;
+  },
 }));
 
 const inboxModule = await vi.importActual<typeof import("./lib/notificationCenter/notificationCenterStore")>("./lib/notificationCenter/notificationCenterStore");
@@ -448,8 +462,116 @@ describe("App notification coordinator wiring", () => {
 
   afterEach(() => {
     cleanup();
+    clearHmrWorkspaceState();
     clearWorkspaceSnapshot();
     storeSpy?.mockRestore();
+  });
+
+  function resetFixture(count: number) {
+    clearHmrWorkspaceState();
+    native.resetAgentState.mockReset();
+    const snapshot = parkedProjectSnapshot("sess-1");
+    snapshot.workspaceId = "default";
+    snapshot.sessions = Object.fromEntries(Array.from({ length: count }, (_, index) => {
+      const id = `sess-${index + 1}`;
+      return [id, { ...snapshot.sessions["sess-1"], id, workspaceId: "default", backendSessionId: `backend-${index + 1}` }];
+    }));
+    const paneLayout = snapshot.layout.layoutsByTabId["tab-r"];
+    paneLayout.sessionIdsByLeafId = Object.fromEntries(
+      Object.keys(snapshot.sessions).map((id, index) => [`leaf-${index}`, id]),
+    );
+    paneLayout.activeLeafId = "leaf-0";
+    paneLayout.root = { type: "leaf", leafId: "leaf-0" };
+    for (let index = 1; index < count; index++) {
+      paneLayout.root = {
+        type: "split", direction: "horizontal", ratio: 0.5,
+        first: paneLayout.root, second: { type: "leaf", leafId: `leaf-${index}` },
+      };
+    }
+    snapshot.activityBySessionId = Object.fromEntries(Object.keys(snapshot.sessions).map((id) => [
+      id, { state: "waiting", title: "Claude", isAgent: true, seen: false },
+    ]));
+    const hook = renderHook(() => realUseWorkspaceStore({
+      workspaceId: "default",
+      services: {
+        ensureTerminalEvents: async () => {},
+        spawnTerminal: vi.fn(), getTerminalCwd: vi.fn(), closeTerminal: vi.fn(), waitForTerminalExit: vi.fn(),
+      },
+    }));
+    act(() => hook.result.current.restoreWorkspace(snapshot));
+    return hook;
+  }
+
+  it.each([false, true])("manual reset outcome store rejection propagates (grouped=%s)", async (grouped) => {
+    const hook = resetFixture(grouped ? 3 : 1);
+    const failure = { code: "IPC_UNAVAILABLE", message: "offline" };
+    let reject!: (reason: unknown) => void;
+    const pending = new Promise<void>((_resolve, fail) => { reject = fail; });
+    native.resetAgentState.mockImplementation((id) => id === "backend-1" ? pending : Promise.resolve());
+    let outcome!: Promise<PromiseSettledResult<void>[]>;
+    act(() => {
+      outcome = Promise.allSettled([grouped
+        ? hook.result.current.resetWorktreeAgentState("/repo/other")
+        : hook.result.current.resetAgentState("sess-1")]);
+    });
+    const retainedWhilePending = hook.result.current.state.activityBySessionId?.["sess-1"];
+    let settled!: PromiseSettledResult<void>[];
+    await act(async () => { reject(failure); settled = await outcome; });
+    expect(settled[0].status).toBe("rejected");
+    expect(retainedWhilePending?.state).toBe("waiting");
+    expect(hook.result.current.state.activityBySessionId?.["sess-1"]?.state).toBe("waiting");
+    if (grouped) {
+      if (settled[0].status === "rejected") {
+        expect(settled[0].reason.results).toEqual([
+          { sessionId: "sess-1", status: "rejected", reason: failure },
+          { sessionId: "sess-2", status: "fulfilled", value: undefined },
+          { sessionId: "sess-3", status: "fulfilled", value: undefined },
+        ]);
+      }
+      expect(native.resetAgentState.mock.calls.map(([id]) => id)).toEqual(["backend-1", "backend-2", "backend-3"]);
+      expect(hook.result.current.state.activityBySessionId?.["sess-2"]).toBeUndefined();
+      expect(hook.result.current.state.activityBySessionId?.["sess-3"]).toBeUndefined();
+    } else if (settled[0].status === "rejected") {
+      expect(settled[0].reason).toBe(failure);
+    }
+  });
+
+  it.each([
+    ["tab", 1, 0], ["tab", 1, 1], ["tab", 3, 1], ["tab", 3, 3], ["tab", 3, 0],
+    ["worktree", 1, 0], ["worktree", 1, 1], ["worktree", 3, 1], ["worktree", 3, 3], ["worktree", 3, 0],
+  ] as const)("manual reset outcome routes %s notifications (%i sessions, %i failures)", async (surface, count, failures) => {
+    const hook = resetFixture(count);
+    const original = storeSpy.getMockImplementation();
+    storeSpy.mockImplementation((options: { workspaceId: string }) => ({
+      ...original(options), state: hook.result.current.state,
+      resetAgentState: hook.result.current.resetAgentState,
+      resetWorktreeAgentState: hook.result.current.resetWorktreeAgentState,
+    }));
+    let resolve!: () => void;
+    const gate = new Promise<void>((done) => { resolve = done; });
+    native.resetAgentState.mockImplementation(async (id) => {
+      await gate;
+      if (Number(id.split("-")[1]) <= failures) throw { code: "IPC_UNAVAILABLE", message: "offline" };
+    });
+    const success = vi.spyOn(toast, "success").mockReturnValue("success");
+    const error = vi.spyOn(toast, "error").mockReturnValue("error");
+    await act(async () => { render(<App />); });
+    let operation!: Promise<void>;
+    act(() => {
+      operation = surface === "tab"
+        ? terminalProps.onResetAgentState!("tab-r")
+        : sidebarProps.onResetAgentState!(hook.result.current.state.worktrees[0]);
+    });
+    expect(success).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
+    await act(async () => { resolve(); await operation; });
+    expect(success).toHaveBeenCalledTimes(failures === 0 ? 1 : 0);
+    expect(error).toHaveBeenCalledTimes(failures === 0 ? 0 : 1);
+    expect(native.resetAgentState).toHaveBeenCalledTimes(count);
+    for (let index = 1; index <= count; index++) {
+      expect(Boolean(hook.result.current.state.activityBySessionId?.[`sess-${index}`])).toBe(index <= failures);
+      expect(hook.result.current.state.sessions[`sess-${index}`].backendSessionId).toBe(`backend-${index}`);
+    }
   });
 
   it("CRITERION 2: clicking the bell button while the window is UNFOCUSED calls dispatchNotification with source: 'terminal-bell' and marks tab and worktree unread", async () => {

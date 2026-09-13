@@ -3,6 +3,7 @@ pub(crate) mod agent_state;
 pub mod client;
 pub mod handover;
 pub mod launchd;
+pub(crate) mod logging;
 pub mod manifest;
 pub mod protocol;
 pub mod proxy;

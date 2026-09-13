@@ -6,6 +6,10 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use tauri::Manager;
 
+#[cfg(all(test, unix))]
+#[path = "agents_reset_event_tests.rs"]
+mod reset_event_tests;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentDetection {
@@ -37,10 +41,11 @@ pub async fn cmd_agent_state_reset<R: tauri::Runtime>(
     daemon_client: tauri::State<'_, std::sync::Arc<crate::daemon::client::DaemonClient>>,
     session_id: String,
 ) -> Result<(), super::IpcError> {
+    daemon_client.reset_agent_state(&session_id).await?;
     if let Some(host) = app.try_state::<crate::native_terminal::surface_host::NativeTerminalSurfaceHostState>() {
         host.reset_agent_state::<R>(&session_id, Some(&app));
     }
-    daemon_client.reset_agent_state(&session_id).await
+    Ok(())
 }
 
 pub(crate) fn discover_agent_session_id(root_pid: u32, agent_type: &str) -> Option<String> {

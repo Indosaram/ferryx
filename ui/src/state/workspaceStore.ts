@@ -1367,25 +1367,23 @@ export function useWorkspaceStore({
     resetAgentState: async (sessionId: string) => {
       const session = stateRef.current.sessions[sessionId];
       const backendId = session?.backendSessionId || sessionId;
+      await tauriIpc.resetAgentState(backendId);
       dispatch({ type: "RESET_AGENT_STATE", sessionId });
-      try {
-        await tauriIpc.resetAgentState(backendId);
-      } catch (err) {
-        console.error("Failed to reset agent state:", err);
-      }
     },
     resetWorktreeAgentState: async (worktreePath: string) => {
       const sessions = Object.values(stateRef.current.sessions).filter(
         (s) => sessionWorktreePath(s) === worktreePath,
       );
-      for (const session of sessions) {
+      const results = await Promise.allSettled(sessions.map(async (session) => {
         const backendId = session.backendSessionId || session.id;
+        await tauriIpc.resetAgentState(backendId);
         dispatch({ type: "RESET_AGENT_STATE", sessionId: session.id });
-        try {
-          await tauriIpc.resetAgentState(backendId);
-        } catch (err) {
-          console.error("Failed to reset agent state:", err);
-        }
+      }));
+      const failures = results.filter((result) => result.status === "rejected");
+      if (failures.length > 0) {
+        throw Object.assign(new Error(`Agent state reset failed for ${failures.length} of ${sessions.length} sessions`), {
+          results: results.map((result, index) => ({ sessionId: sessions[index].id, ...result })),
+        });
       }
     },
     markBackendSessionUnavailable: (
