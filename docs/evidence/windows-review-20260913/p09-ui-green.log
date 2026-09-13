@@ -1,0 +1,11 @@
+$ vitest run --maxWorkers=1 src/components/settings/TerminalSection.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/components/settings/TerminalSection.test.tsx (3 tests) 37ms
+
+ Test Files  1 passed (1)
+      Tests  3 passed (3)
+   Start at  18:10:22
+   Duration  1.40s (transform 79ms, setup 119ms, collect 524ms, tests 37ms, environment 364ms, prepare 36ms)
+

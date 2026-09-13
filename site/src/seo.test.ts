@@ -1,5 +1,6 @@
 import { describe, expect, test, beforeAll } from "bun:test";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 // Assertions run against the production build output, the only artifact a crawler
@@ -38,7 +39,38 @@ beforeAll(async () => {
   if (code !== 0) throw new Error(`astro build failed (exit ${code}):\n${output}`);
 }, BUILD_TIMEOUT_MS);
 
-function builtPages(): Record<string, string> {
+function routeKey(full: string, root: string, paths: typeof path): string {
+  return `/${paths.relative(root, full).split(paths.sep).join("/")}`;
+}
+
+test("built page route keys use URL slashes on POSIX and Windows", () => {
+  for (const route of Object.keys(builtPages())) {
+    for (const paths of [path.posix, path.win32]) {
+      const root = paths.resolve("seo fixture", "dist");
+      const full = paths.join(root, ...route.split("/"));
+      expect(routeKey(full, root, paths)).toBe(route);
+    }
+  }
+});
+
+test("removing a required built page still fails containment", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "ferryx-seo-pages-"));
+  try {
+    for (const [route, html] of Object.entries(builtPages())) {
+      const file = path.join(root, route);
+      mkdirSync(path.dirname(file), { recursive: true });
+      writeFileSync(file, html);
+    }
+    expect(() => builtPages(root)).not.toThrow();
+    rmSync(path.join(root, "docs", "introduction", "index.html"));
+    expect(() => builtPages(root)).toThrow();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    console.info(`SEO page fixture cleaned: ${root}`);
+  }
+});
+
+function builtPages(root = DIST): Record<string, string> {
   const pages: Record<string, string> = {};
   const walk = (dir: string) => {
     for (const entry of readdirSync(dir)) {
@@ -49,10 +81,10 @@ function builtPages(): Record<string, string> {
         continue;
       }
       if (!entry.endsWith(".html")) continue;
-      pages[full.slice(DIST.length) || "/"] = readFileSync(full, "utf8");
+      pages[routeKey(full, root, path)] = readFileSync(full, "utf8");
     }
   };
-  walk(DIST);
+  walk(root);
   // Containment, not equality: a page vanishing from the build still fails loudly,
   // while publishing a new one does not require editing this list first.
   const built = Object.keys(pages);

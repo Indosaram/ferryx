@@ -1,0 +1,35 @@
+bun test v1.4.0 (34cbb9a40)
+
+src/seo.test.ts:
+(pass) built page route keys use URL slashes on POSIX and Windows [1.24ms]
+SEO page fixture cleaned: /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-seo-pages-Wo3ybX
+(pass) removing a required built page still fails containment [5.88ms]
+(pass) SEO — crawl and indexation > robots.txt ships with an absolute Sitemap directive [0.08ms]
+(pass) SEO — crawl and indexation > every page advertises the sitemap and the sitemap resolves [1.92ms]
+(pass) SEO — crawl and indexation > sitemap entries carry lastmod so crawlers can schedule recrawls [0.06ms]
+(pass) SEO — crawl and indexation > the 404 page is noindex and still describes itself [0.07ms]
+(pass) SEO — structured data > every JSON-LD block on every page is valid JSON [0.91ms]
+(pass) SEO — structured data > landing page declares SoftwareApplication with committed descriptive fields [0.11ms]
+(pass) SEO — structured data > landing page declares WebSite and Organization identity [0.07ms]
+(pass) SEO — structured data > docs and policy pages expose an ordered BreadcrumbList [0.53ms]
+(pass) SEO — head metadata and icons > landing description fits inside the SERP snippet budget [0.08ms]
+(pass) SEO — head metadata and icons > every content page ships a unique SERP-sized description [1.31ms]
+(pass) SEO — head metadata and icons > every page links an apple-touch-icon that exists at 180x180 [1.33ms]
+(pass) SEO — head metadata and icons > every page links a valid web app manifest [1.09ms]
+(pass) SEO — head metadata and icons > no page makes the browser download an oversized favicon [0.88ms]
+(pass) SEO — head metadata and icons > docs pages carry explicit Twitter card text and a theme colour [0.80ms]
+(pass) SEO — Core Web Vitals signals > landing images reserve their layout box [0.14ms]
+(pass) SEO — Core Web Vitals signals > no third-party stylesheet blocks the landing page's first paint [0.09ms]
+(pass) SEO — Core Web Vitals signals > below-the-fold islands defer hydration [0.10ms]
+(pass) SEO — Core Web Vitals signals > the landing page ships no oversized public image [0.10ms]
+(pass) SEO — crawlable content and internal linking > the preview section server-renders a heading and descriptive copy [0.18ms]
+(pass) SEO — crawlable content and internal linking > the architecture page is not orphaned [0.17ms]
+(pass) SEO — crawlable content and internal linking > every internal link on every built page resolves to a built page [2.16ms]
+(pass) SEO — deployment portability > a root-origin build still emits absolute, non-doubled URLs [5171.51ms]
+
+ 24 pass
+ 0 fail
+ 1020 expect() calls
+Ran 24 tests across 1 file. [10.83s]
+
+EXIT=0

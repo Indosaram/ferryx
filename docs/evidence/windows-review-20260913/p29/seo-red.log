@@ -1,0 +1,49 @@
+bun test v1.4.0 (34cbb9a40)
+
+src/seo.test.ts:
+45 | test("built page route keys use URL slashes on POSIX and Windows", () => {
+46 |   for (const route of Object.keys(builtPages())) {
+47 |     for (const paths of [path.posix, path.win32]) {
+48 |       const root = paths.resolve("seo fixture", "dist");
+49 |       const full = paths.join(root, ...route.split("/"));
+50 |       expect(routeKey(full, root, paths)).toBe(route);
+                                               ^
+error: expect(received).toBe(expected)
+
+Expected: "/index.html"
+Received: "\index.html"
+
+      at <anonymous> (/Users/indo/code/project/orca-lite/site/src/seo.test.ts:50:43)
+(fail) built page route keys use URL slashes on POSIX and Windows [2.08ms]
+(pass) SEO — crawl and indexation > robots.txt ships with an absolute Sitemap directive [0.07ms]
+(pass) SEO — crawl and indexation > every page advertises the sitemap and the sitemap resolves [1.90ms]
+(pass) SEO — crawl and indexation > sitemap entries carry lastmod so crawlers can schedule recrawls [0.07ms]
+(pass) SEO — crawl and indexation > the 404 page is noindex and still describes itself [0.09ms]
+(pass) SEO — structured data > every JSON-LD block on every page is valid JSON [0.96ms]
+(pass) SEO — structured data > landing page declares SoftwareApplication with committed descriptive fields [0.12ms]
+(pass) SEO — structured data > landing page declares WebSite and Organization identity [0.07ms]
+(pass) SEO — structured data > docs and policy pages expose an ordered BreadcrumbList [0.51ms]
+(pass) SEO — head metadata and icons > landing description fits inside the SERP snippet budget [0.08ms]
+(pass) SEO — head metadata and icons > every content page ships a unique SERP-sized description [0.80ms]
+(pass) SEO — head metadata and icons > every page links an apple-touch-icon that exists at 180x180 [1.22ms]
+(pass) SEO — head metadata and icons > every page links a valid web app manifest [1.54ms]
+(pass) SEO — head metadata and icons > no page makes the browser download an oversized favicon [0.81ms]
+(pass) SEO — head metadata and icons > docs pages carry explicit Twitter card text and a theme colour [0.71ms]
+(pass) SEO — Core Web Vitals signals > landing images reserve their layout box [0.08ms]
+(pass) SEO — Core Web Vitals signals > no third-party stylesheet blocks the landing page's first paint [0.06ms]
+(pass) SEO — Core Web Vitals signals > below-the-fold islands defer hydration [0.10ms]
+(pass) SEO — Core Web Vitals signals > the landing page ships no oversized public image [0.08ms]
+(pass) SEO — crawlable content and internal linking > the preview section server-renders a heading and descriptive copy [0.18ms]
+(pass) SEO — crawlable content and internal linking > the architecture page is not orphaned [0.16ms]
+(pass) SEO — crawlable content and internal linking > every internal link on every built page resolves to a built page [1.67ms]
+(pass) SEO — deployment portability > a root-origin build still emits absolute, non-doubled URLs [5255.75ms]
+
+1 tests failed:
+(fail) built page route keys use URL slashes on POSIX and Windows [2.08ms]
+
+ 22 pass
+ 1 fail
+ 953 expect() calls
+Ran 23 tests across 1 file. [11.89s]
+
+EXIT=1

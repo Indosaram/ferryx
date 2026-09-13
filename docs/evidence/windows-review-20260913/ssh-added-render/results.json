@@ -1,0 +1,124 @@
+{
+  "bun": "1.4.0",
+  "results": [
+    {
+      "theme": "light",
+      "width": 1280,
+      "color": "rgb(21, 128, 61)",
+      "stroke": "rgb(21, 128, 61)",
+      "token": "#15803d",
+      "rgbToken": "21 128 61",
+      "classes": "lucide lucide-check size-3 text-status-success",
+      "label": "Added",
+      "bounds": {
+        "x": 574.359375,
+        "y": 249,
+        "width": 12,
+        "height": 12
+      },
+      "ipc": [
+        {
+          "command": "cmd_ssh_list_hosts",
+          "args": {}
+        },
+        {
+          "command": "cmd_ssh_read_system_config",
+          "args": {
+            "configPath": null
+          }
+        }
+      ]
+    },
+    {
+      "theme": "dark",
+      "width": 1280,
+      "color": "rgb(134, 239, 172)",
+      "stroke": "rgb(134, 239, 172)",
+      "token": "#86efac",
+      "rgbToken": "134 239 172",
+      "classes": "lucide lucide-check size-3 text-status-success",
+      "label": "Added",
+      "bounds": {
+        "x": 574.359375,
+        "y": 249,
+        "width": 12,
+        "height": 12
+      },
+      "ipc": [
+        {
+          "command": "cmd_ssh_list_hosts",
+          "args": {}
+        },
+        {
+          "command": "cmd_ssh_read_system_config",
+          "args": {
+            "configPath": null
+          }
+        }
+      ]
+    },
+    {
+      "theme": "light",
+      "width": 390,
+      "color": "rgb(21, 128, 61)",
+      "stroke": "rgb(21, 128, 61)",
+      "token": "#15803d",
+      "rgbToken": "21 128 61",
+      "classes": "lucide lucide-check size-3 text-status-success",
+      "label": "Added",
+      "bounds": {
+        "x": 295.359375,
+        "y": 285,
+        "width": 12,
+        "height": 12
+      },
+      "ipc": [
+        {
+          "command": "cmd_ssh_list_hosts",
+          "args": {}
+        },
+        {
+          "command": "cmd_ssh_read_system_config",
+          "args": {
+            "configPath": null
+          }
+        }
+      ]
+    },
+    {
+      "theme": "dark",
+      "width": 390,
+      "color": "rgb(134, 239, 172)",
+      "stroke": "rgb(134, 239, 172)",
+      "token": "#86efac",
+      "rgbToken": "134 239 172",
+      "classes": "lucide lucide-check size-3 text-status-success",
+      "label": "Added",
+      "bounds": {
+        "x": 295.359375,
+        "y": 285,
+        "width": 12,
+        "height": 12
+      },
+      "ipc": [
+        {
+          "command": "cmd_ssh_list_hosts",
+          "args": {}
+        },
+        {
+          "command": "cmd_ssh_read_system_config",
+          "args": {
+            "configPath": null
+          }
+        }
+      ]
+    }
+  ],
+  "cleanup": [
+    "1280-light: WebView.close returned",
+    "1280-dark: WebView.close returned",
+    "390-light: WebView.close returned",
+    "390-dark: WebView.close returned",
+    "Vite.close resolved"
+  ]
+}

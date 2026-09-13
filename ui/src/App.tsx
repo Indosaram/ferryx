@@ -22,7 +22,7 @@ import { useApplyAppearanceSettings } from "./lib/appearanceSettings";
 import { workspaceName } from "./lib/branchFilter";
 import { collectDagWatchRoots } from "./lib/dagWatchRoots";
 import { newBrowserTabUrl } from "./lib/browserSettings";
-import { BROWSER_SHORTCUT_EVENT, onBrowserOpenRequested, onBrowserShortcutRequested, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserShortcutAction } from "./lib/browserTauri";
+import { BROWSER_SHORTCUT_EVENT, onBrowserOpenRequested, onBrowserShortcutRequested, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
 import { registerBuiltInBrowserLinkOpener } from "./lib/linkRouting";
 import { useGeneralSettings } from "./lib/generalSettings";
 import { NotificationCoordinator, isWindowForegroundFocused } from "./lib/notificationCoordinator";
@@ -1811,7 +1811,7 @@ function WorkspaceApp({
 
     const activeTab = currentState.layout.tabs.find((tab) => tab.id === activeTabId);
     const activeLayout = currentState.layout.layoutsByTabId?.[activeTabId];
-    if (activeTab?.kind === "terminal" && activeLayout) {
+    if (activeTab && activeTab.kind !== "browser" && activeLayout) {
       const activeLeafId = activeLayout.activeLeafId ?? collectLeafIds(activeLayout.root)[0];
       if (activeLeafId) {
         handleClosePane(activeTabId, activeLeafId);
@@ -2282,9 +2282,19 @@ function WorkspaceApp({
   ]);
 
   const activeShortcutTab = state.layout.tabs.find((tab) => tab.id === state.layout.activeTabId) ?? null;
-  const browserShortcutsActive = activeShortcutTab?.kind === "browser";
+  const shortcutLayout = activeShortcutTab ? state.layout.layoutsByTabId?.[activeShortcutTab.id] : undefined;
+  const shortcutLeafId = shortcutLayout?.activeLeafId ?? (shortcutLayout ? collectLeafIds(shortcutLayout.root)[0] : undefined);
+  const shortcutContent = shortcutLeafId ? shortcutLayout?.contentsByLeafId?.[shortcutLeafId] : undefined;
+  // Match PaneRenderer: explicit leaf content wins; absent content inherits the tab kind.
+  const shortcutBrowserId = shortcutContent
+    ? shortcutContent.kind === "browser" ? shortcutContent.browser?.browserId ?? shortcutContent.browserId : undefined
+    : activeShortcutTab?.kind === "browser" ? activeShortcutTab.browserId : undefined;
+  const browserShortcutsActive = Boolean(shortcutBrowserId);
   const dispatchBrowserShortcut = (action: BrowserShortcutAction) => {
-    window.dispatchEvent(new CustomEvent(BROWSER_SHORTCUT_EVENT, { detail: { action } }));
+    if (!shortcutBrowserId) return;
+    window.dispatchEvent(new CustomEvent(BROWSER_SHORTCUT_EVENT, {
+      detail: { browserId: shortcutBrowserId, action },
+    }) satisfies BrowserShortcutDomEvent);
   };
 
   // Child browser webviews own OS focus, so the main window never sees these
@@ -2422,6 +2432,7 @@ function WorkspaceApp({
       handleCloseActiveSurface,
       handleCyclePaneFocus,
       browserShortcutsActive,
+      shortcutBrowserId,
       handleCycleTab,
       handleOpenCommandPalette,
       handleOpenTerminalSearch,

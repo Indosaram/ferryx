@@ -1,0 +1,27 @@
+bun test v1.4.0 (34cbb9a40)
+
+scripts/macos-dev-runner.test.mjs:
+(pass) signing target has exactly one debug component (/) [0.07ms]
+ 8 | }
+ 9 | 
+10 | for (const paths of [posix, win32]) {
+11 |   test(`signing target has exactly one debug component (${paths.sep})`, () => {
+12 |     const target = paths.join("src-tauri", "target", "debug");
+13 |     expect(paths.join(targetRootFor(target, paths), "debug")).toBe(target);
+                                                                   ^
+error: expect(received).toBe(expected)
+
+Expected: "src-tauri\target\debug"
+Received: "src-tauri\target\debug\debug"
+
+      at <anonymous> (/Users/indo/code/project/orca-lite/scripts/macos-dev-runner.test.mjs:13:63)
+(fail) signing target has exactly one debug component (\) [0.43ms]
+(pass) debug runner uses Developer ID and respects signing exit 0 [1042.91ms]
+(pass) debug runner uses Developer ID and respects signing exit 7 [484.27ms]
+
+ 3 pass
+ 1 fail
+ 10 expect() calls
+Ran 4 tests across 1 file. [2.21s]
+
+EXIT=1

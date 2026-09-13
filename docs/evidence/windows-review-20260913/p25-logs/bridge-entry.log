@@ -1,0 +1,15 @@
+29 | }
+30 | 
+31 | export async function main() {
+32 |   requireDetachedOwnership();
+33 |   function requireDetachedOwnership() {
+34 |     throw Object.assign(new Error("Detached SSH QA requires a runtime-owner process handle/start-identity facility; endpoint PID text cannot authorize teardown"), { code: "QA_OWNERSHIP_PREREQUISITE" });
+                                 ^
+error: Detached SSH QA requires a runtime-owner process handle/start-identity facility; endpoint PID text cannot authorize teardown
+ code: "QA_OWNERSHIP_PREREQUISITE"
+
+      at requireDetachedOwnership (/Users/indo/code/project/orca-lite/scripts/qa/ssh-bridge-survival.mjs:34:29)
+      at main (/Users/indo/code/project/orca-lite/scripts/qa/ssh-bridge-survival.mjs:32:3)
+      at /Users/indo/code/project/orca-lite/scripts/qa/ssh-bridge-survival.mjs:396:9
+
+Bun v1.4.0 (macOS arm64)

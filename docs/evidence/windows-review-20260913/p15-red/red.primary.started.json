@@ -1,0 +1,23 @@
+{
+  "phase": "red",
+  "label": "primary",
+  "pid": 33185,
+  "command": [
+    "/Users/indo/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo",
+    "test",
+    "--manifest-path",
+    "src-tauri/Cargo.toml",
+    "--lib",
+    "remote::state::tests::p15_offline_lan_survives_both_route_failures",
+    "--",
+    "--exact",
+    "--nocapture"
+  ],
+  "log": "/private/tmp/ferryx-p15-st_01a099e2-TCTkwR/red.primary.log",
+  "before": {
+    "src-tauri/src/remote/state.rs": "3b26d49e923ebbf4aab528f4a31798bdc2a6429f1257643fe940c5d216f6b401",
+    "src-tauri/Cargo.toml": "e2e8004912098458c2a045539f233471b3514d0fba66ba1cf261ff829845cbc9",
+    "src-tauri/Cargo.lock": "1b2d01f2d268c2183c5be10cb1d0db464c349afffe9999b79cb93077f11169a5"
+  },
+  "started": "2026-09-13T08:46:23.768Z"
+}

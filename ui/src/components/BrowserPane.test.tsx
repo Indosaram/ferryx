@@ -1,4 +1,4 @@
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { BrowserTab } from "../lib/types";
@@ -60,6 +60,13 @@ describe("BrowserPane native webview lifecycle", () => {
     browserMocks.getBrowserState.mockClear();
     browserMocks.setBrowserBounds.mockClear();
     browserMocks.setBrowserVisible.mockClear();
+  });
+
+  it.each([undefined, "unrelated", "browser-1"])("accepts find only for its DOM target %s", async (browserId) => {
+    await act(async () => { render(<BrowserPane tab={tab} onNavigate={vi.fn()} onReload={vi.fn()} />); });
+    // render/act flushes the synchronous DOM subscription before dispatch.
+    fireEvent(window, new CustomEvent(browserMocks.BROWSER_SHORTCUT_EVENT, { detail: { browserId, action: "find" } }));
+    expect(screen.queryByLabelText("Find in page") !== null).toBe(browserId === tab.browserId);
   });
 
   it("shows the child webview while mounted and hides it during cleanup", async () => {

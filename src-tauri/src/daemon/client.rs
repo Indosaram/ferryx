@@ -409,6 +409,17 @@ impl DaemonClient {
         DaemonStream::connect(format!("127.0.0.1:{port}")).await
     }
 
+    fn upgrade_rpc_client(&self) -> Self {
+        Self {
+            socket_path: self.socket_path.clone(),
+            connection: Arc::new(Mutex::new(None)),
+            interactive_connection: Arc::new(Mutex::new(None)),
+            epoch: Arc::new(parking_lot::RwLock::new(None)),
+            upgrade_requested: Arc::clone(&self.upgrade_requested),
+            spawn_lock: Arc::new(Mutex::new(())),
+        }
+    }
+
     fn maybe_trigger_upgrade_if_stale(
         &self,
         daemon_version: Option<String>,
@@ -437,7 +448,7 @@ impl DaemonClient {
             return;
         }
 
-        let socket_path = self.socket_path.clone();
+        let temp_client = self.upgrade_rpc_client();
         let connection_slot = Arc::clone(&self.connection);
         let own_binary_path = own_exe.map(|p| p.to_string_lossy().to_string());
 
@@ -445,7 +456,6 @@ impl DaemonClient {
             tracing::info!(
                 "Daemon binary is stale (running daemon version: {daemon_version:?}, mtime: {daemon_mtime_ms:?}; own GUI version: {own_version}, mtime: {own_mtime:?}). Sending UpgradeBinary request."
             );
-            let temp_client = DaemonClient::new_with_socket(socket_path);
             match temp_client
                 .send_request(DaemonRequest::UpgradeBinary {
                     new_binary_path: own_binary_path,
@@ -1581,6 +1591,18 @@ mod tests {
     use tempfile::tempdir;
     use tokio::net::UnixListener;
     use tokio::sync::oneshot;
+
+    #[test]
+    fn p08_upgrade_rpc_inherits_admission() {
+        let client = DaemonClient::new_with_socket(PathBuf::from("unused-p08.sock"));
+        client.upgrade_requested.store(true, Ordering::SeqCst);
+        let rpc = client.upgrade_rpc_client();
+        assert!(Arc::ptr_eq(&client.upgrade_requested, &rpc.upgrade_requested),
+            "internal upgrade RPC must share admission with its originating client");
+        assert!(rpc.upgrade_requested.compare_exchange(false, true,
+            Ordering::SeqCst, Ordering::SeqCst).is_err(),
+            "an internal stale handshake must not admit another upgrade");
+    }
 
     #[tokio::test]
     async fn ssh_reconnect_safety_desktop_missing_generation_never_uses_legacy_write() {

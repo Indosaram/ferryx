@@ -1,0 +1,304 @@
+$ vitest run --maxWorkers=1 src/lib/nativeMenu.test.ts
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ❯ src/lib/nativeMenu.test.ts (12 tests | 9 failed) 36ms
+   × native popup ownership > dismisses A with cleanup pending, then copies exactly B once through two actual rows 22ms
+     → expected [ [ 'C:\owned\A' ], [ 'C:\owned\B' ] ] to deeply equal [ [ 'C:\owned\B' ] ]
+   × native popup ownership > unmount cancels a real row during pending registration 4ms
+     → expected "spy" to not be called at all, but actually been called 1 times[90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m    Array [
+      "cmd_native_sidebar_context_menu",
+      Object {
+        "items": Array [
+          Object {
+            "enabled": true,
+            "icon": "reveal",
+            "id": "reveal",
+            "kind": "item",
+            "label": "Show in File Explorer",
+          },
+          Object {
+            "id": "copy-path",
+            "kind": "item",
+            "label": "Copy Worktree Path",
+          },
+          Object {
+            "id": "copy-branch",
+            "kind": "item",
+            "label": "Copy Branch Name",
+          },
+          Object {
+            "kind": "separator",
+          },
+          Object {
+            "enabled": true,
+            "icon": "trash",
+            "id": "delete",
+            "kind": "item",
+            "label": "Delete Worktree",
+          },
+        ],
+        "position": Object {
+          "x": 12,
+          "y": 34,
+        },
+      },
+    ]
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+   × native popup ownership > unmount cancels a real row during pending invoke 2ms
+     → expected "spy" to be called 1 times, but got 0 times
+   × native popup ownership > reopen cancels the obsolete row popup during pending registration 3ms
+     → expected "spy" to be called 1 times, but got 0 times
+   × native popup ownership > reopen cancels the obsolete row popup during pending invoke 2ms
+     → expected "spy" to be called 1 times, but got 0 times
+   × native popup ownership > ignores unrelated actions and maps a submenu ID without mutating entries 1ms
+     → expected "spy" to not be called at all, but actually been called 1 times[90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m    Array [
+      "unrelated",
+    ]
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+   × native popup ownership > keeps a long-open popup selectable until native tracking completes 1ms
+     → expected 1 to be +0 // Object.is equality
+   ✓ native popup ownership > dismissal removes the listener once at the unchanged grace deadline 0ms
+   ✓ native popup ownership > cleans up before propagating invoke rejection 1ms
+   ✓ native popup ownership > propagates registration rejection without invoking 0ms
+   × native popup ownership > callback throw and queued duplicate still release exactly once 1ms
+     → expected [Function] to not throw an error but 'Error: action failed' was thrown
+   × native popup ownership > supports cancellation before registration and a non-native no-op 0ms
+     → expected "spy" to not be called at all, but actually been called 1 times[90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m    Array [
+      "ferryx://menu-action",
+      [Function anonymous],
+    ]
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 9 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/nativeMenu.test.ts > native popup ownership > dismisses A with cleanup pending, then copies exactly B once through two actual rows
+AssertionError: expected [ [ 'C:\owned\A' ], [ 'C:\owned\B' ] ] to deeply equal [ [ 'C:\owned\B' ] ]
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  [[22m
+[2m    [[22m
+[31m+     "C:\\owned\\A",[39m
+[31m+   ],[39m
+[31m+   [[39m
+[2m      "C:\\owned\\B",[22m
+[2m    ],[22m
+[2m  ][22m
+
+ ❯ src/lib/nativeMenu.test.ts:115:36
+    113|       expect(request.position).toEqual(position);
+    114|       await act(async () => { emit(itemId(request.items, "Copy Worktre…
+    115|       expect(writeText.mock.calls).toEqual([["C:\\owned\\B"]]);
+       |                                    ^
+    116|       emit(itemId(request.items, "Copy Worktree Path"));
+    117|       expect(writeText.mock.calls).toEqual([["C:\\owned\\B"]]);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/9]⎯
+
+ FAIL  src/lib/nativeMenu.test.ts > native popup ownership > unmount cancels a real row during pending registration
+AssertionError: expected "spy" to not be called at all, but actually been called 1 times[90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m    Array [
+      "cmd_native_sidebar_context_menu",
+      Object {
+        "items": Array [
+          Object {
+            "enabled": true,
+            "icon": "reveal",
+            "id": "reveal",
+            "kind": "item",
+            "label": "Show in File Explorer",
+          },
+          Object {
+            "id": "copy-path",
+            "kind": "item",
+            "label": "Copy Worktree Path",
+          },
+          Object {
+            "id": "copy-branch",
+            "kind": "item",
+            "label": "Copy Branch Name",
+          },
+          Object {
+            "kind": "separator",
+          },
+          Object {
+            "enabled": true,
+            "icon": "trash",
+            "id": "delete",
+            "kind": "item",
+            "label": "Delete Worktree",
+          },
+        ],
+        "position": Object {
+          "x": 12,
+          "y": 34,
+        },
+      },
+    ]
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+ ❯ src/lib/nativeMenu.test.ts:134:33
+    132|       finally { vi.unstubAllGlobals(); }
+    133|     } else {
+    134|       expect(bridge.invoke).not.toHaveBeenCalled();
+       |                                 ^
+    135|       expect(p.unlisten).toHaveBeenCalledTimes(1);
+    136|     }
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/9]⎯
+
+ FAIL  src/lib/nativeMenu.test.ts > native popup ownership > unmount cancels a real row during pending invoke
+AssertionError: expected "spy" to be called 1 times, but got 0 times
+ ❯ src/lib/nativeMenu.test.ts:128:26
+    126|     await act(async () => { p.registration.resolve(p.unlisten); await …
+    127|     if (request) {
+    128|       expect(p.unlisten).toHaveBeenCalledTimes(1);
+       |                          ^
+    129|       const clipboard = vi.fn();
+    130|       vi.stubGlobal("navigator", { platform: "Win32", userAgent: "Wind…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/9]⎯
+
+ FAIL  src/lib/nativeMenu.test.ts > native popup ownership > reopen cancels the obsolete row popup during pending registration
+ FAIL  src/lib/nativeMenu.test.ts > native popup ownership > reopen cancels the obsolete row popup during pending invoke
+AssertionError: expected "spy" to be called 1 times, but got 0 times
+ ❯ src/lib/nativeMenu.test.ts:147:24
+    145|     const b = popup(); context(view); const request = await ready(b);
+    146|     await act(async () => { a.registration.resolve(a.unlisten); a.comp…
+    147|     expect(a.unlisten).toHaveBeenCalledTimes(1);
+       |                        ^
+    148|     expect(b.unlisten).not.toHaveBeenCalled();
+    149|     const copied = deferred<void>();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/9]⎯
+
+ FAIL  src/lib/nativeMenu.test.ts > native popup ownership > ignores unrelated actions and maps a submenu ID without mutating entries
+AssertionError: expected "spy" to not be called at all, but actually been called 1 times[90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m    Array [
+      "unrelated",
+    ]
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+ ❯ src/lib/nativeMenu.test.ts:163:24
+    161|     const request = await ready(p);
+    162|     emit("unrelated");
+    163|     expect(action).not.toHaveBeenCalled(); expect(p.unlisten).not.toHa…
+       |                        ^
+    164|     emit(itemId(request.items));
+    165|     expect(action.mock.calls).toEqual([["copy-path"]]);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/9]⎯
+
+ FAIL  src/lib/nativeMenu.test.ts > native popup ownership > keeps a long-open popup selectable until native tracking completes
+AssertionError: expected 1 to be +0 // Object.is equality
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- 0[39m
+[31m+ 1[39m
+
+ ❯ src/lib/nativeMenu.test.ts:178:32
+    176|     emit(itemId(request.items)); expect(action.mock.calls).toEqual([["…
+    177|     p.completion.resolve(); (await done)();
+    178|     expect(vi.getTimerCount()).toBe(0);
+       |                                ^
+    179|   });
+    180| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/9]⎯
+
+ FAIL  src/lib/nativeMenu.test.ts > native popup ownership > callback throw and queued duplicate still release exactly once
+AssertionError: expected [Function] to not throw an error but 'Error: action failed' was thrown
+
+[32m- Expected:[39m 
+undefined
+
+[31m+ Received:[39m 
+"Error: action failed"
+
+ ❯ src/lib/nativeMenu.test.ts:208:55
+    206|     const done = start(action); const request = await ready(p);
+    207|     expect(() => p.select(itemId(request.items))).toThrow("action fail…
+    208|     expect(() => p.select(itemId(request.items))).not.toThrow();
+       |                                                       ^
+    209|     expect(action).toHaveBeenCalledTimes(1); expect(p.unlisten).toHave…
+    210|     p.completion.resolve(); (await done)(); expect(vi.getTimerCount())…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/9]⎯
+
+ FAIL  src/lib/nativeMenu.test.ts > native popup ownership > supports cancellation before registration and a non-native no-op
+AssertionError: expected "spy" to not be called at all, but actually been called 1 times[90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m    Array [
+      "ferryx://menu-action",
+      [Function anonymous],
+    ]
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+ ❯ src/lib/nativeMenu.test.ts:215:76
+    213|   it("supports cancellation before registration and a non-native no-op…
+    214|     const controller = new AbortController(); controller.abort();
+    215|     (await start(vi.fn(), controller.signal))(); expect(bridge.listen)…
+       |                                                                            ^
+    216|     bridge.isTauri.mockReturnValue(false);
+    217|     (await start())(); expect(bridge.listen).not.toHaveBeenCalled(); e…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[8/9]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  9 failed | 3 passed (12)
+   Start at  15:43:16
+   Duration  1.16s (transform 77ms, setup 104ms, collect 468ms, tests 36ms, environment 243ms, prepare 30ms)
+
+error: script "test" exited with code 1

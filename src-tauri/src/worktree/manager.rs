@@ -347,6 +347,14 @@ impl WorktreeManager {
     }
 
     pub fn format_branch_name(ws_id: &str, slug: &str) -> Result<String, WorktreeError> {
+        Self::format_branch_name_platform(ws_id, slug, cfg!(windows))
+    }
+
+    pub fn format_branch_name_platform(
+        ws_id: &str,
+        slug: &str,
+        is_windows: bool,
+    ) -> Result<String, WorktreeError> {
         let ws_id = ws_id.trim();
         let slug = slug.trim();
         if ws_id.is_empty() {
@@ -364,8 +372,8 @@ impl WorktreeManager {
                 reason: "Workspace ID cannot contain '/'".into(),
             });
         }
-        Self::validate_ref_component(ws_id, "workspace ID")?;
-        Self::validate_ref_component(slug, "slug")?;
+        Self::validate_ref_component_platform(ws_id, "workspace ID", is_windows)?;
+        Self::validate_ref_component_platform(slug, "slug", is_windows)?;
         Ok(format!("orca/{ws_id}/{slug}"))
     }
 
@@ -383,6 +391,33 @@ impl WorktreeManager {
     }
 
     fn validate_ref_component(component: &str, label: &str) -> Result<(), WorktreeError> {
+        Self::validate_ref_component_platform(component, label, cfg!(windows))
+    }
+
+    pub fn is_windows_reserved_segment(segment: &str) -> bool {
+        let stem = segment.split('.').next().unwrap_or(segment).trim();
+        let lower = stem.to_ascii_lowercase();
+        match lower.as_str() {
+            "con" | "prn" | "aux" | "nul" | "conin$" | "conout$" => return true,
+            _ => {}
+        }
+        if lower.starts_with("com") || lower.starts_with("lpt") {
+            let suffix = &stem[3..];
+            match suffix {
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³" => {
+                    return true
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    pub fn validate_ref_component_platform(
+        component: &str,
+        label: &str,
+        is_windows: bool,
+    ) -> Result<(), WorktreeError> {
         if component.contains("..") || component.contains("//") || component.contains("@{") {
             return Err(WorktreeError::InvalidNamespace {
                 reason: format!("{label} cannot contain '..', '//', or '@{{'"),
@@ -406,6 +441,13 @@ impl WorktreeManager {
                     reason: format!("{label} cannot end with '.lock'"),
                 });
             }
+            if is_windows && Self::is_windows_reserved_segment(segment) {
+                return Err(WorktreeError::InvalidNamespace {
+                    reason: format!(
+                        "{label} path segment '{segment}' is a reserved Windows device name"
+                    ),
+                });
+            }
             for ch in segment.chars() {
                 if ch.is_ascii_control()
                     || ch.is_whitespace()
@@ -413,6 +455,13 @@ impl WorktreeManager {
                 {
                     return Err(WorktreeError::InvalidNamespace {
                         reason: format!("{label} contains invalid character '{ch}'"),
+                    });
+                }
+                if is_windows && matches!(ch, '<' | '>' | '"' | '|') {
+                    return Err(WorktreeError::InvalidNamespace {
+                        reason: format!(
+                            "{label} contains invalid character '{ch}' on Windows"
+                        ),
                     });
                 }
             }

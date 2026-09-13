@@ -906,6 +906,50 @@ pub async fn cmd_native_terminal_send_input<R: Runtime>(
     }
 }
 
+/// Wheel context is pane-local logical pixels, matching the mouse IPC contract.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeTerminalWheelContext {
+    pub position: MousePosition,
+    pub modifiers: KeyModifiers,
+}
+
+/// Shared command policy seam. Layout comes from the attached surface, never the client.
+pub fn native_scroll_outcome<T: TerminalEngine>(
+    term: &T,
+    bounds: Option<&LogicalBounds>,
+    cell_metrics: Option<&CellMetrics>,
+    behavior: &NativeTerminalScrollBehavior,
+    wheel: Option<&NativeTerminalWheelContext>,
+) -> Result<TerminalWheelOutcome, NativeTerminalError> {
+    match behavior {
+        NativeTerminalScrollBehavior::Delta { rows } => {
+            let (lx, ly, modifiers) = match wheel {
+                Some(wheel) => {
+                    if !wheel.position.x.is_finite() || !wheel.position.y.is_finite() {
+                        return Err(NativeTerminalError::InvalidValue(
+                            "Wheel position must be finite".to_string(),
+                        ));
+                    }
+                    let (x, y) = bounds.map(|b| (b.x, b.y)).unwrap_or((0.0, 0.0));
+                    (x + f64::from(wheel.position.x), y + f64::from(wheel.position.y), wheel.modifiers)
+                }
+                None => {
+                    let (x, y) = bounds
+                        .map(|b| (b.x + b.width / 2.0, b.y + b.height / 2.0))
+                        .unwrap_or((0.0, 0.0));
+                    (x, y, KeyModifiers::default())
+                }
+            };
+            let rows = (*rows).clamp(isize::from(i16::MIN), isize::from(i16::MAX)) as i16;
+            crate::native_terminal::compute_wheel_outcome(
+                term, bounds, cell_metrics, lx, ly, rows, modifiers,
+            )
+        }
+        _ => Ok(TerminalWheelOutcome::ScrollViewport(behavior.to_scroll_viewport())),
+    }
+}
+
 #[tauri::command]
 pub async fn cmd_native_terminal_scroll<R: Runtime>(
     app: AppHandle<R>,
@@ -913,35 +957,17 @@ pub async fn cmd_native_terminal_scroll<R: Runtime>(
     daemon_client: State<'_, Arc<DaemonClient>>,
     session_id: String,
     behavior: NativeTerminalScrollBehavior,
+    wheel: Option<NativeTerminalWheelContext>,
     generation: Option<u64>,
 ) -> Result<NativeTerminalBoundsReceipt, IpcError> {
     require_attached_surface(state.inner(), &session_id)
         .map_err(|err| IpcError::internal(err.to_string()))?;
 
-    let outcome = match &behavior {
-        NativeTerminalScrollBehavior::Delta { rows } => {
-            let bounds = state.session_logical_bounds(&session_id);
-            let cell_metrics = state.session_cell_metrics(&session_id);
-            let (lx, ly) = bounds
-                .as_ref()
-                .map(|b| (b.x + b.width / 2.0, b.y + b.height / 2.0))
-                .unwrap_or((0.0, 0.0));
-            state
-                .with_session_terminal(&session_id, |term| {
-                    crate::native_terminal::compute_wheel_outcome(
-                        term,
-                        bounds.as_ref(),
-                        cell_metrics.as_ref(),
-                        lx,
-                        ly,
-                        *rows as i16,
-                        KeyModifiers::default(),
-                    )
-                })
-                .map_err(|err| IpcError::internal(err.to_string()))?
-        }
-        _ => TerminalWheelOutcome::ScrollViewport(behavior.to_scroll_viewport()),
-    };
+    let bounds = state.session_logical_bounds(&session_id);
+    let cell_metrics = state.session_cell_metrics(&session_id);
+    let outcome = state.with_session_terminal(&session_id, |term| {
+        native_scroll_outcome(term, bounds.as_ref(), cell_metrics.as_ref(), &behavior, wheel.as_ref())
+    }).map_err(|err| IpcError::internal(err.to_string()))?;
 
     match outcome {
         TerminalWheelOutcome::WritePty(bytes) => {
@@ -1248,6 +1274,11 @@ pub(crate) fn authoritative_mouse_event(
     })
 }
 
+pub fn native_mouse_routes(tracking: bool, event: &MouseEvent) -> (bool, bool) {
+    let report = tracking && !event.modifiers.shift;
+    (!report, report)
+}
+
 #[tauri::command]
 pub async fn cmd_native_terminal_mouse<R: Runtime>(
     app: AppHandle<R>,
@@ -1273,13 +1304,7 @@ pub async fn cmd_native_terminal_mouse<R: Runtime>(
     let tracking =
         mouse_tracking_enabled_for_attached_session(state.inner(), &session_id).unwrap_or(false);
 
-    let has_shift = event.modifiers.shift;
-    let is_plain_left_selection = event.button == Some(crate::native_terminal::MouseButton::Left)
-        || (event.button.is_none()
-            && (event.action == MouseAction::Motion || event.action == MouseAction::Release));
-
-    let perform_selection = !tracking || is_plain_left_selection || has_shift;
-    let perform_tracking = tracking && !has_shift && !is_plain_left_selection;
+    let (perform_selection, perform_tracking) = native_mouse_routes(tracking, &event);
 
     if perform_tracking {
         let bytes = match encode_attached_native_mouse(state.inner(), &session_id, &event) {
@@ -1340,9 +1365,7 @@ pub async fn cmd_native_terminal_mouse<R: Runtime>(
             let event_position_x = event.position.x as f64;
             let event_position_y = event.position.y as f64;
             let debug_session_id = session_id.clone();
-            tauri::async_runtime::spawn_blocking(move || {
-                use std::fs::OpenOptions;
-                use std::io::Write;
+            {
                 use std::time::{SystemTime, UNIX_EPOCH};
 
                 let wall_time_ms = SystemTime::now()
@@ -1364,14 +1387,8 @@ pub async fn cmd_native_terminal_mouse<R: Runtime>(
                         "selection_range": selection_range,
                     }
                 });
-                if let Ok(mut file) = OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("/tmp/ferryx-switch-debug.jsonl")
-                {
-                    let _ = writeln!(file, "{entry}");
-                }
-            });
+                crate::ipc::debug::log_native_switch_debug(entry);
+            }
         }
     }
 
@@ -1454,8 +1471,6 @@ pub async fn cmd_native_terminal_clipboard_content<R: Runtime>(
             if cfg!(debug_assertions)
                 || std::env::var("FERRYX_SWITCH_DEBUG").ok().as_deref() == Some("1")
             {
-                use std::fs::OpenOptions;
-                use std::io::Write;
                 use std::time::{SystemTime, UNIX_EPOCH};
 
                 let (kind, text_length) = match &content {
@@ -1478,13 +1493,7 @@ pub async fn cmd_native_terminal_clipboard_content<R: Runtime>(
                         "textLength": text_length,
                     }
                 });
-                if let Ok(mut file) = OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("/tmp/ferryx-switch-debug.jsonl")
-                {
-                    let _ = writeln!(file, "{entry}");
-                }
+                crate::ipc::debug::log_native_switch_debug(entry);
             }
             let _ = sender.send(content);
         }) {
@@ -1532,10 +1541,14 @@ pub async fn cmd_native_terminal_clipboard_content<R: Runtime>(
                     "textLength": text_length,
                 }
             });
-            let log_path = std::env::temp_dir().join("ferryx-switch-debug.jsonl");
-            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
-                let _ = writeln!(file, "{entry}");
-            }
+            let _ = crate::ipc::run_blocking(move || {
+                let log_path = std::env::temp_dir().join("ferryx-switch-debug.jsonl");
+                if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
+                    let _ = writeln!(file, "{entry}");
+                }
+                Ok(())
+            })
+            .await;
         }
         Ok(content)
     }

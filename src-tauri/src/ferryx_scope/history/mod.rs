@@ -102,6 +102,7 @@ fn load(root: &Path, path: &Path, budget: usize) -> Result<Vec<u8>> {
 fn field(v: &Value, key: &str) -> Option<String> { v.get(key).and_then(Value::as_str).map(str::to_owned) }
 fn parse(provider: CanonicalProvider, bytes: &[u8]) -> Result<(Entry,Vec<Message>,Vec<String>)> {
     let mut identity: Option<(String,String)> = None; let mut version = None; let mut parent_id = None; let mut messages = vec![]; let mut warnings = vec![];
+    let mut claude_ancestry = vec![];
     for (ordinal,line) in bytes.split_inclusive(|b| *b == b'\n').enumerate() {
         if line.len() > MAX_RECORD {warnings.push("RECORD_LIMIT".into()); continue;}
         if !line.ends_with(b"\n") {warnings.push("PARTIAL_RECORD".into()); continue;}
@@ -117,10 +118,23 @@ fn parse(provider: CanonicalProvider, bytes: &[u8]) -> Result<(Entry,Vec<Message
         }
         let message = match provider {CanonicalProvider::Codex if kind == "response_item" && v["payload"]["type"] == "message" => Some(&v["payload"]), CanonicalProvider::Claude if kind == "user" || kind == "assistant" => Some(&v["message"]), _ => None};
         if let Some(m) = message {
+            if provider == CanonicalProvider::Claude {
+                claude_ancestry.push((ordinal, field(&v,"uuid").or_else(||field(m,"id")), field(&v,"parentUuid")));
+            }
             let content = &m["content"];
             let text = if let Some(text) = content.as_str() {text.to_owned()} else {content.as_array().map(|parts| parts.iter().filter(|p| matches!(p["type"].as_str(),Some("text"|"input_text"|"output_text"))).filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join("\n")).unwrap_or_default()};
             if !text.is_empty() {messages.push(Message {ordinal, role: field(m,"role").unwrap_or_else(||kind.into()), text, id: field(&v,"uuid").or_else(||field(m,"id")), parent_id: field(&v,"parentUuid")});}
         }
+    }
+    // The latest Claude message selects the active branch. Walk only earlier
+    // records, including textless messages, without renumbering source ordinals.
+    if let Some((ordinal, _, mut parent)) = claude_ancestry.pop() {
+        let mut active = std::collections::HashSet::from([ordinal]);
+        for (ordinal, id, ancestor) in claude_ancestry.into_iter().rev() {
+            if parent.is_none() { break; }
+            if id == parent { active.insert(ordinal); parent = ancestor; }
+        }
+        messages.retain(|message| active.contains(&message.ordinal));
     }
     let (id,cwd) = identity.ok_or(HistoryError::InvalidIdentity)?;
     Ok((Entry {entry_key:String::new(),provider,provider_session:AgentProviderSession {key:AgentProviderSessionKey::SessionId,id,transcript_path:None},cwd,version,parent_id},messages,warnings))

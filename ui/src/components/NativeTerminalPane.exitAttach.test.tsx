@@ -121,7 +121,11 @@ describe("NativeTerminalPane abnormal exit attach handling", () => {
 
     const alert = queryByRole("alert");
     expect(alert).toBeNull();
-    expect(onUnavailable).toHaveBeenCalledWith("dead-backend-session", "daemon-attach-not-found");
+    expect(onUnavailable).toHaveBeenCalledWith(
+      "dead-backend-session",
+      "daemon-attach-not-found",
+      "dead-backend-session::0:",
+    );
   });
 
   it("ignores late attach rejection without surfacing alert badge when session exits during in-flight attach", async () => {
@@ -187,7 +191,11 @@ describe("NativeTerminalPane abnormal exit attach handling", () => {
     });
 
     expect(queryByRole("alert")).toBeNull();
-    expect(onUnavailable).toHaveBeenCalledWith("legacy-dead-session", "legacy-internal-error");
+    expect(onUnavailable).toHaveBeenCalledWith(
+      "legacy-dead-session",
+      "legacy-internal-error",
+      "legacy-dead-session::0:",
+    );
   });
 
   it("preserves visible error badge for genuine operational errors like IO_ERROR or GPU surface failure", async () => {

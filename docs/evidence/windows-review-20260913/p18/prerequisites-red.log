@@ -1,0 +1,130 @@
+TAP version 13
+# Subtest: clean-layout edge contract compiles and executes without ephemeral evidence
+not ok 1 - clean-layout edge contract compiles and executes without ephemeral evidence
+  ---
+  duration_ms: 236.751417
+  type: 'test'
+  location: '/Users/indo/code/project/orca-lite/scripts/fixtures/p18-prerequisites.test.mjs:21:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    error: couldn't read `/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p18-owned-n5P2NE/src-tauri/tests/../../.omo/ulw-loop/01a04fcf-f90f-7878-bd5d-3881f49c4297/evidence/windows-edges/run-edge-probes.ps1`: No such file or directory (os error 2)
+     --> /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p18-owned-n5P2NE/src-tauri/tests/windows_edge_probe_contract.rs:1:28
+      |
+    1 |   const EDGE_WRAPPER: &str = include_str!(
+      |  ____________________________^
+    2 | |     "../../.omo/ulw-loop/01a04fcf-f90f-7878-bd5d-3881f49c4297/evidence/windows-edges/run-edge-probes.ps1"
+    3 | | );
+      | |_^
+    
+    error: aborting due to 1 previous error
+    
+    
+    
+    1 !== 0
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 0
+  actual: 1
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/fixtures/p18-prerequisites.test.mjs:32:10)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.start (node:internal/test_runner/test:944:17)
+    startSubtestAfterBootstrap (node:internal/test_runner/harness:296:17)
+  ...
+# Subtest: build script emits MSVC manifest arguments only for windows/msvc
+ok 2 - build script emits MSVC manifest arguments only for windows/msvc
+  ---
+  duration_ms: 540.048458
+  type: 'test'
+  ...
+# Subtest: build script emits MSVC manifest arguments only for windows/gnu
+not ok 3 - build script emits MSVC manifest arguments only for windows/gnu
+  ---
+  duration_ms: 401.969125
+  type: 'test'
+  location: '/Users/indo/code/project/orca-lite/scripts/fixtures/p18-prerequisites.test.mjs:39:3'
+  failureType: 'testCodeFailure'
+  error: |-
+    cargo:rustc-link-arg-tests=/MANIFEST:EMBED
+    cargo:rustc-link-arg-tests=/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' publicKeyToken='6595b64144ccf1df' language='*' processorArchitecture='*'
+    cargo:rustc-link-arg=/MANIFEST:EMBED
+    cargo:rustc-link-arg=/MANIFESTINPUT:/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p18-owned-vErJhL/ferryx-app-manifest.xml
+    BUILDER=custom
+    
+    
+    true !== false
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: false
+  actual: true
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/fixtures/p18-prerequisites.test.mjs:61:12)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: build script emits MSVC manifest arguments only for linux/gnu
+ok 4 - build script emits MSVC manifest arguments only for linux/gnu
+  ---
+  duration_ms: 411.35675
+  type: 'test'
+  ...
+# Subtest: quiescence reports old metadata with GNU-compatible stat
+ok 5 - quiescence reports old metadata with GNU-compatible stat
+  ---
+  duration_ms: 21.591583
+  type: 'test'
+  ...
+# Subtest: quiescence reports recent metadata with GNU-compatible stat
+not ok 6 - quiescence reports recent metadata with GNU-compatible stat
+  ---
+  duration_ms: 365.455292
+  type: 'test'
+  location: '/Users/indo/code/project/orca-lite/scripts/fixtures/p18-prerequisites.test.mjs:67:3'
+  failureType: 'testCodeFailure'
+  error: |-
+    The input did not match the regular expression /\d{4}-\d{2}-\d{2}.*ui\/src\/space name.ts/. Input:
+    
+    'Tree quiescence check FAILED: found 1 file(s) modified within the last 90s.\n' +
+      'Offending files (up to 10 most recent):\n'
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+  actual: |-
+    Tree quiescence check FAILED: found 1 file(s) modified within the last 90s.
+    Offending files (up to 10 most recent):
+    
+  operator: 'match'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/fixtures/p18-prerequisites.test.mjs:82:35)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: quiescence reports invalid metadata with GNU-compatible stat
+ok 7 - quiescence reports invalid metadata with GNU-compatible stat
+  ---
+  duration_ms: 6.942417
+  type: 'test'
+  ...
+1..7
+# tests 7
+# suites 0
+# pass 4
+# fail 3
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 2023.084875

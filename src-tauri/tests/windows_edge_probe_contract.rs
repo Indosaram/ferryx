@@ -1,19 +1,26 @@
-const EDGE_WRAPPER: &str = include_str!(
-    "../../.omo/ulw-loop/01a04fcf-f90f-7878-bd5d-3881f49c4297/evidence/windows-edges/run-edge-probes.ps1"
-);
+use std::process::Command;
+
+// Compile-time dependencies must live in the source tree, not agent evidence.
+const EDGE_WRAPPER: &str = include_str!("../../scripts/fixtures/run-edge-probes.mjs");
+const EDGE_DRIVER: &str = include_str!("../../scripts/fixtures/probe-daemon-edges.mjs");
 
 #[test]
 fn edge_wrapper_stages_and_cleans_its_protocol_driver() {
+    assert!(!EDGE_WRAPPER.is_empty());
+    assert!(!EDGE_DRIVER.is_empty());
+    let wrapper = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../scripts/fixtures/run-edge-probes.mjs");
+    let output = Command::new("node")
+        .arg(wrapper)
+        .output()
+        .expect("execute portable owned edge fixture with Node");
     assert!(
-        EDGE_WRAPPER.contains("$driverSource = Join-Path $PSScriptRoot \"probe-daemon-edges.mjs\""),
-        "edge wrapper must resolve the committed driver beside the wrapper"
+        output.status.success(),
+        "fixture failed: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert!(
-        EDGE_WRAPPER.contains("Copy-Item $driverSource $driver -Force"),
-        "edge wrapper must stage the driver at the repo-root runtime path"
-    );
-    assert!(
-        EDGE_WRAPPER.contains("Remove-Item $driver -Force -ErrorAction SilentlyContinue"),
-        "edge wrapper must remove the staged driver during cleanup"
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "EDGE_FIXTURE_STAGED_EXECUTED_CLEANED"
     );
 }

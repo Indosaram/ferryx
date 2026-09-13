@@ -1,0 +1,10 @@
+SYNTAX_OK scripts/qa/ssh-bridge-survival.mjs
+SYNTAX_OK scripts/qa/ssh-harness-safety.test.mjs
+SYNTAX_OK scripts/qa/ssh-helper-setup.mjs
+SYNTAX_OK scripts/qa/ssh-helper-survival.mjs
+SYNTAX_OK scripts/qa/ssh-process-survival.mjs
+SYNTAX_OK scripts/qa/verify-ferryx-resume-cwd.mjs
+SYNTAX_OK scripts/build-remote-helpers.mjs
+SYNTAX_OK scripts/build-remote-helpers.test.mjs
+DIFF_CHECK_EXIT=0
+REMAINING_TEMP_ROOTS

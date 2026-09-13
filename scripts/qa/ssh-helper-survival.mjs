@@ -2,11 +2,12 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdtemp, mkdir, rm, chmod, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, chmod, symlink, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+export async function main() {
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const binary = process.env.FERRYX_QA_HELPER_BINARY ??
   join(repo, "remote-helper", "target", "debug",
@@ -21,6 +22,8 @@ let bridge;
 let remoteStopped = false;
 let spawnCount = 0;
 let remoteShellPid;
+let daemon;
+let helperIdentity;
 
 async function bounded(promise, label) {
   let timer;
@@ -118,7 +121,7 @@ async function status(connection, expectedCounter) {
 try {
   await mkdir(stateDir, { mode: 0o700 });
   await mkdir(projectDir);
-  const daemon = child(["daemon", "--root", stateDir, "--host-id", "qa-host"]);
+  daemon = child(["daemon", "--root", stateDir, "--host-id", "qa-host"]);
   const ready = (async () => {
     let text = "";
     for await (const chunk of daemon.stdout) {
@@ -128,9 +131,16 @@ try {
     throw new Error("helper exited before ready");
   })();
   await bounded(ready, "helper ready");
+  const endpoint = JSON.parse(await readFile(join(stateDir, "endpoint.json"), "utf8"));
+  assert.equal(endpoint.pid, daemon.pid);
+  assert.equal(daemon.exitCode, null);
+  assert.equal(daemon.signalCode, null);
   bridge = connect();
   const handshake = await bridge.request("handshake");
   assert.equal(handshake.protocol, 1);
+  assert.equal(handshake.hostId, "qa-host");
+  assert(handshake.ownerId && handshake.epoch);
+  helperIdentity = handshake;
   await bridge.request("project.register", { id: "qa-project", path: projectDir });
   const script = process.platform === "win32"
     ? `$n=0; while (($line=[Console]::ReadLine()) -ne $null) { $n++; [Console]::WriteLine(('SURVIVAL:{0}:${nonce}:{1}' -f $PID,$n)) }`
@@ -165,7 +175,11 @@ try {
   await stop(bridge.process);
   bridge = connect();
   const reconnected = await bridge.request("handshake");
+  assert.equal(reconnected.protocol, 1);
+  assert.equal(reconnected.hostId, handshake.hostId);
+  assert.equal(reconnected.ownerId, handshake.ownerId);
   assert.equal(reconnected.epoch, handshake.epoch);
+  assert.equal(JSON.parse(await readFile(join(stateDir, "endpoint.json"), "utf8")).pid, daemon.pid);
   await bridge.request("pty.write", { target, text: `second${enter}` });
   const after = await status(bridge, 2);
   remoteShellPid = after.pid;
@@ -291,17 +305,24 @@ try {
   console.log("PASS: same remote PID, nonce and mutable counter after actual bridge SIGKILL");
 } finally {
   const trackedPids = children.map((c) => c.pid);
+  const cleanupErrors = [];
   if (remoteShellPid) trackedPids.push(remoteShellPid);
   if (target && !remoteStopped) {
     try {
       if (!bridge || bridge.process.exitCode !== null || bridge.process.signalCode !== null) {
         bridge = connect();
       }
-      await bridge.request("pty.stop", { target });
+      assert(helperIdentity, "helper ownership was not authenticated");
+      assert.equal(daemon.exitCode, null);
+      assert.equal(daemon.signalCode, null);
+      assert.equal(JSON.parse(await readFile(join(stateDir, "endpoint.json"), "utf8")).pid, daemon.pid);
+      const identity = await bridge.request("handshake");
+      for (const key of ["protocol", "hostId", "ownerId", "epoch"]) assert.equal(identity[key], helperIdentity[key]);
+      assert.equal((await bridge.request("pty.stop", { target })).stopped, true);
       remoteStopped = true;
     } catch (error) {
       console.error(`cleanup: remote stop failed: ${error}`);
-      process.exitCode = 1;
+      cleanupErrors.push(error);
     }
   }
   for (const owned of children.toReversed()) {
@@ -309,11 +330,10 @@ try {
       await stop(owned);
     } catch (error) {
       console.error(`cleanup: child ${owned.pid} failed: ${error}`);
-      process.exitCode = 1;
+      cleanupErrors.push(error);
     }
   }
-  await rm(fixture, { recursive: true, force: true });
-  console.log(`cleanup: removed ${fixture}; remoteStopped=${remoteStopped}`);
+  if (cleanupErrors.length) throw new AggregateError(cleanupErrors, `Cleanup failed; retaining ${fixture}`);
 
   const remainingLivePids = [];
   for (const pid of trackedPids) {
@@ -324,7 +344,8 @@ try {
       if (error.code !== "ESRCH") throw error;
     }
   }
-  assert.equal(remainingLivePids.length, 0, `QA processes still alive: ${remainingLivePids}`);
+  assert.equal(remainingLivePids.length, 0, `QA processes still alive; retaining ${fixture}: ${remainingLivePids}`);
+  await rm(fixture, { recursive: true, force: true });
   console.log(JSON.stringify({
     event: "cleanup-receipt",
     fixtureRemoved: fixture,
@@ -332,4 +353,13 @@ try {
     remainingLivePids,
     remoteStopped,
   }));
+}
+
+}
+
+if (import.meta.main) {
+  if (process.argv.includes("--self-test")) {
+    throw new Error("Use node --experimental-vm-modules --test scripts/qa/ssh-harness-safety.test.mjs; no live QA was started");
+  }
+  await main();
 }

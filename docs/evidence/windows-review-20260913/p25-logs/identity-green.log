@@ -1,0 +1,84 @@
+TAP version 13
+# (node:61395) ExperimentalWarning: VM Modules is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: import ssh-bridge-survival has no host effects
+ok 1 - import ssh-bridge-survival has no host effects
+  ---
+  duration_ms: 6.7305
+  type: 'test'
+  ...
+# Subtest: import ssh-helper-setup has no host effects
+ok 2 - import ssh-helper-setup has no host effects
+  ---
+  duration_ms: 2.092791
+  type: 'test'
+  ...
+# Subtest: import ssh-helper-survival has no host effects
+ok 3 - import ssh-helper-survival has no host effects
+  ---
+  duration_ms: 1.567583
+  type: 'test'
+  ...
+# Subtest: import ssh-process-survival has no host effects
+ok 4 - import ssh-process-survival has no host effects
+  ---
+  duration_ms: 1.506
+  type: 'test'
+  ...
+# Subtest: import verify-ferryx-resume-cwd has no host effects
+ok 5 - import verify-ferryx-resume-cwd has no host effects
+  ---
+  duration_ms: 0.915792
+  type: 'test'
+  ...
+# Subtest: ssh-bridge-survival never signals a detached endpoint PID
+ok 6 - ssh-bridge-survival never signals a detached endpoint PID
+  ---
+  duration_ms: 0.953958
+  type: 'test'
+  ...
+# Subtest: ssh-helper-setup never signals a detached endpoint PID
+ok 7 - ssh-helper-setup never signals a detached endpoint PID
+  ---
+  duration_ms: 0.638042
+  type: 'test'
+  ...
+# Subtest: bridge initial marker accumulates fragmented output before acceptance
+ok 8 - bridge initial marker accumulates fragmented output before acceptance
+  ---
+  duration_ms: 0.824458
+  type: 'test'
+  ...
+# Subtest: ssh-bridge-survival refuses live detached launch without handle ownership
+ok 9 - ssh-bridge-survival refuses live detached launch without handle ownership
+  ---
+  duration_ms: 2.291709
+  type: 'test'
+  ...
+# Subtest: ssh-helper-setup refuses live detached launch without handle ownership
+ok 10 - ssh-helper-setup refuses live detached launch without handle ownership
+  ---
+  duration_ms: 1.343167
+  type: 'test'
+  ...
+# Subtest: process-survival authenticates socket before a destructive request
+ok 11 - process-survival authenticates socket before a destructive request
+  ---
+  duration_ms: 1.255291
+  type: 'test'
+  ...
+# Subtest: resume driver rejects mismatched handshake before registering or closing sessions
+ok 12 - resume driver rejects mismatched handshake before registering or closing sessions
+  ---
+  duration_ms: 0.616125
+  type: 'test'
+  ...
+1..12
+# tests 12
+# suites 0
+# pass 12
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 59.013208

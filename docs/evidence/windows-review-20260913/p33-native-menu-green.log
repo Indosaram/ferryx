@@ -1,0 +1,11 @@
+$ vitest run --maxWorkers=1 src/lib/nativeMenu.test.ts
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/lib/nativeMenu.test.ts (12 tests) 32ms
+
+ Test Files  1 passed (1)
+      Tests  12 passed (12)
+   Start at  15:45:20
+   Duration  1.31s (transform 90ms, setup 126ms, collect 519ms, tests 32ms, environment 330ms, prepare 32ms)
+

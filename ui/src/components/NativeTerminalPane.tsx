@@ -537,6 +537,10 @@ export function NativeTerminalPane({
   const bindingKey = targetSessionId
     ? `${targetSessionId}:${session?.daemonEpoch ?? ""}:${session?.remoteGeneration ?? 0}:${session?.remoteConnectionState ?? ""}`
     : null;
+  const wheelPixelRemainderRef = useRef(0);
+  useLayoutEffect(() => {
+    wheelPixelRemainderRef.current = 0;
+  }, [bindingKey, paneIdentity, visible]);
   const quarantinedBindingRef = useRef<{ readonly sessionId: string; readonly bindingKey: string } | null>(null);
   useEffect(() => {
     if (quarantinedBindingRef.current && quarantinedBindingRef.current.bindingKey !== bindingKey) {
@@ -2217,14 +2221,41 @@ export function NativeTerminalPane({
         }
       }}
       onWheel={(event) => {
-        if (!visible) return;
+        if (!visible || event.deltaY === 0 || !Number.isFinite(event.deltaY)) return;
         triggerScrollbarReveal();
         if (!isTauri() || !targetSessionId) return;
-        const rows = Math.trunc(event.deltaY / 20) || (event.deltaY > 0 ? 1 : -1);
+        let deltaRows: number;
+        if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) {
+          deltaRows = Math.trunc(event.deltaY * 3);
+        } else if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) {
+          deltaRows = Math.trunc(event.deltaY * (scrollbar?.len ?? 0));
+        } else {
+          const pixels = wheelPixelRemainderRef.current + event.deltaY;
+          deltaRows = Math.trunc(pixels / 20);
+          wheelPixelRemainderRef.current = pixels % 20;
+        }
+        // The command adapter consumes i16 rows. Saturate, discarding excess whole
+        // rows rather than wrapping or replaying them on a later wheel event.
+        const rows = Math.max(-32768, Math.min(32767, deltaRows));
+        if (rows === 0) return;
+        const viewport = viewportRef.current;
+        if (!viewport) return;
+        const rect = viewport.getBoundingClientRect();
         const generation = isRemoteWorkspaceId(session?.workspaceId) ? session?.remoteGeneration ?? null : null;
         void invoke("cmd_native_terminal_scroll", {
           sessionId: targetSessionId,
           behavior: { type: "delta", rows },
+          wheel: {
+            position: { x: event.clientX - rect.left, y: event.clientY - rect.top },
+            modifiers: {
+              shift: event.shiftKey,
+              ctrl: event.ctrlKey,
+              alt: event.altKey,
+              superKey: event.metaKey,
+              capsLock: event.getModifierState("CapsLock"),
+              numLock: event.getModifierState("NumLock"),
+            },
+          },
           ...(generation != null ? { generation } : {}),
         })
           .then(refreshScrollbar)

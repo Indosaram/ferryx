@@ -1,0 +1,36 @@
+warning: unused import: `Path`
+ --> /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-p09-htColb/contract.rs:1:17
+  |
+1 | use std::path::{Path,PathBuf};
+  |                 ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: 1 warning emitted
+
+
+running 3 tests
+test p09_tests::unix_requires_executable_permission ... ok
+
+thread 'p09_tests::windows_pathext_order_case_and_explicit_extension' (3604988) panicked at /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-p09-htColb/contract.rs:107:17:
+assertion `left == right` failed
+  left: None
+ right: Some("/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p09-path-45314/fixture.EXE")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'extension::p09_tests::userprofile_only_installs_existing_agent_extensions' (3604986) panicked at /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-p09-htColb/contract.rs:75:13:
+assertion `left == right` failed
+  left: []
+ right: ["/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p09-home-45314/.omo/agent/extensions", "/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p09-home-45314/.pi/agent/extensions", "/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p09-home-45314/.omp/agent/extensions"]
+test p09_tests::windows_pathext_order_case_and_explicit_extension ... FAILED
+test extension::p09_tests::userprofile_only_installs_existing_agent_extensions ... FAILED
+
+failures:
+
+failures:
+    extension::p09_tests::userprofile_only_installs_existing_agent_extensions
+    p09_tests::windows_pathext_order_case_and_explicit_extension
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+P09 owned executable/source/fixture root removed: /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-p09-htColb

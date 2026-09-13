@@ -1,4 +1,6 @@
-import { act, renderHook } from "@testing-library/react";
+import { act, cleanup, fireEvent, renderHook } from "@testing-library/react";
+import { useEffect } from "react";
+import { Toaster, toast } from "sonner";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { isMacShortcutPlatform } from "./shortcuts";
 
@@ -27,6 +29,68 @@ describe("useNativeTerminalVisibility", () => {
 
   afterEach(() => {
     document.body.innerHTML = "";
+  });
+
+  it.each([
+    { platform: "non-Mac", mac: false, ownerVisible: true, optOut: false, toastVisible: false, interactive: false },
+    { platform: "Mac", mac: true, ownerVisible: true, optOut: false, toastVisible: true, interactive: false },
+    { platform: "hidden owner", mac: false, ownerVisible: false, optOut: false, toastVisible: false, interactive: false },
+    { platform: "opted-out toaster", mac: false, ownerVisible: true, optOut: true, toastVisible: true, interactive: true },
+  ])("restores presentation without unmounting when a persistent real toast is dismissed ($platform)", async ({ mac, ownerVisible, optOut, toastVisible, interactive }) => {
+    // Given: an empty real Toaster and an already-subscribed visibility owner.
+    vi.mocked(isMacShortcutPlatform).mockReturnValue(mac);
+    vi.useFakeTimers(); // Sonner's deferred mount and exit-animation scheduler.
+    const released = vi.fn();
+    const toastId = `native-visibility-${mac}-${ownerVisible}-${optOut}`;
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <NativeTerminalVisibilityProvider visible={ownerVisible}>
+        {children}
+        <div data-native-terminal-yield={optOut ? "off" : undefined}>
+          <Toaster theme="light" position="bottom-right" closeButton />
+        </div>
+      </NativeTerminalVisibilityProvider>
+    );
+    const { result, unmount } = renderHook(() => {
+      useEffect(() => released, []);
+      return useNativeTerminalVisibilityState();
+    }, { wrapper });
+    try {
+      expect(document.querySelector('section[aria-live="polite"]')).not.toBeNull();
+      expect(result.current).toEqual({ visible: ownerVisible, interactive: ownerVisible });
+      await act(async () => {
+        toast.error("Persistent terminal error", { id: toastId, duration: Infinity });
+        await vi.runAllTimersAsync();
+      });
+      expect(document.querySelector("[data-sonner-toast]")).not.toBeNull();
+      expect(result.current).toEqual({ visible: toastVisible, interactive });
+      expect(released).not.toHaveBeenCalled();
+      const closeButton = document.querySelector<HTMLButtonElement>("[data-sonner-toast] [data-close-button]");
+      if (!closeButton) throw new Error("Real Sonner close button was not mounted");
+
+      // When: dismiss through the real button, completing Sonner's exit animation.
+      await act(async () => {
+        fireEvent.click(closeButton);
+        await vi.runAllTimersAsync();
+      });
+
+      // Then: the empty toaster stays mounted and the same owner is restored.
+      expect(document.querySelector("[data-sonner-toast]")).toBeNull();
+      expect(document.querySelector('section[aria-live="polite"]')).not.toBeNull();
+      expect(result.current).toEqual({ visible: ownerVisible, interactive: ownerVisible });
+      expect(released).not.toHaveBeenCalled();
+      unmount();
+      expect(released).toHaveBeenCalledTimes(1);
+    } finally {
+      // Own only this toast; drain its removal work even when the RED assertion fails.
+      await act(async () => {
+        toast.dismiss(toastId);
+        await vi.runAllTimersAsync();
+      });
+      cleanup();
+      await vi.runAllTimersAsync();
+      expect(vi.getTimerCount()).toBe(0);
+      vi.useRealTimers();
+    }
   });
 
   it("returns true when no dialog is mounted", () => {

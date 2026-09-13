@@ -27,7 +27,9 @@ fn main() {
     // Gated to the test profile: bin builds already carry tauri-build's own
     // manifest resource, and a linker-generated one would duplicate it
     // (CVT1100). Non-test builds are unaffected.
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
         println!("cargo:rustc-link-arg-tests=/MANIFEST:EMBED");
         println!(
             "cargo:rustc-link-arg-tests=/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' publicKeyToken='6595b64144ccf1df' language='*' processorArchitecture='*'"
@@ -40,7 +42,9 @@ fn main() {
         }
     }
 
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
         // Embed ONE application manifest for EVERY executable target (bins and
         // unit-test executables alike). tauri-build's resource manifest only
         // reaches bin targets; without it, unit-test executables bind comctl32

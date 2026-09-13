@@ -1225,11 +1225,7 @@ impl DaemonServer {
         };
         let helper = crate::ssh::helper_setup::default_location(&host, &environment)
             .map_err(|e| e.to_string())?;
-        let relative = root
-            .strip_prefix(&project.repo_root)
-            .unwrap_or("")
-            .trim_start_matches(&['/', '\\'][..])
-            .replace('\\', "/");
+        let relative = remote_spawn_relative_path(&project.repo_root, &root);
         let config = crate::terminal::remote::RemoteSessionConfig {
             host,
             environment,
@@ -3212,11 +3208,56 @@ mod ssh_survival_tests;
 #[path = "remote_ssh_tests.rs"]
 mod remote_ssh_tests;
 
+fn remote_spawn_relative_path(repo_root: &str, root: &str) -> String {
+    let norm_repo = repo_root.replace('\\', "/");
+    let norm_root = root.replace('\\', "/");
+
+    let repo_parts: Vec<&str> = norm_repo.split('/').filter(|s| !s.is_empty()).collect();
+    let root_parts: Vec<&str> = norm_root.split('/').filter(|s| !s.is_empty()).collect();
+
+    if root_parts.len() < repo_parts.len() {
+        return String::new();
+    }
+
+    let is_windows = (norm_repo.len() >= 2 && norm_repo.as_bytes()[1] == b':')
+        || norm_repo.starts_with("//")
+        || (norm_root.len() >= 2 && norm_root.as_bytes()[1] == b':')
+        || norm_root.starts_with("//");
+
+    for (repo_part, root_part) in repo_parts.iter().zip(root_parts.iter()) {
+        if is_windows {
+            if repo_part.to_lowercase() != root_part.to_lowercase() {
+                return String::new();
+            }
+        } else if repo_part != root_part {
+            return String::new();
+        }
+    }
+
+    root_parts[repo_parts.len()..].join("/")
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::terminal::output_hub::OutputChunk;
     use tempfile::tempdir;
+
+    #[test]
+    fn p08_remote_cwd_aliases_preserve_relative_path() {
+        for (repo, cwd, expected) in [
+            (r"C:\Repo", r"c:\repo\src", "src"),
+            (r"C:\Repo", "C:/Repo/src", "src"),
+            (r"C:\Repo", r"c:\repo\deep\nested", "deep/nested"),
+            (r"C:\ẞẞ", r"c:\ßß\src", "src"),
+            (r"\\host\share\Repo", "//HOST/share/repo/src", "src"),
+            ("/repo", "/repo/src", "src"),
+            ("/repo", "/repo", ""),
+        ] {
+            assert_eq!(remote_spawn_relative_path(repo, cwd), expected,
+                "remote cwd {cwd} under {repo} must not silently select repository root");
+        }
+    }
 
     #[test]
     fn resolve_upgrade_target_exe_only_resolves_paths_that_exist() {

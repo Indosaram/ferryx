@@ -99,6 +99,8 @@ export const WorktreeRow = memo(function WorktreeRow({
     items.push({ kind: "separator" });
     items.push({ kind: "item", id: "delete", label: "Delete Worktree", enabled: canDelete, icon: "trash" });
     menuUnlistenRef.current?.();
+    const controller = new AbortController();
+    menuUnlistenRef.current = () => controller.abort();
     void openNativePopupMenu(
       "cmd_native_sidebar_context_menu",
       items,
@@ -117,11 +119,8 @@ export const WorktreeRow = memo(function WorktreeRow({
           }
         } else if (id === "delete") onDelete(worktree);
       },
-    )
-      .then((unlisten) => {
-        menuUnlistenRef.current = unlisten;
-      })
-      .catch(() => undefined);
+      controller.signal,
+    ).catch((error: unknown) => console.warn("Could not open native worktree menu", error));
   };
 
   const copyPath = () => {
@@ -246,9 +245,10 @@ const SortableWorktreeRow = memo(function SortableWorktreeRow({
   ...rowProps
 }: SortableWorktreeRowProps) {
   const worktreePath = rowProps.worktree.path;
+  const rowWorkspaceId = rowProps.worktree.workspaceId;
   const sortable = useSortable({
-    id: worktreeSortableId(workspaceId, worktreePath),
-    data: { type: "sidebar-worktree", workspaceId, worktreePath },
+    id: worktreeSortableId(workspaceId, worktreePath, rowWorkspaceId),
+    data: { type: "sidebar-worktree", workspaceId, worktreePath, rowWorkspaceId },
   });
 
   return (

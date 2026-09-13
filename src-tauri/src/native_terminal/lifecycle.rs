@@ -2,20 +2,21 @@
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64};
 
 use super::bell::{
-    terminal_bell_callback, terminal_title_changed_callback, terminal_write_pty_callback,
-    TerminalContext,
+    terminal_bell_callback, terminal_size_callback, terminal_title_changed_callback,
+    terminal_write_pty_callback, TerminalContext,
 };
 use super::error::NativeTerminalError;
-use super::sys::ffi::{ghostty_terminal_free, ghostty_terminal_new, ghostty_terminal_set};
-use super::sys::types::{
-    GhosttyTerminal, GhosttyTerminalImpl, GHOSTTY_TERMINAL_OPT_BELL,
-    GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES,
+use super::sys::constants::{
+    GHOSTTY_TERMINAL_OPT_BELL, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
+    GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, GHOSTTY_TERMINAL_OPT_SIZE,
     GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, GHOSTTY_TERMINAL_OPT_USERDATA,
     GHOSTTY_TERMINAL_OPT_WRITE_PTY,
 };
+use super::sys::ffi::{ghostty_terminal_free, ghostty_terminal_new, ghostty_terminal_set};
+use super::sys::types::{GhosttyTerminal, GhosttyTerminalImpl};
 
 /// Allocates a new native terminal and registers callbacks transactionally.
 pub fn create_native_terminal(
@@ -59,6 +60,10 @@ pub fn create_native_terminal(
         remote_generation: parking_lot::Mutex::new(None),
         write_pty_buffer: parking_lot::Mutex::new(Vec::new()),
         pty_write_tx: parking_lot::Mutex::new(None),
+        cell_width: AtomicU32::new(0),
+        cell_height: AtomicU32::new(0),
+        rows: AtomicU16::new(rows),
+        cols: AtomicU16::new(cols),
     });
     let userdata_ptr = (&*context) as *const TerminalContext as *const c_void;
 
@@ -113,6 +118,18 @@ pub fn create_native_terminal(
         return Err(e);
     }
 
+    let reg_size = unsafe {
+        ghostty_terminal_set(
+            non_null.as_ptr(),
+            GHOSTTY_TERMINAL_OPT_SIZE,
+            terminal_size_callback as *const c_void,
+        )
+    };
+    if let Err(e) = NativeTerminalError::from_c_result(reg_size, "set(OPT_SIZE)") {
+        unsafe { ghostty_terminal_free(non_null.as_ptr()) };
+        return Err(e);
+    }
+
     // By default, libghostty-vt sets max_scrollback_bytes to 10,000 (~10 KiB),
     // which prematurely prunes scrollback after only ~300-500 lines.
     // Unset the byte limit so the line limit governs scrollback retention.
@@ -161,6 +178,7 @@ pub fn teardown_native_terminal(handle: NonNull<GhosttyTerminalImpl>) {
             GHOSTTY_TERMINAL_OPT_WRITE_PTY,
             null_ptr,
         );
+        let _ = ghostty_terminal_set(handle.as_ptr(), GHOSTTY_TERMINAL_OPT_SIZE, null_ptr);
         let _ = ghostty_terminal_set(handle.as_ptr(), GHOSTTY_TERMINAL_OPT_USERDATA, null_ptr);
         ghostty_terminal_free(handle.as_ptr());
     }

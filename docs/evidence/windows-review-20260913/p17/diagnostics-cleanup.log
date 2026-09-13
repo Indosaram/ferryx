@@ -1,0 +1,9 @@
+2026-09-13 Darwin arm64 local checks
+lsp_diagnostics scripts/build-msix.ps1: No LSP server configured for extension: .ps1
+lsp_diagnostics scripts/test-build-msix.ps1: No LSP server configured for extension: .ps1
+command -v powershell.exe: not found
+command -v pwsh: not found
+Native parser, MakeAppx RED/GREEN, and runtime execution NOT RUN.
+Temporary resource-staging.ps1.txt authored by this task removed.
+No Cargo, remote commands, release, signing, installation, app/daemon launches, branch/worktree operations, commits or pushes performed.
+Native fixture runner removes its GUID scratch directory in finally and emits a cleanup receipt; this cleanup behavior is staged, not executed locally.

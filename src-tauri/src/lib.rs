@@ -977,13 +977,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                         "wallTimeMs": wall_time_ms,
                         "details": details
                     });
-                    let _ = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open("/tmp/ferryx-switch-debug.jsonl")
-                        .and_then(|mut file| {
-                            std::io::Write::write_all(&mut file, format!("{record}\n").as_bytes())
-                        });
+                    crate::ipc::debug::log_native_switch_debug(record);
                 }
             }
             #[cfg(not(target_os = "macos"))]

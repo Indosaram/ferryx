@@ -1,0 +1,60 @@
+$ vitest run --maxWorkers=1 src/remote/RemoteAttention.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ❯ src/remote/RemoteAttention.test.tsx (15 tests | 3 failed) 192ms
+   × RemoteAttention Affordance > uses the published target worktree for swipe and waiting selection ('previous', 'published') 46ms
+     → expected [ { workspaceId: 'ferryx-ui', …(2) } ] to deeply equal [ { workspaceId: 'ferryx-ui', …(2) } ]
+   ✓ RemoteAttention Affordance > uses the published target worktree for swipe and waiting selection ('previous', 'omitted') 19ms
+   × RemoteAttention Affordance > uses the published target worktree for swipe and waiting selection ('next', 'published') 7ms
+     → expected [ { workspaceId: 'ferryx-ui', …(2) } ] to deeply equal [ { workspaceId: 'ferryx-ui', …(2) } ]
+   ✓ RemoteAttention Affordance > uses the published target worktree for swipe and waiting selection ('next', 'omitted') 9ms
+   × RemoteAttention Affordance > uses the published target worktree for swipe and waiting selection ('waiting', 'published') 7ms
+     → expected [ { workspaceId: 'ferryx-ui', …(2) } ] to deeply equal [ { workspaceId: 'ferryx-ui', …(2) } ]
+   ✓ RemoteAttention Affordance > uses the published target worktree for swipe and waiting selection ('waiting', 'omitted') 10ms
+   ✓ RemoteAttention Affordance > renders attention affordance with accessible name when a background tab enters waiting state 15ms
+   ✓ RemoteAttention Affordance > activating the attention affordance issues exactly one context selection carrying tabId, workspaceId, and worktreeSlug 18ms
+   ✓ RemoteAttention Affordance > is absent from the DOM when no tab is waiting 6ms
+   ✓ RemoteAttention Affordance > is absent from the DOM when the waiting tab is already the active tab 5ms
+   ✓ RemoteAttention Affordance > targets the first waiting tab in published order and states the waiting count when multiple tabs are waiting 13ms
+   ✓ RemoteAttention Affordance > identifies worktree in accessible name when the waiting target belongs to a different worktree 12ms
+   ✓ RemoteAttention Affordance > horizontal swipe left on embedded terminal advances to next tab using existing selection path 8ms
+   ✓ RemoteAttention Affordance > horizontal swipe right on embedded terminal retreats to previous tab using existing selection path 8ms
+   ✓ RemoteAttention Affordance > swiping past the last tab or before the first tab is a no-op issuing no selection request 9ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > uses the published target worktree for swipe and waiting selection ('previous', 'published')
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > uses the published target worktree for swipe and waiting selection ('next', 'published')
+ FAIL  src/remote/RemoteAttention.test.tsx > RemoteAttention Affordance > uses the published target worktree for swipe and waiting selection ('waiting', 'published')
+AssertionError: expected [ { workspaceId: 'ferryx-ui', …(2) } ] to deeply equal [ { workspaceId: 'ferryx-ui', …(2) } ]
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  [[22m
+[2m    {[22m
+[2m      "tabId": "target-tab",[22m
+[2m      "workspaceId": "ferryx-ui",[22m
+[32m-     "worktreeSlug": "targetB",[39m
+[31m+     "worktreeSlug": "currentA",[39m
+[2m    },[22m
+[2m  ][22m
+
+ ❯ src/remote/RemoteAttention.test.tsx:220:21
+    218|         await signal(requestReceived.promise);
+    219|       });
+    220|       expect(posts).toEqual([expectedRequest]);
+       |                     ^
+    221|       expect(screen.getByTestId("remote-attention-badge")).toBeDisable…
+    222|       await act(async () => {
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  3 failed | 12 passed (15)
+   Start at  15:30:11
+   Duration  1.24s (transform 97ms, setup 101ms, collect 477ms, tests 192ms, environment 235ms, prepare 28ms)
+
+error: script "test" exited with code 1

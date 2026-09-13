@@ -1,0 +1,168 @@
+diff --git a/scripts/macos-dev-runner.test.mjs b/scripts/macos-dev-runner.test.mjs
+index 3eb8c65e..b6e61f51 100644
+--- a/scripts/macos-dev-runner.test.mjs
++++ b/scripts/macos-dev-runner.test.mjs
+@@ -1,15 +1,26 @@
+ import { test, expect } from "bun:test";
+-import { chmod, mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
++import { chmod, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+ import { tmpdir } from "node:os";
+-import { join } from "node:path";
++import { join, posix, win32 } from "node:path";
++
++function targetRootFor(target, paths) {
++  return paths.dirname(target);
++}
++
++for (const paths of [posix, win32]) {
++  test(`signing target has exactly one debug component (${paths.sep})`, () => {
++    const target = paths.join("src-tauri", "target", "debug");
++    expect(paths.join(targetRootFor(target, paths), "debug")).toBe(target);
++  });
++}
+ 
+ for (const signingExit of [0, 7]) {
+   test(`debug runner uses Developer ID and respects signing exit ${signingExit}`, async () => {
+-    expect((await stat(new URL("./macos-dev-runner.sh", import.meta.url))).mode & 0o111).not.toBe(0);
+-    const root = await mkdtemp(join(tmpdir(), "ferryx-dev-signing-"));
++    const root = await mkdtemp(join(tmpdir(), "ferryx dev signing-"));
+     const scripts = join(root, "scripts");
+     const target = join(root, "src-tauri", "target", "debug");
+     const tools = join(root, "tools");
++    let child;
+     try {
+       await Promise.all([
+         mkdir(scripts),
+@@ -26,33 +37,56 @@ for (const signingExit of [0, 7]) {
+         Bun.write(join(target, "Contents", "Info.plist"), "<plist/>"),
+         Bun.write(join(root, "src-tauri", "icons", "icon.icns"), "fixture"),
+         executable(join(target, "ferryx"), "#!/bin/sh\nprintf 'APP_LAUNCHED\\n'\n"),
+-        executable(join(tools, "uname"), "#!/bin/sh\nprintf 'Darwin\\n'\n"),
+-        executable(join(tools, "cargo"), "#!/bin/sh\nexit 0\n"),
+-        executable(join(tools, "codesign"), "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$SIGN_ARGS\"\nexit \"$SIGN_EXIT\"\n"),
++        executable(join(tools, "uname"), "#!/bin/sh\nprintf '%s\\n' uname >> tool-calls\nprintf 'Darwin\\n'\n"),
++        executable(join(tools, "cargo"), "#!/bin/sh\nprintf '%s\\n' cargo \"$@\" >> tool-calls\n"),
++        executable(join(tools, "codesign"), "#!/bin/sh\nprintf '%s\\n' codesign >> tool-calls\nprintf '%s\\n' \"$@\" > \"$SIGN_ARGS\"\nexit \"$SIGN_EXIT\"\n"),
+       ]);
+-      const process = Bun.spawn(["bash", join(scripts, "macos-dev-runner.sh"), "run"], {
++      // Let Bash own its path namespace; no native drive letters in POSIX PATH.
++      // Functions intercept these commands even if a fixture tool is missing:
++      // the explicit Bash invocation fails rather than finding a real build/signer.
++      child = Bun.spawn(["bash", "--noprofile", "--norc", "-c", `
++set -euo pipefail
++uname() { bash ./tools/uname "$@"; }
++cargo() { bash ./tools/cargo "$@"; }
++codesign() { bash ./tools/codesign "$@"; }
++printf '%s\\n' "$PWD" > shell-root
++export CARGO_TARGET_DIR="$PWD/$1"
++source ./scripts/macos-dev-runner.sh run
++`, "signing-fixture", targetRootFor("src-tauri/target/debug", posix)], {
+         cwd: root,
+         env: {
+           ...Bun.env,
+-          PATH: `${tools}:${Bun.env.PATH}`,
+-          CARGO_TARGET_DIR: target.replace(/\/debug$/, ""),
+-          SIGN_ARGS: join(root, "sign-args"),
++          BASH_ENV: "",
++          ENV: "",
++          SIGN_ARGS: "sign-args",
+           SIGN_EXIT: String(signingExit),
+         },
+         stdout: "pipe",
+         stderr: "pipe",
++        timeout: 20_000,
+       });
+       const [stdout, stderr, exitCode] = await Promise.all([
+-        new Response(process.stdout).text(),
+-        new Response(process.stderr).text(),
+-        process.exited,
++        new Response(child.stdout).text(),
++        new Response(child.stderr).text(),
++        child.exited,
+       ]);
+       const args = (await readFile(join(root, "sign-args"), "utf8")).trim().split("\n");
+-      expect(args[args.indexOf("--sign") + 1]).toBe("Developer ID Application: Indo Yoon (5DUM8WPB4C)");
++      const shellRoot = (await readFile(join(root, "shell-root"), "utf8")).trim();
++      expect(args).toEqual([
++        "--force", "--sign", "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
++        `${shellRoot}/src-tauri/target/debug/Ferryx.app`,
++      ]);
++      expect((await readFile(join(root, "tool-calls"), "utf8")).trim().split("\n"))
++        .toEqual(["uname", "cargo", "build", "codesign"]);
+       expect(exitCode, stderr).toBe(signingExit);
+       expect(stdout.includes("APP_LAUNCHED")).toBe(signingExit === 0);
+     } finally {
++      if (child) {
++        if (child.exitCode === null) child.kill();
++        await child.exited;
++      }
+       await rm(root, { recursive: true, force: true });
++      console.info(`signing fixture cleaned: exit=${child?.exitCode}, root=${root}`);
+     }
+   }, 30_000);
+ }
+diff --git a/site/src/seo.test.ts b/site/src/seo.test.ts
+index 2f03627a..0d7935ff 100644
+--- a/site/src/seo.test.ts
++++ b/site/src/seo.test.ts
+@@ -1,5 +1,6 @@
+ import { describe, expect, test, beforeAll } from "bun:test";
+-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
++import { existsSync, readFileSync, readdirSync, statSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
++import { tmpdir } from "node:os";
+ import path from "node:path";
+ 
+ // Assertions run against the production build output, the only artifact a crawler
+@@ -38,7 +39,38 @@ beforeAll(async () => {
+   if (code !== 0) throw new Error(`astro build failed (exit ${code}):\n${output}`);
+ }, BUILD_TIMEOUT_MS);
+ 
+-function builtPages(): Record<string, string> {
++function routeKey(full: string, root: string, paths: typeof path): string {
++  return `/${paths.relative(root, full).split(paths.sep).join("/")}`;
++}
++
++test("built page route keys use URL slashes on POSIX and Windows", () => {
++  for (const route of Object.keys(builtPages())) {
++    for (const paths of [path.posix, path.win32]) {
++      const root = paths.resolve("seo fixture", "dist");
++      const full = paths.join(root, ...route.split("/"));
++      expect(routeKey(full, root, paths)).toBe(route);
++    }
++  }
++});
++
++test("removing a required built page still fails containment", () => {
++  const root = mkdtempSync(path.join(tmpdir(), "ferryx-seo-pages-"));
++  try {
++    for (const [route, html] of Object.entries(builtPages())) {
++      const file = path.join(root, route);
++      mkdirSync(path.dirname(file), { recursive: true });
++      writeFileSync(file, html);
++    }
++    expect(() => builtPages(root)).not.toThrow();
++    rmSync(path.join(root, "docs", "introduction", "index.html"));
++    expect(() => builtPages(root)).toThrow();
++  } finally {
++    rmSync(root, { recursive: true, force: true });
++    console.info(`SEO page fixture cleaned: ${root}`);
++  }
++});
++
++function builtPages(root = DIST): Record<string, string> {
+   const pages: Record<string, string> = {};
+   const walk = (dir: string) => {
+     for (const entry of readdirSync(dir)) {
+@@ -49,10 +81,10 @@ function builtPages(): Record<string, string> {
+         continue;
+       }
+       if (!entry.endsWith(".html")) continue;
+-      pages[full.slice(DIST.length) || "/"] = readFileSync(full, "utf8");
++      pages[routeKey(full, root, path)] = readFileSync(full, "utf8");
+     }
+   };
+-  walk(DIST);
++  walk(root);
+   // Containment, not equality: a page vanishing from the build still fails loudly,
+   // while publishing a new one does not require editing this list first.
+   const built = Object.keys(pages);

@@ -32,7 +32,7 @@ export async function maybeShowWindowsStoreMigrationNotice(storage: Storage | nu
 
   let channel = "";
   try {
-    channel = await invoke<string>("distribution_channel");
+    channel = await invoke<string>("cmd_distribution_channel");
   } catch {
     return;
   }

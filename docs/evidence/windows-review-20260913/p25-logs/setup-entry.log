@@ -1,0 +1,15 @@
+ 9 | import { fileURLToPath } from "node:url";
+10 | 
+11 | export async function main() {
+12 |   requireDetachedOwnership();
+13 |   function requireDetachedOwnership() {
+14 |     throw Object.assign(new Error("Detached SSH QA requires a runtime-owner process handle/start-identity facility and same-account namespace proof; no remote startup is authorized"), { code: "QA_OWNERSHIP_PREREQUISITE" });
+                                 ^
+error: Detached SSH QA requires a runtime-owner process handle/start-identity facility and same-account namespace proof; no remote startup is authorized
+ code: "QA_OWNERSHIP_PREREQUISITE"
+
+      at requireDetachedOwnership (/Users/indo/code/project/orca-lite/scripts/qa/ssh-helper-setup.mjs:14:29)
+      at main (/Users/indo/code/project/orca-lite/scripts/qa/ssh-helper-setup.mjs:12:3)
+      at /Users/indo/code/project/orca-lite/scripts/qa/ssh-helper-setup.mjs:398:9
+
+Bun v1.4.0 (macOS arm64)

@@ -255,6 +255,10 @@ impl BrowserManager {
                 s.loading = false;
                 return Ok(browser_state(s));
             }
+            // Same-URL history entries can replace the document/state without
+            // a URL change. Invalidate the snapshot when dispatch begins.
+            s.generation += 1;
+            s.automation_targets.clear();
             s.loading = true;
             s.load_error = None;
             return Ok(browser_state(s));

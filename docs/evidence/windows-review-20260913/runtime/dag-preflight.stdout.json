@@ -1,0 +1,84 @@
+{
+    "utc":  "2026-09-13T08:53:00.3533413Z",
+    "host":  "DESKTOP-1LAPJMP",
+    "identity":  "DESKTOP-1LAPJMP\\sook",
+    "sshSession":  0,
+    "sessions":  " SESSIONNAME               USERNAME                 ID  STATE   TYPE        DEVICE \r\n\u003eservices                                            0  Disc                        \r\n console                   sook                      1  Active                      \r\n",
+    "disk":  {
+                 "DeviceID":  "C:",
+                 "Size":  999127248896,
+                 "FreeSpace":  186810707968
+             },
+    "processes":  [
+                      {
+                          "ProcessId":  17288,
+                          "ParentProcessId":  2860,
+                          "SessionId":  1,
+                          "ExecutablePath":  "C:\\Users\\sook\\AppData\\Local\\Ferryx\\ferryx.exe",
+                          "CreationDate":  "\/Date(1789211998895)\/",
+                          "CommandLine":  "\"C:\\Users\\sook\\AppData\\Local\\Ferryx\\ferryx.exe\" "
+                      },
+                      {
+                          "ProcessId":  1756,
+                          "ParentProcessId":  17288,
+                          "SessionId":  1,
+                          "ExecutablePath":  "C:\\Users\\sook\\AppData\\Local\\Ferryx\\ferryx.exe",
+                          "CreationDate":  "\/Date(1789212001837)\/",
+                          "CommandLine":  "\"C:\\Users\\sook\\AppData\\Local\\Ferryx\\ferryx.exe\" --daemon"
+                      },
+                      {
+                          "ProcessId":  20196,
+                          "ParentProcessId":  17288,
+                          "SessionId":  1,
+                          "ExecutablePath":  "C:\\Users\\sook\\AppData\\Local\\Ferryx\\ferryx.exe",
+                          "CreationDate":  "\/Date(1789212002037)\/",
+                          "CommandLine":  "\"C:\\Users\\sook\\AppData\\Local\\Ferryx\\ferryx.exe\" --daemon"
+                      }
+                  ],
+    "ports":  [
+                  {
+                      "LocalAddress":  "127.0.0.1",
+                      "LocalPort":  53986,
+                      "OwningProcess":  20196
+                  }
+              ],
+    "tasks":  [
+
+              ],
+    "checkouts":  [
+                      {
+                          "root":  "C:\\Users\\sook\\ferryx-qa-fresh-0912",
+                          "missing":  true
+                      },
+                      {
+                          "root":  "C:\\Users\\sook\\ferryx-qa-rt-st01a0958a",
+                          "missing":  true
+                      }
+                  ],
+    "tools":  [
+                  {
+                      "name":  "git",
+                      "path":  "C:\\Program Files\\Git\\cmd\\git.exe"
+                  },
+                  {
+                      "name":  "bun",
+                      "path":  "C:\\Users\\sook\\.bun\\bin\\bun.exe"
+                  },
+                  {
+                      "name":  "cargo",
+                      "path":  "C:\\Users\\sook\\.cargo\\bin\\cargo.exe"
+                  },
+                  {
+                      "name":  "rustc",
+                      "path":  "C:\\Users\\sook\\.cargo\\bin\\rustc.exe"
+                  },
+                  {
+                      "name":  "zig",
+                      "path":  "C:\\Users\\sook\\AppData\\Local\\Microsoft\\WinGet\\Links\\zig.exe"
+                  },
+                  {
+                      "name":  "node",
+                      "path":  "C:\\Program Files\\nodejs\\node.exe"
+                  }
+              ]
+}

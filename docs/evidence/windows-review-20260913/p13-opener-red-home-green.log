@@ -1,0 +1,23 @@
+Actual production seams SHA256 1ca64cba16c802373318c76ba334a575c16615932a70da10b1f6d60898d06fd6
+
+running 3 tests
+test file_link_expands_profile_relative_path ... ok
+test file_link_expands_bare_home ... ok
+test external_open_preserves_target_without_shell ... FAILED
+
+failures:
+
+failures:
+    external_open_preserves_target_without_shell
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+thread 'external_open_preserves_target_without_shell' (3634745) panicked at /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p13-seam-jmr9t787/seam.rs:34:13:
+assertion `left == right` failed
+  left: ShellCommand { program: "cmd", args: ["/C", "start", "https://example.test/?a=1&b=2"] }
+ right: ShellExecute { target: "https://example.test/?a=1&b=2" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+exit=101
+TemporaryDirectory cleanup: automatic

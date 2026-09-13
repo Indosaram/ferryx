@@ -1,0 +1,120 @@
+TAP version 13
+# Subtest: stager rejects empty without publication
+ok 1 - stager rejects empty without publication
+  ---
+  duration_ms: 1.855583
+  type: 'test'
+  ...
+# Subtest: stager rejects gnu without publication
+ok 2 - stager rejects gnu without publication
+  ---
+  duration_ms: 1.352208
+  type: 'test'
+  ...
+# Subtest: stager rejects debug without publication
+ok 3 - stager rejects debug without publication
+  ---
+  duration_ms: 1.8235
+  type: 'test'
+  ...
+# Subtest: stager rejects stale without publication
+ok 4 - stager rejects stale without publication
+  ---
+  duration_ms: 1.70775
+  type: 'test'
+  ...
+# Subtest: stager requires full matrix before publishing any bytes
+ok 5 - stager requires full matrix before publishing any bytes
+  ---
+  duration_ms: 1.418667
+  type: 'test'
+  ...
+# Subtest: stager binds explicit artifact bytes, source lock and helper protocol 1
+ok 6 - stager binds explicit artifact bytes, source lock and helper protocol 1
+  ---
+  duration_ms: 2.335459
+  type: 'test'
+  ...
+# Subtest: stager rejects hash receipt
+ok 7 - stager rejects hash receipt
+  ---
+  duration_ms: 1.105166
+  type: 'test'
+  ...
+# Subtest: stager rejects lock receipt
+ok 8 - stager rejects lock receipt
+  ---
+  duration_ms: 0.96575
+  type: 'test'
+  ...
+# Subtest: stager rejects machine receipt
+ok 9 - stager rejects machine receipt
+  ---
+  duration_ms: 1.104292
+  type: 'test'
+  ...
+# Subtest: stager rejects duplicate receipt
+ok 10 - stager rejects duplicate receipt
+  ---
+  duration_ms: 0.975709
+  type: 'test'
+  ...
+# (node:58147) ExperimentalWarning: VM Modules is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: import ssh-bridge-survival has no host effects
+ok 11 - import ssh-bridge-survival has no host effects
+  ---
+  duration_ms: 5.601791
+  type: 'test'
+  ...
+# Subtest: import ssh-helper-setup has no host effects
+ok 12 - import ssh-helper-setup has no host effects
+  ---
+  duration_ms: 1.544709
+  type: 'test'
+  ...
+# Subtest: import ssh-helper-survival has no host effects
+ok 13 - import ssh-helper-survival has no host effects
+  ---
+  duration_ms: 1.430708
+  type: 'test'
+  ...
+# Subtest: import ssh-process-survival has no host effects
+ok 14 - import ssh-process-survival has no host effects
+  ---
+  duration_ms: 1.650208
+  type: 'test'
+  ...
+# Subtest: import verify-ferryx-resume-cwd has no host effects
+ok 15 - import verify-ferryx-resume-cwd has no host effects
+  ---
+  duration_ms: 0.875792
+  type: 'test'
+  ...
+# Subtest: ssh-bridge-survival never signals a detached endpoint PID
+ok 16 - ssh-bridge-survival never signals a detached endpoint PID
+  ---
+  duration_ms: 0.905583
+  type: 'test'
+  ...
+# Subtest: ssh-helper-setup never signals a detached endpoint PID
+ok 17 - ssh-helper-setup never signals a detached endpoint PID
+  ---
+  duration_ms: 0.634541
+  type: 'test'
+  ...
+# Subtest: bridge initial marker accumulates fragmented output before acceptance
+ok 18 - bridge initial marker accumulates fragmented output before acceptance
+  ---
+  duration_ms: 0.873625
+  type: 'test'
+  ...
+1..18
+# tests 18
+# suites 0
+# pass 18
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 55.61575

@@ -30,6 +30,8 @@ export function clearRemoteAuthToken(hostId?: string) {
   localStorage.removeItem(LEGACY_TOKEN_KEY);
 }
 
+export type RemotePreferenceTarget = { baseUrl: string; token: string };
+
 export class RemoteClient {
   private baseUrl: string;
   private ws: WebSocket | null = null;
@@ -37,12 +39,15 @@ export class RemoteClient {
   private reconnectTimer: any = null;
   private reconnectAttempts = 0;
 
-  constructor(baseUrl: string = typeof window !== "undefined" && window.location?.origin ? window.location.origin : "http://localhost:5173") {
+  constructor(
+    baseUrl: string = typeof window !== "undefined" && window.location?.origin ? window.location.origin : "http://localhost:5173",
+    private readonly token?: string,
+  ) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
   }
 
   private authHeader(): Record<string, string> {
-    const token = getRemoteAuthToken();
+    const token = this.token ?? getRemoteAuthToken();
     return token ? { Authorization: `Bearer ${token}` } : {};
   }
 
@@ -56,7 +61,7 @@ export class RemoteClient {
       },
     });
     if (!res.ok) {
-      if (res.status === 401) {
+      if (res.status === 401 && this.token === undefined) {
         clearRemoteAuthToken();
       }
       throw new Error(`Remote API error ${res.status}: ${await res.text()}`);

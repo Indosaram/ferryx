@@ -1,0 +1,8 @@
+LSP diagnostics via functions.lsp_diagnostics, severity all:
+- src-tauri/src/permissions/mod.rs initial: only inactive-code hints at 73,91,151,224,226,238,243,317,343.
+- src-tauri/tests/permissions_contract.rs initial: only inactive-code hints at 4,34,17.
+- After formatting/removing two description-prose assertions: source request cancelled by server; tests only inactive-code hints at 4,48,21.
+- Source request repeated after cancellation: only inactive-code hints at 73,91,151,224,226,238,243,317,343. No errors/warnings reported.
+- git diff --check -- src-tauri/src/permissions/mod.rs src-tauri/tests/permissions_contract.rs: exit 0, no output.
+- Isolated rustc Windows/Linux builds: existing home_dir dead_code warning retained in red.log, green.log, final-green.log. No warning suppression or unrelated source cleanup.
+- Cargo/build not executed: no lead-issued exclusive shared-target slot received.

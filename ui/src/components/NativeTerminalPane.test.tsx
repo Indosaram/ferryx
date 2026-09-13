@@ -14,6 +14,7 @@ import {
 } from "./NativeTerminalPane";
 import { registerBuiltInBrowserLinkOpener } from "../lib/linkRouting";
 import { saveBrowserSettings } from "../lib/browserSettings";
+import { NativeTerminalVisibilityProvider } from "../lib/nativeTerminalVisibility";
 
 const tauriCoreMocks = vi.hoisted(() => ({
   invoke: vi.fn<(cmd: string, args?: any) => Promise<any>>(async () => undefined),
@@ -488,6 +489,156 @@ describe("NativeTerminalPane IPC failure reporting and visible error state", () 
     );
 
     consoleSpy.mockRestore();
+  });
+});
+
+describe("NativeTerminalPane bounded wheel normalization", () => {
+  let restorePaneRect: () => void;
+
+  beforeEach(() => {
+    resetNativeTerminalPaneForTest();
+    resetNativeTerminalLifecycleForTest();
+    restorePaneRect = stubPaneRect();
+    tauriCoreMocks.invoke.mockReset();
+    tauriCoreMocks.isTauri.mockReturnValue(true);
+    tauriWindowMocks.reset();
+    nativeTerminalEventMocks.scrollbarListener = null;
+    nativeTerminalEventMocks.onNativeTerminalScrollbar.mockClear();
+    vi.stubGlobal("ResizeObserver", MockResizeObserver);
+  });
+
+  afterEach(() => {
+    cleanup();
+    restorePaneRect();
+    resetNativeTerminalPaneForTest();
+    resetNativeTerminalLifecycleForTest();
+    vi.unstubAllGlobals();
+  });
+
+  const scrollCalls = () => tauriCoreMocks.invoke.mock.calls
+    .filter(([command]) => command === "cmd_native_terminal_scroll")
+    .map(([, args]) => args);
+
+  async function mountWheelPane(session = createSession("wheel-pane", "wheel-backend")) {
+    let boundsReported!: () => void;
+    const ready = new Promise<void>((resolve) => { boundsReported = resolve; });
+    tauriCoreMocks.invoke.mockImplementation(async (command) => {
+      if (command === "cmd_native_terminal_set_bounds") {
+        boundsReported();
+        return { presented: true, renderDeferred: false };
+      }
+      if (command === "cmd_native_terminal_scrollbar") return { total: 200, offset: 0, len: 24 };
+      return undefined;
+    });
+    const view = render(
+      <NativeTerminalVisibilityProvider visible>
+        <NativeTerminalPane session={session} />
+      </NativeTerminalVisibilityProvider>,
+    );
+    // Subscribe before mount; Vitest's bounded test timeout is the failure deadline.
+    // The real bounds command and exact listener registration, not elapsed time, gate input.
+    await act(async () => { await ready; });
+    expect(nativeTerminalEventMocks.onNativeTerminalScrollbar).toHaveBeenCalledOnce();
+    expect(nativeTerminalEventMocks.scrollbarListener).toBeTypeOf("function");
+    expect(view.getByTestId("native-terminal-pane")).toHaveAttribute("data-native-terminal-presented", "true");
+    return view;
+  }
+
+  it.each([
+    { name: "zero", mode: 0, deltas: [0, -0], expected: [] },
+    { name: "horizontal-only", mode: 0, deltas: [0], expected: [], deltaX: 80 },
+    { name: "line notches", mode: 1, deltas: [1, -2], expected: [3, -6] },
+    { name: "visible pages", mode: 2, deltas: [1, -2], expected: [24, -48] },
+    { name: "fractional pixels", mode: 0, deltas: [0.5, 9.5, 9, 1, 25, 15], expected: [1, 1, 1] },
+    { name: "negative fractional pixels", mode: 0, deltas: [-0.5, -9.5, -9, -1, -25, -15], expected: [-1, -1, -1] },
+    { name: "direction cancellation", mode: 0, deltas: [15, -10, -5, -20], expected: [-1] },
+    { name: "pixel i16 saturation", mode: 0, deltas: [1e9, 20, -1e9, -20], expected: [32767, 1, -32768, -1] },
+    { name: "line i16 saturation", mode: 1, deltas: [1e9, -1e9], expected: [32767, -32768] },
+    { name: "page i16 saturation", mode: 2, deltas: [1e9, -1e9], expected: [32767, -32768] },
+  ])("normalizes $name through mounted onWheel", async ({ mode, deltas, expected, deltaX }) => {
+    const view = await mountWheelPane();
+    await act(async () => {
+      for (const deltaY of deltas) {
+        fireEvent.wheel(view.getByTestId("native-terminal-pane"), { deltaY, deltaX: deltaX ?? 0, deltaMode: mode });
+      }
+    });
+    expect(scrollCalls()).toEqual(expected.map((rows) => ({
+      sessionId: "wheel-backend", behavior: { type: "delta", rows },
+      wheel: { position: { x: -10, y: -20 }, modifiers: { shift: false, ctrl: false, alt: false, superKey: false, capsLock: false, numLock: false } },
+    })));
+  });
+
+  it("forwards pane-local wheel position and all modifier states", async () => {
+    const view = await mountWheelPane();
+    vi.spyOn(view.getByTestId("native-terminal-viewport"), "getBoundingClientRect").mockReturnValue({
+      left: 100, top: 50, right: 900, bottom: 530, width: 800, height: 480,
+      x: 100, y: 50, toJSON: () => ({}),
+    });
+    const event = new WheelEvent("wheel", {
+      bubbles: true, deltaY: -20, clientX: 125, clientY: 120,
+      ctrlKey: true, shiftKey: true, altKey: true, metaKey: true,
+    });
+    Object.defineProperty(event, "getModifierState", {
+      value: (key: string) => key === "CapsLock" || key === "NumLock",
+    });
+    await act(async () => { view.getByTestId("native-terminal-pane").dispatchEvent(event); });
+    expect(scrollCalls()).toEqual([{
+      sessionId: "wheel-backend", behavior: { type: "delta", rows: -1 },
+      wheel: {
+        position: { x: 25, y: 70 },
+        modifiers: { shift: true, ctrl: true, alt: true, superKey: true, capsLock: true, numLock: true },
+      },
+    }]);
+  });
+
+  it("uses updated visible rows and ignores sibling scrollbar metrics", async () => {
+    const view = await mountWheelPane();
+    act(() => {
+      nativeTerminalEventMocks.scrollbarListener!({ sessionId: "wheel-backend", total: 200, offset: 0, len: 40 });
+      nativeTerminalEventMocks.scrollbarListener!({ sessionId: "sibling", total: 200, offset: 0, len: 7 });
+    });
+    await act(async () => { fireEvent.wheel(view.getByTestId("native-terminal-pane"), { deltaY: 1, deltaMode: 2 }); });
+    expect(scrollCalls()).toEqual([{ sessionId: "wheel-backend", behavior: { type: "delta", rows: 40 },
+      wheel: { position: { x: -10, y: -20 }, modifiers: { shift: false, ctrl: false, alt: false, superKey: false, capsLock: false, numLock: false } },
+    }]);
+  });
+
+  it.each(["session", "generation", "daemon epoch", "hidden"])("discards fractional movement across a %s transition", async (transition) => {
+    const session = { ...createSession("wheel-pane", "wheel-backend"), workspaceId: "ssh:wheel", remoteGeneration: 1, daemonEpoch: "1" };
+    const view = await mountWheelPane(session);
+    const wheel = () => fireEvent.wheel(view.getByTestId("native-terminal-pane"), { deltaY: 10 });
+    await act(async () => { wheel(); });
+    const next = {
+      ...session,
+      ...(transition === "session" ? { id: "next-pane", backendSessionId: "next-backend" } : {}),
+      ...(transition === "generation" ? { remoteGeneration: 2 } : {}),
+      ...(transition === "daemon epoch" ? { daemonEpoch: "2" } : {}),
+    };
+    if (transition === "hidden") {
+      await act(async () => {
+        view.rerender(<NativeTerminalVisibilityProvider visible={false}><NativeTerminalPane session={session} /></NativeTerminalVisibilityProvider>);
+      });
+      expect(view.getByTestId("native-terminal-pane")).toHaveAttribute("data-native-terminal-input-enabled", "false");
+      await act(async () => { wheel(); });
+    }
+    await act(async () => {
+      view.rerender(<NativeTerminalVisibilityProvider visible><NativeTerminalPane session={next} /></NativeTerminalVisibilityProvider>);
+    });
+    expect(view.getByTestId("native-terminal-pane")).toHaveAttribute("data-native-terminal-input-enabled", "true");
+    await act(async () => { wheel(); });
+    expect(scrollCalls()).toEqual([]);
+    await act(async () => { wheel(); });
+    expect(scrollCalls()).toEqual([{ sessionId: next.backendSessionId, generation: next.remoteGeneration, behavior: { type: "delta", rows: 1 },
+      wheel: { position: { x: -10, y: -20 }, modifiers: { shift: false, ctrl: false, alt: false, superKey: false, capsLock: false, numLock: false } },
+    }]);
+  });
+
+  it("does not send wheel IPC outside Tauri", async () => {
+    tauriCoreMocks.isTauri.mockReturnValue(false);
+    const view = render(<NativeTerminalPane session={createSession("web-wheel")} />);
+    await act(async () => { fireEvent.wheel(view.getByTestId("native-terminal-pane"), { deltaY: 60 }); });
+    expect(scrollCalls()).toEqual([]);
+    expect(nativeTerminalEventMocks.onNativeTerminalScrollbar).not.toHaveBeenCalled();
   });
 });
 
@@ -3468,6 +3619,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_scroll", {
       sessionId: "term-session-1",
       behavior: { type: "delta", rows: 3 },
+      wheel: { position: { x: -10, y: -20 }, modifiers: { shift: false, ctrl: false, alt: false, superKey: false, capsLock: false, numLock: false } },
     });
 
     tauriCoreMocks.invoke.mockClear();
@@ -3478,6 +3630,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_scroll", {
       sessionId: "term-session-1",
       behavior: { type: "delta", rows: -3 },
+      wheel: { position: { x: -10, y: -20 }, modifiers: { shift: false, ctrl: false, alt: false, superKey: false, capsLock: false, numLock: false } },
     });
   });
 

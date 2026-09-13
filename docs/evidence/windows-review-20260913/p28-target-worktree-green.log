@@ -1,0 +1,11 @@
+$ vitest run --maxWorkers=1 src/remote/RemoteAttention.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/remote/RemoteAttention.test.tsx (15 tests) 202ms
+
+ Test Files  1 passed (1)
+      Tests  15 passed (15)
+   Start at  15:31:27
+   Duration  1.37s (transform 106ms, setup 107ms, collect 490ms, tests 202ms, environment 243ms, prepare 30ms)
+

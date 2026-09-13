@@ -1,0 +1,173 @@
+TAP version 13
+# (node:56133) ExperimentalWarning: VM Modules is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: import ssh-bridge-survival has no host effects
+not ok 1 - import ssh-bridge-survival has no host effects
+  ---
+  duration_ms: 5.6265
+  type: 'test'
+  location: '/Users/indo/code/project/orca-lite/scripts/qa/ssh-harness-safety.test.mjs:9:29'
+  failureType: 'testCodeFailure'
+  error: |-
+    import invoked 1 host operations: Error: HOST_OPERATION
+    
+    1 !== 0
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 0
+  actual: 1
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/qa/ssh-harness-safety.test.mjs:25:10)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+# Subtest: import ssh-helper-setup has no host effects
+not ok 2 - import ssh-helper-setup has no host effects
+  ---
+  duration_ms: 2.091375
+  type: 'test'
+  location: '/Users/indo/code/project/orca-lite/scripts/qa/ssh-harness-safety.test.mjs:9:29'
+  failureType: 'testCodeFailure'
+  error: |-
+    import invoked 1 host operations: Error: HOST_OPERATION
+    
+    1 !== 0
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 0
+  actual: 1
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/qa/ssh-harness-safety.test.mjs:25:10)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: import ssh-helper-survival has no host effects
+not ok 3 - import ssh-helper-survival has no host effects
+  ---
+  duration_ms: 1.846791
+  type: 'test'
+  location: '/Users/indo/code/project/orca-lite/scripts/qa/ssh-harness-safety.test.mjs:9:29'
+  failureType: 'testCodeFailure'
+  error: |-
+    import invoked 1 host operations: Error: HOST_OPERATION
+    
+    1 !== 0
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 0
+  actual: 1
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/qa/ssh-harness-safety.test.mjs:25:10)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: import ssh-process-survival has no host effects
+not ok 4 - import ssh-process-survival has no host effects
+  ---
+  duration_ms: 1.989875
+  type: 'test'
+  location: '/Users/indo/code/project/orca-lite/scripts/qa/ssh-harness-safety.test.mjs:9:29'
+  failureType: 'testCodeFailure'
+  error: |-
+    import invoked 1 host operations: Error: HOST_OPERATION
+    
+    1 !== 0
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 0
+  actual: 1
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/qa/ssh-harness-safety.test.mjs:25:10)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: import verify-ferryx-resume-cwd has no host effects
+not ok 5 - import verify-ferryx-resume-cwd has no host effects
+  ---
+  duration_ms: 1.05975
+  type: 'test'
+  location: '/Users/indo/code/project/orca-lite/scripts/qa/ssh-harness-safety.test.mjs:9:29'
+  failureType: 'testCodeFailure'
+  error: |-
+    import invoked 1 host operations: Error: HOST_OPERATION
+    
+    1 !== 0
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 0
+  actual: 1
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/qa/ssh-harness-safety.test.mjs:25:10)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: ssh-bridge-survival never signals a detached endpoint PID
+not ok 6 - ssh-bridge-survival never signals a detached endpoint PID
+  ---
+  duration_ms: 0.681
+  type: 'test'
+  location: '/Users/indo/code/project/orca-lite/scripts/qa/ssh-harness-safety.test.mjs:29:65'
+  failureType: 'testCodeFailure'
+  error: 'Missing expected rejection.'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  operator: 'rejects'
+  stack: |-
+    async TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/qa/ssh-harness-safety.test.mjs:38:3)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: ssh-helper-setup never signals a detached endpoint PID
+not ok 7 - ssh-helper-setup never signals a detached endpoint PID
+  ---
+  duration_ms: 0.892833
+  type: 'test'
+  location: '/Users/indo/code/project/orca-lite/scripts/qa/ssh-harness-safety.test.mjs:29:65'
+  failureType: 'testCodeFailure'
+  error: 'Missing expected rejection.'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  operator: 'rejects'
+  stack: |-
+    async TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/qa/ssh-harness-safety.test.mjs:38:3)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: bridge initial marker accumulates fragmented output before acceptance
+not ok 8 - bridge initial marker accumulates fragmented output before acceptance
+  ---
+  duration_ms: 0.57025
+  type: 'test'
+  location: '/Users/indo/code/project/orca-lite/scripts/qa/ssh-harness-safety.test.mjs:42:1'
+  failureType: 'testCodeFailure'
+  error: 'Expected INIT with nonce, got: INIT:non'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: '=='
+  stack: |-
+    evalmachine.<anonymous>:11:3
+    async TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/qa/ssh-harness-safety.test.mjs:54:3)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+1..8
+# tests 8
+# suites 0
+# pass 0
+# fail 8
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 50.418583

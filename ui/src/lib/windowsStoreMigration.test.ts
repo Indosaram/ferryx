@@ -1,11 +1,25 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const rustRegistry = readFileSync(resolve(__dirname, "../../../src-tauri/src/lib.rs"), "utf8");
+const registeredUpdaterCommands = new Set(
+  [...rustRegistry.matchAll(/tauri::generate_handler!\[([\s\S]*?)\]/g)].flatMap((handler) =>
+    [...(handler[1] ?? "").matchAll(/crate::ipc::updater::(\w+)\s*,/g)].map((entry) => entry[1]),
+  ),
+);
 
 const invoke = vi.fn();
 const isTauri = vi.fn(() => true);
 const toastInfo = vi.fn();
 
 vi.mock("@tauri-apps/api/core", () => ({
-  invoke: (...args: unknown[]) => invoke(...args),
+  invoke: async (command: string) => {
+    if (command !== "cmd_distribution_channel" || !registeredUpdaterCommands.has(command)) {
+      throw new Error(`Unregistered distribution command: ${command}`);
+    }
+    return invoke(command);
+  },
   isTauri: () => isTauri(),
 }));
 vi.mock("../components/ui/sonner", () => ({
@@ -53,6 +67,35 @@ describe("windows store migration notice", () => {
     const options = toastArgs();
     expect(options.id).toBe("windows-store-migration");
     expect(options.description).toContain("reinstall Ferryx from the Microsoft Store");
+  });
+
+  it.each(["store", "native"])("stays silent after a registered probe when the channel is %s", async (channel) => {
+    // Given
+    invoke.mockResolvedValue(channel);
+    const migration = await freshModule();
+
+    // When
+    await migration.maybeShowWindowsStoreMigrationNotice(fakeStorage());
+
+    // Then
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("cmd_distribution_channel");
+    expect(toastInfo).not.toHaveBeenCalled();
+  });
+
+  it("persists dismissal when the installer toast is dismissed", async () => {
+    // Given
+    invoke.mockResolvedValue("installer");
+    const migration = await freshModule();
+    const storage = fakeStorage();
+    await migration.maybeShowWindowsStoreMigrationNotice(storage);
+    expect(toastInfo).toHaveBeenCalledTimes(1);
+    const options: { onDismiss: () => void } = toastInfo.mock.calls[0][1];
+
+    // When
+    options.onDismiss();
+
+    // Then
+    expect(migration.loadMigrationDismissed(storage)).toBe(true);
   });
 
   it("stays silent on Store installs and other platforms", async () => {

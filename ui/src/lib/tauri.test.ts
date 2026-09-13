@@ -464,6 +464,7 @@ describe("Tauri IPC wrapper contract", () => {
         sessionId: "pty-1",
         tabId: "tab-1",
         terminalTabs: [{ id: "tab-1", label: "main" }],
+        attentionInventory: [],
       },
     });
 
@@ -484,6 +485,7 @@ describe("Tauri IPC wrapper contract", () => {
         sessionId: null,
         tabId: null,
         terminalTabs: [],
+        attentionInventory: [],
       },
     });
   });
@@ -492,6 +494,12 @@ describe("Tauri IPC wrapper contract", () => {
     core.invoke.mockResolvedValue(undefined);
 
     await publishFocusedTerminal({
+      attentionInventory: [{
+        workspaceId: "other-workspace",
+        worktreeSlug: "feature",
+        worktreeLabel: "feature",
+        state: "waiting",
+      }],
       workspaceId: "orca-lite",
       worktreeSlug: "main",
       worktreeLabel: "main",
@@ -514,6 +522,12 @@ describe("Tauri IPC wrapper contract", () => {
           { id: "tab-1", label: "main", activityState: "working", agentType: "claude" },
           { id: "tab-2", label: "feature", activityState: "waiting", agentType: "codex" },
         ],
+        attentionInventory: [{
+          workspaceId: "other-workspace",
+          worktreeSlug: "feature",
+          worktreeLabel: "feature",
+          state: "waiting",
+        }],
       },
     });
   });
@@ -645,7 +659,18 @@ describe("probeNotificationDelivery", () => {
     // `sendTest`. Any other key is dropped, silently defaulting to false and sending nothing.
     expect(core.invoke).toHaveBeenCalledWith(
       "cmd_notification_probe_delivery",
-      { sendTest: true },
+      { sendTest: true, sound: "system" },
+    );
+  });
+
+  it("forwards explicit silent delivery without replacing it with system sound", async () => {
+    core.invoke.mockResolvedValue({ outcome: "ready", testSubmitted: true });
+
+    await probeNotificationDelivery(true, "silent");
+
+    expect(core.invoke).toHaveBeenCalledWith(
+      "cmd_notification_probe_delivery",
+      { sendTest: true, sound: "silent" },
     );
   });
 });

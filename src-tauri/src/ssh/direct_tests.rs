@@ -333,6 +333,49 @@ fn ssh_bridge_plan_options_disable_tty_and_enforce_strict_host_keys() {
     assert!(remote_cmd.contains("bridge --stdio --root"));
 }
 
+#[cfg(windows)]
+#[tokio::test]
+async fn p10_windows_bridge_preserves_native_argv() {
+    use base64::Engine;
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir.path().join("argv recorder.exe");
+    let source = r#"using System;
+public class Recorder {
+    public static void Main(string[] args) {
+        foreach (string arg in args)
+            Console.WriteLine(Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(arg)));
+    }
+}"#;
+    let compile = format!(
+        "Add-Type -TypeDefinition {} -Language CSharp -OutputAssembly {} -OutputType ConsoleApplication",
+        crate::ssh::runtime::powershell_data(source),
+        crate::ssh::runtime::powershell_data(exe.to_str().unwrap()),
+    );
+    let powershell = |script: String| ShellCommandPlan {
+        program: "powershell.exe".into(),
+        args: vec!["-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), script],
+    };
+    bounded_output(&powershell(compile), Duration::from_secs(30)).await.unwrap();
+    assert!(exe.is_file());
+    let env = crate::ssh::runtime::RemoteEnvironment {
+        platform: crate::ssh::runtime::RemotePlatform::Windows,
+        executor: crate::ssh::runtime::RemoteExecutor::Powershell,
+        version: "fixture".into(), home: dir.path().display().to_string(),
+        temp: dir.path().display().to_string(), git: false,
+    };
+    for root in [r"C:\Users\QA Person\项目\.ferryx\helper\h", r"C:\Users\QA Person\项目\"] {
+        let location = crate::ssh::helper_setup::HelperLocation {
+            executable: exe.to_str().unwrap().into(), root: root.into(),
+        };
+        let output = bounded_output(&powershell(bridge_command(&env, &location)), Duration::from_secs(10))
+            .await.unwrap();
+        let actual: Vec<String> = std::str::from_utf8(&output).unwrap().lines().map(|line| {
+            String::from_utf8(base64::engine::general_purpose::STANDARD.decode(line).unwrap()).unwrap()
+        }).collect();
+        assert_eq!(actual, vec!["bridge", "--stdio", "--root", root]);
+    }
+}
+
 #[test]
 fn ssh_bridge_plan_windows_uses_raw_child_stdio_forwarding() {
     let env = crate::ssh::runtime::RemoteEnvironment {

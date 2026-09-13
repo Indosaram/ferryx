@@ -475,6 +475,97 @@ mod tests {
         assert_eq!(parsed, resp);
     }
 
+    // This fixture uses the production connection handler over an actual owned
+    // TCP socket on every platform. No desktop, daemon or global runtime path.
+    async fn p12_raw_tcp_request(request: serde_json::Value) -> BrowserCliResponse {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(BrowserManager::new());
+        manager
+            .register_session(CreateBrowserRequest {
+                browser_id: Some("p12-owned-browser".into()),
+                workspace_id: Some("p12-owned-workspace".into()),
+                worktree_path: None,
+                url: "https://example.test/p12-private".into(),
+                profile: Some(BrowserProfileId::Default),
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .expect("register owned browser");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind owned listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = async {
+            let (stream, _) = listener.accept().await.expect("accept independent peer");
+            handle_connection(stream, app.handle().clone(), manager)
+                .await
+                .expect("handle actual TCP connection");
+        };
+        let client = async {
+            let mut stream = tokio::net::TcpStream::connect(address)
+                .await
+                .expect("connect independent peer");
+            let mut bytes = serde_json::to_vec(&request).expect("serialize raw request");
+            bytes.push(b'\n');
+            stream.write_all(&bytes).await.expect("write raw request");
+            let mut response = String::new();
+            BufReader::new(stream)
+                .read_line(&mut response)
+                .await
+                .expect("read authorization result");
+            serde_json::from_str(&response).expect("parse authorization result")
+        };
+        // Joining scoped futures, rather than spawning, guarantees that timeout
+        // and panic drop the listener and both streams; there is no orphan task.
+        let (_, response) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(server, client)
+        })
+        .await
+        .expect("bounded socket exchange");
+        response
+    }
+
+    #[tokio::test]
+    async fn p12_tcp_rejects_unauthenticated_commands() {
+        // Given an actual listener and a registered private browser, when a peer
+        // sends each supported command without credentials, then dispatch is denied.
+        for request in [
+            serde_json::json!({"command": "list"}),
+            serde_json::json!({"command": "snapshot", "browser_id": "missing-browser"}),
+            serde_json::json!({"command": "act", "request": {
+                "browserId": "missing-browser", "generation": 1,
+                "action": {"type": "click", "reference": "e1"}
+            }}),
+        ] {
+            let response = p12_raw_tcp_request(request.clone()).await;
+            assert!(
+                matches!(&response, BrowserCliResponse::Error { code, .. }
+                    if code == "BROWSER_CLI_UNAUTHORIZED"),
+                "unauthenticated {request} reached dispatch: {response:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn p12_tcp_rejects_forged_credential() {
+        // Given a peer without the capability, when it supplies a forged token,
+        // then the actual socket must not disclose the registered browser URL.
+        let response = p12_raw_tcp_request(serde_json::json!({
+            "command": "list", "token": "p12-forged-not-a-capability"
+        }))
+        .await;
+        assert!(
+            matches!(&response, BrowserCliResponse::Error { code, .. }
+                if code == "BROWSER_CLI_UNAUTHORIZED"),
+            "forged credential reached dispatch: {response:?}"
+        );
+    }
+
     #[test]
     fn test_read_and_write_port_file_round_trip() {
         let temp_dir = tempfile::tempdir().expect("tempdir");

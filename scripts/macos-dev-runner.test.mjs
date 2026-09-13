@@ -1,15 +1,26 @@
 import { test, expect } from "bun:test";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, posix, win32 } from "node:path";
+
+function targetRootFor(target, paths) {
+  return paths.dirname(target);
+}
+
+for (const paths of [posix, win32]) {
+  test(`signing target has exactly one debug component (${paths.sep})`, () => {
+    const target = paths.join("src-tauri", "target", "debug");
+    expect(paths.join(targetRootFor(target, paths), "debug")).toBe(target);
+  });
+}
 
 for (const signingExit of [0, 7]) {
   test(`debug runner uses Developer ID and respects signing exit ${signingExit}`, async () => {
-    expect((await stat(new URL("./macos-dev-runner.sh", import.meta.url))).mode & 0o111).not.toBe(0);
-    const root = await mkdtemp(join(tmpdir(), "ferryx-dev-signing-"));
+    const root = await mkdtemp(join(tmpdir(), "ferryx dev signing-"));
     const scripts = join(root, "scripts");
     const target = join(root, "src-tauri", "target", "debug");
     const tools = join(root, "tools");
+    let child;
     try {
       await Promise.all([
         mkdir(scripts),
@@ -26,33 +37,56 @@ for (const signingExit of [0, 7]) {
         Bun.write(join(target, "Contents", "Info.plist"), "<plist/>"),
         Bun.write(join(root, "src-tauri", "icons", "icon.icns"), "fixture"),
         executable(join(target, "ferryx"), "#!/bin/sh\nprintf 'APP_LAUNCHED\\n'\n"),
-        executable(join(tools, "uname"), "#!/bin/sh\nprintf 'Darwin\\n'\n"),
-        executable(join(tools, "cargo"), "#!/bin/sh\nexit 0\n"),
-        executable(join(tools, "codesign"), "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$SIGN_ARGS\"\nexit \"$SIGN_EXIT\"\n"),
+        executable(join(tools, "uname"), "#!/bin/sh\nprintf '%s\\n' uname >> tool-calls\nprintf 'Darwin\\n'\n"),
+        executable(join(tools, "cargo"), "#!/bin/sh\nprintf '%s\\n' cargo \"$@\" >> tool-calls\n"),
+        executable(join(tools, "codesign"), "#!/bin/sh\nprintf '%s\\n' codesign >> tool-calls\nprintf '%s\\n' \"$@\" > \"$SIGN_ARGS\"\nexit \"$SIGN_EXIT\"\n"),
       ]);
-      const process = Bun.spawn(["bash", join(scripts, "macos-dev-runner.sh"), "run"], {
+      // Let Bash own its path namespace; no native drive letters in POSIX PATH.
+      // Functions intercept these commands even if a fixture tool is missing:
+      // the explicit Bash invocation fails rather than finding a real build/signer.
+      child = Bun.spawn(["bash", "--noprofile", "--norc", "-c", `
+set -euo pipefail
+uname() { bash ./tools/uname "$@"; }
+cargo() { bash ./tools/cargo "$@"; }
+codesign() { bash ./tools/codesign "$@"; }
+printf '%s\\n' "$PWD" > shell-root
+export CARGO_TARGET_DIR="$PWD/$1"
+source ./scripts/macos-dev-runner.sh run
+`, "signing-fixture", targetRootFor("src-tauri/target/debug", posix)], {
         cwd: root,
         env: {
           ...Bun.env,
-          PATH: `${tools}:${Bun.env.PATH}`,
-          CARGO_TARGET_DIR: target.replace(/\/debug$/, ""),
-          SIGN_ARGS: join(root, "sign-args"),
+          BASH_ENV: "",
+          ENV: "",
+          SIGN_ARGS: "sign-args",
           SIGN_EXIT: String(signingExit),
         },
         stdout: "pipe",
         stderr: "pipe",
+        timeout: 20_000,
       });
       const [stdout, stderr, exitCode] = await Promise.all([
-        new Response(process.stdout).text(),
-        new Response(process.stderr).text(),
-        process.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
       ]);
       const args = (await readFile(join(root, "sign-args"), "utf8")).trim().split("\n");
-      expect(args[args.indexOf("--sign") + 1]).toBe("Developer ID Application: Indo Yoon (5DUM8WPB4C)");
+      const shellRoot = (await readFile(join(root, "shell-root"), "utf8")).trim();
+      expect(args).toEqual([
+        "--force", "--sign", "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
+        `${shellRoot}/src-tauri/target/debug/Ferryx.app`,
+      ]);
+      expect((await readFile(join(root, "tool-calls"), "utf8")).trim().split("\n"))
+        .toEqual(["uname", "cargo", "build", "codesign"]);
       expect(exitCode, stderr).toBe(signingExit);
       expect(stdout.includes("APP_LAUNCHED")).toBe(signingExit === 0);
     } finally {
+      if (child) {
+        if (child.exitCode === null) child.kill();
+        await child.exited;
+      }
       await rm(root, { recursive: true, force: true });
+      console.info(`signing fixture cleaned: exit=${child?.exitCode}, root=${root}`);
     }
   }, 30_000);
 }

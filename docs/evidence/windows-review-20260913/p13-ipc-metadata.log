@@ -1,0 +1,402 @@
+Metadata compile current full ipc/browser.rs against existing deps; no binary execution
+['rustc', '--edition=2021', '--crate-type=lib', '/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p13-ipc-27_690xj/ipc.rs', '-L', 'dependency=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps', '--emit=metadata', '-o', '/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p13-ipc-27_690xj/ipc.rmeta', '--extern', 'ferryx_lib=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libferryx_lib.rlib', '--extern', 'serde=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libserde-457dad90a8a134ee.rlib', '--extern', 'serde_json=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libserde_json-14c786ffca776a07.rlib', '--extern', 'parking_lot=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libparking_lot-d3877efc54e330ad.rlib', '--extern', 'tokio=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libtokio-ea053dd4c2ac9062.rlib', '--extern', 'tauri=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libtauri-b8b32d6f4ae3a1cf.rlib', '--extern', 'uuid=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libuuid-01dc03bbedcc66f1.rlib', '--extern', 'objc2=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libobjc2-e8bce5b05b031cc9.rlib', '--extern', 'objc2_app_kit=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libobjc2_app_kit-bb7a0b3d80d2a6b1.rlib', '--extern', 'objc2_foundation=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libobjc2_foundation-848aab268b77eedc.rlib', '--extern', 'objc2_web_kit=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libobjc2_web_kit-959fe5dc358d1e16.rlib']
+error: custom attribute panicked
+   --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:856:1
+    |
+856 | #[tauri::command]
+    | ^^^^^^^^^^^^^^^^^
+    |
+    = help: message: missing `CARGO_PKG_NAME` environment variable: NotPresent
+
+error: custom attribute panicked
+    --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:1159:1
+     |
+1159 | #[tauri::command]
+     | ^^^^^^^^^^^^^^^^^
+     |
+     = help: message: missing `CARGO_PKG_NAME` environment variable: NotPresent
+
+error: custom attribute panicked
+    --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:1271:1
+     |
+1271 | #[tauri::command]
+     | ^^^^^^^^^^^^^^^^^
+     |
+     = help: message: missing `CARGO_PKG_NAME` environment variable: NotPresent
+
+error: custom attribute panicked
+    --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:1280:1
+     |
+1280 | #[tauri::command]
+     | ^^^^^^^^^^^^^^^^^
+     |
+     = help: message: missing `CARGO_PKG_NAME` environment variable: NotPresent
+
+error: custom attribute panicked
+    --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:1289:1
+     |
+1289 | #[tauri::command]
+     | ^^^^^^^^^^^^^^^^^
+     |
+     = help: message: missing `CARGO_PKG_NAME` environment variable: NotPresent
+
+error: custom attribute panicked
+    --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:1340:1
+     |
+1340 | #[tauri::command]
+     | ^^^^^^^^^^^^^^^^^
+     |
+     = help: message: missing `CARGO_PKG_NAME` environment variable: NotPresent
+
+error: custom attribute panicked
+    --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:1369:1
+     |
+1369 | #[tauri::command]
+     | ^^^^^^^^^^^^^^^^^
+     |
+     = help: message: missing `CARGO_PKG_NAME` environment variable: NotPresent
+
+error: custom attribute panicked
+    --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:1414:1
+     |
+1414 | #[tauri::command]
+     | ^^^^^^^^^^^^^^^^^
+     |
+     = help: message: missing `CARGO_PKG_NAME` environment variable: NotPresent
+
+error: custom attribute panicked
+    --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:1460:1
+     |
+1460 | #[tauri::command]
+     | ^^^^^^^^^^^^^^^^^
+     |
+     = help: message: missing `CARGO_PKG_NAME` environment variable: NotPresent
+
+error: custom attribute panicked
+    --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:1478:1
+     |
+1478 | #[tauri::command]
+     | ^^^^^^^^^^^^^^^^^
+     |
+     = help: message: missing `CARGO_PKG_NAME` environment variable: NotPresent
+
+error: custom attribute panicked
+    --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:1494:1
+     |
+1494 | #[tauri::command]
+     | ^^^^^^^^^^^^^^^^^
+     |
+     = help: message: missing `CARGO_PKG_NAME` environment variable: NotPresent
+
+error: custom attribute panicked
+    --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:1503:1
+     |
+1503 | #[tauri::command]
+     | ^^^^^^^^^^^^^^^^^
+     |
+     = help: message: missing `CARGO_PKG_NAME` environment variable: NotPresent
+
+error: custom attribute panicked
+    --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:1528:1
+     |
+1528 | #[tauri::command]
+     | ^^^^^^^^^^^^^^^^^
+     |
+     = help: message: missing `CARGO_PKG_NAME` environment variable: NotPresent
+
+error: custom attribute panicked
+    --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:1544:1
+     |
+1544 | #[tauri::command]
+     | ^^^^^^^^^^^^^^^^^
+     |
+     = help: message: missing `CARGO_PKG_NAME` environment variable: NotPresent
+
+error: custom attribute panicked
+    --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:1549:1
+     |
+1549 | #[tauri::command]
+     | ^^^^^^^^^^^^^^^^^
+     |
+     = help: message: missing `CARGO_PKG_NAME` environment variable: NotPresent
+
+error: custom attribute panicked
+    --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:1603:1
+     |
+1603 | #[tauri::command]
+     | ^^^^^^^^^^^^^^^^^
+     |
+     = help: message: missing `CARGO_PKG_NAME` environment variable: NotPresent
+
+error: custom attribute panicked
+    --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:1655:1
+     |
+1655 | #[tauri::command]
+     | ^^^^^^^^^^^^^^^^^
+     |
+     = help: message: missing `CARGO_PKG_NAME` environment variable: NotPresent
+
+error: custom attribute panicked
+    --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:1676:1
+     |
+1676 | #[tauri::command]
+     | ^^^^^^^^^^^^^^^^^
+     |
+     = help: message: missing `CARGO_PKG_NAME` environment variable: NotPresent
+
+error: custom attribute panicked
+    --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:1746:1
+     |
+1746 | #[tauri::command]
+     | ^^^^^^^^^^^^^^^^^
+     |
+     = help: message: missing `CARGO_PKG_NAME` environment variable: NotPresent
+
+error: custom attribute panicked
+    --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:1778:1
+     |
+1778 | #[tauri::command]
+     | ^^^^^^^^^^^^^^^^^
+     |
+     = help: message: missing `CARGO_PKG_NAME` environment variable: NotPresent
+
+error[E0603]: function `run_blocking` is private
+  --> /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p13-ipc-27_690xj/ipc.rs:1:101
+   |
+ 1 | extern crate ferryx_lib; pub use ferryx_lib::browser; pub mod ipc { pub use ferryx_lib::ipc::{error,run_blocking}; #[path="/Users/indo/co...
+   |                                                                                                     ^^^^^^^^^^^^ private function
+   |
+note: the function `run_blocking` is defined here
+  --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/mod.rs:26:1
+   |
+26 | / pub(crate) async fn run_blocking<T, F>(operation: F) -> Result<T, error::IpcError>
+27 | | where
+28 | |     T: Send + 'static,
+29 | |     F: FnOnce() -> Result<T, error::IpcError> + Send + 'static,
+   | |_______________________________________________________________^
+
+warning: unused imports: `BROWSER_CLEAR_FIND_SCRIPT`, `BROWSER_DOWNLOAD_REQUESTED_EVENT`, `BROWSER_OPEN_REQUESTED_EVENT`, `BROWSER_SHORTCUT_REQUESTED_EVENT`, `BrowserDownloadRequestedPayload`, `BrowserFindResult`, `BrowserGuestAction`, `BrowserOpenRequestedPayload`, `BrowserProfileId`, `BrowserSessionSummary`, `BrowserShortcutRequestedPayload`, `CreateBrowserRequest`, `ImportBrowserCookiesRequest`, `ImportBrowserCookiesResult`, `LogicalRect`, `browser_find_script`, `browser_guest_bridge_script`, `cookie_from_imported`, `download_url_to_path`, `parse_browser_find_callback`, `parse_browser_guest_action`, and `parse_cookie_file`
+  --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:2:5
+   |
+ 2 |     browser_find_script, browser_guest_bridge_script, cookie_from_imported, download_url_to_path,
+   |     ^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^
+ 3 |     parse_browser_find_callback, parse_browser_guest_action, parse_cookie_file,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^
+ 4 |     BrowserAutomationAction, BrowserAutomationElement, BrowserAutomationRequest,
+ 5 |     BrowserAutomationSnapshot, BrowserAutomationTarget, BrowserDownloadRequestedPayload,
+   |                                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ 6 |     BrowserError, BrowserFindResult, BrowserGuestAction, BrowserManager,
+   |                   ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^
+ 7 |     BrowserOpenRequestedPayload, BrowserProfileId, BrowserSessionSummary,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^
+ 8 |     BrowserShortcutRequestedPayload, BrowserState, BrowserStateChangedPayload,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ 9 |     CreateBrowserRequest, ImportBrowserCookiesRequest, ImportBrowserCookiesResult, LogicalRect,
+   |     ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^
+10 |     BROWSER_CLEAR_FIND_SCRIPT, BROWSER_DOWNLOAD_REQUESTED_EVENT, BROWSER_OPEN_REQUESTED_EVENT,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+11 |     BROWSER_SHORTCUT_REQUESTED_EVENT,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `tauri::webview::PageLoadEvent`
+  --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:18:5
+   |
+18 | use tauri::webview::PageLoadEvent;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `State`
+  --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:19:42
+   |
+19 | use tauri::{AppHandle, Emitter, Manager, State};
+   |                                          ^^^^^
+
+error[E0277]: the trait bound `AutomationSnapshotResult: serde::Deserialize<'de>` is not satisfied
+    --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:1572:9
+     |
+1572 |         serde_json::from_str(&snapshot_json).map_err(|error| {
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+     |
+help: the trait `serde_core::de::Deserialize<'_>` is not implemented for `AutomationSnapshotResult`
+    --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:23:1
+     |
+  23 | struct AutomationSnapshotResult {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `AutomationSnapshotResult` type
+     = note: for types from other crates check whether the crate offers a `serde` feature flag
+note: there are multiple different versions of crate `serde_core` in the dependency graph
+    --> /Users/indo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde_core-1.0.229/src/de/mod.rs:554:1
+     |
+ 554 | pub trait Deserialize<'de>: Sized {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this is the required trait
+     |
+    ::: /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:23:1
+     |
+  23 | struct AutomationSnapshotResult {
+     | ------------------------------- this type doesn't implement the required trait
+...
+ 323 |             let selector = serde_json::to_string(selector.ok_or_else(|| {
+     |                            ---------- one version of crate `serde_core` used here, as a dependency of crate `serde_json`
+     |
+    ::: /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p13-ipc-27_690xj/ipc.rs:1:1
+     |
+   1 | extern crate ferryx_lib; pub use ferryx_lib::browser; pub mod ipc { pub use ferryx_lib::ipc::{error,run_blocking}; #[path="/Users/indo/co...
+     | ------------------------ one version of crate `serde_core` used here, as a dependency of crate `serde`
+     |
+    ::: /Users/indo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde_core-1.0.229/src/de/value.rs:1879:5
+     |
+1879 |     pub trait Pair {
+     |     -------------- this is the found trait
+     = help: you can use `cargo tree` to explore your dependency tree
+note: required by a bound in `serde_json::from_str`
+    --> /Users/indo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde_json-1.0.151/src/de.rs:2711:8
+     |
+2709 | pub fn from_str<'a, T>(s: &'a str) -> Result<T>
+     |        -------- required by a bound in this function
+2710 | where
+2711 |     T: de::Deserialize<'a>,
+     |        ^^^^^^^^^^^^^^^^^^^ required by this bound in `from_str`
+
+error[E0599]: no associated item named `Command` found for struct `NSEventModifierFlags` in the current scope
+   --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:252:48
+    |
+252 |         modifiers.insert(NSEventModifierFlags::Command);
+    |                                                ^^^^^^^ associated item not found in `NSEventModifierFlags`
+
+error[E0599]: no associated item named `Control` found for struct `NSEventModifierFlags` in the current scope
+   --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:255:48
+    |
+255 |         modifiers.insert(NSEventModifierFlags::Control);
+    |                                                ^^^^^^^ associated item not found in `NSEventModifierFlags`
+
+error[E0599]: no associated item named `Option` found for struct `NSEventModifierFlags` in the current scope
+   --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:258:48
+    |
+258 |         modifiers.insert(NSEventModifierFlags::Option);
+    |                                                ^^^^^^ associated item not found in `NSEventModifierFlags`
+
+error[E0599]: no associated item named `Shift` found for struct `NSEventModifierFlags` in the current scope
+   --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:261:48
+    |
+261 |         modifiers.insert(NSEventModifierFlags::Shift);
+    |                                                ^^^^^ associated item not found in `NSEventModifierFlags`
+
+error[E0308]: arguments to this function are incorrect
+   --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:276:32
+    |
+276 | ...et key_down = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+277 | ...   NSEventType::KeyDown,
+278 | ...   location,
+    |       -------- expected `objc2_foundation::geometry::CGPoint`, found `objc2_core_foundation::geometry::CGPoint`
+    |
+    = note: `objc2_core_foundation::geometry::CGPoint` and `objc2_foundation::geometry::CGPoint` have similar names, but are actually distinct types
+note: `objc2_core_foundation::geometry::CGPoint` is defined in crate `objc2_core_foundation`
+   --> /Users/indo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-core-foundation-0.3.2/src/geometry.rs:52:1
+    |
+ 52 | pub struct CGPoint {
+    | ^^^^^^^^^^^^^^^^^^
+note: `objc2_foundation::geometry::CGPoint` is defined in crate `objc2_foundation`
+   --> /Users/indo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-foundation-0.2.2/src/geometry.rs:54:1
+    |
+ 54 | pub struct CGPoint {
+    | ^^^^^^^^^^^^^^^^^^
+note: expected `&NSString`, found `&Retained<NSString>`
+   --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:283:21
+    |
+283 |                     &characters,
+    |                     ^^^^^^^^^^^
+    = note: expected reference `&objc2_foundation::generated::__NSString::NSString`
+               found reference `&objc2::rc::retained::Retained<NSString>`
+note: expected `&NSString`, found `&Retained<NSString>`
+   --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:284:21
+    |
+284 |                     &characters,
+    |                     ^^^^^^^^^^^
+    = note: expected reference `&objc2_foundation::generated::__NSString::NSString`
+               found reference `&objc2::rc::retained::Retained<NSString>`
+note: associated function defined here
+   --> /Users/indo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-app-kit-0.2.2/src/generated/NSEvent.rs:817:23
+    |
+817 | ...fn keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: arguments to this function are incorrect
+   --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:289:30
+    |
+289 | ...et key_up = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+290 | ...   NSEventType::KeyUp,
+291 | ...   location,
+    |       -------- expected `objc2_foundation::geometry::CGPoint`, found `objc2_core_foundation::geometry::CGPoint`
+    |
+    = note: `objc2_core_foundation::geometry::CGPoint` and `objc2_foundation::geometry::CGPoint` have similar names, but are actually distinct types
+note: `objc2_core_foundation::geometry::CGPoint` is defined in crate `objc2_core_foundation`
+   --> /Users/indo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-core-foundation-0.3.2/src/geometry.rs:52:1
+    |
+ 52 | pub struct CGPoint {
+    | ^^^^^^^^^^^^^^^^^^
+note: `objc2_foundation::geometry::CGPoint` is defined in crate `objc2_foundation`
+   --> /Users/indo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-foundation-0.2.2/src/geometry.rs:54:1
+    |
+ 54 | pub struct CGPoint {
+    | ^^^^^^^^^^^^^^^^^^
+note: expected `&NSString`, found `&Retained<NSString>`
+   --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:296:21
+    |
+296 |                     &characters,
+    |                     ^^^^^^^^^^^
+    = note: expected reference `&objc2_foundation::generated::__NSString::NSString`
+               found reference `&objc2::rc::retained::Retained<NSString>`
+note: expected `&NSString`, found `&Retained<NSString>`
+   --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:297:21
+    |
+297 |                     &characters,
+    |                     ^^^^^^^^^^^
+    = note: expected reference `&objc2_foundation::generated::__NSString::NSString`
+               found reference `&objc2::rc::retained::Retained<NSString>`
+note: associated function defined here
+   --> /Users/indo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-app-kit-0.2.2/src/generated/NSEvent.rs:817:23
+    |
+817 | ...fn keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+   --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:303:32
+    |
+303 |                 native.keyDown(&key_down);
+    |                        ------- ^^^^^^^^^ expected `&NSEvent`, found `&Retained<NSEvent>`
+    |                        |
+    |                        arguments to this method are incorrect
+    |
+    = note: expected reference `&objc2_app_kit::generated::__NSEvent::NSEvent`
+               found reference `&objc2::rc::id::Retained<NSEvent>`
+note: method defined here
+   --> /Users/indo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-app-kit-0.3.2/src/generated/NSResponder.rs:153:16
+    |
+153 |         pub fn keyDown(&self, event: &NSEvent);
+    |                ^^^^^^^
+
+error[E0308]: mismatched types
+   --> /Users/indo/code/project/orca-lite/src-tauri/src/ipc/browser.rs:304:30
+    |
+304 |                 native.keyUp(&key_up);
+    |                        ----- ^^^^^^^ expected `&NSEvent`, found `&Retained<NSEvent>`
+    |                        |
+    |                        arguments to this method are incorrect
+    |
+    = note: expected reference `&objc2_app_kit::generated::__NSEvent::NSEvent`
+               found reference `&objc2::rc::id::Retained<NSEvent>`
+note: method defined here
+   --> /Users/indo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-app-kit-0.3.2/src/generated/NSResponder.rs:158:16
+    |
+158 |         pub fn keyUp(&self, event: &NSEvent);
+    |                ^^^^^
+
+error: aborting due to 30 previous errors; 3 warnings emitted
+
+Some errors have detailed explanations: E0277, E0308, E0599, E0603.
+For more information about an error, try `rustc --explain E0277`.
+
+exit=1

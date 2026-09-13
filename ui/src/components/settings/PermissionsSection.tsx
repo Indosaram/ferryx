@@ -179,14 +179,14 @@ export function PermissionsSection() {
             All system permissions granted. Ferryx has full access for terminal commands, subagents, and alerts.
           </AlertDescription>
         </Alert>
-      ) : (
+      ) : status?.platform === "macos" ? (
         <Alert className="border-amber-500/30 bg-amber-500/10 text-amber-300">
           <AlertTriangle className="size-4 text-amber-400" />
           <AlertDescription className="text-xs">
             Granting Full Disk Access stops macOS from showing alerts such as &ldquo;Ferryx would like to access your Photo Library&rdquo; or folder access prompts when subagents and terminal tools inspect files.
           </AlertDescription>
         </Alert>
-      )}
+      ) : null}
 
       <div className="space-y-4">
         {status?.platform === "macos" && (

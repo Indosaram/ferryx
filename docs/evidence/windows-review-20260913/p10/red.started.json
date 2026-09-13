@@ -1,0 +1,31 @@
+{
+  "cwd": "/Users/indo/code/project/orca-lite",
+  "root": "/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-p10-st_01a09a03-5ABx5b",
+  "cargo": "/Users/indo/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo",
+  "cargoHome": "/private/tmp/p32-adjacent-st_01a099cd-ZyJhzW/cargo",
+  "rustupHome": "/Users/indo/.rustup",
+  "target": "/private/tmp/p32-adjacent-st_01a099cd-ZyJhzW/target",
+  "commands": [
+    [
+      "test",
+      "--manifest-path",
+      "src-tauri/Cargo.toml",
+      "--lib",
+      "ssh::config::tests::p10_",
+      "--",
+      "--nocapture"
+    ],
+    [
+      "test",
+      "--manifest-path",
+      "src-tauri/Cargo.toml",
+      "--test",
+      "worktree_safety",
+      "p10_namespace_accepts_nested_unicode_and_non_devices",
+      "--",
+      "--exact",
+      "--nocapture"
+    ]
+  ],
+  "configSha256": "169dd263b9dae971a9b0f49a17f98a6a0c966d948edd17701bbd3749b8b5c6c6"
+}

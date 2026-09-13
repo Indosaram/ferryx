@@ -335,6 +335,30 @@ pub fn derived_cell_metrics_for_scale(scale_factor: f64) -> CellMetrics {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn p06_windows_stack_matches_explicit_installed_face() {
+        p06_assert_stack_matches("Consolas, \"Courier New\", monospace", "Consolas");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn p06_windows_missing_first_face_uses_next_family() {
+        p06_assert_stack_matches("P06 Definitely Missing Font, \"Courier New\", monospace", "Courier New");
+    }
+
+    #[cfg(target_os = "windows")]
+    fn p06_assert_stack_matches(stack: &str, family: &str) {
+        let requested = FontManager::new_with_family_and_size(stack, 17.0);
+        let reference = FontManager::new_with_family_and_size(family, 17.0);
+        for text in ["A", "M", "g", "W"] {
+            let expected = reference.rasterize_glyph(text, 32, 40, false, false);
+            assert!(expected.buffer().iter().any(|&byte| byte != 0), "known font reference must have ink");
+            let actual = requested.rasterize_glyph(text, 32, 40, false, false);
+            assert_eq!(actual.buffer(), expected.buffer(), "stack must select {family} for {text}");
+        }
+    }
+
     #[test]
     fn test_font_manager_derives_nonzero_metrics_and_rasterizes() {
         let mgr = FontManager::global();

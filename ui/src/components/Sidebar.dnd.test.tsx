@@ -21,18 +21,15 @@ const dndHarness = vi.hoisted(() => ({
 }));
 
 vi.mock("@dnd-kit/core", () => ({
-  DndContext: (props: { children: ReactNode; onDragStart?: DragStart; onDragEnd?: DragEnd }) => {
+  DndContext: (props: { children: ReactNode; sensors: Array<{ sensor: unknown; options?: unknown }>; onDragStart?: DragStart; onDragEnd?: DragEnd }) => {
     dndHarness.props = props;
+    dndHarness.sensors = props.sensors;
     return props.children;
   },
   DragOverlay: ({ children }: { children: ReactNode }) => children,
   KeyboardSensor: function KeyboardSensor() {},
   PointerSensor: function PointerSensor() {},
-  useSensor: (sensor: unknown, options?: unknown) => {
-    const descriptor = { sensor, options };
-    dndHarness.sensors.push(descriptor);
-    return descriptor;
-  },
+  useSensor: (sensor: unknown, options?: unknown) => ({ sensor, options }),
   useSensors: (...sensors: unknown[]) => sensors,
 }));
 
@@ -169,7 +166,7 @@ describe("Sidebar drag reorder", () => {
     );
 
     expect(JSON.parse(localStorage.getItem(SIDEBAR_WORKTREE_ORDER_STORAGE_KEY) ?? "{}"))
-      .toEqual({ alpha: [second.path, first.path] });
+      .toEqual({ alpha: ["sidebar-worktree:alpha:/repos/alpha/second", "sidebar-worktree:alpha:/repos/alpha/first"] });
     expect(visibleWorktreeNames()).toEqual(["second", "first"]);
 
     unmount();
@@ -204,7 +201,7 @@ describe("Sidebar drag reorder", () => {
     );
 
     expect(JSON.parse(localStorage.getItem(SIDEBAR_WORKTREE_ORDER_STORAGE_KEY) ?? "{}"))
-      .toEqual({ alpha: [first.path, second.path] });
+      .toEqual({ alpha: ["sidebar-worktree:alpha:/repos/alpha/first", "sidebar-worktree:alpha:/repos/alpha/second"] });
   });
 
   it("does not render separate reorder grip handles and makes rows directly draggable", () => {

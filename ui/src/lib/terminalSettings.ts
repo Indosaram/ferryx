@@ -1,4 +1,5 @@
 import { DEFAULT_TERMINAL_FONT_STACK } from "./tauri";
+import type { RemotePreferenceTarget } from "./remoteClient";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { getMigratedItem, TERMINAL_SETTINGS_STORAGE_KEY } from "./storageKeys";
@@ -225,20 +226,27 @@ export async function fetchCachedNativePreferences(force = false): Promise<Termi
   return globalPreferencesPromise;
 }
 
-export function useTerminalSettings() {
+export function useTerminalSettings(remote?: RemotePreferenceTarget) {
+  const baseUrl = remote?.baseUrl;
+  const token = remote?.token;
   const [localSettings, setLocalSettings] = useState<TerminalSettings>(() => loadTerminalSettings());
-  const [resolvedPreferences, setNativePreferences] = useState<TerminalPreferences | null>(
-    () => lastResolvedPreferences,
-  );
+  const [resolution, setNativePreferences] = useState(() => ({
+    baseUrl, token, preferences: remote ? null : lastResolvedPreferences,
+  }));
+  const resolvedPreferences = resolution.baseUrl === baseUrl && resolution.token === token
+    ? resolution.preferences : null;
   const nativePreferences = resolvedPreferences ?? FALLBACK_PREFERENCES;
   const preferenceRequest = useRef(0);
 
   const refreshNativePreferences = useCallback(async (force = true): Promise<TerminalPreferences> => {
     const request = ++preferenceRequest.current;
-    const preferences = await fetchCachedNativePreferences(force);
-    if (request === preferenceRequest.current) setNativePreferences(preferences);
+    // Scoped web preferences never enter the process-wide local appearance cache.
+    const preferences = baseUrl !== undefined && token !== undefined
+      ? await getTerminalPreferences({ baseUrl, token })
+      : await fetchCachedNativePreferences(force);
+    if (request === preferenceRequest.current) setNativePreferences({ baseUrl, token, preferences });
     return preferences;
-  }, []);
+  }, [baseUrl, token]);
 
   useEffect(() => {
     void refreshNativePreferences(false);

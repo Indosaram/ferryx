@@ -22,13 +22,20 @@ describe("TerminalTransport abstractions", () => {
         sessionId: "sess-100",
         worktreePath: "/repo/path",
       },
+      {
+        sessionId: "sess-exited",
+        worktreePath: "/repo/exited",
+        daemonEpoch: "epoch-exited",
+        running: false,
+      },
     ]);
     const transport = new TauriTerminalTransport();
     const sessions = await transport.listSessions();
 
     expect(listSpy).toHaveBeenCalled();
     expect(sessions).toEqual([
-      { sessionId: "sess-100", worktreePath: "/repo/path", daemonEpoch: null },
+      { sessionId: "sess-100", worktreePath: "/repo/path", daemonEpoch: null, running: true },
+      { sessionId: "sess-exited", worktreePath: "/repo/exited", daemonEpoch: "epoch-exited", running: false },
     ]);
   });
 

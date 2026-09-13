@@ -398,6 +398,10 @@ impl TerminalEngine for NativeTerminal {
         if cols == 0 || rows == 0 {
             return Err(NativeTerminalError::InvalidDimensions(cols, rows));
         }
+        self.context.cols.store(cols, Ordering::Release);
+        self.context.rows.store(rows, Ordering::Release);
+        self.context.cell_width.store(cell_width_px, Ordering::Release);
+        self.context.cell_height.store(cell_height_px, Ordering::Release);
         let synchronized_output = self.synchronized_output_enabled()?;
 
         // SAFETY: Category: Foreign State Mutation.

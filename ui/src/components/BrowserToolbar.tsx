@@ -20,6 +20,7 @@ import {
   openExternalUrl,
   setBrowserZoom,
   type BrowserShortcutAction,
+  type BrowserShortcutDomEvent,
 } from "../lib/browserTauri";
 import {
   BROWSER_HISTORY_EVENT,
@@ -42,8 +43,6 @@ interface BrowserToolbarProps {
   onGoBack?: () => void;
   onGoForward?: () => void;
 }
-
-type BrowserShortcutDomEvent = CustomEvent<{ action: BrowserShortcutAction }>;
 
 export function BrowserToolbar({
   tab,
@@ -144,7 +143,7 @@ export function BrowserToolbar({
 
     const handleDomShortcut = (event: Event) => {
       const detail = (event as BrowserShortcutDomEvent).detail;
-      if (detail?.action) runShortcut(detail.action);
+      if (detail?.browserId === tab.browserId) runShortcut(detail.action);
     };
     window.addEventListener(BROWSER_SHORTCUT_EVENT, handleDomShortcut);
 

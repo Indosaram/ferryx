@@ -1,0 +1,20 @@
+Sun Sep 13 09:29:52 UTC 2026
+Darwin arm64
+1.4.0
+/Users/indo/.bun/bin/bun
+/opt/homebrew/bin/bash
+GNU bash, version 5.3.15(1)-release (aarch64-apple-darwin25.4.0)
+Copyright (C) 2025 Free Software Foundation, Inc.
+License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>
+
+This is free software; you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+da6eec06d65551f67bbc43f09910cde470c3478d
+ad9ccea8c515ddecb074358d817d4d661b857f053d0356e3a13a91c71cfd771a  scripts/macos-dev-runner.test.mjs
+c29635f5a920dddda93a3273fa37f7e5a3bd666a11c35b37b0ee3ae9ef0ccb77  scripts/macos-dev-runner.sh
+77250111649fb5a4fdf8ebb3dad95d8d200ae4494f9fd785765979410a4b1b60  site/src/seo.test.ts
+diff-check exit=0
+CLEANUP verified absent: /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx dev signing-BvYPBS
+CLEANUP verified absent: /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx dev signing-NTEdy1
+CLEANUP verified absent: /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-seo-pages-Wo3ybX
+Site build outputs retained: site/dist and site/node_modules/.cache/seo-root-dist (existing suite output locations, not deleted as shared artifacts).

@@ -611,8 +611,7 @@ describe("SettingsDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Remote Access" }));
 
     const remote = screen.getByRole("region", { name: "Remote Access" });
-    expect(remote).toHaveTextContent(/authorized browser profiles reconnect/i);
-    expect(remote).toHaveTextContent(/re-pair only after browser storage is cleared, a device is revoked, or a different browser profile\/device is used/i);
+    expect(remote).toHaveTextContent(/authorized browsers reconnect automatically while this stays on/i);
   });
 
   it("automatically generates and displays a new QR code when Remote Access is already Active with paired devices present", async () => {

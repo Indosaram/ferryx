@@ -568,7 +568,46 @@ fn login_shell_path() -> Option<OsString> {
 }
 
 pub(crate) fn resolve_binary(name: &str, search_paths: &[PathBuf]) -> Option<PathBuf> {
+    resolve_binary_with_env(name, search_paths, cfg!(windows), env::var("PATHEXT").ok().as_deref())
+}
+
+fn resolve_binary_with_env(
+    name: &str,
+    search_paths: &[PathBuf],
+    windows: bool,
+    pathext: Option<&str>,
+) -> Option<PathBuf> {
     if name.contains('/') || name.contains('\\') {
+        return None;
+    }
+    if windows {
+        // Only extensions with a supported native or command-script launch policy.
+        let extensions: Vec<String> = pathext.unwrap_or(".COM;.EXE;.BAT;.CMD")
+            .split(';')
+            .map(|ext| ext.trim().to_ascii_lowercase())
+            .filter(|ext| matches!(ext.as_str(), ".com" | ".exe" | ".bat" | ".cmd"))
+            .collect();
+        let candidates: Vec<String> = if Path::new(name).extension().is_some() {
+            if !extensions.iter().any(|ext| name.to_ascii_lowercase().ends_with(ext)) {
+                return None;
+            }
+            vec![name.to_string()]
+        } else {
+            extensions.iter().map(|ext| format!("{name}{ext}")).collect()
+        };
+        for dir in search_paths {
+            for candidate in &candidates {
+                // Preserve the directory entry's spelling on both case-sensitive and
+                // case-insensitive filesystems (the returned path is displayed in the UI).
+                if let Ok(entries) = std::fs::read_dir(dir) {
+                    if let Some(path) = entries.filter_map(Result::ok)
+                        .find(|entry| entry.file_name().to_string_lossy().eq_ignore_ascii_case(candidate) && entry.path().is_file())
+                        .map(|entry| entry.path()) {
+                        return Some(path);
+                    }
+                }
+            }
+        }
         return None;
     }
     search_paths
@@ -942,5 +981,53 @@ mod tests {
         assert!(!is_valid_opencode_session_id("ses_"));
         assert!(!is_valid_opencode_session_id("ses_has space"));
         assert!(!is_valid_opencode_session_id("ses_has;semi"));
+    }
+}
+
+#[cfg(test)]
+mod p09_tests {
+    use super::*;
+
+    #[test]
+    fn windows_pathext_order_case_and_explicit_extension() {
+        let dir = std::env::temp_dir().join(format!("p09-path-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let result = std::panic::catch_unwind(|| {
+            for ext in ["EXE", "COM", "CmD", "bat"] {
+                std::fs::write(dir.join(format!("fixture.{ext}")), b"fixture").unwrap();
+            }
+            for (extensions, expected) in [
+                (".EXE;.COM;.CMD;.BAT", "fixture.EXE"),
+                (".COM;.EXE;.CMD;.BAT", "fixture.COM"),
+                (".CMD;.BAT;.EXE", "fixture.CmD"),
+                (".BAT;.CMD", "fixture.bat"),
+            ] {
+                assert_eq!(resolve_binary_with_env("fixture", &[dir.clone()], true, Some(extensions)), Some(dir.join(expected)));
+            }
+            assert_eq!(resolve_binary_with_env("FIXTURE.cmd", &[dir.clone()], true, Some(".CMD")), Some(dir.join("fixture.CmD")));
+            std::fs::write(dir.join("data.txt"), b"data").unwrap();
+            assert_eq!(resolve_binary_with_env("data.txt", &[dir.clone()], true, Some(".TXT;.CMD")), None);
+            assert_eq!(resolve_binary_with_env("../fixture", &[dir.clone()], true, Some(".EXE")), None);
+        });
+        std::fs::remove_dir_all(&dir).unwrap();
+        if let Err(error) = result { std::panic::resume_unwind(error); }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_requires_executable_permission() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("p09-unix-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let result = std::panic::catch_unwind(|| {
+            let file = dir.join("fixture");
+            std::fs::write(&file, b"fixture").unwrap();
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert_eq!(resolve_binary_with_env("fixture", &[dir.clone()], false, None), None);
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert_eq!(resolve_binary_with_env("fixture", &[dir.clone()], false, None), Some(file));
+        });
+        std::fs::remove_dir_all(&dir).unwrap();
+        if let Err(error) = result { std::panic::resume_unwind(error); }
     }
 }

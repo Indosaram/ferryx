@@ -80,6 +80,58 @@ fn test_key_encode_plain_and_mode_sensitive_arrow_keys() {
 }
 
 #[test]
+fn test_key_encode_legacy_ctrl_backslash_without_utf8() {
+    let term = NativeTerminal::new(80, 24).expect("create terminal");
+    let event = KeyEvent {
+        key: KeyCode::Character('\\'),
+        action: KeyAction::Press,
+        modifiers: KeyModifiers { ctrl: true, ..Default::default() },
+        utf8: None,
+    };
+    assert_eq!(term.encode_key(&event).expect("encode Ctrl+backslash"), [28]);
+}
+
+#[test]
+fn test_key_encode_legacy_ctrl_right_bracket_without_utf8() {
+    let term = NativeTerminal::new(80, 24).expect("create terminal");
+    let event = KeyEvent {
+        key: KeyCode::Character(']'),
+        action: KeyAction::Press,
+        modifiers: KeyModifiers { ctrl: true, ..Default::default() },
+        utf8: None,
+    };
+    assert_eq!(term.encode_key(&event).expect("encode Ctrl+]"), [29]);
+}
+
+#[test]
+fn test_key_encode_punctuation_preserves_escape_fixterms_and_kitty() {
+    let mut term = NativeTerminal::new(80, 24).expect("create terminal");
+    let escape = KeyEvent::new(KeyCode::Escape, KeyAction::Press);
+    assert_eq!(term.encode_key(&escape).expect("encode Escape"), b"\x1b");
+
+    let mut bracket = KeyEvent {
+        key: KeyCode::Character('['),
+        action: KeyAction::Press,
+        modifiers: KeyModifiers { ctrl: true, ..Default::default() },
+        utf8: Some("[".into()),
+    };
+    // Ghostty deliberately distinguishes Ctrl+[ from Escape via fixterms.
+    assert_eq!(term.encode_key(&bracket).expect("encode fixterms Ctrl+["), b"\x1b[91;5u");
+    bracket.utf8 = None;
+    // Without text, the existing legacy Ctrl+[ path emits nothing, not ESC.
+    assert_eq!(term.encode_key(&bracket).expect("encode legacy Ctrl+[ without text"), b"");
+
+    term.feed_str("\x1b[>1u").expect("enable Kitty disambiguation");
+    for (character, expected) in [('\\', &b"\x1b[92;5u"[..]), (']', &b"\x1b[93;5u"[..]), ('[', &b"\x1b[91;5u"[..])] {
+        bracket.key = KeyCode::Character(character);
+        assert_eq!(term.encode_key(&bracket).expect("encode Kitty punctuation"), expected);
+    }
+    assert_eq!(term.encode_key(&escape).expect("encode Kitty Escape"), b"\x1b[27u");
+    term.feed_str("\x1b[<u").expect("restore legacy keyboard mode");
+    assert_eq!(term.encode_key(&escape).expect("encode restored Escape"), b"\x1b");
+}
+
+#[test]
 fn test_key_encode_rejects_c0_control_utf8_payload() {
     // Given: an initialized terminal engine instance
     let term: Box<dyn TerminalEngine> =

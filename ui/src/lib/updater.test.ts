@@ -1,4 +1,13 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const rustRegistry = readFileSync(resolve(__dirname, "../../../src-tauri/src/lib.rs"), "utf8");
+const registeredUpdaterCommands = new Set(
+  [...rustRegistry.matchAll(/tauri::generate_handler!\[([\s\S]*?)\]/g)].flatMap((handler) =>
+    [...(handler[1] ?? "").matchAll(/crate::ipc::updater::(\w+)\s*,/g)].map((entry) => entry[1]),
+  ),
+);
 
 const check = vi.fn();
 const relaunch = vi.fn();
@@ -11,7 +20,12 @@ vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: (...args: unknown[]) =>
 vi.mock("@tauri-apps/api/app", () => ({ getVersion: (...args: unknown[]) => getVersion(...args) }));
 vi.mock("@tauri-apps/api/core", () => ({
   isTauri: () => isTauri(),
-  invoke: (...args: unknown[]) => invoke(...args),
+  invoke: async (command: string) => {
+    if (command !== "cmd_updater_managed_externally" || !registeredUpdaterCommands.has(command)) {
+      throw new Error(`Unregistered updater command: ${command}`);
+    }
+    return invoke(command);
+  },
 }));
 
 async function freshModule() {
@@ -43,6 +57,21 @@ describe("updater status machine", () => {
     invoke.mockReset();
     invoke.mockResolvedValue(false);
     isTauri.mockReturnValue(true);
+  });
+
+  it.each(["installer", "native"])("offers plugin updates when the channel is %s", async () => {
+    // Given: both non-Store channels report updater-owned in the Rust command.
+    invoke.mockResolvedValue(false);
+    check.mockResolvedValue(updateHandle([]));
+    const updater = await freshModule();
+
+    // When
+    await updater.checkForUpdate();
+
+    // Then
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("cmd_updater_managed_externally");
+    expect(check).toHaveBeenCalledTimes(1);
+    expect(updater.getUpdateStatus()).toMatchObject({ state: "available", version: "2026.08.26.1" });
   });
 
   it("starts idle", async () => {

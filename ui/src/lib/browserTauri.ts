@@ -89,6 +89,9 @@ export type BrowserShortcutRequestedPayload = {
   action: BrowserShortcutAction;
 };
 
+/** App-webview shortcuts always address one native browser, never broadcast an action. */
+export type BrowserShortcutDomEvent = CustomEvent<BrowserShortcutRequestedPayload>;
+
 export type BrowserFindResult = {
   matchCount: number;
   found: boolean;

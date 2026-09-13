@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
+import { parse } from "yaml";
 import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -327,6 +328,28 @@ test("PR check workflow wires the release workflow policy check", () => {
     /bun\s+scripts\/release-workflow-policy\.mjs/,
     "build-test.yml must execute release-workflow-policy.mjs",
   );
+});
+
+test("Windows CI executes isolated nonzero platform-relevant contracts", () => {
+  const workflow = parse(readFileSync(BUILD_TEST_PATH, "utf8"));
+  const job = workflow.jobs['rust-check'];
+  const windows = job.strategy.matrix.include.filter(row => row.os_name === 'windows');
+  assert.equal(windows.length, 1);
+  assert.equal(windows[0].platform, 'windows-latest');
+  assert.equal(windows[0].target, 'x86_64-pc-windows-msvc');
+  assert.equal(job['runs-on'], '${{ matrix.platform }}');
+  const steps = job.steps.filter(step => step.if === "matrix.os_name == 'windows'" && /cargo test\b/.test(step.run ?? ''));
+  assert.ok(steps.length > 0, 'Windows must execute tests, not just check/link');
+  const commands = steps.map(step => step.run).join('\n');
+  assert.doesNotMatch(commands, /--no-run|--list|--lib|daemon_persistence_contract/);
+  for (const target of ['windows_edge_probe_contract', 'windows_window_opacity_contract']) {
+    assert.match(commands, new RegExp(`--test ${target}\\b`));
+    const source = readFileSync(join(REPO_ROOT, 'src-tauri/tests', `${target}.rs`), 'utf8');
+    assert.match(source, /#\[test\]/);
+    assert.doesNotMatch(source, /#!\[cfg\((?:unix|target_os = "linux")\)\]/);
+  }
+  assert.match(commands, /--target \$\{\{ matrix.target \}\}/);
+  assert.match(commands, /--test-threads=1/);
 });
 
 test("Windows CI links the native binary before a release tag", () => {

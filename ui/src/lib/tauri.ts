@@ -1,7 +1,7 @@
 import type { DagRunSnapshot } from "./dagTypes";
 import type { RunTarget } from "./scopedContracts";
 export const DEFAULT_TERMINAL_FONT_STACK = 'MesloLGS NF, "Noto Sans KR", monospace';
-import { defaultRemoteClient, getRemoteAuthToken } from "./remoteClient";
+import { defaultRemoteClient, getRemoteAuthToken, RemoteClient, type RemotePreferenceTarget } from "./remoteClient";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { switchDebug } from "./switchDebug";
@@ -178,11 +178,12 @@ export async function listProjectBranches(workspaceId: string) {
   return invokeCommand<LocalBranch[]>("cmd_project_branches", { request: { workspaceId } });
 }
 
-export async function getTerminalPreferences(): Promise<TerminalPreferences> {
+export async function getTerminalPreferences(remote?: RemotePreferenceTarget): Promise<TerminalPreferences> {
   if (!isTauri()) {
-    if (getRemoteAuthToken()) {
+    if (remote || getRemoteAuthToken()) {
       try {
-        return await defaultRemoteClient.fetchJson<TerminalPreferences>("/api/v1/terminal/preferences");
+        const client = remote ? new RemoteClient(remote.baseUrl, remote.token) : defaultRemoteClient;
+        return await client.fetchJson<TerminalPreferences>("/api/v1/terminal/preferences");
       } catch {
         // Fallback below
       }

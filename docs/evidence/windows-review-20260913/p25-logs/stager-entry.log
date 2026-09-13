@@ -1,0 +1,18 @@
+69 |   }
+70 | }
+71 | 
+72 | if (import.meta.main) {
+73 |   const receiptPath = process.argv[2];
+74 |   assert(receiptPath, "explicit build-receipt JSON required; no automatic build or fallback staging");
+       ^
+AssertionError: explicit build-receipt JSON required; no automatic build or fallback staging
+ generatedMessage: false,
+     actual: undefined,
+   expected: true,
+   operator: "==",
+       diff: "simple",
+       code: "ERR_ASSERTION"
+
+      at /Users/indo/code/project/orca-lite/scripts/build-remote-helpers.mjs:74:3
+
+Bun v1.4.0 (macOS arm64)

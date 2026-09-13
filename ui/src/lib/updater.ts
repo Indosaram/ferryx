@@ -56,7 +56,7 @@ let managedExternallyCache: boolean | null = null;
 async function updatesManagedExternally(): Promise<boolean> {
   if (managedExternallyCache === null) {
     try {
-      managedExternallyCache = await invoke<boolean>("updater_managed_externally");
+      managedExternallyCache = await invoke<boolean>("cmd_updater_managed_externally");
     } catch {
       managedExternallyCache = false;
     }

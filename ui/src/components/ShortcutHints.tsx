@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { formatBindingLabel, isMacShortcutPlatform, matchesBinding, SHORTCUTS, type ShortcutActionId } from "../lib/shortcuts";
+import { formatBindingLabel, isMacShortcutPlatform, matchesBinding, resolveBinding, SHORTCUTS, type ShortcutActionId } from "../lib/shortcuts";
 
 export type ShortcutHintContext = {
   readonly tabIds: readonly string[];
@@ -88,7 +88,7 @@ export function ShortcutHints(props: ShortcutHintsProps) {
         for (const shortcut of SHORTCUTS) {
           if (!enabled.has(shortcut.id) || !actions.includes(shortcut.id)) continue;
           if (editing && shortcut.id !== "settings.toggle" && shortcut.id !== "commandPalette.open" && !shortcut.id.startsWith("browser.")) continue;
-          const binding = [shortcut.binding, ...(shortcut.aliases ?? [])].find((candidate) =>
+          const binding = [shortcut.binding, ...(shortcut.aliases ?? [])].map((candidate) => resolveBinding(candidate, isMac)).find((candidate) =>
             (!event.metaKey || Boolean(candidate.mod && isMac))
             && (!event.ctrlKey || Boolean(candidate.control || (candidate.mod && !isMac)))
             && (!event.altKey || Boolean(candidate.alt))

@@ -1,0 +1,1 @@
+Lead user turn grants st_01a099ff EXCLUSIVE /private/tmp/p32-adjacent-st_01a099cd-ZyJhzW/{target,cargo} through exact P02 RED/GREEN batch. Direct Rust1.98.1, owned explicit environment/sandbox. Preserve user cargo-tauri dev. Release immediately after checks; P08 waiting. lib.rs single switch-debug writer allocated.

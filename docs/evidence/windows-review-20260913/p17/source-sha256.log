@@ -1,0 +1,3 @@
+131aa01f3921514a7792b8d0896541d21b309fadba0ef160dfc309e0e7ac1448  scripts/build-msix.ps1
+a5204dff9acb1141d3c098cee2e1fa4bc3c75bf5ff70e3fe8c002c54bd721108  scripts/test-build-msix.ps1
+39ce06318980284b654782218a36ed8bbcc78d11a0cb6736e3dada44c5eb5ff8  docs/evidence/windows-review-20260913/p17/build-msix.original.ps1

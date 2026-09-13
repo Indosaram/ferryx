@@ -15,4 +15,17 @@ describe("push client boundaries", () => {
     const client = new PushClient({request: async () => { throw new Error("offline"); }}, {pushManager: {getSubscription: async () => subscription}} as unknown as ServiceWorkerRegistration);
     await expect(client.disable()).rejects.toThrow("offline"); expect(removed).toBe(false);
   });
+  it("enable registers subscription with backend", async () => {
+    const apiRequest = vi.fn().mockResolvedValue({ ok: true });
+    const fakeSub = { endpoint: "https://push.test/sub", toJSON: () => ({ endpoint: "https://push.test/sub" }) };
+    const client = new PushClient({ request: apiRequest }, {
+      pushManager: {
+        getSubscription: vi.fn().mockResolvedValue(fakeSub),
+        subscribe: vi.fn(),
+      }
+    } as unknown as ServiceWorkerRegistration);
+    const state = await client.enable();
+    expect(state).toBe("enabled");
+    expect(apiRequest).toHaveBeenCalledWith("/push/subscribe", fakeSub);
+  });
 });

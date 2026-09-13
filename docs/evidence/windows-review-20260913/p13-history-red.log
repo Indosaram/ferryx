@@ -1,0 +1,18 @@
+Direct source manager SHA256 f575ec7a30e3a50e9a2eb2ee4d4b23e3c019eafeff95cd0589015849ac6d8e4d
+
+running 1 test
+test native_history_invalidates_same_url_snapshot ... FAILED
+
+failures:
+
+failures:
+    native_history_invalidates_same_url_snapshot
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+thread 'native_history_invalidates_same_url_snapshot' (3668527) panicked at /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p13-history-7u_ffep0/history.rs:18:5:
+assertion failed: pending.generation > state.generation
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+exit=101

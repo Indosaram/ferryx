@@ -37,6 +37,7 @@ pub const GHOSTTY_TERMINAL_OPT_USERDATA: c_int = 0;
 pub const GHOSTTY_TERMINAL_OPT_WRITE_PTY: c_int = 1;
 pub const GHOSTTY_TERMINAL_OPT_BELL: c_int = 2;
 pub const GHOSTTY_TERMINAL_OPT_TITLE_CHANGED: c_int = 5;
+pub const GHOSTTY_TERMINAL_OPT_SIZE: c_int = 6;
 pub const GHOSTTY_TERMINAL_OPT_TITLE: c_int = 9;
 pub const GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND: c_int = 11;
 pub const GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND: c_int = 12;
@@ -94,6 +95,8 @@ pub const GHOSTTY_MOUSE_ENCODER_OPT_SIZE: c_int = 2;
 
 // GhosttyKey physical key code constants matching `ghostty/vt/key/event.h`.
 pub const GHOSTTY_KEY_UNIDENTIFIED: c_int = 0;
+pub const GHOSTTY_KEY_BACKSLASH: c_int = 2;
+pub const GHOSTTY_KEY_BRACKET_RIGHT: c_int = 4;
 pub const GHOSTTY_KEY_DIGIT_0: c_int = 6;
 pub const GHOSTTY_KEY_A: c_int = 20;
 pub const GHOSTTY_KEY_BACKSPACE: c_int = 53;

@@ -199,7 +199,7 @@ async fn production_paste_boundary_rejects_detached_and_unattached_session() {
     // Paste to detached session must fail and not recreate state
     assert!(matches!(
         encode_attached_native_paste(&state, session_id, "after detach"),
-        Err(NativeTerminalError::NoValue)
+        Err(NativeTerminalError::SessionDetached(_))
     ));
     assert!(
         state.ensure_surface_attached(session_id).is_err(),
@@ -209,7 +209,7 @@ async fn production_paste_boundary_rejects_detached_and_unattached_session() {
     // Paste to unattached session must fail
     assert!(matches!(
         encode_attached_native_paste(&state, "unattached-session", "test"),
-        Err(NativeTerminalError::NoValue)
+        Err(NativeTerminalError::SessionDetached(_))
     ));
 }
 
@@ -242,7 +242,7 @@ async fn production_mouse_boundary_rejects_detached_and_unattached_session() {
     // Mouse event to detached session must fail and not recreate state
     assert!(matches!(
         encode_attached_native_mouse(&state, session_id, &mouse_event),
-        Err(NativeTerminalError::NoValue)
+        Err(NativeTerminalError::SessionDetached(_))
     ));
     assert!(
         state.ensure_surface_attached(session_id).is_err(),
@@ -252,7 +252,7 @@ async fn production_mouse_boundary_rejects_detached_and_unattached_session() {
     // Mouse to unattached session must fail
     assert!(matches!(
         encode_attached_native_mouse(&state, "unattached-session", &mouse_event),
-        Err(NativeTerminalError::NoValue)
+        Err(NativeTerminalError::SessionDetached(_))
     ));
 }
 
@@ -544,15 +544,15 @@ async fn selection_and_search_boundaries_reject_detached_and_unattached_sessions
     // After detach, select / copy / search / scroll must be rejected
     assert!(matches!(
         select_attached_native_terminal(&state, session_id, &NativeTerminalSelectMode::All),
-        Err(NativeTerminalError::NoValue)
+        Err(NativeTerminalError::SessionDetached(_))
     ));
     assert!(matches!(
         copy_attached_native_selection(&state, session_id),
-        Err(NativeTerminalError::NoValue)
+        Err(NativeTerminalError::SessionDetached(_))
     ));
     assert!(matches!(
         search_attached_native_terminal(&state, session_id, "foo", true),
-        Err(NativeTerminalError::NoValue)
+        Err(NativeTerminalError::SessionDetached(_))
     ));
     assert!(matches!(
         scroll_attached_native_terminal(
@@ -560,7 +560,7 @@ async fn selection_and_search_boundaries_reject_detached_and_unattached_sessions
             session_id,
             NativeTerminalScrollBehavior::Top.to_scroll_viewport()
         ),
-        Err(NativeTerminalError::NoValue)
+        Err(NativeTerminalError::SessionDetached(_))
     ));
 }
 
@@ -787,4 +787,90 @@ async fn test_double_click_selection_via_surface_host_boundary() {
     let sel2 = copy_attached_native_selection(&state, session_id).expect("copy sel 2");
     println!("AFTER CLICK 2: {:?}", sel2);
     assert_eq!(sel2, "world".to_string());
+}
+
+#[test]
+fn command_wheel_preserves_noncentral_cell_and_ctrl() {
+    use ferryx_lib::ipc::native_terminal::{native_scroll_outcome, NativeTerminalWheelContext};
+    use ferryx_lib::native_terminal::composition::{CellMetrics, LogicalBounds};
+    use ferryx_lib::native_terminal::TerminalWheelOutcome;
+    let mut term = NativeTerminal::new(80, 24).expect("terminal");
+    term.feed(b"\x1b[?1000h\x1b[?1006h").expect("tracking");
+    let bounds = LogicalBounds { x: 100.0, y: 50.0, width: 800.0, height: 480.0, scale_factor: 1.5 };
+    let cells = CellMetrics { width_px: 15, height_px: 30 };
+    let wheel: NativeTerminalWheelContext = serde_json::from_value(serde_json::json!({
+        "position": {"x": 25.0, "y": 70.0},
+        "modifiers": {"shift": false, "ctrl": true, "alt": false, "superKey": false, "capsLock": false, "numLock": false}
+    })).expect("actual wire context");
+    let outcome = native_scroll_outcome(&term, Some(&bounds), Some(&cells),
+        &NativeTerminalScrollBehavior::Delta { rows: -1 }, Some(&wheel)).expect("command policy");
+    assert_eq!(outcome, TerminalWheelOutcome::WritePty(b"\x1b[<80;3;4M".to_vec()));
+}
+
+#[test]
+fn command_shift_wheel_moves_only_primary_viewport() {
+    use ferryx_lib::ipc::native_terminal::{native_scroll_outcome, NativeTerminalWheelContext};
+    use ferryx_lib::native_terminal::TerminalWheelOutcome;
+    let mut term = NativeTerminal::new(80, 24).expect("terminal");
+    let mut sibling = NativeTerminal::new(80, 24).expect("sibling");
+    let history = (0..200).map(|row| format!("row-{row:03}\r\n")).collect::<String>();
+    term.feed(history.as_bytes()).expect("history");
+    sibling.feed(history.as_bytes()).expect("sibling history");
+    term.feed(b"\x1b[?1000h\x1b[?1006h").expect("tracking");
+    let before = term.scrollbar().expect("before").offset;
+    let sibling_before = sibling.scrollbar().expect("sibling before").offset;
+    let wheel = NativeTerminalWheelContext { position: MousePosition { x: 25.0, y: 70.0 },
+        modifiers: KeyModifiers { shift: true, ..Default::default() } };
+    let outcome = native_scroll_outcome(&term, None, None,
+        &NativeTerminalScrollBehavior::Delta { rows: -3 }, Some(&wheel)).expect("command policy");
+    // This variant is the command's zero-PTY-write branch.
+    assert_eq!(outcome, TerminalWheelOutcome::ScrollViewport(ScrollViewport::Delta(-3)));
+    if let TerminalWheelOutcome::ScrollViewport(scroll) = outcome {
+        term.scroll_viewport(scroll).expect("command viewport dispatch");
+    }
+    assert_eq!(term.scrollbar().expect("after").offset, before - 3);
+    assert_eq!(sibling.scrollbar().expect("sibling after").offset, sibling_before);
+}
+
+#[test]
+fn command_wheel_rows_never_wrap_i16() {
+    use ferryx_lib::ipc::native_terminal::native_scroll_outcome;
+    use ferryx_lib::native_terminal::TerminalWheelOutcome;
+    let term = NativeTerminal::new(80, 24).expect("terminal");
+    for rows in [65536, -65536] {
+        let outcome = native_scroll_outcome(&term, None, None,
+            &NativeTerminalScrollBehavior::Delta { rows }, None).expect("command policy");
+        let expected = rows.clamp(i16::MIN as isize, i16::MAX as isize);
+        assert_eq!(outcome, TerminalWheelOutcome::ScrollViewport(ScrollViewport::Delta(expected)));
+    }
+    assert_eq!(native_scroll_outcome(&term, None, None,
+        &NativeTerminalScrollBehavior::Delta { rows: 0 }, None).expect("zero"), TerminalWheelOutcome::None);
+}
+
+#[test]
+fn command_mouse_tracking_reports_plain_buttons_and_hover() {
+    use ferryx_lib::ipc::native_terminal::native_mouse_routes;
+    use ferryx_lib::native_terminal::MouseRendererSize;
+    for (action, button, expected) in [
+        (MouseAction::Press, Some(MouseButton::Left), "\x1b[<0;3;4M"),
+        (MouseAction::Press, Some(MouseButton::Middle), "\x1b[<1;3;4M"),
+        (MouseAction::Press, Some(MouseButton::Right), "\x1b[<2;3;4M"),
+        (MouseAction::Motion, None, "\x1b[<35;3;4M"),
+        (MouseAction::Release, Some(MouseButton::Right), "\x1b[<2;3;4m"),
+    ] {
+        let mut term = NativeTerminal::new(80, 24).expect("terminal");
+        term.feed(b"\x1b[?1003h\x1b[?1006h").expect("all motion tracking");
+        let event = MouseEvent { action, button,
+            position: MousePosition { x: 25.0, y: 70.0 }, modifiers: Default::default(),
+            timestamp_ns: None, size: Some(MouseRendererSize {
+                screen_width: 800, screen_height: 480, cell_width: 10, cell_height: 20,
+                padding_top: 0, padding_bottom: 0, padding_left: 0, padding_right: 0,
+            }) };
+        let (select, report) = native_mouse_routes(term.mouse_tracking_enabled().expect("mode"), &event);
+        let bytes = if report { term.encode_mouse(&event).expect("actual Ghostty encoder") } else { Vec::new() };
+        assert_eq!(bytes, expected.as_bytes(), "{action:?} {button:?}");
+        assert!(!select);
+        let shifted = MouseEvent { modifiers: KeyModifiers { shift: true, ..Default::default() }, ..event };
+        assert_eq!(native_mouse_routes(true, &shifted), (true, false));
+    }
 }

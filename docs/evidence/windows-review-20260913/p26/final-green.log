@@ -1,0 +1,57 @@
+source_sha256=fbf52d3ece645c1f3d901bbb193d46d95a84e610cca47ada0cb7e0ecc7b254de
+test_sha256=d75a0f47692b978e36a5385529a7f6f4229173729cb0b2430ed73a99a13cdcc1
+COMMAND ['rustc', '--edition=2021', '--test', '/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-p26-osm5j_g6/contract.rs', '--cfg', 'p26_os="windows"', '-o', '/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-p26-osm5j_g6/windows']
+warning: function `home_dir` is never used
+   --> /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-p26-osm5j_g6/contract.rs:155:4
+    |
+155 | fn home_dir() -> Option<PathBuf> {
+    |    ^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: 1 warning emitted
+
+
+running 10 tests
+test permissions::notification_item_tests::authoritative_authorized_is_granted ... ok
+test permissions::notification_item_tests::authoritative_denied_is_denied ... ok
+test permissions::notification_item_tests::authoritative_not_determined_can_request ... ok
+test permissions::notification_item_tests::authoritative_provisional_is_granted ... ok
+test permissions::notification_item_tests::non_authoritative_linux_is_unknown_no_settings ... ok
+test permissions::notification_item_tests::non_authoritative_windows_is_unknown_with_settings ... ok
+test permissions_contract_reports_consistent_aggregate_status ... ok
+test permissions_known_settings_targets_preserve_launch_contract ... ok
+test permissions_unknown_settings_target_never_launches ... ok
+test unsupported_accessibility_request_does_not_report_success ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+windows test_exit=0
+COMMAND ['rustc', '--edition=2021', '--test', '/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-p26-osm5j_g6/contract.rs', '--cfg', 'p26_os="linux"', '-o', '/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-p26-osm5j_g6/linux']
+warning: function `home_dir` is never used
+   --> /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-p26-osm5j_g6/contract.rs:155:4
+    |
+155 | fn home_dir() -> Option<PathBuf> {
+    |    ^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: 1 warning emitted
+
+
+running 10 tests
+test permissions::notification_item_tests::authoritative_denied_is_denied ... ok
+test permissions::notification_item_tests::non_authoritative_linux_is_unknown_no_settings ... ok
+test permissions::notification_item_tests::authoritative_authorized_is_granted ... ok
+test permissions::notification_item_tests::authoritative_not_determined_can_request ... ok
+test permissions::notification_item_tests::authoritative_provisional_is_granted ... ok
+test permissions::notification_item_tests::non_authoritative_windows_is_unknown_with_settings ... ok
+test permissions_contract_reports_consistent_aggregate_status ... ok
+test permissions_known_settings_targets_preserve_launch_contract ... ok
+test unsupported_accessibility_request_does_not_report_success ... ok
+test permissions_unknown_settings_target_never_launches ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+linux test_exit=0
+cleanup_owned_root_absent=True

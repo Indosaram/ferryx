@@ -61,6 +61,34 @@ const TERMINAL_CHORD_CASES: readonly [string, ShortcutActionId, KeyboardEventIni
 ];
 
 describe("shortcut registry", () => {
+  it.each([1, 2, 3, 4, 5, 6, 7, 8, 9] as const)("routes digit %s exclusively by platform modifier", (digit) => {
+    for (const isMac of [false, true]) {
+      for (const workspace of [false, true]) {
+        // Given: both action families are enabled, as in App.
+        const tab = vi.fn();
+        const selectWorkspace = vi.fn();
+        const { unmount } = renderHook(() => useShortcuts({
+          [`tab.select${digit}`]: tab,
+          [`workspace.select${digit}`]: selectWorkspace,
+        }, { isMac }));
+        const event = new KeyboardEvent("keydown", {
+          key: String(digit), code: `Digit${digit}`, cancelable: true,
+          ctrlKey: !workspace, metaKey: workspace && isMac, altKey: workspace && !isMac,
+        });
+        try {
+          // When: the intended tab or workspace chord reaches window capture.
+          window.dispatchEvent(event);
+          // Then: exactly the intended handler consumes it.
+          expect(workspace ? selectWorkspace : tab).toHaveBeenCalledOnce();
+          expect(workspace ? tab : selectWorkspace).not.toHaveBeenCalled();
+          expect(event.defaultPrevented).toBe(true);
+        } finally {
+          unmount();
+        }
+      }
+    }
+  });
+
   it("contains the required frontend actions with platform-aware Mod labels and aliases", () => {
     expect(SHORTCUTS.map((shortcut) => shortcut.id)).toEqual([
       "tab.newTerminal",
@@ -124,7 +152,7 @@ describe("shortcut registry", () => {
     expect(shortcutLabel("settings.toggle", true)).toBe("⌘,");
     expect(shortcutLabel("settings.toggle", false)).toBe("Ctrl+,");
     expect(shortcutLabel("workspace.select1", true)).toBe("⌘1");
-    expect(shortcutLabel("workspace.select1", false)).toBe("Ctrl+1");
+    expect(shortcutLabel("workspace.select1", false)).toBe("Alt+1");
     expect(shortcutLabel("workspace.select9", true)).toBe("⌘9");
     expect(shortcutLabel("tab.select1", true)).toBe("⌃1");
     expect(shortcutLabel("tab.select1", false)).toBe("Ctrl+1");

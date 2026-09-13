@@ -1,0 +1,17 @@
+
+running 1 test
+test windows_keypress_returns_typed_unsupported ... FAILED
+
+failures:
+
+failures:
+    windows_keypress_returns_typed_unsupported
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+thread 'windows_keypress_returns_typed_unsupported' (3664683) panicked at /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p13-key-wd6n9y0u/key.rs:6:98:
+no trusted Windows input adapter: ()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+exit=101

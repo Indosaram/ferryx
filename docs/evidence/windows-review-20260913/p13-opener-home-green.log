@@ -1,0 +1,13 @@
+source SHA256 c7c0a5ebbf042d6c65f528e711b5df35ac0387eb599984460b17a1da7b8875f9
+compile argv ['rustc', '--edition=2021', '--test', '/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p13-opener-home-nnhdrl6s/seam.rs', '-o', '/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p13-opener-home-nnhdrl6s/seam']
+
+running 3 tests
+test external_open_preserves_target_without_shell ... ok
+test file_link_expands_profile_relative_path ... ok
+test file_link_expands_bare_home ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+exit=0
+TemporaryDirectory binaries/source automatically removed.

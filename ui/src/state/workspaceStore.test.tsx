@@ -202,6 +202,75 @@ afterEach(() => {
 });
 
 describe("useWorkspaceStore terminal ownership", () => {
+  it.each(
+    [false, true].flatMap((tagged) =>
+      [false, true].flatMap((pinned) =>
+        ["1", "2"].map((closing) => ({ tagged, pinned, closing })),
+      ),
+    ),
+  )("preserves the sibling backend while closing $closing (tagged=$tagged pinned=$pinned)", async ({ tagged, pinned, closing }) => {
+    const { services } = createServices();
+    let releaseClose!: () => void;
+    let reportRequest!: (sessionId: string) => void;
+    const released = new Promise<void>((resolve) => { releaseClose = resolve; });
+    const requested = new Promise<string>((resolve) => { reportRequest = resolve; });
+    const closeTerminal = vi.fn(async (sessionId: string) => {
+      reportRequest(sessionId);
+      await released;
+    });
+    services.closeTerminal = closeTerminal;
+    services.waitForTerminalExit = vi.fn(async () => { await released; });
+    const { result, unmount } = renderHook(() =>
+      useWorkspaceStore({ workspaceId: "ws-main", initialWorktrees: [worktree], services }),
+    );
+    const state = restoredSplitState();
+    const tab = state.layout.tabs[0];
+    if (tab.kind === "browser") throw new Error("Expected terminal fixture");
+    if (tagged) tab.kind = "terminal";
+    tab.pinned = pinned;
+    const sibling = closing === "1" ? "2" : "1";
+    let completed = false;
+    let operation: Promise<void> | undefined;
+    try {
+      act(() => result.current.restoreWorkspace(state));
+      const survivor = result.current.state.sessions[`session-${sibling}`];
+      await act(async () => {
+        operation = result.current.closePane("tab-primary", `leaf-${closing}`).then(() => { completed = true; });
+      });
+      // A wrong whole-tab path fails synchronously here, including pinned tabs
+      // that issue no request. Awaiting a missing request cannot hide the failure.
+      expect(closeTerminal.mock.calls).toEqual([[`restored-backend-${closing}`]]);
+      expect(await requested).toBe(`restored-backend-${closing}`);
+      expect(completed).toBe(false);
+      expect(result.current.state.sessions[`session-${closing}`]).toBeUndefined();
+      expect(result.current.state.sessions[`session-${sibling}`]).toBe(survivor);
+      expect(result.current.state.layout.layoutsByTabId["tab-primary"].root).toEqual({
+        type: "leaf", leafId: `leaf-${sibling}`,
+      });
+      expect(result.current.state.layout.layoutsByTabId["tab-primary"].sessionIdsByLeafId).toEqual({
+        [`leaf-${sibling}`]: `session-${sibling}`,
+      });
+      expect(services.spawnTerminal).not.toHaveBeenCalled();
+      await act(async () => {
+        releaseClose();
+        await operation;
+      });
+      expect(completed).toBe(true);
+      expect(closeTerminal.mock.calls).toEqual([[`restored-backend-${closing}`]]);
+      expect(result.current.state.sessions[`session-${sibling}`]).toBe(survivor);
+      expect(survivor.backendSessionId).toBe(`restored-backend-${sibling}`);
+      expect(result.current.state.layout.tabs).toHaveLength(1);
+      expect(result.current.state.layout.tabs[0].pinned).toBe(pinned);
+      expect(services.spawnTerminal).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => {
+        releaseClose();
+        await operation;
+      });
+      unmount();
+    }
+  });
+
   it("forwards a per-tab shell override to the backend spawn", async () => {
     const { services } = createServices();
     const { result } = renderHook(() =>

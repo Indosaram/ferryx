@@ -1,0 +1,43 @@
+$ vitest run --maxWorkers=1 src/components/NativeTerminalPane.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+stderr | src/components/NativeTerminalPane.test.tsx > NativeTerminalPane daemon and session identity mapping > retries mount attach on rejection with exponential backoff and attaches on eventual success
+Native terminal IPC command failed {
+  command: [32m'cmd_native_terminal_attach'[39m,
+  error: Error: mount attach failed
+      at [90m/Users/indo/code/project/orca-lite/ui/[39msrc/components/NativeTerminalPane.test.tsx:5269:19
+      at mockCall [90m(file:///Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4m@vitest/spy[24m/dist/index.js:96:15[90m)[39m
+      at spy [90m(file:///Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mtinyspy[24m/dist/index.js:47:80[90m)[39m
+      at Object.operation [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/components/NativeTerminalPane.tsx:795:13[90m)[39m
+      at [90m/Users/indo/code/project/orca-lite/ui/[39msrc/lib/nativeTerminalLifecycle.ts:242:19
+      at startLifecycleOperation [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/lib/nativeTerminalLifecycle.ts:157:30[90m)[39m
+      at enqueueNativeTerminalLifecycle [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/lib/nativeTerminalLifecycle.ts:325:12[90m)[39m
+      at attachNativeTerminalLifecycle [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/lib/nativeTerminalLifecycle.ts:240:22[90m)[39m
+      at [90m/Users/indo/code/project/orca-lite/ui/[39msrc/components/NativeTerminalPane.tsx:792:12
+      at [90m/Users/indo/code/project/orca-lite/ui/[39msrc/components/NativeTerminalPane.tsx:1943:17
+}
+
+stderr | src/components/NativeTerminalPane.test.tsx > NativeTerminalPane daemon and session identity mapping > retries mount attach on rejection with exponential backoff and attaches on eventual success
+Native terminal IPC command failed {
+  command: [32m'cmd_native_terminal_attach'[39m,
+  error: Error: mount attach failed
+      at [90m/Users/indo/code/project/orca-lite/ui/[39msrc/components/NativeTerminalPane.test.tsx:5269:19
+      at mockCall [90m(file:///Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4m@vitest/spy[24m/dist/index.js:96:15[90m)[39m
+      at spy [90m(file:///Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mtinyspy[24m/dist/index.js:47:80[90m)[39m
+      at Object.operation [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/components/NativeTerminalPane.tsx:795:13[90m)[39m
+      at [90m/Users/indo/code/project/orca-lite/ui/[39msrc/lib/nativeTerminalLifecycle.ts:242:19
+      at startLifecycleOperation [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/lib/nativeTerminalLifecycle.ts:157:30[90m)[39m
+      at enqueueNativeTerminalLifecycle [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/lib/nativeTerminalLifecycle.ts:325:12[90m)[39m
+      at attachNativeTerminalLifecycle [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/lib/nativeTerminalLifecycle.ts:240:22[90m)[39m
+      at reattachNativeTerminalLifecycle [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/lib/nativeTerminalLifecycle.ts:269:10[90m)[39m
+      at [90m/Users/indo/code/project/orca-lite/ui/[39msrc/components/NativeTerminalPane.tsx:792:12
+}
+
+ ✓ src/components/NativeTerminalPane.test.tsx (168 tests) 2582ms
+
+ Test Files  1 passed (1)
+      Tests  168 passed (168)
+   Start at  18:13:31
+   Duration  3.52s (transform 240ms, setup 142ms, collect 305ms, tests 2.58s, environment 345ms, prepare 42ms)
+

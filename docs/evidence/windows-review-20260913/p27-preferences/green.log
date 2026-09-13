@@ -1,0 +1,11 @@
+$ vitest run --maxWorkers=1 src/remote/RemotePreferences.contract.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/remote/RemotePreferences.contract.test.tsx (3 tests) 88ms
+
+ Test Files  1 passed (1)
+      Tests  3 passed (3)
+   Start at  15:41:51
+   Duration  1.30s (transform 131ms, setup 110ms, collect 543ms, tests 88ms, environment 246ms, prepare 29ms)
+

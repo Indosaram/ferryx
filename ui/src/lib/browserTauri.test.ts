@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   browserAutomationAct,
@@ -7,6 +7,9 @@ import {
   browserTabSelectIndex,
   browserWorkspaceSelectIndex,
   closeBrowser,
+  goBackBrowser,
+  goForwardBrowser,
+  openExternalUrl,
   isBrowserTabShortcutAction,
   setBrowserBounds,
   setBrowserVisible,
@@ -59,8 +62,10 @@ describe("browser native lifecycle queue", () => {
 
   it("serializes Fast Refresh hide/show and close operations for the same child webview", async () => {
     const first = deferred();
+    const invoked = deferred();
     vi.mocked(invoke).mockImplementation((command) => {
       if (command === "cmd_browser_set_visible" && vi.mocked(invoke).mock.calls.length === 1) {
+        invoked.resolve();
         return first.promise;
       }
       return Promise.resolve();
@@ -70,7 +75,8 @@ describe("browser native lifecycle queue", () => {
     const showPromise = setBrowserVisible("browser-hmr", true);
     const closePromise = closeBrowser("browser-hmr");
 
-    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(1));
+    await invoked.promise;
+    expect(invoke).toHaveBeenCalledTimes(1);
     expect(invoke).toHaveBeenNthCalledWith(1, "cmd_browser_set_visible", {
       browserId: "browser-hmr",
       visible: false,
@@ -91,8 +97,10 @@ describe("browser native lifecycle queue", () => {
 
 describe("setBrowserBounds retry on WebviewNotFound", () => {
   beforeEach(() => {
+    vi.useFakeTimers();
     vi.mocked(invoke).mockReset();
   });
+  afterEach(() => vi.useRealTimers());
 
   it("retries when WebviewNotFound is returned and succeeds once the webview is ready", async () => {
     let callCount = 0;
@@ -108,7 +116,9 @@ describe("setBrowserBounds retry on WebviewNotFound", () => {
     });
 
     const bounds = { x: 0, y: 50, width: 800, height: 550 };
-    await setBrowserBounds("browser-1", bounds, 5, 1);
+    const result = setBrowserBounds("browser-1", bounds, 5, 1);
+    await vi.runAllTimersAsync();
+    await result;
 
     expect(callCount).toBe(3);
     expect(invoke).toHaveBeenCalledTimes(3);
@@ -124,9 +134,11 @@ describe("setBrowserBounds retry on WebviewNotFound", () => {
     });
 
     const bounds = { x: 0, y: 50, width: 800, height: 550 };
-    await expect(setBrowserBounds("browser-missing", bounds, 3, 1)).rejects.toMatchObject({
+    const assertion = expect(setBrowserBounds("browser-missing", bounds, 3, 1)).rejects.toMatchObject({
       code: "WEBVIEW_NOT_FOUND",
     });
+    await vi.runAllTimersAsync();
+    await assertion;
 
     expect(invoke).toHaveBeenCalledTimes(4); // initial + 3 retries
   });
@@ -142,6 +154,36 @@ describe("setBrowserBounds retry on WebviewNotFound", () => {
     });
 
     expect(invoke).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("browser OS and engine IPC", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+  });
+
+  it("preserves URL query separators at the OS command boundary", async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    const url = "https://example.test/?a=1&b=2";
+    await openExternalUrl(url);
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("cmd_browser_open_external", { url });
+  });
+
+  it("targets the selected engine for back and forward", async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    await goBackBrowser("browser-focused");
+    await goForwardBrowser("browser-focused");
+    expect(vi.mocked(invoke).mock.calls).toEqual([
+      ["cmd_browser_go_back", { browserId: "browser-focused" }],
+      ["cmd_browser_go_forward", { browserId: "browser-focused" }],
+    ]);
+  });
+
+  it("propagates typed unsupported input instead of reporting keypress success", async () => {
+    vi.mocked(invoke).mockRejectedValue({ code: "UNSUPPORTED", message: "native input unavailable" });
+    await expect(browserAutomationAct({ browserId: "browser-focused", generation: 1,
+      action: { type: "keypress", key: "Backspace" },
+    })).rejects.toMatchObject({ code: "UNSUPPORTED" });
   });
 });
 

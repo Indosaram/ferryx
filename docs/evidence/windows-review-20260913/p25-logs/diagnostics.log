@@ -1,0 +1,11 @@
+LSP tool results from this session:
+scripts/build-remote-helpers.mjs: No diagnostics found
+scripts/build-remote-helpers.test.mjs: No diagnostics found
+scripts/qa/ssh-helper-survival.mjs: No diagnostics found (after final edit)
+scripts/qa/ssh-process-survival.mjs: No diagnostics found (after final edit)
+scripts/qa/verify-ferryx-resume-cwd.mjs: No diagnostics found (after final edit)
+scripts/qa/ssh-helper-setup.mjs: No diagnostics found (after final edit)
+scripts/qa/ssh-harness-safety.test.mjs: No diagnostics found (after final edit)
+scripts/qa/ssh-bridge-survival.mjs: No diagnostics found before final CRLF normalization edit; two fresh-diagnostics requests after that edit timed out at 3000ms. Final fresh LSP result UNVERIFIED. Node syntax and 27 behavioral tests pass on final bytes.
+scripts/qa/helper-wrapper-contracts.ps1: No LSP server configured for extension .ps1. Neither pwsh nor powershell.exe found. Syntax/runtime UNVERIFIED.
+No errors or hints were suppressed. Removed unused cleanup retry helper and dead local bookkeeping; fixed unused test parameter by asserting machine-consumed op.

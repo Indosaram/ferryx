@@ -14,6 +14,7 @@ use super::sys::ffi::{
 use super::sys::types::{
     GhosttyKeyEncoder, GhosttyKeyEvent, GhosttyTerminal, GHOSTTY_KEY_A, GHOSTTY_KEY_ARROW_DOWN,
     GHOSTTY_KEY_ARROW_LEFT, GHOSTTY_KEY_ARROW_RIGHT, GHOSTTY_KEY_ARROW_UP, GHOSTTY_KEY_BACKSPACE,
+    GHOSTTY_KEY_BACKSLASH, GHOSTTY_KEY_BRACKET_RIGHT,
     GHOSTTY_KEY_DELETE, GHOSTTY_KEY_DIGIT_0, GHOSTTY_KEY_ENCODER_OPT_MACOS_OPTION_AS_ALT,
     GHOSTTY_KEY_END, GHOSTTY_KEY_ENTER, GHOSTTY_KEY_ESCAPE, GHOSTTY_KEY_F1, GHOSTTY_KEY_F10,
     GHOSTTY_KEY_F11, GHOSTTY_KEY_F12, GHOSTTY_KEY_F2, GHOSTTY_KEY_F3, GHOSTTY_KEY_F4,
@@ -33,6 +34,8 @@ fn map_key_code_to_c(key: KeyCode) -> i32 {
             'A'..='Z' => GHOSTTY_KEY_A + (c.to_ascii_uppercase() as i32 - 'A' as i32),
             '0'..='9' => GHOSTTY_KEY_DIGIT_0 + (c as i32 - '0' as i32),
             ' ' => GHOSTTY_KEY_SPACE,
+            '\\' => GHOSTTY_KEY_BACKSLASH,
+            ']' => GHOSTTY_KEY_BRACKET_RIGHT,
             '\n' | '\r' => GHOSTTY_KEY_ENTER,
             '\t' => GHOSTTY_KEY_TAB,
             _ => GHOSTTY_KEY_UNIDENTIFIED,

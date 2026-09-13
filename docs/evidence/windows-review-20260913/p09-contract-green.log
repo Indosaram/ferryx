@@ -1,0 +1,9 @@
+
+running 3 tests
+test p09_tests::unix_requires_executable_permission ... ok
+test p09_tests::windows_pathext_order_case_and_explicit_extension ... ok
+test extension::p09_tests::userprofile_only_installs_existing_agent_extensions ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+P09 owned executable/source/fixture root removed: /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-p09-1wYcy1

@@ -9,17 +9,20 @@ export function startNativeWindowFocusTracking(): void {
   trackingStarted = true;
 
   void (async () => {
+    let receivedFocusEvent = false;
     try {
       const win = getCurrentWindow();
-      nativeFocused = await win.isFocused();
       unlistenFocusChanged = await win.onFocusChanged((event) => {
+        receivedFocusEvent = true;
         nativeFocused = event.payload;
         if (event.payload && typeof window !== "undefined") {
           window.dispatchEvent(new CustomEvent("ferryx:window-focused"));
         }
       });
+      const focused = await win.isFocused();
+      if (!receivedFocusEvent) nativeFocused = focused;
     } catch {
-      nativeFocused = null;
+      if (!receivedFocusEvent) nativeFocused = null;
     }
   })();
 }

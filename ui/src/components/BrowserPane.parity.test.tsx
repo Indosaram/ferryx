@@ -75,14 +75,14 @@ describe("BrowserPane parity affordances", () => {
   it("opens find-in-page from the browser shortcut and reports matches", async () => {
     render(<BrowserPane tab={baseTab} onNavigate={vi.fn()} onReload={vi.fn()} />);
 
-    fireEvent(window, new CustomEvent(BROWSER_SHORTCUT_EVENT, { detail: { action: "find" } }));
-    const input = await screen.findByLabelText("Find in page");
-    fireEvent.change(input, { target: { value: "example" } });
-
-    await waitFor(() => {
+    fireEvent(window, new CustomEvent(BROWSER_SHORTCUT_EVENT, { detail: { browserId: baseTab.browserId, action: "find" } }));
+    const input = screen.getByLabelText("Find in page");
+    await act(async () => {
+      fireEvent.change(input, { target: { value: "example" } });
       expect(browserMocks.findBrowser).toHaveBeenCalledWith("browser-1", "example", false);
-      expect(screen.getByText("2 matches")).toBeInTheDocument();
+      await browserMocks.findBrowser.mock.results[0].value;
     });
+    expect(screen.getByText("2 matches")).toBeInTheDocument();
   });
 
   it("shows the attempted URL on load failure and retries without replacing it", () => {

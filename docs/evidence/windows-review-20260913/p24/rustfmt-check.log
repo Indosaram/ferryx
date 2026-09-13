@@ -1,0 +1,123 @@
+Diff in /Users/indo/code/project/orca-lite/src-tauri/src/dag/watcher.rs:285:
+         let (events_tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+         let (lose_tx, lose_rx) = tokio::sync::oneshot::channel();
+         let task = tokio::spawn(run_watcher_loop_observed(
+[31m-            root.to_string_lossy().into_owned(), root.clone(), tx,
+(B[m[31m-            WatcherHooks { events: Some(events_tx), scan: None }, Some(lose_rx),
+(B[m[32m+            root.to_string_lossy().into_owned(),
+(B[m[32m+            root.clone(),
+(B[m[32m+            tx,
+(B[m[32m+            WatcherHooks {
+(B[m[32m+                events: Some(events_tx),
+(B[m[32m+                scan: None,
+(B[m[32m+            },
+(B[m[32m+            Some(lose_rx),
+(B[m         ));
+         let outcome = async {
+             next_event(&mut events, "armed").await;
+Diff in /Users/indo/code/project/orca-lite/src-tauri/src/dag/watcher.rs:297:
+             next_event(&mut events, "lost-scanned").await;
+             std::fs::create_dir_all(&runs).expect("recreate journal");
+             let checkpoint = runs.join("checkpoint.json");
+[31m-            std::fs::write(&checkpoint, FIXTURE_F107_JSON.replace(
+(B[m[31m-                "\"status\":\"cancelled\"", "\"status\":\"running\"",
+(B[m[31m-            )).expect("write recreated checkpoint");
+(B[m[32m+            std::fs::write(
+(B[m[32m+                &checkpoint,
+(B[m[32m+                FIXTURE_F107_JSON.replace("\"status\":\"cancelled\"", "\"status\":\"running\""),
+(B[m[32m+            )
+(B[m[32m+            .expect("write recreated checkpoint");
+(B[m             // Then periodic reconciliation must recover without any native notification.
+             let first = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+             if let Ok(Some((_, snapshot))) = &first {
+Diff in /Users/indo/code/project/orca-lite/src-tauri/src/dag/watcher.rs:306:
+                 assert_eq!(snapshot.status, DagRunStatus::Running);
+             }
+[31m-            if !matches!(first, Ok(Some(_))) { return (first, None); }
+(B[m[31m-            std::fs::write(&checkpoint, FIXTURE_F107_JSON.replace(
+(B[m[31m-                "\"status\":\"cancelled\"", "\"status\":\"completed\"",
+(B[m[31m-            )).expect("write subsequent update");
+(B[m[32m+            if !matches!(first, Ok(Some(_))) {
+(B[m[32m+                return (first, None);
+(B[m[32m+            }
+(B[m[32m+            std::fs::write(
+(B[m[32m+                &checkpoint,
+(B[m[32m+                FIXTURE_F107_JSON.replace("\"status\":\"cancelled\"", "\"status\":\"completed\""),
+(B[m[32m+            )
+(B[m[32m+            .expect("write subsequent update");
+(B[m             let second = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+             (first, Some(second))
+[31m-        }.await;
+(B[m[32m+        }
+(B[m[32m+        .await;
+(B[m         task.abort();
+         assert!(task.await.expect_err("watcher cancelled").is_cancelled());
+[31m-        let first = outcome.0.expect("recreated journal must emit after silent watch loss")
+(B[m[32m+        let first = outcome
+(B[m[32m+            .0
+(B[m[32m+            .expect("recreated journal must emit after silent watch loss")
+(B[m             .expect("snapshot sink remains open");
+         assert_eq!(first.0, root.to_string_lossy());
+[31m-        let second = outcome.1.expect("subsequent update attempted")
+(B[m[31m-            .expect("subsequent update deadline").expect("subsequent snapshot");
+(B[m[32m+        let second = outcome
+(B[m[32m+            .1
+(B[m[32m+            .expect("subsequent update attempted")
+(B[m[32m+            .expect("subsequent update deadline")
+(B[m[32m+            .expect("subsequent snapshot");
+(B[m         assert_eq!(second.1.status, DagRunStatus::Completed);
+     }
+ 
+Diff in /Users/indo/code/project/orca-lite/src-tauri/src/dag/watcher.rs:326:
+     fn test_dag_scan_runs_off_async_worker() {
+         // Given a current-thread runtime and externally controlled blocking scan boundary.
+         let temp = tempfile::tempdir().expect("owned scan root");
+[31m-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all()
+(B[m[31m-            .build().expect("current-thread runtime");
+(B[m[32m+        let runtime = tokio::runtime::Builder::new_current_thread()
+(B[m[32m+            .enable_all()
+(B[m[32m+            .build()
+(B[m[32m+            .expect("current-thread runtime");
+(B[m         let async_thread = std::thread::current().id();
+         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+         let (sentinel_tx, sentinel_rx) = std::sync::mpsc::channel();
+Diff in /Users/indo/code/project/orca-lite/src-tauri/src/dag/watcher.rs:336:
+         let hooks = WatcherHooks {
+             events: None,
+             scan: Some(std::sync::Arc::new(move || {
+[31m-                entered_tx.send(std::thread::current().id()).expect("record scan identity");
+(B[m[31m-                release_rx.lock().expect("release receiver").recv().expect("scan released");
+(B[m[32m+                entered_tx
+(B[m[32m+                    .send(std::thread::current().id())
+(B[m[32m+                    .expect("record scan identity");
+(B[m[32m+                release_rx
+(B[m[32m+                    .lock()
+(B[m[32m+                    .expect("release receiver")
+(B[m[32m+                    .recv()
+(B[m[32m+                    .expect("scan released");
+(B[m             })),
+         };
+         let controller = std::thread::spawn(move || {
+Diff in /Users/indo/code/project/orca-lite/src-tauri/src/dag/watcher.rs:352:
+             let (tx, _rx) = tokio::sync::mpsc::channel(10);
+             let mut cache = HashMap::new();
+             let scan = scan_and_emit("owned", temp.path(), &mut cache, &tx, &hooks);
+[31m-            let sentinel = async { sentinel_tx.send(()).expect("async sentinel"); };
+(B[m[32m+            let sentinel = async {
+(B[m[32m+                sentinel_tx.send(()).expect("async sentinel");
+(B[m[32m+            };
+(B[m             let (open, ()) = tokio::join!(biased; scan, sentinel);
+             assert!(open);
+         });
+Diff in /Users/indo/code/project/orca-lite/src-tauri/src/dag/watcher.rs:359:
+         let (worker, sentinel) = controller.join().expect("controller joined");
+         // Then neither metadata, file reads nor parsing may occupy the async worker.
+[31m-        assert_ne!(worker.expect("scan entered"), async_thread, "scan must run off async worker");
+(B[m[32m+        assert_ne!(
+(B[m[32m+            worker.expect("scan entered"),
+(B[m[32m+            async_thread,
+(B[m[32m+            "scan must run off async worker"
+(B[m[32m+        );
+(B[m         sentinel.expect("async sentinel must execute before scan release");
+     }
+ 

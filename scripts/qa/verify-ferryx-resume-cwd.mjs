@@ -5,6 +5,7 @@ import net from "node:net";
 import { delimiter, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 
+export async function main() {
 if (process.platform === "win32") throw new Error("This QA driver uses the Unix daemon socket");
 const binary = resolve(process.argv[2] ?? "src-tauri/target/debug/ferryx");
 const root = await realpath(await mkdtemp("/tmp/fx-cwd-"));
@@ -14,6 +15,7 @@ let socket;
 let lines;
 let readyTimer;
 let call;
+let identityVerified = false;
 const ownedSessions = new Set();
 
 try {
@@ -59,6 +61,7 @@ process.stdin.resume();
       USERPROFILE: root,
       FERRYX_RUNTIME_DIR: runtime,
       FERRYX_SESSION_DIR: join(root, "state"),
+      FERRYX_DATA_DIR: join(root, "data"),
       PI_OFFLINE: "1",
     },
     stdout: "pipe",
@@ -83,7 +86,13 @@ process.stdin.resume();
     socket.write(`${JSON.stringify(request)}\n`);
     return JSON.parse((await response)[0]);
   };
-  assert.equal((await call({ type: "handshake", version: 3 })).type, "handshakeOk");
+  const identity = await call({ type: "handshake", version: 3 });
+  assert.equal(identity.type, "handshakeOk");
+  assert.equal(identity.version, 3);
+  assert.equal(identity.pid, daemon.pid);
+  assert.equal(await realpath(identity.binaryPath), await realpath(binary));
+  assert(identity.epoch !== undefined);
+  identityVerified = true;
   assert.equal((await call({ type: "registerWorkspace", workspaceId: "qa", repoRoot: repo })).type, "registerWorkspaceOk");
   const results = [];
   for (const scenario of ["with-transcript", "legacy-id-only"]) {
@@ -129,8 +138,11 @@ process.stdin.resume();
 } finally {
   clearTimeout(readyTimer);
   try {
-    if (call && socket && !socket.destroyed) {
-      for (const sessionId of ownedSessions) await call({ type: "close", sessionId });
+    if (identityVerified && call && socket && !socket.destroyed) {
+      for (const sessionId of ownedSessions) {
+        assert.equal((await call({ type: "close", sessionId })).type, "closeOk");
+        ownedSessions.delete(sessionId);
+      }
     }
   } finally {
     lines?.close();
@@ -139,7 +151,17 @@ process.stdin.resume();
       if (daemon.exitCode === null) daemon.kill();
       await daemon.exited;
     }
-    receiver.close();
+    if (receiver.listening) await new Promise((resolveClose, reject) => receiver.close(error => error ? reject(error) : resolveClose()));
+    assert.equal(ownedSessions.size, 0, `Session cleanup unproved; retaining ${root}`);
     await rm(root, { recursive: true, force: true });
   }
+}
+
+}
+
+if (import.meta.main) {
+  if (process.argv.includes("--self-test")) {
+    throw new Error("Use node --experimental-vm-modules --test scripts/qa/ssh-harness-safety.test.mjs; no live QA was started");
+  }
+  await main();
 }

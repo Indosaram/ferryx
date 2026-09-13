@@ -5,6 +5,24 @@ use std::fs;
 use std::time::Duration;
 use tempfile::TempDir;
 
+#[test]
+fn p10_windows_namespace_rejects_invalid_path_components() {
+    for name in ["bad|name", "bad<name", "bad>name", "bad\"name", "CON", "aux.txt", "nested/LPT1.log", "COM9", "nul.tar.gz", "conin$", "CONOUT$", "COM¹"] {
+        for (workspace, slug) in [(name, "valid"), ("valid", name)] {
+            assert!(matches!(WorktreeManager::format_branch_name_platform(workspace, slug, true),
+                Err(WorktreeError::InvalidNamespace { .. })), "{workspace}/{slug}");
+        }
+    }
+}
+
+#[test]
+fn p10_namespace_accepts_nested_unicode_and_non_devices() {
+    for name in ["feature/项目", "console", "COM10", "auxiliary.txt", "nested/LPT0.log"] {
+        assert_eq!(WorktreeManager::format_branch_name("workspace", name).unwrap(),
+            format!("orca/workspace/{name}"));
+    }
+}
+
 fn setup_test_repo() -> (TempDir, WorktreeManager) {
     let temp_dir = TempDir::new().expect("temp dir");
     let repo_path = temp_dir.path();

@@ -120,15 +120,14 @@ export function TabBar({
     actions: Record<string, () => void>,
   ) => {
     menuUnlistenRef.current?.();
+    const controller = new AbortController();
+    menuUnlistenRef.current = () => controller.abort();
     void openNativePopupMenu(command, items, position, (id) => {
-      actions[id]?.();
       menuUnlistenRef.current?.();
       menuUnlistenRef.current = null;
-    })
-      .then((unlisten) => {
-        menuUnlistenRef.current = unlisten;
-      })
-      .catch(() => undefined);
+      actions[id]?.();
+    }, controller.signal)
+      .catch((error: unknown) => console.warn("Could not open native tab menu", error));
   };
 
   const handleNewTabClick = () => {

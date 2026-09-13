@@ -1,0 +1,174 @@
+TAP version 13
+# Subtest: stager rejects empty without publication
+ok 1 - stager rejects empty without publication
+  ---
+  duration_ms: 2.096334
+  type: 'test'
+  ...
+# Subtest: stager rejects gnu without publication
+ok 2 - stager rejects gnu without publication
+  ---
+  duration_ms: 1.353875
+  type: 'test'
+  ...
+# Subtest: stager rejects debug without publication
+ok 3 - stager rejects debug without publication
+  ---
+  duration_ms: 1.926167
+  type: 'test'
+  ...
+# Subtest: stager rejects stale without publication
+ok 4 - stager rejects stale without publication
+  ---
+  duration_ms: 1.656958
+  type: 'test'
+  ...
+# Subtest: stager requires full matrix before publishing any bytes
+ok 5 - stager requires full matrix before publishing any bytes
+  ---
+  duration_ms: 1.365167
+  type: 'test'
+  ...
+# Subtest: stager binds explicit artifact bytes, source lock and helper protocol 1
+ok 6 - stager binds explicit artifact bytes, source lock and helper protocol 1
+  ---
+  duration_ms: 2.340959
+  type: 'test'
+  ...
+# Subtest: stager rejects hash receipt
+ok 7 - stager rejects hash receipt
+  ---
+  duration_ms: 1.439125
+  type: 'test'
+  ...
+# Subtest: stager rejects lock receipt
+ok 8 - stager rejects lock receipt
+  ---
+  duration_ms: 1.341042
+  type: 'test'
+  ...
+# Subtest: stager rejects machine receipt
+ok 9 - stager rejects machine receipt
+  ---
+  duration_ms: 1.078833
+  type: 'test'
+  ...
+# Subtest: stager rejects duplicate receipt
+ok 10 - stager rejects duplicate receipt
+  ---
+  duration_ms: 1.081291
+  type: 'test'
+  ...
+# (node:67860) ExperimentalWarning: VM Modules is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: import ssh-bridge-survival has no host effects
+ok 11 - import ssh-bridge-survival has no host effects
+  ---
+  duration_ms: 5.483792
+  type: 'test'
+  ...
+# Subtest: import ssh-helper-setup has no host effects
+ok 12 - import ssh-helper-setup has no host effects
+  ---
+  duration_ms: 1.949125
+  type: 'test'
+  ...
+# Subtest: import ssh-helper-survival has no host effects
+ok 13 - import ssh-helper-survival has no host effects
+  ---
+  duration_ms: 1.043875
+  type: 'test'
+  ...
+# Subtest: import ssh-process-survival has no host effects
+ok 14 - import ssh-process-survival has no host effects
+  ---
+  duration_ms: 1.364834
+  type: 'test'
+  ...
+# Subtest: import verify-ferryx-resume-cwd has no host effects
+ok 15 - import verify-ferryx-resume-cwd has no host effects
+  ---
+  duration_ms: 0.778792
+  type: 'test'
+  ...
+# Subtest: ssh-bridge-survival never signals a detached endpoint PID
+ok 16 - ssh-bridge-survival never signals a detached endpoint PID
+  ---
+  duration_ms: 0.890625
+  type: 'test'
+  ...
+# Subtest: ssh-helper-setup never signals a detached endpoint PID
+ok 17 - ssh-helper-setup never signals a detached endpoint PID
+  ---
+  duration_ms: 0.475
+  type: 'test'
+  ...
+# Subtest: bridge initial marker accumulates fragmented output before acceptance
+ok 18 - bridge initial marker accumulates fragmented output before acceptance
+  ---
+  duration_ms: 1.232625
+  type: 'test'
+  ...
+# Subtest: ssh-bridge-survival refuses live detached launch without handle ownership
+ok 19 - ssh-bridge-survival refuses live detached launch without handle ownership
+  ---
+  duration_ms: 0.880917
+  type: 'test'
+  ...
+# Subtest: ssh-helper-setup refuses live detached launch without handle ownership
+ok 20 - ssh-helper-setup refuses live detached launch without handle ownership
+  ---
+  duration_ms: 0.798792
+  type: 'test'
+  ...
+# Subtest: process-survival authenticates socket before a destructive request
+ok 21 - process-survival authenticates socket before a destructive request
+  ---
+  duration_ms: 1.258209
+  type: 'test'
+  ...
+# Subtest: resume driver rejects mismatched handshake before registering or closing sessions
+ok 22 - resume driver rejects mismatched handshake before registering or closing sessions
+  ---
+  duration_ms: 0.505083
+  type: 'test'
+  ...
+# Subtest: helper-survival validates endpoint against owned daemon before destructive RPC
+ok 23 - helper-survival validates endpoint against owned daemon before destructive RPC
+  ---
+  duration_ms: 0.5055
+  type: 'test'
+  ...
+# Subtest: helper-survival retains fixture when owned child cleanup fails
+ok 24 - helper-survival retains fixture when owned child cleanup fails
+  ---
+  duration_ms: 0.666125
+  type: 'test'
+  ...
+# Subtest: ssh-bridge-survival retains detached fixture on unproved cleanup
+ok 25 - ssh-bridge-survival retains detached fixture on unproved cleanup
+  ---
+  duration_ms: 0.579083
+  type: 'test'
+  ...
+# Subtest: ssh-helper-setup retains detached fixture on unproved cleanup
+ok 26 - ssh-helper-setup retains detached fixture on unproved cleanup
+  ---
+  duration_ms: 0.549417
+  type: 'test'
+  ...
+# Subtest: bridge marker accepts CRLF split UTF8 and rejects EOF, gap, wrong PID
+ok 27 - bridge marker accepts CRLF split UTF8 and rejects EOF, gap, wrong PID
+  ---
+  duration_ms: 1.291125
+  type: 'test'
+  ...
+1..27
+# tests 27
+# suites 0
+# pass 27
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 57.544125

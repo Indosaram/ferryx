@@ -1,0 +1,29 @@
+Please perform a comprehensive final code review of the complete Windows remediation and PR resolution changeset in Ferryx (/Users/indo/code/project/orca-lite).
+
+Review Scope:
+1. PR #2 and PR #3 dispositions and code fixes:
+   - PR #2: Pointer hit-testing and dragging into WebView2 surfaces in native terminal windows.
+   - PR #3: 16-case close matrix for preserving sibling PTYs across tagged/untagged, pinned/unpinned, and keyboard/native-menu closures.
+2. Windows input and wheel scrolling (P02):
+   - Portable debug logging sink avoiding hardcoded /tmp paths.
+   - Wheel delta normalization (+/-120), scrollback navigation, and alternate-screen mouse reporting.
+   - Shift viewport navigation vs mouse reporting isolation.
+3. Windows font rendering and sizing (P06):
+   - Implementation of GHOSTTY_TERMINAL_OPT_SIZE callback and size query response (CSI 16 t).
+   - Layout preparation and resize triggers across dimension and metric changes.
+4. Daemon authorization and path handling (P08):
+   - Recursive upgrade admission inheritance in daemon client.
+   - Remote CWD alias preservation for Windows and UNC paths.
+5. SSH arguments and worktree safety (P10):
+   - IdentityFile quoting grammar, space handling, and comment stripping in ssh/config.rs.
+   - Worktree branch namespace validation for Unicode and non-device paths.
+6. Frontend settings, permissions, and push (P09, P26, push):
+   - TerminalSection platform gating for macOS Option as Alt without regression of existing behavior tests.
+   - SettingsDialog copy alignment with shipped RemoteAccessSection.
+   - PushClient origin validation and service worker unsubscribe lifecycle boundaries.
+7. Architectural invariants and cross-platform safety:
+   - Thread safety: all synchronous disk I/O, Git subprocesses, and OS dialogs use crate::ipc::run_blocking.
+   - Uncommitted foreign work preservation in shared worktrees.
+   - Daemon lifetime: background daemon owns all PTY fds and must never be forcibly killed.
+
+Inspect the repository git diff, test files, and implementation reports in docs/evidence/windows-review-20260913/. Provide an explicit verdict (PASS or FAIL with specific blockers) and recommendations.

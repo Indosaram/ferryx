@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { SystemPermissionsStatus } from "../../lib/types";
@@ -96,6 +96,33 @@ const mockStatusWindows: SystemPermissionsStatus = {
   },
 };
 
+const savedProcessPlatform = process.platform;
+const savedPlatform = Object.getOwnPropertyDescriptor(window.navigator, "platform");
+const savedUserAgent = Object.getOwnPropertyDescriptor(window.navigator, "userAgent");
+
+async function renderStatus(status: SystemPermissionsStatus) {
+  Object.defineProperty(process, "platform", {
+    value: status.platform === "macos" ? "darwin" : "win32",
+  });
+  Object.defineProperty(window.navigator, "platform", {
+    value: status.platform === "macos" ? "MacIntel" : "Win32", configurable: true,
+  });
+  Object.defineProperty(window.navigator, "userAgent", {
+    value: status.platform === "macos" ? "Macintosh" : "Windows NT 10.0", configurable: true,
+  });
+  // Subscribe to the exact IPC request before mounting; Vitest bounds the await.
+  const ready = new Promise<void>((resolve) => {
+    mockTauri.getSystemPermissionsStatus.mockImplementation(() => {
+      resolve();
+      return Promise.resolve(status);
+    });
+  });
+  render(<PermissionsSection />);
+  await act(async () => {
+    await ready;
+  });
+}
+
 describe("PermissionsSection", () => {
   beforeEach(() => {
     mockTauri.getSystemPermissionsStatus.mockReset();
@@ -106,50 +133,49 @@ describe("PermissionsSection", () => {
 
   afterEach(() => {
     cleanup();
+    Object.defineProperty(process, "platform", { value: savedProcessPlatform });
+    if (savedPlatform) Object.defineProperty(window.navigator, "platform", savedPlatform);
+    else Reflect.deleteProperty(window.navigator, "platform");
+    if (savedUserAgent) Object.defineProperty(window.navigator, "userAgent", savedUserAgent);
+    else Reflect.deleteProperty(window.navigator, "userAgent");
   });
 
-  it("renders permission items and shows Photo Library guidance for FDA", async () => {
-    mockTauri.getSystemPermissionsStatus.mockResolvedValue(mockStatusNotGranted);
+  it("renders applicable grant advice when macOS permissions are denied", async () => {
+    // Given / When: mount with denied macOS permissions from OS IPC.
+    await renderStatus(mockStatusNotGranted);
 
-    render(<PermissionsSection />);
-
-    await waitFor(() => {
-      expect(screen.getByText("Full Disk Access")).toBeDefined();
-    });
-
-    expect(screen.getAllByText(/Photo Library/i).length).toBeGreaterThanOrEqual(1);
+    // Then: applicable advice and grant controls remain available.
+    expect(screen.getByRole("alert")).toBeDefined();
+    expect(screen.getByTestId("open-fda-settings")).toBeEnabled();
+    expect(screen.getByTestId("open-accessibility-settings")).toBeEnabled();
     expect(screen.getByText("Accessibility")).toBeDefined();
     expect(screen.getByText("Desktop Notifications")).toBeDefined();
     expect(screen.getAllByText("Required").length).toBeGreaterThanOrEqual(1);
   });
 
   it("triggers open system settings when clicking open settings buttons", async () => {
-    mockTauri.getSystemPermissionsStatus.mockResolvedValue(mockStatusNotGranted);
+    // Given
     mockTauri.openPermissionsSystemSettings.mockResolvedValue({ opened: true, target: "full_disk_access" });
+    await renderStatus(mockStatusNotGranted);
 
-    render(<PermissionsSection />);
-
-    await waitFor(() => {
-      expect(screen.getByTestId("open-fda-settings")).toBeDefined();
-    });
-
-    fireEvent.click(screen.getByTestId("open-fda-settings"));
+    // When
+    await act(async () => fireEvent.click(screen.getByTestId("open-fda-settings")));
+    // Then
     expect(mockTauri.openPermissionsSystemSettings).toHaveBeenCalledWith("full_disk_access");
   });
 
   it("renders all granted status correctly", async () => {
-    mockTauri.getSystemPermissionsStatus.mockResolvedValue(mockStatusAllGranted);
+    // Given / When
+    await renderStatus(mockStatusAllGranted);
 
-    render(<PermissionsSection />);
-
-    await waitFor(() => {
-      expect(screen.getAllByText("Granted").length).toBe(3);
-    });
-
-    expect(screen.getByText(/All system permissions granted/i)).toBeDefined();
+    // Then
+    expect(screen.getAllByText("Granted").length).toBe(3);
+    expect(screen.getByRole("alert")).toBeDefined();
+    expect(screen.queryByTestId("request-notifications")).toBeNull();
   });
 
   it("requests notification permission and refreshes when Enable Notifications is clicked", async () => {
+    // Given
     const canRequestStatus: SystemPermissionsStatus = {
       ...mockStatusNotGranted,
       notifications: {
@@ -158,33 +184,36 @@ describe("PermissionsSection", () => {
         granted: false,
       },
     };
-    mockTauri.getSystemPermissionsStatus.mockResolvedValue(canRequestStatus);
     mockTauri.requestNotificationPermission.mockResolvedValue({ granted: true, status: "granted" });
-
-    render(<PermissionsSection />);
-
-    await waitFor(() => {
-      expect(screen.getByTestId("request-notifications")).toBeDefined();
+    await renderStatus(canRequestStatus);
+    const refreshed = new Promise<void>((resolve) => {
+      mockTauri.getSystemPermissionsStatus.mockImplementationOnce(() => {
+        resolve();
+        return Promise.resolve(mockStatusAllGranted);
+      });
     });
 
-    fireEvent.click(screen.getByTestId("request-notifications"));
-
-    await waitFor(() => {
-      expect(mockTauri.requestNotificationPermission).toHaveBeenCalledTimes(1);
+    // When
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("request-notifications"));
+      await refreshed;
     });
-    // Initial load + refetch after request.
-    expect(mockTauri.getSystemPermissionsStatus.mock.calls.length).toBeGreaterThanOrEqual(2);
+
+    // Then
+    expect(mockTauri.requestNotificationPermission).toHaveBeenCalledTimes(1);
+    expect(mockTauri.getSystemPermissionsStatus).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId("request-notifications")).toBeNull();
   });
 
   it("renders Windows notifications-only surface with OS-managed badge", async () => {
-    mockTauri.getSystemPermissionsStatus.mockResolvedValue(mockStatusWindows);
+    // Given / When: non-authoritative Windows capabilities arrive through IPC.
+    await renderStatus(mockStatusWindows);
 
-    render(<PermissionsSection />);
-
-    await waitFor(() => {
-      expect(screen.getByText("Desktop Notifications")).toBeDefined();
-    });
-
+    // Then: no macOS advice or grant actions, but OS settings remain available.
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByTestId("open-fda-settings")).toBeNull();
+    expect(screen.queryByTestId("open-accessibility-settings")).toBeNull();
+    expect(screen.queryByTestId("rerun-permissions-onboarding")).toBeNull();
     expect(screen.queryByText("Full Disk Access")).toBeNull();
     expect(screen.queryByText("Accessibility")).toBeNull();
     expect(screen.getByText("Managed by OS")).toBeDefined();
@@ -193,7 +222,8 @@ describe("PermissionsSection", () => {
   });
 
   it("resets dismissed key and dispatches open-onboarding event on Re-run Welcome Setup", async () => {
-    const nav = window.navigator as Navigator & Record<string, unknown>;
+    // Given
+    const nav = window.navigator;
     const savedPlatform = Object.getOwnPropertyDescriptor(nav, "platform");
     const savedUserAgent = Object.getOwnPropertyDescriptor(nav, "userAgent");
     Object.defineProperty(nav, "platform", { value: "MacIntel", configurable: true });
@@ -203,19 +233,15 @@ describe("PermissionsSection", () => {
     });
     try {
       window.localStorage.setItem("ferryx.permissions.onboarding-dismissed", "true");
-      mockTauri.getSystemPermissionsStatus.mockResolvedValue(mockStatusNotGranted);
-
       const onEvent = vi.fn();
       window.addEventListener("ferryx:open-permissions-onboarding", onEvent, { once: true });
 
-      render(<PermissionsSection />);
+      await renderStatus(mockStatusNotGranted);
 
-      await waitFor(() => {
-        expect(screen.getByTestId("rerun-permissions-onboarding")).toBeDefined();
-      });
-
+      // When
       fireEvent.click(screen.getByTestId("rerun-permissions-onboarding"));
 
+      // Then
       expect(window.localStorage.getItem("ferryx.permissions.onboarding-dismissed")).toBeNull();
       expect(onEvent).toHaveBeenCalledTimes(1);
     } finally {

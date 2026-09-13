@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import net from 'node:net';
 import readline from 'node:readline';
 
+export async function main() {
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const scenario = process.argv[process.argv.indexOf('--scenario') + 1];
 assert(['transport-loss', 'daemon-restart', 'reconnect-safety'].includes(scenario), '--scenario transport-loss|daemon-restart|reconnect-safety required');
@@ -51,8 +52,22 @@ function waitLine(p, prefix) {
 async function connect() {
   const s = net.createConnection(join(root, 'runtime/daemon.sock')); sockets.add(s); s.on('close', () => sockets.delete(s));
   const lines = readline.createInterface({ input: s })[Symbol.asyncIterator]();
-  await bounded(once(s, 'connect'), 'daemon socket connect');
-  return { s, async next() { const item = await bounded(lines.next(), 'daemon message'); assert(!item.done, 'daemon stream closed'); return JSON.parse(item.value); }, send(v) { s.write(JSON.stringify(v) + '\n'); } };
+  try {
+    await bounded(once(s, 'connect'), 'daemon socket connect');
+    const connection = { s, async next() { const item = await bounded(lines.next(), 'daemon message'); assert(!item.done, 'daemon stream closed'); return JSON.parse(item.value); }, send(v) { s.write(JSON.stringify(v) + '\n'); } };
+    connection.send({ type: 'handshake', version: 3 });
+    const identity = await connection.next();
+    assert.equal(identity.type, 'handshakeOk');
+    assert.equal(identity.version, 3);
+    assert.equal(identity.pid, daemon.pid);
+    assert.equal(daemon.exitCode, null);
+    assert.equal(daemon.signalCode, null);
+    assert.equal(await realpath(identity.binaryPath), await realpath(executable));
+    assert(identity.epoch !== undefined);
+    if (daemonEpoch !== undefined) assert.equal(identity.epoch, daemonEpoch);
+    daemonEpoch = identity.epoch;
+    return connection;
+  } catch (error) { s.destroy(); throw error; }
 }
 async function rpc(request) { const c = await connect(); try { c.send(request); return await c.next(); } finally { c.s.destroy(); } }
 async function attach(id) {
@@ -63,11 +78,12 @@ async function attach(id) {
   return c;
 }
 let executable;
+let daemonEpoch;
 function daemonChild(mode) {
   const env = { ...process.env, HOME: join(root, 'home'), PATH: `${root}/bin:${process.env.PATH}`, FERRYX_RUNTIME_DIR: join(root, 'runtime'), FERRYX_SESSION_DIR: root, FERRYX_DATA_DIR: root, FERRYX_SURVIVAL_ROOT: root, FERRYX_SURVIVAL_OWNER: owner, FERRYX_SURVIVAL_MODE: mode };
   return child(executable, [], { env });
 }
-async function startDaemon() { daemon = daemonChild('serve'); await waitLine(daemon, 'QA_DAEMON_READY'); log({ event: 'daemon-ready', pid: daemon.pid }); }
+async function startDaemon() { daemonEpoch = undefined; daemon = daemonChild('serve'); await waitLine(daemon, 'QA_DAEMON_READY'); log({ event: 'daemon-ready', pid: daemon.pid }); }
 async function details() { const v = await rpc({ type: 'remoteSessionDetails', sessionId: descriptor.backendSessionId }); assert(v.details, JSON.stringify(v)); return v.details; }
 async function tick(stream, label, n) {
   const d = await details();
@@ -204,3 +220,12 @@ finally {
   await writeFile(evidence, records.join('\n') + '\n');
 }
 if (failure) process.exitCode = 1;
+
+}
+
+if (import.meta.main) {
+  if (process.argv.includes("--self-test")) {
+    throw new Error("Use node --experimental-vm-modules --test scripts/qa/ssh-harness-safety.test.mjs; no live QA was started");
+  }
+  await main();
+}

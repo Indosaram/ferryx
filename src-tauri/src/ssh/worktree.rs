@@ -341,8 +341,13 @@ pub async fn create_remote(
     validate_base_ref(base_ref)?;
     environment.platform.validate_path(repo_root)?;
     environment.platform.validate_path(path)?;
-    let branch = crate::worktree::manager::WorktreeManager::format_branch_name(ws_segment, slug)
-        .map_err(|err| IpcError::new(IpcErrorCode::InvalidNamespace, err.to_string()))?;
+    let is_windows = environment.platform == RemotePlatform::Windows;
+    let branch = crate::worktree::manager::WorktreeManager::format_branch_name_platform(
+        ws_segment,
+        slug,
+        is_windows,
+    )
+    .map_err(|err| IpcError::new(IpcErrorCode::InvalidNamespace, err.to_string()))?;
     let script = worktree_create_script(environment.platform, repo_root, &branch, path, base_ref);
     let plan = direct::ssh_plan(host, environment.executor.command(&script), false)?;
     direct::bounded_output(&plan, Duration::from_secs(30))
@@ -403,6 +408,17 @@ mod tests {
         assert!(windows.contains("Invoke-FerryxGit"));
         assert!(windows.contains("'worktree','list','--porcelain'"));
         assert!(windows.contains("MARKER_WIN"));
+    }
+
+    #[test]
+    fn remote_worktree_cross_platform_namespace_selection() {
+        let ws_segment = "ssh-0123456789ab";
+        // POSIX remote accepts names that are reserved devices only on Windows
+        assert!(WorktreeManager::format_branch_name_platform(ws_segment, "CON", false).is_ok());
+        assert!(WorktreeManager::format_branch_name_platform(ws_segment, "aux.txt", false).is_ok());
+        // Windows remote strictly rejects Windows reserved device names
+        assert!(WorktreeManager::format_branch_name_platform(ws_segment, "CON", true).is_err());
+        assert!(WorktreeManager::format_branch_name_platform(ws_segment, "aux.txt", true).is_err());
     }
 
     #[test]

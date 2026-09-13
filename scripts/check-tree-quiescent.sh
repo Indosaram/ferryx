@@ -51,9 +51,13 @@ echo "Offending files (up to 10 most recent):"
 
 echo "$RECENT_FILES" | while IFS= read -r file; do
   if [ -n "$file" ] && [ -e "$file" ]; then
-    stat -f "%m	%Sm	%N" -t "%Y-%m-%d %H:%M:%S" "$file"
+    if stat -c $'%Y\t%y\t%n' "$file" 2>/dev/null; then
+      :
+    else
+      stat -f "%m	%Sm	%N" -t "%Y-%m-%d %H:%M:%S" "$file"
+    fi
   fi
-done | sort -k1,1nr | head -n 10 | while IFS='	' read -r _mtime formatted path; do
+done | sort -k1,1nr | awk 'NR <= 10' | while IFS='	' read -r _mtime formatted path; do
   echo "  $formatted  $path"
 done
 

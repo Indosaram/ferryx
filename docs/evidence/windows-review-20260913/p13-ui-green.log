@@ -1,0 +1,11 @@
+$ vitest run --maxWorkers=1 src/lib/browserTauri.test.ts
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/lib/browserTauri.test.ts (14 tests) 6ms
+
+ Test Files  1 passed (1)
+      Tests  14 passed (14)
+   Start at  18:18:43
+   Duration  578ms (transform 47ms, setup 127ms, collect 33ms, tests 6ms, environment 294ms, prepare 33ms)
+

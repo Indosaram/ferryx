@@ -23,12 +23,38 @@ fn resolve_dag_runs_dir(root: &Path) -> PathBuf {
     }
 }
 
+#[derive(Clone, Default)]
+struct WatcherHooks {
+    #[cfg(test)]
+    events: Option<tokio::sync::mpsc::UnboundedSender<&'static str>>,
+    #[cfg(test)]
+    scan: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl WatcherHooks {
+    fn event(&self, _event: &'static str) {
+        #[cfg(test)]
+        if let Some(events) = &self.events {
+            let _ = events.send(_event);
+        }
+    }
+
+    fn scanning(&self) {
+        #[cfg(test)]
+        if let Some(scan) = &self.scan {
+            scan();
+        }
+    }
+}
+
 async fn scan_and_emit(
     project_path: &str,
     root: &Path,
     cache: &mut HashMap<String, DagRunSnapshot>,
     sink: &TaggedSink,
+    hooks: &WatcherHooks,
 ) -> bool {
+    hooks.scanning();
     let runs_dir = resolve_dag_runs_dir(root);
     let target_dir = if runs_dir.is_dir() {
         &runs_dir
@@ -84,6 +110,16 @@ async fn scan_and_emit(
 }
 
 async fn run_watcher_loop(project_path: String, root: PathBuf, sink: TaggedSink) {
+    run_watcher_loop_observed(project_path, root, sink, WatcherHooks::default(), None).await;
+}
+
+async fn run_watcher_loop_observed(
+    project_path: String,
+    root: PathBuf,
+    sink: TaggedSink,
+    hooks: WatcherHooks,
+    mut lose_watch: Option<tokio::sync::oneshot::Receiver<()>>,
+) {
     let mut cache = HashMap::new();
     let (notify_tx, mut notify_rx) = tokio::sync::mpsc::channel(64);
 
@@ -102,7 +138,7 @@ async fn run_watcher_loop(project_path: String, root: PathBuf, sink: TaggedSink)
 
     // Hydrate before arming: starting a filesystem watch can stall for seconds on a loaded
     // host, and the current inventory must not wait on it.
-    if !scan_and_emit(&project_path, &root, &mut cache, &sink).await {
+    if !scan_and_emit(&project_path, &root, &mut cache, &sink, &hooks).await {
         return;
     }
 
@@ -138,10 +174,12 @@ async fn run_watcher_loop(project_path: String, root: PathBuf, sink: TaggedSink)
         _ => (true, None),
     };
 
+    hooks.event(if polling_mode { "polling" } else { "armed" });
     // Second pass: anything written while the watch was arming produced no event.
-    if !scan_and_emit(&project_path, &root, &mut cache, &sink).await {
+    if !scan_and_emit(&project_path, &root, &mut cache, &sink, &hooks).await {
         return;
     }
+    hooks.event("scanned");
 
     let mut debounce_sleep: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
     let mut poll_interval = interval(Duration::from_secs(1));
@@ -150,7 +188,24 @@ async fn run_watcher_loop(project_path: String, root: PathBuf, sink: TaggedSink)
     loop {
         tokio::select! {
             biased;
-            recv_res = notify_rx.recv() => {
+            _ = async {
+                match lose_watch.as_mut() {
+                    Some(signal) => { let _ = signal.await; }
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                // Models the Windows backend silently losing its native watch.
+                lose_watch = None;
+                drop(_watcher_guard.take());
+                notify_rx.close();
+                while notify_rx.try_recv().is_ok() {}
+                debounce_sleep = None;
+                if !scan_and_emit(&project_path, &root, &mut cache, &sink, &hooks).await {
+                    break;
+                }
+                hooks.event("lost-scanned");
+            }
+            recv_res = notify_rx.recv(), if !notify_rx.is_closed() => {
                 match recv_res {
                     Some(()) => {
                         debounce_sleep = Some(Box::pin(sleep(Duration::from_millis(250))));
@@ -169,14 +224,16 @@ async fn run_watcher_loop(project_path: String, root: PathBuf, sink: TaggedSink)
                 }
             }, if debounce_sleep.is_some() => {
                 debounce_sleep = None;
-                if !scan_and_emit(&project_path, &root, &mut cache, &sink).await {
+                if !scan_and_emit(&project_path, &root, &mut cache, &sink, &hooks).await {
                     break;
                 }
+                hooks.event("scanned");
             }
             _ = poll_interval.tick(), if polling_mode => {
-                if !scan_and_emit(&project_path, &root, &mut cache, &sink).await {
+                if !scan_and_emit(&project_path, &root, &mut cache, &sink, &hooks).await {
                     break;
                 }
+                hooks.event("scanned");
             }
         }
     }
@@ -200,6 +257,142 @@ mod tests {
 
     const FIXTURE_F107_JSON: &str =
         include_str!("testdata/dag_f107f318-ac78-46a2-b8c6-584b4e10eaa7.json");
+
+    async fn next_event(
+        events: &mut tokio::sync::mpsc::UnboundedReceiver<&'static str>,
+        expected: &'static str,
+    ) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if events.recv().await.expect("watcher event stream closed") == expected {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("watcher state deadline");
+    }
+
+    #[tokio::test]
+    async fn test_dag_watcher_recovers_after_silent_watch_loss() {
+        // Given an armed real native watch, with event subscriptions installed first.
+        let temp = tempfile::tempdir().expect("owned journal root");
+        let root = temp.path().to_path_buf();
+        let dag = root.join(".omo/senpi-task/dag");
+        let runs = dag.join("runs");
+        std::fs::create_dir_all(&runs).expect("create watched directory");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+        let (events_tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let (lose_tx, lose_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(run_watcher_loop_observed(
+            root.to_string_lossy().into_owned(),
+            root.clone(),
+            tx,
+            WatcherHooks {
+                events: Some(events_tx),
+                scan: None,
+            },
+            Some(lose_rx),
+        ));
+        let outcome = async {
+            next_event(&mut events, "armed").await;
+            next_event(&mut events, "scanned").await;
+            // When the entire watched target is removed and the backend loses its handle.
+            std::fs::remove_dir_all(&dag).expect("delete entire watch target");
+            lose_tx.send(()).expect("inject silent backend loss");
+            next_event(&mut events, "lost-scanned").await;
+            std::fs::create_dir_all(&runs).expect("recreate journal");
+            let checkpoint = runs.join("checkpoint.json");
+            std::fs::write(
+                &checkpoint,
+                FIXTURE_F107_JSON.replace("\"status\":\"cancelled\"", "\"status\":\"running\""),
+            )
+            .expect("write recreated checkpoint");
+            // Then periodic reconciliation must recover without any native notification.
+            let first = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+            if let Ok(Some((_, snapshot))) = &first {
+                assert_eq!(snapshot.status, DagRunStatus::Running);
+            }
+            if !matches!(first, Ok(Some(_))) {
+                return (first, None);
+            }
+            std::fs::write(
+                &checkpoint,
+                FIXTURE_F107_JSON.replace("\"status\":\"cancelled\"", "\"status\":\"completed\""),
+            )
+            .expect("write subsequent update");
+            let second = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+            (first, Some(second))
+        }
+        .await;
+        task.abort();
+        assert!(task.await.expect_err("watcher cancelled").is_cancelled());
+        let first = outcome
+            .0
+            .expect("recreated journal must emit after silent watch loss")
+            .expect("snapshot sink remains open");
+        assert_eq!(first.0, root.to_string_lossy());
+        let second = outcome
+            .1
+            .expect("subsequent update attempted")
+            .expect("subsequent update deadline")
+            .expect("subsequent snapshot");
+        assert_eq!(second.1.status, DagRunStatus::Completed);
+    }
+
+    #[test]
+    fn test_dag_scan_runs_off_async_worker() {
+        // Given a current-thread runtime and externally controlled blocking scan boundary.
+        let temp = tempfile::tempdir().expect("owned scan root");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        let async_thread = std::thread::current().id();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (sentinel_tx, sentinel_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let hooks = WatcherHooks {
+            events: None,
+            scan: Some(std::sync::Arc::new(move || {
+                entered_tx
+                    .send(std::thread::current().id())
+                    .expect("record scan identity");
+                release_rx
+                    .lock()
+                    .expect("release receiver")
+                    .recv()
+                    .expect("scan released");
+            })),
+        };
+        let controller = std::thread::spawn(move || {
+            let worker = entered_rx.recv_timeout(Duration::from_secs(5));
+            // RED must release the scan too: a bounded deadline is not success evidence.
+            let sentinel = sentinel_rx.recv_timeout(Duration::from_secs(2));
+            release_tx.send(()).expect("release owned scan");
+            (worker, sentinel)
+        });
+        // When the real scan starts, another task must run before its barrier is released.
+        runtime.block_on(async {
+            let (tx, _rx) = tokio::sync::mpsc::channel(10);
+            let mut cache = HashMap::new();
+            let scan = scan_and_emit("owned", temp.path(), &mut cache, &tx, &hooks);
+            let sentinel = async {
+                sentinel_tx.send(()).expect("async sentinel");
+            };
+            let (open, ()) = tokio::join!(biased; scan, sentinel);
+            assert!(open);
+        });
+        let (worker, sentinel) = controller.join().expect("controller joined");
+        // Then neither metadata, file reads nor parsing may occupy the async worker.
+        assert_ne!(
+            worker.expect("scan entered"),
+            async_thread,
+            "scan must run off async worker"
+        );
+        sentinel.expect("async sentinel must execute before scan release");
+    }
 
     #[tokio::test]
     async fn test_dag_watcher_detects_checkpoint_changes() {

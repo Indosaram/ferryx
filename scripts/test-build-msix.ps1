@@ -1,6 +1,8 @@
 # scripts/test-build-msix.ps1
 # Comprehensive behavior test suite for build-msix.ps1 hardening
 
+param([string]$BuildScript = (Join-Path $PSScriptRoot "build-msix.ps1"))
+
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
@@ -91,7 +93,7 @@ public class Program { public static void Main() {} }
 }
 
 $scriptDir = $PSScriptRoot
-$buildMsixScript = Join-Path $scriptDir "build-msix.ps1"
+$buildMsixScript = (Resolve-Path -LiteralPath $BuildScript).Path
 if (-not (Test-Path $buildMsixScript)) {
     throw "build-msix.ps1 not found at $buildMsixScript"
 }
@@ -101,6 +103,29 @@ $scratchDir = Join-Path ([System.IO.Path]::GetTempPath()) ("ferryx-test-scratch-
 New-Item -ItemType Directory -Force -Path $scratchDir | Out-Null
 
 try {
+    # Run the actual script in an isolated repository layout, not against ui/dist
+    # or helper binaries owned by a developer's checkout.
+    $fixtureRoot = Join-Path $scratchDir "repo"
+    $fixtureScripts = Join-Path $fixtureRoot "scripts"
+    $fixtureDist = Join-Path $fixtureRoot "ui/dist"
+    $fixtureHelpers = Join-Path $fixtureRoot "src-tauri/resources/helpers"
+    New-Item -ItemType Directory -Force -Path $fixtureScripts, (Join-Path $fixtureDist "assets"), $fixtureHelpers | Out-Null
+    Copy-Item -LiteralPath $buildMsixScript -Destination (Join-Path $fixtureScripts "build-msix.ps1")
+    $buildMsixScript = Join-Path $fixtureScripts "build-msix.ps1"
+    [System.IO.File]::WriteAllText((Join-Path $fixtureDist "index.html"), '<html><script src="assets/app.js"></script></html>')
+    [System.IO.File]::WriteAllText((Join-Path $fixtureDist "assets/app.js"), 'window.fixture = 17;')
+    $artifacts = @()
+    foreach ($target in @("x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu")) {
+        $filename = if ($target -eq "x86_64-pc-windows-msvc") { "ferryx-remote-helper.exe" } else { "ferryx-remote-helper" }
+        $targetDir = Join-Path $fixtureHelpers $target
+        New-Item -ItemType Directory -Path $targetDir | Out-Null
+        $binary = Join-Path $targetDir $filename
+        [System.IO.File]::WriteAllBytes($binary, [System.Text.Encoding]::UTF8.GetBytes("fixture-helper-$target"))
+        $artifacts += @{ target = $target; filename = $filename; byteLength = (Get-Item -LiteralPath $binary).Length; sha256 = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant() }
+    }
+    $helperManifest = @{ schemaVersion = 1; protocolVersion = 1; helperVersion = "2026.908.1"; artifacts = $artifacts }
+    [System.IO.File]::WriteAllText((Join-Path $fixtureHelpers "manifest.json"), ($helperManifest | ConvertTo-Json -Depth 5))
+
     # -------------------------------------------------------------
     # Test 1: Missing -ExePath parameter throws
     # -------------------------------------------------------------
@@ -357,6 +382,35 @@ try {
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         $zip = [System.IO.Compression.ZipFile]::OpenRead($expectedMsix)
         try {
+            $expectedResources = @{
+                "ui/dist/index.html" = (Join-Path $fixtureDist "index.html")
+                "ui/dist/assets/app.js" = (Join-Path $fixtureDist "assets/app.js")
+                "helpers/manifest.json" = (Join-Path $fixtureHelpers "manifest.json")
+            }
+            foreach ($artifact in $artifacts) {
+                $relative = "$($artifact.target)/$($artifact.filename)"
+                $expectedResources["helpers/$relative"] = Join-Path $fixtureHelpers $relative
+            }
+            foreach ($relative in $expectedResources.Keys) {
+                $resource = $zip.GetEntry($relative)
+                if (-not $resource) { throw "Missing packaged resource: $relative" }
+                $source = $expectedResources[$relative]
+                if ($resource.Length -ne (Get-Item -LiteralPath $source).Length) { throw "Packaged resource length mismatch: $relative" }
+                $resourceStream = $resource.Open()
+                $sha = [System.Security.Cryptography.SHA256]::Create()
+                try {
+                    $hash = [BitConverter]::ToString($sha.ComputeHash($resourceStream)).Replace("-", "")
+                    if ($hash -ne (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash) { throw "Packaged resource hash mismatch: $relative" }
+                    foreach ($artifact in $artifacts) {
+                        if ($relative -eq "helpers/$($artifact.target)/$($artifact.filename)") {
+                            if ($hash -ne $artifact.sha256 -or $resource.Length -ne $artifact.byteLength) { throw "Packaged helper disagrees with manifest: $relative" }
+                        }
+                    }
+                } finally {
+                    $sha.Dispose()
+                    $resourceStream.Dispose()
+                }
+            }
             $entry = $zip.GetEntry("AppxManifest.xml")
             if (-not $entry) { throw "Packaged MSIX does not contain AppxManifest.xml" }
             $stream = $entry.Open()
@@ -490,8 +544,42 @@ try {
         } "Packaged manifest Identity ProcessorArchitecture.*does not match expected 'x64'"
     }
 
+    foreach ($relative in @("ui/dist/index.html", "src-tauri/resources/helpers/manifest.json", "src-tauri/resources/helpers/x86_64-pc-windows-msvc/ferryx-remote-helper.exe")) {
+        Run-Test "Missing required resource fails before packaging: $relative" {
+            $resource = Join-Path $fixtureRoot $relative
+            $saved = [System.IO.File]::ReadAllBytes($resource)
+            $out = Join-Path $scratchDir ([Guid]::NewGuid().ToString("N"))
+            try {
+                Remove-Item -LiteralPath $resource
+                Assert-Throws {
+                    & $buildMsixScript -ExePath (Join-Path $scratchDir "ferryx.exe") -Version "2026.908.1" -OutputDir $out -ManifestTemplate (Join-Path $scratchDir "AppxManifest.xml") -IconsDir (Join-Path $scratchDir "icons") -SkipSigning
+                } ([regex]::Escape([System.IO.Path]::GetFileName($resource)))
+                if (Test-Path (Join-Path $out "Ferryx_2026.908.1_x64.msix")) { throw "Missing resource produced a package" }
+            } finally {
+                [System.IO.File]::WriteAllBytes($resource, $saved)
+            }
+        }
+    }
+    Run-Test "Corrupt helper bytes fail before packaging" {
+        $resource = Join-Path $fixtureHelpers "x86_64-pc-windows-msvc/ferryx-remote-helper.exe"
+        $saved = [System.IO.File]::ReadAllBytes($resource)
+        $out = Join-Path $scratchDir "corrupt-helper"
+        try {
+            $corrupt = $saved.Clone()
+            $corrupt[0] = $corrupt[0] -bxor 255
+            [System.IO.File]::WriteAllBytes($resource, $corrupt)
+            Assert-Throws {
+                & $buildMsixScript -ExePath (Join-Path $scratchDir "ferryx.exe") -Version "2026.908.1" -OutputDir $out -ManifestTemplate (Join-Path $scratchDir "AppxManifest.xml") -IconsDir (Join-Path $scratchDir "icons") -SkipSigning
+            } "ferryx-remote-helper.exe"
+            if (Test-Path (Join-Path $out "Ferryx_2026.908.1_x64.msix")) { throw "Corrupt helper produced a package" }
+        } finally {
+            [System.IO.File]::WriteAllBytes($resource, $saved)
+        }
+    }
 } finally {
-    Remove-Item -Recurse -Force $scratchDir -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $scratchDir -Recurse -Force
+    if (Test-Path -LiteralPath $scratchDir) { throw "Fixture scratch cleanup failed: $scratchDir" }
+    Write-Host "Fixture scratch removed: $scratchDir"
 }
 
 Write-Host "======================================================="

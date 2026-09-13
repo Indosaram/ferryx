@@ -141,3 +141,27 @@ describe("TerminalSection", () => {
     expect(customInput).toHaveValue("/opt/homebrew/bin/nu");
   });
 });
+
+describe("terminal platform applicability", () => {
+  it.each(["Win32", "Linux x86_64", "MacIntel"])("gates Option control on %s", (platform) => {
+    vi.stubGlobal("navigator", { platform, userAgent: platform });
+    vi.stubGlobal("process", { ...process, platform: platform === "MacIntel" ? "darwin" : platform === "Win32" ? "win32" : "linux" });
+    const onOptionAsAlt = vi.fn();
+    const { container } = render(<TerminalSection
+      fontFamily="monospace" fontSize={14} macosOptionAsAlt={false}
+      source="default" sourcePath={null}
+      onFontFamily={vi.fn()} onFontSize={vi.fn()} onOptionAsAlt={onOptionAsAlt}
+      onUseImported={vi.fn()}
+    />);
+    const control = container.querySelector("#terminal-macos-option-as-alt");
+    if (platform === "MacIntel") {
+      expect(control).not.toBeNull();
+      fireEvent.click(control!);
+      expect(onOptionAsAlt).toHaveBeenCalledExactlyOnceWith(true);
+    } else {
+      expect(control).toBeNull();
+      expect(onOptionAsAlt).not.toHaveBeenCalled();
+    }
+    expect(container.querySelector("#terminal-default-shell")).not.toBeNull();
+  });
+});

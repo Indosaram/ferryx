@@ -1,0 +1,33 @@
+$ vitest run --maxWorkers=1 src/remote/RemotePreferences.contract.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ❯ src/remote/RemotePreferences.contract.test.tsx (3 tests | 2 failed) 3069ms
+   × migrates real scoped auth and loads only the selected host's preferences across gated host switches 1558ms
+     → Expected preferences signal did not arrive
+   × rejects late preferences after an in-place credential change and retains local override precedence 1505ms
+     → Expected preferences signal did not arrive
+   ✓ keeps desktop-embedded appearance local even with remote transport credentials 6ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/remote/RemotePreferences.contract.test.tsx > migrates real scoped auth and loads only the selected host's preferences across gated host switches
+ FAIL  src/remote/RemotePreferences.contract.test.tsx > rejects late preferences after an in-place credential change and retains local override precedence
+Error: Expected preferences signal did not arrive
+ ❯ Timeout.<anonymous> src/remote/RemotePreferences.contract.test.tsx:23:39
+     21|   try {
+     22|     return await Promise.race([signal, new Promise<never>((_, reject) …
+     23|       timer = setTimeout(() => reject(new Error("Expected preferences …
+       |                                       ^
+     24|     })]);
+     25|   } finally { clearTimeout(timer); }
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  2 failed | 1 passed (3)
+   Start at  15:41:16
+   Duration  4.29s (transform 125ms, setup 107ms, collect 549ms, tests 3.07s, environment 250ms, prepare 29ms)
+
+error: script "test" exited with code 1

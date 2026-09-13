@@ -1,0 +1,1235 @@
+status: exited_1 exit_code: 1
++                 <span className="text-[12px] text-muted-foreground">
++                   Hosts discovered in <code className="font-mono text-[11px]">{systemConfig.path}</code>:
++                 </span>
++                 <Button
++                   size="sm"
++                   variant="ghost"
++                   onClick={() => setShowRawConfig((prev) => !prev)}
++                   className="h-6 text-[11px] text-muted-foreground hover:text-foreground"
++                 >
++                   {showRawConfig ? "Hide Raw Config" : "View Raw Config"}
++                 </Button>
++               </div>
++
++               {showRawConfig ? (
++                 <pre className="max-h-48 overflow-auto rounded border border-border/60 bg-muted/40 p-2.5 font-mono text-[11px] text-foreground scrollbar-sleek">
++                   {systemConfig.rawText}
++                 </pre>
++               ) : null}
++
++               <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 max-h-56 overflow-y-auto pr-1 scrollbar-sleek">
++                 {systemConfig.hosts.map((sysHost) => {
++                   const alreadyAdded = hosts.some(
++                     (h) =>
++                       h.label === sysHost.label ||
++                       (h.hostname === sysHost.hostname &&
++                         (h.port ?? 22) === (sysHost.port ?? 22) &&
++                         (h.username || "") === (sysHost.username || "")),
++                   );
++
++                   return (
++                     <div
++                       key={sysHost.id}
++                       className="flex items-center justify-between rounded border border-border/40 bg-background/60 px-2.5 py-1.5 text-[12px]"
++                     >
++                       <div className="min-w-0 pr-2">
++                         <div className="font-medium text-foreground truncate">{sysHost.label}</div>
++                         <div className="font-mono text-[10px] text-muted-foreground truncate">
++                           {formatSshTarget(sysHost)}:{sysHost.port ?? 22}
++                         </div>
++                       </div>
++
++                       {alreadyAdded ? (
++                         <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground shrink-0">
++                           <Check className="size-3 text-emerald-500" /> Added
++                         </span>
++                       ) : (
++                         <Button
++                           size="sm"
++                           variant="secondary"
++                           disabled={importingHostId === sysHost.id}
++                           onClick={() => handleImportSingleSystemHost(sysHost)}
++                           className="h-6 text-[11px] px-2 shrink-0"
++                         >
++                           {importingHostId === sysHost.id ? (
++                             <Loader2 className="size-3 animate-spin" />
++                           ) : (
++                             "+ Import"
++                           )}
++                         </Button>
++                       )}
++                     </div>
++                   );
++                 })}
++               </div>
++             </div>
++           ) : null}
++         </Card>
++       ) : null}
++
++       {/* Manual Add / Edit Form Card */}
++       {isFormOpen ? (
++         <Card className="mb-6 border-border p-4 bg-card/60">
++           <div className="mb-4">
++             <h3 className="text-[13px] font-semibold text-foreground">
++               {editingHost ? "Edit SSH Machine" : "Add SSH Machine"}
++             </h3>
++             <p className="mt-0.5 text-[11px] text-muted-foreground">
++               Configure connection parameters for an outbound SSH host.
++             </p>
++           </div>
++
++           <form onSubmit={handleSubmitForm} className="space-y-3.5">
++             {formError ? (
++               <Alert variant="destructive" className="py-2 text-[12px]">
++                 <AlertCircle className="size-4" />
++                 <AlertDescription>{formError}</AlertDescription>
++               </Alert>
++             ) : null}
++
++             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
++               <div className="space-y-1">
++                 <Label htmlFor="ssh-host-label" className="text-[12px]">
++                   Label <span className="text-destructive">*</span>
++                 </Label>
++                 <Input
++                   id="ssh-host-label"
++                   placeholder="e.g. dev-server or Production"
++                   value={formData.label}
++                   onChange={(e) => setFormData((prev) => ({ ...prev, label: e.target.value }))}
++                   disabled={submitting}
++                   autoComplete="off"
++                 />
++               </div>
++
++               <div className="space-y-1">
++                 <Label htmlFor="ssh-host-hostname" className="text-[12px]">
++                   Hostname / IP <span className="text-destructive">*</span>
++                 </Label>
++                 <Input
++                   id="ssh-host-hostname"
++                   placeholder="e.g. 192.168.1.100 or box.internal"
++                   value={formData.hostname}
++                   onChange={(e) => setFormData((prev) => ({ ...prev, hostname: e.target.value }))}
++                   disabled={submitting}
++                   autoComplete="off"
++                 />
++               </div>
++
++               <div className="space-y-1">
++                 <Label htmlFor="ssh-host-username" className="text-[12px]">
++                   Username (optional)
++                 </Label>
++                 <Input
++                   id="ssh-host-username"
++                   placeholder="e.g. ubuntu"
++                   value={formData.username}
++                   onChange={(e) => setFormData((prev) => ({ ...prev, username: e.target.value }))}
++                   disabled={submitting}
++                   autoComplete="off"
++                 />
++               </div>
++
++               <div className="space-y-1">
++                 <Label htmlFor="ssh-host-port" className="text-[12px]">
++                   Port (optional, default 22)
++                 </Label>
++                 <Input
++                   id="ssh-host-port"
++                   type="number"
++                   min={1}
++                   max={65535}
++                   placeholder="22"
++                   value={formData.port}
++                   onChange={(e) => setFormData((prev) => ({ ...prev, port: e.target.value }))}
++                   disabled={submitting}
++                 />
++               </div>
++
++               <div className="space-y-1">
++                 <Label htmlFor="ssh-host-identity" className="text-[12px]">
++                   Identity File (optional)
++                 </Label>
++                 <Input
++                   id="ssh-host-identity"
++                   placeholder="e.g. ~/.ssh/id_ed25519"
++                   value={formData.identityFile}
++                   onChange={(e) => setFormData((prev) => ({ ...prev, identityFile: e.target.value }))}
++                   disabled={submitting}
++                   autoComplete="off"
++                 />
++               </div>
++
++               <div className="space-y-1">
++                 <Label htmlFor="ssh-host-jumphost" className="text-[12px]">
++                   Jump Host / ProxyJump (optional)
++                 </Label>
++                 <Input
++                   id="ssh-host-jumphost"
++                   placeholder="e.g. bastion.corp.net"
++                   value={formData.jumpHost}
++                   onChange={(e) => setFormData((prev) => ({ ...prev, jumpHost: e.target.value }))}
++                   disabled={submitting}
++                   autoComplete="off"
++                 />
++               </div>
++
++               <div className="space-y-1 sm:col-span-2">
++                 <Label htmlFor="ssh-host-auth" className="text-[12px]">
++                   Authentication Method
++                 </Label>
++                 <Select
++                   value={formData.authMethod}
++                   onValueChange={(val) =>
++                     setFormData((prev) => ({ ...prev, authMethod: val as SshAuthMethod }))
++                   }
++                   disabled={submitting}
++                 >
++                   <SelectTrigger id="ssh-host-auth" aria-label="Authentication Method">
++                     <SelectValue />
++                   </SelectTrigger>
++                   <SelectContent>
++                     <SelectItem value="agent">SSH Agent</SelectItem>
++                     <SelectItem value="key">Key File</SelectItem>
++                   </SelectContent>
++                 </Select>
++               </div>
++             </div>
++
++             <div className="flex items-center gap-2 pt-2">
++               <Button type="submit" size="sm" disabled={submitting}>
++                 {submitting ? (
++                   <>
++                     <Loader2 className="size-3.5 animate-spin" />
++                     <span>Saving…</span>
++                   </>
++                 ) : editingHost ? (
++                   "Update Machine"
++                 ) : (
++                   "Save Machine"
++                 )}
++               </Button>
++               <Button
++                 type="button"
++                 variant="ghost"
++                 size="sm"
++                 disabled={submitting}
++                 onClick={handleCancelForm}
++               >
++                 Cancel
++               </Button>
++             </div>
++           </form>
++         </Card>
++       ) : null}
++
++       {/* Paste Config Import Card */}
++       {isImporting ? (
++         <Card className="mb-6 border-border p-4 bg-card/60">
++           <div className="mb-3">
++             <h3 className="text-[13px] font-semibold text-foreground">
++               Import from SSH Config
++             </h3>
++             <p className="mt-0.5 text-[11px] text-muted-foreground">
++               Paste the contents of your OpenSSH config file (<code className="font-mono">~/.ssh/config</code>).
++               Host entries will be parsed and added to your machines list without overwriting existing aliases.
++             </p>
++           </div>
++
++           <div className="space-y-3">
++             {importError ? (
++               <Alert variant="destructive" className="py-2 text-[12px]">
++                 <AlertCircle className="size-4" />
++                 <AlertDescription>{importError}</AlertDescription>
++               </Alert>
++             ) : null}
++
++             <div className="space-y-1">
++               <Label htmlFor="ssh-config-input" className="text-[12px]">
++                 Configuration Content
++               </Label>
++               <textarea
++                 id="ssh-config-input"
++                 aria-label="Configuration Content"
++                 rows={6}
++                 value={configText}
++                 onChange={(e) => setConfigText(e.target.value)}
++                 disabled={importing}
++                 placeholder={"Host dev-box\n  HostName 10.0.0.1\n  User ubuntu\n  Port 22"}
++                 className="w-full resize-y rounded-md border border-input bg-transparent px-3 py-2 font-mono text-[12px] shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
++               />
++             </div>
++
++             <div className="flex items-center gap-2">
++               <Button
++                 type="button"
++                 size="sm"
++                 disabled={importing}
++                 onClick={handleImport}
++               >
++                 {importing ? (
++                   <>
++                     <Loader2 className="size-3.5 animate-spin" />
++                     <span>Importing…</span>
++                   </>
++                 ) : (
++                   "Import Machines"
++                 )}
++               </Button>
++               <Button
++                 type="button"
++                 variant="ghost"
++                 size="sm"
++                 disabled={importing}
++                 onClick={handleCancelImport}
++               >
++                 Cancel
++               </Button>
++             </div>
++           </div>
++         </Card>
++       ) : null}
++
++       {/* Configured Machines Inventory Group */}
++       <SettingsGroup
++         title={`Configured Machines (${hosts.length})`}
++         action={
++           <div className="flex items-center gap-2">
++             <Button
++               type="button"
++               size="sm"
++               variant="outline"
++               disabled={isFormOpen || isImporting}
++               onClick={handleOpenImport}
++             >
++               <FileText className="size-3.5" />
++               Import Config
++             </Button>
++             <Button
++               type="button"
++               size="sm"
++               disabled={isFormOpen || isImporting}
++               onClick={handleOpenAdd}
++             >
++               <Plus className="size-3.5" />
++               Add Machine
++             </Button>
++           </div>
++         }
++       >
++         {loading && hosts.length === 0 ? (
++           <div className="flex items-center justify-center py-8 text-[12px] text-muted-foreground">
++             <Loader2 className="mr-2 size-3.5 animate-spin" />
++             Loading SSH machines…
++           </div>
++         ) : hosts.length === 0 ? (
++           <div
++             className="rounded-lg border border-dashed border-border/80 p-8 text-center"
++             data-testid="ssh-empty-state"
++           >
++             <Server className="mx-auto size-8 text-muted-foreground/40 mb-2.5" />
++             <div className="text-[13px] font-medium text-foreground">
++               No SSH machines configured
++             </div>
++             <p className="mt-1 text-[11px] text-muted-foreground max-w-sm mx-auto">
++               Add an SSH machine to connect to remote workspaces or run remote worktrees.
++             </p>
++           </div>
++         ) : (
++           <div className="divide-y divide-border/40">
++             {hosts.map((host) => {
++               const test = testResults[host.id];
++               const isBusy = busyHostId === host.id;
++
++               return (
++                 <div
++                   key={host.id}
++                   data-testid={`ssh-host-${host.id}`}
++                   className="flex flex-col gap-3 py-3 sm:flex-row sm:items-center sm:justify-between"
++                 >
++                   <div className="space-y-1 min-w-0">
++                     <div className="flex flex-wrap items-center gap-2">
++                       <span className="text-[13px] font-medium text-foreground truncate">
++                         {host.label}
++                       </span>
++                       {host.disabled ? (
++                         <Badge
++                           variant="secondary"
++                           data-testid={`ssh-status-badge-${host.id}`}
++                           className="text-[11px] font-normal py-0 px-1.5 h-4 bg-muted text-muted-foreground"
++                         >
++                           Disabled
++                         </Badge>
++                       ) : (
++                         <Badge
++                           variant="secondary"
++                           data-testid={`ssh-status-badge-${host.id}`}
++                           className="text-[11px] font-normal py-0 px-1.5 h-4 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30"
++                         >
++                           Active
++                         </Badge>
++                       )}
++                     </div>
++
++                     <div className="font-mono text-[11px] text-muted-foreground truncate">
++                       {formatSshTarget(host)}:{host.port ?? 22}
++                       {host.jumpHost ? ` via ${host.jumpHost}` : ""}
++                     </div>
++
++                     {test ? (
++                       <div className="pt-0.5">
++                         {test.testing ? (
++                           <span className="text-[11px] text-muted-foreground flex items-center gap-1">
++                             <Loader2 className="size-3 animate-spin" /> Testing connection…
++                           </span>
++                         ) : test.reachable ? (
++                           <span
++                             data-testid={`ssh-test-success-${host.id}`}
++                             className="text-[11px] font-medium text-emerald-600 dark:text-emerald-400 flex items-center gap-1"
++                           >
++                             <CheckCircle2 className="size-3" /> Connection verified
++                           </span>
++                         ) : (
++                           <div
++                             role="alert"
++                             data-testid={`ssh-test-error-${host.id}`}
++                             className="text-[11px] text-destructive flex items-center gap-1"
++                           >
++                             <AlertCircle className="size-3 shrink-0" />
++                             <span>Failed{test.stage ? ` (${test.stage})` : ""}: {test.error ?? "Connection failed"}</span>
++                           </div>
++                         )}
++                       </div>
++                     ) : null}
++                     {test?.environment ? (
++                       <div
++                         data-testid={`ssh-runtime-${host.id}`}
++                         data-platform={test.environment.platform}
++                         data-git={String(test.environment.git)}
++                         className="text-[11px] text-muted-foreground space-y-1"
++                       >
++                         <div>{test.environment.platform === "windows" ? "Windows" : "POSIX"} · {test.environment.executor} {test.environment.version} · {test.environment.git ? "Git available" : "Git not installed"}</div>
++                         <Button
++                           type="button"
++                           variant="ghost"
++                           size="sm"
++                           disabled={isBusy || test.testing || !!host.disabled || isFormOpen}
++                           onClick={() => handlePrepareIntegration(host)}
++                           aria-label={`Prepare agent integration on ${host.label}`}
++                         >
++                           {isBusy ? "Preparing…" : preparedHosts[host.id] ? "Reinstall agent integration" : "Prepare agent integration"}
++                         </Button>
++                         <div>{preparedHosts[host.id] ? "Extension installed. Open a new remote agent session to use it." : "Optional: installs the Ferryx state extension in remote agent folders."}</div>
++                       </div>
++                     ) : null}
++                   </div>
++
++                   <div className="flex flex-wrap items-center gap-2 shrink-0">
++                     {onOpenProject ? (
++                       <Button type="button" size="sm" variant="outline"
++                         disabled={!!host.disabled || isBusy || test?.testing || isFormOpen}
++                         onClick={() => onOpenProject(host.id)}
++                         aria-label={`Open project on ${host.label}`}>
++                         <FolderOpen className="size-3.5" />
++                         Open Project
++                       </Button>
++                     ) : null}
++                     <div className="flex items-center mr-1">
++                       <Switch
++                         id={`ssh-toggle-${host.id}`}
++                         checked={!host.disabled}
++                         onCheckedChange={(checked) => handleToggleDisabled(host, !checked)}
++                         disabled={isBusy || test?.testing}
++                         aria-label={`Enable ${host.label}`}
++                       />
++                     </div>
++
++                     <Button
++                       type="button"
++                       size="sm"
++                       variant="outline"
++                       disabled={test?.testing || isBusy || isFormOpen}
++                       onClick={() => handleTestHost(host)}
++                       aria-label={`Test connection to ${host.label}`}
++                     >
++                       {test?.testing ? "Testing…" : "Test"}
++                     </Button>
++
++                     <Button
++                       type="button"
++                       size="sm"
++                       variant="ghost"
++                       disabled={isBusy || test?.testing || isFormOpen}
++                       onClick={() => handleStartEdit(host)}
++                       aria-label={`Edit ${host.label}`}
++                     >
++                       Edit
++                     </Button>
++
++                     <Button
++                       type="button"
++                       size="sm"
++                       variant="ghost"
++                       disabled={isBusy || test?.testing}
++                       onClick={() => handleDeleteHost(host.id)}
++                       className="text-destructive hover:text-destructive hover:bg-destructive/10"
++                       aria-label={`Delete ${host.label}`}
++                     >
++                       <Trash2 className="size-3.5" />
++                     </Button>
++                   </div>
++                 </div>
++               );
++             })}
++           </div>
++         )}
++       </SettingsGroup>
++     </section>
++   );
++ }
++
++ import { fireEvent, render, screen } from "@testing-library/react";
++ import { useState } from "react";
++ import { describe, expect, it, vi } from "vitest";
++
++ import { TerminalSection } from "./TerminalSection";
++
++ const FONT_SIZE_MIN = 10;
++ const FONT_SIZE_MAX = 24;
++ const PERSISTED_FONT_FAMILY = "MesloLGS NF";
++
++ function clampLikeNormalizeTerminalSettings(value: number): number {
++   return Math.min(FONT_SIZE_MAX, Math.max(FONT_SIZE_MIN, Math.round(value)));
++ }
++
++ function ParentThatClampsAndFeedsBack({ onCommit }: { onCommit: (value: number) => void }) {
++   const [fontSize, setFontSize] = useState(13);
++   return (
++     <TerminalSection
++       fontFamily={PERSISTED_FONT_FAMILY}
++       fontSize={fontSize}
++       macosOptionAsAlt={false}
++       source="imported"
++       sourcePath={null}
++       onFontFamily={vi.fn()}
++       onFontSize={(value) => {
++         onCommit(value);
++         setFontSize(clampLikeNormalizeTerminalSettings(value));
++       }}
++       onOptionAsAlt={vi.fn()}
++       onUseImported={vi.fn()}
++     />
++   );
++ }
++
++ describe("TerminalSection interaction safety", () => {
++   it("lets the user type a multi-digit font size without the clamp overwriting the draft", () => {
++     const onCommit = vi.fn();
++     render(<ParentThatClampsAndFeedsBack onCommit={onCommit} />);
++
++     const input = screen.getByLabelText(/font size/i) as HTMLInputElement;
++     fireEvent.change(input, { target: { value: "" } });
++     fireEvent.change(input, { target: { value: "1" } });
++
++     expect(input.value).toBe("1");
++
++     fireEvent.change(input, { target: { value: "14" } });
++     fireEvent.blur(input);
++
++     expect(input.value).toBe("14");
++     expect(onCommit).toHaveBeenLastCalledWith(14);
++   });
++
++   it("does not commit an out-of-range intermediate value while typing", () => {
++     const onCommit = vi.fn();
++     render(<ParentThatClampsAndFeedsBack onCommit={onCommit} />);
++
++     const input = screen.getByLabelText(/font size/i) as HTMLInputElement;
++     fireEvent.change(input, { target: { value: "" } });
++     fireEvent.change(input, { target: { value: "1" } });
++
++     expect(onCommit).not.toHaveBeenCalledWith(1);
++   });
++
++   it("restores the persisted value when blurring a whitespace-only font family", () => {
++     render(<ParentThatClampsAndFeedsBack onCommit={vi.fn()} />);
++
++     const input = screen.getByLabelText(/font family/i) as HTMLInputElement;
++     fireEvent.change(input, { target: { value: "   " } });
++     fireEvent.blur(input);
++
++     expect(input.value).toBe(PERSISTED_FONT_FAMILY);
++   });
++ });
++
++ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
++ import { afterEach, describe, expect, it, vi } from "vitest";
++
++ import { TerminalSection } from "./TerminalSection";
++
++ afterEach(cleanup);
++
++ describe("TerminalSection", () => {
++   const defaultProps = {
++     fontFamily: "JetBrains Mono",
++     fontSize: 14,
++     macosOptionAsAlt: true,
++     source: "Ghostty · Imported",
++     sourcePath: "/Users/test/.config/ghostty/config",
++     onFontFamily: vi.fn(),
++     onFontSize: vi.fn(),
++     onOptionAsAlt: vi.fn(),
++     onUseImported: vi.fn(),
++   };
++
++   it("renders Scrollback control and commits changes on blur or Enter", () => {
++     const onScrollback = vi.fn();
++     render(<TerminalSection {...defaultProps} scrollback={10_000} onScrollback={onScrollback} />);
++
++     const scrollbackInput = screen.getByLabelText(/scrollback lines/i);
++     expect(scrollbackInput).toBeInTheDocument();
++     expect(scrollbackInput).toHaveValue(10_000);
++
++     fireEvent.change(scrollbackInput, { target: { value: "25000" } });
++     expect(onScrollback).not.toHaveBeenCalled();
++
++     fireEvent.blur(scrollbackInput);
++     expect(onScrollback).toHaveBeenCalledWith(25_000);
++
++     fireEvent.change(scrollbackInput, { target: { value: "50000" } });
++     fireEvent.keyDown(scrollbackInput, { key: "Enter" });
++     expect(onScrollback).toHaveBeenCalledWith(50_000);
++
++     // Clamps out of range numbers
++     fireEvent.change(scrollbackInput, { target: { value: "200000" } });
++     fireEvent.blur(scrollbackInput);
++     expect(onScrollback).toHaveBeenCalledWith(100_000);
++   });
++
++   it("buffers font family changes and commits only on blur or Enter", () => {
++     const onFontFamily = vi.fn();
++     render(<TerminalSection {...defaultProps} onFontFamily={onFontFamily} />);
++
++     const fontInput = screen.getByLabelText(/font family/i);
++     fireEvent.change(fontInput, { target: { value: "F" } });
++     fireEvent.change(fontInput, { target: { value: "Fi" } });
++     fireEvent.change(fontInput, { target: { value: "Fir" } });
++     fireEvent.change(fontInput, { target: { value: "Fira" } });
++     fireEvent.change(fontInput, { target: { value: "Fira Code" } });
++
++     expect(onFontFamily).toHaveBeenCalledTimes(0);
++
++     fireEvent.blur(fontInput);
++     expect(onFontFamily).toHaveBeenCalledTimes(1);
++     expect(onFontFamily).toHaveBeenCalledWith("Fira Code");
++
++     fireEvent.change(fontInput, { target: { value: "Menlo" } });
++     expect(onFontFamily).toHaveBeenCalledTimes(1);
++
++     fireEvent.keyDown(fontInput, { key: "Enter" });
++     expect(onFontFamily).toHaveBeenCalledTimes(2);
++     expect(onFontFamily).toHaveBeenLastCalledWith("Menlo");
++   });
++
++   it("does not call onFontSize with 0 or NaN when clearing the input", () => {
++     const onFontSize = vi.fn();
++     render(<TerminalSection {...defaultProps} fontSize={14} onFontSize={onFontSize} />);
++
++     const fontSizeInput = screen.getByLabelText(/font size/i);
++     fireEvent.change(fontSizeInput, { target: { value: "" } });
++
++     expect(onFontSize).not.toHaveBeenCalled();
++
++     fireEvent.blur(fontSizeInput);
++     expect(fontSizeInput).toHaveValue(14);
++   });
++
++   it("restores draft font size from prop on blur when unparseable", () => {
++     const onFontSize = vi.fn();
++     render(<TerminalSection {...defaultProps} fontSize={16} onFontSize={onFontSize} />);
++
++     const fontSizeInput = screen.getByLabelText(/font size/i);
++     fireEvent.change(fontSizeInput, { target: { value: "   " } });
++     expect(onFontSize).not.toHaveBeenCalled();
++
++     fireEvent.blur(fontSizeInput);
++     expect(fontSizeInput).toHaveValue(16);
++   });
++
++   it("updates font family and font size drafts when props change", () => {
++     const { rerender } = render(<TerminalSection {...defaultProps} fontFamily="Monaco" fontSize={12} />);
++
++     expect(screen.getByLabelText(/font family/i)).toHaveValue("Monaco");
++     expect(screen.getByLabelText(/font size/i)).toHaveValue(12);
++
++     rerender(<TerminalSection {...defaultProps} fontFamily="Courier" fontSize={18} />);
++
++     expect(screen.getByLabelText(/font family/i)).toHaveValue("Courier");
++     expect(screen.getByLabelText(/font size/i)).toHaveValue(18);
++   });
++
++   it("renders Default shell selector and changing it calls onShell", () => {
++     const onShell = vi.fn();
++     render(<TerminalSection {...defaultProps} shell={null} onShell={onShell} />);
++
++     const shellSelect = screen.getByLabelText(/default shell/i);
++     expect(shellSelect).toBeInTheDocument();
++     expect(shellSelect).toHaveValue("");
++
++     fireEvent.change(shellSelect, { target: { value: "pwsh" } });
++     expect(onShell).toHaveBeenCalledWith("pwsh");
++   });
++
++   it("handles custom shell path input and commits on blur/enter", () => {
++     const onShell = vi.fn();
++     render(<TerminalSection {...defaultProps} shell={null} onShell={onShell} />);
++
++     const shellSelect = screen.getByLabelText(/default shell/i);
++     fireEvent.change(shellSelect, { target: { value: "custom" } });
++
++     const customInput = screen.getByLabelText(/custom shell path/i);
++     expect(customInput).toBeInTheDocument();
++
++     fireEvent.change(customInput, { target: { value: "/bin/fish" } });
++     fireEvent.blur(customInput);
++     expect(onShell).toHaveBeenCalledWith("/bin/fish");
++   });
++
++   it("renders custom shell selection when prop is custom path", () => {
++     render(<TerminalSection {...defaultProps} shell="/opt/homebrew/bin/nu" />);
++
++     const shellSelect = screen.getByLabelText(/default shell/i);
++     expect(shellSelect).toHaveValue("custom");
++
++     const customInput = screen.getByLabelText(/custom shell path/i);
++     expect(customInput).toHaveValue("/opt/homebrew/bin/nu");
++   });
++ });
++
++ import { useEffect, useState } from "react";
++ import { RotateCcw, TerminalSquare } from "lucide-react";
++
++ import { Button } from "../ui/button";
++ import { Input } from "../ui/input";
++ import { Label } from "../ui/label";
++ import { Switch } from "../ui/switch";
++ import { SettingsHeading } from "./primitives";
++ import type { TerminalSectionProps } from "./types";
++
++ export function TerminalSection({
++   fontFamily,
++   fontSize,
++   macosOptionAsAlt,
++   shell = null,
++   scrollback = 10_000,
++   source,
++   sourcePath,
++   onFontFamily,
++   onFontSize,
++   onOptionAsAlt,
++   onShell,
++   onScrollback,
++   onUseImported,
++ }: TerminalSectionProps) {
++   const [familyDraft, setFamilyDraft] = useState(fontFamily);
++   const [sizeDraft, setSizeDraft] = useState(String(fontSize));
++   const [scrollbackDraft, setScrollbackDraft] = useState(String(scrollback));
++
++   const knownShells = ["pwsh", "powershell", "cmd", "wsl"];
++   const isKnownShell = shell !== null && knownShells.includes(shell);
++   const isCustomShell = shell !== null && shell !== "" && !isKnownShell;
++
++   const [selectedShell, setSelectedShell] = useState<string>(() => {
++     if (shell === null || shell === "") return "";
++     if (isKnownShell) return shell;
++     return "custom";
++   });
++   const [customDraft, setCustomDraft] = useState<string>(() => (isCustomShell ? shell : ""));
++
++   useEffect(() => {
++     setFamilyDraft(fontFamily);
++   }, [fontFamily]);
++
++   useEffect(() => {
++     setSizeDraft(String(fontSize));
++   }, [fontSize]);
++
++   useEffect(() => {
++     setScrollbackDraft(String(scrollback));
++   }, [scrollback]);
++
++   useEffect(() => {
++     if (shell === null || shell === "") {
++       setSelectedShell("");
++     } else if (knownShells.includes(shell)) {
++       setSelectedShell(shell);
++     } else {
++       setSelectedShell("custom");
++       setCustomDraft(shell);
++     }
++   }, [shell]);
++
++   const commitFamily = () => {
++     if (familyDraft.trim() === "") {
++       setFamilyDraft(fontFamily);
++       return;
++     }
++     onFontFamily(familyDraft);
++   };
++
++   const handleFontSizeChange = (event: React.ChangeEvent<HTMLInputElement>) => {
++     setSizeDraft(event.target.value);
++   };
++
++   const commitFontSize = () => {
++     const parsed = Number(sizeDraft);
++     if (sizeDraft.trim() === "" || !Number.isFinite(parsed)) {
++       setSizeDraft(String(fontSize));
++       return;
++     }
++     onFontSize(parsed);
++   };
++
++   const handleScrollbackChange = (event: React.ChangeEvent<HTMLInputElement>) => {
++     setScrollbackDraft(event.target.value);
++   };
++
++   const commitScrollback = () => {
++     const parsed = Number(scrollbackDraft);
++     if (scrollbackDraft.trim() === "" || !Number.isFinite(parsed)) {
++       setScrollbackDraft(String(scrollback));
++       return;
++     }
++     const clamped = Math.min(100_000, Math.max(1_000, Math.round(parsed)));
++     setScrollbackDraft(String(clamped));
++     onScrollback?.(clamped);
++   };
++
++   const handleShellChange = (event: React.ChangeEvent<HTMLSelectElement>) => {
++     const value = event.target.value;
++     setSelectedShell(value);
++     if (value === "custom") {
++       if (customDraft.trim()) {
++         onShell?.(customDraft.trim());
++       }
++     } else {
++       onShell?.(value === "" ? null : value);
++     }
++   };
++
++   const commitCustom = () => {
++     const trimmed = customDraft.trim();
++     if (trimmed) {
++       onShell?.(trimmed);
++     } else {
++       onShell?.(null);
++     }
++   };
++
++
++
++   return (
++     <section aria-labelledby="settings-terminal-heading">
++       <SettingsHeading
++         icon={<TerminalSquare />}
++         title="Terminal"
++         description="Ghostty preferences are imported by the native runtime. Explicit values set here take precedence locally."
++       />
++       <h2 id="settings-terminal-heading" className="sr-only">
++         Terminal
++       </h2>
++       <div className="mb-5 flex items-start justify-between gap-5 border-y border-border py-3">
++         <div className="min-w-0">
++           <div className="text-[13px] font-semibold">Effective preferences</div>
++           <div className="mt-1 text-[11px] text-muted-foreground">{source}</div>
++           {sourcePath ? (
++             <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground/65">
++               {sourcePath}
++             </div>
++           ) : null}
++         </div>
++         <Button
++           type="button"
++           variant="outline"
++           size="sm"
++           onClick={onUseImported}
++           className="no-drag h-7 shrink-0 gap-1.5 px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
++         >
++           <RotateCcw className="size-3" />
++           Use imported
++         </Button>
++       </div>
++
++       <div className="space-y-5">
++         <div>
++           <Label
++             htmlFor="terminal-font-family"
++             className="mb-1.5 block text-[11px] font-medium"
++           >
++             Font family
++           </Label>
++           <Input
++             id="terminal-font-family"
++             value={familyDraft}
++             onChange={(event) => setFamilyDraft(event.target.value)}
++             onBlur={commitFamily}
++             onKeyDown={(event) => {
++               if (event.key === "Enter") {
++                 commitFamily();
++               }
++             }}
++             className="h-8 text-[11px]"
++           />
++           <p className="mt-1 text-[11px] text-muted-foreground">
++             Leave the local override reset to follow Ghostty.
++           </p>
++         </div>
++         <div>
++           <Label
++             htmlFor="terminal-font-size"
++             className="mb-1.5 block text-[11px] font-medium"
++           >
++             Font size
++           </Label>
++           <Input
++             id="terminal-font-size"
++             type="number"
++             min={10}
++             max={24}
++             value={sizeDraft}
++             onChange={handleFontSizeChange}
++             onBlur={commitFontSize}
++             onKeyDown={(event) => {
++               if (event.key === "Enter") commitFontSize();
++             }}
++             className="h-8 text-[11px]"
++           />
++         </div>
++         <div>
++           <Label
++             htmlFor="terminal-scrollback"
++             className="mb-1.5 block text-[11px] font-medium"
++           >
++             Scrollback lines
++           </Label>
++           <Input
++             id="terminal-scrollback"
++             type="number"
++             min={1000}
++             max={100000}
++             step={1000}
++             value={scrollbackDraft}
++             onChange={handleScrollbackChange}
++             onBlur={commitScrollback}
++             onKeyDown={(event) => {
++               if (event.key === "Enter") commitScrollback();
++             }}
++             className="h-8 text-[11px]"
++           />
++           <p className="mt-1 text-[11px] text-muted-foreground">
++             Maximum scrollback lines retained in memory (1,000 – 100,000).
++           </p>
++         </div>
++         <div>
++           <Label
++             htmlFor="terminal-default-shell"
++             className="mb-1.5 block text-[11px] font-medium"
++           >
++             Default shell
++           </Label>
++           <select
++             id="terminal-default-shell"
++             value={selectedShell}
++             onChange={handleShellChange}
++             className="h-8 w-full rounded-md border border-input bg-transparent px-3 py-1 text-[11px] shadow-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
++           >
++             <option value="" className="bg-popover text-popover-foreground">Platform default</option>
++             <option value="pwsh" className="bg-popover text-popover-foreground">PowerShell</option>
++             <option value="powershell" className="bg-popover text-popover-foreground">Windows PowerShell</option>
++             <option value="cmd" className="bg-popover text-popover-foreground">Command Prompt</option>
++             <option value="wsl" className="bg-popover text-popover-foreground">WSL</option>
++             <option value="custom" className="bg-popover text-popover-foreground">Custom...</option>
++           </select>
++           {selectedShell === "custom" ? (
++             <div className="mt-2">
++               <Input
++                 id="terminal-custom-shell"
++                 placeholder="/path/to/shell"
++                 aria-label="Custom shell path"
++                 value={customDraft}
++                 onChange={(event) => setCustomDraft(event.target.value)}
++                 onBlur={commitCustom}
++                 onKeyDown={(event) => {
++                   if (event.key === "Enter") commitCustom();
++                 }}
++                 className="h-8 text-[11px]"
++               />
++             </div>
++           ) : null}
++           <p className="mt-1 text-[11px] text-muted-foreground">
++             Choose the default shell spawned in new tabs and panes.
++           </p>
++         </div>
++         <div className="flex items-center justify-between gap-4 border-y border-border py-3 text-[11px]">
++           <div>
++             <Label
++               htmlFor="terminal-macos-option-as-alt"
++               className="font-medium text-foreground cursor-pointer"
++             >
++               macOS Option as Alt
++             </Label>
++             <div className="mt-0.5 text-[11px] text-muted-foreground">
++               Maps the Option key to terminal Meta/Alt behavior.
++             </div>
++           </div>
++           <Switch
++             id="terminal-macos-option-as-alt"
++             checked={macosOptionAsAlt}
++             onCheckedChange={onOptionAsAlt}
++           />
++         </div>
++       </div>
++     </section>
++   );
++ }
++
++ import type { ReactNode } from "react";
++
++ export function SettingsHeading({
++   icon,
++   title,
++   description,
++ }: {
++   icon: ReactNode;
++   title: string;
++   description: string;
++ }) {
++   return (
++     <header className="mb-8 border-b border-border pb-5">
++       <div className="mb-2 flex items-center gap-2 text-[15px] font-semibold">
++         <span className="text-muted-foreground [&>svg]:size-4">{icon}</span>
++         {title}
++       </div>
++       <p className="max-w-2xl text-[12px] leading-5 text-muted-foreground">{description}</p>
++     </header>
++   );
++ }
++
++ export function SettingsGroup({
++   title,
++   action,
++   description,
++   children,
++ }: {
++   title: string;
++   action?: ReactNode;
++   description?: string;
++   children: ReactNode;
++ }) {
++   return (
++     <div className="mb-6">
++       <div className="mb-4 flex items-center justify-between border-b border-border pb-3">
++         <div>
++           <h3 className="text-[13px] font-semibold text-foreground">{title}</h3>
++           {description ? (
++             <p className="mt-0.5 text-[11px] text-muted-foreground">{description}</p>
++           ) : null}
++         </div>
++         {action ? <div className="flex items-center gap-2">{action}</div> : null}
++       </div>
++       {children}
++     </div>
++   );
++ }
++
++ export function SettingRow({
++   label,
++   title,
++   description,
++   children,
++ }: {
++   label?: string;
++   title?: string;
++   description?: ReactNode;
++   children: ReactNode;
++ }) {
++   const heading = label ?? title ?? "";
++   return (
++     <div className="flex items-start justify-between gap-4 py-3 border-b border-border/40 last:border-0">
++       <div className="space-y-0.5 max-w-[480px]">
++         <div className="text-[13px] font-medium text-foreground">{heading}</div>
++         {description ? <p className="text-[11px] text-muted-foreground">{description}</p> : null}
++       </div>
++       <div className="shrink-0">{children}</div>
++     </div>
++   );
++ }
++
+
+ ❯ src/appearanceThemeContract.test.ts:71:26
+     69|     expect(settings).toContain("text-status-warning");
+     70|     expect(settings).toContain("text-destructive");
+     71|     expect(settings).not.toContain("text-emerald-500");
+       |                          ^
+     72|     expect(settings).not.toContain("text-amber-500");
+     73|     expect(settings).not.toContain("text-rose-500");
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/10]⎯
+
+ FAIL  src/components/NativeTerminalPane.exitAttach.test.tsx > NativeTerminalPane abnormal exit attach handling > suppresses error badge and cancels retry when cmd_native_terminal_attach returns SESSION_NOT_FOUND with typed details
+AssertionError: expected "spy" to be called with arguments: [ 'dead-backend-session', …(1) ]
+
+Received: 
+
+  1st spy call:
+
+  [
+    "dead-backend-session",
+    "daemon-attach-not-found",
++   "dead-backend-session::0:",
+  ]
+
+
+Number of calls: 1
+
+ ❯ src/components/NativeTerminalPane.exitAttach.test.tsx:124:27
+    122|     const alert = queryByRole("alert");
+    123|     expect(alert).toBeNull();
+    124|     expect(onUnavailable).toHaveBeenCalledWith("dead-backend-session", "daemon-attach-not-found");
+       |                           ^
+    125|   });
+    126| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/10]⎯
+
+ FAIL  src/components/NativeTerminalPane.exitAttach.test.tsx > NativeTerminalPane abnormal exit attach handling > suppresses error badge for legacy INTERNAL_ERROR with exact Session not found message
+AssertionError: expected "spy" to be called with arguments: [ 'legacy-dead-session', …(1) ]
+
+Received: 
+
+  1st spy call:
+
+  [
+    "legacy-dead-session",
+    "legacy-internal-error",
++   "legacy-dead-session::0:",
+  ]
+
+
+Number of calls: 1
+
+ ❯ src/components/NativeTerminalPane.exitAttach.test.tsx:190:27
+    188| 
+    189|     expect(queryByRole("alert")).toBeNull();
+    190|     expect(onUnavailable).toHaveBeenCalledWith("legacy-dead-session", "legacy-internal-error");
+       |                           ^
+    191|   });
+    192| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/10]⎯
+
+ FAIL  src/components/SettingsDialog.test.tsx > SettingsDialog > states that authorized browser profiles reconnect while Remote remains enabled and only require re-pairing when storage cleared, revoked, or profile changed
+Error: expect(element).toHaveTextContent()
+
+Expected element to have text content:
+  /authorized browser profiles reconnect/i
+Received:
+  Remote AccessAccess desktop terminal sessions from your phone. One switch turns remote access on; one QR code pairs any device, connecting through the relay and upgrading to a direct LAN or Tailscale path whenever it is reachable.Remote AccessRemote AccessServe live terminal sessions to paired devices. Authorized browsers reconnect automatically while this stays on.Relay / Signaling Server URLPublic relay that carries pairing and traffic when a device is off your network. Leave empty to stay local-network only.Paired DevicesNo paired devices.
+ ❯ src/components/SettingsDialog.test.tsx:614:20
+    612| 
+    613|     const remote = screen.getByRole("region", { name: "Remote Access" });
+    614|     expect(remote).toHaveTextContent(/authorized browser profiles reconnect/i);
+       |                    ^
+    615|     expect(remote).toHaveTextContent(/re-pair only after browser storage is cleared, a device is revoked, or a…
+    616|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/10]⎯
+
+ FAIL  src/components/TerminalPane.exitAttach.integration.test.tsx > TerminalPane exit attach integration > propagates session unavailable on attach failure, transitions session to exited, and displays Shell exited overlay without error badge
+AssertionError: expected "spy" to be called with arguments: [ 'term-pane-1', …(2) ]
+
+Received: 
+
+  1st spy call:
+
+  [
+    "term-pane-1",
+    "backend-dead-pty",
+    "daemon-attach-not-found",
++   "backend-dead-pty::0:",
+  ]
+
+
+Number of calls: 1
+
+ ❯ src/components/TerminalPane.exitAttach.integration.test.tsx:148:31
+    146|     });
+    147| 
+    148|     expect(handleUnavailable).toHaveBeenCalledWith("term-pane-1", "backend-dead-pty", "daemon-attach-not-found…
+       |                               ^
+    149|     expect(currentSession.lifecycle).toBe("exited");
+    150|     expect(currentSession.backendSessionId).toBeNull();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/10]⎯
+
+ FAIL  src/features/ferryx/push/client.test.ts > push client boundaries > accepts only same origin exact task links
+AssertionError: expected null to be 'https://ferryx.test/#task=YWJj' // Object.is equality
+
+- Expected: 
+"https://ferryx.test/#task=YWJj"
+
++ Received: 
+null
+
+ ❯ src/features/ferryx/push/client.test.ts:5:66
+
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[8/10]⎯
+
+ FAIL  src/features/ferryx/push/client.test.ts > push client boundaries > denied permission never subscribes
+AssertionError: expected 'enabled' to be 'denied' // Object.is equality
+
+Expected: "denied"
+Received: "enabled"
+
+ ❯ src/features/ferryx/push/client.test.ts:11:35
+      9|     vi.stubGlobal("isSecureContext", true); vi.stubGlobal("Notification", { permission: "denied", requestPermi…
+     10|     const subscribe = vi.fn(); const client = new PushClient({request: vi.fn()}, {pushManager: {subscribe}} as…
+     11|     expect(await client.enable()).toBe("denied"); expect(subscribe).not.toHaveBeenCalled(); vi.unstubAllGlobal…
+       |                                   ^
+     12|   });
+     13|   it("server unsubscribe precedes local removal and failure preserves subscription", async () => {
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[9/10]⎯
+
+ FAIL  src/features/ferryx/push/client.test.ts > push client boundaries > server unsubscribe precedes local removal and failure preserves subscription
+AssertionError: promise resolved "'disabled'" instead of rejecting
+
+- Expected: 
+Error {
+  "message": "rejected promise",
+}
+
++ Received: 
+"disabled"
+
+ ❯ src/features/ferryx/push/client.test.ts:16:34
+     14|     let removed = false; const subscription = { endpoint: "https://push.test/a", unsubscribe: async () => { re…
+     15|     const client = new PushClient({request: async () => { throw new Error("offline"); }}, {pushManager: {getSu…
+     16|     await expect(client.disable()).rejects.toThrow("offline"); expect(removed).toBe(false);
+       |                                  ^
+     17|   });
+     18| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[10/10]⎯
+
+
+ Test Files  7 failed | 212 passed (219)
+      Tests  10 failed | 2439 passed (2449)
+   Start at  17:29:14
+   Duration  114.46s (transform 1.84s, setup 12.99s, collect 28.06s, tests 21.00s, environment 29.21s, prepare 5.64s)
+
+error: script "test" exited with code 1
+
+[Showing lines 5667-6898 of 6898; earlier output dropped]

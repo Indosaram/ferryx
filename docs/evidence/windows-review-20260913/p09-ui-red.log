@@ -1,0 +1,53 @@
+$ vitest run --maxWorkers=1 src/components/settings/TerminalSection.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ❯ src/components/settings/TerminalSection.test.tsx (3 tests | 2 failed) 43ms
+   × terminal platform applicability > gates Option control on Win32 30ms
+     → expected <button type="button" …(6)>…(1)</button> to be null
+   × terminal platform applicability > gates Option control on Linux x86_64 6ms
+     → expected <button type="button" …(6)>…(1)</button> to be null
+   ✓ terminal platform applicability > gates Option control on MacIntel 7ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/settings/TerminalSection.test.tsx > terminal platform applicability > gates Option control on Win32
+ FAIL  src/components/settings/TerminalSection.test.tsx > terminal platform applicability > gates Option control on Linux x86_64
+AssertionError: expected <button type="button" …(6)>…(1)</button> to be null
+
+[32m- Expected:[39m 
+null
+
+[31m+ Received:[39m 
+<button
+  aria-checked="false"
+  class="peer inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-primary data-[state=unchecked]:bg-input"
+  data-state="unchecked"
+  id="terminal-macos-option-as-alt"
+  role="switch"
+  type="button"
+  value="on"
+>
+  <span
+    class="pointer-events-none block h-4 w-4 rounded-full bg-background shadow-lg ring-0 transition-transform data-[state=checked]:translate-x-4 data-[state=unchecked]:translate-x-0"
+    data-state="unchecked"
+  />
+</button>
+
+ ❯ src/components/settings/TerminalSection.test.tsx:27:23
+     25|       expect(onOptionAsAlt).toHaveBeenCalledExactlyOnceWith(true);
+     26|     } else {
+     27|       expect(control).toBeNull();
+       |                       ^
+     28|       expect(onOptionAsAlt).not.toHaveBeenCalled();
+     29|     }
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  2 failed | 1 passed (3)
+   Start at  18:09:59
+   Duration  1.27s (transform 60ms, setup 123ms, collect 488ms, tests 43ms, environment 317ms, prepare 34ms)
+
+error: script "test" exited with code 1

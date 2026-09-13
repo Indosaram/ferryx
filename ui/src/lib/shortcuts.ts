@@ -53,6 +53,7 @@ export type ShortcutBinding = {
   control?: boolean;
   alt?: boolean;
   shift?: boolean;
+  readonly nonMac?: Partial<Omit<ShortcutBinding, "nonMac">>;
 };
 
 export type ShortcutDefinition = {
@@ -212,63 +213,63 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "workspace.select1",
     title: "Select workspace 1",
     group: "Workspaces",
-    binding: { key: "1", mod: true },
+    binding: { key: "1", mod: true, nonMac: { mod: false, alt: true } },
     source: "ferryx",
   },
   {
     id: "workspace.select2",
     title: "Select workspace 2",
     group: "Workspaces",
-    binding: { key: "2", mod: true },
+    binding: { key: "2", mod: true, nonMac: { mod: false, alt: true } },
     source: "ferryx",
   },
   {
     id: "workspace.select3",
     title: "Select workspace 3",
     group: "Workspaces",
-    binding: { key: "3", mod: true },
+    binding: { key: "3", mod: true, nonMac: { mod: false, alt: true } },
     source: "ferryx",
   },
   {
     id: "workspace.select4",
     title: "Select workspace 4",
     group: "Workspaces",
-    binding: { key: "4", mod: true },
+    binding: { key: "4", mod: true, nonMac: { mod: false, alt: true } },
     source: "ferryx",
   },
   {
     id: "workspace.select5",
     title: "Select workspace 5",
     group: "Workspaces",
-    binding: { key: "5", mod: true },
+    binding: { key: "5", mod: true, nonMac: { mod: false, alt: true } },
     source: "ferryx",
   },
   {
     id: "workspace.select6",
     title: "Select workspace 6",
     group: "Workspaces",
-    binding: { key: "6", mod: true },
+    binding: { key: "6", mod: true, nonMac: { mod: false, alt: true } },
     source: "ferryx",
   },
   {
     id: "workspace.select7",
     title: "Select workspace 7",
     group: "Workspaces",
-    binding: { key: "7", mod: true },
+    binding: { key: "7", mod: true, nonMac: { mod: false, alt: true } },
     source: "ferryx",
   },
   {
     id: "workspace.select8",
     title: "Select workspace 8",
     group: "Workspaces",
-    binding: { key: "8", mod: true },
+    binding: { key: "8", mod: true, nonMac: { mod: false, alt: true } },
     source: "ferryx",
   },
   {
     id: "workspace.select9",
     title: "Select workspace 9",
     group: "Workspaces",
-    binding: { key: "9", mod: true },
+    binding: { key: "9", mod: true, nonMac: { mod: false, alt: true } },
     source: "ferryx",
   },
   {
@@ -362,7 +363,13 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
 
 const SHORTCUT_BY_ID = new Map<ShortcutActionId, ShortcutDefinition>(SHORTCUTS.map((shortcut) => [shortcut.id, shortcut]));
 
-export function formatBindingLabel(binding: ShortcutBinding, isMac = detectMacPlatform()): string {
+export function resolveBinding(binding: ShortcutBinding, isMac: boolean): ShortcutBinding {
+  const { nonMac, ...base } = binding;
+  return isMac ? base : { ...base, ...nonMac };
+}
+
+export function formatBindingLabel(rawBinding: ShortcutBinding, isMac = detectMacPlatform()): string {
+  const binding = resolveBinding(rawBinding, isMac);
   const key = displayKey(binding.key);
   if (isMac) {
     return `${binding.mod ? "⌘" : ""}${binding.control ? "⌃" : ""}${binding.alt ? "⌥" : ""}${binding.shift ? "⇧" : ""}${key}`;
@@ -454,7 +461,7 @@ export function isMacShortcutPlatform() {
   return detectMacPlatform();
 }
 
-export function matchesBinding(event: KeyboardEvent, binding: ShortcutBinding, isMac: boolean): boolean {
+export function matchesBinding(event: KeyboardEvent, rawBinding: ShortcutBinding, isMac: boolean): boolean {
   // Keydowns owned by an active IME composition must never match an app chord:
   // the physical `code` still reflects the shortcut key, but the keystroke belongs
   // to text conversion. WebKit signals this with legacy keyCode 229 and/or a
@@ -470,6 +477,7 @@ export function matchesBinding(event: KeyboardEvent, binding: ShortcutBinding, i
     return false;
   }
 
+  const binding = resolveBinding(rawBinding, isMac);
   const expectedMeta = Boolean(binding.mod && isMac);
   const expectedControl = Boolean(binding.control || (binding.mod && !isMac));
   const expectedAlt = Boolean(binding.alt);

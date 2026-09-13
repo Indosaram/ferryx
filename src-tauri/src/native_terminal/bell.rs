@@ -1,7 +1,7 @@
 //! Safe bell, title, and pty write event observation and callback management.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use parking_lot::Mutex;
 
 use super::sys::types::GhosttyTerminal;
@@ -21,6 +21,47 @@ pub struct TerminalContext {
     pub remote_generation: Mutex<Option<u64>>,
     pub write_pty_buffer: Mutex<Vec<PtyWriteRecord>>,
     pub pty_write_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<PtyWriteRecord>>>,
+    pub cell_width: AtomicU32,
+    pub cell_height: AtomicU32,
+    pub rows: AtomicU16,
+    pub cols: AtomicU16,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GhosttySizeReportSize {
+    pub rows: u16,
+    pub columns: u16,
+    pub cell_width: u32,
+    pub cell_height: u32,
+}
+
+/// Safe C callback for terminal size query events (CSI 14/16/18 t and mode 2048).
+pub unsafe extern "C" fn terminal_size_callback(
+    _terminal: GhosttyTerminal,
+    userdata: *mut c_void,
+    out_size: *mut GhosttySizeReportSize,
+) -> bool {
+    if userdata.is_null() || out_size.is_null() {
+        return false;
+    }
+    let ctx = unsafe { &*(userdata as *const TerminalContext) };
+    let cell_width = ctx.cell_width.load(Ordering::Acquire);
+    let cell_height = ctx.cell_height.load(Ordering::Acquire);
+    let rows = ctx.rows.load(Ordering::Acquire);
+    let columns = ctx.cols.load(Ordering::Acquire);
+    if cell_width == 0 || cell_height == 0 || rows == 0 || columns == 0 {
+        return false;
+    }
+    unsafe {
+        *out_size = GhosttySizeReportSize {
+            rows,
+            columns,
+            cell_width,
+            cell_height,
+        };
+    }
+    true
 }
 
 /// Safe C callback for terminal BEL character (0x07) events.

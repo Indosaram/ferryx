@@ -1,0 +1,8 @@
+bash_syntax_exit=0
+node_syntax_exit=0
+rustfmt_exit=0
+EDGE_FIXTURE_STAGED_EXECUTED_CLEANED
+fixture_exit=0
+P18 requires a lead-issued exclusive Cargo slot.
+unauthorized_runner_exit=2
+diff_check_exit=0

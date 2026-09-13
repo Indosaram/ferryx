@@ -405,6 +405,8 @@ impl RelayState {
             // Another relay process may have enrolled machines since this one loaded the
             // store. Writing our in-memory snapshot would silently drop their records, so
             // re-read and merge under our lock before persisting.
+            #[cfg(test)]
+            tests::probe_enrollment_transaction(path, "read");
             match std::fs::read(path) {
                 Ok(bytes) => {
                     let on_disk: HashMap<String, String> = serde_json::from_slice(&bytes)
@@ -437,6 +439,8 @@ impl RelayState {
                 return Err("Machine ID already claimed by another public key".into());
             }
             enrolled.insert(auth.machine_id.clone(), auth.public_key.clone());
+            #[cfg(test)]
+            tests::probe_enrollment_transaction(path, "publication");
             write_private_json(path, &enrolled)
                 .map_err(|error| format!("Failed to persist machine ownership: {error}"))?;
         } else {
@@ -1867,6 +1871,84 @@ async fn proxy_sockets(a: WebSocket, b: WebSocket) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    thread_local! {
+        static PROBE_ENROLLMENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    pub(super) fn probe_enrollment_transaction(path: &std::path::Path, boundary: &str) {
+        if !PROBE_ENROLLMENT.get() {
+            return;
+        }
+        // A separate process must not acquire the transaction lock while production
+        // is reloading or publishing. No timing or two-reader rendezvous is involved.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "remote::relay_server::tests::test_relay_transaction_lock_probe_child",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("FERRYX_P23_PROBE_KEY_FILE", path)
+            .output()
+            .expect("run owned transaction probe process");
+        assert!(
+            output.status.success(),
+            "cross-process transaction exclusion failed at {boundary}: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn test_relay_transaction_lock_probe_child() {
+        let Some(path) = std::env::var_os("FERRYX_P23_PROBE_KEY_FILE") else {
+            return;
+        };
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(std::path::PathBuf::from(path).with_extension("tx.lock"))
+            .unwrap();
+        assert!(
+            matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+            "enrollment must hold a cross-process lock throughout reload and publication"
+        );
+    }
+
+    #[test]
+    fn test_relay_key_store_transaction_is_cross_process() {
+        struct ProbeGuard;
+        impl Drop for ProbeGuard {
+            fn drop(&mut self) {
+                PROBE_ENROLLMENT.set(false);
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("machine_keys.json");
+        let first = RelayState::new_with_key_store(vec![], &path).unwrap();
+        let second = RelayState::new_with_key_store(vec![], &path).unwrap();
+        let auth = |seed, machine: &str| ControlAuth {
+            machine_id: machine.to_owned(),
+            public_key: identity(seed, machine).public_key,
+            display_name: machine.to_owned(),
+            enrollment_token: None,
+            signature: String::new(),
+            timestamp: 0,
+        };
+        PROBE_ENROLLMENT.set(true);
+        let _probe = ProbeGuard;
+        first.bind_machine_key(&auth(41, "alpha-machine")).unwrap();
+        second.bind_machine_key(&auth(42, "beta-machine")).unwrap();
+        assert!(second.bind_machine_key(&auth(43, "alpha-machine")).is_err());
+        let restarted = RelayState::new_with_key_store(vec![], &path).unwrap();
+        assert_eq!(restarted.inner.machine_public_keys.lock().len(), 2);
+        restarted.bind_machine_key(&auth(41, "alpha-machine")).unwrap();
+        restarted.bind_machine_key(&auth(42, "beta-machine")).unwrap();
+        assert!(restarted.bind_machine_key(&auth(43, "alpha-machine")).is_err());
+    }
+
     fn test_state(tokens: Vec<String>) -> RelayState {
         RelayState::with_key_store(tokens, None).unwrap()
     }

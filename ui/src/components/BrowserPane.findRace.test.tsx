@@ -74,7 +74,7 @@ describe("BrowserPane find response ordering", () => {
     render(<BrowserPane tab={tab} onNavigate={() => undefined} onReload={() => undefined} />);
 
     act(() => {
-      fireEvent(window, new CustomEvent(BROWSER_SHORTCUT_EVENT, { detail: { action: "find" } }));
+      fireEvent(window, new CustomEvent(BROWSER_SHORTCUT_EVENT, { detail: { browserId: tab.browserId, action: "find" } }));
     });
     const input = screen.getByLabelText("Find in page");
 
@@ -104,7 +104,7 @@ describe("BrowserPane find response ordering", () => {
     render(<BrowserPane tab={tab} onNavigate={() => undefined} onReload={() => undefined} />);
 
     act(() => {
-      fireEvent(window, new CustomEvent(BROWSER_SHORTCUT_EVENT, { detail: { action: "find" } }));
+      fireEvent(window, new CustomEvent(BROWSER_SHORTCUT_EVENT, { detail: { browserId: tab.browserId, action: "find" } }));
     });
     const input = screen.getByLabelText("Find in page");
 
@@ -137,7 +137,7 @@ describe("BrowserPane find response ordering", () => {
     );
 
     act(() => {
-      fireEvent(window, new CustomEvent(BROWSER_SHORTCUT_EVENT, { detail: { action: "find" } }));
+      fireEvent(window, new CustomEvent(BROWSER_SHORTCUT_EVENT, { detail: { browserId: tab.browserId, action: "find" } }));
     });
     const input = screen.getByLabelText("Find in page");
 

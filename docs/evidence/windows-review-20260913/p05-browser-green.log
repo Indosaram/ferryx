@@ -1,0 +1,14 @@
+$ vitest run --maxWorkers=1 src/App.test.tsx src/components/BrowserPane.test.tsx src/components/BrowserToolbar.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ✓ src/App.test.tsx (133 tests) 2265ms
+   ✓ App project workspace flow > Automatic agent session resume on workspace restore > auto-resumes exited agent sessions in staggered order, while plain shell sessions and unsupported agents are not auto-resumed  928ms
+ ✓ src/components/BrowserPane.test.tsx (6 tests) 85ms
+ ✓ src/components/BrowserToolbar.test.tsx (12 tests) 71ms
+
+ Test Files  3 passed (3)
+      Tests  151 passed (151)
+   Start at  15:19:02
+   Duration  4.83s (transform 464ms, setup 206ms, collect 1.25s, tests 2.42s, environment 526ms, prepare 72ms)
+

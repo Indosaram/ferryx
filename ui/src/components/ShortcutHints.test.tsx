@@ -56,6 +56,21 @@ afterEach(() => {
 });
 
 describe("modifier-held shortcut targets", () => {
+  it.each([
+    [false, { key: "Control", ctrlKey: true }, "tab.select2", "Ctrl+2", "workspace.select2"],
+    [false, { key: "Alt", altKey: true }, "workspace.select2", "Alt+2", "tab.select2"],
+    [true, { key: "Control", ctrlKey: true }, "tab.select2", "⌃2", "workspace.select2"],
+    [true, { key: "Meta", metaKey: true }, "workspace.select2", "⌘2", "tab.select2"],
+  ] as const)("shows exclusive digit hints on Mac=%s for %s", (isMac, chord, action, label, excluded) => {
+    // Given: the real hint component has both tab and workspace targets enabled.
+    render(<Fixture isMac={isMac} />);
+    // When: the modifier is held through the existing intentional delay.
+    hold(chord);
+    // Then: only the matching family is advertised with its effective label.
+    expect(hints().find((hint) => hint.dataset.shortcutHint === action)?.textContent).toBe(label);
+    expect(hints().some((hint) => hint.dataset.shortcutHint === excluded)).toBe(false);
+  });
+
   it("reveals existing labels only after the intentional hold, without taking focus", () => {
     render(<Fixture />);
     const sink = screen.getByRole("textbox", { name: "Terminal" });

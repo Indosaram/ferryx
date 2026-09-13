@@ -7,6 +7,7 @@ import { Label } from "../ui/label";
 import { Switch } from "../ui/switch";
 import { SettingsHeading } from "./primitives";
 import type { TerminalSectionProps } from "./types";
+import { isMacShortcutPlatform } from "../../lib/shortcuts";
 
 export function TerminalSection({
   fontFamily,
@@ -262,7 +263,7 @@ export function TerminalSection({
             Choose the default shell spawned in new tabs and panes.
           </p>
         </div>
-        <div className="flex items-center justify-between gap-4 border-y border-border py-3 text-[11px]">
+        {isMacShortcutPlatform() && <div className="flex items-center justify-between gap-4 border-y border-border py-3 text-[11px]">
           <div>
             <Label
               htmlFor="terminal-macos-option-as-alt"
@@ -279,7 +280,7 @@ export function TerminalSection({
             checked={macosOptionAsAlt}
             onCheckedChange={onOptionAsAlt}
           />
-        </div>
+        </div>}
       </div>
     </section>
   );

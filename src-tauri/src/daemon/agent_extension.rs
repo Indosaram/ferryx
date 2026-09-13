@@ -12,17 +12,20 @@ pub const EXTENSION_FILE_NAME: &str = "ferryx-agent-state.ts";
 
 /// Extension directories of agents that share the same lifecycle extension API.
 fn extension_dirs() -> Vec<PathBuf> {
-    let Some(home) = home_dir() else {
+    extension_dirs_with_env(|key| std::env::var_os(key))
+}
+
+fn extension_dirs_with_env(get_env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Vec<PathBuf> {
+    let Some(home) = get_env("HOME")
+        .filter(|value| !value.is_empty())
+        .or_else(|| get_env("USERPROFILE").filter(|value| !value.is_empty()))
+        .map(PathBuf::from) else {
         return Vec::new();
     };
     ["\u{2e}omo", ".pi", ".omp"]
         .iter()
         .map(|agent| home.join(agent).join("agent").join("extensions"))
         .collect()
-}
-
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
 }
 
 fn install_into(dir: &Path) -> std::io::Result<bool> {
@@ -133,5 +136,30 @@ mod tests {
             EXTENSION_SOURCE.contains("!rotated"),
             "a rotated provider session must publish even when the activity state repeats"
         );
+    }
+}
+
+#[cfg(test)]
+mod p09_tests {
+    use super::*;
+
+    #[test]
+    fn userprofile_only_installs_existing_agent_extensions() {
+        let root = std::env::temp_dir().join(format!("p09-home-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let result = std::panic::catch_unwind(|| {
+            let expected = [".omo", ".pi", ".omp"].map(|agent| root.join(agent).join("agent/extensions"));
+            for dir in &expected { std::fs::create_dir_all(dir).unwrap(); }
+            let dirs = extension_dirs_with_env(|key| (key == "USERPROFILE").then(|| root.clone().into_os_string()));
+            assert_eq!(dirs, expected);
+            for dir in dirs {
+                assert!(install_into(&dir).unwrap());
+                assert_eq!(std::fs::read_to_string(dir.join(EXTENSION_FILE_NAME)).unwrap(), EXTENSION_SOURCE);
+                assert!(!install_into(&dir).unwrap());
+            }
+            assert!(extension_dirs_with_env(|_| None).is_empty());
+        });
+        std::fs::remove_dir_all(&root).unwrap();
+        if let Err(error) = result { std::panic::resume_unwind(error); }
     }
 }

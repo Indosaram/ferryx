@@ -1,0 +1,43 @@
+$ vitest run --maxWorkers=1 src/appearanceThemeContract.test.ts src/components/settings/SshSection.test.tsx "--reporter=verbose"
+
+[1m[46m RUN [49m[22m [36mv3.2.7 [39m[90m/Users/indo/code/project/orca-lite/ui[39m
+
+ [32m✓[39m src/appearanceThemeContract.test.ts[2m > [22mappearance theme color contract[2m > [22muses a legible dark foreground for every custom accent action[32m 4[2mms[22m[39m
+ [32m✓[39m src/appearanceThemeContract.test.ts[2m > [22mappearance theme color contract[2m > [22muses dark-safe status text and destructive action tokens in light mode[32m 1[2mms[22m[39m
+ [32m✓[39m src/appearanceThemeContract.test.ts[2m > [22mappearance theme color contract[2m > [22muses a high-contrast destructive foreground in dark-capable base themes[32m 2[2mms[22m[39m
+ [32m✓[39m src/appearanceThemeContract.test.ts[2m > [22mappearance theme color contract[2m > [22muses semantic surfaces rather than fixed dark colors in remote UI[32m 1[2mms[22m[39m
+ [32m✓[39m src/appearanceThemeContract.test.ts[2m > [22mappearance theme color contract[2m > [22muses semantic surfaces for QR pairing controls[32m 4[2mms[22m[39m
+ [32m✓[39m src/appearanceThemeContract.test.ts[2m > [22mappearance theme color contract[2m > [22muses semantic status tokens for theme-sensitive badges and browser tabs[32m 3[2mms[22m[39m
+ [32m✓[39m src/appearanceThemeContract.test.ts[2m > [22mappearance theme color contract[2m > [22mloads the runtime theme stylesheet and installs the appearance bridge[32m 0[2mms[22m[39m
+ [32m✓[39m src/components/settings/SshSection.test.tsx[2m > [22mSshSection Settings Component[2m > [22mopens a project on the chosen enabled host without installing integration[32m 78[2mms[22m[39m
+ [32m✓[39m src/components/settings/SshSection.test.tsx[2m > [22mSshSection Settings Component[2m > [22mshows the detected runtime and prepares integration only on explicit action[32m 29[2mms[22m[39m
+ [32m✓[39m src/components/settings/SshSection.test.tsx[2m > [22mSshSection Settings Component[2m > [22mrenders empty state when no SSH machines are configured[32m 8[2mms[22m[39m
+ [32m✓[39m src/components/settings/SshSection.test.tsx[2m > [22mSshSection Settings Component[2m > [22mdisables connection tests and integration preparation while editing[32m 39[2mms[22m[39m
+ [32m✓[39m src/components/settings/SshSection.test.tsx[2m > [22mSshSection Settings Component[2m > [22mignores a late connection success after the host configuration changes[32m 19[2mms[22m[39m
+ [32m✓[39m src/components/settings/SshSection.test.tsx[2m > [22mSshSection Settings Component[2m > [22mignores a late connection failure after the host configuration changes[32m 14[2mms[22m[39m
+ [32m✓[39m src/components/settings/SshSection.test.tsx[2m > [22mSshSection Settings Component[2m > [22mignores a late integration success after the host configuration changes[32m 29[2mms[22m[39m
+ [32m✓[39m src/components/settings/SshSection.test.tsx[2m > [22mSshSection Settings Component[2m > [22mignores a late integration failure after the host configuration changes[32m 37[2mms[22m[39m
+ [32m✓[39m src/components/settings/SshSection.test.tsx[2m > [22mSshSection Settings Component[2m > [22mrenders mounted inventory with badges, endpoints, and status[32m 6[2mms[22m[39m
+ [32m✓[39m src/components/settings/SshSection.test.tsx[2m > [22mSshSection Settings Component[2m > [22mvalidates form input when adding a machine manually[32m 54[2mms[22m[39m
+ [32m✓[39m src/components/settings/SshSection.test.tsx[2m > [22mSshSection Settings Component[2m > [22msaves a new machine, disables duplicate submit while pending, and mounts it into inventory[32m 29[2mms[22m[39m
+ [32m✓[39m src/components/settings/SshSection.test.tsx[2m > [22mSshSection Settings Component[2m > [22medits an existing machine and updates the inventory[32m 22[2mms[22m[39m
+ [32m✓[39m src/components/settings/SshSection.test.tsx[2m > [22mSshSection Settings Component[2m > [22mtoggles enabled/disabled state via switch with async busy guard[32m 6[2mms[22m[39m
+ [32m✓[39m src/components/settings/SshSection.test.tsx[2m > [22mSshSection Settings Component[2m > [22mdeletes a machine from the inventory with async guard[32m 17[2mms[22m[39m
+ [32m✓[39m src/components/settings/SshSection.test.tsx[2m > [22mSshSection Settings Component[2m > [22mimports pasted SSH configuration and updates inventory[32m 31[2mms[22m[39m
+ [32m✓[39m src/components/settings/SshSection.test.tsx[2m > [22mSshSection Settings Component[2m > [22mtests host connection and renders visible success and error results[32m 26[2mms[22m[39m
+ [32m✓[39m src/components/settings/SshSection.test.tsx[2m > [22mSshSection Settings Component[2m > [22mStructured IPC mutation error surfacing[2m > [22msurfaces backend error message when saving a machine fails with structured IPC error[32m 22[2mms[22m[39m
+ [32m✓[39m src/components/settings/SshSection.test.tsx[2m > [22mSshSection Settings Component[2m > [22mStructured IPC mutation error surfacing[2m > [22msurfaces backend error message when importing config fails with structured IPC error[32m 13[2mms[22m[39m
+ [32m✓[39m src/components/settings/SshSection.test.tsx[2m > [22mSshSection Settings Component[2m > [22mStructured IPC mutation error surfacing[2m > [22msurfaces backend error message when deleting a machine fails with structured IPC error[32m 6[2mms[22m[39m
+ [32m✓[39m src/components/settings/SshSection.test.tsx[2m > [22mSshSection Settings Component[2m > [22mStructured IPC mutation error surfacing[2m > [22msurfaces backend error message when toggling a machine fails with structured IPC error[32m 5[2mms[22m[39m
+ [32m✓[39m src/components/settings/SshSection.test.tsx[2m > [22mSshSection Settings Component[2m > [22mStructured IPC mutation error surfacing[2m > [22msurfaces backend error message when testing connection rejects with structured IPC error[32m 6[2mms[22m[39m
+ [32m✓[39m src/components/settings/SshSection.test.tsx[2m > [22mSshSection Settings Component[2m > [22mSystem SSH Config Auto-Discovery and Viewer[2m > [22msurfaces system config read failures and allows retrying[32m 9[2mms[22m[39m
+ [32m✓[39m src/components/settings/SshSection.test.tsx[2m > [22mSshSection Settings Component[2m > [22mSystem SSH Config Auto-Discovery and Viewer[2m > [22mloads and displays discovered hosts from ~/.ssh/config and allows importing them[32m 44[2mms[22m[39m
+ [32m✓[39m src/components/settings/SshSection.test.tsx[2m > [22mSshSection Settings Component[2m > [22mSystem SSH Config Auto-Discovery and Viewer[2m > [22mreads hosts from a user-selected config file instead of the default path[32m 8[2mms[22m[39m
+ [32m✓[39m src/components/settings/SshSection.test.tsx[2m > [22mSshSection Settings Component[2m > [22mSystem SSH Config Auto-Discovery and Viewer[2m > [22mrestores the previously selected config file on remount and can revert to the default[32m 16[2mms[22m[39m
+ [32m✓[39m src/components/settings/SshSection.test.tsx[2m > [22mSshSection Settings Component[2m > [22mSystem SSH Config Auto-Discovery and Viewer[2m > [22mdoes not render the Choose File button when running outside Tauri desktop (web/remote mode)[32m 5[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m2 passed[39m[22m[90m (2)[39m
+[2m      Tests [22m [1m[32m33 passed[39m[22m[90m (33)[39m
+[2m   Start at [22m 17:43:22
+[2m   Duration [22m 3.19s[2m (transform 171ms, setup 262ms, collect 770ms, tests 594ms, environment 808ms, prepare 85ms)[22m
+

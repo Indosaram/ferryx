@@ -9,7 +9,8 @@ import {
 import { isMacShortcutPlatform } from "./shortcuts";
 
 const NativeTerminalVisibilityContext = createContext({ visible: true, occluded: false });
-const YIELDING_SURFACE_SELECTOR = '[role="dialog"], [role="search"]';
+// Match toast items through their exit animation, never the empty live region.
+const YIELDING_SURFACE_SELECTOR = '[role="dialog"], [role="search"], [data-sonner-toast]';
 const OPT_OUT_SELECTOR = '[data-native-terminal-yield="off"]';
 
 function isYieldingSurfaceVisible(): boolean {

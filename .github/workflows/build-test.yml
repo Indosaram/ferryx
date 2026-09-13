@@ -124,6 +124,18 @@ jobs:
         if: matrix.os_name == 'windows'
         run: cargo build --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
 
+      # Owned filesystem/config contracts only: no daemon, GPU or user-profile mutation.
+      # Expand this list only after the domain-specific isolation repairs are verified.
+      - name: Cargo Test (Windows isolated contracts)
+        if: matrix.os_name == 'windows'
+        shell: bash
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml \
+            --target ${{ matrix.target }} \
+            --test windows_edge_probe_contract \
+            --test windows_window_opacity_contract \
+            -- --test-threads=1
+
       # The renderer contract suite constructs a real WGPU device (GpuContext::new) and is
       # verified locally on GPU hardware instead; hosted runners have no reliable adapter.
       # daemon_persistence_contract shares on-disk daemon state, so tests run single-threaded.

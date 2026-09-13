@@ -8,6 +8,11 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+export async function main() {
+  requireDetachedOwnership();
+  function requireDetachedOwnership() {
+    throw Object.assign(new Error("Detached SSH QA requires a runtime-owner process handle/start-identity facility and same-account namespace proof; no remote startup is authorized"), { code: "QA_OWNERSHIP_PREREQUISITE" });
+  }
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const binary = process.env.FERRYX_QA_HELPER_BINARY ??
   join(repo, "remote-helper", "target", "debug",
@@ -15,22 +20,6 @@ const binary = process.env.FERRYX_QA_HELPER_BINARY ??
 
 const isWin = process.platform === "win32";
 const sshTarget = process.env.FERRYX_QA_SSH_TARGET ?? (isWin ? "localhost" : "127.0.0.1");
-
-async function rmRetry(dir, retries = 10) {
-  for (let i = 0; i < retries; i++) {
-    try {
-      await rm(dir, { recursive: true, force: true });
-      return;
-    } catch (err) {
-      if (err.code === "EBUSY" || err.code === "EPERM" || err.code === "ENOTEMPTY") {
-        await new Promise((r) => setTimeout(r, 100));
-        continue;
-      }
-      throw err;
-    }
-  }
-  await rm(dir, { recursive: true, force: true });
-}
 
 // Ensure prerequisites exist; never succeed silently
 try {
@@ -48,7 +37,6 @@ const hostId = `qa-setup-${randomUUID().slice(0, 8)}`;
 const nonce = randomUUID();
 
 let target = null;
-let bridge = null;
 const ownedChildren = [];
 let daemonPid;
 let ptyPid;
@@ -82,43 +70,7 @@ async function reapChild(child, label) {
 
 async function reapPid(pid, label) {
   if (!pid) return;
-  try {
-    process.kill(pid, 0);
-  } catch (err) {
-    if (err.code === "ESRCH") return;
-    throw err;
-  }
-  try {
-    process.kill(pid, isWin ? undefined : "SIGTERM");
-  } catch {}
-  const deadline = Date.now() + 5000;
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 50));
-    try {
-      process.kill(pid, 0);
-    } catch (err) {
-      if (err.code === "ESRCH") {
-        console.log(JSON.stringify({ event: "pid-reaped", label, pid }));
-        return;
-      }
-    }
-  }
-  try {
-    process.kill(pid, isWin ? undefined : "SIGKILL");
-  } catch {}
-  const killDeadline = Date.now() + 3000;
-  while (Date.now() < killDeadline) {
-    await new Promise((r) => setTimeout(r, 50));
-    try {
-      process.kill(pid, 0);
-    } catch (err) {
-      if (err.code === "ESRCH") {
-        console.log(JSON.stringify({ event: "pid-force-reaped", label, pid }));
-        return;
-      }
-    }
-  }
-  throw new Error(`Failed to reap ${label} PID ${pid} within timeout`);
+  throw new Error(`Unproved detached process identity: ${label} PID ${pid}; retain fixture, never signal a numeric endpoint PID`);
 }
 
 function sshArgs(remoteCommand) {
@@ -280,7 +232,6 @@ try {
 
   // Verify bridge connects to the detached daemon
   let bridgeConn = connectBridge();
-  bridge = bridgeConn;
   const handshake1 = await bridgeConn.request("handshake");
   assert.equal(handshake1.protocol, 1);
   assert.equal(handshake1.hostId, hostId);
@@ -350,7 +301,6 @@ try {
 
   // Kill bridge connection (bridge-kill)
   await bridgeConn.close();
-  bridge = null;
 
   // 6. Test idempotent ensure_started over SSH preserves the live helper
   const secondStart = await runSsh(startScript, "second-start-ssh");
@@ -358,7 +308,6 @@ try {
 
   // Reconnect bridge and verify epoch, PTY, and counter survived
   bridgeConn = connectBridge();
-  bridge = bridgeConn;
   const handshake2 = await bridgeConn.request("handshake");
   assert.equal(handshake2.epoch, epoch1, "helper epoch must remain identical across idempotent start");
 
@@ -376,46 +325,30 @@ try {
   await bridgeConn.request("pty.stop", { target });
   target = null;
   await bridgeConn.close();
-  bridge = null;
 
   console.log("PASS: SSH detached helper startup, survival after SSH parent death, and idempotent preserve verified");
-} finally {
-  // Capture daemon PID from endpoint while root directory still exists
-  if (!daemonPid) {
-    try {
-      const endpointContent = JSON.parse(await readFile(join(stateDir, "endpoint.json"), "utf8"));
-      daemonPid = endpointContent.pid;
-    } catch {}
-  }
-
-  // Graceful stop of active PTY session if still open
-  if (target && bridge) {
-    try {
-      await bridge.request("pty.stop", { target });
-    } catch {}
-  }
-
-  // Reap explicit PTY child process and await disappearance
-  if (ptyPid) {
-    try { await reapPid(ptyPid, "pty-child"); } catch (e) { console.error(e.message); }
-  }
-
-  // Reap verified helper daemon process and await disappearance before touching fixture
-  if (daemonPid) {
-    try { await reapPid(daemonPid, "helper-daemon"); } catch (e) { console.error(e.message); }
-  }
-
-  // Reap any remaining spawned SSH child processes
+ } finally {
+  const failures = [];
+  // Only owned child handles can be terminated. Detached identity is a
+  // prerequisite failure, never a reason to signal an endpoint's numeric PID.
   for (const child of ownedChildren.toReversed()) {
-    try { await reapChild(child, "ssh-child"); } catch (e) { console.error(e.message); }
+    try { await reapChild(child, "ssh-child"); } catch (error) { failures.push(error); }
   }
+  for (const pid of [ptyPid, daemonPid]) {
+    if (pid) {
+      try { await reapPid(pid, "detached-helper-or-pty"); } catch (error) { failures.push(error); }
+    }
+  }
+  if (failures.length) throw new AggregateError(failures, `Cleanup unproved; retaining ${fixture}`);
+  await rm(fixture, { recursive: true, force: true });
+  console.log(JSON.stringify({ event: "cleanup-receipt", fixtureRemoved: fixture }));
+}
 
-  // Only remove fixture after every process disappearance is verified
-  await rmRetry(fixture);
-  console.log(JSON.stringify({
-    event: "cleanup-receipt",
-    fixtureRemoved: fixture,
-    reapedDaemonPid: daemonPid,
-    reapedPtyPid: ptyPid,
-  }));
+}
+
+if (import.meta.main) {
+  if (process.argv.includes("--self-test")) {
+    throw new Error("Use node --experimental-vm-modules --test scripts/qa/ssh-harness-safety.test.mjs; no live QA was started");
+  }
+  await main();
 }

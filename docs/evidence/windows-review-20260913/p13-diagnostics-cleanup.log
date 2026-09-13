@@ -1,0 +1,13 @@
+P13 final diagnostics receipt
+Rust LSP manager: no diagnostics
+Rust LSP tests and IPC: inactive cfg hints only, no errors
+UI LSP: latest fresh request timed out; earlier no diagnostics
+UI tsc --noEmit --pretty false: exit0 (empty output)
+Parallel LSP wave: cancelled/timeouts, individually rechecked Rust
+Full crate build/Cargo: not run, exclusive slot not granted
+Windows cfg/FFI runtime: not run
+diff-check exit=0
+1c5c26f0be111c618e21b7e67d3ee588a63a3c3962f40cc3285aee5949d26aeb  src-tauri/src/ipc/browser.rs
+d28f91e1fec66cf23b49128c593454e1f039dca40121a526dce3ccb6b437acbd  src-tauri/src/browser/manager.rs
+8ec9aea820b6ecd970de940ab9f948ee6f994f343547faeb8477b37efadac82d  src-tauri/src/browser/tests.rs
+157c01779ce8bbbad5126a80fa30ad1ffe1541cd6ca900e28f5373444c7e636b  ui/src/lib/browserTauri.test.ts

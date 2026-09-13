@@ -74,6 +74,7 @@ unsafe extern "system" {
         face: *const u16,
     ) -> Hfont;
     fn TextOutW(hdc: Hdc, x: i32, y: i32, text: *const u16, len: i32) -> i32;
+    fn GdiFlush() -> i32;
 }
 
 fn wide(value: &str) -> Vec<u16> {
@@ -112,7 +113,12 @@ pub fn rasterize_to_alpha_buffer(
         colors: [0; 3],
     };
 
-    let face = wide(family);
+    let primary_family = family
+        .split(',')
+        .map(|s| s.trim().trim_matches('\'').trim_matches('"'))
+        .find(|s| !s.is_empty())
+        .unwrap_or("Consolas");
+    let face = wide(primary_family);
     let glyphs = wide(text);
     let glyph_len = glyphs.len().saturating_sub(1) as i32;
     if glyph_len == 0 {
@@ -166,6 +172,7 @@ pub fn rasterize_to_alpha_buffer(
         SetBkMode(dc, TRANSPARENT_MODE);
         SetTextColor(dc, 0x00FF_FFFF);
         TextOutW(dc, 0, 0, glyphs.as_ptr(), glyph_len);
+        GdiFlush();
 
         let pixels = std::slice::from_raw_parts(bits as *const u32, (width * height) as usize);
         let mut inked = false;

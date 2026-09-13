@@ -1,0 +1,5 @@
+1698ecf9440a0feb9d8a0964a5ea9756bbaa7792adc68da254167433210a34a6  ui/src/remote/RemoteTerminal.tsx
+ff8e33eb4bf2755e286c6724bde1372088e1e339834387c13903782d0d90d30e  ui/src/lib/terminalSettings.ts
+1382ca195b53802a63f527bb9e49e9fee9210adc8b41fb0a789fa987fb5acb65  ui/src/lib/tauri.ts
+85403d1f4e04e018e9f17235cfbeafdc6292c5022a39976c8fa29e0ccaa10cdd  ui/src/lib/remoteClient.ts
+210b0b004328779fff3bd90d9eb6907827875682b1e6b0a50bc3cc16f49de20f  ui/src/remote/RemotePreferences.contract.test.tsx

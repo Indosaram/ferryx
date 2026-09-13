@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, cleanup, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, cleanup, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { BrowserToolbar } from "./BrowserToolbar";
 import type { BrowserTab } from "../lib/types";
@@ -68,6 +68,21 @@ describe("BrowserToolbar", () => {
     canGoBack: true,
     canGoForward: false,
   };
+
+  it.each([undefined, "unrelated", "b-1"])("accepts navigation only for its DOM target %s", async (browserId) => {
+    const reload = vi.fn();
+    await act(async () => { render(<BrowserToolbar tab={mockTab} onNavigate={vi.fn()} onReload={reload} />); });
+    // Effects have installed the DOM listener before the action.
+    await act(async () => {
+      for (const action of ["reload", "back", "forward"]) {
+        fireEvent(window, new CustomEvent("ferryx:browser-shortcut", { detail: { browserId, action } }));
+      }
+    });
+    const expected = browserId === mockTab.browserId;
+    expect(reload).toHaveBeenCalledTimes(expected ? 1 : 0);
+    expect(browserNative.goBackBrowser.mock.calls).toEqual(expected ? [["b-1"]] : []);
+    expect(browserNative.goForwardBrowser.mock.calls).toEqual(expected ? [["b-1"]] : []);
+  });
 
   it("renders address input with tab url", () => {
     render(

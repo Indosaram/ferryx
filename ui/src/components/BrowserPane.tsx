@@ -15,6 +15,7 @@ import {
   setBrowserVisible,
   type BrowserFindResult,
   type BrowserShortcutAction,
+  type BrowserShortcutDomEvent,
 } from "../lib/browserTauri";
 import { recordBrowserHistory } from "../lib/browserHistory";
 import { PRIVATE_BROWSER_PROFILE } from "../lib/browserSettings";
@@ -40,8 +41,6 @@ type BrowserStateChangedPayload = {
   zoomFactor: number;
   loadError?: string | null;
 };
-
-type BrowserShortcutDomEvent = CustomEvent<{ action: BrowserShortcutAction }>;
 
 function suggestedDownloadName(url: string): string {
   try {
@@ -157,7 +156,7 @@ export function BrowserPane({ tab, visible = true, onNavigate, onReload }: Brows
     };
     const handleDomShortcut = (event: Event) => {
       const detail = (event as BrowserShortcutDomEvent).detail;
-      if (detail?.action) openFind(detail.action);
+      if (detail?.browserId === tab.browserId) openFind(detail.action);
     };
     window.addEventListener(BROWSER_SHORTCUT_EVENT, handleDomShortcut);
 

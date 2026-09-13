@@ -1,0 +1,562 @@
+$ vitest run --maxWorkers=1 src/lib/nativeMenu.test.ts
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+stderr | src/lib/nativeMenu.test.ts > native popup ownership > dismisses A with cleanup pending, then copies exactly B once through two actual rows
+Error: Uncaught [TypeError: 'get platform' called on an object that is not a valid instance of Navigator.]
+    at reportException (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/helpers/runtime-script-errors.js:66:24)
+    at innerInvokeEventListeners (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:353:9)
+    at invokeEventListeners (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:286:3)
+    at HTMLUnknownElementImpl._dispatch (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:233:9)
+    at HTMLUnknownElementImpl.dispatchEvent (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:104:17)
+    at HTMLUnknownElement.dispatchEvent (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/generated/EventTarget.js:241:34)
+    at Object.invokeGuardedCallbackDev (/Users/indo/code/project/orca-lite/ui/node_modules/react-dom/cjs/react-dom.development.js:4213:16)
+    at invokeGuardedCallback (/Users/indo/code/project/orca-lite/ui/node_modules/react-dom/cjs/react-dom.development.js:4277:31)
+    at invokeGuardedCallbackAndCatchFirstError (/Users/indo/code/project/orca-lite/ui/node_modules/react-dom/cjs/react-dom.development.js:4291:25)
+    at executeDispatch (/Users/indo/code/project/orca-lite/ui/node_modules/react-dom/cjs/react-dom.development.js:9041:3) TypeError: 'get platform' called on an object that is not a valid instance of Navigator.
+    at Navigator.get platform [as platform] [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/generated/Navigator.js:145:15[90m)[39m
+    at fileManagerActionLabel [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/components/WorktreeList.tsx:44:70[90m)[39m
+    at handleContextMenu [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/components/WorktreeList.tsx:93:93[90m)[39m
+    at HTMLUnknownElement.callCallback [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:4164:14[90m)[39m
+    at HTMLUnknownElement.callTheUserObjectsOperation [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/generated/EventListener.js:26:30[90m)[39m
+    at innerInvokeEventListeners [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:350:25[90m)[39m
+    at invokeEventListeners [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:286:3[90m)[39m
+    at HTMLUnknownElementImpl._dispatch [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:233:9[90m)[39m
+    at HTMLUnknownElementImpl.dispatchEvent [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:104:17[90m)[39m
+    at HTMLUnknownElement.dispatchEvent [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/generated/EventTarget.js:241:34[90m)[39m
+Error: Uncaught [TypeError: 'get platform' called on an object that is not a valid instance of Navigator.]
+    at reportException (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/helpers/runtime-script-errors.js:66:24)
+    at innerInvokeEventListeners (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:353:9)
+    at invokeEventListeners (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:286:3)
+    at HTMLButtonElementImpl._dispatch (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:233:9)
+    at HTMLButtonElementImpl.dispatchEvent (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:104:17)
+    at HTMLButtonElement.dispatchEvent (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/generated/EventTarget.js:241:34)
+    at /Users/indo/code/project/orca-lite/ui/node_modules/@testing-library/dom/dist/events.js:19:20
+    at /Users/indo/code/project/orca-lite/ui/node_modules/@testing-library/react/dist/pure.js:113:18
+    at /Users/indo/code/project/orca-lite/ui/node_modules/@testing-library/react/dist/act-compat.js:47:24
+    at act (/Users/indo/code/project/orca-lite/ui/node_modules/react/cjs/react.development.js:2512:16) TypeError: 'get platform' called on an object that is not a valid instance of Navigator.
+    at Navigator.get platform [as platform] [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/generated/Navigator.js:145:15[90m)[39m
+    at fileManagerActionLabel [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/components/WorktreeList.tsx:44:70[90m)[39m
+    at handleContextMenu [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/components/WorktreeList.tsx:93:93[90m)[39m
+    at HTMLUnknownElement.callCallback [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:4164:14[90m)[39m
+    at HTMLUnknownElement.callTheUserObjectsOperation [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/generated/EventListener.js:26:30[90m)[39m
+    at innerInvokeEventListeners [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:350:25[90m)[39m
+    at invokeEventListeners [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:286:3[90m)[39m
+    at HTMLUnknownElementImpl._dispatch [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:233:9[90m)[39m
+    at HTMLUnknownElementImpl.dispatchEvent [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:104:17[90m)[39m
+    at HTMLUnknownElement.dispatchEvent [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/generated/EventTarget.js:241:34[90m)[39m
+
+stderr | src/lib/nativeMenu.test.ts > native popup ownership > unmount cancels a real row during pending registration
+Error: Uncaught [TypeError: 'get platform' called on an object that is not a valid instance of Navigator.]
+    at reportException (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/helpers/runtime-script-errors.js:66:24)
+    at innerInvokeEventListeners (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:353:9)
+    at invokeEventListeners (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:286:3)
+    at HTMLUnknownElementImpl._dispatch (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:233:9)
+    at HTMLUnknownElementImpl.dispatchEvent (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:104:17)
+    at HTMLUnknownElement.dispatchEvent (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/generated/EventTarget.js:241:34)
+    at Object.invokeGuardedCallbackDev (/Users/indo/code/project/orca-lite/ui/node_modules/react-dom/cjs/react-dom.development.js:4213:16)
+    at invokeGuardedCallback (/Users/indo/code/project/orca-lite/ui/node_modules/react-dom/cjs/react-dom.development.js:4277:31)
+    at invokeGuardedCallbackAndCatchFirstError (/Users/indo/code/project/orca-lite/ui/node_modules/react-dom/cjs/react-dom.development.js:4291:25)
+    at executeDispatch (/Users/indo/code/project/orca-lite/ui/node_modules/react-dom/cjs/react-dom.development.js:9041:3) TypeError: 'get platform' called on an object that is not a valid instance of Navigator.
+    at Navigator.get platform [as platform] [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/generated/Navigator.js:145:15[90m)[39m
+    at fileManagerActionLabel [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/components/WorktreeList.tsx:44:70[90m)[39m
+    at handleContextMenu [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/components/WorktreeList.tsx:93:93[90m)[39m
+    at HTMLUnknownElement.callCallback [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:4164:14[90m)[39m
+    at HTMLUnknownElement.callTheUserObjectsOperation [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/generated/EventListener.js:26:30[90m)[39m
+    at innerInvokeEventListeners [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:350:25[90m)[39m
+    at invokeEventListeners [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:286:3[90m)[39m
+    at HTMLUnknownElementImpl._dispatch [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:233:9[90m)[39m
+    at HTMLUnknownElementImpl.dispatchEvent [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:104:17[90m)[39m
+    at HTMLUnknownElement.dispatchEvent [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/generated/EventTarget.js:241:34[90m)[39m
+Error: Uncaught [TypeError: 'get platform' called on an object that is not a valid instance of Navigator.]
+    at reportException (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/helpers/runtime-script-errors.js:66:24)
+    at innerInvokeEventListeners (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:353:9)
+    at invokeEventListeners (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:286:3)
+    at HTMLButtonElementImpl._dispatch (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:233:9)
+    at HTMLButtonElementImpl.dispatchEvent (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:104:17)
+    at HTMLButtonElement.dispatchEvent (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/generated/EventTarget.js:241:34)
+    at /Users/indo/code/project/orca-lite/ui/node_modules/@testing-library/dom/dist/events.js:19:20
+    at /Users/indo/code/project/orca-lite/ui/node_modules/@testing-library/react/dist/pure.js:113:18
+    at /Users/indo/code/project/orca-lite/ui/node_modules/@testing-library/react/dist/act-compat.js:47:24
+    at act (/Users/indo/code/project/orca-lite/ui/node_modules/react/cjs/react.development.js:2512:16) TypeError: 'get platform' called on an object that is not a valid instance of Navigator.
+    at Navigator.get platform [as platform] [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/generated/Navigator.js:145:15[90m)[39m
+    at fileManagerActionLabel [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/components/WorktreeList.tsx:44:70[90m)[39m
+    at handleContextMenu [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/components/WorktreeList.tsx:93:93[90m)[39m
+    at HTMLUnknownElement.callCallback [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:4164:14[90m)[39m
+    at HTMLUnknownElement.callTheUserObjectsOperation [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/generated/EventListener.js:26:30[90m)[39m
+    at innerInvokeEventListeners [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:350:25[90m)[39m
+    at invokeEventListeners [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:286:3[90m)[39m
+    at HTMLUnknownElementImpl._dispatch [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:233:9[90m)[39m
+    at HTMLUnknownElementImpl.dispatchEvent [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:104:17[90m)[39m
+    at HTMLUnknownElement.dispatchEvent [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/generated/EventTarget.js:241:34[90m)[39m
+
+stderr | src/lib/nativeMenu.test.ts > native popup ownership > unmount cancels a real row during pending invoke
+Error: Uncaught [TypeError: 'get platform' called on an object that is not a valid instance of Navigator.]
+    at reportException (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/helpers/runtime-script-errors.js:66:24)
+    at innerInvokeEventListeners (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:353:9)
+    at invokeEventListeners (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:286:3)
+    at HTMLUnknownElementImpl._dispatch (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:233:9)
+    at HTMLUnknownElementImpl.dispatchEvent (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:104:17)
+    at HTMLUnknownElement.dispatchEvent (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/generated/EventTarget.js:241:34)
+    at Object.invokeGuardedCallbackDev (/Users/indo/code/project/orca-lite/ui/node_modules/react-dom/cjs/react-dom.development.js:4213:16)
+    at invokeGuardedCallback (/Users/indo/code/project/orca-lite/ui/node_modules/react-dom/cjs/react-dom.development.js:4277:31)
+    at invokeGuardedCallbackAndCatchFirstError (/Users/indo/code/project/orca-lite/ui/node_modules/react-dom/cjs/react-dom.development.js:4291:25)
+    at executeDispatch (/Users/indo/code/project/orca-lite/ui/node_modules/react-dom/cjs/react-dom.development.js:9041:3) TypeError: 'get platform' called on an object that is not a valid instance of Navigator.
+    at Navigator.get platform [as platform] [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/generated/Navigator.js:145:15[90m)[39m
+    at fileManagerActionLabel [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/components/WorktreeList.tsx:44:70[90m)[39m
+    at handleContextMenu [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/components/WorktreeList.tsx:93:93[90m)[39m
+    at HTMLUnknownElement.callCallback [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:4164:14[90m)[39m
+    at HTMLUnknownElement.callTheUserObjectsOperation [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/generated/EventListener.js:26:30[90m)[39m
+    at innerInvokeEventListeners [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:350:25[90m)[39m
+    at invokeEventListeners [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:286:3[90m)[39m
+    at HTMLUnknownElementImpl._dispatch [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:233:9[90m)[39m
+    at HTMLUnknownElementImpl.dispatchEvent [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:104:17[90m)[39m
+    at HTMLUnknownElement.dispatchEvent [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/generated/EventTarget.js:241:34[90m)[39m
+Error: Uncaught [TypeError: 'get platform' called on an object that is not a valid instance of Navigator.]
+    at reportException (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/helpers/runtime-script-errors.js:66:24)
+    at innerInvokeEventListeners (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:353:9)
+    at invokeEventListeners (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:286:3)
+    at HTMLButtonElementImpl._dispatch (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:233:9)
+    at HTMLButtonElementImpl.dispatchEvent (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:104:17)
+    at HTMLButtonElement.dispatchEvent (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/generated/EventTarget.js:241:34)
+    at /Users/indo/code/project/orca-lite/ui/node_modules/@testing-library/dom/dist/events.js:19:20
+    at /Users/indo/code/project/orca-lite/ui/node_modules/@testing-library/react/dist/pure.js:113:18
+    at /Users/indo/code/project/orca-lite/ui/node_modules/@testing-library/react/dist/act-compat.js:47:24
+    at act (/Users/indo/code/project/orca-lite/ui/node_modules/react/cjs/react.development.js:2512:16) TypeError: 'get platform' called on an object that is not a valid instance of Navigator.
+    at Navigator.get platform [as platform] [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/generated/Navigator.js:145:15[90m)[39m
+    at fileManagerActionLabel [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/components/WorktreeList.tsx:44:70[90m)[39m
+    at handleContextMenu [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/components/WorktreeList.tsx:93:93[90m)[39m
+    at HTMLUnknownElement.callCallback [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:4164:14[90m)[39m
+    at HTMLUnknownElement.callTheUserObjectsOperation [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/generated/EventListener.js:26:30[90m)[39m
+    at innerInvokeEventListeners [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:350:25[90m)[39m
+    at invokeEventListeners [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:286:3[90m)[39m
+    at HTMLUnknownElementImpl._dispatch [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:233:9[90m)[39m
+    at HTMLUnknownElementImpl.dispatchEvent [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:104:17[90m)[39m
+    at HTMLUnknownElement.dispatchEvent [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/generated/EventTarget.js:241:34[90m)[39m
+
+stderr | src/lib/nativeMenu.test.ts > native popup ownership > reopen cancels the obsolete row popup during pending registration
+Error: Uncaught [TypeError: 'get platform' called on an object that is not a valid instance of Navigator.]
+    at reportException (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/helpers/runtime-script-errors.js:66:24)
+    at innerInvokeEventListeners (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:353:9)
+    at invokeEventListeners (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:286:3)
+    at HTMLUnknownElementImpl._dispatch (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:233:9)
+    at HTMLUnknownElementImpl.dispatchEvent (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:104:17)
+    at HTMLUnknownElement.dispatchEvent (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/generated/EventTarget.js:241:34)
+    at Object.invokeGuardedCallbackDev (/Users/indo/code/project/orca-lite/ui/node_modules/react-dom/cjs/react-dom.development.js:4213:16)
+    at invokeGuardedCallback (/Users/indo/code/project/orca-lite/ui/node_modules/react-dom/cjs/react-dom.development.js:4277:31)
+    at invokeGuardedCallbackAndCatchFirstError (/Users/indo/code/project/orca-lite/ui/node_modules/react-dom/cjs/react-dom.development.js:4291:25)
+    at executeDispatch (/Users/indo/code/project/orca-lite/ui/node_modules/react-dom/cjs/react-dom.development.js:9041:3) TypeError: 'get platform' called on an object that is not a valid instance of Navigator.
+    at Navigator.get platform [as platform] [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/generated/Navigator.js:145:15[90m)[39m
+    at fileManagerActionLabel [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/components/WorktreeList.tsx:44:70[90m)[39m
+    at handleContextMenu [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/components/WorktreeList.tsx:93:93[90m)[39m
+    at HTMLUnknownElement.callCallback [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:4164:14[90m)[39m
+    at HTMLUnknownElement.callTheUserObjectsOperation [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/generated/EventListener.js:26:30[90m)[39m
+    at innerInvokeEventListeners [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:350:25[90m)[39m
+    at invokeEventListeners [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:286:3[90m)[39m
+    at HTMLUnknownElementImpl._dispatch [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:233:9[90m)[39m
+    at HTMLUnknownElementImpl.dispatchEvent [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:104:17[90m)[39m
+    at HTMLUnknownElement.dispatchEvent [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/generated/EventTarget.js:241:34[90m)[39m
+Error: Uncaught [TypeError: 'get platform' called on an object that is not a valid instance of Navigator.]
+    at reportException (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/helpers/runtime-script-errors.js:66:24)
+    at innerInvokeEventListeners (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:353:9)
+    at invokeEventListeners (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:286:3)
+    at HTMLButtonElementImpl._dispatch (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:233:9)
+    at HTMLButtonElementImpl.dispatchEvent (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:104:17)
+    at HTMLButtonElement.dispatchEvent (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/generated/EventTarget.js:241:34)
+    at /Users/indo/code/project/orca-lite/ui/node_modules/@testing-library/dom/dist/events.js:19:20
+    at /Users/indo/code/project/orca-lite/ui/node_modules/@testing-library/react/dist/pure.js:113:18
+    at /Users/indo/code/project/orca-lite/ui/node_modules/@testing-library/react/dist/act-compat.js:47:24
+    at act (/Users/indo/code/project/orca-lite/ui/node_modules/react/cjs/react.development.js:2512:16) TypeError: 'get platform' called on an object that is not a valid instance of Navigator.
+    at Navigator.get platform [as platform] [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/generated/Navigator.js:145:15[90m)[39m
+    at fileManagerActionLabel [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/components/WorktreeList.tsx:44:70[90m)[39m
+    at handleContextMenu [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/components/WorktreeList.tsx:93:93[90m)[39m
+    at HTMLUnknownElement.callCallback [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:4164:14[90m)[39m
+    at HTMLUnknownElement.callTheUserObjectsOperation [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/generated/EventListener.js:26:30[90m)[39m
+    at innerInvokeEventListeners [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:350:25[90m)[39m
+    at invokeEventListeners [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:286:3[90m)[39m
+    at HTMLUnknownElementImpl._dispatch [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:233:9[90m)[39m
+    at HTMLUnknownElementImpl.dispatchEvent [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:104:17[90m)[39m
+    at HTMLUnknownElement.dispatchEvent [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/generated/EventTarget.js:241:34[90m)[39m
+
+stderr | src/lib/nativeMenu.test.ts > native popup ownership > reopen cancels the obsolete row popup during pending invoke
+Error: Uncaught [TypeError: 'get platform' called on an object that is not a valid instance of Navigator.]
+    at reportException (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/helpers/runtime-script-errors.js:66:24)
+    at innerInvokeEventListeners (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:353:9)
+    at invokeEventListeners (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:286:3)
+    at HTMLUnknownElementImpl._dispatch (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:233:9)
+    at HTMLUnknownElementImpl.dispatchEvent (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:104:17)
+    at HTMLUnknownElement.dispatchEvent (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/generated/EventTarget.js:241:34)
+    at Object.invokeGuardedCallbackDev (/Users/indo/code/project/orca-lite/ui/node_modules/react-dom/cjs/react-dom.development.js:4213:16)
+    at invokeGuardedCallback (/Users/indo/code/project/orca-lite/ui/node_modules/react-dom/cjs/react-dom.development.js:4277:31)
+    at invokeGuardedCallbackAndCatchFirstError (/Users/indo/code/project/orca-lite/ui/node_modules/react-dom/cjs/react-dom.development.js:4291:25)
+    at executeDispatch (/Users/indo/code/project/orca-lite/ui/node_modules/react-dom/cjs/react-dom.development.js:9041:3) TypeError: 'get platform' called on an object that is not a valid instance of Navigator.
+    at Navigator.get platform [as platform] [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/generated/Navigator.js:145:15[90m)[39m
+    at fileManagerActionLabel [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/components/WorktreeList.tsx:44:70[90m)[39m
+    at handleContextMenu [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/components/WorktreeList.tsx:93:93[90m)[39m
+    at HTMLUnknownElement.callCallback [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:4164:14[90m)[39m
+    at HTMLUnknownElement.callTheUserObjectsOperation [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/generated/EventListener.js:26:30[90m)[39m
+    at innerInvokeEventListeners [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:350:25[90m)[39m
+    at invokeEventListeners [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:286:3[90m)[39m
+    at HTMLUnknownElementImpl._dispatch [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:233:9[90m)[39m
+    at HTMLUnknownElementImpl.dispatchEvent [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:104:17[90m)[39m
+    at HTMLUnknownElement.dispatchEvent [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/generated/EventTarget.js:241:34[90m)[39m
+Error: Uncaught [TypeError: 'get platform' called on an object that is not a valid instance of Navigator.]
+    at reportException (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/helpers/runtime-script-errors.js:66:24)
+    at innerInvokeEventListeners (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:353:9)
+    at invokeEventListeners (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:286:3)
+    at HTMLButtonElementImpl._dispatch (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:233:9)
+    at HTMLButtonElementImpl.dispatchEvent (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:104:17)
+    at HTMLButtonElement.dispatchEvent (/Users/indo/code/project/orca-lite/ui/node_modules/jsdom/lib/jsdom/living/generated/EventTarget.js:241:34)
+    at /Users/indo/code/project/orca-lite/ui/node_modules/@testing-library/dom/dist/events.js:19:20
+    at /Users/indo/code/project/orca-lite/ui/node_modules/@testing-library/react/dist/pure.js:113:18
+    at /Users/indo/code/project/orca-lite/ui/node_modules/@testing-library/react/dist/act-compat.js:47:24
+    at act (/Users/indo/code/project/orca-lite/ui/node_modules/react/cjs/react.development.js:2512:16) TypeError: 'get platform' called on an object that is not a valid instance of Navigator.
+    at Navigator.get platform [as platform] [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/generated/Navigator.js:145:15[90m)[39m
+    at fileManagerActionLabel [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/components/WorktreeList.tsx:44:70[90m)[39m
+    at handleContextMenu [90m(/Users/indo/code/project/orca-lite/ui/[39msrc/components/WorktreeList.tsx:93:93[90m)[39m
+    at HTMLUnknownElement.callCallback [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mreact-dom[24m/cjs/react-dom.development.js:4164:14[90m)[39m
+    at HTMLUnknownElement.callTheUserObjectsOperation [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/generated/EventListener.js:26:30[90m)[39m
+    at innerInvokeEventListeners [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:350:25[90m)[39m
+    at invokeEventListeners [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:286:3[90m)[39m
+    at HTMLUnknownElementImpl._dispatch [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:233:9[90m)[39m
+    at HTMLUnknownElementImpl.dispatchEvent [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/events/EventTarget-impl.js:104:17[90m)[39m
+    at HTMLUnknownElement.dispatchEvent [90m(/Users/indo/code/project/orca-lite/ui/[39mnode_modules/[4mjsdom[24m/lib/jsdom/living/generated/EventTarget.js:241:34[90m)[39m
+
+ ❯ src/lib/nativeMenu.test.ts (12 tests | 9 failed) 25027ms
+   × native popup ownership > dismisses A with cleanup pending, then copies exactly B once through two actual rows 5007ms
+     → Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+     → expected "spy" to be called 1 times, but got 0 times
+   × native popup ownership > unmount cancels a real row during pending registration 5003ms
+     → Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+     → expected "spy" to be called 1 times, but got 0 times
+   × native popup ownership > unmount cancels a real row during pending invoke 5003ms
+     → Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+     → expected "spy" to be called 1 times, but got 0 times
+   × native popup ownership > reopen cancels the obsolete row popup during pending registration 5003ms
+     → Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+     → expected "spy" to be called 1 times, but got 0 times
+   × native popup ownership > reopen cancels the obsolete row popup during pending invoke 5003ms
+     → Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+     → expected "spy" to be called 1 times, but got 0 times
+   × native popup ownership > ignores unrelated actions and maps a submenu ID without mutating entries 3ms
+     → expected "spy" to not be called at all, but actually been called 1 times[90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m    Array [
+      "unrelated",
+    ]
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+   × native popup ownership > keeps a long-open popup selectable until native tracking completes 2ms
+     → expected 1 to be +0 // Object.is equality
+   ✓ native popup ownership > dismissal removes the listener once at the unchanged grace deadline 0ms
+   ✓ native popup ownership > cleans up before propagating invoke rejection 1ms
+   ✓ native popup ownership > propagates registration rejection without invoking 0ms
+   × native popup ownership > callback throw and queued duplicate still release exactly once 1ms
+     → expected [Function] to not throw an error but 'Error: action failed' was thrown
+   × native popup ownership > supports cancellation before registration and a non-native no-op 0ms
+     → expected "spy" to not be called at all, but actually been called 1 times[90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m    Array [
+      "ferryx://menu-action",
+      [Function anonymous],
+    ]
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 9 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/nativeMenu.test.ts > native popup ownership > dismisses A with cleanup pending, then copies exactly B once through two actual rows
+Error: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+ ❯ src/lib/nativeMenu.test.ts:102:3
+    100| 
+    101| describe("native popup ownership", () => {
+    102|   it("dismisses A with cleanup pending, then copies exactly B once thr…
+       |   ^
+    103|     const copied = deferred<void>();
+    104|     const writeText = vi.fn(async (_text: string) => { copied.resolve(…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/14]⎯
+
+ FAIL  src/lib/nativeMenu.test.ts > native popup ownership > dismisses A with cleanup pending, then copies exactly B once through two actual rows
+ FAIL  src/lib/nativeMenu.test.ts > native popup ownership > unmount cancels a real row during pending registration
+ FAIL  src/lib/nativeMenu.test.ts > native popup ownership > unmount cancels a real row during pending invoke
+ FAIL  src/lib/nativeMenu.test.ts > native popup ownership > reopen cancels the obsolete row popup during pending registration
+ FAIL  src/lib/nativeMenu.test.ts > native popup ownership > reopen cancels the obsolete row popup during pending invoke
+AssertionError: expected "spy" to be called 1 times, but got 0 times
+ ❯ src/lib/nativeMenu.test.ts:94:53
+     92|   try {
+     93|     expect(listeners.size).toBe(0);
+     94|     for (const plan of plans) expect(plan.unlisten).toHaveBeenCalledTi…
+       |                                                     ^
+     95|     expect(vi.getTimerCount()).toBe(0);
+     96|   } finally {
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/14]⎯
+
+ FAIL  src/lib/nativeMenu.test.ts > native popup ownership > unmount cancels a real row during pending registration
+ FAIL  src/lib/nativeMenu.test.ts > native popup ownership > unmount cancels a real row during pending invoke
+Error: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+ ❯ src/lib/nativeMenu.test.ts:121:46
+    119|   });
+    120| 
+    121|   it.each(["registration", "invoke"] as const)("unmount cancels a real…
+       |                                              ^
+    122|     const view = row("C:\\owned\\A");
+    123|     const p = popup(); context(view); await p.registered.promise;
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/14]⎯
+
+ FAIL  src/lib/nativeMenu.test.ts > native popup ownership > reopen cancels the obsolete row popup during pending registration
+ FAIL  src/lib/nativeMenu.test.ts > native popup ownership > reopen cancels the obsolete row popup during pending invoke
+Error: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+ ❯ src/lib/nativeMenu.test.ts:139:46
+    137|   });
+    138| 
+    139|   it.each(["registration", "invoke"] as const)("reopen cancels the obs…
+       |                                              ^
+    140|     const view = row("C:\\owned\\A");
+    141|     const a = popup(); context(view); await a.registered.promise;
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/14]⎯
+
+ FAIL  src/lib/nativeMenu.test.ts > native popup ownership > ignores unrelated actions and maps a submenu ID without mutating entries
+AssertionError: expected "spy" to not be called at all, but actually been called 1 times[90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m    Array [
+      "unrelated",
+    ]
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+ ❯ src/lib/nativeMenu.test.ts:163:24
+    161|     const request = await ready(p);
+    162|     emit("unrelated");
+    163|     expect(action).not.toHaveBeenCalled(); expect(p.unlisten).not.toHa…
+       |                        ^
+    164|     emit(itemId(request.items));
+    165|     expect(action.mock.calls).toEqual([["copy-path"]]);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/14]⎯
+
+ FAIL  src/lib/nativeMenu.test.ts > native popup ownership > keeps a long-open popup selectable until native tracking completes
+AssertionError: expected 1 to be +0 // Object.is equality
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- 0[39m
+[31m+ 1[39m
+
+ ❯ src/lib/nativeMenu.test.ts:178:32
+    176|     emit(itemId(request.items)); expect(action.mock.calls).toEqual([["…
+    177|     p.completion.resolve(); (await done)();
+    178|     expect(vi.getTimerCount()).toBe(0);
+       |                                ^
+    179|   });
+    180| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/14]⎯
+
+ FAIL  src/lib/nativeMenu.test.ts > native popup ownership > callback throw and queued duplicate still release exactly once
+AssertionError: expected [Function] to not throw an error but 'Error: action failed' was thrown
+
+[32m- Expected:[39m 
+undefined
+
+[31m+ Received:[39m 
+"Error: action failed"
+
+ ❯ src/lib/nativeMenu.test.ts:208:55
+    206|     const done = start(action); const request = await ready(p);
+    207|     expect(() => p.select(itemId(request.items))).toThrow("action fail…
+    208|     expect(() => p.select(itemId(request.items))).not.toThrow();
+       |                                                       ^
+    209|     expect(action).toHaveBeenCalledTimes(1); expect(p.unlisten).toHave…
+    210|     p.completion.resolve(); (await done)(); expect(vi.getTimerCount())…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/14]⎯
+
+ FAIL  src/lib/nativeMenu.test.ts > native popup ownership > supports cancellation before registration and a non-native no-op
+AssertionError: expected "spy" to not be called at all, but actually been called 1 times[90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m    Array [
+      "ferryx://menu-action",
+      [Function anonymous],
+    ]
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+ ❯ src/lib/nativeMenu.test.ts:215:76
+    213|   it("supports cancellation before registration and a non-native no-op…
+    214|     const controller = new AbortController(); controller.abort();
+    215|     (await start(vi.fn(), controller.signal))(); expect(bridge.listen)…
+       |                                                                            ^
+    216|     bridge.isTauri.mockReturnValue(false);
+    217|     (await start())(); expect(bridge.listen).not.toHaveBeenCalled(); e…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[8/14]⎯
+
+⎯⎯⎯⎯⎯⎯ Unhandled Errors ⎯⎯⎯⎯⎯⎯
+
+Vitest caught 5 unhandled errors during the test run.
+This might cause false positive tests. Resolve unhandled errors to make sure your tests are not affected.
+
+⎯⎯⎯⎯⎯ Uncaught Exception ⎯⎯⎯⎯⎯
+TypeError: 'get platform' called on an object that is not a valid instance of Navigator.
+ ❯ Navigator.get platform [as platform] node_modules/jsdom/lib/jsdom/living/generated/Navigator.js:145:15
+ ❯ fileManagerActionLabel src/components/WorktreeList.tsx:44:70
+     42| 
+     43| export function fileManagerActionLabel() {
+     44|   const platform = typeof navigator === "undefined" ? "" : navigator.p…
+       |                                                                      ^
+     45|   if (/Mac/i.test(platform)) return "Reveal in Finder";
+     46|   if (/Win/i.test(platform)) return "Show in File Explorer";
+ ❯ handleContextMenu src/components/WorktreeList.tsx:93:93
+ ❯ HTMLUnknownElement.callCallback node_modules/react-dom/cjs/react-dom.development.js:4164:14
+ ❯ HTMLUnknownElement.callTheUserObjectsOperation node_modules/jsdom/lib/jsdom/living/generated/EventListener.js:26:30
+ ❯ innerInvokeEventListeners node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:350:25
+ ❯ invokeEventListeners node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:286:3
+ ❯ HTMLUnknownElementImpl._dispatch node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:233:9
+ ❯ HTMLUnknownElementImpl.dispatchEvent node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:104:17
+ ❯ HTMLUnknownElement.dispatchEvent node_modules/jsdom/lib/jsdom/living/generated/EventTarget.js:241:34
+
+This error originated in "src/lib/nativeMenu.test.ts" test file. It doesn't mean the error was thrown inside the file itself, but while it was running.
+The latest test that might've caused the error is "dismisses A with cleanup pending, then copies exactly B once through two actual rows". It might mean one of the following:
+- The error was thrown, while Vitest was running this test.
+- If the error occurred after the test had been completed, this was the last documented test before it was thrown.
+
+⎯⎯⎯⎯⎯ Uncaught Exception ⎯⎯⎯⎯⎯
+TypeError: 'get platform' called on an object that is not a valid instance of Navigator.
+ ❯ Navigator.get platform [as platform] node_modules/jsdom/lib/jsdom/living/generated/Navigator.js:145:15
+ ❯ fileManagerActionLabel src/components/WorktreeList.tsx:44:70
+     42| 
+     43| export function fileManagerActionLabel() {
+     44|   const platform = typeof navigator === "undefined" ? "" : navigator.p…
+       |                                                                      ^
+     45|   if (/Mac/i.test(platform)) return "Reveal in Finder";
+     46|   if (/Win/i.test(platform)) return "Show in File Explorer";
+ ❯ handleContextMenu src/components/WorktreeList.tsx:93:93
+ ❯ HTMLUnknownElement.callCallback node_modules/react-dom/cjs/react-dom.development.js:4164:14
+ ❯ HTMLUnknownElement.callTheUserObjectsOperation node_modules/jsdom/lib/jsdom/living/generated/EventListener.js:26:30
+ ❯ innerInvokeEventListeners node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:350:25
+ ❯ invokeEventListeners node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:286:3
+ ❯ HTMLUnknownElementImpl._dispatch node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:233:9
+ ❯ HTMLUnknownElementImpl.dispatchEvent node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:104:17
+ ❯ HTMLUnknownElement.dispatchEvent node_modules/jsdom/lib/jsdom/living/generated/EventTarget.js:241:34
+
+This error originated in "src/lib/nativeMenu.test.ts" test file. It doesn't mean the error was thrown inside the file itself, but while it was running.
+The latest test that might've caused the error is "unmount cancels a real row during pending registration". It might mean one of the following:
+- The error was thrown, while Vitest was running this test.
+- If the error occurred after the test had been completed, this was the last documented test before it was thrown.
+
+⎯⎯⎯⎯⎯ Uncaught Exception ⎯⎯⎯⎯⎯
+TypeError: 'get platform' called on an object that is not a valid instance of Navigator.
+ ❯ Navigator.get platform [as platform] node_modules/jsdom/lib/jsdom/living/generated/Navigator.js:145:15
+ ❯ fileManagerActionLabel src/components/WorktreeList.tsx:44:70
+     42| 
+     43| export function fileManagerActionLabel() {
+     44|   const platform = typeof navigator === "undefined" ? "" : navigator.p…
+       |                                                                      ^
+     45|   if (/Mac/i.test(platform)) return "Reveal in Finder";
+     46|   if (/Win/i.test(platform)) return "Show in File Explorer";
+ ❯ handleContextMenu src/components/WorktreeList.tsx:93:93
+ ❯ HTMLUnknownElement.callCallback node_modules/react-dom/cjs/react-dom.development.js:4164:14
+ ❯ HTMLUnknownElement.callTheUserObjectsOperation node_modules/jsdom/lib/jsdom/living/generated/EventListener.js:26:30
+ ❯ innerInvokeEventListeners node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:350:25
+ ❯ invokeEventListeners node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:286:3
+ ❯ HTMLUnknownElementImpl._dispatch node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:233:9
+ ❯ HTMLUnknownElementImpl.dispatchEvent node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:104:17
+ ❯ HTMLUnknownElement.dispatchEvent node_modules/jsdom/lib/jsdom/living/generated/EventTarget.js:241:34
+
+This error originated in "src/lib/nativeMenu.test.ts" test file. It doesn't mean the error was thrown inside the file itself, but while it was running.
+The latest test that might've caused the error is "unmount cancels a real row during pending invoke". It might mean one of the following:
+- The error was thrown, while Vitest was running this test.
+- If the error occurred after the test had been completed, this was the last documented test before it was thrown.
+
+⎯⎯⎯⎯⎯ Uncaught Exception ⎯⎯⎯⎯⎯
+TypeError: 'get platform' called on an object that is not a valid instance of Navigator.
+ ❯ Navigator.get platform [as platform] node_modules/jsdom/lib/jsdom/living/generated/Navigator.js:145:15
+ ❯ fileManagerActionLabel src/components/WorktreeList.tsx:44:70
+     42| 
+     43| export function fileManagerActionLabel() {
+     44|   const platform = typeof navigator === "undefined" ? "" : navigator.p…
+       |                                                                      ^
+     45|   if (/Mac/i.test(platform)) return "Reveal in Finder";
+     46|   if (/Win/i.test(platform)) return "Show in File Explorer";
+ ❯ handleContextMenu src/components/WorktreeList.tsx:93:93
+ ❯ HTMLUnknownElement.callCallback node_modules/react-dom/cjs/react-dom.development.js:4164:14
+ ❯ HTMLUnknownElement.callTheUserObjectsOperation node_modules/jsdom/lib/jsdom/living/generated/EventListener.js:26:30
+ ❯ innerInvokeEventListeners node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:350:25
+ ❯ invokeEventListeners node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:286:3
+ ❯ HTMLUnknownElementImpl._dispatch node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:233:9
+ ❯ HTMLUnknownElementImpl.dispatchEvent node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:104:17
+ ❯ HTMLUnknownElement.dispatchEvent node_modules/jsdom/lib/jsdom/living/generated/EventTarget.js:241:34
+
+This error originated in "src/lib/nativeMenu.test.ts" test file. It doesn't mean the error was thrown inside the file itself, but while it was running.
+The latest test that might've caused the error is "reopen cancels the obsolete row popup during pending registration". It might mean one of the following:
+- The error was thrown, while Vitest was running this test.
+- If the error occurred after the test had been completed, this was the last documented test before it was thrown.
+
+⎯⎯⎯⎯⎯ Uncaught Exception ⎯⎯⎯⎯⎯
+TypeError: 'get platform' called on an object that is not a valid instance of Navigator.
+ ❯ Navigator.get platform [as platform] node_modules/jsdom/lib/jsdom/living/generated/Navigator.js:145:15
+ ❯ fileManagerActionLabel src/components/WorktreeList.tsx:44:70
+     42| 
+     43| export function fileManagerActionLabel() {
+     44|   const platform = typeof navigator === "undefined" ? "" : navigator.p…
+       |                                                                      ^
+     45|   if (/Mac/i.test(platform)) return "Reveal in Finder";
+     46|   if (/Win/i.test(platform)) return "Show in File Explorer";
+ ❯ handleContextMenu src/components/WorktreeList.tsx:93:93
+ ❯ HTMLUnknownElement.callCallback node_modules/react-dom/cjs/react-dom.development.js:4164:14
+ ❯ HTMLUnknownElement.callTheUserObjectsOperation node_modules/jsdom/lib/jsdom/living/generated/EventListener.js:26:30
+ ❯ innerInvokeEventListeners node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:350:25
+ ❯ invokeEventListeners node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:286:3
+ ❯ HTMLUnknownElementImpl._dispatch node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:233:9
+ ❯ HTMLUnknownElementImpl.dispatchEvent node_modules/jsdom/lib/jsdom/living/events/EventTarget-impl.js:104:17
+ ❯ HTMLUnknownElement.dispatchEvent node_modules/jsdom/lib/jsdom/living/generated/EventTarget.js:241:34
+
+This error originated in "src/lib/nativeMenu.test.ts" test file. It doesn't mean the error was thrown inside the file itself, but while it was running.
+The latest test that might've caused the error is "reopen cancels the obsolete row popup during pending invoke". It might mean one of the following:
+- The error was thrown, while Vitest was running this test.
+- If the error occurred after the test had been completed, this was the last documented test before it was thrown.
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯
+
+
+ Test Files  1 failed (1)
+      Tests  9 failed | 3 passed (12)
+     Errors  5 errors
+   Start at  15:41:56
+   Duration  25.70s (transform 83ms, setup 75ms, collect 318ms, tests 25.03s, environment 153ms, prepare 24ms)
+
+error: script "test" exited with code 1

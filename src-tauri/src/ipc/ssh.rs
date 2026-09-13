@@ -176,10 +176,19 @@ pub async fn cmd_ssh_read_system_config<R: Runtime>(
     .await
 }
 
-fn load_store(path: &PathBuf) -> SshHostStore {
+fn load_store(path: &PathBuf) -> Result<SshHostStore, IpcError> {
     match std::fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
-        Err(_) => SshHostStore::default(),
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| {
+            IpcError::new(
+                IpcErrorCode::ParseError,
+                format!("Failed to parse ssh store: {}", e),
+            )
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(SshHostStore::default()),
+        Err(e) => Err(IpcError::new(
+            IpcErrorCode::IoError,
+            format!("Failed to read ssh store: {}", e),
+        )),
     }
 }
 
@@ -215,7 +224,7 @@ fn now_millis() -> u64 {
 #[tauri::command]
 pub async fn cmd_ssh_list_hosts<R: Runtime>(app: AppHandle<R>) -> Result<Vec<SshHost>, IpcError> {
     let path = get_ssh_store_path(&app)?;
-    run_blocking(move || Ok(load_store(&path).hosts)).await
+    run_blocking(move || Ok(load_store(&path)?.hosts)).await
 }
 
 #[tauri::command]
@@ -228,7 +237,7 @@ pub async fn cmd_ssh_import_config<R: Runtime>(
 }
 
 fn import_config_into_store(path: &PathBuf, config_text: &str) -> Result<Vec<SshHost>, IpcError> {
-    let mut store = load_store(path);
+    let mut store = load_store(path)?;
     let parsed = parse_ssh_config(config_text);
     let already_stored: Vec<String> = store.hosts.iter().map(|host| host.key()).collect();
     let imported = crate::ssh::config::import_aliases(&parsed, &already_stored);
@@ -252,7 +261,7 @@ pub async fn cmd_ssh_update_host<R: Runtime>(
 ) -> Result<Vec<SshHost>, IpcError> {
     let path = get_ssh_store_path(&app)?;
     run_blocking(move || {
-        let mut store = load_store(&path);
+        let mut store = load_store(&path)?;
         if let Some(slot) = store
             .hosts
             .iter_mut()
@@ -275,7 +284,7 @@ pub async fn cmd_ssh_delete_host<R: Runtime>(
 ) -> Result<Vec<SshHost>, IpcError> {
     let path = get_ssh_store_path(&app)?;
     run_blocking(move || {
-        let mut store = load_store(&path);
+        let mut store = load_store(&path)?;
         if let Some(position) = store.hosts.iter().position(|host| host.id == id) {
             let removed = store.hosts.remove(position);
             if removed.source == crate::ssh::SshHostSource::Config {
@@ -538,6 +547,39 @@ mod tests {
     }
 
     #[test]
+    fn import_preserves_corrupt_store_bytes() {
+        let dir = tempfile::tempdir().expect("temporary store");
+        let path = dir.path().join("ssh_hosts.json");
+        let original = b"{\"hosts\": [\n  {\"id\": \"saved-host\"},";
+        std::fs::write(&path, original).expect("seed corrupt store");
+
+        let result = import_config_into_store(&path, "Host new-box\n  HostName new.example\n");
+        let saved = std::fs::read(&path).expect("read inventory after import");
+        assert_eq!(
+            (result.as_ref().err().map(|error| error.code), saved.as_slice()),
+            (Some(IpcErrorCode::ParseError), original.as_slice()),
+        );
+        assert!(!path.with_extension("json.tmp").exists());
+    }
+
+    #[test]
+    fn import_creates_missing_store() {
+        let dir = tempfile::tempdir().expect("temporary store");
+        let path = dir.path().join("new-data").join("ssh_hosts.json");
+        assert!(!path.exists());
+
+        let hosts = import_config_into_store(&path, "Host new-box\n  HostName new.example\n")
+            .expect("import into missing store");
+        let saved: SshHostStore =
+            serde_json::from_slice(&std::fs::read(&path).expect("read new store"))
+                .expect("parse new store");
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].hostname, "new.example");
+        assert_eq!(saved.hosts, hosts);
+        assert!(saved.tombstones.is_empty());
+    }
+
+    #[test]
     fn explicit_import_restores_a_previously_deleted_config_host() {
         let dir = tempfile::tempdir().expect("temporary store");
         let path = dir.path().join("ssh_hosts.json");
@@ -558,7 +600,7 @@ mod tests {
 
         assert_eq!(hosts.len(), 1);
         assert_eq!(hosts[0].label, "dev-box");
-        let saved = load_store(&path);
+        let saved = load_store(&path).expect("load saved store");
         assert_eq!(saved.hosts, hosts);
         assert_eq!(saved.tombstones, vec!["other.example:22"]);
     }
@@ -582,7 +624,7 @@ mod tests {
         let imported = import_config_into_store(&path, config).expect("import config");
 
         assert_eq!(imported, hosts);
-        assert_eq!(load_store(&path).hosts, hosts);
+        assert_eq!(load_store(&path).expect("load saved store").hosts, hosts);
     }
 
     #[test]
@@ -600,7 +642,7 @@ mod tests {
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].id, first[0].id);
         assert_eq!(second[0].hostname, "omarchy");
-        assert_eq!(load_store(&path).hosts, second);
+        assert_eq!(load_store(&path).expect("load saved store").hosts, second);
     }
 
     #[test]

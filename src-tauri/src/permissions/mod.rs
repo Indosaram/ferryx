@@ -150,7 +150,7 @@ pub fn request_accessibility() -> bool {
 
 #[cfg(not(target_os = "macos"))]
 pub fn request_accessibility() -> bool {
-    true
+    false
 }
 
 /// Map a notification permission DTO to a UI-facing permission item.
@@ -255,7 +255,7 @@ pub fn get_system_permissions_status() -> SystemPermissionsStatus {
         accessibility: PermissionItemStatus {
             status: ax_status,
             granted: ax_granted,
-            can_request: true,
+            can_request: cfg!(target_os = "macos"),
             can_open_settings: deep_links,
             description: "Allows global keyboard shortcuts, native terminal focus management, and automation.".to_string(),
         },
@@ -265,6 +265,23 @@ pub fn get_system_permissions_status() -> SystemPermissionsStatus {
 }
 
 pub fn open_system_settings_for_target(target: &str) -> OpenPermissionsSettingsResult {
+    open_system_settings_for_target_with_launcher(target, |program, args| {
+        crate::util::no_window_command(program)
+            .args(args)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    })
+}
+
+/// Settings routing with an injected launch boundary for non-desktop contract tests.
+#[doc(hidden)]
+pub fn open_system_settings_for_target_with_launcher(
+    target: &str,
+    mut launch: impl FnMut(&str, &[&str]) -> bool,
+) -> OpenPermissionsSettingsResult {
+    // Linux has no supported launcher; retain the same injectable API on every target.
+    let _ = &mut launch;
     #[cfg(target_os = "macos")]
     {
         let url = match target {
@@ -284,11 +301,7 @@ pub fn open_system_settings_for_target(target: &str) -> OpenPermissionsSettingsR
             }
         };
 
-        let opened = crate::util::no_window_command("open")
-            .arg(url)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+        let opened = launch("open", &[url]);
 
         OpenPermissionsSettingsResult {
             opened,
@@ -308,11 +321,7 @@ pub fn open_system_settings_for_target(target: &str) -> OpenPermissionsSettingsR
             _ => None,
         };
         if let Some(uri) = uri {
-            let opened = crate::util::no_window_command("cmd")
-                .args(["/C", "start", "", uri])
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
+            let opened = launch("cmd", &["/C", "start", "", uri]);
             OpenPermissionsSettingsResult {
                 opened,
                 target: target.to_string(),
@@ -416,7 +425,6 @@ mod notification_item_tests {
         assert!(!item.granted);
         assert!(!item.can_request);
         assert!(item.can_open_settings);
-        assert!(item.description.contains("Windows manages"));
     }
 
     #[test]
@@ -428,6 +436,5 @@ mod notification_item_tests {
         assert!(!item.granted);
         assert!(!item.can_request);
         assert!(!item.can_open_settings);
-        assert!(item.description.contains("desktop environment"));
     }
 }

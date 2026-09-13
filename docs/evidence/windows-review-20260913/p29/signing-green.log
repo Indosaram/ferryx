@@ -1,0 +1,16 @@
+bun test v1.4.0 (34cbb9a40)
+
+scripts/macos-dev-runner.test.mjs:
+(pass) signing target has exactly one debug component (/) [0.03ms]
+(pass) signing target has exactly one debug component (\)
+signing fixture cleaned: exit=0, root=/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx dev signing-BvYPBS
+(pass) debug runner uses Developer ID and respects signing exit 0 [366.80ms]
+signing fixture cleaned: exit=7, root=/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx dev signing-NTEdy1
+(pass) debug runner uses Developer ID and respects signing exit 7 [68.35ms]
+
+ 4 pass
+ 0 fail
+ 10 expect() calls
+Ran 4 tests across 1 file. [1068.00ms]
+
+EXIT=0

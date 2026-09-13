@@ -1,0 +1,83 @@
+source_sha256=916d9184f4d091698a15e0b88fb7a478b142dd67a5f058852370591033d93c28
+test_sha256=fe87fa803d9344822407a882547ed6036c90b2e3a42d0ec9b0955966de0a41f3
+COMMAND ['rustc', '--edition=2021', '--test', '/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-p26-h8_h1eo5/contract.rs', '--cfg', 'p26_os="windows"', '-o', '/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-p26-h8_h1eo5/windows']
+warning: function `home_dir` is never used
+   --> /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-p26-h8_h1eo5/contract.rs:155:4
+    |
+155 | fn home_dir() -> Option<PathBuf> {
+    |    ^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: 1 warning emitted
+
+
+running 10 tests
+
+thread 'permissions_contract_reports_consistent_aggregate_status' (3691718) panicked at /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-p26-h8_h1eo5/contract.rs:581:13:
+assertion failed: !item.can_request
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'unsupported_accessibility_request_does_not_report_success' (3691721) panicked at /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-p26-h8_h1eo5/contract.rs:593:5:
+assertion failed: !request_accessibility()
+test permissions::notification_item_tests::authoritative_authorized_is_granted ... ok
+test permissions::notification_item_tests::authoritative_denied_is_denied ... ok
+test permissions::notification_item_tests::authoritative_not_determined_can_request ... ok
+test permissions::notification_item_tests::authoritative_provisional_is_granted ... ok
+test permissions::notification_item_tests::non_authoritative_linux_is_unknown_no_settings ... ok
+test permissions::notification_item_tests::non_authoritative_windows_is_unknown_with_settings ... ok
+test permissions_unknown_settings_target_never_launches ... ok
+test permissions_known_settings_targets_preserve_launch_contract ... ok
+test unsupported_accessibility_request_does_not_report_success ... FAILED
+test permissions_contract_reports_consistent_aggregate_status ... FAILED
+
+failures:
+
+failures:
+    permissions_contract_reports_consistent_aggregate_status
+    unsupported_accessibility_request_does_not_report_success
+
+test result: FAILED. 8 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+windows test_exit=101
+COMMAND ['rustc', '--edition=2021', '--test', '/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-p26-h8_h1eo5/contract.rs', '--cfg', 'p26_os="linux"', '-o', '/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-p26-h8_h1eo5/linux']
+warning: function `home_dir` is never used
+   --> /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-p26-h8_h1eo5/contract.rs:155:4
+    |
+155 | fn home_dir() -> Option<PathBuf> {
+    |    ^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: 1 warning emitted
+
+
+running 10 tests
+
+thread 'permissions_contract_reports_consistent_aggregate_status' (3691850) panicked at /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-p26-h8_h1eo5/contract.rs:581:13:
+assertion failed: !item.can_request
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test permissions::notification_item_tests::authoritative_not_determined_can_request ... ok
+
+thread 'unsupported_accessibility_request_does_not_report_success' (3691853) panicked at /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/ferryx-p26-h8_h1eo5/contract.rs:593:5:
+assertion failed: !request_accessibility()
+test permissions::notification_item_tests::authoritative_authorized_is_granted ... ok
+test permissions::notification_item_tests::authoritative_denied_is_denied ... ok
+test permissions::notification_item_tests::authoritative_provisional_is_granted ... ok
+test permissions::notification_item_tests::non_authoritative_linux_is_unknown_no_settings ... ok
+test permissions::notification_item_tests::non_authoritative_windows_is_unknown_with_settings ... ok
+test permissions_known_settings_targets_preserve_launch_contract ... ok
+test permissions_unknown_settings_target_never_launches ... ok
+test unsupported_accessibility_request_does_not_report_success ... FAILED
+test permissions_contract_reports_consistent_aggregate_status ... FAILED
+
+failures:
+
+failures:
+    permissions_contract_reports_consistent_aggregate_status
+    unsupported_accessibility_request_does_not_report_success
+
+test result: FAILED. 8 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+linux test_exit=101
+cleanup_owned_root_absent=True

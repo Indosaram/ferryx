@@ -1,0 +1,76 @@
+source SHA256 51f1099d2e70e3528a841422647dbf7429a1a935ec9f676b00d699206bb1fee0
+compile argv ['rustc', '--edition=2021', '--test', '/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p13-history-gpgn2ydm/seam.rs', '-o', '/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p13-history-gpgn2ydm/seam', '-L', 'dependency=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps', '--extern', 'ferryx_lib=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libferryx_lib.rlib', '--extern', 'parking_lot=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libparking_lot-d3877efc54e330ad.rlib', '--extern', 'uuid=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libuuid-01dc03bbedcc66f1.rlib']
+warning: field `bounds` is never read
+  --> /Users/indo/code/project/orca-lite/src-tauri/src/browser/manager.rs:24:9
+   |
+ 9 | pub struct ManagedBrowserSession {
+   |            --------------------- field in this struct
+...
+24 |     pub bounds: Option<LogicalRect>,
+   |         ^^^^^^
+   |
+   = note: `ManagedBrowserSession` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: multiple methods are never used
+   --> /Users/indo/code/project/orca-lite/src-tauri/src/browser/manager.rs:165:12
+    |
+102 | impl BrowserManager {
+    | ------------------- methods in this implementation
+...
+165 |     pub fn get_state(&self, browser_id: &str) -> Result<BrowserState, BrowserError> {
+    |            ^^^^^^^^^
+...
+173 |     pub fn get_bounds(&self, browser_id: &str) -> Result<Option<LogicalRect>, BrowserError> {
+    |            ^^^^^^^^^^
+...
+181 |     pub fn is_visible(&self, browser_id: &str) -> Result<bool, BrowserError> {
+    |            ^^^^^^^^^^
+...
+189 |     pub fn get_webview_label(&self, browser_id: &str) -> Result<String, BrowserError> {
+    |            ^^^^^^^^^^^^^^^^^
+...
+197 |     pub fn webview_labels_for_profile(&self, profile_id: &BrowserProfileId) -> Vec<String> {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+206 |     pub fn update_url(&self, browser_id: &str, new_url: &str) -> Result<String, BrowserError> {
+    |            ^^^^^^^^^^
+...
+224 |     pub fn begin_reload(&self, browser_id: &str) -> Result<BrowserState, BrowserError> {
+    |            ^^^^^^^^^^^^
+...
+289 |     pub fn cancel_history_navigation(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+319 |     pub fn set_bounds(&self, browser_id: &str, bounds: LogicalRect) -> Result<(), BrowserError> {
+    |            ^^^^^^^^^^
+...
+371 |     pub fn assert_automation_generation(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+383 |     pub fn set_visible(&self, browser_id: &str, visible: bool) -> Result<(), BrowserError> {
+    |            ^^^^^^^^^^^
+...
+392 |     pub fn set_zoom(&self, browser_id: &str, zoom: f64) -> Result<f64, BrowserError> {
+    |            ^^^^^^^^
+...
+451 |     pub fn has_sessions(&self) -> bool {
+    |            ^^^^^^^^^^^^
+...
+455 |     pub fn remove_session(&self, browser_id: &str) -> Option<ManagedBrowserSession> {
+    |            ^^^^^^^^^^^^^^
+...
+459 |     pub fn list_sessions(&self) -> Vec<BrowserSessionSummary> {
+    |            ^^^^^^^^^^^^^
+
+warning: 2 warnings emitted
+
+
+running 1 test
+test native_history_invalidates_same_url_snapshot ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+exit=0
+TemporaryDirectory binaries/source automatically removed.

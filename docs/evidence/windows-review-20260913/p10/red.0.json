@@ -1,0 +1,14 @@
+{
+  "command": [
+    "/Users/indo/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo",
+    "test",
+    "--manifest-path",
+    "src-tauri/Cargo.toml",
+    "--lib",
+    "ssh::config::tests::p10_",
+    "--",
+    "--nocapture"
+  ],
+  "status": 101,
+  "signal": null
+}

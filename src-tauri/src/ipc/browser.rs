@@ -1609,6 +1609,14 @@ pub async fn cmd_browser_automation_act<R: tauri::Runtime>(
     browser_automation_act(app, manager.inner(), request).await
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn windows_keypress_capability() -> Result<(), IpcError> {
+    Err(IpcError::new(
+        crate::ipc::error::IpcErrorCode::Unsupported,
+        "Trusted browser keypress automation is unavailable on Windows",
+    ))
+}
+
 pub async fn browser_automation_act<R: tauri::Runtime>(
     app: AppHandle<R>,
     manager: &Arc<BrowserManager>,
@@ -1621,6 +1629,8 @@ pub async fn browser_automation_act<R: tauri::Runtime>(
         }
         BrowserAutomationAction::Keypress { .. } => {
             manager.assert_automation_generation(&request.browser_id, request.generation)?;
+            #[cfg(target_os = "windows")]
+            windows_keypress_capability()?;
             None
         }
     };
@@ -1670,26 +1680,104 @@ pub async fn cmd_browser_list(
     Ok(manager.list_sessions())
 }
 
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, PartialEq, Eq)]
+enum WindowsOpenRequest<'a> {
+    ShellExecute { target: &'a str },
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_open_request(target: &str) -> WindowsOpenRequest<'_> {
+    WindowsOpenRequest::ShellExecute { target }
+}
+
+#[cfg(target_os = "windows")]
+fn open_windows_target(target: &std::ffi::OsStr) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn ShellExecuteW(
+            hwnd: *mut std::ffi::c_void,
+            operation: *const u16,
+            file: *const u16,
+            parameters: *const u16,
+            directory: *const u16,
+            show: i32,
+        ) -> isize;
+    }
+    let mut wide: Vec<u16> = target.encode_wide().collect();
+    if wide.contains(&0) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "open target contains NUL"));
+    }
+    wide.push(0);
+    // SAFETY: all strings are NUL-terminated and live until the synchronous
+    // ShellExecuteW call returns. Null optional parameters mean no arguments,
+    // no working directory and no owner HWND; the target is never shell syntax.
+    let result = unsafe {
+        ShellExecuteW(std::ptr::null_mut(), [111u16, 112, 101, 110, 0].as_ptr(),
+            wide.as_ptr(), std::ptr::null(), std::ptr::null(), 1)
+    };
+    shell_execute_result(result)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn shell_execute_result(result: isize) -> std::io::Result<()> {
+    if result <= 32 {
+        return Err(std::io::Error::other(format!("ShellExecuteW failed with code {result}")));
+    }
+    Ok(())
+}
+
+fn open_system_target(target: &std::ffi::OsStr) -> Result<(), IpcError> {
+    #[cfg(target_os = "windows")]
+    {
+        open_windows_target(target).map_err(|error| IpcError::internal(error.to_string()))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        #[cfg(target_os = "macos")]
+        let program = "open";
+        #[cfg(not(target_os = "macos"))]
+        let program = "xdg-open";
+        let status = std::process::Command::new(program).arg(target).status()
+            .map_err(|error| IpcError::internal(error.to_string()))?;
+        if !status.success() {
+            return Err(IpcError::internal(format!("system opener exited with {status}")));
+        }
+        Ok(())
+    }
+}
+
 #[tauri::command]
 pub async fn cmd_browser_open_external(url: String) -> Result<(), IpcError> {
     let valid_url = crate::browser::validate_url(&url)?;
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open").arg(&valid_url).spawn();
+    crate::ipc::run_blocking::<(), _>(move || {
+        #[cfg(target_os = "windows")]
+        let WindowsOpenRequest::ShellExecute { target } = windows_open_request(&valid_url);
+        #[cfg(not(target_os = "windows"))]
+        let target = valid_url.as_str();
+        open_system_target(std::ffi::OsStr::new(target))
+    }).await
+}
+
+fn resolve_file_link(
+    trimmed: &str,
+    cwd: Option<&str>,
+    home: Option<std::path::PathBuf>,
+) -> std::path::PathBuf {
+    if trimmed.starts_with("~/") || trimmed == "~" {
+        home.map(|h| match trimmed.strip_prefix("~/") {
+            Some(suffix) => h.join(suffix),
+            None => h,
+        })
+            .unwrap_or_else(|| std::path::PathBuf::from(trimmed))
+    } else if std::path::Path::new(trimmed).is_absolute() {
+        std::path::PathBuf::from(trimmed)
+    } else if let Some(cwd_dir) = cwd {
+        std::path::Path::new(cwd_dir).join(trimmed)
+    } else {
+        std::path::PathBuf::from(trimmed)
     }
-    #[cfg(target_os = "linux")]
-    {
-        let _ = std::process::Command::new("xdg-open")
-            .arg(&valid_url)
-            .spawn();
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let _ = crate::util::no_window_command("cmd")
-            .args(["/C", "start", &valid_url])
-            .spawn();
-    }
-    Ok(())
 }
 
 #[tauri::command]
@@ -1707,51 +1795,61 @@ pub async fn cmd_open_file_path(
             return Ok(false);
         }
 
-        let candidate = if trimmed.starts_with("~/") || trimmed == "~" {
-            std::env::var_os("HOME")
-                .map(std::path::PathBuf::from)
-                .map(|h| h.join(trimmed.trim_start_matches("~/")))
-                .unwrap_or_else(|| std::path::PathBuf::from(trimmed))
-        } else if std::path::Path::new(trimmed).is_absolute() {
-            std::path::PathBuf::from(trimmed)
-        } else if let Some(ref cwd_dir) = cwd {
-            std::path::Path::new(cwd_dir).join(trimmed)
-        } else {
-            std::path::PathBuf::from(trimmed)
-        };
+        let candidate = resolve_file_link(
+            trimmed,
+            cwd.as_deref(),
+            std::env::home_dir(),
+        );
 
         if !candidate.exists() {
             return Ok(false);
         }
 
-        let full_path = candidate.to_string_lossy().to_string();
-
-        #[cfg(target_os = "macos")]
-        {
-            let status = std::process::Command::new("open").arg(&full_path).status();
-            Ok(status.map(|s| s.success()).unwrap_or(false))
-        }
-        #[cfg(target_os = "linux")]
-        {
-            let status = std::process::Command::new("xdg-open")
-                .arg(&full_path)
-                .status();
-            Ok(status.map(|s| s.success()).unwrap_or(false))
-        }
-        #[cfg(target_os = "windows")]
-        {
-            let status = crate::util::no_window_command("cmd")
-                .args(["/C", "start", "", &full_path])
-                .status();
-            Ok(status.map(|s| s.success()).unwrap_or(false))
-        }
+        open_system_target(candidate.as_os_str())?;
+        Ok(true)
     })
     .await
 }
 
 #[cfg(test)]
 mod tests {
-    use super::cmd_open_file_path;
+    use super::{cmd_open_file_path, resolve_file_link, windows_open_request, WindowsOpenRequest};
+
+    #[test]
+    fn external_open_propagates_failure() {
+        for failure in 0..=32 {
+            assert!(super::shell_execute_result(failure).is_err());
+        }
+        assert!(super::shell_execute_result(33).is_ok());
+    }
+
+    #[test]
+    fn windows_keypress_returns_typed_unsupported() {
+        let error = super::windows_keypress_capability().expect_err("no trusted Windows input adapter");
+        assert_eq!(error.code, crate::ipc::error::IpcErrorCode::Unsupported);
+    }
+
+    #[test]
+    fn external_open_preserves_target_without_shell() {
+        for target in ["https://example.test/?a=1&b=2", "C:\\QA\\two words & notes.txt"] {
+            assert_eq!(windows_open_request(target), WindowsOpenRequest::ShellExecute { target });
+        }
+    }
+
+    #[test]
+    fn file_link_expands_bare_home() {
+        let home = std::path::PathBuf::from("C:/Users/P13 fixture");
+        assert_eq!(resolve_file_link("~", Some("C:/work"), Some(home.clone())), home);
+    }
+
+    #[test]
+    fn file_link_expands_profile_relative_path() {
+        let home = std::path::PathBuf::from("C:/Users/P13 fixture");
+        assert_eq!(
+            resolve_file_link("~/two words & notes.txt", None, Some(home.clone())),
+            home.join("two words & notes.txt")
+        );
+    }
 
     #[test]
     fn keep_or_discard_fresh_webview_covers_both_branches() {
@@ -1780,17 +1878,12 @@ mod tests {
         assert_eq!(res, false);
     }
 
-    #[tokio::test]
-    async fn test_cmd_open_file_path_resolves_relative_with_cwd() {
+    #[test]
+    fn test_cmd_open_file_path_resolves_relative_with_cwd() {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let res = cmd_open_file_path(
-            "Cargo.toml".to_string(),
-            Some(manifest_dir.to_string()),
-            None,
-            None,
-        )
-        .await
-        .expect("ipc result");
-        assert_eq!(res, true);
+        // Test the production resolver, not the user's default application.
+        let resolved = resolve_file_link("Cargo.toml", Some(manifest_dir), None);
+        assert_eq!(resolved, std::path::Path::new(manifest_dir).join("Cargo.toml"));
+        assert!(resolved.is_file());
     }
 }

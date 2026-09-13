@@ -1,0 +1,202 @@
+$ vitest run --maxWorkers=1 src/lib/terminalSettings.test.tsx src/lib/remoteClient.test.ts src/lib/tauri.test.ts src/remote/RemoteTerminal.contract.test.tsx src/remote/RemoteTerminal.mobile.test.tsx src/remote/RemoteTerminalGestures.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ❯ src/lib/tauri.test.ts (31 tests | 3 failed) 15ms
+   ✓ Tauri IPC wrapper contract > routes remote status, retry and generation-fenced control without remapping arguments 2ms
+   ✓ Tauri IPC wrapper contract > gets the native initial project without a request 0ms
+   ✓ Tauri IPC wrapper contract > registers projects and lists real local branches through typed native DTOs 0ms
+   ✓ Tauri IPC wrapper contract > fetches the native effective Ghostty terminal preferences 0ms
+   ✓ Tauri IPC wrapper contract > spawns terminals with caller-stable clientRequestId, workspace/worktree identity, and an optional cwd slot 0ms
+   ✓ Tauri IPC wrapper contract > spawns terminals with custom shell override 0ms
+   ✓ Tauri IPC wrapper contract > preserves typed agent-resume startup and binding metadata 0ms
+   ✓ Tauri IPC wrapper contract > strips non-serializable values from the spawn request instead of failing IPC 0ms
+   ✓ Tauri IPC wrapper contract > sends worktree create DTOs in camelCase 0ms
+   ✓ Tauri IPC wrapper contract > lists worktrees through a registered workspace identity 0ms
+   ✓ Tauri IPC wrapper contract > wraps worktree status, preview, safe delete, and destructive delete commands 0ms
+   ✓ Tauri IPC wrapper contract > wraps terminal signal and terminal session listing 0ms
+   ✓ Tauri IPC wrapper contract > bridges the native Cmd+T menu event into the frontend callback 3ms
+   ✓ Tauri IPC wrapper contract > bridges the native Cmd+W menu event into the frontend callback 0ms
+   ✓ Tauri IPC wrapper contract > bridges the native copy or interrupt event into the frontend callback 0ms
+   ✓ Tauri IPC wrapper contract > normalizes rejected command invocations at the wrapper boundary 0ms
+   ✓ Tauri IPC wrapper contract > preserves structured errors and does not parse message strings 0ms
+   ✓ Tauri IPC wrapper contract > attaches to a terminal session with typed protocol-v2 DTO and optional resume sequence 0ms
+   ✓ Tauri IPC wrapper contract > handles non-tauri runtime fallback for attachTerminal 0ms
+   × Tauri IPC wrapper contract > publishes focused terminal payload to native IPC 4ms
+     → expected "spy" to be called with arguments: [ …(2) ][90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m[33m@@ -1,9 +1,10 @@[90m
+[2m  [[22m
+[2m    "cmd_remote_set_active_selection",[22m
+[2m    {[22m
+[2m      "request": {[22m
+[31m+       "attentionInventory": [],[90m
+[2m        "sessionId": "pty-1",[22m
+[2m        "tabId": "tab-1",[22m
+[2m        "terminalTabs": [[22m
+[2m          {[22m
+[2m            "id": "tab-1",[22m
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+   × Tauri IPC wrapper contract > publishes focused terminal with optional activityState and agentType on terminal tabs 1ms
+     → expected "spy" to be called with arguments: [ …(2) ][90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m[33m@@ -1,9 +1,10 @@[90m
+[2m  [[22m
+[2m    "cmd_remote_set_active_selection",[22m
+[2m    {[22m
+[2m      "request": {[22m
+[31m+       "attentionInventory": [],[90m
+[2m        "sessionId": "pty-1",[22m
+[2m        "tabId": "tab-1",[22m
+[2m        "terminalTabs": [[22m
+[2m          {[22m
+[2m            "activityState": "working",[22m
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+   ✓ Tauri IPC wrapper contract > propagates publishFocusedTerminal rejection instead of swallowing errors 0ms
+   ✓ Tauri IPC wrapper contract > listens for remote selection requests and triggers callback 0ms
+   ✓ Tauri IPC wrapper contract > listens for native terminal scrollbar updates 0ms
+   ✓ Tauri IPC wrapper contract > invokes backend command to set native terminal scrollbar overlay visibility 0ms
+   ✓ Tauri IPC wrapper contract > invokes backend command to set native terminal attention frame 0ms
+   ✓ Tauri IPC wrapper contract > sets native app badge count with normalized integer payload 0ms
+   ✓ Tauri IPC wrapper contract > normalizes boundary badge counts safely within u32 bounds 0ms
+   ✓ Tauri IPC wrapper contract > handles non-tauri fallback for setBadgeCount 0ms
+   × probeNotificationDelivery > names the argument the Rust command actually binds, so a test notification is really sent 0ms
+     → expected "spy" to be called with arguments: [ …(2) ][90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m[2m  [[22m
+[2m    "cmd_notification_probe_delivery",[22m
+[2m    {[22m
+[2m      "sendTest": true,[22m
+[31m+     "sound": "system",[90m
+[2m    },[22m
+[2m  ][22m
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+   ✓ dispatchNotification > binds payload under 'request' parameter expected by Rust cmd_notification_dispatch 0ms
+ ✓ src/remote/RemoteTerminal.contract.test.tsx (58 tests) 285ms
+ ✓ src/remote/RemoteTerminalGestures.test.tsx (10 tests) 88ms
+ ✓ src/remote/RemoteTerminal.mobile.test.tsx (8 tests) 84ms
+ ✓ src/lib/terminalSettings.test.tsx (15 tests) 26ms
+ ✓ src/lib/remoteClient.test.ts (3 tests) 1ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/tauri.test.ts > Tauri IPC wrapper contract > publishes focused terminal payload to native IPC
+AssertionError: expected "spy" to be called with arguments: [ …(2) ][90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m[33m@@ -1,9 +1,10 @@[90m
+[2m  [[22m
+[2m    "cmd_remote_set_active_selection",[22m
+[2m    {[22m
+[2m      "request": {[22m
+[31m+       "attentionInventory": [],[90m
+[2m        "sessionId": "pty-1",[22m
+[2m        "tabId": "tab-1",[22m
+[2m        "terminalTabs": [[22m
+[2m          {[22m
+[2m            "id": "tab-1",[22m
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+ ❯ src/lib/tauri.test.ts:459:25
+    457|     });
+    458| 
+    459|     expect(core.invoke).toHaveBeenCalledWith("cmd_remote_set_active_se…
+       |                         ^
+    460|       request: {
+    461|         workspaceId: "orca-lite",
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯
+
+ FAIL  src/lib/tauri.test.ts > Tauri IPC wrapper contract > publishes focused terminal with optional activityState and agentType on terminal tabs
+AssertionError: expected "spy" to be called with arguments: [ …(2) ][90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m[33m@@ -1,9 +1,10 @@[90m
+[2m  [[22m
+[2m    "cmd_remote_set_active_selection",[22m
+[2m    {[22m
+[2m      "request": {[22m
+[31m+       "attentionInventory": [],[90m
+[2m        "sessionId": "pty-1",[22m
+[2m        "tabId": "tab-1",[22m
+[2m        "terminalTabs": [[22m
+[2m          {[22m
+[2m            "activityState": "working",[22m
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+ ❯ src/lib/tauri.test.ts:506:25
+    504|     });
+    505| 
+    506|     expect(core.invoke).toHaveBeenCalledWith("cmd_remote_set_active_se…
+       |                         ^
+    507|       request: {
+    508|         workspaceId: "orca-lite",
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯
+
+ FAIL  src/lib/tauri.test.ts > probeNotificationDelivery > names the argument the Rust command actually binds, so a test notification is really sent
+AssertionError: expected "spy" to be called with arguments: [ …(2) ][90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m[2m  [[22m
+[2m    "cmd_notification_probe_delivery",[22m
+[2m    {[22m
+[2m      "sendTest": true,[22m
+[31m+     "sound": "system",[90m
+[2m    },[22m
+[2m  ][22m
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+ ❯ src/lib/tauri.test.ts:646:25
+    644|     // cmd_notification_probe_delivery takes `send_test: Option<bool>`…
+    645|     // `sendTest`. Any other key is dropped, silently defaulting to fa…
+    646|     expect(core.invoke).toHaveBeenCalledWith(
+       |                         ^
+    647|       "cmd_notification_probe_delivery",
+    648|       { sendTest: true },
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/3]⎯
+
+
+ Test Files  1 failed | 5 passed (6)
+      Tests  3 failed | 122 passed (125)
+   Start at  15:40:37
+   Duration  3.14s (transform 114ms, setup 329ms, collect 740ms, tests 500ms, environment 898ms, prepare 138ms)
+
+error: script "test" exited with code 1

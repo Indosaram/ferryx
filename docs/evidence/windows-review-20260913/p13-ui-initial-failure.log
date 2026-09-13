@@ -1,0 +1,34 @@
+$ vitest run --maxWorkers=1 src/lib/browserTauri.test.ts
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ❯ src/lib/browserTauri.test.ts (14 tests | 1 failed) 6ms
+   ✓ browser tab shortcut helpers > classifies guest-forwarded tab actions 1ms
+   ✓ browser tab shortcut helpers > maps tab-select actions to zero-based indices 0ms
+   ✓ browser tab shortcut helpers > maps workspace-select actions to zero-based indices 0ms
+   ✓ browser native lifecycle queue > serializes Fast Refresh hide/show and close operations for the same child webview 1ms
+   ✓ setBrowserBounds retry on WebviewNotFound > retries when WebviewNotFound is returned and succeeds once the webview is ready 1ms
+   ✓ setBrowserBounds retry on WebviewNotFound > throws after exhausting retries if webview never appears 1ms
+   ✓ setBrowserBounds retry on WebviewNotFound > fails immediately without retrying on other errors 0ms
+   ✓ browser OS and engine IPC > preserves URL query separators at the OS command boundary 0ms
+   ✓ browser OS and engine IPC > targets the selected engine for back and forward 0ms
+   × browser OS and engine IPC > propagates typed unsupported input instead of reporting keypress success 0ms
+     → native input unavailable
+   ✓ browser automation ipc > invokes cmd_browser_automation_snapshot with browserId and returns snapshot 0ms
+   ✓ browser automation ipc > invokes cmd_browser_automation_act with click request 0ms
+   ✓ browser automation ipc > invokes cmd_browser_automation_act with fill request 0ms
+   ✓ browser automation ipc > invokes cmd_browser_automation_act with keypress request 0ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/browserTauri.test.ts > browser OS and engine IPC > propagates typed unsupported input instead of reporting keypress success
+Unknown Error: native input unavailable
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 13 passed (14)
+   Start at  18:17:52
+   Duration  614ms (transform 46ms, setup 130ms, collect 34ms, tests 6ms, environment 321ms, prepare 35ms)
+
+error: script "test" exited with code 1

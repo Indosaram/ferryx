@@ -1,0 +1,11 @@
+source SHA256 207e0e3fd37f1c64e6a4129e4efa19cd9b11a4bc2abdf64df382e952c3cde42d
+compile argv ['rustc', '--edition=2021', '--test', '/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p13-key-0v5tm13h/seam.rs', '-o', '/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p13-key-0v5tm13h/seam', '-L', 'dependency=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps', '--extern', 'ferryx_lib=/Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/libferryx_lib.rlib']
+
+running 1 test
+test tests::windows_keypress_returns_typed_unsupported ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+exit=0
+TemporaryDirectory binaries/source automatically removed.

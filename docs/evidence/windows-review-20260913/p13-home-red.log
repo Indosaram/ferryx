@@ -1,0 +1,22 @@
+Actual resolver extraction SHA256 2c4510993d5b96c210d1884a9f457e43e68e2b4228b60674a4ff6c90dcc0ddd0
+
+running 2 tests
+test file_link_expands_profile_relative_path ... ok
+test file_link_expands_bare_home ... FAILED
+
+failures:
+
+failures:
+    file_link_expands_bare_home
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+thread 'file_link_expands_bare_home' (3628802) panicked at /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p13-red-wnes_gih/seam.rs:21:9:
+assertion `left == right` failed
+  left: "C:/Users/P13 fixture/~"
+ right: "C:/Users/P13 fixture"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+exit=101
+TemporaryDirectory cleanup: automatic

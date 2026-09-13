@@ -268,6 +268,42 @@ try {
     # Copy executable
     Copy-Item $resolvedExePath -Destination (Join-Path $stagingDir "ferryx.exe") -Force
 
+    # Match tauri.conf.json resource destinations; never depend on caller CWD.
+    $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
+    $distSource = Join-Path $repoRoot "ui/dist"
+    $helpersSource = Join-Path $repoRoot "src-tauri/resources/helpers"
+    foreach ($required in @((Join-Path $distSource "index.html"), (Join-Path $helpersSource "manifest.json"))) {
+        if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+            throw "ERROR: Required MSIX resource missing: $required"
+        }
+    }
+    $helperManifest = Get-Content -LiteralPath (Join-Path $helpersSource "manifest.json") -Raw | ConvertFrom-Json
+    if ($helperManifest.schemaVersion -ne 1 -or $helperManifest.protocolVersion -ne 1 -or @($helperManifest.artifacts).Count -eq 0) {
+        throw "ERROR: Invalid helper manifest.json schema, protocol or empty artifacts"
+    }
+    foreach ($artifact in $helperManifest.artifacts) {
+        $expectedFilename = switch ($artifact.target) {
+            "x86_64-pc-windows-msvc" { "ferryx-remote-helper.exe" }
+            "x86_64-unknown-linux-gnu" { "ferryx-remote-helper" }
+            "aarch64-unknown-linux-gnu" { "ferryx-remote-helper" }
+            default { throw "ERROR: Unsupported helper manifest.json target: $($artifact.target)" }
+        }
+        if ($artifact.filename -cne $expectedFilename) {
+            throw "ERROR: Invalid helper manifest.json filename: $($artifact.filename)"
+        }
+        $binary = Join-Path (Join-Path $helpersSource $artifact.target) $artifact.filename
+        if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
+            throw "ERROR: Required MSIX helper missing: $binary"
+        }
+        if ((Get-Item -LiteralPath $binary).Length -ne $artifact.byteLength -or
+            (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash -ne $artifact.sha256) {
+            throw "ERROR: MSIX helper length or SHA256 mismatch: $binary"
+        }
+    }
+    New-Item -ItemType Directory -Path (Join-Path $stagingDir "ui") | Out-Null
+    Copy-Item -LiteralPath $distSource -Destination (Join-Path $stagingDir "ui/dist") -Recurse
+    Copy-Item -LiteralPath $helpersSource -Destination (Join-Path $stagingDir "helpers") -Recurse
+
     # Locate and copy icon assets
     $iconSource = $null
     if ($IconsDir -and (Test-Path $IconsDir)) {

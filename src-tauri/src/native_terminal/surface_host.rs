@@ -1064,7 +1064,9 @@ impl NativeTerminalSurfaceHostState {
             })
         };
 
-        let resized = if session.terminal.dimensions()? != (layout.cols, layout.rows) {
+        let dimensions_changed = session.terminal.dimensions()? != (layout.cols, layout.rows);
+        let metrics_changed = session.cell_metrics != Some(cell_metrics);
+        let resized = if initialized || dimensions_changed || metrics_changed {
             session.terminal.resize(
                 layout.cols,
                 layout.rows,
@@ -1087,7 +1089,7 @@ impl NativeTerminalSurfaceHostState {
                     .terminal
                     .scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
             }
-            true
+            dimensions_changed
         } else {
             if is_at_bottom {
                 let _ = session
@@ -2678,6 +2680,42 @@ impl NativeTerminalSurfaceHostState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn p06_initial_layout_sets_ghostty_pixel_reply() {
+        p06_assert_pixel_reply(false);
+    }
+
+    #[test]
+    fn p06_dpi_only_layout_updates_ghostty_pixel_reply() {
+        p06_assert_pixel_reply(true);
+    }
+
+    fn p06_assert_pixel_reply(change_dpi: bool) {
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "p06-pixel-geometry";
+        for scale in 1..=if change_dpi { 2 } else { 1 } {
+            let metrics = CellMetrics { width_px: 8 * scale, height_px: 16 * scale };
+            let layout = state.prepare_session_layout(
+                NativeTerminalBoundsRequest {
+                    session_id: session_id.into(),
+                    bounds: LogicalBounds {
+                        x: 0.0, y: 0.0, width: 640.0, height: 384.0,
+                        scale_factor: f64::from(scale),
+                    },
+                },
+                metrics,
+            ).expect("prepare unchanged 80x24 grid");
+            assert_eq!((layout.cols, layout.rows), (80, 24));
+        }
+        let mut sessions = state.sessions.lock();
+        let terminal = &mut sessions.get_mut(session_id).expect("prepared session").terminal;
+        terminal.discard_buffered_pty_writes();
+        terminal.feed(b"\x1b[16t").expect("query actual Ghostty cell pixel size");
+        let reply: Vec<u8> = terminal.buffered_pty_writes().into_iter()
+            .flat_map(|record| record.data).collect();
+        assert_eq!(reply, if change_dpi { b"\x1b[6;32;16t".as_slice() } else { b"\x1b[6;16;8t".as_slice() });
+    }
 
     type RenderTask = Box<dyn FnOnce() + Send>;
     pub(super) struct RenderDispatch {

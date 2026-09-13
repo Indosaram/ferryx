@@ -72,6 +72,7 @@ type SidebarWorktreeDragData = {
   type: "sidebar-worktree";
   workspaceId: string;
   worktreePath: string;
+  rowWorkspaceId?: string;
 };
 
 type SidebarDragData = SidebarProjectDragData | SidebarWorktreeDragData;
@@ -315,9 +316,9 @@ export function Sidebar({
       return;
     }
     const rows = worktreesByProject.get(active.workspaceId) ?? [];
-    const paths = rows.map((worktree) => worktree.path);
-    const fromIndex = paths.indexOf(active.worktreePath);
-    const toIndex = paths.indexOf(over.worktreePath);
+    const paths = rows.map((worktree) => worktreeSortableId(active.workspaceId, worktree.path, worktree.workspaceId));
+    const fromIndex = paths.indexOf(worktreeSortableId(active.workspaceId, active.worktreePath, active.rowWorkspaceId));
+    const toIndex = paths.indexOf(worktreeSortableId(over.workspaceId, over.worktreePath, over.rowWorkspaceId));
     if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return;
 
     const nextOrder = pruneWorktreeOrder(
@@ -342,7 +343,8 @@ export function Sidebar({
     activeDrag?.type === "sidebar-worktree"
       ? worktreesByProject
           .get(activeDrag.workspaceId)
-          ?.find((worktree) => worktree.path === activeDrag.worktreePath)
+          ?.find((worktree) => worktreeSortableId(activeDrag.workspaceId, worktree.path, worktree.workspaceId) ===
+            worktreeSortableId(activeDrag.workspaceId, activeDrag.worktreePath, activeDrag.rowWorkspaceId))
       : undefined;
 
   if (!open) {
@@ -634,6 +636,8 @@ function ProjectHeader({
       { kind: "item", id: "remove", label: "Remove Project", enabled: Boolean(onRemoveProject), icon: "trash" },
     ];
     menuUnlistenRef.current?.();
+    const controller = new AbortController();
+    menuUnlistenRef.current = () => controller.abort();
     void openNativePopupMenu(
       "cmd_native_sidebar_context_menu",
       items,
@@ -657,11 +661,8 @@ function ProjectHeader({
           }
         } else if (id === "remove") onRemoveProject?.();
       },
-    )
-      .then((unlisten) => {
-        menuUnlistenRef.current = unlisten;
-      })
-      .catch(() => undefined);
+      controller.signal,
+    ).catch((error: unknown) => console.warn("Could not open native project menu", error));
   };
 
   return (
@@ -894,12 +895,14 @@ function groupWorktreesByProject(
 function applyWorktreeOrder(grouped: Map<string, Worktree[]>, order: WorktreeOrder) {
   const ordered = new Map<string, Worktree[]>();
   for (const [workspaceId, rows] of grouped) {
-    const rowKey = (r: Worktree) => (r.workspaceId ? `${r.workspaceId}:${r.path}` : r.path);
+    const rowKey = (r: Worktree) => worktreeSortableId(workspaceId, r.path, r.workspaceId);
     const byKey = new Map(rows.map((row) => [rowKey(row), row]));
     const seen = new Set<string>();
     const next: Worktree[] = [];
     for (const path of order[workspaceId] ?? []) {
-      const row = byKey.get(path) ?? rows.find((r) => r.path === path && !seen.has(rowKey(r)));
+      // Prefer the qualified ID, then accept previously stored member keys or paths.
+      const row = byKey.get(path) ?? rows.find((r) =>
+        (r.path === path || (r.workspaceId && `${r.workspaceId}:${r.path}` === path)) && !seen.has(rowKey(r)));
       if (!row || seen.has(rowKey(row))) continue;
       seen.add(rowKey(row));
       next.push(row);
@@ -918,12 +921,17 @@ function applyWorktreeOrder(grouped: Map<string, Worktree[]>, order: WorktreeOrd
 function pruneWorktreeOrder(order: WorktreeOrder, grouped: Map<string, Worktree[]>) {
   const pruned: WorktreeOrder = {};
   for (const [workspaceId, storedPaths] of Object.entries(order)) {
-    const existingPaths = new Set((grouped.get(workspaceId) ?? []).map((row) => row.path));
+    const rows = grouped.get(workspaceId) ?? [];
     const seen = new Set<string>();
-    const next = storedPaths.filter((path) => {
-      if (!existingPaths.has(path) || seen.has(path)) return false;
-      seen.add(path);
-      return true;
+    const next = storedPaths.flatMap((path) => {
+      const row = rows.find((row) => worktreeSortableId(workspaceId, row.path, row.workspaceId) === path)
+        ?? rows.find((row) => (row.path === path || (row.workspaceId && `${row.workspaceId}:${row.path}` === path)) &&
+          !seen.has(worktreeSortableId(workspaceId, row.path, row.workspaceId)));
+      if (!row) return [];
+      const id = worktreeSortableId(workspaceId, row.path, row.workspaceId);
+      if (seen.has(id)) return [];
+      seen.add(id);
+      return [id];
     });
     if (next.length > 0) pruned[workspaceId] = next;
   }
@@ -952,7 +960,8 @@ function readSidebarDragData(value: unknown): SidebarDragData | null {
       typeof value.workspaceId === "string" &&
       "worktreePath" in value &&
       typeof value.worktreePath === "string"
-      ? { type: value.type, workspaceId: value.workspaceId, worktreePath: value.worktreePath }
+      ? { type: value.type, workspaceId: value.workspaceId, worktreePath: value.worktreePath,
+          rowWorkspaceId: "rowWorkspaceId" in value && typeof value.rowWorkspaceId === "string" ? value.rowWorkspaceId : undefined }
       : null;
   }
   return null;

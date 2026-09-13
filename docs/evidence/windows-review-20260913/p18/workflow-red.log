@@ -1,0 +1,150 @@
+TAP version 13
+# Subtest: actual current producer fixture is rejected by parsed-policy validator
+ok 1 - actual current producer fixture is rejected by parsed-policy validator
+  ---
+  duration_ms: 21.901
+  type: 'test'
+  ...
+# Subtest: manual release producer fixture (workflow_dispatch) is rejected
+ok 2 - manual release producer fixture (workflow_dispatch) is rejected
+  ---
+  duration_ms: 13.300792
+  type: 'test'
+  ...
+# Subtest: tag release producer fixture (push.tags) is rejected
+ok 3 - tag release producer fixture (push.tags) is rejected
+  ---
+  duration_ms: 11.531334
+  type: 'test'
+  ...
+# Subtest: callable release producer fixture (workflow_call) is rejected
+ok 4 - callable release producer fixture (workflow_call) is rejected
+  ---
+  duration_ms: 12.007959
+  type: 'test'
+  ...
+# Subtest: reusable release producer fixture (workflow_call with release signing secrets) is rejected
+ok 5 - reusable release producer fixture (workflow_call with release signing secrets) is rejected
+  ---
+  duration_ms: 11.821583
+  type: 'test'
+  ...
+# Subtest: rejects 'bun tauri build' release entry point fixture
+ok 6 - rejects 'bun tauri build' release entry point fixture
+  ---
+  duration_ms: 11.893041
+  type: 'test'
+  ...
+# Subtest: rejects root 'bun run build' delegation fixture while permitting scoped ui/site builds
+ok 7 - rejects root 'bun run build' delegation fixture while permitting scoped ui/site builds
+  ---
+  duration_ms: 11.937792
+  type: 'test'
+  ...
+# Subtest: rejects 'tauri-apps/tauri-action' action in step uses
+ok 8 - rejects 'tauri-apps/tauri-action' action in step uses
+  ---
+  duration_ms: 11.823541
+  type: 'test'
+  ...
+# Subtest: rejects 'scripts/release-local.mjs' coordinator invocation in workflow
+ok 9 - rejects 'scripts/release-local.mjs' coordinator invocation in workflow
+  ---
+  duration_ms: 12.293958
+  type: 'test'
+  ...
+# Subtest: rejects reusable job uses of release workflows and secrets: inherit
+ok 10 - rejects reusable job uses of release workflows and secrets: inherit
+  ---
+  duration_ms: 12.04775
+  type: 'test'
+  ...
+# Subtest: PR check workflow (.github/workflows/build-test.yml) complies with release policy
+ok 11 - PR check workflow (.github/workflows/build-test.yml) complies with release policy
+  ---
+  duration_ms: 14.962291
+  type: 'test'
+  ...
+# Subtest: Pages deployment workflow (.github/workflows/deploy-pages.yml) complies with release policy
+not ok 12 - Pages deployment workflow (.github/workflows/deploy-pages.yml) complies with release policy
+  ---
+  duration_ms: 18.824
+  type: 'test'
+  location: '/Users/indo/code/project/orca-lite/scripts/release-workflow.test.mjs:315:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    deploy-pages.yml failed policy check: [release-workflow-policy] FAIL: Release policy violations detected!
+      - Target not found: /Users/indo/code/project/orca-lite/.github/workflows/deploy-pages.yml
+    
+    
+    1 !== 0
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 0
+  actual: 1
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/release-workflow.test.mjs:317:10)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: PR check workflow wires the release workflow policy check
+ok 13 - PR check workflow wires the release workflow policy check
+  ---
+  duration_ms: 0.179542
+  type: 'test'
+  ...
+# Subtest: Windows CI executes isolated nonzero platform-relevant contracts
+not ok 14 - Windows CI executes isolated nonzero platform-relevant contracts
+  ---
+  duration_ms: 7.020417
+  type: 'test'
+  location: '/Users/indo/code/project/orca-lite/scripts/release-workflow.test.mjs:333:1'
+  failureType: 'testCodeFailure'
+  error: 'Windows must execute tests, not just check/link'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: '=='
+  stack: |-
+    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/release-workflow.test.mjs:342:10)
+    Test.runInAsyncScope (node:async_hooks:214:14)
+    Test.run (node:internal/test_runner/test:1047:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
+    Test.postRun (node:internal/test_runner/test:1173:19)
+    Test.run (node:internal/test_runner/test:1101:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: Windows CI links the native binary before a release tag
+ok 15 - Windows CI links the native binary before a release tag
+  ---
+  duration_ms: 0.153334
+  type: 'test'
+  ...
+# Subtest: hosted release producer .github/workflows/release.yml is absent from disk
+ok 16 - hosted release producer .github/workflows/release.yml is absent from disk
+  ---
+  duration_ms: 0.045959
+  type: 'test'
+  ...
+# Subtest: live repository .github/workflows directory complies fully with policy
+ok 17 - live repository .github/workflows directory complies fully with policy
+  ---
+  duration_ms: 14.517542
+  type: 'test'
+  ...
+1..17
+# tests 17
+# suites 0
+# pass 15
+# fail 2
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 278.430083

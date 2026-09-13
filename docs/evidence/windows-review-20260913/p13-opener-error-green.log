@@ -1,0 +1,11 @@
+source SHA256 3c9527d8de425315256c58fe4576804e841c51028a151d6bc2ddcb9f7dddf313
+compile argv ['rustc', '--edition=2021', '--test', '/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p13-opener-error-4bpec7ui/seam.rs', '-o', '/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p13-opener-error-4bpec7ui/seam']
+
+running 1 test
+test tests::external_open_propagates_failure ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+exit=0
+TemporaryDirectory binaries/source automatically removed.

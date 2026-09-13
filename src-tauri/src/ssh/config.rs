@@ -72,7 +72,10 @@ pub fn parse_ssh_config(text: &str) -> Vec<ConfigHost> {
             "identityfile" => {
                 if let Some(host) = current.as_mut() {
                     if host.identity_file.is_none() {
-                        host.identity_file = Some(value.to_string());
+                        let parsed_val = parse_ssh_value(value);
+                        if !parsed_val.is_empty() {
+                            host.identity_file = Some(parsed_val);
+                        }
                     }
                 }
             }
@@ -93,11 +96,45 @@ pub fn parse_ssh_config(text: &str) -> Vec<ConfigHost> {
 
 fn split_keyword_value(line: &str) -> Option<(&str, &str)> {
     let trimmed = line.trim();
-    let (keyword, rest) = match trimmed.find(char::is_whitespace) {
-        Some(index) => (&trimmed[..index], &trimmed[index..]),
-        None => return None,
-    };
-    Some((keyword, rest.trim()))
+    let index = trimmed.find(|c: char| c.is_whitespace() || c == '=')?;
+    let keyword = trimmed[..index].trim();
+    let mut rest = trimmed[index..].trim_start();
+    if let Some(after_eq) = rest.strip_prefix('=') {
+        rest = after_eq.trim_start();
+    }
+    Some((keyword, rest.trim_end()))
+}
+
+fn parse_ssh_value(input: &str) -> String {
+    let trimmed = input.trim();
+    if let Some(rest) = trimmed.strip_prefix('"') {
+        let mut result = String::new();
+        let mut in_escape = false;
+        let mut chars = rest.char_indices().peekable();
+        while let Some((_, c)) = chars.next() {
+            if in_escape {
+                if c == '"' {
+                    result.push('"');
+                } else if c == '\\' {
+                    result.push('\\');
+                } else {
+                    result.push('\\');
+                    result.push(c);
+                }
+                in_escape = false;
+            } else if c == '\\' {
+                in_escape = true;
+            } else if c == '"' {
+                break;
+            } else {
+                result.push(c);
+            }
+        }
+        result
+    } else {
+        let end = trimmed.find(|c: char| c.is_whitespace() || c == '#').unwrap_or(trimmed.len());
+        trimmed[..end].to_string()
+    }
 }
 
 pub fn import_aliases(config_hosts: &[ConfigHost], tombstones: &[String]) -> Vec<SshHost> {
@@ -141,6 +178,37 @@ fn uuid_like(seed: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn p10_identity_file_import_preserves_semantic_argv() {
+        let key = std::env::temp_dir().join("QA Person's key");
+        let key = key.to_str().unwrap();
+        let text = format!("Host fixture\n IdentityFile \"{key}\" # key comment\n IdentityFile ~/ignored\n");
+        let parsed = parse_ssh_config(&text);
+        assert_eq!(parsed[0].identity_file.as_deref(), Some(key));
+        let imported = import_aliases(&parsed, &[]);
+        let plan = crate::ssh::direct::ssh_plan(&imported[0], "true".into(), false).unwrap();
+        let values: Vec<_> = plan.args.windows(2)
+            .filter(|pair| pair[0] == "-i").map(|pair| pair[1].as_str()).collect();
+        assert_eq!(values, vec![key]);
+    }
+
+    #[test]
+    fn p10_identity_file_config_quoting_grammar() {
+        for (directive, expected) in [
+            (r#"IdentityFile "C:\Users\QA Person\.ssh\id_ed25519""#, r"C:\Users\QA Person\.ssh\id_ed25519"),
+            (r#"IdentityFile="~/.ssh/key with space""#, "~/.ssh/key with space"),
+            (r#"IdentityFile = "/path/with spaces/key""#, "/path/with spaces/key"),
+            (r#"IdentityFile = /path/plain/key"#, "/path/plain/key"),
+            (r#"IdentityFile = ~/.ssh/key # comment"#, "~/.ssh/key"),
+            (r#"IdentityFile "~/.ssh/key\"quote""#, "~/.ssh/key\"quote"),
+            (r#"IdentityFile ~/.ssh/plain # comment"#, "~/.ssh/plain"),
+            (r#"IdentityFile "~/.ssh/key#literal""#, "~/.ssh/key#literal"),
+        ] {
+            let parsed = parse_ssh_config(&format!("Host fixture\n {directive}\n"));
+            assert_eq!(parsed[0].identity_file.as_deref(), Some(expected), "{directive}");
+        }
+    }
 
     const SAMPLE: &str = "\
 # comment line

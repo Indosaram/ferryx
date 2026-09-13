@@ -7,6 +7,32 @@ import { tmpdir, homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+export async function readMarker(connection, target, cursor, marker, expectedPid) {
+  const parts = [];
+  let byteLength = 0;
+  for (;;) {
+    const reply = await connection.request("pty.read", { target, cursor, waitMs: 2000 });
+    assert.notEqual(reply.gap, true, "marker output was lost");
+    if (expectedPid !== undefined) assert.equal(reply.pid, expectedPid);
+    assert.equal(typeof reply.cursor, "string");
+    cursor = reply.cursor;
+    for (const chunk of reply.chunks) {
+      const bytes = Buffer.from(chunk.data, "base64");
+      byteLength += bytes.length;
+      assert(byteLength <= 1024 * 1024, "marker exceeds output bound");
+      parts.push(bytes);
+    }
+    const text = Buffer.concat(parts).toString("utf8");
+    if (text.replaceAll("\r\n", "\n").includes(marker)) return { ...reply, text, cursor };
+    assert.equal(reply.exited, false, "process exited before marker");
+  }
+}
+
+export async function main() {
+  requireDetachedOwnership();
+  function requireDetachedOwnership() {
+    throw Object.assign(new Error("Detached SSH QA requires a runtime-owner process handle/start-identity facility; endpoint PID text cannot authorize teardown"), { code: "QA_OWNERSHIP_PREREQUISITE" });
+  }
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const binary = process.env.FERRYX_QA_HELPER_BINARY ??
   join(repo, "remote-helper", "target", "debug",
@@ -42,50 +68,15 @@ async function sha256File(path) {
   try {
     const bytes = await readFile(path);
     return createHash("sha256").update(bytes).digest("hex");
-  } catch {
-    return null;
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
   }
 }
 
 async function reapPid(pid, label) {
   if (!pid) return;
-  try {
-    process.kill(pid, 0);
-  } catch (err) {
-    if (err.code === "ESRCH") return;
-    return;
-  }
-  try {
-    process.kill(pid, "SIGTERM");
-  } catch {}
-  const deadline = Date.now() + 5000;
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 50));
-    try {
-      process.kill(pid, 0);
-    } catch (err) {
-      if (err.code === "ESRCH") {
-        console.log(JSON.stringify({ event: "pid-reaped", label, pid }));
-        return;
-      }
-    }
-  }
-  try {
-    process.kill(pid, "SIGKILL");
-  } catch {}
-  const killDeadline = Date.now() + 3000;
-  while (Date.now() < killDeadline) {
-    await new Promise((r) => setTimeout(r, 50));
-    try {
-      process.kill(pid, 0);
-    } catch (err) {
-      if (err.code === "ESRCH") {
-        console.log(JSON.stringify({ event: "pid-force-reaped", label, pid }));
-        return;
-      }
-    }
-  }
-  console.error(`Warning: PID ${pid} (${label}) did not disappear within deadline`);
+  throw new Error(`Unproved detached process identity: ${label} PID ${pid}; retain fixture, never signal a numeric endpoint PID`);
 }
 
 async function reapChild(child, label) {
@@ -248,14 +239,9 @@ try {
 
   // Initial Read on Connection 1
   let cursor = "0";
-  const read1 = await bridge1.request("pty.read", {
-    target,
-    cursor,
-    waitMs: 2000,
-  });
+  const read1 = await readMarker(bridge1, target, cursor, `INIT:${nonce}:1\n`);
   cursor = read1.cursor;
-  assert(read1.chunks.length > 0, "Expected output chunks from initial spawn");
-  const initOutput = Buffer.concat(read1.chunks.map((c) => Buffer.from(c.data, "base64"))).toString("utf8");
+  const initOutput = read1.text;
   assert(initOutput.includes(`INIT:${nonce}:1`), `Expected INIT with nonce, got: ${initOutput}`);
   console.log(JSON.stringify({
     event: "step-1-verified-on-conn-1",
@@ -270,13 +256,9 @@ try {
     data: Buffer.from("tick1\n").toString("base64"),
   });
 
-  const readAck1 = await bridge1.request("pty.read", {
-    target,
-    cursor,
-    waitMs: 2000,
-  });
+  const readAck1 = await readMarker(bridge1, target, cursor, `ACK:${nonce}:2:tick1\n`, ptyPid);
   cursor = readAck1.cursor;
-  const ack1Output = Buffer.concat(readAck1.chunks.map((c) => Buffer.from(c.data, "base64"))).toString("utf8");
+  const ack1Output = readAck1.text;
   assert(ack1Output.includes(`ACK:${nonce}:2:tick1`), `Expected ACK counter 2, got: ${ack1Output}`);
   console.log(JSON.stringify({
     event: "step-1-counter-2-verified",
@@ -324,13 +306,9 @@ try {
   });
 
   // Read continuation chunks from Connection 2 using cursor
-  const readAck2 = await bridge2.request("pty.read", {
-    target,
-    cursor,
-    waitMs: 2000,
-  });
+  const readAck2 = await readMarker(bridge2, target, cursor, `ACK:${nonce}:3:tick2\n`, ptyPid);
   cursor = readAck2.cursor;
-  const ack2Output = Buffer.concat(readAck2.chunks.map((c) => Buffer.from(c.data, "base64"))).toString("utf8");
+  const ack2Output = readAck2.text;
   assert(ack2Output.includes(`ACK:${nonce}:3:tick2`), `Expected ACK counter 3 with same nonce, got: ${ack2Output}`);
   assert.equal(readAck2.pid, ptyPid, "ReadResult must report identical remote PID");
 
@@ -373,38 +351,28 @@ try {
   }));
 
   console.log("PASS: SSH bridge survival verified with identical remote PID, nonce, and continuous counter");
-} finally {
-  // Orderly and bounded teardown:
-  // 1. Reap explicit QA PTY process while root still exists
-  if (ptyPid) {
-    try {
-      await reapPid(ptyPid, "qa-pty-process");
-    } catch {}
-  }
-
-  // 2. Reap verified helper daemon while root still exists and await disappearance
-  if (helperDaemonPid) {
-    try {
-      await reapPid(helperDaemonPid, "helper-daemon");
-    } catch {}
-  }
-
-  // 3. Reap any owned SSH child processes
+ } finally {
+  const failures = [];
+  // Only owned child handles can be terminated. Detached identity is a
+  // prerequisite failure, never a reason to signal an endpoint's numeric PID.
   for (const child of ownedSshChildren.toReversed()) {
-    try {
-      await reapChild(child, "ssh-child");
-    } catch {}
+    try { await reapChild(child, "ssh-child"); } catch (error) { failures.push(error); }
   }
+  for (const pid of [ptyPid, helperDaemonPid]) {
+    if (pid) {
+      try { await reapPid(pid, "detached-helper-or-pty"); } catch (error) { failures.push(error); }
+    }
+  }
+  if (failures.length) throw new AggregateError(failures, `Cleanup unproved; retaining ${fixture}`);
+  await rm(fixture, { recursive: true, force: true });
+  console.log(JSON.stringify({ event: "cleanup-receipt", fixtureRemoved: fixture }));
+}
 
-  // 4. Delete fixture only after all processes have disappeared
-  try {
-    await rm(fixture, { recursive: true, force: true });
-  } catch {}
+}
 
-  console.log(JSON.stringify({
-    event: "cleanup-receipt",
-    fixtureRemoved: fixture,
-    reapedHelperPid: helperDaemonPid,
-    reapedPtyPid: ptyPid,
-  }));
+if (import.meta.main) {
+  if (process.argv.includes("--self-test")) {
+    throw new Error("Use node --experimental-vm-modules --test scripts/qa/ssh-harness-safety.test.mjs; no live QA was started");
+  }
+  await main();
 }

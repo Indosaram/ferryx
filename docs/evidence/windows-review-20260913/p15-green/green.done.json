@@ -1,0 +1,17 @@
+{
+  "phase": "green",
+  "results": [
+    {
+      "label": "primary",
+      "exit": 0,
+      "accepted": true
+    },
+    {
+      "label": "companion",
+      "exit": 0,
+      "accepted": true
+    }
+  ],
+  "accepted": true,
+  "finished": "2026-09-13T08:53:09.110Z"
+}

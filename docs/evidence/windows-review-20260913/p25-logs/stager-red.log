@@ -1,0 +1,218 @@
+TAP version 13
+# Skipped x86_64-unknown-linux-gnu: no compiled artifact found
+# Skipped aarch64-unknown-linux-gnu: no compiled artifact found
+# Skipped x86_64-pc-windows-msvc: no compiled artifact found
+# Generated manifest at /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p25-stage-1LSxJT/src-tauri/resources/helpers/manifest.json with 0 artifacts
+# Skipped x86_64-unknown-linux-gnu: no compiled artifact found
+# Skipped aarch64-unknown-linux-gnu: no compiled artifact found
+# Staged x86_64-pc-windows-msvc from /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p25-stage-rCYZUC/remote-helper/target/x86_64-pc-windows-gnu/release/ferryx-remote-helper.exe (5 bytes)
+# Generated manifest at /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p25-stage-rCYZUC/src-tauri/resources/helpers/manifest.json with 1 artifacts
+# Skipped x86_64-unknown-linux-gnu: no compiled artifact found
+# Skipped aarch64-unknown-linux-gnu: no compiled artifact found
+# Staged x86_64-pc-windows-msvc from /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p25-stage-oYaae8/remote-helper/target/x86_64-pc-windows-msvc/debug/ferryx-remote-helper.exe (5 bytes)
+# Generated manifest at /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p25-stage-oYaae8/src-tauri/resources/helpers/manifest.json with 1 artifacts
+# Skipped x86_64-unknown-linux-gnu: no compiled artifact found
+# Skipped aarch64-unknown-linux-gnu: no compiled artifact found
+# Preserved existing staged asset: x86_64-pc-windows-msvc (5 bytes)
+# Generated manifest at /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p25-stage-rP4B5F/src-tauri/resources/helpers/manifest.json with 1 artifacts
+# Skipped x86_64-unknown-linux-gnu: no compiled artifact found
+# Skipped aarch64-unknown-linux-gnu: no compiled artifact found
+# Skipped x86_64-pc-windows-msvc: no compiled artifact found
+# Generated manifest at /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p25-stage-CURAwy/src-tauri/resources/helpers/manifest.json with 0 artifacts
+# Skipped x86_64-unknown-linux-gnu: no compiled artifact found
+# Skipped aarch64-unknown-linux-gnu: no compiled artifact found
+# Skipped x86_64-pc-windows-msvc: no compiled artifact found
+# Generated manifest at /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p25-stage-oPrtHZ/src-tauri/resources/helpers/manifest.json with 0 artifacts
+# Skipped x86_64-unknown-linux-gnu: no compiled artifact found
+# Skipped aarch64-unknown-linux-gnu: no compiled artifact found
+# Skipped x86_64-pc-windows-msvc: no compiled artifact found
+# Generated manifest at /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p25-stage-VSG827/src-tauri/resources/helpers/manifest.json with 0 artifacts
+# Skipped x86_64-unknown-linux-gnu: no compiled artifact found
+# Skipped aarch64-unknown-linux-gnu: no compiled artifact found
+# Skipped x86_64-pc-windows-msvc: no compiled artifact found
+# Generated manifest at /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p25-stage-im2Hfs/src-tauri/resources/helpers/manifest.json with 0 artifacts
+# Skipped x86_64-unknown-linux-gnu: no compiled artifact found
+# Skipped aarch64-unknown-linux-gnu: no compiled artifact found
+# Skipped x86_64-pc-windows-msvc: no compiled artifact found
+# Generated manifest at /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p25-stage-MKGU5D/src-tauri/resources/helpers/manifest.json with 0 artifacts
+# Skipped x86_64-unknown-linux-gnu: no compiled artifact found
+# Skipped aarch64-unknown-linux-gnu: no compiled artifact found
+# Skipped x86_64-pc-windows-msvc: no compiled artifact found
+# Generated manifest at /var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/p25-stage-OdSmKp/src-tauri/resources/helpers/manifest.json with 0 artifacts
+# (node:57623) ExperimentalWarning: VM Modules is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: stager rejects empty without publication
+not ok 1 - stager rejects empty without publication
+  ---
+  duration_ms: 5.405459
+  type: 'test'
+  location: '/Users/indo/code/project/orca-lite/scripts/build-remote-helpers.test.mjs:32:56'
+  failureType: 'testCodeFailure'
+  error: 'Missing expected rejection.'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  operator: 'rejects'
+  stack: |-
+    async TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/build-remote-helpers.test.mjs:36:3)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+# Subtest: stager rejects gnu without publication
+not ok 2 - stager rejects gnu without publication
+  ---
+  duration_ms: 3.795292
+  type: 'test'
+  location: '/Users/indo/code/project/orca-lite/scripts/build-remote-helpers.test.mjs:32:56'
+  failureType: 'testCodeFailure'
+  error: 'Missing expected rejection.'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  operator: 'rejects'
+  stack: |-
+    async TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/build-remote-helpers.test.mjs:36:3)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: stager rejects debug without publication
+not ok 3 - stager rejects debug without publication
+  ---
+  duration_ms: 3.213625
+  type: 'test'
+  location: '/Users/indo/code/project/orca-lite/scripts/build-remote-helpers.test.mjs:32:56'
+  failureType: 'testCodeFailure'
+  error: 'Missing expected rejection.'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  operator: 'rejects'
+  stack: |-
+    async TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/build-remote-helpers.test.mjs:36:3)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: stager rejects stale without publication
+not ok 4 - stager rejects stale without publication
+  ---
+  duration_ms: 2.741875
+  type: 'test'
+  location: '/Users/indo/code/project/orca-lite/scripts/build-remote-helpers.test.mjs:32:56'
+  failureType: 'testCodeFailure'
+  error: 'Missing expected rejection.'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  operator: 'rejects'
+  stack: |-
+    async TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/build-remote-helpers.test.mjs:36:3)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: stager requires full matrix before publishing any bytes
+not ok 5 - stager requires full matrix before publishing any bytes
+  ---
+  duration_ms: 2.778542
+  type: 'test'
+  location: '/Users/indo/code/project/orca-lite/scripts/build-remote-helpers.test.mjs:46:1'
+  failureType: 'testCodeFailure'
+  error: 'Missing expected rejection.'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  operator: 'rejects'
+  stack: |-
+    async TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/build-remote-helpers.test.mjs:48:3)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: stager binds explicit artifact bytes, source lock and helper protocol 1
+not ok 6 - stager binds explicit artifact bytes, source lock and helper protocol 1
+  ---
+  duration_ms: 2.13775
+  type: 'test'
+  location: '/Users/indo/code/project/orca-lite/scripts/build-remote-helpers.test.mjs:51:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+    
+    0 !== 1
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 1
+  actual: 0
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/build-remote-helpers.test.mjs:55:10)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: stager rejects hash receipt
+not ok 7 - stager rejects hash receipt
+  ---
+  duration_ms: 2.338083
+  type: 'test'
+  location: '/Users/indo/code/project/orca-lite/scripts/build-remote-helpers.test.mjs:59:66'
+  failureType: 'testCodeFailure'
+  error: 'Missing expected rejection.'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  operator: 'rejects'
+  stack: |-
+    async TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/build-remote-helpers.test.mjs:64:3)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: stager rejects lock receipt
+not ok 8 - stager rejects lock receipt
+  ---
+  duration_ms: 3.30175
+  type: 'test'
+  location: '/Users/indo/code/project/orca-lite/scripts/build-remote-helpers.test.mjs:59:66'
+  failureType: 'testCodeFailure'
+  error: 'Missing expected rejection.'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  operator: 'rejects'
+  stack: |-
+    async TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/build-remote-helpers.test.mjs:64:3)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: stager rejects machine receipt
+not ok 9 - stager rejects machine receipt
+  ---
+  duration_ms: 2.890417
+  type: 'test'
+  location: '/Users/indo/code/project/orca-lite/scripts/build-remote-helpers.test.mjs:59:66'
+  failureType: 'testCodeFailure'
+  error: 'Missing expected rejection.'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  operator: 'rejects'
+  stack: |-
+    async TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/build-remote-helpers.test.mjs:64:3)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+# Subtest: stager rejects duplicate receipt
+not ok 10 - stager rejects duplicate receipt
+  ---
+  duration_ms: 2.49725
+  type: 'test'
+  location: '/Users/indo/code/project/orca-lite/scripts/build-remote-helpers.test.mjs:59:66'
+  failureType: 'testCodeFailure'
+  error: 'Missing expected rejection.'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  operator: 'rejects'
+  stack: |-
+    async TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/build-remote-helpers.test.mjs:64:3)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+1..10
+# tests 10
+# suites 0
+# pass 0
+# fail 10
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 84.441083

@@ -1,0 +1,8 @@
+Task st_01a09a0e
+functions.lsp_diagnostics filePath=src-tauri/tests/native_terminal_images.rs severity=all
+Result: No diagnostics found.
+No Cargo command executed: exclusive shared-target slot was not issued in this child session.
+No runtime RED or GREEN claimed. Slot guard exited 2 before Cargo.
+No product source edited. src-tauri/src/native_terminal/images.rs remained clean in final scoped git status.
+No daemon, GUI window, PTY, remote connection, background process, or temporary fixture root created; no runtime resource cleanup required.
+Evidence logs and staged test/runner intentionally retained. No branch/worktree, commit, push, install, release, or global environment changes.

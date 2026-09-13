@@ -1,0 +1,54 @@
+$ vitest run --maxWorkers=1 src/remote/RemotePreferences.contract.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+
+ ❯ src/remote/RemotePreferences.contract.test.tsx (3 tests | 2 failed) 70ms
+   × migrates real scoped auth and loads only the selected host's preferences across gated host switches 59ms
+     → expected '13px' to be '17px' // Object.is equality
+   × rejects late preferences after an in-place credential change and retains local override precedence 6ms
+     → expected '13px' to be '25px' // Object.is equality
+   ✓ keeps desktop-embedded appearance local even with remote transport credentials 5ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/remote/RemotePreferences.contract.test.tsx > migrates real scoped auth and loads only the selected host's preferences across gated host switches
+AssertionError: expected '13px' to be '17px' // Object.is equality
+
+Expected: [32m"1[7m7[27mpx"[39m
+Received: [31m"1[7m3[27mpx"[39m
+
+ ❯ expectAppearance src/remote/RemotePreferences.contract.test.tsx:35:35
+     33| function expectAppearance(fontSize: number, background: string) {
+     34|   const terminal = screen.getByTestId("remote-terminal-grid");
+     35|   expect(terminal.style.fontSize).toBe(`${fontSize}px`);
+       |                                   ^
+     36|   expect(terminal.style.backgroundColor).toBe(background);
+     37| }
+ ❯ src/remote/RemotePreferences.contract.test.tsx:120:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+ FAIL  src/remote/RemotePreferences.contract.test.tsx > rejects late preferences after an in-place credential change and retains local override precedence
+AssertionError: expected '13px' to be '25px' // Object.is equality
+
+Expected: [32m"[7m25[27mpx"[39m
+Received: [31m"[7m13[27mpx"[39m
+
+ ❯ expectAppearance src/remote/RemotePreferences.contract.test.tsx:35:35
+     33| function expectAppearance(fontSize: number, background: string) {
+     34|   const terminal = screen.getByTestId("remote-terminal-grid");
+     35|   expect(terminal.style.fontSize).toBe(`${fontSize}px`);
+       |                                   ^
+     36|   expect(terminal.style.backgroundColor).toBe(background);
+     37| }
+ ❯ src/remote/RemotePreferences.contract.test.tsx:158:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  2 failed | 1 passed (3)
+   Start at  15:38:54
+   Duration  1.10s (transform 129ms, setup 110ms, collect 553ms, tests 70ms, environment 245ms, prepare 30ms)
+
+error: script "test" exited with code 1

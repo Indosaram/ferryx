@@ -6,7 +6,6 @@ use ferryx_lib::daemon::protocol::{
     DaemonRequest, DaemonResponse, DaemonSessionDetails, DaemonStreamMessage,
     DAEMON_PROTOCOL_VERSION,
 };
-use ferryx_lib::daemon::server::{get_lock_path, get_socket_path};
 use ferryx_lib::session::{
     clear_session_from_path, load_session_from_path, save_session_to_path, PersistedLayout,
     PersistedTab, PersistedWorkspace, PersistedWorkspaceSession, PersistedWorktree,
@@ -18,101 +17,112 @@ use std::time::Duration;
 use tempfile::{tempdir, TempDir};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-use tokio::process::Command as TokioCommand;
 use tokio::time::timeout;
 
 /// Harness managing the standalone `ferryx --daemon` process lifecycle with deterministic
 /// readiness awaiting, clean shutdown, and safe cleanup of socket/lock artifacts on drop.
 struct DaemonProcessHarness {
-    child: tokio::process::Child,
+    child: std::process::Child,
     socket_path: PathBuf,
-    lock_path: PathBuf,
+    // Declared after child: the owned endpoint tree outlives process cleanup.
+    root: TempDir,
     pub daemon_pid: u32,
 }
 
 impl DaemonProcessHarness {
     async fn start() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let bin_path = env!("CARGO_BIN_EXE_ferryx");
-        let socket_path = get_socket_path();
-        let lock_path = get_lock_path();
-
-        let mut child = TokioCommand::new(bin_path)
+        // Short explicit root also avoids Darwin's 104-byte sockaddr_un limit.
+        let root = tempfile::Builder::new().prefix("p19-").tempdir_in("/tmp")?;
+        let runtime = root.path().join("run");
+        let home = root.path().join("home");
+        std::fs::create_dir(&home)?;
+        let child = std::process::Command::new(bin_path)
             .arg("--daemon")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .env("XDG_CONFIG_HOME", home.join("config"))
+            .env("XDG_DATA_HOME", home.join("data"))
+            .env("FERRYX_RUNTIME_DIR", &runtime)
+            .env("FERRYX_DATA_DIR", root.path().join("data"))
+            .env("FERRYX_SESSION_DIR", root.path().join("sessions"))
+            .env("SHELL", "/bin/sh")
+            .env("TERM", "xterm-256color")
+            .current_dir(&home)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::inherit())
             .spawn()?;
-
-        let stdout = child.stdout.take().expect("Daemon stdout must be captured");
-        let mut reader = BufReader::new(stdout).lines();
+        let daemon_pid = child.id();
+        // Install ownership before the first fallible read or await.
+        let mut harness = Self {
+            child,
+            socket_path: runtime.join("daemon.sock"),
+            root,
+            daemon_pid,
+        };
+        let stdout = harness
+            .child
+            .stdout
+            .take()
+            .expect("Daemon stdout must be captured");
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let result = std::io::BufReader::new(stdout).lines().next();
+            if ready_tx.send(result).is_err() {
+                eprintln!("P19 readiness receiver dropped during child cleanup");
+            }
+        });
 
         // Exact readiness signal: wait for deterministic daemon ready line without polling/sleeps
-        let ready_line = timeout(Duration::from_secs(10), reader.next_line())
+        let ready_line = timeout(Duration::from_secs(10), ready_rx)
             .await
             .map_err(|_| "Daemon readiness timed out")??
-            .ok_or("Daemon process exited before emitting readiness signal")?;
+            .ok_or("Daemon process exited before emitting readiness signal")??;
 
         assert_eq!(
             ready_line, "FERRYX_DAEMON_READY",
             "Daemon stdout must emit deterministic readiness token"
         );
 
-        // Probe handshake to obtain daemon pid
-        let stream = UnixStream::connect(&socket_path).await?;
-        let (read_half, mut write_half) = stream.into_split();
-        let hs = DaemonRequest::Handshake {
-            version: DAEMON_PROTOCOL_VERSION,
-        };
-        let mut hs_json = serde_json::to_string(&hs)?;
-        hs_json.push('\n');
-        write_half.write_all(hs_json.as_bytes()).await?;
-        write_half.flush().await?;
-
-        let mut line = String::new();
-        let mut hs_reader = BufReader::new(read_half);
-        hs_reader.read_line(&mut line).await?;
-        let resp: DaemonResponse = serde_json::from_str(line.trim())?;
-        let daemon_pid = match resp {
-            DaemonResponse::HandshakeOk { pid, .. } => pid,
-            other => panic!("Expected HandshakeOk, got {other:?}"),
-        };
-
-        Ok(Self {
-            child,
-            socket_path,
-            lock_path,
-            daemon_pid,
-        })
+        harness.connect_client().await?;
+        Ok(harness)
     }
 
     async fn connect_client(
         &self,
     ) -> Result<TestDaemonClient, Box<dyn std::error::Error + Send + Sync>> {
-        TestDaemonClient::connect(&self.socket_path).await
+        TestDaemonClient::connect(&self.socket_path, self.daemon_pid).await
     }
 
-    async fn shutdown(mut self) {
-        if let Ok(mut client) = TestDaemonClient::connect(&self.socket_path).await {
-            let _ = client.send_request(&DaemonRequest::Shutdown).await;
-        }
-
-        if timeout(Duration::from_secs(3), self.child.wait())
-            .await
-            .is_err()
-        {
-            let _ = self.child.kill().await;
-            let _ = timeout(Duration::from_secs(3), self.child.wait()).await;
-        }
-
-        let _ = std::fs::remove_file(&self.socket_path);
-        let _ = std::fs::remove_file(&self.lock_path);
+    async fn shutdown(self) {
+        // Kill/wait only the spawn handle, never a PID received over the wire.
+        // Drop is also the panic, readiness-failure and cancellation path.
+        drop(self);
     }
 }
 
 impl Drop for DaemonProcessHarness {
     fn drop(&mut self) {
-        let _ = self.child.start_kill();
-        let _ = std::fs::remove_file(&self.socket_path);
-        let _ = std::fs::remove_file(&self.lock_path);
+        match self.child.try_wait() {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                if let Err(error) = self.child.kill() {
+                    eprintln!("P19 owned child kill failed: {error}");
+                }
+                if let Err(error) = self.child.wait() {
+                    eprintln!("P19 owned child reap failed: {error}");
+                }
+            }
+            Err(error) => eprintln!("P19 owned child status failed: {error}"),
+        }
+        eprintln!(
+            "P19 reaped owned child {} at {}",
+            self.daemon_pid,
+            self.root.path().display()
+        );
     }
 }
 
@@ -123,7 +133,13 @@ struct TestDaemonClient {
 }
 
 impl TestDaemonClient {
-    async fn connect(socket_path: &Path) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    async fn connect(
+        socket_path: &Path,
+        expected_pid: u32,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        // RED staging: the owned fake endpoint regression below must reject this
+        // missing identity check before the final validation is installed.
+        let _ = expected_pid;
         let stream = UnixStream::connect(socket_path).await?;
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
@@ -137,7 +153,7 @@ impl TestDaemonClient {
         write_half.flush().await?;
 
         let mut line = String::new();
-        let bytes = reader.read_line(&mut line).await?;
+        let bytes = timeout(Duration::from_secs(5), reader.read_line(&mut line)).await??;
         if bytes == 0 {
             return Err("EOF during handshake".into());
         }
@@ -203,7 +219,7 @@ impl TestDaemonClient {
                 workspace_id: workspace_id.to_string(),
                 worktree: None,
                 cwd: None,
-                shell: None,
+                shell: Some("/bin/sh".to_string()),
                 startup: None,
                 cols,
                 rows,
@@ -300,26 +316,15 @@ struct TestAttachStream {
 
 impl TestAttachStream {
     async fn attach(
-        socket_path: &Path,
+        daemon: &DaemonProcessHarness,
         session_id: &str,
         after_sequence: Option<u64>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let stream = UnixStream::connect(socket_path).await?;
-        let (read_half, mut write_half) = stream.into_split();
-        let mut reader = BufReader::new(read_half);
-
-        let hs = DaemonRequest::Handshake {
-            version: DAEMON_PROTOCOL_VERSION,
-        };
-        let mut hs_json = serde_json::to_string(&hs)?;
-        hs_json.push('\n');
-        write_half.write_all(hs_json.as_bytes()).await?;
-        write_half.flush().await?;
-
+        let TestDaemonClient {
+            mut reader,
+            writer: mut write_half,
+        } = daemon.connect_client().await?;
         let mut line = String::new();
-        reader.read_line(&mut line).await?;
-        let hs_resp: DaemonResponse = serde_json::from_str(line.trim())?;
-        assert!(matches!(hs_resp, DaemonResponse::HandshakeOk { .. }));
 
         let req = DaemonRequest::Attach {
             session_id: session_id.to_string(),
@@ -331,7 +336,7 @@ impl TestAttachStream {
         write_half.flush().await?;
 
         line.clear();
-        reader.read_line(&mut line).await?;
+        timeout(Duration::from_secs(5), reader.read_line(&mut line)).await??;
         let attach_resp: DaemonResponse = serde_json::from_str(line.trim())?;
 
         Ok(Self {
@@ -380,8 +385,8 @@ impl TestAttachStream {
             if bytes == 0 {
                 break;
             }
-            if let Ok(DaemonStreamMessage::Output { data, .. }) =
-                serde_json::from_str::<DaemonStreamMessage<'static>>(line.trim())
+            if let DaemonStreamMessage::Output { data, .. } =
+                serde_json::from_str::<DaemonStreamMessage<'static>>(line.trim())?
             {
                 let text = String::from_utf8_lossy(&data);
                 accumulated.push_str(&text);
@@ -450,81 +455,102 @@ fn extract_pid_and_ppid(output: &str) -> Option<(u32, u32)> {
 
 #[tokio::test]
 async fn test_daemon_cli_selection_headless_readiness_and_cancellation() {
-    let bin_path = env!("CARGO_BIN_EXE_ferryx");
-    let mut child = TokioCommand::new(bin_path)
-        .arg("--daemon")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("Failed to spawn ferryx with --daemon");
-
-    let stdout = child.stdout.take().expect("Child stdout must be captured");
-    let mut reader = BufReader::new(stdout).lines();
-
-    // Exact readiness signal: wait for deterministic daemon ready line without polling/sleeps
-    let ready_line = timeout(Duration::from_secs(10), reader.next_line())
+    let daemon = DaemonProcessHarness::start()
         .await
-        .expect("Daemon readiness timed out")
-        .expect("Failed to read readiness line from daemon stdout")
-        .expect("Daemon exited before emitting readiness signal");
+        .expect("owned headless daemon");
+    let root = daemon.root.path().to_owned();
+    let mut client = daemon.connect_client().await.expect("owned handshake");
+    assert!(matches!(
+        client.send_request(&DaemonRequest::Ping).await.unwrap(),
+        DaemonResponse::Pong
+    ));
+    daemon.shutdown().await;
+    assert!(!root.exists(), "owned runtime removed after child reap");
+}
 
-    assert_eq!(
-        ready_line, "FERRYX_DAEMON_READY",
-        "Daemon stdout must emit deterministic readiness token"
-    );
-
-    let socket_path = get_socket_path();
-    let stream = UnixStream::connect(&socket_path)
+#[tokio::test]
+async fn test_harness_rejects_foreign_handshake_before_commands() {
+    // Given an owned wire peer, never the ambient user daemon.
+    let root = tempfile::Builder::new()
+        .prefix("p19-peer-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let socket = root.path().join("peer.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let peer = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read, mut write) = stream.into_split();
+        let mut reader = BufReader::new(read);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        assert!(matches!(
+            serde_json::from_str::<DaemonRequest>(&line).unwrap(),
+            DaemonRequest::Handshake { .. }
+        ));
+        let reply = DaemonResponse::HandshakeOk {
+            version: DAEMON_PROTOCOL_VERSION,
+            pid: 2,
+            epoch: 1,
+            binary_path: None,
+            binary_mtime_ms: None,
+            daemon_version: None,
+        };
+        write
+            .write_all(format!("{}\n", serde_json::to_string(&reply).unwrap()).as_bytes())
+            .await
+            .unwrap();
+        line.clear();
+        let bytes = timeout(Duration::from_secs(5), reader.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(bytes, 0, "identity failure must close without any command");
+    });
+    // When the real fixture connection seam is given a different owned PID.
+    let result = TestDaemonClient::connect(&socket, 1).await;
+    let rejected = result.is_err();
+    drop(result);
+    timeout(Duration::from_secs(5), peer)
         .await
-        .expect("Failed to connect to daemon UDS socket after readiness signal");
-
-    let (read_half, mut write_half) = stream.into_split();
-    let mut socket_reader = BufReader::new(read_half);
-
-    // 1. Handshake
-    let hs = DaemonRequest::Handshake {
-        version: DAEMON_PROTOCOL_VERSION,
-    };
-    let mut hs_json = serde_json::to_string(&hs).unwrap();
-    hs_json.push('\n');
-    write_half.write_all(hs_json.as_bytes()).await.unwrap();
-
-    let mut line = String::new();
-    socket_reader.read_line(&mut line).await.unwrap();
-    let resp: DaemonResponse = serde_json::from_str(line.trim()).unwrap();
-    match resp {
-        DaemonResponse::HandshakeOk { version, pid, .. } => {
-            assert_eq!(version, DAEMON_PROTOCOL_VERSION);
-            assert!(pid > 0);
-        }
-        other => panic!("Expected HandshakeOk, got {other:?}"),
-    }
-
-    // 2. Ping
-    line.clear();
-    let ping = DaemonRequest::Ping;
-    let mut ping_json = serde_json::to_string(&ping).unwrap();
-    ping_json.push('\n');
-    write_half.write_all(ping_json.as_bytes()).await.unwrap();
-
-    socket_reader.read_line(&mut line).await.unwrap();
-    let resp: DaemonResponse = serde_json::from_str(line.trim()).unwrap();
-    assert!(matches!(resp, DaemonResponse::Pong));
-
-    // Exact cancellation signal: terminate child process and await bounded shutdown
-    child
-        .kill()
-        .await
-        .expect("Failed to send termination signal to daemon process");
-    let exit_status = timeout(Duration::from_secs(5), child.wait())
-        .await
-        .expect("Daemon process failed to exit within timeout after cancellation")
-        .expect("Failed to wait on child process");
-
+        .unwrap()
+        .unwrap();
+    // Then it must refuse admission, even though the protocol version matches.
     assert!(
-        !exit_status.success() || exit_status.code().unwrap_or(0) == 0,
-        "Child process terminated"
+        rejected,
+        "foreign handshake PID must be rejected before commands"
     );
+}
+
+#[tokio::test]
+async fn test_harness_panic_cleanup_preserves_concurrent_owned_daemon() {
+    let (first, second) =
+        tokio::join!(DaemonProcessHarness::start(), DaemonProcessHarness::start());
+    let first = first.expect("first owned daemon");
+    let second = second.expect("second owned daemon");
+    assert_ne!(first.socket_path, second.socket_path);
+    assert_ne!(first.daemon_pid, second.daemon_pid);
+    let first_root = first.root.path().to_owned();
+    let second_root = second.root.path().to_owned();
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _owned = first;
+        panic!("injected harness owner panic");
+    }));
+    assert!(panic.is_err());
+    assert!(
+        !first_root.exists(),
+        "panic cleanup removed only the first owned tree"
+    );
+    assert!(second.socket_path.exists());
+    let mut sibling = second
+        .connect_client()
+        .await
+        .expect("sibling survived panic cleanup");
+    assert!(matches!(
+        sibling.send_request(&DaemonRequest::Ping).await.unwrap(),
+        DaemonResponse::Pong
+    ));
+    second.shutdown().await;
+    assert!(!second_root.exists());
 }
 
 #[tokio::test]
@@ -574,7 +600,7 @@ async fn test_daemon_terminal_persistence_reconnect_replay_and_isolation() {
         .expect("Write input to Shell B failed");
 
     // Read initial stream from Shell A to parse shell A PID and PPID
-    let mut attach_a_init = TestAttachStream::attach(&daemon.socket_path, &session_a, None)
+    let mut attach_a_init = TestAttachStream::attach(&daemon, &session_a, None)
         .await
         .expect("Attach to Shell A on Client A failed");
     let out_a = attach_a_init
@@ -597,7 +623,7 @@ async fn test_daemon_terminal_persistence_reconnect_replay_and_isolation() {
     );
 
     // Read initial stream from Shell B to parse shell B PID and PPID
-    let mut attach_b_init = TestAttachStream::attach(&daemon.socket_path, &session_b, None)
+    let mut attach_b_init = TestAttachStream::attach(&daemon, &session_b, None)
         .await
         .expect("Attach to Shell B on Client A failed");
     let out_b = attach_b_init
@@ -662,7 +688,7 @@ async fn test_daemon_terminal_persistence_reconnect_replay_and_isolation() {
     assert_eq!(desc_a.rows, 24);
 
     // Client B attaches to session A and verifies history replay exactly once
-    let mut attach_b_a = TestAttachStream::attach(&daemon.socket_path, &session_a, None)
+    let mut attach_b_a = TestAttachStream::attach(&daemon, &session_a, None)
         .await
         .expect("Attach to session A on Client B failed");
 
@@ -744,19 +770,14 @@ async fn test_daemon_terminal_persistence_reconnect_replay_and_isolation() {
         "Stream must deliver Exit message on session close"
     );
 
-    // Verify Shell A process terminates
-    let exit_deadline = std::time::Instant::now() + Duration::from_secs(5);
-    let mut shell_a_exited = false;
-    while std::time::Instant::now() < exit_deadline {
-        if unsafe { libc::kill(shell_a_pid as i32, 0) != 0 } {
-            shell_a_exited = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    // CloseOk follows mandatory reap; the subscribed Exit above is the barrier.
+    let shell_a_status = std::process::Command::new("ps")
+        .args(["-p", &shell_a_pid.to_string(), "-o", "pid="])
+        .output()
+        .expect("inspect reaped shell");
     assert!(
-        shell_a_exited,
-        "Shell A process group must terminate when session A is closed"
+        !shell_a_status.status.success(),
+        "Shell A must be reaped before CloseOk"
     );
 
     // Verify Shell B remains alive and responsive
@@ -780,7 +801,7 @@ async fn test_daemon_terminal_persistence_reconnect_replay_and_isolation() {
         .await
         .expect("Write input to Session B failed");
 
-    let mut attach_b_b = TestAttachStream::attach(&daemon.socket_path, &session_b, None)
+    let mut attach_b_b = TestAttachStream::attach(&daemon, &session_b, None)
         .await
         .expect("Attach to Session B failed");
     let hist_b = match &attach_b_b.attach_resp {
@@ -879,7 +900,7 @@ async fn test_daemon_output_sequence_contiguity_and_replay_gap() {
         .await
         .expect("spawn");
 
-    let mut attach = TestAttachStream::attach(&daemon.socket_path, &session_id, None)
+    let mut attach = TestAttachStream::attach(&daemon, &session_id, None)
         .await
         .expect("attach");
     let start_end = match &attach.attach_resp {
@@ -891,13 +912,16 @@ async fn test_daemon_output_sequence_contiguity_and_replay_gap() {
     client
         .write_input(
             &session_id,
-            b"for i in 1 2 3 4 5; do echo SEQ_BURST_$i; done\n",
+            b"PS1=''; stty -echo; for i in 1 2 3 4 5; do printf '__SEQ_%s__\\n' \"$i\"; done\n",
         )
         .await
         .expect("write");
 
-    let mut seen_bursts = 0;
-    while seen_bursts < 5 {
+    // Accumulate across arbitrary PTY chunk boundaries; command echo cannot
+    // contain the expanded fifth sentinel. Empty PS1 prevents trailing output
+    // racing DescribeSession versus the subsequent attach snapshot.
+    let mut burst_output = String::new();
+    while !burst_output.contains("__SEQ_5__\r\n") {
         let msg = attach.next_message().await.expect("next message");
         if let DaemonStreamMessage::Output { sequence, data, .. } = msg {
             assert!(
@@ -910,14 +934,15 @@ async fn test_daemon_output_sequence_contiguity_and_replay_gap() {
                 "Output chunk sequence must be strictly contiguous without drops"
             );
             last_seq = sequence;
-            let text = String::from_utf8_lossy(&data);
-            if text.contains("SEQ_BURST_") {
-                seen_bursts += text.matches("SEQ_BURST_").count();
-            }
+            burst_output.push_str(&String::from_utf8_lossy(&data));
         }
     }
 
-    // Await any trailing prompt chunks and obtain final sequence from DescribeSession
+    for index in 1..=5 {
+        assert!(burst_output.contains(&format!("__SEQ_{index}__")));
+    }
+
+    // The fifth completed line is the final-output barrier (PS1 is empty).
     let desc = client
         .describe_session(&session_id)
         .await
@@ -925,10 +950,9 @@ async fn test_daemon_output_sequence_contiguity_and_replay_gap() {
     let current_end_seq = desc.end_sequence;
 
     // Attach with after_sequence: current_end_seq returns empty history and no gap
-    let attach_current =
-        TestAttachStream::attach(&daemon.socket_path, &session_id, current_end_seq)
-            .await
-            .expect("attach at current end");
+    let attach_current = TestAttachStream::attach(&daemon, &session_id, current_end_seq)
+        .await
+        .expect("attach at current end");
     match &attach_current.attach_resp {
         DaemonResponse::AttachOk {
             history,
@@ -977,7 +1001,7 @@ async fn test_daemon_gui_process_non_ownership_and_process_tree() {
         .await
         .expect("write");
 
-    let mut attach = TestAttachStream::attach(&daemon.socket_path, &session_id, None)
+    let mut attach = TestAttachStream::attach(&daemon, &session_id, None)
         .await
         .expect("attach");
 

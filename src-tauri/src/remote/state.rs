@@ -164,12 +164,19 @@ fn routed_ipv4_address(destination: &str) -> Result<std::net::Ipv4Addr, String> 
     }
 }
 
-#[cfg(any(not(unix), test))]
+#[cfg(any(not(any(unix, windows)), test))]
 fn portable_ipv4_interface_addresses() -> Result<Vec<std::net::Ipv4Addr>, String> {
+    portable_ipv4_interface_addresses_with(routed_ipv4_address)
+}
+
+#[cfg(any(not(unix), test))]
+fn portable_ipv4_interface_addresses_with(
+    mut route: impl FnMut(&str) -> Result<std::net::Ipv4Addr, String>,
+) -> Result<Vec<std::net::Ipv4Addr>, String> {
     let mut addresses = Vec::new();
     let mut errors = Vec::new();
     for destination in ["8.8.8.8:80", "100.100.100.100:80"] {
-        match routed_ipv4_address(destination) {
+        match route(destination) {
             Ok(address) if !addresses.contains(&address) => addresses.push(address),
             Ok(_) => {}
             Err(error) => errors.push(error),
@@ -185,9 +192,264 @@ fn portable_ipv4_interface_addresses() -> Result<Vec<std::net::Ipv4Addr>, String
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn enumerate_ipv4_interface_addresses() -> Result<Vec<std::net::Ipv4Addr>, String> {
     portable_ipv4_interface_addresses()
+}
+
+#[cfg(windows)]
+fn enumerate_ipv4_interface_addresses() -> Result<Vec<std::net::Ipv4Addr>, String> {
+    non_unix_ipv4_interface_addresses_with(routed_ipv4_address, windows_adapters::enumerate)
+}
+
+#[cfg(any(windows, test))]
+fn non_unix_ipv4_interface_addresses_with(
+    route: impl FnMut(&str) -> Result<std::net::Ipv4Addr, String>,
+    adapters: impl FnOnce() -> Result<Vec<std::net::Ipv4Addr>, String>,
+) -> Result<Vec<std::net::Ipv4Addr>, String> {
+    let routed = portable_ipv4_interface_addresses_with(route);
+    let mut addresses = adapters()?;
+    match routed {
+        Ok(routed) => {
+            for address in routed {
+                if !addresses.contains(&address) {
+                    addresses.push(address);
+                }
+            }
+        }
+        Err(error) => tracing::debug!(%error, "using adapter inventory without off-link routes"),
+    }
+    Ok(addresses)
+}
+
+#[cfg(windows)]
+mod windows_adapters {
+    use std::mem::{size_of, MaybeUninit};
+    use std::net::Ipv4Addr;
+    use windows_sys::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, ERROR_NO_DATA, NO_ERROR};
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER,
+        GAA_FLAG_SKIP_MULTICAST, IF_TYPE_SOFTWARE_LOOPBACK, IP_ADAPTER_ADDRESSES_LH,
+    };
+    use windows_sys::Win32::NetworkManagement::Ndis::IfOperStatusUp;
+    use windows_sys::Win32::Networking::WinSock::{IpDadStatePreferred, AF_INET, SOCKADDR_IN};
+
+    pub(super) fn enumerate() -> Result<Vec<Ipv4Addr>, String> {
+        // SAFETY: GetAdaptersAddresses honors the supplied capacity and on success
+        // initializes the linked records within this allocation. No pointer escapes.
+        unsafe {
+            enumerate_with(|buffer, size| {
+                GetAdaptersAddresses(
+                    u32::from(AF_INET),
+                    GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER,
+                    std::ptr::null(),
+                    buffer,
+                    size,
+                )
+            })
+        }
+    }
+
+    /// # Safety
+    /// `query` must obey GetAdaptersAddresses' buffer contract: never write beyond
+    /// the input size, and on success provide initialized, aligned, acyclic adapter
+    /// and unicast records whose pointers remain valid until traversal completes.
+    /// All sockaddr pointers must address at least their advertised length.
+    unsafe fn enumerate_with(
+        mut query: impl FnMut(*mut IP_ADAPTER_ADDRESSES_LH, &mut u32) -> u32,
+    ) -> Result<Vec<Ipv4Addr>, String> {
+        let mut size = 15 * 1024u32;
+        for _ in 0..3 {
+            // Typed backing storage guarantees adapter alignment (unlike Vec<u8>).
+            // It is never resized after the API has installed interior pointers.
+            let count = (size as usize).div_ceil(size_of::<IP_ADAPTER_ADDRESSES_LH>());
+            let mut buffer = Vec::<MaybeUninit<IP_ADAPTER_ADDRESSES_LH>>::new();
+            buffer.try_reserve_exact(count).map_err(|error| {
+                format!("failed to allocate Windows adapter inventory: {error}")
+            })?;
+            buffer.resize_with(count, MaybeUninit::zeroed);
+            let head = buffer.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
+            match query(head, &mut size) {
+                ERROR_BUFFER_OVERFLOW => continue,
+                ERROR_NO_DATA => return Ok(Vec::new()),
+                NO_ERROR => {
+                    // SAFETY: query's success contract guarantees initialized lists
+                    // and sockaddr storage. buffer stays alive/unmoved during this
+                    // walk; only copied IPv4 values are returned before it is dropped.
+                    return Ok(unsafe { collect(head) });
+                }
+                status => return Err(format!("GetAdaptersAddresses failed: {status}")),
+            }
+        }
+        Err(format!(
+            "GetAdaptersAddresses failed after 3 buffer attempts: {ERROR_BUFFER_OVERFLOW}"
+        ))
+    }
+
+    /// # Safety
+    /// `head` must satisfy enumerate_with's successful query list contract.
+    unsafe fn collect(mut head: *const IP_ADAPTER_ADDRESSES_LH) -> Vec<Ipv4Addr> {
+        let mut addresses = Vec::new();
+        // SAFETY: caller guarantees valid initialized acyclic lists for this walk.
+        // Null pointers terminate lists; sockaddr length/family are checked before
+        // reading IPv4 layout, with read_unaligned avoiding stronger alignment needs.
+        unsafe {
+            while let Some(adapter) = head.as_ref() {
+                if adapter.OperStatus == IfOperStatusUp
+                    && adapter.IfType != IF_TYPE_SOFTWARE_LOOPBACK
+                {
+                    let mut cursor = adapter.FirstUnicastAddress;
+                    while let Some(unicast) = cursor.as_ref() {
+                        let socket = unicast.Address;
+                        if unicast.DadState == IpDadStatePreferred
+                            && !socket.lpSockaddr.is_null()
+                            && socket.iSockaddrLength >= size_of::<SOCKADDR_IN>() as i32
+                            && std::ptr::addr_of!((*socket.lpSockaddr).sa_family).read_unaligned()
+                                == AF_INET
+                        {
+                            let ipv4 = socket.lpSockaddr.cast::<SOCKADDR_IN>().read_unaligned();
+                            let address = Ipv4Addr::from(ipv4.sin_addr.S_un.S_addr.to_ne_bytes());
+                            if !addresses.contains(&address) {
+                                addresses.push(address);
+                            }
+                        }
+                        cursor = unicast.Next;
+                    }
+                }
+                head = adapter.Next;
+            }
+        }
+        addresses
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use windows_sys::Win32::NetworkManagement::IpHelper::IP_ADAPTER_UNICAST_ADDRESS_LH;
+        use windows_sys::Win32::Networking::WinSock::{IpDadStateTentative, AF_INET6};
+
+        #[repr(C)]
+        struct Inventory {
+            adapters: [IP_ADAPTER_ADDRESSES_LH; 3],
+            unicast: [IP_ADAPTER_UNICAST_ADDRESS_LH; 7],
+            sockets: [SOCKADDR_IN; 7],
+        }
+
+        #[test]
+        fn native_inventory_walk_filters_records_and_preserves_cgnat() {
+            // Given: typed records stored inside the production-owned API buffer.
+            // SAFETY: fixture fits the supplied size/alignment, zero is valid for
+            // these C integer/union/raw-pointer structs. All linked pointers stay
+            // within the buffer and are installed after its final allocation.
+            let result = unsafe {
+                enumerate_with(|buffer, size| {
+                    assert!(size_of::<Inventory>() <= *size as usize);
+                    assert!(
+                        std::mem::align_of::<Inventory>()
+                            <= std::mem::align_of::<IP_ADAPTER_ADDRESSES_LH>()
+                    );
+                    let fixture = buffer.cast::<Inventory>();
+                    fixture.write(std::mem::zeroed());
+                    let adapters = std::ptr::addr_of_mut!((*fixture).adapters)
+                        .cast::<IP_ADAPTER_ADDRESSES_LH>();
+                    let unicast = std::ptr::addr_of_mut!((*fixture).unicast)
+                        .cast::<IP_ADAPTER_UNICAST_ADDRESS_LH>();
+                    let sockets = std::ptr::addr_of_mut!((*fixture).sockets).cast::<SOCKADDR_IN>();
+                    for index in 0..3 {
+                        (*adapters.add(index)).OperStatus = IfOperStatusUp;
+                        (*adapters.add(index)).FirstUnicastAddress = unicast;
+                        if index < 2 {
+                            (*adapters.add(index)).Next = adapters.add(index + 1);
+                        }
+                    }
+                    (*adapters).OperStatus = 0; // down adapter
+                    (*adapters.add(1)).IfType = IF_TYPE_SOFTWARE_LOOPBACK;
+                    (*adapters.add(2)).FirstUnicastAddress = unicast.add(1);
+                    for index in 0..7 {
+                        (*unicast.add(index)).DadState = IpDadStatePreferred;
+                        (*unicast.add(index)).Address.lpSockaddr = sockets.add(index).cast();
+                        (*unicast.add(index)).Address.iSockaddrLength =
+                            size_of::<SOCKADDR_IN>() as i32;
+                        (*sockets.add(index)).sin_family = AF_INET;
+                        (*sockets.add(index)).sin_addr.S_un.S_addr =
+                            u32::from_ne_bytes([10, 0, 0, index as u8]);
+                        if index < 6 {
+                            (*unicast.add(index)).Next = unicast.add(index + 1);
+                        }
+                    }
+                    (*sockets.add(1)).sin_family = AF_INET6;
+                    (*unicast.add(2)).Address.iSockaddrLength = 1;
+                    (*unicast.add(3)).Address.lpSockaddr = std::ptr::null_mut();
+                    (*unicast.add(4)).DadState = IpDadStateTentative;
+                    (*sockets.add(5)).sin_addr.S_un.S_addr = u32::from_ne_bytes([100, 88, 12, 4]);
+                    (*sockets.add(6)).sin_addr.S_un.S_addr = u32::from_ne_bytes([192, 168, 50, 7]);
+                    NO_ERROR
+                })
+            };
+            // When / Then: production traversal copies network-order IPv4 values;
+            // down/loopback adapters and unusable unicast records contribute none.
+            let addresses = result.expect("native inventory");
+            assert_eq!(
+                addresses,
+                [
+                    Ipv4Addr::new(100, 88, 12, 4),
+                    Ipv4Addr::new(192, 168, 50, 7)
+                ]
+            );
+            assert_eq!(
+                super::super::select_local_network_address(addresses, None),
+                Some(Ipv4Addr::new(192, 168, 50, 7))
+            );
+        }
+
+        #[test]
+        fn native_buffer_overflow_retries_with_aligned_larger_storage() {
+            let mut calls = 0;
+            // SAFETY: first call writes no records and requests a larger buffer;
+            // second initializes one terminal C adapter with no unicast records.
+            let result = unsafe {
+                enumerate_with(|buffer, size| {
+                    calls += 1;
+                    assert!(buffer.is_aligned());
+                    if calls == 1 {
+                        *size = 32 * 1024;
+                        ERROR_BUFFER_OVERFLOW
+                    } else {
+                        assert_eq!(*size, 32 * 1024);
+                        buffer.write(std::mem::zeroed());
+                        NO_ERROR
+                    }
+                })
+            };
+            assert_eq!(calls, 2);
+            assert_eq!(result, Ok(Vec::new()));
+        }
+
+        #[test]
+        fn native_buffer_overflow_is_bounded() {
+            let mut calls = 0;
+            // SAFETY: error-only query never provides records to traverse.
+            let result = unsafe {
+                enumerate_with(|_, size| {
+                    calls += 1;
+                    *size += 1024;
+                    ERROR_BUFFER_OVERFLOW
+                })
+            };
+            assert_eq!(calls, 3);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn native_api_no_data_is_empty_and_failure_is_not_success() {
+            // SAFETY: neither return status permits buffer traversal.
+            let empty = unsafe { enumerate_with(|_, _| ERROR_NO_DATA) };
+            // SAFETY: error-only query does not initialize or expose records.
+            let failure = unsafe { enumerate_with(|_, _| 5) };
+            assert_eq!(empty, Ok(Vec::new()));
+            assert!(failure.is_err());
+        }
+    }
 }
 
 fn select_local_network_address(
@@ -208,8 +470,8 @@ fn select_local_network_address(
         .min_by_key(|addr| (Some(*addr) != routed, !addr.is_private()))
 }
 
-/// Default [`InterfaceResolver`] backed by routing probes and, on Unix, the
-/// operating system's active interface list.
+/// Default [`InterfaceResolver`] backed by routing probes and the operating
+/// system's active interface list on Unix and Windows.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SystemInterfaceResolver;
 
@@ -927,6 +1189,51 @@ mod tests {
         assert!(!address.is_loopback());
         assert!(!is_tailscale_cgnat_address(&address));
         std::net::UdpSocket::bind((address, 0)).expect("resolved address is locally bindable");
+    }
+
+    #[test]
+    fn p15_offline_lan_survives_both_route_failures() {
+        use std::net::Ipv4Addr;
+
+        // Given: only on-link LAN is usable; neither off-link route exists.
+        let lan = Ipv4Addr::new(192, 168, 50, 7);
+        let cgnat = Ipv4Addr::new(100, 88, 12, 4);
+        let mut probes = Vec::new();
+        let inventory_read = std::cell::Cell::new(false);
+
+        // When: execute the production non-Unix fallback and LAN selector.
+        let result = non_unix_ipv4_interface_addresses_with(
+            |destination| {
+                probes.push(destination.to_owned());
+                Err("fixture: no off-link route".to_owned())
+            },
+            || {
+                inventory_read.set(true);
+                Ok(vec![cgnat, lan])
+            },
+        )
+        .and_then(|addresses| {
+            select_local_network_address(addresses, None)
+                .ok_or_else(|| "fixture: no eligible LAN address".to_owned())
+        });
+
+        // Then: route failures cannot hide a usable adapter or select CGNAT.
+        assert_eq!(probes, ["8.8.8.8:80", "100.100.100.100:80"]);
+        assert_eq!(result, Ok(lan));
+        assert!(inventory_read.get());
+    }
+
+    #[test]
+    fn p15_offline_lan_rejects_cgnat_only_inventory() {
+        use std::net::Ipv4Addr;
+
+        // Given: a Tailscale-only inventory and no usable preferred route.
+        let inventory = [
+            Ipv4Addr::new(100, 64, 0, 0),
+            Ipv4Addr::new(100, 127, 255, 255),
+        ];
+        // When / Then: LocalNetwork must not expose the Tailscale adapter.
+        assert_eq!(select_local_network_address(inventory, None), None);
     }
 
     #[test]

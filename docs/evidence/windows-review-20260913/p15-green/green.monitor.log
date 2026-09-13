@@ -1,0 +1,3 @@
+{"phase":"green","label":"primary","pid":36078,"log":"/private/tmp/ferryx-p15-st_01a099e2-TCTkwR/green.primary.log"}
+{"phase":"green","label":"companion","pid":36399,"log":"/private/tmp/ferryx-p15-st_01a099e2-TCTkwR/green.companion.log"}
+{"phase":"green","results":[{"label":"primary","exit":0,"accepted":true},{"label":"companion","exit":0,"accepted":true}],"accepted":true}

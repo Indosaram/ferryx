@@ -1,0 +1,23 @@
+{
+  "phase": "green",
+  "label": "companion",
+  "pid": 36399,
+  "command": [
+    "/Users/indo/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo",
+    "test",
+    "--manifest-path",
+    "src-tauri/Cargo.toml",
+    "--lib",
+    "remote::state::tests::p15_offline_lan_rejects_cgnat_only_inventory",
+    "--",
+    "--exact",
+    "--nocapture"
+  ],
+  "log": "/private/tmp/ferryx-p15-st_01a099e2-TCTkwR/green.companion.log",
+  "before": {
+    "src-tauri/src/remote/state.rs": "c8d20a92b46084e8c57b8f6234ffc3b1047e46146a78407b2e585ccb4dd01cd4",
+    "src-tauri/Cargo.toml": "1fdf8ec46e62043b6d75a541bc60682e60f701dcdfe6551a8c03a4492ec6efdc",
+    "src-tauri/Cargo.lock": "1b2d01f2d268c2183c5be10cb1d0db464c349afffe9999b79cb93077f11169a5"
+  },
+  "started": "2026-09-13T08:53:08.243Z"
+}

@@ -1,0 +1,4 @@
+bash syntax exit=0
+P30 requires a lead-issued exclusive Cargo slot.
+slot guard exit=2
+diff check exit=0

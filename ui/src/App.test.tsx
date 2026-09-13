@@ -98,7 +98,7 @@ const native = {
 };
 
 const updater = {
-  checkForUpdate: vi.fn(),
+  check: vi.fn(),
 };
 
 const defaultTabPaneLayout: TabPaneLayout = {
@@ -226,13 +226,9 @@ vi.mock("./lib/tauri", () => ({
   isStructuredIpcError: (_error: unknown) => false,
 }));
 
-vi.mock("./lib/updater", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./lib/updater")>();
-  return {
-    ...actual,
-    checkForUpdate: updater.checkForUpdate,
-  };
-});
+vi.mock("@tauri-apps/plugin-updater", () => ({
+  check: (...args: unknown[]) => updater.check(...args),
+}));
 
 const workspaceStoreModule = await import("./state/workspaceStore");
 let storeSpy: any;
@@ -508,8 +504,8 @@ describe("App project workspace flow", () => {
     native.onOpenSettingsMenu.mockReset();
     native.onOpenSettingsMenu.mockResolvedValue(() => {});
     native.onRemoteSelectionRequested.mockReset();
-    updater.checkForUpdate.mockReset();
-    updater.checkForUpdate.mockResolvedValue(undefined);
+    updater.check.mockReset();
+    updater.check.mockResolvedValue(null);
     native.remoteSelectionHandler = null;
     native.onRemoteSelectionRequested.mockImplementation(async (handler: (payload: any) => void) => {
       native.remoteSelectionHandler = handler;
@@ -548,6 +544,226 @@ describe("App project workspace flow", () => {
     native.writeTerminal.mockResolvedValue(undefined);
     native.isTauriRuntime.mockReset();
     native.isTauriRuntime.mockReturnValue(false);
+  });
+
+  describe("P05 focused browser shortcut targeting on Windows", () => {
+    it.each(["nested", "flat", "top-level", "terminal", "missing-content"])("routes mounted receivers for %s content", async (mode) => {
+      const browser = await import("./lib/browserTauri");
+      const { BrowserPane } = await import("./components/BrowserPane");
+      const platform = Object.getOwnPropertyDescriptor(navigator, "platform")!;
+      const processPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
+      Object.defineProperty(navigator, "platform", { configurable: true, value: "Win32" });
+      Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
+      const back = vi.spyOn(browser, "goBackBrowser").mockResolvedValue();
+      const forward = vi.spyOn(browser, "goForwardBrowser").mockResolvedValue();
+      const find = vi.spyOn(browser, "findBrowser").mockResolvedValue({ matchCount: 1, found: true });
+      const bounds = vi.spyOn(browser, "setBrowserBounds").mockResolvedValue();
+      const visibility = vi.spyOn(browser, "setBrowserVisible").mockResolvedValue();
+      let ready!: () => void;
+      const subscribed = new Promise<void>((resolve) => { ready = resolve; });
+      let subscriptions = 0;
+      const shortcut = vi.spyOn(browser, "onBrowserShortcutRequested").mockImplementation(async () => {
+        if (++subscriptions === 5) ready(); // App plus two real pane/toolbar pairs.
+        return () => undefined;
+      });
+      const download = vi.spyOn(browser, "onBrowserDownloadRequested").mockResolvedValue(() => undefined);
+      const selected = { id: "tab-1", kind: "browser" as const, label: "Selected", browserId: "selected", url: "https://selected.test" };
+      const sibling = { ...selected, id: "tab-sibling", browserId: "sibling", url: "https://sibling.test" };
+      const shortcutTabs: import("./lib/types").WorkspaceTab[] = mode === "top-level" ? [selected] : [{ id: "tab-1", label: "Mixed", sessionId: "sess-1" }];
+      Object.assign(workspace.storeState.layout, { tabs: shortcutTabs });
+      workspace.storeState.layout.activeTabId = "tab-1";
+      workspace.storeState.layout.layoutsByTabId["tab-1"] = {
+        root: { type: "split", direction: "horizontal", ratio: 0.5, first: { type: "leaf", leafId: "a" }, second: { type: "leaf", leafId: "b" } },
+        activeLeafId: "b", expandedLeafId: null, sessionIdsByLeafId: { a: "sess-1", b: "sess-2" },
+        contentsByLeafId: mode === "top-level" || mode === "missing-content" ? {} : {
+          a: { kind: "browser", browser: { browserId: "sibling", url: sibling.url } },
+          b: mode === "terminal" ? { kind: "terminal", sessionId: "sess-2" } : mode === "flat"
+            ? { kind: "browser", browserId: "selected", url: selected.url }
+            : { kind: "browser", browser: { browserId: "selected", url: selected.url }, browserId: "wrong-flat-id" },
+        },
+      };
+      const reload = vi.fn();
+      const siblingReload = vi.fn();
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<never>((_, reject) => { deadline = setTimeout(() => reject(new Error("browser receivers not subscribed")), 2000); });
+      try {
+        await act(async () => {
+          render(<><App /><section data-testid="selected-browser"><BrowserPane tab={selected} onNavigate={vi.fn()} onReload={reload} /></section><section data-testid="sibling-browser"><BrowserPane tab={sibling} onNavigate={vi.fn()} onReload={siblingReload} /></section></>);
+        });
+        await Promise.race([subscribed, timeout]);
+        const enabled = mode !== "terminal" && mode !== "missing-content";
+        const key = async (value: string, altKey = false) => {
+          await act(async () => { fireEvent.keyDown(window, { key: value, ctrlKey: !altKey, altKey }); });
+        };
+        await key("l");
+        const selectedView = within(screen.getByTestId("selected-browser"));
+        const siblingView = within(screen.getByTestId("sibling-browser"));
+        expect(document.activeElement === selectedView.getByLabelText("URL address bar")).toBe(enabled);
+        expect(document.activeElement).not.toBe(siblingView.getByLabelText("URL address bar"));
+        await key("r");
+        await key("[");
+        await key("]");
+        await key("ArrowLeft", true);
+        await key("ArrowRight", true);
+        expect(reload).toHaveBeenCalledTimes(enabled ? 1 : 0);
+        expect(siblingReload).not.toHaveBeenCalled();
+        expect(back.mock.calls).toEqual(enabled ? [["selected"], ["selected"]] : []);
+        expect(forward.mock.calls).toEqual(enabled ? [["selected"], ["selected"]] : []);
+        await key("f");
+        expect(siblingView.queryByLabelText("Find in page")).toBeNull();
+        if (enabled) {
+          await act(async () => { fireEvent.change(selectedView.getByLabelText("Find in page"), { target: { value: "needle" } }); });
+          expect(find).toHaveBeenCalledExactlyOnceWith("selected", "needle", false);
+        } else {
+          expect(selectedView.queryByLabelText("Find in page")).toBeNull();
+          expect(find).not.toHaveBeenCalled();
+        }
+      } finally {
+        clearTimeout(deadline);
+        cleanup();
+        for (const spy of [back, forward, find, bounds, visibility, shortcut, download]) spy.mockRestore();
+        Object.defineProperty(navigator, "platform", platform);
+        Object.defineProperty(process, "platform", processPlatform);
+      }
+    });
+  });
+
+  // Mounted App wiring coverage: mocked store actions do not prove PTY teardown or sibling survival.
+  describe("P05 optional-kind focused close wiring on Windows", () => {
+    let platformDescriptor: PropertyDescriptor | undefined;
+    let userAgentDescriptor: PropertyDescriptor | undefined;
+    let processPlatformDescriptor: PropertyDescriptor | undefined;
+
+    beforeEach(() => {
+      platformDescriptor = Object.getOwnPropertyDescriptor(navigator, "platform");
+      userAgentDescriptor = Object.getOwnPropertyDescriptor(navigator, "userAgent");
+      processPlatformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+      Object.defineProperty(navigator, "platform", { configurable: true, value: "Win32" });
+      Object.defineProperty(navigator, "userAgent", { configurable: true, value: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" });
+      Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
+    });
+
+    afterEach(() => {
+      cleanup();
+      for (const [target, key, descriptor] of [
+        [navigator, "platform", platformDescriptor],
+        [navigator, "userAgent", userAgentDescriptor],
+        [process, "platform", processPlatformDescriptor],
+      ] as const) {
+        if (descriptor) Object.defineProperty(target, key, descriptor);
+        else Reflect.deleteProperty(target, key);
+      }
+    });
+
+    async function mountCloseAction(route: "Ctrl+W" | "native menu") {
+      // Subscribe before mounting to the actual production menu registration, not a timer tick.
+      let registered!: (handler: () => void) => void;
+      const ready = new Promise<() => void>((resolve) => { registered = resolve; });
+      native.onCloseTabMenu.mockImplementation(async (handler: () => void) => {
+        native.closeMenuHandler = handler;
+        registered(handler);
+        return () => {
+          if (native.closeMenuHandler === handler) native.closeMenuHandler = null;
+        };
+      });
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      const failure = new Promise<never>((_, reject) => {
+        deadline = setTimeout(() => reject(new Error("App close-menu subscription missing")), 2000);
+      });
+      try {
+        await act(async () => { render(<App />); });
+        const handler = await Promise.race([ready, failure]);
+        return () => {
+          if (route === "native menu") act(() => { handler(); });
+          else {
+            const event = new KeyboardEvent("keydown", {
+              key: "w", code: "KeyW", ctrlKey: true, metaKey: false, bubbles: true, cancelable: true,
+            });
+            act(() => { window.dispatchEvent(event); });
+            expect(event.defaultPrevented).toBe(true);
+          }
+        };
+      } finally {
+        clearTimeout(deadline);
+      }
+    }
+
+    function seedCloseLayout(tagged: boolean, pinned: boolean, split: boolean) {
+      const tab = {
+        id: "tab-1", label: "main", sessionId: "sess-1", pinned,
+        ...(tagged ? { kind: "terminal" } : {}),
+      };
+      workspace.storeState.layout.tabs = [tab];
+      workspace.storeState.layout.layoutsByTabId["tab-1"] = {
+        root: split ? {
+          type: "split", direction: "horizontal", ratio: 0.5,
+          first: { type: "leaf", leafId: "leaf-1" },
+          second: { type: "leaf", leafId: "leaf-2" },
+        } : { type: "leaf", leafId: "leaf-2" },
+        activeLeafId: split ? "leaf-2" : null,
+        expandedLeafId: null,
+        sessionIdsByLeafId: split ? { "leaf-1": "sess-1", "leaf-2": "sess-2" } : { "leaf-2": "sess-2" },
+      };
+    }
+
+    describe.each(["Ctrl+W", "native menu"] as const)("%s", (route) => {
+      it.each([true, false].flatMap((tagged) => [true, false].flatMap((pinned) =>
+        [true, false].map((split) => ({ tagged, pinned, split })),
+      )))("targets only the focused pane: tagged=$tagged pinned=$pinned split=$split", async ({ tagged, pinned, split }) => {
+        seedCloseLayout(tagged, pinned, split);
+        const close = await mountCloseAction(route);
+        close();
+        expect(workspace.closePane).toHaveBeenCalledExactlyOnceWith("tab-1", "leaf-2");
+        expect(workspace.closeTab).not.toHaveBeenCalled();
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      });
+
+      it.each(["working", "waiting"] as const)("keeps untagged focused %s agent confirmation and cancellation", async (state) => {
+        seedCloseLayout(false, false, true);
+        workspace.storeState.activityBySessionId["sess-2"] = { state, title: "agent", isAgent: true };
+        const close = await mountCloseAction(route);
+        close();
+        expect(workspace.closePane).not.toHaveBeenCalled();
+        expect(workspace.closeTab).not.toHaveBeenCalled();
+        fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: /cancel/i }));
+        expect(workspace.closePane).not.toHaveBeenCalled();
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+        close();
+        fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: /close pane/i }));
+        expect(workspace.closePane).toHaveBeenCalledExactlyOnceWith("tab-1", "leaf-2");
+        expect(workspace.closeTab).not.toHaveBeenCalled();
+      });
+
+      it("does not ask for confirmation for an untagged pane's busy sibling", async () => {
+        seedCloseLayout(false, false, true);
+        workspace.storeState.activityBySessionId["sess-1"] = { state: "working", title: "agent", isAgent: true };
+        const close = await mountCloseAction(route);
+        close();
+        expect(workspace.closePane).toHaveBeenCalledExactlyOnceWith("tab-1", "leaf-2");
+        expect(workspace.closeTab).not.toHaveBeenCalled();
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      });
+
+      it.each([false, true])("preserves browser whole-tab guard with pinned=%s even with a layout", async (pinned) => {
+        seedCloseLayout(true, pinned, true);
+        workspace.storeState.layout.tabs = [{
+          id: "tab-1", kind: "browser", label: "Browser", pinned, url: "about:blank", browserId: "browser-1",
+        }] as any;
+        const close = await mountCloseAction(route);
+        close();
+        expect(workspace.closePane).not.toHaveBeenCalled();
+        if (pinned) expect(workspace.closeTab).not.toHaveBeenCalled();
+        else expect(workspace.closeTab).toHaveBeenCalledExactlyOnceWith("tab-1");
+      });
+
+      it("ignores a nonexistent active tab even with a leftover layout", async () => {
+        workspace.storeState.layout.tabs = [];
+        const close = await mountCloseAction(route);
+        close();
+        expect(workspace.closePane).not.toHaveBeenCalled();
+        expect(workspace.closeTab).not.toHaveBeenCalled();
+      });
+    });
   });
 
   it("passes live tabless workspace state to the sidebar", async () => {
@@ -853,10 +1069,30 @@ describe("App project workspace flow", () => {
 
   it("checks for a signed update when the native app starts", async () => {
     native.isTauriRuntime.mockReturnValue(true);
-
-    render(<App />);
-
-    await waitFor(() => expect(updater.checkForUpdate).toHaveBeenCalledOnce());
+    const runtimeDescriptor = Object.getOwnPropertyDescriptor(globalThis, "isTauri");
+    Object.defineProperty(globalThis, "isTauri", { configurable: true, value: true });
+    let checked!: () => void;
+    const request = new Promise<void>((resolve) => { checked = resolve; });
+    updater.check.mockImplementation(async () => {
+      checked();
+      return null;
+    });
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    const failure = new Promise<never>((_, reject) => {
+      deadline = setTimeout(() => reject(new Error("Startup plugin check not received")), 1000);
+    });
+    try {
+      render(<App />);
+      await act(async () => {
+        await Promise.race([request, failure]);
+      });
+      expect(updater.check).toHaveBeenCalledOnce();
+    } finally {
+      clearTimeout(deadline);
+      cleanup();
+      if (runtimeDescriptor) Object.defineProperty(globalThis, "isTauri", runtimeDescriptor);
+      else Reflect.deleteProperty(globalThis, "isTauri");
+    }
   });
 
   it("restores projects lost from WebView storage using the native session catalog", async () => {

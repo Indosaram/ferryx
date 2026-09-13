@@ -260,6 +260,53 @@ fn kitty_png_visual_evidence_uses_real_terminal_surface_path() {
 }
 
 #[test]
+fn kitty_rgb_expansion_limit_does_not_block_text_frames() {
+    let (mut terminal, mut renderer) = terminal_and_renderer();
+    place_rgb(&mut terminal, [255, 0, 0]);
+    assert_eq!(pixel(&render(&terminal, &mut renderer), 12, 12), [255, 0, 0, 255]);
+    terminal.discard_buffered_pty_writes();
+    terminal.feed(b"\x1b[1;1H").expect("oversized image origin");
+
+    // Raw RGB fits the parser's 64 MiB storage budget, but its RGBA expansion
+    // does not. 3072 raw bytes encode to the protocol's 4096-byte chunk limit.
+    let byte_count = 4097usize * 4097 * 3;
+    assert_eq!(byte_count, 50_356_227);
+    let chunk = [0, 0, 255].repeat(1024);
+    for offset in (0..byte_count).step_by(chunk.len()) {
+        let count = (byte_count - offset).min(chunk.len());
+        let more = u8::from(offset + count < byte_count);
+        let command = if offset == 0 {
+            format!("a=T,f=24,s=4097,v=4097,i=76,c=1,r=1,C=1,m={more}")
+        } else {
+            format!("m={more}")
+        };
+        terminal.feed(&kitty(&command, &chunk[..count])).expect("RGB chunk");
+    }
+    let replies: Vec<u8> = terminal
+        .buffered_pty_writes()
+        .iter()
+        .flat_map(|record| record.data.iter().copied())
+        .collect();
+    assert_eq!(replies, b"\x1b_Gi=76;OK\x1b\\", "parser must accept RGB");
+
+    // Exercise both initial capture and the unchanged-image cache path while
+    // real text updates continue. A parser rejection or dropping all images
+    // cannot satisfy these assertions.
+    for text in [b' ', b'X'] {
+        terminal.feed(b"\x1b[5;1H\x1b[38;2;0;255;0;48;2;0;255;0m").expect("green text style");
+        terminal.feed(&[text]).expect("subsequent text update");
+        let snapshot = terminal.render_snapshot().expect("RGB expansion must not abort text snapshot");
+        assert_eq!(snapshot.cell(0, 4).expect("text cell").text, char::from(text).to_string());
+        assert_eq!(snapshot.images.len(), 1, "omit only unsupported expansion");
+        assert_eq!(snapshot.images[0].image.id, 71);
+        let frame = renderer.render_snapshot(&snapshot, None).expect("GPU readback");
+        assert_eq!(pixel(&frame, 12, 12), [255, 0, 0, 255]);
+        assert_eq!(pixel(&frame, 4, 36), [0, 255, 0, 255]);
+        assert_eq!(pixel(&frame, 4, 4), [0, 0, 0, 255]);
+    }
+}
+
+#[test]
 fn kitty_png_above_gpu_texture_limit_does_not_block_text_frames() {
     // Given: a valid PNG wider than WGPU's requested texture limit.
     let (mut terminal, mut renderer) = terminal_and_renderer();
