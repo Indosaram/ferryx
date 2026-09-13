@@ -61,7 +61,6 @@ export function WorktreeDeleteDialog({
   onDeleted,
   services,
   initialDirty = false,
-  dirtyFiles = [],
 }: WorktreeDeleteDialogProps) {
   const resolvedServices = useMemo(() => services ?? createDefaultServices(workspaceId), [services, workspaceId]);
   const [preview, setPreview] = useState<BranchDeletionPreview | null>(null);
@@ -77,6 +76,8 @@ export function WorktreeDeleteDialog({
   );
   const [destructiveRequired, setDestructiveRequired] = useState(initialDirty);
   const [busy, setBusy] = useState(false);
+  const dirtyFiles = preview?.dirtyState.files ?? [];
+  const hasDirtyLoss = preview?.dirtyState.isDirty || error?.code === "DIRTY_WORKTREE";
 
   useEffect(() => {
     let cancelled = false;
@@ -97,7 +98,11 @@ export function WorktreeDeleteDialog({
     void resolvedServices
       .previewDelete(worktree)
       .then((result) => {
-        if (!cancelled) setPreview(result);
+        if (!cancelled) {
+          setPreview(result);
+          setDestructiveRequired(result.dirtyState.isDirty);
+          setError(null);
+        }
       })
       .catch((cause) => {
         if (!cancelled) setError(toIpcError(cause));
@@ -124,13 +129,23 @@ export function WorktreeDeleteDialog({
     } catch (cause) {
       const ipcError = toIpcError(cause);
       setError(ipcError);
-      setDestructiveRequired(ipcError.code === "UNMERGED_BRANCH" || ipcError.code === "DIRTY_WORKTREE");
+      const requiresDestructive = ipcError.code === "UNMERGED_BRANCH" || ipcError.code === "DIRTY_WORKTREE";
+      setDestructiveRequired(requiresDestructive);
+      if (requiresDestructive) {
+        setPreview(null);
+        try {
+          setPreview(await resolvedServices.previewDelete(worktree));
+        } catch (previewError) {
+          setError(toIpcError(previewError));
+        }
+      }
     } finally {
       setBusy(false);
     }
   };
 
   const handleDestructiveDelete = async () => {
+    if (busy || !preview) return;
     setBusy(true);
     setError(null);
     try {
@@ -190,14 +205,14 @@ export function WorktreeDeleteDialog({
                 <AlertTriangle className="mt-0.5 size-4 shrink-0" />
                 <div>
                   <div className="font-semibold">
-                    {error?.code === "DIRTY_WORKTREE" ? "Uncommitted changes" : "Unmerged branch"}
+                    {hasDirtyLoss ? "Uncommitted changes" : "Unmerged branch"}
                   </div>
                   <p className="mt-1 text-[11px] leading-relaxed text-destructive/85">
-                    {error?.code === "DIRTY_WORKTREE"
+                    {hasDirtyLoss
                       ? "Safe deletion refused because the worktree has uncommitted or untracked changes. Destructive deletion will discard all changes permanently."
                       : "Safe deletion refused to discard unmerged commits. Destructive deletion is a separate explicit action."}
                   </p>
-                  {error?.code === "DIRTY_WORKTREE" && dirtyFiles.length > 0 ? (
+                  {dirtyFiles.length > 0 ? (
                     <div className="mt-2" data-testid="dirty-file-preview">
                       <div className="text-[11px] font-semibold text-destructive">
                         {dirtyFiles.length} file{dirtyFiles.length === 1 ? "" : "s"} will be discarded
@@ -221,18 +236,18 @@ export function WorktreeDeleteDialog({
               </div>
               <button
                 type="button"
-                disabled={busy}
+                disabled={busy || !preview}
                 onClick={() => void handleDestructiveDelete()}
                 className="w-full rounded-md bg-destructive px-3 py-2 font-semibold text-destructive-foreground disabled:opacity-50"
               >
-                {error?.code === "DIRTY_WORKTREE"
+                {hasDirtyLoss
                   ? "Delete worktree and discard changes permanently"
                   : "Delete unmerged branch permanently"}
               </button>
             </div>
           ) : null}
 
-          {error && !destructiveRequired ? (
+          {error && (!destructiveRequired || !preview) ? (
             <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-destructive">
               <div className="font-semibold">{error.code}</div>
               <div className="mt-0.5 text-[11px]">{error.message}</div>

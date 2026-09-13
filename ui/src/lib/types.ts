@@ -38,6 +38,8 @@ export type DirtyState = {
 };
 
 export type BranchDeletionPreview = {
+  dirtyState: DirtyState;
+  missing: boolean;
   branch: string;
   head: string;
   upstream: string | null;

@@ -198,6 +198,25 @@ impl WorkspaceRegistry {
         Ok((manager, worktree))
     }
 
+    pub(crate) fn resolve_deletion_worktree(
+        &self,
+        workspace_id: &str,
+        identity: &WorktreeIdentity,
+    ) -> Result<(WorktreeManager, Worktree), WorktreeError> {
+        let manager = self.manager(workspace_id)?;
+        let target = manager.worktree_path_for(&identity.ws_id, &identity.slug)?;
+        let record = manager.deletion_record(&target)?;
+        let branch = WorktreeManager::format_branch_name(&identity.ws_id, &identity.slug)?;
+        if record.branch_short_name() != Some(branch.as_str()) {
+            return Err(WorktreeError::WorktreeIdentityNotFound {
+                workspace_id: workspace_id.into(),
+                ws_id: identity.ws_id.clone(),
+                slug: identity.slug.clone(),
+            });
+        }
+        Ok((manager, record))
+    }
+
     pub fn resolve_terminal_target(
         &self,
         workspace_id: &str,

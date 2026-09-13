@@ -1,10 +1,10 @@
 import "./worktree-disk-test-dom";
-import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it as test, vi } from "vitest";
 
-import type { BranchDeletionPreview, Worktree } from "../lib/types";
+import type { BranchDeletionPreview, DirtyState, Worktree } from "../lib/types";
 import {
   WorktreeDiskDialog,
   type DiskScanSnapshot,
@@ -133,13 +133,15 @@ const completedSnapshot: DiskScanSnapshot = {
   error: null,
 };
 
-const mockPreview: BranchDeletionPreview = {
+const mockPreview: BranchDeletionPreview & { dirtyState: DirtyState; missing: boolean } = {
   branch: "orca/ws-1/stale-b",
   head: "commit333",
   upstream: null,
   merged: false,
   ahead: 1,
   behind: 0,
+  dirtyState: { isDirty: true, files: [{ statusCode: " M", path: "dirty-file.ts" }] },
+  missing: false,
 };
 
 function createMockServices(overrides: Partial<WorktreeDiskServices> = {}): {
@@ -181,11 +183,17 @@ function createMockServices(overrides: Partial<WorktreeDiskServices> = {}): {
   return { services, callOrder };
 }
 
+async function renderSettled(element: Parameters<typeof render>[0]) {
+  let view!: ReturnType<typeof render>;
+  await act(async () => { view = render(element); });
+  return view;
+}
+
 describe("WorktreeDiskDialog", () => {
   it("subscribes to scan progress BEFORE calling startScan", async () => {
     const { services, callOrder } = createMockServices();
 
-    render(
+    await renderSettled(
       <WorktreeDiskDialog
         workspaceId="ws-1"
         projectName="Test Project"
@@ -194,9 +202,9 @@ describe("WorktreeDiskDialog", () => {
       />,
     );
 
-    await waitFor(() => {
+    {
       expect(services.startScan).toHaveBeenCalledWith("ws-1", false);
-    });
+    }
 
     const progressIndex = callOrder.indexOf("onScanProgress");
     const startIndex = callOrder.indexOf("startScan");
@@ -229,7 +237,7 @@ describe("WorktreeDiskDialog", () => {
       startScan: vi.fn(async () => runningSnapshot),
     });
 
-    const view = render(
+    const view = await renderSettled(
       <WorktreeDiskDialog
         workspaceId="ws-1"
         projectName="Test Project"
@@ -238,23 +246,23 @@ describe("WorktreeDiskDialog", () => {
       />,
     );
 
-    const scanningText = await view.findByText(/Scanning worktrees/i);
+    const scanningText = view.getByText(/Scanning worktrees/i);
     expect(scanningText).toBeTruthy();
     expect(view.getByText(/2 of 5 worktrees/i)).toBeTruthy();
 
     const cancelButton = view.getByRole("button", { name: /Cancel scan/i });
     expect(cancelButton).toBeTruthy();
 
-    fireEvent.click(cancelButton);
-    await waitFor(() => {
+    await act(async () => fireEvent.click(cancelButton));
+    {
       expect(services.cancelScan).toHaveBeenCalledWith("ws-1", "scan-999");
-    });
+    }
   });
 
   it("displays every worktree row including size, last commit date, dirty state, and per-row error", async () => {
     const { services } = createMockServices();
 
-    const view = render(
+    const view = await renderSettled(
       <WorktreeDiskDialog
         workspaceId="ws-1"
         projectName="Test Project"
@@ -264,7 +272,7 @@ describe("WorktreeDiskDialog", () => {
     );
 
     // Dialog title
-    expect(await view.findByRole("dialog", { name: /Worktree Disk Management/i })).toBeTruthy();
+    expect(view.getByRole("dialog", { name: /Worktree Disk Management/i })).toBeTruthy();
 
     // Verify row contents
     expect(view.getByText("feature-a")).toBeTruthy();
@@ -285,7 +293,7 @@ describe("WorktreeDiskDialog", () => {
   it("identifies cleanup candidates based on prunable status and unused days threshold", async () => {
     const { services } = createMockServices();
 
-    const view = render(
+    const view = await renderSettled(
       <WorktreeDiskDialog
         workspaceId="ws-1"
         projectName="Test Project"
@@ -294,7 +302,7 @@ describe("WorktreeDiskDialog", () => {
       />,
     );
 
-    await view.findByText("stale-b");
+    view.getByText("stale-b");
 
     // stale-b has commit 25 days ago (> 14 days default) -> candidate badge
     const staleCandidateBadge = view.getByTestId("candidate-badge-stale-b");
@@ -321,7 +329,7 @@ describe("WorktreeDiskDialog", () => {
       }),
     });
 
-    const view = render(
+    const view = await renderSettled(
       <WorktreeDiskDialog
         workspaceId="ssh:remote-host"
         projectName="Remote SSH Project"
@@ -330,14 +338,14 @@ describe("WorktreeDiskDialog", () => {
       />,
     );
 
-    expect(await view.findByText(/Disk scans are only available for local workspaces/i)).toBeTruthy();
+    expect(view.getByText(/Disk scans are only available for local workspaces/i)).toBeTruthy();
     expect(view.getByText("UNSUPPORTED")).toBeTruthy();
   });
 
   it("wires cleanup flow using preview and warns before deleting a dirty worktree", async () => {
     const { services } = createMockServices();
 
-    const view = render(
+    const view = await renderSettled(
       <WorktreeDiskDialog
         workspaceId="ws-1"
         projectName="Test Project"
@@ -346,34 +354,34 @@ describe("WorktreeDiskDialog", () => {
       />,
     );
 
-    await view.findByText("stale-b");
+    view.getByText("stale-b");
 
     // Click cleanup/delete button on the dirty row 'stale-b'
     const deleteButton = view.getByTestId("delete-btn-stale-b");
-    fireEvent.click(deleteButton);
+    await act(async () => fireEvent.click(deleteButton));
 
     // Delete confirmation dialog opens
-    expect(await view.findByRole("dialog", { name: /Delete worktree/i })).toBeTruthy();
+    expect(view.getByRole("dialog", { name: /Delete worktree/i })).toBeTruthy();
     expect(services.previewDelete).toHaveBeenCalled();
 
     // Dirty warning is displayed
-    expect(await view.findByText(/Uncommitted changes/i)).toBeTruthy();
+    expect(view.getByText(/Uncommitted changes/i)).toBeTruthy();
     const confirmBtn = view.getByRole("button", {
       name: /Delete worktree and discard changes permanently/i,
     });
     expect(confirmBtn).toBeTruthy();
 
     // Explicit confirmation triggers destructive deletion
-    fireEvent.click(confirmBtn);
-    await waitFor(() => {
+    await act(async () => fireEvent.click(confirmBtn));
+    {
       expect(services.deleteDestructive).toHaveBeenCalledWith("ws-1", mockWorktrees[2]);
-    });
+    }
   });
 
   it("sorts worktree rows by apparent size descending by default", async () => {
     const { services } = createMockServices();
 
-    const view = render(
+    const view = await renderSettled(
       <WorktreeDiskDialog
         workspaceId="ws-1"
         projectName="Test Project"
@@ -382,7 +390,7 @@ describe("WorktreeDiskDialog", () => {
       />,
     );
 
-    await view.findByText("feature-a");
+    view.getByText("feature-a");
 
     const rowNames = view.getAllByTestId(/worktree-disk-row-name-/i).map((el) => el.textContent);
     // mockWorktrees[0] (main) has 2 GB, stale-b has 1 GB, feature-a has 500 MB, prunable-c has null
@@ -392,9 +400,15 @@ describe("WorktreeDiskDialog", () => {
   });
 
   it("removes the deleted worktree row from the list after deletion completes", async () => {
-    const { services } = createMockServices();
+    let emit!: (snapshot: DiskScanSnapshot) => void;
+    const { services } = createMockServices({
+      onScanProgress: async (handler) => {
+        emit = handler;
+        return () => {};
+      },
+    });
 
-    const view = render(
+    const view = await renderSettled(
       <WorktreeDiskDialog
         workspaceId="ws-1"
         projectName="Test Project"
@@ -403,28 +417,32 @@ describe("WorktreeDiskDialog", () => {
       />,
     );
 
-    await view.findByText("stale-b");
+    view.getByText("stale-b");
     const before = view
       .getAllByTestId(/worktree-disk-row-name-/i)
       .map((el) => el.textContent);
     expect(before.some((name) => name?.includes("stale-b"))).toBe(true);
 
-    fireEvent.click(view.getByTestId("delete-btn-stale-b"));
-    await view.findByRole("dialog", { name: /Delete worktree/i });
-    fireEvent.click(
+    await act(async () => fireEvent.click(view.getByTestId("delete-btn-stale-b")));
+    view.getByRole("dialog", { name: /Delete worktree/i });
+    await act(async () => fireEvent.click(
       view.getByRole("button", {
         name: /Delete worktree and discard changes permanently/i,
       }),
-    );
+    ));
 
     // The scan snapshot must drop the deleted row without requiring a rescan.
-    await waitFor(() => {
+    {
       const after = view
         .getAllByTestId(/worktree-disk-row-name-/i)
         .map((el) => el.textContent);
       expect(after.some((name) => name?.includes("stale-b"))).toBe(false);
       expect(after.length).toBe(before.length - 1);
-    });
+    }
+
+    // A queued snapshot must not restore a successfully deleted row.
+    await act(async () => emit(completedSnapshot));
+    expect(view.queryByTestId("delete-btn-stale-b")).toBeNull();
 
     // Surviving rows are untouched by the removal.
     const survivors = view
