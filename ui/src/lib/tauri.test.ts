@@ -31,6 +31,10 @@ import {
   onNewTerminalTabMenu,
   onCloseTabMenu,
   listWorktrees,
+  startWorktreeDiskScan,
+  cancelWorktreeDiskScan,
+  getWorktreeDiskScanResult,
+  onWorktreeDiskScanProgress,
   previewWorktreeDelete,
   registerProject,
   signalTerminal,
@@ -298,6 +302,32 @@ describe("Tauri IPC wrapper contract", () => {
     expect(core.invoke).toHaveBeenNthCalledWith(4, "cmd_worktree_delete_destructive", {
       request: { ...request, deleteBranch: true },
     });
+  });
+
+  it("wraps worktree disk scan commands and progress listener", async () => {
+    core.invoke
+      .mockResolvedValueOnce({ workspaceId: "ws-1", scanId: "s-1", status: "running" })
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce({ workspaceId: "ws-1", scanId: "s-1", status: "completed" });
+    events.listen.mockResolvedValueOnce(vi.fn());
+
+    await startWorktreeDiskScan({ workspaceId: "ws-1", refresh: true });
+    await cancelWorktreeDiskScan({ workspaceId: "ws-1", scanId: "s-1" });
+    await getWorktreeDiskScanResult("ws-1");
+    await onWorktreeDiskScanProgress(vi.fn());
+
+    expect(core.invoke).toHaveBeenNthCalledWith(1, "cmd_worktree_disk_scan_start", {
+      workspaceId: "ws-1",
+      refresh: true,
+    });
+    expect(core.invoke).toHaveBeenNthCalledWith(2, "cmd_worktree_disk_scan_cancel", {
+      workspaceId: "ws-1",
+      scanId: "s-1",
+    });
+    expect(core.invoke).toHaveBeenNthCalledWith(3, "cmd_worktree_disk_scan_result", {
+      workspaceId: "ws-1",
+    });
+    expect(events.listen).toHaveBeenCalledWith("worktree_disk_scan_progress", expect.any(Function));
   });
 
   it("wraps terminal signal and terminal session listing", async () => {

@@ -22,6 +22,9 @@ pub mod ssh;
 pub mod terminal;
 pub mod updater;
 pub mod worktree;
+pub mod worktree_disk;
+#[cfg(test)]
+mod worktree_disk_tests;
 
 pub(crate) async fn run_blocking<T, F>(operation: F) -> Result<T, error::IpcError>
 where
@@ -58,3 +61,4 @@ pub use remote::*;
 pub use session::*;
 pub use terminal::*;
 pub use worktree::*;
+pub use worktree_disk::*;

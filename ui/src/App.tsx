@@ -14,6 +14,7 @@ import { TerminalSplitView } from "./components/TerminalSplitView";
 import { RemoteHostConnection } from "./remote/RemoteApp";
 import { remoteHostStore, selectActiveHost } from "./state/remoteHostStore";
 import { WorktreeDeleteDialog } from "./components/WorktreeDeleteDialog";
+import { WorktreeDiskDialog } from "./components/WorktreeDiskDialog";
 import { ConfirmCloseTabDialog } from "./components/ConfirmCloseTabDialog";
 import { TerminalLinkActions } from "./components/TerminalLinkActions";
 import { Toaster, toast } from "./components/ui/sonner";
@@ -1324,6 +1325,7 @@ function WorkspaceApp({
   const [searchLeafId, setSearchLeafId] = useState<string | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(loadSidebarOpen);
   const [deleteTarget, setDeleteTarget] = useState<Worktree | null>(null);
+  const [diskManageProject, setDiskManageProject] = useState<RegisteredProject | null>(null);
   const [pendingTabClose, setPendingTabClose] = useState<{
     kind: "pane" | "tab";
     tabId: string;
@@ -2516,6 +2518,7 @@ function WorkspaceApp({
           onCreateWorktree={handleOpenCreateWorktree}
           onDeleteWorktree={setDeleteTarget}
           onResetAgentState={handleResetWorktreeAgentState}
+          onManageDisk={setDiskManageProject}
           onOpenSettings={handleOpenSettings}
           onNavigateToSession={handleNotificationTarget}
           isSessionNavigable={(workspaceId, sessionId) => {
@@ -2755,6 +2758,13 @@ function WorkspaceApp({
           activeAgentCount={pendingTabClose.activeAgentCount}
           onCancel={handleCancelTabClose}
           onConfirm={handleConfirmTabClose}
+        />
+      ) : null}
+      {diskManageProject ? (
+        <WorktreeDiskDialog
+          workspaceId={diskManageProject.workspaceId}
+          projectName={diskManageProject.workspaceId}
+          onClose={() => setDiskManageProject(null)}
         />
       ) : null}
     </div>

@@ -46,6 +46,35 @@ export type BranchDeletionPreview = {
   behind: number | null;
 };
 
+export type DiskScanStatus = "running" | "completed" | "cancelled" | "failed";
+
+export type WorkspaceDiskProgress = {
+  completedWorktrees: number;
+  totalWorktrees: number;
+  currentPath: string | null;
+  scannedBytes: number;
+  scannedFiles: number;
+  scannedEntries: number;
+};
+
+export type WorktreeDiskRow = {
+  worktree: Worktree;
+  sizeBytes: number | null;
+  lastCommitAt: number | null;
+  isDirty: boolean | null;
+  dirtyFiles: DirtyFile[];
+  error: StructuredIpcError | null;
+};
+
+export type DiskScanSnapshot = {
+  workspaceId: string;
+  scanId: string;
+  status: DiskScanStatus;
+  progress: WorkspaceDiskProgress;
+  rows: WorktreeDiskRow[];
+  error: StructuredIpcError | null;
+};
+
 export type TerminalSignal = "interrupt" | "terminate" | "kill";
 
 export type TerminalSessionSummary = {

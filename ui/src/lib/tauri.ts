@@ -11,6 +11,8 @@ export type {
   AttachTerminalRequest,
   AttachTerminalResponse,
   CliLauncherStatus,
+  DiskScanSnapshot,
+  DiskScanStatus,
   NativeTerminalAgentStatePayload,
   NativeTerminalScrollbarPayload,
   NotificationBadgeResult,
@@ -20,7 +22,9 @@ export type {
   TerminalReplayGap,
   TerminalSessionSummary,
   TerminalSignal,
+  WorkspaceDiskProgress,
   WorktreeChangedPayload,
+  WorktreeDiskRow,
 };
 
 import type {
@@ -30,6 +34,8 @@ import type {
   BranchDeletionPreview,
   CliLauncherStatus,
   DirtyState,
+  DiskScanSnapshot,
+  DiskScanStatus,
   NativeTerminalAgentStatePayload,
   NativeTerminalBellPayload,
   NativeTerminalScrollbarPayload,
@@ -42,8 +48,10 @@ import type {
   TerminalReplayGap,
   TerminalSessionSummary,
   TerminalSignal,
+  WorkspaceDiskProgress,
   Worktree,
   WorktreeChangedPayload,
+  WorktreeDiskRow,
   WorktreeIdentity,
 } from "./types";
 
@@ -299,6 +307,39 @@ export async function deleteWorktreeDestructive(request: DeleteWorktreeRequest) 
       deleteBranch: request.deleteBranch ?? null,
     },
   });
+}
+
+export async function startWorktreeDiskScan(request: {
+  workspaceId: string;
+  refresh?: boolean;
+}): Promise<DiskScanSnapshot> {
+  return invokeCommand<DiskScanSnapshot>("cmd_worktree_disk_scan_start", {
+    workspaceId: request.workspaceId,
+    refresh: request.refresh ?? false,
+  });
+}
+
+export async function cancelWorktreeDiskScan(request: {
+  workspaceId: string;
+  scanId: string;
+}): Promise<boolean> {
+  return invokeCommand<boolean>("cmd_worktree_disk_scan_cancel", {
+    workspaceId: request.workspaceId,
+    scanId: request.scanId,
+  });
+}
+
+export async function getWorktreeDiskScanResult(workspaceId: string): Promise<DiskScanSnapshot | null> {
+  return invokeCommand<DiskScanSnapshot | null>("cmd_worktree_disk_scan_result", {
+    workspaceId,
+  });
+}
+
+export async function onWorktreeDiskScanProgress(
+  handler: (payload: DiskScanSnapshot) => void,
+): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listen<DiskScanSnapshot>("worktree_disk_scan_progress", (event) => handler(event.payload));
 }
 
 function describeNonSerializablePaths(

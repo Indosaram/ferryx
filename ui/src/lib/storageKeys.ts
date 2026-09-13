@@ -16,6 +16,7 @@ export const DISMISSED_UPDATE_VERSION_STORAGE_KEY = "ferryx.update.dismissedVers
 export const PERMISSIONS_ONBOARDING_DISMISSED_STORAGE_KEY = "ferryx.permissions.onboarding-dismissed";
 export const SSH_CONFIG_PATH_STORAGE_KEY = "ferryx.ssh.configPath";
 export const REMOTE_INSTALLATION_ID_STORAGE_KEY = "ferryx.remote.installation-id";
+export const WORKTREE_DISK_UNUSED_DAYS_KEY = "ferryx.worktree-disk.unused-days";
 
 export const LEGACY_STORAGE_KEY_MAP: Record<string, string[]> = {
   [PROJECTS_STORAGE_KEY]: ["rorca.projects", "orca.projects"],
