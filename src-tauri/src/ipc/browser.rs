@@ -1703,6 +1703,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_cmd_open_file_path_resolves_relative_with_cwd() {
+        // The Linux opener is xdg-open, which cannot succeed in a headless
+        // session (CI, SSH without a desktop): it exits "no method available"
+        // and cmd_open_file_path correctly reports false. The resolution logic
+        // under test does not depend on a display, so skip there instead of
+        // failing the frozen-backend rehearsal benches.
+        #[cfg(target_os = "linux")]
+        if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+            return;
+        }
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let res = cmd_open_file_path(
             "Cargo.toml".to_string(),

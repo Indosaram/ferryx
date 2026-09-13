@@ -99,7 +99,7 @@ warning: method `acquire_writer_lease` is never used
     |                   ^^^^^^^^^^^^^^^^^^^^
 
 warning: `ferryx` (lib) generated 11 warnings (run `cargo fix --lib -p ferryx` to apply 2 suggestions)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 19.94s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 30.85s
 BUILD_EXIT=0
 === TEST full lib (--test-threads=1) ===
    Compiling ferryx v2026.908.1 (/home/indo/ferryx-herdr-r9-01a097f8/src-tauri)
@@ -184,7 +184,7 @@ warning: method `acquire_writer_lease` is never used
     |                   ^^^^^^^^^^^^^^^^^^^^
 
 warning: `ferryx` (lib test) generated 10 warnings (run `cargo fix --lib -p ferryx --tests` to apply 3 suggestions)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 17.74s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 23.68s
      Running unittests src/lib.rs (src-tauri/target/debug/deps/ferryx_lib-28d47167d9daced1)
 
 running 1013 tests
@@ -309,37 +309,37 @@ test daemon::protocol::tests::test_spawn_with_agent_resume_startup_roundtrip ...
 test daemon::protocol::tests::test_upgrade_binary_protocol_serde_roundtrip ... ok
 test daemon::server::a03_owner_cli_fixture::a03_private_owner_cli_surface ... 
 running 1 test
-A03 UDS protocol=3 exact_owner_pid=974256 capabilities=machinePairingV1,pairedHostInventoryV1 legacy_ping=pong
-A03 CLI pid=974263 exited=0 reaped=true
+A03 UDS protocol=3 exact_owner_pid=1440937 capabilities=machinePairingV1,pairedHostInventoryV1 legacy_ping=pong
+A03 CLI pid=1440944 exited=0 reaped=true
 A03 AUTHORITY Access: mirror; controls only exposed desktop sessions.
-A03 CLI pid=974264 exited=0 reaped=true
+A03 CLI pid=1440945 exited=0 reaped=true
 A13 REPEAT issuance=1 owner_cli=0 exchange=200 scope=Machine permission=Control stale_pin_refused=true
-A03 CLI pid=974265 exited=0 reaped=true
+A03 CLI pid=1440946 exited=0 reaped=true
 A13 REPEAT issuance=2 owner_cli=0 exchange=200 scope=Machine permission=Control stale_pin_refused=true
 A03 DIRECTORY scope=Mirror status=403 native_projection_verified=false sentinel_unchanged=true sessions_status=403
-A03 UDS protocol=3 exact_owner_pid=974256 capabilities=machinePairingV1,pairedHostInventoryV1 legacy_ping=pong
-A03 CAPABILITIES {"accessScope":"mirror","apiVersion":1,"capabilities":[],"daemonEpoch":"1789295760506","limits":{"directoryEntries":1000,"terminalSessions":64},"machineId":"805b68dd-c7c7-417b-a8f5-1c8424ba4bef","permission":"control","platform":"linux"}
+A03 UDS protocol=3 exact_owner_pid=1440937 capabilities=machinePairingV1,pairedHostInventoryV1 legacy_ping=pong
+A03 CAPABILITIES {"accessScope":"mirror","apiVersion":1,"capabilities":[],"daemonEpoch":"1789314597090","limits":{"directoryEntries":1000,"terminalSessions":64},"machineId":"37bf41dc-dc82-4e31-a641-3e8626b3da8c","permission":"control","platform":"linux"}
 A03 SURFACE scope=Mirror permission=Control relay_exchange=200 capabilities=200 anonymous=401 revoked=401 machine_capabilities=[]
-A03 UDS protocol=3 exact_owner_pid=974256 capabilities=machinePairingV1,pairedHostInventoryV1 legacy_ping=pong
-A03 CLI pid=974270 exited=0 reaped=true
+A03 UDS protocol=3 exact_owner_pid=1440937 capabilities=machinePairingV1,pairedHostInventoryV1 legacy_ping=pong
+A03 CLI pid=1440951 exited=0 reaped=true
 A03 AUTHORITY Access: machine; permits browsing and executing programs as the daemon OS user.
-A03 CLI pid=974271 exited=0 reaped=true
+A03 CLI pid=1440952 exited=0 reaped=true
 A13 REPEAT issuance=1 owner_cli=0 exchange=200 scope=Machine permission=Control stale_pin_refused=true
-A03 CLI pid=974272 exited=0 reaped=true
+A03 CLI pid=1440953 exited=0 reaped=true
 A13 REPEAT issuance=2 owner_cli=0 exchange=200 scope=Machine permission=Control stale_pin_refused=true
 A03 DIRECTORY scope=Machine status=200 native_projection_verified=true sentinel_unchanged=true sessions_status=400
-A03 UDS protocol=3 exact_owner_pid=974256 capabilities=machinePairingV1,pairedHostInventoryV1 legacy_ping=pong
-A03 CAPABILITIES {"accessScope":"machine","apiVersion":1,"capabilities":["directoryBrowseV1","terminalCreateV1"],"daemonEpoch":"1789295760657","limits":{"directoryEntries":1000,"terminalSessions":64},"machineId":"805b68dd-c7c7-417b-a8f5-1c8424ba4bef","permission":"control","platform":"linux"}
+A03 UDS protocol=3 exact_owner_pid=1440937 capabilities=machinePairingV1,pairedHostInventoryV1 legacy_ping=pong
+A03 CAPABILITIES {"accessScope":"machine","apiVersion":1,"capabilities":["directoryBrowseV1","terminalCreateV1"],"daemonEpoch":"1789314597243","limits":{"directoryEntries":1000,"terminalSessions":64},"machineId":"37bf41dc-dc82-4e31-a641-3e8626b3da8c","permission":"control","platform":"linux"}
 A03 SURFACE scope=Machine permission=Control relay_exchange=200 capabilities=200 anonymous=401 revoked=401 machine_capabilities=["directoryBrowseV1","terminalCreateV1"]
-A03 CLEANUP fixture_pid=974256 runtimes_stopped=true sockets_removed=true
+A03 CLEANUP fixture_pid=1440937 runtimes_stopped=true sockets_removed=true
 test daemon::server::a03_owner_cli_fixture::a03_private_owner_cli_surface ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1012 filtered out; finished in 0.30s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1012 filtered out; finished in 0.31s
 
 ok
 test daemon::server::a04_shared_services_tests::a04_cleanup_failure_paths ... 
 running 1 test
-A04 AUTHORITY session=0x7f113c018b40 workspace=0x7f112c0031b0 backend=Pointer { addr: 0x7f113c018b40, metadata: DynMetadata(0x55ae30f04298) }
+A04 AUTHORITY session=0x7f4d74018b40 workspace=0x7f4d640031b0 backend=Pointer { addr: 0x7f4d74018b40, metadata: DynMetadata(0x5614f3ee0870) }
 A04 CLEANUP listener=IPC joined=true
 A04 CLEANUP listeners_joined=true socket_removed=true closed=0 injection=IpcSetup errors=[]
 test daemon::server::a04_shared_services_tests::a04_shared_authority_runtime ... ok
@@ -348,7 +348,7 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1012 filtered out; f
 
 
 running 1 test
-A04 AUTHORITY session=0x7f7954018b40 workspace=0x7f79440031b0 backend=Pointer { addr: 0x7f7954018b40, metadata: DynMetadata(0x55fa99d63298) }
+A04 AUTHORITY session=0x7fd57c018b40 workspace=0x7fd56c0031b0 backend=Pointer { addr: 0x7fd57c018b40, metadata: DynMetadata(0x55ff66146870) }
 A04 CLEANUP listener=IPC joined=true
 A04 CLEANUP listener=HTTP joined=true
 A04 CLEANUP listeners_joined=true socket_removed=true closed=0 injection=HttpSetup errors=[]
@@ -358,39 +358,39 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1012 filtered out; f
 
 
 running 1 test
-A04 AUTHORITY session=0x7fd0a4018b40 workspace=0x7fd0940031b0 backend=Pointer { addr: 0x7fd0a4018b40, metadata: DynMetadata(0x564968fc8298) }
-A04 OWNED owner_pid=974288 session=464b9ab6-8cb1-4042-83a0-ddd8e60b6186 pty_pid=974311 root=/tmp/a04-tNMD9L
+A04 AUTHORITY session=0x7faaa0018b40 workspace=0x7faa900031b0 backend=Pointer { addr: 0x7faaa0018b40, metadata: DynMetadata(0x56086348d870) }
+A04 OWNED owner_pid=1440969 session=49c0e321-9925-4b1e-8af4-051907cef22c pty_pid=1440992 root=/tmp/a04-NUDiJj
 A04 CLEANUP listener=IPC joined=true
 A04 CLEANUP listener=HTTP joined=true
-A04 CLEANUP session=464b9ab6-8cb1-4042-83a0-ddd8e60b6186 pty_pid=Some(974311) reaped=true
+A04 CLEANUP session=49c0e321-9925-4b1e-8af4-051907cef22c pty_pid=Some(1440992) reaped=true
 A04 CLEANUP listeners_joined=true socket_removed=true closed=1 injection=Scenario errors=[]
 test daemon::server::a04_shared_services_tests::a04_shared_authority_runtime ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1012 filtered out; finished in 0.13s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1012 filtered out; finished in 0.14s
 
 
 running 1 test
-A04 AUTHORITY session=0x7fe978018b40 workspace=0x7fe9680031b0 backend=Pointer { addr: 0x7fe978018b40, metadata: DynMetadata(0x55debe546298) }
-A04 OWNED owner_pid=974313 session=96f6742f-3069-4174-8780-f958b5e7a5d1 pty_pid=974336 root=/tmp/a04-u8V18w
-A04 OWNED owner_pid=974313 session=a92c81f2-13e1-4de4-9c1e-ef9d3bc1f917 pty_pid=Some(974338) root=/tmp/a04-u8V18w
-A04 LIVE owner_pid=974313 pty_pid=974336 ipc=/tmp/a04-u8V18w/fixture.sock http=127.0.0.1:38247 metadata={"session":{"cols":80,"cwd":"/tmp/a04-u8V18w/project","endSequence":1,"rows":24,"running":true,"sessionId":"96f6742f-3069-4174-8780-f958b5e7a5d1","startSequence":1,"workspaceId":"a04","worktree":null},"type":"describeSessionOk"} process_cwd=Some("/tmp/a04-u8V18w/project")
-A04 HTTP status=200 sessions=[{"running":true,"sessionId":"96f6742f-3069-4174-8780-f958b5e7a5d1","title":null,"workspaceId":"a04","worktreeLabel":"project"},{"running":true,"sessionId":"a92c81f2-13e1-4de4-9c1e-ef9d3bc1f917","title":null,"workspaceId":"a04","worktreeLabel":"project"}] registry_ipc=1 registry_http=1
+A04 AUTHORITY session=0x7f2e2c018b40 workspace=0x7f2e1c0031b0 backend=Pointer { addr: 0x7f2e2c018b40, metadata: DynMetadata(0x55d8af81f870) }
+A04 OWNED owner_pid=1440994 session=1504e514-13b3-493c-977a-d52018f194ca pty_pid=1441017 root=/tmp/a04-bnAkn4
+A04 OWNED owner_pid=1440994 session=db51263e-3086-4c0d-ab74-aa8016a0a5b8 pty_pid=Some(1441019) root=/tmp/a04-bnAkn4
+A04 LIVE owner_pid=1440994 pty_pid=1441017 ipc=/tmp/a04-bnAkn4/fixture.sock http=127.0.0.1:43805 metadata={"session":{"cols":80,"cwd":"/tmp/a04-bnAkn4/project","endSequence":1,"rows":24,"running":true,"sessionId":"1504e514-13b3-493c-977a-d52018f194ca","startSequence":1,"workspaceId":"a04","worktree":null},"type":"describeSessionOk"} process_cwd=Some("/tmp/a04-bnAkn4/project")
+A04 HTTP status=200 sessions=[{"running":true,"sessionId":"1504e514-13b3-493c-977a-d52018f194ca","title":null,"workspaceId":"a04","worktreeLabel":"project"},{"running":true,"sessionId":"db51263e-3086-4c0d-ab74-aa8016a0a5b8","title":null,"workspaceId":"a04","worktreeLabel":"project"}] registry_ipc=1 registry_http=1
 A04 CLEANUP listener=IPC joined=true
 A04 CLEANUP listener=HTTP joined=true
-A04 CLEANUP session=a92c81f2-13e1-4de4-9c1e-ef9d3bc1f917 pty_pid=Some(974338) reaped=true
-A04 CLEANUP session=96f6742f-3069-4174-8780-f958b5e7a5d1 pty_pid=Some(974336) reaped=true
-A04 CLEANUP listeners_joined=true socket_removed=true closed=2 injection=Cleanup errors=["close a92c81f2-13e1-4de4-9c1e-ef9d3bc1f917: General error: injected close failure"]
+A04 CLEANUP session=db51263e-3086-4c0d-ab74-aa8016a0a5b8 pty_pid=Some(1441019) reaped=true
+A04 CLEANUP session=1504e514-13b3-493c-977a-d52018f194ca pty_pid=Some(1441017) reaped=true
+A04 CLEANUP listeners_joined=true socket_removed=true closed=2 injection=Cleanup errors=["close db51263e-3086-4c0d-ab74-aa8016a0a5b8: General error: injected close failure"]
 test daemon::server::a04_shared_services_tests::a04_shared_authority_runtime ... ok
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1012 filtered out; finished in 2.23s
 
 
 running 1 test
-A04 AUTHORITY session=0x7f6820018b40 workspace=0x7f68100031b0 backend=Pointer { addr: 0x7f6820018b40, metadata: DynMetadata(0x55d9c4247298) }
-A04 OWNED owner_pid=974372 session=d274fe11-f6e9-4f3d-b098-f12d4b8b0080 pty_pid=974395 root=/tmp/a04-SDszu0
+A04 AUTHORITY session=0x7f9328018b40 workspace=0x7f93180031b0 backend=Pointer { addr: 0x7f9328018b40, metadata: DynMetadata(0x556b47f00870) }
+A04 OWNED owner_pid=1441053 session=4e73eb8d-a6f7-4bae-ab34-5c9e8e3b5a68 pty_pid=1441076 root=/tmp/a04-ZD0lvz
 A04 CLEANUP listener=IPC joined=true
 A04 CLEANUP listener=HTTP joined=true
-A04 CLEANUP session=d274fe11-f6e9-4f3d-b098-f12d4b8b0080 pty_pid=Some(974395) reaped=true
+A04 CLEANUP session=4e73eb8d-a6f7-4bae-ab34-5c9e8e3b5a68 pty_pid=Some(1441076) reaped=true
 A04 CLEANUP listeners_joined=true socket_removed=true closed=1 injection=Cancel errors=[]
 test daemon::server::a04_shared_services_tests::a04_shared_authority_runtime ... ok
 
@@ -398,28 +398,28 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1012 filtered out; f
 
 
 running 1 test
-A04 AUTHORITY session=0x7f2d68018b40 workspace=0x7f2d580031b0 backend=Pointer { addr: 0x7f2d68018b40, metadata: DynMetadata(0x558231596298) }
-A04 OWNED owner_pid=974397 session=3fed1714-9064-4534-9fb6-dd84e32ab068 pty_pid=974423 root=/tmp/a04-d7FcHi
+A04 AUTHORITY session=0x7f7d2c018b40 workspace=0x7f7d1c0031b0 backend=Pointer { addr: 0x7f7d2c018b40, metadata: DynMetadata(0x5589f741e870) }
+A04 OWNED owner_pid=1441078 session=23626365-96e4-4ae1-968c-2a9b0266e96a pty_pid=1441117 root=/tmp/a04-eUqLSO
 A04 CLEANUP listener=IPC joined=true
 A04 CLEANUP listener=HTTP joined=true
-A04 CLEANUP session=3fed1714-9064-4534-9fb6-dd84e32ab068 pty_pid=Some(974423) reaped=true
+A04 CLEANUP session=23626365-96e4-4ae1-968c-2a9b0266e96a pty_pid=Some(1441117) reaped=true
 A04 CLEANUP listeners_joined=true socket_removed=true closed=1 injection=Deadline errors=[]
 test daemon::server::a04_shared_services_tests::a04_shared_authority_runtime ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1012 filtered out; finished in 1.15s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1012 filtered out; finished in 1.16s
 
 ok
 test daemon::server::a04_shared_services_tests::a04_legacy_constructors_have_no_machine_authority ... ok
 test daemon::server::a04_shared_services_tests::a04_services_have_no_strong_owner_cycle ... ok
 test daemon::server::a04_shared_services_tests::a04_shared_authority_runtime ... 
 running 1 test
-A04 AUTHORITY session=0x7f3a14018b40 workspace=0x7f3a040031b0 backend=Pointer { addr: 0x7f3a14018b40, metadata: DynMetadata(0x56190273e298) }
-A04 OWNED owner_pid=974494 session=0a873ff4-2edb-4eb0-a522-10c4d4463031 pty_pid=974517 root=/tmp/a04-Go2lin
-A04 LIVE owner_pid=974494 pty_pid=974517 ipc=/tmp/a04-Go2lin/fixture.sock http=127.0.0.1:42805 metadata={"session":{"cols":80,"cwd":"/tmp/a04-Go2lin/project","endSequence":null,"rows":24,"running":true,"sessionId":"0a873ff4-2edb-4eb0-a522-10c4d4463031","startSequence":null,"workspaceId":"a04","worktree":null},"type":"describeSessionOk"} process_cwd=Some("/tmp/a04-Go2lin/project")
-A04 HTTP status=200 sessions=[{"running":true,"sessionId":"0a873ff4-2edb-4eb0-a522-10c4d4463031","title":null,"workspaceId":"a04","worktreeLabel":"project"}] registry_ipc=1 registry_http=1
+A04 AUTHORITY session=0x7f3b30018b40 workspace=0x7f3b200031b0 backend=Pointer { addr: 0x7f3b30018b40, metadata: DynMetadata(0x556f0f430870) }
+A04 OWNED owner_pid=1441139 session=8c441c69-c03d-46e6-9d88-eba06797ec49 pty_pid=1441162 root=/tmp/a04-K2C9RB
+A04 LIVE owner_pid=1441139 pty_pid=1441162 ipc=/tmp/a04-K2C9RB/fixture.sock http=127.0.0.1:44875 metadata={"session":{"cols":80,"cwd":"/tmp/a04-K2C9RB/project","endSequence":null,"rows":24,"running":true,"sessionId":"8c441c69-c03d-46e6-9d88-eba06797ec49","startSequence":null,"workspaceId":"a04","worktree":null},"type":"describeSessionOk"} process_cwd=Some("/tmp/a04-K2C9RB/project")
+A04 HTTP status=200 sessions=[{"running":true,"sessionId":"8c441c69-c03d-46e6-9d88-eba06797ec49","title":null,"workspaceId":"a04","worktreeLabel":"project"}] registry_ipc=1 registry_http=1
 A04 CLEANUP listener=IPC joined=true
 A04 CLEANUP listener=HTTP joined=true
-A04 CLEANUP session=0a873ff4-2edb-4eb0-a522-10c4d4463031 pty_pid=Some(974517) reaped=true
+A04 CLEANUP session=8c441c69-c03d-46e6-9d88-eba06797ec49 pty_pid=Some(1441162) reaped=true
 A04 CLEANUP listeners_joined=true socket_removed=true closed=1 injection=None errors=[]
 test daemon::server::a04_shared_services_tests::a04_shared_authority_runtime ... ok
 
@@ -429,7 +429,7 @@ ok
 test daemon::server::a05_compatibility_tests::catalog_constructor_child ... ok
 test daemon::server::a05_compatibility_tests::catalog_constructor_isolation ... 
 running 1 test
-CONSTRUCTOR cleanup first=/tmp/r9tmp.t7fPuC/.tmp81SpRk/.tmpeOgKQq second=/tmp/r9tmp.t7fPuC/.tmp81SpRk/.tmpvuwoST absent=true sentinel_unchanged=true
+CONSTRUCTOR cleanup first=/tmp/r9tmp.0GghXl/.tmp1Ibdbu/.tmppkHyfa second=/tmp/r9tmp.0GghXl/.tmp1Ibdbu/.tmpeNrUJD absent=true sentinel_unchanged=true
 test daemon::server::a05_compatibility_tests::catalog_constructor_child ... ok
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1012 filtered out; finished in 0.01s
@@ -535,14 +535,7 @@ test ipc::browser::automation_tests::keypress_script_rejects_invalid_inputs ... 
 test ipc::browser::automation_tests::parse_keypress_valid_combinations ... ok
 test ipc::browser::tests::keep_or_discard_fresh_webview_covers_both_branches ... ok
 test ipc::browser::tests::test_cmd_open_file_path_rejects_nonexistent_file ... ok
-test ipc::browser::tests::test_cmd_open_file_path_resolves_relative_with_cwd ... /usr/bin/xdg-open: line 1045: www-browser: command not found
-/usr/bin/xdg-open: line 1045: links2: command not found
-/usr/bin/xdg-open: line 1045: elinks: command not found
-/usr/bin/xdg-open: line 1045: links: command not found
-/usr/bin/xdg-open: line 1045: lynx: command not found
-/usr/bin/xdg-open: line 1045: w3m: command not found
-xdg-open: no method available for opening '/home/indo/ferryx-herdr-r9-01a097f8/src-tauri/Cargo.toml'
-FAILED
+test ipc::browser::tests::test_cmd_open_file_path_resolves_relative_with_cwd ... ok
 test ipc::browser_cli::tests::browser_cli_server_starts_without_tokio_reactor ... ok
 test ipc::browser_cli::tests::test_browser_cli_error_code_matches_ipc_wire_format ... ok
 test ipc::browser_cli::tests::test_browser_cli_list_request_serialization ... ok
@@ -1069,22 +1062,22 @@ test remote::workspace_api::worktrees::authority_tests::typed_owner_repair_priva
 test remote::workspace_api::worktrees::publication_tests::cancelled_publication_preserves_unknown_after_git ... ok
 test remote::workspace_api::worktrees::wire_proof_tests::non_head_and_partial_prune_wires ... 
 running 1 test
-A08_WIRE_HANDSHAKE owner_pid=995409 exact=true socket=/tmp/a08-wire-jNmr0q/runtime/daemon.sock http=127.0.0.1:35519
-A08_WIRE_HTTP_REQUEST method=POST endpoint=http://127.0.0.1:35519/api/v1/workspace/worktrees body={"baseRef":"HEAD~1","requestId":"4d652cb4-84cf-43f8-913f-0c784fb4d1f8","workspaceId":"wire-proof","worktree":{"slug":"non-head","wsId":"wire-proof"}}
-A08_WIRE_HTTP_RESPONSE status=201 body={"bare":false,"branch":"refs/heads/orca/wire-proof/non-head","detached":false,"head":"fe693715eb433aeb2fe0d3246bdbd6ab2f1b5e83","identity":{"slug":"non-head","wsId":"wire-proof"},"locked":null,"managed":true,"path":"/tmp/a08-wire-jNmr0q/repo/.orca-worktrees/wire-proof/non-head","prunable":null,"workspaceId":"wire-proof"}
-A08_WIRE_NON_HEAD first_http=201 base=fe693715eb433aeb2fe0d3246bdbd6ab2f1b5e83 original_head=f02b06eb6927cc3594170b6ffe6f4b5c8808eb5a actual_checkout_equal=true
+A08_WIRE_HANDSHAKE owner_pid=1462290 exact=true socket=/tmp/a08-wire-EVLzKM/runtime/daemon.sock http=127.0.0.1:34135
+A08_WIRE_HTTP_REQUEST method=POST endpoint=http://127.0.0.1:34135/api/v1/workspace/worktrees body={"baseRef":"HEAD~1","requestId":"a7dfb4b1-c95f-47a2-9f84-4fbb522494a8","workspaceId":"wire-proof","worktree":{"slug":"non-head","wsId":"wire-proof"}}
+A08_WIRE_HTTP_RESPONSE status=201 body={"bare":false,"branch":"refs/heads/orca/wire-proof/non-head","detached":false,"head":"61c0583a2cd11386eb6faa8bf7c730e074e1e1ef","identity":{"slug":"non-head","wsId":"wire-proof"},"locked":null,"managed":true,"path":"/tmp/a08-wire-EVLzKM/repo/.orca-worktrees/wire-proof/non-head","prunable":null,"workspaceId":"wire-proof"}
+A08_WIRE_NON_HEAD first_http=201 base=61c0583a2cd11386eb6faa8bf7c730e074e1e1ef original_head=d667fa8488ae30a2eb153c389b2dc89f43d76a5e actual_checkout_equal=true
 A08_WIRE_UDS_REQUEST {"baseRef":null,"type":"createWorktree","workspaceId":"wire-proof","worktree":{"slug":"local-prune","wsId":"wire-proof"}}
-A08_WIRE_UDS_RESPONSE {"type":"createWorktreeOk","worktree":{"bare":false,"branch":"refs/heads/orca/wire-proof/local-prune","detached":false,"head":"f02b06eb6927cc3594170b6ffe6f4b5c8808eb5a","locked":null,"path":"/tmp/a08-wire-jNmr0q/repo/.orca-worktrees/wire-proof/local-prune","prunable":null}}
+A08_WIRE_UDS_RESPONSE {"type":"createWorktreeOk","worktree":{"bare":false,"branch":"refs/heads/orca/wire-proof/local-prune","detached":false,"head":"d667fa8488ae30a2eb153c389b2dc89f43d76a5e","locked":null,"path":"/tmp/a08-wire-EVLzKM/repo/.orca-worktrees/wire-proof/local-prune","prunable":null}}
 A08_WIRE_UDS_REQUEST {"deleteBranch":true,"destructive":false,"type":"deleteWorktree","workspaceId":"wire-proof","worktree":{"slug":"local-prune","wsId":"wire-proof"}}
-A08_WIRE_UDS_RESPONSE {"error":{"code":"WORKTREE_REMOVED_PRUNE_FAILED","details":{"branchDeleted":false,"cause":{"code":"GIT_ERROR","details":{"command":"git worktree prune","exitCode":128,"stderr":"fatal: Expected git repo version <= 1, found 999"},"message":"Git command failed (git worktree prune): fatal: Expected git repo version <= 1, found 999 (exit code: Some(128))"},"path":"/tmp/a08-wire-jNmr0q/repo/.orca-worktrees/wire-proof/local-prune","pruned":false,"worktreeRemoved":true},"message":"Worktree '/tmp/a08-wire-jNmr0q/repo/.orca-worktrees/wire-proof/local-prune' was removed but prune failed: Git command failed (git worktree prune): fatal: Expected git repo version <= 1, found 999 (exit code: Some(128))"},"type":"worktreeError"}
+A08_WIRE_UDS_RESPONSE {"error":{"code":"WORKTREE_REMOVED_PRUNE_FAILED","details":{"branchDeleted":false,"cause":{"code":"GIT_ERROR","details":{"command":"git worktree prune","exitCode":128,"stderr":"fatal: Expected git repo version <= 1, found 999"},"message":"Git command failed (git worktree prune): fatal: Expected git repo version <= 1, found 999 (exit code: Some(128))"},"path":"/tmp/a08-wire-EVLzKM/repo/.orca-worktrees/wire-proof/local-prune","pruned":false,"worktreeRemoved":true},"message":"Worktree '/tmp/a08-wire-EVLzKM/repo/.orca-worktrees/wire-proof/local-prune' was removed but prune failed: Git command failed (git worktree prune): fatal: Expected git repo version <= 1, found 999 (exit code: Some(128))"},"type":"worktreeError"}
 A08_WIRE_PRUNE legacy=false removed=true branch_preserved=true config_restored=true publication_received=true
 A08_WIRE_UDS_REQUEST {"baseRef":null,"type":"createWorktree","workspaceId":"wire-proof","worktree":{"slug":"legacy-prune","wsId":"wire-proof"}}
-A08_WIRE_UDS_RESPONSE {"type":"createWorktreeOk","worktree":{"bare":false,"branch":"refs/heads/orca/wire-proof/legacy-prune","detached":false,"head":"f02b06eb6927cc3594170b6ffe6f4b5c8808eb5a","locked":null,"path":"/tmp/a08-wire-jNmr0q/repo/.orca-worktrees/wire-proof/legacy-prune","prunable":null}}
-A08_WIRE_HTTP_REQUEST method=DELETE endpoint=http://127.0.0.1:35519/api/v1/workspace/worktrees body={"deleteBranch":true,"workspaceId":"wire-proof","worktree":{"slug":"legacy-prune","wsId":"wire-proof"}}
-A08_WIRE_HTTP_RESPONSE status=409 body={"error":{"code":"WORKTREE_REMOVED_PRUNE_FAILED","details":{"branchDeleted":false,"pruned":false,"worktreeRemoved":true},"message":"WORKTREE_REMOVED_PRUNE_FAILED","requestId":"12b264eb-aaee-4f61-aa4e-33d6a517a156","retryable":false}}
+A08_WIRE_UDS_RESPONSE {"type":"createWorktreeOk","worktree":{"bare":false,"branch":"refs/heads/orca/wire-proof/legacy-prune","detached":false,"head":"d667fa8488ae30a2eb153c389b2dc89f43d76a5e","locked":null,"path":"/tmp/a08-wire-EVLzKM/repo/.orca-worktrees/wire-proof/legacy-prune","prunable":null}}
+A08_WIRE_HTTP_REQUEST method=DELETE endpoint=http://127.0.0.1:34135/api/v1/workspace/worktrees body={"deleteBranch":true,"workspaceId":"wire-proof","worktree":{"slug":"legacy-prune","wsId":"wire-proof"}}
+A08_WIRE_HTTP_RESPONSE status=409 body={"error":{"code":"WORKTREE_REMOVED_PRUNE_FAILED","details":{"branchDeleted":false,"pruned":false,"worktreeRemoved":true},"message":"WORKTREE_REMOVED_PRUNE_FAILED","requestId":"a7de9702-2512-4858-91c4-e8574a1b43a4","retryable":false}}
 A08_WIRE_PRUNE legacy=true removed=true branch_preserved=true config_restored=true publication_received=true
 A08_WIRE_LISTENERS joined=true clients_joined=true tcp_refused=true uds_refused=true socket_removed=true failed=false
-A08_WIRE_OWNER pid=995409 runtime_joined=true git_children=ECHILD failed=false
+A08_WIRE_OWNER pid=1462290 runtime_joined=true git_children=ECHILD failed=false
 test remote::workspace_api::worktrees::wire_proof_tests::private_wire_owner ... ok
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1012 filtered out; finished in 0.39s
@@ -1117,7 +1110,7 @@ test ssh::bridge::tests::ssh_bridge_handshake_independently_validates_configured
 test ssh::bridge::tests::ssh_bridge_handshake_verifies_host_and_epoch ... ok
 test ssh::bridge::tests::ssh_bridge_independent_read_does_not_block_control ... ok
 test ssh::bridge::tests::ssh_bridge_lifecycle_poison_on_timeout_cancel_and_eof_reaping ... ok
-test ssh::bridge::tests::ssh_bridge_live_loopback_openssh_connection ... FAILED
+test ssh::bridge::tests::ssh_bridge_live_loopback_openssh_connection ... ok
 test ssh::bridge::tests::ssh_bridge_remote_pid_does_not_expose_signal_target ... ok
 test ssh::bridge::tests::ssh_bridge_single_attempt_write_does_not_queue ... ok
 test ssh::bridge::tests::ssh_bridge_spawn_retry_requires_matching_client_request_id ... ok
@@ -1240,8 +1233,8 @@ test ssh::worktree::tests::red_malformed_porcelain_tolerated ... ok
 test ssh::worktree::tests::red_parse_porcelain_entries ... ok
 test ssh::worktree::tests::red_path_inside_root_guard ... ok
 test ssh::worktree::tests::red_porcelain_parsing_of_created_output ... ok
-test ssh::worktree::tests::red_posix_script_builders_executable_behavior ... Initialized empty Git repository in /tmp/r9tmp.t7fPuC/.tmpCYBUR4/.git/
-[master (root-commit) e222cec] init
+test ssh::worktree::tests::red_posix_script_builders_executable_behavior ... Initialized empty Git repository in /tmp/r9tmp.0GghXl/.tmp8GEjCf/.git/
+[master (root-commit) 5b48097] init
 ok
 test ssh::worktree::tests::test_resolve_remote_spawn_root ... ok
 test terminal::output_hub::tests::ssh_process_survival_gap_precedes_recovered_bytes_and_invalidates_history ... ok
@@ -1322,7 +1315,7 @@ test terminal::tests::test_lifecycle_poll_interval_is_relaxed_and_event_driven .
 test terminal::tests::test_multiple_concurrent_sessions ... ok
 test terminal::tests::test_resize ... ok
 test terminal::tests::test_session_lifecycle_and_errors ... ok
-test terminal::tests::test_spawn_startup_command_omo ... FAILED
+test terminal::tests::test_spawn_startup_command_omo ... ok
 test terminal::tests::test_spawn_write_echo_and_read ... ok
 test terminal::tests::test_terminal_service_sequence_safe_attach_and_replay ... ok
 test tests::app_remote_state_persists_pairing_but_starts_off ... ok
@@ -1361,35 +1354,9 @@ test worktree::tests::safe_delete_clean_worktree ... ok
 test worktree::tests::worktree_manager_rejects_filesystem_root ... ok
 test worktree::tests::worktree_manager_resolves_nested_git_directory_to_canonical_root ... ok
 
-failures:
+test result: ok. 1012 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 224.17s
 
----- ipc::browser::tests::test_cmd_open_file_path_resolves_relative_with_cwd stdout ----
-
-thread 'ipc::browser::tests::test_cmd_open_file_path_resolves_relative_with_cwd' (985716) panicked at src/ipc/browser.rs:1715:9:
-assertion `left == right` failed
-  left: false
- right: true
-
----- ssh::bridge::tests::ssh_bridge_live_loopback_openssh_connection stdout ----
-
-thread 'ssh::bridge::tests::ssh_bridge_live_loopback_openssh_connection' (996015) panicked at src/ssh/bridge_tests.rs:724:5:
-Loopback SSH must be available for live OpenSSH bridge test
-
----- terminal::tests::test_spawn_startup_command_omo stdout ----
-
-thread 'terminal::tests::test_spawn_startup_command_omo' (996837) panicked at src/terminal/tests.rs:75:5:
-spawning omo should succeed without 'not found in PATH' error: Some(SpawnError("Failed to spawn command: Unable to spawn omo because:\nNo viable candidates found in PATH \"/home/indo/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/home/indo/.bun/bin:/home/indo/.local/bin:/home/indo/.local/share/mise/installs/codex/latest/bin:/home/indo/.local/share/mise/installs/gh/latest/gh_2.100.0_linux_amd64/bin:/home/indo/.local/share/mise/installs/ninja/latest:/home/indo/.local/share/mise/installs/node/26.8.1/bin:/home/indo/.local/share/mise/installs/opencode/latest:/home/indo/.local/share/mise/installs/sccache/latest/sccache-v0.17.0-x86_64-unknown-linux-musl:/usr/local/sbin:/home/indo/.local/share/mise/shims:/usr/bin/site_perl:/usr/bin/vendor_perl:/usr/bin/core_perl\""))
-
-
-failures:
-    ipc::browser::tests::test_cmd_open_file_path_resolves_relative_with_cwd
-    ssh::bridge::tests::ssh_bridge_live_loopback_openssh_connection
-    terminal::tests::test_spawn_startup_command_omo
-
-test result: FAILED. 1009 passed; 3 failed; 1 ignored; 0 measured; 0 filtered out; finished in 223.47s
-
-error: test failed, to rerun pass `--lib`
-TEST_EXIT=101
+TEST_EXIT=0
 === HEADLESS BOOT SMOKE ===
 SMOKE_READY=yes
 SMOKE_KILL_EXIT=143

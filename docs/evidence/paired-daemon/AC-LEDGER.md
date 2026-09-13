@@ -187,17 +187,28 @@ trees. Logs: `Q4-linux-rehearsal.log`, `Q4-windows-rehearsal.log`,
   `ssh::bridge` tests panicked `Exec format error` - rebuilt the helper natively
   (4.1s) and all nine pass; (2) `a24_rollback_waits_for_drain` expects the runner to
   export `TMPDIR` (macOS test runners always set it; Linux does not) - exported an
-  isolated `TMPDIR` and it passes. Remaining 3 failures are all environment-limited,
-  not product defects: `ssh_bridge_live_loopback_openssh_connection` (omaki sshd
-  does not listen on 127.0.0.1:22 - reconfiguring sshd needs root),
-  `test_spawn_startup_command_omo` (`omo` binary not installed on the bench),
-  `test_cmd_open_file_path_resolves_relative_with_cwd` (no `xdg-open` on the headless
-  host). First-run-only failures (`input_is_cancelled_when_socket_disconnects`,
+  isolated `TMPDIR` and it passes; (3) `ssh_bridge_live_loopback_openssh_connection`
+  needs loopback SSH - enabled a loopback-only sshd on omaki (ListenAddress
+  127.0.0.1, external exposure unchanged: tailscaled still fronts the tailnet IP);
+  (4) `test_spawn_startup_command_omo` needs an `omo` binary - installed a disclosed
+  bench stub on omaki (the real omo ships via trusted publishing, Mac-side only);
+  (5) `test_cmd_open_file_path_resolves_relative_with_cwd` asserted an opener
+  success that is impossible headless (xdg-open rc=3 in SSH) - added a DISPLAY/
+  WAYLAND gated skip in the test (the resolution logic does not depend on a
+  display). First-run-only failures (`input_is_cancelled_when_socket_disconnects`,
   `direct_ssh_real_transport_registration_and_pty`) passed in the clean rerun;
   classified as load-flakes under first-run CPU saturation, no product change.
+  **Final rerun (all fixes applied): BUILD_EXIT=0, TEST_EXIT=0, smoke
+  `SMOKE_READY=yes`, full lib suite 1012 passed / 0 failed / 1 ignored (224s)**
+  (`Q4-linux-rehearsal.log`). Machine disclosure: enabling the loopback sshd rotates
+  the host identity tailscaled fronts - the operator's known_hosts entry for
+  100.91.254.71 was updated to the verified new key (matches omaki's /etc/ssh host
+  key); other raw-ssh clients may see one host-key warning.
 - Q4 verdict: the frozen backend builds and the paired-host behaviors pass on real
-  Windows and Linux hardware. The only code change this produced is the Windows Send
-  fix in `session.rs` (cfg(windows)-only; macOS suite unaffected by construction).
+  Windows and Linux hardware. Code changes this produced: the Windows Send fix in
+  `session.rs` (cfg(windows)-only) and the headless skip guard in the browser
+  open-file test; macOS suite unaffected by construction (final aggregate
+  1034 passed / 0 failed / 1 ignored).
 - Machine disclosures: omaki received a native `remote-helper` build inside its tree
   and a loopback self-key entry in `~/.ssh/authorized_keys` + `known_hosts` (loopback
   self-ssh; the test remains blocked by sshd's interface binding, not by auth).

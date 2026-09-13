@@ -110,11 +110,16 @@ Still open (user/machine-gated):
   (`write_input_slice` sync helper); green rerun `BUILD_EXIT=0`, `paired_host::` 33
   passed / 0 failed (`Q4-windows-*`, RED record `Q4-windows-rehearsal-RED.md`).
   Linux: `BUILD_EXIT=0`, headless boot smoke `SMOKE_READY=yes` (clean kill), full lib
-  suite `--test-threads=1` **1009 passed / 3 failed / 1 ignored** — all 3
-  environment-limited (no sshd on 127.0.0.1:22, no `omo` binary, no `xdg-open` on the
-  headless bench), not product defects (`Q4-linux-rehearsal.log`); details in
-  `AC-LEDGER.md` § "Q4 frozen-backend rehearsals". Final macOS aggregate with the
-  fix: **1034 passed / 0 failed / 1 ignored** (264s, exit 0).
+  suite `--test-threads=1` **1012 passed / 0 failed / 1 ignored (final rerun,
+  TEST_EXIT=0)** after environment completion: native `remote-helper` rebuild (tar
+  had carried the macOS binary), isolated `TMPDIR` for the runner, loopback-only
+  sshd on omaki, disclosed bench `omo` stub, and a DISPLAY/WAYLAND gated skip in the
+  browser open-file test (xdg-open cannot succeed headless; product code correct,
+  `Q4-linux-rehearsal.log`). Known_hosts rotation for 100.91.254.71 disclosed in the
+  ledger. Windows post-fix: `BUILD_EXIT=0`, `paired_host::` 33 passed / 0 failed
+  (`Q4-windows-*`, RED record `Q4-windows-rehearsal-RED.md`). Final macOS aggregate:
+  **1034 passed / 0 failed / 1 ignored** (264s, exit 0). Details in `AC-LEDGER.md` §
+  "Q4 frozen-backend rehearsals".
 - **Commit risk**: `git status` is broken in this worktree (ghostty submodule symlink),
   so ~70 untracked files are invisible — including the entire `paired_host/` module,
   `machine_gateway.rs`, `machine_owner.rs`, `machine_peer.rs`,
