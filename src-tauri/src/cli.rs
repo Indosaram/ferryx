@@ -476,7 +476,37 @@ pub fn run_daemon_headless(
         .enable_all()
         .build()?;
     rt.block_on(async {
+        let logging = match crate::daemon::logging::DaemonLogging::start().await {
+            Ok(logging) => Some(logging),
+            Err(error) => {
+                crate::daemon::logging::report_failure(&error);
+                None
+            }
+        };
+        #[cfg(test)]
+        if std::env::var("FERRYX_LOGGING_FIXTURE").as_deref() == Ok("1") {
+            let hub = crate::daemon::agent_state::AgentStateHub::default();
+            hub.release_manual("logging-fixture-session");
+            hub.release_foreground("logging-fixture-session");
+            if let Some(logging) = logging { logging.finish().await?; }
+            return Ok(());
+        }
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        #[cfg(test)]
+        let lifecycle_fixture = std::env::var("FERRYX_LOGGING_FIXTURE").is_ok_and(|v| v != "1");
+        #[cfg(not(test))]
+        let lifecycle_fixture = false;
+        let server_task = if lifecycle_fixture {
+            tokio::spawn(async move {
+                let _ = ready_tx.send(());
+                crate::daemon::agent_state::AgentStateHub::default().release_manual("failure-fixture");
+                use tokio::io::AsyncReadExt;
+                let mut byte = [0];
+                tokio::io::stdin().read_exact(&mut byte).await.map_err(|e| e.to_string())?;
+                println!("FERRYX_PRIMARY_SERVICE_ALIVE");
+                Ok(())
+            })
+        } else {
         let server = Arc::new(crate::daemon::server::DaemonServer::new());
         let server_clone = Arc::clone(&server);
         let server_task = tokio::spawn(async move {
@@ -496,6 +526,9 @@ pub fn run_daemon_headless(
             }
         });
 
+        server_task
+        };
+
         // Wait for server to bind listener and initialize before emitting readiness signal
         match ready_rx.await {
             Ok(()) => {
@@ -509,17 +542,104 @@ pub fn run_daemon_headless(
             }
         }
 
-        match server_task.await {
+        let completed = server_task.await;
+        let result = match completed {
             Ok(Ok(())) => Ok(()),
             Ok(Err(e)) => Err(e.into()),
             Err(e) => Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>),
+        };
+        if let Some(logging) = logging {
+            if let Err(error) = logging.finish().await {
+                crate::daemon::logging::report_failure(&error);
+            }
         }
+        result
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn headless_logging_child() {
+        if std::env::var_os("FERRYX_LOGGING_FIXTURE").is_some() {
+            run_daemon_headless(None).expect("headless initialization and shutdown");
+        }
+    }
+
+    #[test]
+    fn headless_release_reasons_reach_private_bounded_sink() {
+        // Given: a separate process with all writable locations inside this worktree.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
+        let fixture = tempfile::tempdir_in(root).unwrap();
+        let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+        child.args(["--exact", "cli::tests::headless_logging_child", "--nocapture"])
+            .env("FERRYX_LOGGING_FIXTURE", "1")
+            .current_dir(fixture.path())
+            .kill_on_drop(true);
+        for key in ["FERRYX_DATA_DIR", "FERRYX_RUNTIME_DIR", "HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "TMPDIR", "TMP", "TEMP"] {
+            child.env(key, fixture.path());
+        }
+        // When: production headless initialization emits both real release operations and exits.
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let output = runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(20), child.output())
+                .await.expect("bounded child exit").unwrap()
+        });
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        // Then: both structured reasons and their session reach the daemon-owned file.
+        let path = fixture.path().join("logs/daemon.log");
+        let text = std::fs::read_to_string(&path).expect("headless release log must exist");
+        for reason in ["manual_reset", "foreground_agent_to_shell"] {
+            assert!(text.lines().any(|line| line.contains("session_id=\"logging-fixture-session\"") && line.contains(&format!("reason=\"{reason}\""))), "missing {reason}: {text}");
+        }
+        assert!(text.len() <= 1024 * 1024);
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("reason="));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("reason="));
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn headless_primary_service_survives_logging_failures() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        for mode in ["init_failure", "write_failure"] {
+            // Given: isolated production CLI lifecycle with a gated primary task.
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
+            let fixture = tempfile::tempdir_in(root).unwrap();
+            if mode == "init_failure" {
+                std::fs::write(fixture.path().join("logs"), b"not a directory").unwrap();
+            }
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                tokio::time::timeout(std::time::Duration::from_secs(20), async {
+                    let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+                    command.args(["--exact", "cli::tests::headless_logging_child", "--nocapture"])
+                        .env("FERRYX_LOGGING_FIXTURE", mode).current_dir(fixture.path())
+                        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::piped()).kill_on_drop(true);
+                    for key in ["FERRYX_DATA_DIR", "FERRYX_RUNTIME_DIR", "HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "TMPDIR", "TMP", "TEMP"] {
+                        command.env(key, fixture.path());
+                    }
+                    let mut child = command.spawn().unwrap();
+                    let mut errors = BufReader::new(child.stderr.take().unwrap()).lines();
+                    // When: the actual CLI reports sink failure, release the primary task.
+                    let report = errors.next_line().await.unwrap().unwrap_or_default();
+                    if let Some(mut stdin) = child.stdin.take() { let _ = stdin.write_all(b"x").await; }
+                    let output = child.wait_with_output().await.unwrap();
+                    // Then: readiness and a post-failure service action both survive.
+                    assert!(output.status.success(), "{mode}: {report}");
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    assert!(stdout.contains("FERRYX_DAEMON_READY"), "{mode}: {stdout}");
+                    assert!(stdout.contains("FERRYX_PRIMARY_SERVICE_ALIVE"), "{mode}: {stdout}");
+                    assert!(report.contains("FERRYX_DAEMON_LOGGING_DISABLED"), "{report}");
+                    assert!(errors.next_line().await.unwrap().is_none(), "only one failure report");
+                }).await.expect("bounded lifecycle fixture exit");
+            });
+        }
+    }
 
     #[test]
     fn browser_list_cli_parses_without_browser_id() {

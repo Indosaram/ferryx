@@ -669,18 +669,25 @@ function WorkspaceApp({
       const tab = state.layout.tabs.find((t) => t.id === tabId);
       if (!tab || tab.kind === "browser") return;
       const sessionIds = getTabSessionIds(state, tab.id);
-      for (const sessionId of sessionIds) {
-        await resetAgentState(sessionId);
+      const results = await Promise.allSettled([...sessionIds].map(resetAgentState));
+      const failures = results.filter((result) => result.status === "rejected");
+      if (failures.length > 0) {
+        toast.error(`Agent state reset failed for ${failures.length} of ${sessionIds.size} sessions`);
+      } else {
+        toast.success("Agent state reset");
       }
-      toast.success("Agent state reset");
     },
     [state, resetAgentState],
   );
 
   const handleResetWorktreeAgentState = useCallback(
     async (worktree: Worktree) => {
-      await resetWorktreeAgentState(worktree.path);
-      toast.success("Agent state reset");
+      try {
+        await resetWorktreeAgentState(worktree.path);
+        toast.success("Agent state reset");
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Failed to reset agent state");
+      }
     },
     [resetWorktreeAgentState],
   );
