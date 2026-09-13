@@ -5,7 +5,6 @@ import { remoteHostStore } from "../state/remoteHostStore";
 import { projectRootWorktree } from "../lib/projectIdentity";
 import { groupProjects } from "../lib/projectGrouping";
 import type { RegisteredProject } from "../lib/types";
-vi.mock("./RemoteHostSwitcher", () => ({ RemoteHostSwitcher: () => null }));
 vi.mock("../lib/sshHosts", () => ({ useSshHosts: () => ({ hosts: [{ id: "ssh", label: "SSH machine" }] }) }));
 afterEach(() => { cleanup(); localStorage.clear(); remoteHostStore.reset(); });
 it("keeps identical local, SSH and paired paths separate and selects explicit paired roots with machine status", () => {

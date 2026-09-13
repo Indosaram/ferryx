@@ -46,7 +46,6 @@ import { type ActiveAgent, type DirtyState, type Worktree } from "../lib/types";
 import { SidebarDragRow } from "./sidebar-dnd/SidebarDragRow";
 import { projectSortableId, SortableProjectSection } from "./sidebar-dnd/SortableProjectSection";
 import { openNativePopupMenu, type NativeMenuEntry } from "../lib/nativeMenu";
-import { RemoteHostSwitcher } from "./RemoteHostSwitcher";
 import { IconButton } from "./ui/IconButton";
 import { StatusDot } from "./ui/StatusDot";
 import { fileManagerActionLabel, WorktreeList, WorktreeRow, worktreeSortableId } from "./WorktreeList";
@@ -372,7 +371,6 @@ export function Sidebar({
           >
             <PanelLeftClose className="size-3.5" />
           </IconButton>
-          <RemoteHostSwitcher className="no-drag ml-1 min-w-0 flex-1" />
           <IconButton label="Add project" className="no-drag" size="sm" onClick={onAddProject}>
             <Plus className="size-3.5" />
           </IconButton>
