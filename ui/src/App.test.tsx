@@ -42,7 +42,8 @@ const { resolve } = await import("node:path");
 const { act, cleanup, fireEvent, render, screen, waitFor, within } = await import("@testing-library/react");
 const { afterEach, beforeEach, describe, expect, it, vi } = await import("vitest");
 await import("./test/setup");
-import type { Worktree } from "./lib/types";
+import type { TabPaneLayout, Worktree } from "./lib/types";
+import type { TerminalActivity } from "./lib/activity";
 import { createLayoutState } from "./state/layout";
 import { clearWorkspaceSnapshot, setWorkspaceSnapshot } from "./state/workspaceSnapshotCache";
 
@@ -100,6 +101,13 @@ const updater = {
   checkForUpdate: vi.fn(),
 };
 
+const defaultTabPaneLayout: TabPaneLayout = {
+  root: { type: "leaf", leafId: "leaf-1" },
+  activeLeafId: "leaf-1",
+  expandedLeafId: null,
+  sessionIdsByLeafId: { "leaf-1": "sess-1" },
+};
+
 const workspace = {
   activateTab: vi.fn(),
   activatePrimary: vi.fn(),
@@ -123,10 +131,10 @@ const workspace = {
     layout: {
       activeTabId: "tab-1",
       layoutsByTabId: {
-        "tab-1": { root: { type: "leaf" as const, leafId: "leaf-1" }, activeLeafId: "leaf-1", expandedLeafId: null, sessionIdsByLeafId: { "leaf-1": "sess-1" } },
+        "tab-1": defaultTabPaneLayout,
       },
       tabs: [
-        { id: "tab-1", label: "main", sessionId: "sess-1" },
+        { id: "tab-1", kind: "terminal", label: "main", sessionId: "sess-1" },
         { id: "tab-2", label: "feature", sessionId: "sess-2" },
         { id: "tab-3", label: "bugfix", sessionId: "sess-3" },
         { id: "tab-4", label: "docs", sessionId: "sess-4" },
@@ -144,6 +152,7 @@ const workspace = {
       { path: "/repo/bugfix", branch: "refs/heads/bugfix" },
       { path: "/repo/docs", branch: "refs/heads/docs" },
     ] as Array<{ path: string; branch: string | null }>,
+    activityBySessionId: {} as Record<string, TerminalActivity>,
     unreadTabIds: {} as Record<string, boolean>,
     unreadWorktreePaths: {} as Record<string, boolean>,
   },
@@ -336,12 +345,16 @@ vi.mock("./components/TerminalSplitView", () => {
       agents,
       onLaunchAgent,
       onAddBrowserTab,
+      onClosePane,
+      onCloseTab,
       defaultAgentId,
     }: {
       searchLeafId?: string | null;
       agents?: Array<{ name: string; command: string; args: string }>;
       onLaunchAgent?: (agent: { name: string; command: string; args: string }) => void;
       onAddBrowserTab?: (url?: string) => void;
+      onClosePane?: (tabId: string, leafId: string) => void;
+      onCloseTab?: (tabId: string) => void;
       defaultAgentId?: string | null;
     }) => {
       return (
@@ -350,6 +363,12 @@ vi.mock("./components/TerminalSplitView", () => {
           data-search-leaf-id={searchLeafId ?? ""}
           data-default-agent-id={defaultAgentId ?? ""}
         >
+          <button type="button" onClick={() => onClosePane?.("tab-1", "leaf-1")}>
+            Close fixture pane
+          </button>
+          <button type="button" onClick={() => onCloseTab?.("tab-1")}>
+            Close fixture tab
+          </button>
           <button type="button" onClick={() => onAddBrowserTab?.()}>
             New browser tab
           </button>
@@ -570,13 +589,85 @@ describe("App project workspace flow", () => {
   });
 
   it("routes the native Cmd+W menu accelerator to close the active tab", async () => {
-    render(<App />);
-
-    await waitFor(() => expect(native.onCloseTabMenu).toHaveBeenCalledOnce());
+    await act(async () => { render(<App />); });
     expect(native.closeMenuHandler).toBeTypeOf("function");
-    native.closeMenuHandler?.();
+    act(() => { native.closeMenuHandler?.(); });
+    expect(workspace.closePane).toHaveBeenCalledWith("tab-1", "leaf-1");
+    expect(workspace.closeTab).not.toHaveBeenCalled();
+  });
 
-    await waitFor(() => expect(workspace.closeTab).toHaveBeenCalledWith("tab-1"));
+  it("routes web Cmd+W on a leaf-root terminal tab to its pane when focus is unset", async () => {
+    workspace.storeState.layout.layoutsByTabId["tab-1"].activeLeafId = null;
+    await act(async () => { render(<App />); });
+    fireEvent.keyDown(window, { key: "w", metaKey: true });
+    expect(workspace.closePane).toHaveBeenCalledWith("tab-1", "leaf-1");
+    expect(workspace.closeTab).not.toHaveBeenCalled();
+  });
+
+  it.each(["working", "waiting"] as const)("confirms pane close for a %s agent, with cancel leaving it open", async (state) => {
+    workspace.storeState.activityBySessionId["sess-1"] = { state, title: "agent", isAgent: true };
+    await act(async () => { render(<App />); });
+    fireEvent.click(screen.getByRole("button", { name: "Close fixture pane" }));
+    const dialog = screen.getByRole("dialog");
+    expect(workspace.closePane).not.toHaveBeenCalled();
+    expect(workspace.closeTab).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole("button", { name: /cancel/i }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(workspace.closePane).not.toHaveBeenCalled();
+    expect(workspace.closeTab).not.toHaveBeenCalled();
+    act(() => { native.closeMenuHandler?.(); });
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: /close pane/i }));
+    expect(workspace.closePane).toHaveBeenCalledExactlyOnceWith("tab-1", "leaf-1");
+    expect(workspace.closeTab).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it.each(["working", "waiting"] as const)("confirms tab close for a %s agent even with confirmCloseTab disabled", async (state) => {
+    localStorage.setItem("ferryx.settings.general", JSON.stringify({ confirmCloseTab: false }));
+    workspace.storeState.activityBySessionId["sess-1"] = { state, title: "agent", isAgent: true };
+    await act(async () => { render(<App />); });
+    fireEvent.click(screen.getByRole("button", { name: "Close fixture tab" }));
+    const dialog = screen.getByRole("dialog");
+    expect(workspace.closeTab).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole("button", { name: /cancel/i }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(workspace.closeTab).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Close fixture tab" }));
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: /close tab/i }));
+    expect(workspace.closeTab).toHaveBeenCalledExactlyOnceWith("tab-1");
+    expect(workspace.closePane).not.toHaveBeenCalled();
+  });
+
+  it("closes an idle focused pane through native Cmd+W without confirming for a busy sibling", async () => {
+    workspace.storeState.layout.layoutsByTabId["tab-1"] = {
+      root: {
+        type: "split",
+        direction: "horizontal",
+        first: { type: "leaf", leafId: "leaf-1" },
+        second: { type: "leaf", leafId: "leaf-2" },
+        ratio: 0.5,
+      },
+      activeLeafId: "leaf-1",
+      expandedLeafId: null,
+      sessionIdsByLeafId: { "leaf-1": "sess-1", "leaf-2": "sess-2" },
+    };
+    workspace.storeState.activityBySessionId["sess-2"] = {
+      state: "working", title: "agent", isAgent: true,
+    };
+    await act(async () => { render(<App />); });
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(native.closeMenuHandler).toBeTypeOf("function");
+    act(() => { native.closeMenuHandler?.(); });
+
+    expect(workspace.closePane).toHaveBeenCalledExactlyOnceWith("tab-1", "leaf-1");
+    expect(workspace.closeTab).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    // The mocked close leaves the split intact; closing the whole tab includes the busy sibling.
+    fireEvent.click(screen.getByRole("button", { name: "Close fixture tab" }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(workspace.closeTab).not.toHaveBeenCalled();
   });
 
   it("routes the native Cmd+W menu accelerator to close the focused pane in a split terminal tab", async () => {
@@ -700,10 +791,8 @@ describe("App project workspace flow", () => {
 
   it("shows tab close confirmation when confirmCloseTab is enabled, cancelling on reject and closing on confirm", async () => {
     localStorage.setItem("ferryx.settings.general", JSON.stringify({ confirmCloseTab: true }));
-    render(<App />);
-
-    await waitFor(() => expect(native.onCloseTabMenu).toHaveBeenCalledOnce());
-    native.closeMenuHandler?.();
+    await act(async () => { render(<App />); });
+    fireEvent.click(screen.getByRole("button", { name: "Close fixture tab" }));
 
     // Dialog appears
     const dialog = await screen.findByRole("dialog", { name: /close tab/i });
@@ -717,7 +806,7 @@ describe("App project workspace flow", () => {
     expect(workspace.closeTab).not.toHaveBeenCalled();
 
     // Trigger again and confirm
-    native.closeMenuHandler?.();
+    fireEvent.click(screen.getByRole("button", { name: "Close fixture tab" }));
     const dialog2 = await screen.findByRole("dialog", { name: /close tab/i });
     expect(dialog2).toBeInTheDocument();
 
