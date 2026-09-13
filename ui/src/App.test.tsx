@@ -3564,6 +3564,20 @@ describe("App project workspace flow", () => {
       await waitFor(() => expect(workspace.reportRuntimeError).toHaveBeenCalledWith(publishError));
     });
 
+    it("creates a new remote terminal through openTab instead of reusing an existing worktree tab", async () => {
+      localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" }]));
+      localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "orca-lite");
+      native.registerProject.mockResolvedValue({ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" });
+      await act(async () => { render(<App />); });
+      workspace.openTab.mockClear();
+      workspace.ensureTabForWorktree.mockClear();
+      await act(async () => {
+        native.remoteSelectionHandler?.({ workspaceId: "orca-lite", worktreeSlug: "feature", createTerminal: true });
+      });
+      expect(workspace.openTab).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ path: "/repo/feature" }));
+      expect(workspace.ensureTabForWorktree).not.toHaveBeenCalled();
+    });
+
     it("handles native remote_selection_requested and activates requested worktree context", async () => {
       localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" }]));
       localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "orca-lite");

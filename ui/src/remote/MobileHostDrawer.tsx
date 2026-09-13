@@ -169,7 +169,7 @@ export function MobileHostDrawer({ open, onOpenChange }: MobileHostDrawerProps) 
       <div
         role="dialog"
         aria-label="Switch host"
-        className="relative z-10 max-h-[80vh] overflow-y-auto rounded-t-xl border-t border-border bg-popover text-popover-foreground shadow-2xl scrollbar-sleek"
+        className="relative z-10 min-w-0 max-h-[80dvh] overflow-y-auto overflow-x-hidden rounded-t-xl border-t border-border bg-popover text-popover-foreground shadow-2xl scrollbar-sleek"
       >
         <div className="flex items-center justify-between border-b border-border px-3 py-2.5">
           <h2 className="text-sm font-semibold">Switch host</h2>

@@ -311,6 +311,16 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
   const [model, setModel] = useState<RemoteWorkspaceModel>(EMPTY_MODEL);
   const [pending, setPending] = useState<RemoteContextOption | null>(null);
   const [selectorOpen, setSelectorOpen] = useState(false);
+  const [creationError, setCreationError] = useState<string | null>(null);
+  const creationSessionsRef = useRef<Set<string> | null>(null);
+  const [viewportHeight, setViewportHeight] = useState(() => window.visualViewport?.height);
+  useEffect(() => {
+    const viewport = window.visualViewport;
+    if (!viewport) return;
+    const resize = () => setViewportHeight(viewport.height);
+    viewport.addEventListener("resize", resize);
+    return () => viewport.removeEventListener("resize", resize);
+  }, []);
   const [hostDrawerOpen, setHostDrawerOpen] = useState(false);
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
   // First render always speaks to the relay; a verified probe swaps this for a direct endpoint.
@@ -497,6 +507,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
       clearTimeout(confirmationTimeoutRef.current);
       confirmationTimeoutRef.current = null;
     }
+    creationSessionsRef.current = null;
     pendingSelectionRef.current = null;
     selectionRequestAcceptedRef.current = false;
     selectionEventReceivedRef.current = false;
@@ -546,7 +557,10 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
     const confirmed = await refreshWorkspace();
     confirmationInFlightRef.current = false;
     if (pendingSelectionRef.current !== option) return;
-    if (confirmed && modelConfirmsSelection(option, confirmed)) {
+    const creating = creationSessionsRef.current;
+    const newSession = confirmed?.context.activeTerminal?.sessionId;
+    if (confirmed && modelConfirmsSelection(option, confirmed)
+      && (!creating || (newSession && !creating.has(newSession)))) {
       clearPendingSelection(true);
     }
   }, [clearPendingSelection, refreshWorkspace]);
@@ -655,12 +669,18 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
     confirmationTimeoutRef.current = setTimeout(() => {
       confirmationTimeoutRef.current = null;
       if (pendingSelectionRef.current !== option) return;
+      if (creationSessionsRef.current) setCreationError("Desktop did not confirm a new terminal. Check the desktop before retrying.");
       clearPendingSelection();
     }, CONFIRMATION_TIMEOUT_MS);
   }, [clearPendingSelection]);
 
-  const selectContext = useCallback(async (option: RemoteContextOption) => {
-    if (!token || pending) return;
+  const selectContext = useCallback(async (option: RemoteContextOption, createTerminal = false) => {
+    if (!token || pendingSelectionRef.current) return;
+    setCreationError(null);
+    creationSessionsRef.current = createTerminal ? new Set([
+      ...(model.context.terminalTabs?.flatMap((tab) => tab.sessionId ? [tab.sessionId] : []) ?? []),
+      ...(model.context.activeTerminal ? [model.context.activeTerminal.sessionId] : []),
+    ]) : null;
     pendingSelectionRef.current = option;
     selectionRequestAcceptedRef.current = false;
     selectionEventReceivedRef.current = false;
@@ -682,6 +702,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
             ...(option.worktreeSlug ? { worktreeSlug: option.worktreeSlug } : {}),
             ...(option.tabId ? { tabId: option.tabId } : {}),
             ...(!option.tabId && option.sessionId ? { sessionId: option.sessionId } : {}),
+            ...(createTerminal ? { createTerminal: true } : {}),
           }),
         },
       );
@@ -690,10 +711,11 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
       selectionRequestAcceptedRef.current = true;
       armConfirmationTimeout(option);
       if (selectionEventReceivedRef.current) void confirmSelection(option);
-    } catch {
+    } catch (error) {
+      if (createTerminal) setCreationError(error instanceof Error ? error.message : "Terminal creation request failed");
       clearPendingSelection();
     }
-  }, [activeHost?.machineId, armConfirmationTimeout, clearPendingSelection, confirmSelection, pending, token, transportBaseUrl]);
+  }, [activeHost?.machineId, armConfirmationTimeout, clearPendingSelection, confirmSelection, model, token, transportBaseUrl]);
 
   const tabs = model.context.terminalTabs;
   const activeIndex = tabs && model.context.activeTabId
@@ -741,7 +763,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
     : "";
 
   return (
-    <div className="flex h-[100dvh] min-h-screen flex-col overflow-hidden bg-background text-foreground">
+    <div className="flex h-[100dvh] min-h-0 min-w-0 flex-col overflow-hidden bg-background text-foreground" style={viewportHeight ? { height: viewportHeight } : undefined}>
       <Toaster />
       <header className="flex h-7 shrink-0 items-center justify-between border-b border-border bg-card px-2.5">
         <button
@@ -884,6 +906,11 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
         selectorOpen={selectorOpen}
         onSelectorOpenChange={setSelectorOpen}
         onSelect={(option) => void selectContext(option)}
+        onCreateTerminal={() => {
+          if (!model.context.workspaceId) return;
+          void selectContext({ workspaceId: model.context.workspaceId, worktreeSlug: model.context.worktreeSlug, worktreeLabel: model.context.worktreeLabel }, true);
+        }}
+        creationError={creationError}
       >
         {effectiveSessionId ? (
           <RemoteTerminal

@@ -2986,6 +2986,37 @@ async fn test_remote_select_workspace_with_tab_selector_and_primary_worktree() {
     assert_eq!(event_payload["worktreeSlug"], "feature-tab");
     assert_eq!(event_payload["tabId"], "tab-term-selected");
 
+    // Creation shares selection validation and reaches the real desktop event sink.
+    for (token, slug, tab_id, expected) in [
+        (Some(token_view.as_str()), "feature-tab", None, 403),
+        (None, "feature-tab", None, 401),
+        (Some(token_ctrl.as_str()), "missing-worktree", None, 400),
+        (Some(token_ctrl.as_str()), "feature-tab", Some("tab-term-selected"), 400),
+        (Some(token_ctrl.as_str()), "feature-tab", None, 200),
+    ] {
+        let mut request = serde_json::json!({
+            "workspaceId": workspace_id,
+            "worktreeSlug": slug,
+            "createTerminal": true,
+        });
+        if let Some(tab_id) = tab_id {
+            request["tabId"] = tab_id.into();
+        }
+        let (status, body) = http_request(addr, "POST", "/api/v1/workspace/select", token, Some(&request.to_string())).await;
+        assert_eq!(status, expected, "{body}");
+        if expected == 200 {
+            let (event, payload) = event_received.lock().take().expect("creation event emitted before HTTP response");
+            assert_eq!(event, REMOTE_SELECTION_REQUEST_EVENT);
+            assert_eq!(payload["createTerminal"], true);
+            assert_eq!(payload["workspaceId"], workspace_id);
+            assert_eq!(payload["worktreeSlug"], slug);
+            assert!(payload.get("tabId").is_none());
+            assert!(!body.contains(&repo_root.to_string_lossy().to_string()));
+        } else {
+            assert!(event_received.lock().is_none());
+        }
+    }
+
     // 3. Primary worktree selection (without worktreeSlug) with tab selector
     state.set_active_selection(RemoteActiveDesktopSelection {
         workspace_id: Some(workspace_id.to_string()),

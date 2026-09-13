@@ -1014,6 +1014,7 @@ export async function publishFocusedTerminal(payload: FocusedTerminalPayload | n
 
 export type RemoteSelectionRequestedPayload = {
   workspaceId: string;
+  createTerminal?: boolean;
   worktreeSlug?: string | null;
   worktreeLabel?: string | null;
   sessionId?: string | null;

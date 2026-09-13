@@ -201,6 +201,8 @@ pub struct RemoteActiveDesktopSelection {
 pub struct RemoteSelectWorkspaceRequest {
     pub workspace_id: String,
     #[serde(default)]
+    pub create_terminal: bool,
+    #[serde(default)]
     pub worktree: Option<WorktreeIdentity>,
     #[serde(default)]
     pub worktree_slug: Option<String>,
@@ -216,6 +218,8 @@ pub struct RemoteSelectWorkspaceRequest {
 #[serde(rename_all = "camelCase")]
 pub struct RemoteSelectionRequestPayload {
     pub workspace_id: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub create_terminal: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree: Option<WorktreeIdentity>,
     #[serde(skip_serializing_if = "Option::is_none")]

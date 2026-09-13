@@ -1312,6 +1312,7 @@ function WorkspaceApp({
   const [pendingWorktreePath, setPendingWorktreePath] = useState<string | null>(null);
   const [pendingRemoteSlug, setPendingRemoteSlug] = useState<{
     workspaceId: string;
+    createTerminal?: boolean;
     slug?: string | null;
     tabId?: string | null;
   } | null>(null);
@@ -1562,6 +1563,10 @@ function WorkspaceApp({
     if (!target) return;
     const requestedEntryId = pendingRemoteSlug.tabId ?? null;
     setPendingRemoteSlug(null);
+    if (pendingRemoteSlug.createTerminal) {
+      runTabOperation(() => openTab(target));
+      return;
+    }
     if (!isTerminalTabInWorktree(state, target, requestedEntryId)) return;
     runTabOperation(() => Promise.resolve(ensureTabForWorktree(target))
       .then(() => {
@@ -1569,7 +1574,7 @@ function WorkspaceApp({
           activateRemoteEntry(requestedEntryId);
         }
       }));
-  }, [activeProject.repoRoot, activeProject.target, activeProject.workspaceId, activateRemoteEntry, ensureTabForWorktree, pendingRemoteSlug, registeredProjectId, runTabOperation, state.worktrees, state.workspaceId, workspaceRestoreStatus]);
+  }, [activeProject.repoRoot, activeProject.target, activeProject.workspaceId, activateRemoteEntry, ensureTabForWorktree, openTab, pendingRemoteSlug, registeredProjectId, runTabOperation, state.worktrees, state.workspaceId, workspaceRestoreStatus]);
 
   const handleRemoteSelectionRequested = useCallback(
     (payload: RemoteSelectionRequestedPayload) => {
@@ -1577,6 +1582,7 @@ function WorkspaceApp({
       const targetProject = projectsRef.current.find((p) => p.workspaceId === payload.workspaceId);
       const isCurrentProject = activeProjectRef.current.workspaceId === payload.workspaceId;
       const requestedEntryId = payload.tabId ?? payload.activeTabId ?? null;
+      if (payload.createTerminal && (requestedEntryId || payload.sessionId)) return;
 
       if (payload.sessionId && !requestedEntryId) {
         if (!targetProject) return;
@@ -1596,7 +1602,7 @@ function WorkspaceApp({
 
       if (isCurrentProject) {
         if (!requestedEntryId) {
-          setPendingRemoteSlug({ workspaceId: payload.workspaceId, slug: payload.worktreeSlug ?? null });
+          setPendingRemoteSlug({ workspaceId: payload.workspaceId, slug: payload.worktreeSlug ?? null, createTerminal: payload.createTerminal });
           return;
         }
         const targetWorktree = payload.worktreeSlug
@@ -1627,6 +1633,7 @@ function WorkspaceApp({
           workspaceId: targetProject.workspaceId,
           slug: payload.worktreeSlug ?? null,
           tabId: requestedEntryId,
+          createTerminal: payload.createTerminal,
         });
       }
     },

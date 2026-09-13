@@ -967,6 +967,10 @@ async fn select_workspace(
         ));
     }
 
+    if payload.create_terminal && (payload.tab_id.is_some() || payload.session_id.is_some()) {
+        return Err((StatusCode::BAD_REQUEST, "Terminal creation cannot select an existing terminal".into()));
+    }
+
     let is_ssh = crate::ssh::projects::is_remote(&payload.workspace_id);
     if is_ssh {
         let projects = super::ssh::projects(&state).await.map_err(|_| {
@@ -1060,6 +1064,7 @@ async fn select_workspace(
 
     let event_payload = RemoteSelectionRequestPayload {
         workspace_id: payload.workspace_id,
+        create_terminal: payload.create_terminal,
         worktree: worktree_identity,
         worktree_slug,
         worktree_label,

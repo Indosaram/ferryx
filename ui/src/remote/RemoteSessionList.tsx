@@ -4,10 +4,12 @@ import {
   ChevronRight,
   GitBranch,
   LoaderCircle,
+  Plus,
   Terminal as TerminalIcon,
   X,
 } from "lucide-react";
 import React, { useMemo, type ReactNode } from "react";
+import { IconButton } from "../components/ui/IconButton";
 import { isMonochromeAgentLogo, resolveAgentLogo } from "../lib/agentIcon";
 
 export type RemoteTerminalTabInfo = {
@@ -355,6 +357,8 @@ type RemoteWorkspaceMirrorProps = {
   selectorOpen: boolean;
   onSelectorOpenChange: (open: boolean) => void;
   onSelect: (option: RemoteContextOption) => void;
+  onCreateTerminal?: () => void;
+  creationError?: string | null;
   children?: ReactNode;
 };
 
@@ -364,6 +368,8 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
   selectorOpen,
   onSelectorOpenChange,
   onSelect,
+  onCreateTerminal,
+  creationError,
   children,
 }) => {
   const groupedOptions = useMemo(() => {
@@ -377,9 +383,9 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
   }, [model.options]);
 
   return (
-    <div className="relative flex min-h-0 flex-1 flex-col bg-background">
+    <div className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-background">
       {selectorOpen ? (
-        <div className="absolute inset-x-2 top-1.5 z-20 rounded-lg border border-border bg-popover text-popover-foreground shadow-xl" role="dialog" aria-label="Workspace context">
+        <div className="absolute inset-x-2 top-1.5 z-20 flex max-h-full min-w-0 flex-col rounded-lg border border-border bg-popover text-popover-foreground shadow-xl" role="dialog" aria-label="Workspace context">
           <div className="flex items-center justify-between border-b border-border px-3 py-2">
             <div>
               <h2 className="text-sm font-semibold">Choose worktree</h2>
@@ -393,7 +399,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
               <X className="size-4" aria-hidden="true" />
             </button>
           </div>
-          <div className="max-h-96 overflow-y-auto p-2 scrollbar-sleek">
+          <div className="min-h-0 max-h-96 overflow-y-auto overflow-x-hidden p-2 scrollbar-sleek">
             {groupedOptions.length === 0 ? (
               <p className="px-3 py-6 text-center text-xs text-muted-foreground">
                 No selectable desktop contexts are available.
@@ -409,7 +415,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                 return (
                   <section key={workspaceId} className="mb-2 last:mb-0" aria-label={workspaceId}>
                     <div className="flex items-center justify-between px-2 py-1">
-                      <h3 className="text-xs font-semibold text-muted-foreground">{workspaceId}</h3>
+                      <h3 className="min-w-0 flex-1 truncate text-xs font-semibold text-muted-foreground" title={workspaceId}>{workspaceId}</h3>
                       {projectAttention === "working" ? (
                         <LoaderCircle
                           aria-hidden="true"
@@ -497,14 +503,14 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
         </div>
       ) : null}
 
-      {model.context.terminalTabs && model.context.terminalTabs.length > 0 ? (() => {
-        const tabs = model.context.terminalTabs;
+      {model.context.workspaceId || model.context.terminalTabs?.length ? (() => {
+        const tabs = model.context.terminalTabs ?? [];
         const activeIdx = tabs.findIndex((tab) => tab.id === model.context.activeTabId);
         const currentIndex = activeIdx >= 0 ? activeIdx : 0;
-        const currentOrdinal = currentIndex + 1;
+        const currentOrdinal = tabs.length ? currentIndex + 1 : 0;
 
         return (
-          <div className="flex items-center border-b border-border bg-card px-1.5 py-0.5">
+          <div className="flex min-w-0 shrink-0 items-center border-b border-border bg-card px-1.5 py-0.5">
             <div className="flex items-center gap-0.5 shrink-0 pr-1 border-r border-border">
               <button
                 type="button"
@@ -642,9 +648,15 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                 );
               })}
             </div>
+            {onCreateTerminal ? (
+              <IconButton label="New terminal tab" disabled={pending !== null || !model.context.workspaceId} onClick={onCreateTerminal}>
+                <Plus className="size-3.5" aria-hidden="true" />
+              </IconButton>
+            ) : null}
           </div>
         );
       })() : null}
+      {creationError ? <p role="alert" className="shrink-0 px-3 py-2 text-xs text-destructive">{creationError}</p> : null}
 
       <div className="flex min-h-0 flex-1 flex-col">
         {children ? (

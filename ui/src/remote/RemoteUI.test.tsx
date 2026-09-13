@@ -224,6 +224,81 @@ afterEach(() => {
 });
 
 describe("Remote UI Components", () => {
+  it("creates a terminal in an empty selected worktree and waits for desktop publication", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    vi.stubGlobal("WebSocket", EventWebSocket);
+    let snapshot: { activeContext: { workspaceId: string; worktreeSlug: string; worktreeLabel: string; activeTerminal: { sessionId: string; running: boolean } | null } } = { ...confirmedNoFocusState };
+    const request = vi.fn<typeof fetch>(async (_input, init) => {
+      if (init?.method === "POST") return jsonResponse({});
+      return jsonResponse(snapshot);
+    });
+    vi.stubGlobal("fetch", ticketed(request));
+    await act(async () => { render(<RemoteApp />); });
+    const button = screen.getByRole("button", { name: "New terminal tab" });
+    await act(async () => { fireEvent.click(button); });
+    expect(request).toHaveBeenCalledWith(expect.stringContaining("/api/v1/workspace/select"), expect.objectContaining({
+      method: "POST",
+      headers: expect.objectContaining({ Authorization: "Bearer test-token" }),
+      body: JSON.stringify({ workspaceId: "api-service", worktreeSlug: "feature/remote-safe", createTerminal: true }),
+    }));
+    expect(button).toBeDisabled();
+    expect(screen.queryByTestId("remote-terminal")).toBeNull();
+    snapshot = { ...confirmedNoFocusState, activeContext: { ...confirmedNoFocusState.activeContext, activeTerminal: { sessionId: "created-terminal", running: true } } };
+    await act(async () => {
+      eventSocket().onmessage?.(new MessageEvent("message", { data: JSON.stringify({ event: "remote_active_selection_changed", payload: snapshot.activeContext }) }));
+    });
+    expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "created-terminal");
+    expect(button).toBeEnabled();
+  });
+
+  it("does not confirm creation from an unchanged terminal and reports rejected requests", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    vi.stubGlobal("WebSocket", EventWebSocket);
+    const response = deferred<Response>();
+    const request = vi.fn<typeof fetch>(async (_input, init) => init?.method === "POST" ? response.promise : jsonResponse(focusedState));
+    vi.stubGlobal("fetch", ticketed(request));
+    await act(async () => { render(<RemoteApp />); });
+    const button = screen.getByRole("button", { name: "New terminal tab" });
+    await act(async () => { fireEvent.click(button); fireEvent.click(button); });
+    expect(request.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+    await act(async () => {
+      eventSocket().onmessage?.(new MessageEvent("message", { data: JSON.stringify({ event: "remote_active_selection_changed", payload: focusedState.activeContext }) }));
+    });
+    expect(button).toBeDisabled();
+    await act(async () => { response.resolve(jsonResponse({}, false)); });
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(button).toBeEnabled();
+    expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "focused-terminal");
+  });
+
+  it("shrinks the mobile shell on visual viewport resize without a screen-height minimum", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const viewport = Object.assign(new EventTarget(), { height: 720 });
+    vi.stubGlobal("visualViewport", viewport);
+    vi.stubGlobal("fetch", ticketed(vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(focusedState))));
+    await act(async () => { render(<RemoteApp />); });
+    const shell = screen.getByLabelText("Current desktop context").closest("header")?.parentElement;
+    expect(shell).toHaveStyle({ height: "720px" });
+    act(() => { viewport.height = 320; viewport.dispatchEvent(new Event("resize")); });
+    expect(shell).toHaveStyle({ height: "320px" });
+    expect(shell).not.toHaveClass("min-h-screen");
+  });
+
+  it("keeps long workspace identifiers within the vertical worktree picker", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const workspaceId = "workspace-" + "unbroken".repeat(40);
+    vi.stubGlobal("fetch", ticketed(vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      activeContext: { workspaceId, activeTerminal: null },
+      projects: [{ workspaceId, worktrees: [{ worktreeSlug: "feature", worktreeLabel: "long".repeat(100) }] }],
+    }))));
+    await act(async () => { render(<RemoteApp />); });
+    fireEvent.click(screen.getByRole("button", { name: "Change workspace context" }));
+    const dialog = screen.getByRole("dialog", { name: "Workspace context" });
+    expect(dialog.querySelector(".overflow-y-auto")).toHaveClass("overflow-x-hidden", "min-h-0");
+    expect(within(dialog).getByRole("heading", { name: workspaceId })).toHaveClass("min-w-0", "truncate");
+    expect(screen.getByRole("button", { name: "New terminal tab" })).toBeEnabled();
+  });
+
   it("PairingPage renders the Ferryx Desktop PIN flow", () => {
     render(<PairingPage onPaired={vi.fn()} />);
 
