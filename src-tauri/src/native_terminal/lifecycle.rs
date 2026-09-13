@@ -26,6 +26,7 @@ pub fn create_native_terminal(
         return Err(NativeTerminalError::InvalidDimensions(cols, rows));
     }
 
+    super::png_decoder::install()?;
     let mut raw_term: GhosttyTerminal = std::ptr::null_mut();
 
     // SAFETY: Category: Foreign Handle Allocation.
@@ -38,6 +39,18 @@ pub fn create_native_terminal(
             "ghostty_terminal_new returned null pointer despite success status".to_string(),
         )
     })?;
+
+    let image_limit = super::png_decoder::IMAGE_LIMIT as u64;
+    // SAFETY: The live terminal copies this u64 option synchronously. File,
+    // temporary-file and shared-memory media remain disabled by default.
+    let result = unsafe {
+        ghostty_terminal_set(non_null.as_ptr(), super::sys::kitty::STORAGE_LIMIT,
+            (&image_limit as *const u64).cast())
+    };
+    if let Err(error) = NativeTerminalError::from_c_result(result, "set(KittyImageStorageLimit)") {
+        unsafe { ghostty_terminal_free(non_null.as_ptr()) };
+        return Err(error);
+    }
 
     let context = Box::new(TerminalContext {
         bell_counter: AtomicU64::new(0),

@@ -68,6 +68,7 @@ fn build_attribute_snapshot() -> RenderSnapshot {
 
     RenderSnapshot {
         cols,
+        images: Vec::new(),
         rows,
         cursor: CursorSnapshot {
             x: 0,

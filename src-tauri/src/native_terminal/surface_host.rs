@@ -3795,6 +3795,7 @@ mod tests {
 
     fn preedit_test_snapshot(cols: u16, rows: u16, cursor_x: u16, cursor_y: u16) -> RenderSnapshot {
         RenderSnapshot {
+            images: Vec::new(),
             cols,
             rows,
             cursor: super::super::cursor::CursorSnapshot {

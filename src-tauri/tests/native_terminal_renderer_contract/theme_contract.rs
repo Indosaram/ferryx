@@ -45,6 +45,7 @@ fn make_test_snapshot(cols: u16, rows: u16, text: &str) -> RenderSnapshot {
 
     RenderSnapshot {
         cols,
+        images: Vec::new(),
         rows,
         cursor: CursorSnapshot {
             x: 0,

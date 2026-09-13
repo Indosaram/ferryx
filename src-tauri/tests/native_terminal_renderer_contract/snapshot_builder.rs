@@ -200,6 +200,7 @@ pub fn build_test_snapshot() -> RenderSnapshot {
 
     RenderSnapshot {
         cols,
+        images: Vec::new(),
         rows,
         cursor: CursorSnapshot {
             x: 10,

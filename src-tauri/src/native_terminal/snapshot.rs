@@ -100,6 +100,9 @@ pub struct RenderSnapshot {
     pub rows: u16,
     pub cursor: CursorSnapshot,
     pub grid: Vec<Vec<CellSnapshot>>,
+    /// Native-only image placements. The remote text snapshot wire stays unchanged.
+    #[serde(skip)]
+    pub images: Vec<super::images::ImagePlacementSnapshot>,
 }
 
 impl RenderSnapshot {

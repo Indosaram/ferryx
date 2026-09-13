@@ -83,6 +83,7 @@ fn canonical_scenario() -> (RenderSnapshot, SelectionSnapshot) {
     (
         RenderSnapshot {
             cols,
+            images: Vec::new(),
             rows,
             cursor: CursorSnapshot {
                 x: 10,

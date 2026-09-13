@@ -162,6 +162,12 @@ impl PtyManager {
         // COLORTERM instead, and degrade to a reduced palette when it is missing.
         cmd.env("COLORTERM", "truecolor");
 
+        // Pi/Senpi otherwise disables images for an unknown TERM_PROGRAM.
+        #[cfg(feature = "native-terminal")]
+        if cmd.get_env("PI_IMAGE_PROTOCOL").is_none() {
+            cmd.env("PI_IMAGE_PROTOCOL", "kitty");
+        }
+
         let pty_size = PtySize {
             rows,
             cols,

@@ -73,6 +73,7 @@ pub fn canonical_scenario() -> (RenderSnapshot, SelectionSnapshot) {
     (
         RenderSnapshot {
             cols: 80,
+            images: Vec::new(),
             rows: 24,
             cursor: CursorSnapshot {
                 x: 10,
@@ -96,6 +97,7 @@ pub fn canonical_scenario() -> (RenderSnapshot, SelectionSnapshot) {
 pub fn single_cell_scenario(cell: CellSnapshot) -> RenderSnapshot {
     RenderSnapshot {
         cols: 1,
+        images: Vec::new(),
         rows: 1,
         cursor: CursorSnapshot {
             x: 0,

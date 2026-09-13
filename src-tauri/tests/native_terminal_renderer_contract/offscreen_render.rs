@@ -66,6 +66,7 @@ fn test_dense_scale_2_working_set_pixel_readback_integrity() {
         }
         RenderSnapshot {
             cols: 80,
+            images: Vec::new(),
             rows,
             grid,
             cursor: CursorSnapshot {
@@ -178,6 +179,7 @@ fn test_glyph_pixels_blend_once_and_leave_uncovered_pixels_as_cell_background() 
     };
     let snapshot = RenderSnapshot {
         cols: 1,
+        images: Vec::new(),
         rows: 1,
         cursor: CursorSnapshot {
             x: 0,
@@ -427,6 +429,7 @@ fn test_render_snapshot_offscreen_frame_with_color_emoji() {
 
     let snapshot = RenderSnapshot {
         cols,
+        images: Vec::new(),
         rows,
         cursor: ferryx_lib::native_terminal::CursorSnapshot {
             x: 0,

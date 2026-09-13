@@ -115,6 +115,7 @@ pub struct NativeTerminal {
     handle: NonNull<GhosttyTerminalImpl>,
     context: Box<TerminalContext>,
     gesture: SelectionGestureGuard,
+    image_cache: std::cell::RefCell<super::images::ImageCache>,
     synchronized_output_deadline: Option<tokio::time::Instant>,
 }
 
@@ -145,6 +146,7 @@ impl NativeTerminal {
             handle,
             context,
             gesture,
+            image_cache: Default::default(),
             synchronized_output_deadline: None,
         })
     }
@@ -475,7 +477,9 @@ impl TerminalEngine for NativeTerminal {
     }
 
     fn render_snapshot(&self) -> Result<RenderSnapshot, NativeTerminalError> {
-        capture_render_snapshot(self.handle.as_ptr())
+        let mut snapshot = capture_render_snapshot(self.handle.as_ptr())?;
+        snapshot.images = self.image_cache.borrow_mut().capture(self.handle.as_ptr())?;
+        Ok(snapshot)
     }
 
     fn encode_key(&self, event: &KeyEvent) -> Result<Vec<u8>, NativeTerminalError> {

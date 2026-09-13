@@ -189,6 +189,7 @@ pub fn capture_render_snapshot(
     }
 
     Ok(RenderSnapshot {
+        images: Vec::new(),
         cols,
         rows,
         cursor,

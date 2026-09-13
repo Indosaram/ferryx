@@ -2,4 +2,5 @@
 
 pub mod constants;
 pub mod ffi;
+pub mod kitty;
 pub mod types;

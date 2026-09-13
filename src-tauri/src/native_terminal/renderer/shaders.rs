@@ -97,7 +97,10 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    if in.is_color > 0.5 {
+    if in.is_color > 1.5 {
+        // Kitty pixels are straight-alpha, unlike premultiplied emoji rasters.
+        return textureSample(color_tex, atlas_sampler, in.uv);
+    } else if in.is_color > 0.5 {
         let c = textureSample(color_tex, atlas_sampler, in.uv);
         if c.a > 0.001 {
             return vec4<f32>(c.rgb / c.a, c.a);
