@@ -1241,23 +1241,50 @@ async fn while_device_authorized<T>(
 }
 
 async fn handle_events_socket(
-    mut socket: WebSocket,
+    socket: WebSocket,
     mut rx: broadcast::Receiver<String>,
     active_selection: Option<RemoteActiveDesktopSelection>,
 ) {
+    let (mut sender, mut receiver) = socket.split();
     if let Some(selection) = active_selection {
         let snapshot = serde_json::to_string(&RemoteEventMessage {
             event: REMOTE_ACTIVE_SELECTION_CHANGED_EVENT.to_string(),
             payload: serde_json::to_value(selection).unwrap_or(serde_json::Value::Null),
         })
         .unwrap_or_default();
-        if socket.send(Message::Text(snapshot.into())).await.is_err() {
+        if sender.send(Message::Text(snapshot.into())).await.is_err() {
             return;
         }
     }
-    while let Ok(msg) = rx.recv().await {
-        if socket.send(Message::Text(msg.into())).await.is_err() {
-            break;
+    loop {
+        tokio::select! {
+            biased;
+            // The client half is polled too: a send-only loop cannot observe a
+            // closed socket while no events are flowing, which would leak the
+            // task, receiver, and authorization watcher until the next event.
+            incoming = receiver.next() => {
+                match incoming {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Ping(payload))) => {
+                        if sender.send(Message::Pong(payload)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) => break,
+                }
+            }
+            msg = rx.recv() => {
+                match msg {
+                    Ok(msg) => {
+                        if sender.send(Message::Text(msg.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
         }
     }
 }
@@ -2125,7 +2152,9 @@ async fn push_subscribe(
         .auth_manager
         .validate_token(&token)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
-    global_push_store().subscribe(payload);
+    global_push_store()
+        .subscribe(payload)
+        .map_err(|message| (StatusCode::PAYLOAD_TOO_LARGE, message))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
