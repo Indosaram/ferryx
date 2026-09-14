@@ -1,6 +1,6 @@
 [package]
 name = "ferryx"
-version = "2026.908.1"
+version = "2026.915.1"
 description = "Ultra-lightweight workspace & AI agent launcher (Tauri v2 + Rust)"
 authors = ["Ferryx Contributors"]
 license = "SUL-1.0"
@@ -47,6 +47,7 @@ tauri-build = { version = "2", features = [] }
 
 [features]
 default = ["native-terminal"]
+# Native GPU presentation is optional; real libghostty-vt parsing is always built.
 native-terminal = [
     "dep:wgpu",
     "dep:raw-window-handle",
@@ -62,7 +63,7 @@ serde_json = "1.0"
 regex = "1"
 toml = "0.9"
 tokio = { version = "1.53", features = ["full"] }
-portable-pty = "0.9"
+portable-pty = { version = "0.9", path = "vendor/portable-pty" }
 base64 = "0.23"
 libc = "0.2"
 anyhow = "1.0"
