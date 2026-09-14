@@ -1774,12 +1774,39 @@ mod tests {
         let config_path = dir.path().join("remote-config.json");
         let auth_path = dir.path().join("remote-auth.json");
 
+        // Pairing from Off now auto-configures Relay. Use the real relay protocol
+        // locally so persistence coverage never depends on the production service.
+        let relay_state = remote::relay_server::RelayState::new_with_key_store(
+            vec![],
+            dir.path().join("relay-keys.json"),
+        )
+        .expect("relay state");
+        let relay_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("relay listener");
+        let relay_url = format!("http://{}", relay_listener.local_addr().unwrap());
+        let relay_task = tokio::spawn(async move {
+            axum::serve(
+                relay_listener,
+                remote::relay_server::relay_router(relay_state)
+                    .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .expect("serve relay");
+        });
+
         let socket_path = dir.path().join("daemon1.sock");
         let listener = tokio::net::UnixListener::bind(&socket_path).expect("bind 1");
         let server = Arc::new(crate::daemon::server::DaemonServer::new_with_paths(
             Some(config_path.clone()),
             Some(auth_path.clone()),
         ));
+        {
+            let mut config = server.remote_state().config.write();
+            assert_eq!(config.mode, remote::RemoteNetworkMode::Off);
+            config.port = 0;
+            config.relay_url = Some(relay_url.clone());
+        }
         let server_clone = Arc::clone(&server);
         let server_task = tokio::spawn(async move {
             loop {
@@ -1796,13 +1823,22 @@ mod tests {
         });
 
         let client = Arc::new(DaemonClient::new_with_socket(socket_path));
-        let code = client
-            .remote_create_pairing_code(Some(DevicePermission::Control))
+        let (code, pairing_token, machine_id, effective_relay_url) = client
+            .remote_create_pairing_code_detailed(Some(DevicePermission::Control))
             .await
             .expect("create code");
         assert_eq!(code.len(), 6);
+        assert!(pairing_token.is_some());
+        assert!(machine_id.is_some());
+        assert_eq!(effective_relay_url, Some(relay_url.clone()));
+        let status = client.remote_get_status().await.expect("configured status");
+        assert_eq!(status.mode, remote::RemoteNetworkMode::Relay);
+        assert!(status.is_running);
         let devices = client.remote_list_devices().await.expect("list devices");
         assert_eq!(devices.len(), 0);
+        let (_, paired_device) = server.remote_state().auth_manager
+            .exchange_pairing_code(&code, "Phone")
+            .expect("pair");
         server_task.abort();
 
         let socket_path2 = dir.path().join("daemon2.sock");
@@ -1828,10 +1864,17 @@ mod tests {
 
         let client2 = Arc::new(DaemonClient::new_with_socket(socket_path2));
         let status = client2.remote_get_status().await.expect("status");
-        assert_eq!(status.mode, remote::RemoteNetworkMode::Off);
+        // Construction restores configuration and paired devices, but does not
+        // start a listener; daemon startup owns listener restoration.
+        assert_eq!(status.mode, remote::RemoteNetworkMode::Relay);
         assert!(!status.is_running);
         assert!(status.bound_address.is_none());
+        assert_eq!(server2.remote_state().config.read().relay_url, Some(relay_url));
+        let devices = client2.remote_list_devices().await.expect("persisted devices");
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].id, paired_device.id);
         server_task2.abort();
+        relay_task.abort();
     }
 }
 

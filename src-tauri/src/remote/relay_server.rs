@@ -405,7 +405,24 @@ impl RelayState {
         if let Some(path) = &self.inner.key_store_path {
             // Another relay process may have enrolled machines since this one loaded the
             // store. Writing our in-memory snapshot would silently drop their records, so
-            // re-read and merge under our lock before persisting.
+            // re-read and merge under a cross-process transaction lock before persisting.
+            // The publication helper uses a separate .lock sidecar; keeping this
+            // .tx.lock file open covers both the reload and atomic publication.
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| format!("Failed to create machine ownership directory: {error}"))?;
+            }
+            let mut options = std::fs::OpenOptions::new();
+            options.create(true).truncate(false).read(true).write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                options.mode(0o600);
+            }
+            let transaction = options.open(path.with_extension("tx.lock"))
+                .map_err(|error| format!("Failed to open machine ownership transaction: {error}"))?;
+            transaction.lock()
+                .map_err(|error| format!("Failed to lock machine ownership transaction: {error}"))?;
             #[cfg(test)]
             tests::probe_enrollment_transaction(path, "read");
             match std::fs::read(path) {

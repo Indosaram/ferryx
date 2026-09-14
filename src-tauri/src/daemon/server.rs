@@ -2142,10 +2142,14 @@ impl DaemonServer {
                             None => {
                                 match self.remote_state.auth_manager.create_scoped_pairing_code(perm, scope) {
                                     Ok(code) => {
-                                        let machine_id = crate::remote::auth::canonical_identity_dir()
-                                            .ok()
-                                            .and_then(|dir| crate::remote::auth::load_or_generate_machine_identity(&dir).ok())
-                                            .map(|id| id.machine_id);
+                                        let machine_id = if scope == crate::remote::auth::DeviceAccessScope::Machine {
+                                            crate::remote::auth::canonical_identity_dir()
+                                                .ok()
+                                                .and_then(|dir| crate::remote::auth::load_or_generate_machine_identity(&dir).ok())
+                                                .map(|id| id.machine_id)
+                                        } else {
+                                            None
+                                        };
                                         DaemonResponse::RemotePairingCodeOk {
                                             code,
                                             pairing_token: None,
@@ -3926,59 +3930,97 @@ mod tests {
 
     #[tokio::test]
     async fn test_remote_create_pairing_code_fresh_off_auto_configures_relay() {
-        let server = Arc::new(DaemonServer::new());
+        use crate::remote::auth::DeviceAccessScope;
 
-        // Fresh server: mode is Off, relay_url is None
-        assert_eq!(server.remote_state.config.read().mode, RemoteNetworkMode::Off);
-        assert_eq!(server.remote_state.config.read().relay_url, None);
-
-        let (client_stream, server_stream) = UnixStream::pair().expect("unix pair");
-        let server_clone = Arc::clone(&server);
-        let server_task = tokio::spawn(async move {
-            server_clone.handle_client(server_stream).await;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let relay_state = crate::remote::relay_server::RelayState::new_with_key_store(
+            vec![],
+            temp_dir.path().join("keys.json"),
+        )
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_url = format!("http://{}", listener.local_addr().unwrap());
+        let relay_task = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                crate::remote::relay_server::relay_router(relay_state)
+                    .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .expect("serve relay");
         });
 
-        let (read_half, mut write_half) = client_stream.into_split();
-        let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
+        for (pair_req, scope) in [
+            (
+                DaemonRequest::RemoteCreatePairingCode {
+                    permission: Some(DevicePermission::Control),
+                },
+                DeviceAccessScope::Mirror,
+            ),
+            (
+                DaemonRequest::RemoteCreateMachinePairingCode,
+                DeviceAccessScope::Machine,
+            ),
+        ] {
+            let server = Arc::new(DaemonServer::new());
+            assert_eq!(
+                server.remote_state.config.read().mode,
+                RemoteNetworkMode::Off
+            );
+            // Only substitute the relay endpoint; pairing must start the gateway.
+            server.remote_state.config.write().relay_url = Some(relay_url.clone());
+            server.remote_state.config.write().port = 0;
 
-        let pair_req = DaemonRequest::RemoteCreatePairingCode {
-            permission: Some(DevicePermission::Control),
-        };
-        let mut json = serde_json::to_string(&pair_req).unwrap();
-        json.push('\n');
-        write_half.write_all(json.as_bytes()).await.unwrap();
+            let (client_stream, server_stream) = UnixStream::pair().expect("unix pair");
+            let server_clone = Arc::clone(&server);
+            let server_task = tokio::spawn(async move {
+                server_clone.handle_client(server_stream).await;
+            });
 
-        reader.read_line(&mut line).await.unwrap();
-        let resp: DaemonResponse = serde_json::from_str(line.trim()).unwrap();
+            let (read_half, mut write_half) = client_stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
 
-        // Auto-configuration must have switched mode to Relay and set DEFAULT_RELAY_URL
-        assert_eq!(server.remote_state.config.read().mode, RemoteNetworkMode::Relay);
-        assert_eq!(
-            server.remote_state.config.read().relay_url,
-            Some(crate::remote::relay_server::DEFAULT_RELAY_URL.to_string())
-        );
+            let mut json = serde_json::to_string(&pair_req).unwrap();
+            json.push('\n');
+            write_half.write_all(json.as_bytes()).await.unwrap();
 
-        // Response must NEVER be a local-only PIN (pairing_token == None)
-        match resp {
-            DaemonResponse::RemotePairingCodeOk { pairing_token, relay_url, .. } => {
-                assert!(pairing_token.is_some(), "must not be a local-only PIN");
-                assert_eq!(
-                    relay_url,
-                    Some(crate::remote::relay_server::DEFAULT_RELAY_URL.to_string())
-                );
+            reader.read_line(&mut line).await.unwrap();
+            let resp: DaemonResponse = serde_json::from_str(line.trim()).unwrap();
+
+            assert_eq!(
+                server.remote_state.config.read().mode,
+                RemoteNetworkMode::Relay
+            );
+            assert_eq!(
+                server.remote_state.config.read().relay_url,
+                Some(relay_url.clone())
+            );
+
+            match resp {
+                DaemonResponse::RemotePairingCodeOk {
+                    code,
+                    pairing_token,
+                    machine_id,
+                    relay_url: effective_url,
+                } => {
+                    assert!(pairing_token.is_some(), "must not be a local-only PIN");
+                    assert!(machine_id.is_some());
+                    assert_eq!(effective_url, Some(relay_url.clone()));
+                    let (_, device) = server
+                        .remote_state
+                        .auth_manager
+                        .exchange_pairing_code(&code, "Paired device")
+                        .expect("pair");
+                    assert_eq!(device.access_scope, scope);
+                }
+                other => panic!("Expected RemotePairingCodeOk, got {other:?}"),
             }
-            DaemonResponse::Error { message } => {
-                assert!(
-                    message.contains("Relay is unreachable") || message.contains("registration failed"),
-                    "unexpected error message: {message}"
-                );
-            }
-            other => panic!("Expected RemotePairingCodeOk with token or Error, got {other:?}"),
+
+            drop(write_half);
+            server_task.await.expect("client task");
         }
-
-        drop(write_half);
-        let _ = server_task.await;
+        relay_task.abort();
     }
 
     #[tokio::test]
@@ -4019,6 +4061,8 @@ mod tests {
                 }
                 other => panic!("Expected RemotePairingCodeOk for mode {mode:?}, got {other:?}"),
             }
+            assert_eq!(server.remote_state.config.read().mode, mode);
+            assert_eq!(server.remote_state.config.read().relay_url, None);
 
             drop(write_half);
             let _ = server_task.await;

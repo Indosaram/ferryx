@@ -220,12 +220,13 @@ pub(crate) async fn owner_mutation(state: Arc<RemoteGatewayState>, workspace: St
         let path = match manager.worktree_path_for(&id.ws_id, &id.slug) { Ok(path) => path, Err(error) => return Ok(typed(error)) };
         if let Some((delete_branch, destructive)) = delete {
             // Preserve the preexisting registry's identity-missing error details.
-            match manager.find_worktree_by_slug(&id.ws_id, &id.slug) {
+            // Deletion accepts a jailed prunable record even when its checkout
+            // is missing; ordinary lookup deliberately excludes those records.
+            match manager.deletion_record(&path) {
+                Err(WorktreeError::WorktreeNotFound { .. }) => return Ok(typed(WorktreeError::WorktreeIdentityNotFound { workspace_id: workspace, ws_id: id.ws_id, slug: id.slug })),
                 Err(error) => return Ok(typed(error)),
-                Ok(None) => return Ok(typed(WorktreeError::WorktreeIdentityNotFound { workspace_id: workspace, ws_id: id.ws_id, slug: id.slug })),
-                Ok(Some(_)) => {}
+                Ok(_) => {}
             }
-            if let Err(error) = manager.canonical_allowed_path(&path) { return Ok(typed(error)); }
             // Porcelain listing retains lock/prunable metadata that inspecting
             // the worktree's HEAD alone does not provide.
             let row = rows(&workspace, &manager)?.into_iter()

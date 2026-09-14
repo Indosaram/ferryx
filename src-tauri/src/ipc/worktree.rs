@@ -333,6 +333,48 @@ mod deletion_repair_tests {
         (dir, registry, identity, wt)
     }
 
+    async fn deletion_daemon(
+        root: &std::path::Path,
+        registry: &WorkspaceRegistry,
+    ) -> (Arc<DaemonClient>, tokio::sync::oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+        let owner = Arc::new(crate::daemon::server::DaemonServer::new_with_paths(
+            Some(root.join("config.json")),
+            Some(root.join("auth.json")),
+        ));
+        owner.remote_state().machine_services.as_ref().unwrap().workspaces
+            .register("repair", registry.manager("repair").unwrap().repo_root().to_str().unwrap())
+            .unwrap();
+        let socket = root.join("repair.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let (stop, mut stopped) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let mut clients = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    _ = &mut stopped => break,
+                    accepted = listener.accept() => {
+                        let (stream, _) = accepted.unwrap();
+                        clients.spawn(owner.clone().handle_client(stream));
+                    }
+                }
+            }
+            clients.shutdown().await;
+        });
+        (Arc::new(DaemonClient::new_with_socket(socket)), stop, task)
+    }
+
+    async fn stop_deletion_daemon(stop: tokio::sync::oneshot::Sender<()>, mut task: tokio::task::JoinHandle<()>) {
+        stop.send(()).unwrap();
+        match tokio::time::timeout(std::time::Duration::from_secs(10), &mut task).await {
+            Ok(result) => result.unwrap(),
+            Err(_) => {
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+                panic!("deletion daemon failed to stop");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn deletion_repair_preview_reports_current_dirty_and_unmerged_loss() {
         let (_dir, registry, identity, wt) = fixture();
@@ -392,7 +434,9 @@ mod deletion_repair_tests {
         for path in [&wt.path, &other, &outside] {
             std::fs::remove_dir_all(path).unwrap();
         }
+        let (client, stop, daemon) = deletion_daemon(_dir.path(), &registry).await;
         let app = tauri::test::mock_builder()
+            .manage(client)
             .manage(registry)
             .manage(WorktreeDiskScans::default())
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
@@ -433,6 +477,7 @@ mod deletion_repair_tests {
             .find_worktree_by_slug("repair", "other")
             .unwrap()
             .is_none());
+        stop_deletion_daemon(stop, daemon).await;
     }
 
     #[tokio::test]
@@ -450,7 +495,9 @@ mod deletion_repair_tests {
         let (initial, _) = scans.begin("repair", false);
         scans.finish("repair", &initial.scan_id, Ok(vec![row.clone()]));
         let (worker, _) = scans.begin("repair", true);
+        let (client, stop, daemon) = deletion_daemon(_dir.path(), &registry).await;
         let app = tauri::test::mock_builder()
+            .manage(client)
             .manage(registry)
             .manage(scans.clone())
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
@@ -488,5 +535,6 @@ mod deletion_repair_tests {
         assert!(scans.result("repair").unwrap().rows.is_empty());
         let (cached, _) = scans.begin("repair", false);
         assert!(cached.rows.is_empty(), "reopen must not return deleted row");
+        stop_deletion_daemon(stop, daemon).await;
     }
 }

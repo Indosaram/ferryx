@@ -1,6 +1,6 @@
 use crate::worktree::git::{
     git_branch_delete, git_branch_is_ancestor_of_head, git_status_porcelain, git_worktree_add,
-    git_worktree_list, git_worktree_remove, inspect_worktree, run_git,
+    git_worktree_list, git_worktree_prune, git_worktree_remove, inspect_worktree, run_git,
 };
 use crate::worktree::model::{
     BranchDeletionPreview, CreateWorktreeOptions, DirtyState, OrcaWorktreeInfo, Worktree,
@@ -698,8 +698,28 @@ impl WorktreeManager {
         git_worktree_remove(&self.repo_root, &canonical, force)?;
         self.dirty_snapshots.lock().remove(&canonical);
         self.bump_revision();
-        // Git remove targets this record; global prune would affect other records.
-        Ok(missing)
+        // Missing-checkout repair is targeted: leave other stale records alone.
+        // Ordinary deletion retains the metadata-cleanup followthrough contract.
+        if !missing {
+            #[cfg(test)]
+            PRUNE_PROBE.with(|probe| {
+                if let Some(probe) = probe.borrow().as_ref() {
+                    probe(&self.repo_root, true);
+                }
+            });
+            let prune = git_worktree_prune(&self.repo_root);
+            #[cfg(test)]
+            PRUNE_PROBE.with(|probe| {
+                if let Some(probe) = probe.borrow_mut().take() {
+                    probe(&self.repo_root, false);
+                }
+            });
+            prune.map_err(|source| WorktreeError::WorktreeRemovedPruneFailed {
+                path: canonical,
+                source: Box::new(source),
+            })?;
+        }
+        Ok(true)
     }
 
     pub fn remove_worktree(&self, worktree_path: &Path, force: bool) -> Result<(), WorktreeError> {

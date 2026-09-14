@@ -1369,7 +1369,11 @@ async fn ws_terminal_handler(
                 ));
             }
         }
-    } else if !is_session_valid {
+    } else if !is_session_valid
+        || state.terminal_service.remote().details(&session_id).is_some()
+    {
+        // Local headless sessions remain attachable, but an SSH terminal must
+        // first be exposed through the desktop selection before mirror access.
         return Err((
             StatusCode::FORBIDDEN,
             "Forbidden: session is not the active desktop session".into(),
