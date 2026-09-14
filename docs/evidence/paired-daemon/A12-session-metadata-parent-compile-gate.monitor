@@ -1,0 +1,4 @@
+owner=17809 command=cargo check --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib --tests 
+  PID  PPID    RSS ELAPSED COMMAND
+17809 17806    688   00:00 cargo check --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib --tests
+exit=101 owner_reaped=true

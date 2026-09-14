@@ -1,0 +1,53 @@
+   Compiling scopeguard v1.2.0
+   Compiling anyhow v1.0.104
+   Compiling winreg v0.10.1
+   Compiling smallvec v1.16.1
+   Compiling lock_api v0.4.14
+   Compiling lazy_static v1.5.0
+   Compiling bitflags v2.13.2
+   Compiling pin-project-lite v0.2.17
+   Compiling shared_library v0.1.9
+   Compiling windows-targets v0.52.6
+   Compiling filedescriptor v0.8.3
+   Compiling parking_lot v0.12.5
+   Compiling tokio-macros v2.7.2
+   Compiling futures-macro v0.3.34
+   Compiling mio v1.2.3
+   Compiling serial2 v0.2.38
+   Compiling socket2 v0.6.5
+   Compiling log v0.4.34
+   Compiling shell-words v1.1.1
+   Compiling bitflags v1.3.2
+   Compiling slab v0.4.12
+   Compiling downcast-rs v1.2.1
+   Compiling futures-core v0.3.34
+   Compiling bytes v1.12.1
+   Compiling futures-task v0.3.34
+   Compiling futures-util v0.3.34
+   Compiling tokio v1.53.1
+   Compiling portable-pty v0.9.0 (C:\Users\sook\ferryx-a10-input-01a0983c\src-tauri\vendor\portable-pty)
+   Compiling windows-sys v0.59.0
+   Compiling ferryx-pty-input-native-proof v0.1.0 (C:\Users\sook\ferryx-a10-input-01a0983c\src-tauri\tests\pty-input-native)
+error[E0433]: cannot find module or crate `serde` in this scope
+  --> ..\..\src\terminal\session.rs:23:45
+   |
+23 | #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+   |                                             ^^^^^ use of unresolved module or unlinked crate `serde`
+
+error[E0433]: cannot find module or crate `serde` in this scope
+  --> ..\..\src\terminal\session.rs:23:63
+   |
+23 | #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+   |                                                               ^^^^^ use of unresolved module or unlinked crate `serde`
+
+error: cannot find attribute `serde` in this scope
+  --> ..\..\src\terminal\session.rs:24:3
+   |
+24 | #[serde(rename_all = "camelCase")]
+   |   ^^^^^
+
+For more information about this error, try `rustc --explain E0433`.
+error: could not compile `ferryx-pty-input-native-proof` (test "native") due to 3 previous errors
+EXIT=101
+#< CLIXML
+<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="progress" RefId="0"><TN RefId="0"><T>System.Management.Automation.PSCustomObject</T><T>System.Object</T></TN><MS><I64 N="SourceId">1</I64><PR N="Record"><AV>Preparing modules for first use.</AV><AI>0</AI><Nil /><PI>-1</PI><PC>-1</PC><T>Completed</T><SR>-1</SR><SD> </SD></PR></MS></Obj><Obj S="progress" RefId="1"><TNRef RefId="0" /><MS><I64 N="SourceId">1</I64><PR N="Record"><AV>Preparing modules for first use.</AV><AI>0</AI><Nil /><PI>-1</PI><PC>-1</PC><T>Completed</T><SR>-1</SR><SD> </SD></PR></MS></Obj></Objs>

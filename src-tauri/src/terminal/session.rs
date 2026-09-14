@@ -7,6 +7,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+#[cfg(windows)]
+#[path = "windows_input.rs"]
+pub(crate) mod windows_input;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PtySessionState {
@@ -26,6 +29,10 @@ pub enum TerminalSignal {
 }
 
 pub(crate) struct PtySessionConfig {
+    #[cfg(windows)]
+    pub input: windows_input::WindowsInput,
+    #[cfg(unix)]
+    pub input: tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>,
     pub id: String,
     pub master: Box<dyn MasterPty + Send>,
     pub child: Box<dyn Child + Send + Sync>,
@@ -44,6 +51,11 @@ pub(crate) struct PtySessionConfig {
 }
 
 pub struct PtySession {
+    #[cfg(windows)]
+    input: windows_input::WindowsInput,
+    #[cfg(unix)]
+    input: tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>,
+    input_gate: tokio::sync::Mutex<()>,
     pub id: String,
     master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
     writer: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
@@ -67,6 +79,11 @@ impl PtySession {
             .expect("output sender must exist while starting reader")
             .clone();
         let reader = config.reader;
+        #[cfg(unix)]
+        let reader_poll = {
+            use std::os::fd::AsFd;
+            config.input.get_ref().as_fd().try_clone_to_owned().expect("duplicate PTY poll descriptor")
+        };
         let metrics_session_id = config.id.clone();
         let reader_finished = Arc::new(AtomicBool::new(false));
         let reader_finished_task = Arc::clone(&reader_finished);
@@ -83,6 +100,12 @@ impl PtySession {
                         }
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    #[cfg(unix)]
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        use std::os::fd::AsRawFd;
+                        let mut poll = libc::pollfd { fd: reader_poll.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+                        if unsafe { libc::poll(&mut poll, 1, -1) } < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted { break; }
+                    }
                     Err(_) => break,
                 }
             }
@@ -90,6 +113,8 @@ impl PtySession {
         });
 
         Self {
+            input: config.input,
+            input_gate: tokio::sync::Mutex::new(()),
             id: config.id,
             master: Arc::new(Mutex::new(Some(config.master))),
             writer: Arc::new(Mutex::new(Some(config.writer))),
@@ -179,13 +204,90 @@ impl PtySession {
         let writer = writer
             .as_mut()
             .ok_or_else(|| PtyError::IoError("PTY writer is closed".into()))?;
-        writer
-            .write_all(data)
-            .map_err(|e| PtyError::IoError(format!("Write failed: {e}")))?;
+        let mut remaining = data;
+        while !remaining.is_empty() {
+            match writer.write(remaining) {
+                Ok(0) => return Err(PtyError::IoError("PTY write returned zero".into())),
+                Ok(n) => remaining = &remaining[n..],
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                #[cfg(unix)]
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    use std::os::fd::AsRawFd;
+                    let mut poll = libc::pollfd { fd: self.input.get_ref().as_raw_fd(), events: libc::POLLOUT, revents: 0 };
+                    if unsafe { libc::poll(&mut poll, 1, -1) } < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+                        return Err(PtyError::IoError(std::io::Error::last_os_error().to_string()));
+                    }
+                }
+                Err(e) => return Err(PtyError::IoError(format!("Write failed: {e}"))),
+            }
+        }
         writer
             .flush()
             .map_err(|e| PtyError::IoError(format!("Flush failed: {e}")))?;
         Ok(())
+    }
+
+    /// Cancellation drops the pending readiness future: no worker owns bytes.
+    /// Bytes accepted before cancellation cannot be withdrawn from the kernel.
+    /// A partial failure must never be retried as a complete frame.
+    #[cfg(unix)]
+    pub async fn write_input_cancellable(&self, data: &[u8]) -> Result<(), PtyError> {
+        use std::os::fd::AsRawFd;
+        if data.len() > 65536 { return Err(PtyError::IoError("PTY_INPUT_TOO_LARGE".into())); }
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let _gate = self.input_gate.lock().await;
+            let mut remaining = data;
+            while !remaining.is_empty() {
+                let mut ready = self.input.writable().await.map_err(|e| PtyError::IoError(e.to_string()))?;
+                // Do not wait behind a synchronous legacy writer or closed I/O.
+                let writer = self.writer.try_lock().ok_or_else(|| PtyError::IoError("PTY_INPUT_BUSY".into()))?;
+                if writer.is_none() { return Err(PtyError::IoError("PTY_INPUT_CLOSED".into())); }
+                let state=self.state.lock();
+                if !matches!(*state,PtySessionState::Starting | PtySessionState::Running) { return Err(PtyError::IoError("PTY_INPUT_CLOSED".into())); }
+                let result = ready.try_io(|fd| {
+                    let n = unsafe { libc::write(fd.get_ref().as_raw_fd(), remaining.as_ptr().cast(), remaining.len()) };
+                    if n < 0 { Err(std::io::Error::last_os_error()) } else { Ok(n as usize) }
+                });
+                drop(state);
+                drop(writer);
+                match result {
+                    Ok(Ok(0)) => return Err(PtyError::IoError("PTY write returned zero".into())),
+                    Ok(Ok(n)) => remaining = &remaining[n..],
+                    Ok(Err(e)) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Ok(Err(e)) => return Err(PtyError::IoError(e.to_string())),
+                    Err(_) => continue,
+                }
+            }
+            Ok(())
+        }).await.map_err(|_| PtyError::IoError("PTY_INPUT_TIMEOUT".into()))?
+    }
+
+    #[cfg(windows)]
+    pub async fn write_input_cancellable(&self, data: &[u8]) -> Result<(), PtyError> {
+        if data.len() > 65536 { return Err(PtyError::IoError("PTY_INPUT_TOO_LARGE".into())); }
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let _gate = self.input_gate.lock().await;
+            if self.writer.try_lock().is_none_or(|w| w.is_none()) { return Err(PtyError::IoError("PTY_INPUT_BUSY_OR_CLOSED".into())); }
+            let mut bytes=data;
+            while !bytes.is_empty() {
+                let n=self.write_input_slice(bytes)?;
+                if n==0 {tokio::time::sleep(std::time::Duration::from_millis(1)).await;} else {bytes=&bytes[n..];}
+            }
+            Ok(())
+        }).await.map_err(|_| PtyError::IoError("PTY_INPUT_TIMEOUT".into()))?
+    }
+
+    /// One synchronous pump iteration for the Windows ConPTY input path. Every
+    /// lock is acquired and released inside this plain frame, so no guard or
+    /// raw-handle-bearing input value is ever live across the caller's await
+    /// point: the ConPTY input type made the surrounding async block !Send and
+    /// broke the axum WebSocket upgrade future.
+    #[cfg(windows)]
+    fn write_input_slice(&self, bytes: &[u8]) -> Result<usize, PtyError> {
+        let writer=self.writer.try_lock().ok_or_else(|| PtyError::IoError("PTY_INPUT_BUSY".into()))?;
+        let state=self.state.lock();
+        if writer.is_none() || !matches!(*state,PtySessionState::Starting | PtySessionState::Running) { return Err(PtyError::IoError("PTY_INPUT_CLOSED".into())); }
+        self.input.try_write(bytes).map_err(|e|PtyError::IoError(e.to_string()))
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> Result<(), PtyError> {

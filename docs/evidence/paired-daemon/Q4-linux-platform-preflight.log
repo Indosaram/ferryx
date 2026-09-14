@@ -1,0 +1,17 @@
+/home/indo/.cargo/bin/cargo
+/home/indo/.cargo/bin/rustc
+/home/indo/.bun/bin/bun
+/usr/bin/git
+/usr/local/bin/zig
+/usr/bin/pkg-config
+/home/indo/.cargo/bin/rust-analyzer
+cargo 1.98.0 (797e8a9bc 2026-08-05)
+rustc 1.98.0 (88d9e12ae 2026-08-18)
+0.16.0
+3.24.52
+2.52.6
+2.52.6
+1.2.16.1
+/usr/bin/cc
+12
+SSH_EXIT=0

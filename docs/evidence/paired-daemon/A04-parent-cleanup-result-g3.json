@@ -1,0 +1,64 @@
+{
+  "status": "cleanup-scenarios-verified-not-A04-accepted",
+  "worktree": "/Users/indo/code/project/orca-lite-wt/herdr-wave1",
+  "sourceSha256": {
+    "src-tauri/src/daemon/a04_shared_services_tests.rs": "24d8e8f0e61043ec1fe2e8d3984bd26f37c17aa2881717bf959e71436906115d",
+    "src-tauri/src/daemon/server.rs": "668e1710b738c5de019ec447c36bbcf075852f6256c0946d3a47f6838a190345"
+  },
+  "command": "env -u A04_PRIVATE_ROOT -u A04_SPLIT_AUTHORITY -u A04_INJECTION CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR=/Users/indo/code/project/orca-lite-wt/herdr-wave1/src-tauri/target cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib daemon::server::a04_shared_services_tests:: -- --nocapture",
+  "exitCode": 0,
+  "tests": 2,
+  "scenarios": [
+    "None",
+    "IpcSetup",
+    "HttpSetup",
+    "Scenario",
+    "Cleanup",
+    "Cancel",
+    "Deadline"
+  ],
+  "log": "A04-cleanup-reviewed-g3.log",
+  "pids": [
+    "95504",
+    "95505",
+    "95503",
+    "95570",
+    "95521",
+    "95574",
+    "95575",
+    "95608",
+    "95609",
+    "95622",
+    "95655",
+    "95656",
+    "95689"
+  ],
+  "roots": [
+    "/private/tmp/a04-hBTTha",
+    "/private/tmp/a04-yiQtX2",
+    "/private/tmp/a04-M3DwlH",
+    "/private/tmp/a04-urmn6e",
+    "/private/tmp/a04-X2Qr4i",
+    "/private/tmp/a04-hQ8ThA",
+    "/private/tmp/a04-mwKaAt"
+  ],
+  "cleanup": {
+    "allReportedPidsAbsent": true,
+    "allSevenRootsAbsent": true,
+    "receiptsChecked": true
+  },
+  "parentChanges": [
+    "Map IpcError explicitly at test boundary",
+    "Propagate IPC join failure",
+    "Retain original PTY handles outside cancellable future",
+    "Assert injected cleanup counts",
+    "Accurate listener join receipt",
+    "Emergency kill/reap off runtime"
+  ],
+  "limitations": [
+    "No external SIGKILL or OS deadlock guarantee",
+    "Cancellation during blocking spawn remains untested",
+    "No Windows runtime proof",
+    "Service extraction and complete A04 checks remain outstanding"
+  ]
+}

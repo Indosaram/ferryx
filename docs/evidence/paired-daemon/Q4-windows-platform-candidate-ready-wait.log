@@ -1,0 +1,144 @@
+pty EXIT=101; WAITED=True
+relay EXIT=101; WAITED=True
+worktrees EXIT=101; WAITED=True
+authority EXIT=0; WAITED=True
+git EXIT=101; WAITED=True
+catalog EXIT=0; WAITED=True
+candidate-ready-authority.log
+test remote::workspace_api::worktrees::authority_tests::owner_http_gate_and_eight_admissions ... ok
+A08 publication revoke=false git_target_exists=true catalog_unchanged=true outcome_unknown=true workers_drained=true private_root_removed=true
+A08 interrupted owner pid=11256 replay=true status=exit code: 0 reaped=true
+A08 interrupted Git transaction private_root_removed=true
+test remote::workspace_api::worktrees::authority_tests::interrupted_git_transaction_restart_never_repeats ... ok
+A08 followthrough journal_failure=false request=f0c1922a-453e-4f7b-8be9-e73971e7413e workspace=project-ffb7f272bb674172880034e23d7eeb99 non_head=cd018760f2dddcd646595917b6f066077f272a73 restart_no_repeat=true prunable_preview=422
+A08 followthrough write failure private_root_removed=true
+A08 delete-vs-spawn request=0f8dfbd6-65a0-4ca6-832d-2cf9099930f5 spawn_observed_at_shared_gate=true blocked_until_delete_publication=true spawn_refused=true workers_joined=true root_removed=true
+test remote::workspace_api::worktrees::authority_tests::followthrough_delete_publication_blocks_spawn ... ok
+A08 followthrough prune request=6ba16f20-2100-4bf6-8a57-d60d08bdc88a workspace=project-17ad704d3c864efa98c95a3ee6debdc5 original_result_replayed=true restart=true
+A08 followthrough prune workers_awaited=true private_root_removed=true
+test remote::workspace_api::worktrees::authority_tests::followthrough_prune_partial_replays_after_restart ... ok
+A08 publication revoke=true git_target_exists=true catalog_unchanged=true outcome_unknown=true workers_drained=true private_root_removed=true
+test remote::workspace_api::worktrees::publication_tests::cancelled_publication_preserves_unknown_after_git ... ok
+A08 followthrough journal_failure=true request=443dc60c-3934-4141-9077-201104916e67 workspace=project-6f5bfaa370fb43768a1b9c2b37c9c5d9 non_head=845319cb1f2b3b637060c896182e626afba33e32 restart_no_repeat=true prunable_preview=422
+A08 followthrough write failure private_root_removed=true
+test remote::workspace_api::worktrees::authority_tests::followthrough_write_failures_non_head_and_prunable_preview ... ok
+R12 incomplete body sockets_closed=true gateway_joined=true root_removed=true
+test remote::workspace_api_tests::r12_router_incomplete_body ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 711 filtered out; finished in 10.13s
+
+candidate-ready-catalog.log
+RESTORE missing row retained without recreation
+IPC cleanup client_joined=true handler_joined=true duplex_closed=true injected=false
+OWNER readiness=Ping/Pong pid=15636 command=restore
+OWNER cleanup pid=15636 reaped=true status=exit code: 0 sockets=[] command=restore
+WRITE_FAILURE rename target directory: no success or published revision; mutations fenced
+QUARANTINE invalid/newer catalog preserved; mutation refused
+IPC cleanup client_joined=true handler_joined=true duplex_closed=true injected=false
+OWNER readiness=Ping/Pong pid=9524 command=inject
+OWNER cleanup pid=9524 reaped=true status=exit code: 1 sockets=[] command=inject
+QUARANTINE invalid/newer catalog preserved; mutation refused
+CLEANUP root=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\temp\.tmpPk5vIJ absent=true daemon_pids=[] sockets=[]
+test registration_survives_isolated_service_restart ... ok
+
+thread 'tokio-rt-worker' (10732) panicked at tests\machine_catalog_persistence.rs:23:13:
+injected IPC assertion after Pong
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+IPC cleanup client_joined=true handler_joined=true duplex_closed=true injected=true
+OWNER CLEANUP root=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\temp\.tmpbgW1d8 absent=true
+test isolated_owner_restart_and_failure_cleanup ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+
+candidate-ready-git.log
+test worktree::tests::worktree_manager_rejects_filesystem_root ... ok
+test worktree::git::local_budget_tests::a08_git_real_legacy_worktree_path ... ok
+test worktree::tests::existing_target_and_missing_status_are_rejected ... ok
+test worktree::tests::registry_resolves_only_registered_workspace_identity ... ok
+test worktree::tests::worktree_manager_resolves_nested_git_directory_to_canonical_root ... ok
+test worktree::tests::resolve_worktree_by_path_and_identity ... ok
+test worktree::tests::create_find_and_list_worktree ... ok
+test worktree::git::local_budget_tests::local_budget_runs_existing_manager_create_delete ... ok
+test worktree::tests::safe_delete_clean_worktree ... ok
+test worktree::tests::safe_branch_delete_removes_merged_branch ... ok
+test worktree::tests::dirty_worktree_survives_force_remove_but_yields_to_explicit_destructive_delete ... ok
+test worktree::tests::git_merge_base_is_ancestor_and_branch_merge_detection ... ok
+test worktree::tests::multiple_worktrees_remain_isolated ... ok
+
+failures:
+
+failures:
+    ssh::worktree::tests::red_posix_script_builders_executable_behavior
+
+test result: FAILED. 39 passed; 1 failed; 0 ignored; 0 measured; 690 filtered out; finished in 1.79s
+
+error: test failed, to rerun pass `--lib`
+candidate-ready-pty.log
+warning: `ferryx` (lib test) generated 26 warnings (run `cargo fix --lib -p ferryx --tests` to apply 13 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 54.44s
+     Running unittests src\lib.rs (C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\ferryx_lib-c12d60fa37477486.exe)
+
+running 1 test
+
+thread 'remote::relay_server::tests::coordinator_pairs_through_relay_to_real_gateway' (9588) panicked at src\remote\relay_server.rs:3397:10:
+terminal output arrived before the deadline: Elapsed(())
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'remote::relay_server::tests::coordinator_pairs_through_relay_to_real_gateway' (9588) panicked at src\remote\relay_server.rs:3423:27:
+called `Result::unwrap()` on an `Err` value: Custom { kind: Uncategorized, error: PathError { path: "C:\\Users\\sook\\ferryx-herdr-q4-windows-01a097f8\\temp\\.tmphwXfEM", err: Os { code: 32, kind: Uncategorized, message: "?ㅻⅨ ?꾨줈?몄뒪媛 ?뚯씪???ъ슜 以묒씠湲??뚮Ц???꾨줈?몄뒪媛 ?≪꽭???????놁뒿?덈떎." } } }
+test remote::relay_server::tests::coordinator_pairs_through_relay_to_real_gateway ... FAILED
+
+failures:
+
+failures:
+    remote::relay_server::tests::coordinator_pairs_through_relay_to_real_gateway
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 729 filtered out; finished in 20.60s
+
+error: test failed, to rerun pass `--lib`
+candidate-ready-relay.log
+1190 |     struct RestoreFerryxDataDir(Option<OsString>);
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib test) generated 26 warnings (run `cargo fix --lib -p ferryx --tests` to apply 13 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 1.04s
+     Running unittests src\lib.rs (C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\ferryx_lib-c12d60fa37477486.exe)
+
+running 1 test
+
+thread 'remote::relay_server::tests::test_relay_browser_ws_terminal_bridge_success' (24336) panicked at src\remote\relay_server.rs:3164:35:
+called `Result::unwrap()` on an `Err` value: Protocol(ResetWithoutClosingHandshake)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test remote::relay_server::tests::test_relay_browser_ws_terminal_bridge_success ... FAILED
+
+failures:
+
+failures:
+    remote::relay_server::tests::test_relay_browser_ws_terminal_bridge_success
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 729 filtered out; finished in 0.03s
+
+error: test failed, to rerun pass `--lib`
+candidate-ready-worktrees.log
+test worktree_revision_survives_owner_restart ... ok
+A08 delete scenario=unmerged status=409 body={"error":{"code":"UNMERGED_BRANCH","message":"UNMERGED_BRANCH","retryable":false,"requestId":"afd8a8fe-4223-4e42-81d0-2250c8cb0227","details":{}}}
+A08 delete scenario=partial status=409 body={"error":{"code":"WORKTREE_REMOVED_BRANCH_RETAINED","message":"WORKTREE_REMOVED_BRANCH_RETAINED","retryable":false,"requestId":"e2cbc079-4536-4048-9bc1-e3c9a16b80ec","details":{"branch":"orca/project-9cf2b3dd14d442fc89ce2196b46afdcd/partial","branchDeleted":false,"worktreeRemoved":true}}}
+A08 delete scenario=remove-branch status=204 body=
+
+thread 'tokio-rt-worker' (15876) panicked at tests\machine_worktrees.rs:412:153:
+called `Result::unwrap()` on an `Err` value: GitError { command: "git worktree add --detach C:\\Users\\sook\\ferryx-herdr-q4-windows-01a097f8\\temp\\.tmpsGvp4P\\external space \"quote\" HEAD", stderr: "Preparing worktree (detached HEAD 6b5a39b)\nfatal: could not create directory of '.git/worktrees/external-space-\"quote\"': Invalid argument", stdout: "", code: Some(128) }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'machine_worktree_http_contract' (17104) panicked at tests\machine_worktrees.rs:412:169:
+called `Result::unwrap()` on an `Err` value: JoinError::Panic(Id(2410), "called `Result::unwrap()` on an `Err` value: GitError { command: \"git worktree add --detach C:\\\\Users\\\\sook\\\\ferryx-herdr-q4-windows-01a097f8\\\\temp\\\\.tmpsGvp4P\\\\external space \\\"quote\\\" HEAD\", stderr: \"Preparing worktree (detached HEAD 6b5a39b)\\nfatal: could not create directory of '.git/worktrees/external-space-\\\"quote\\\"': Invalid argument\", stdout: \"\", code: Some(128) }", ...)
+A08 CLEANUP listener_joined=true private_root_removed=true
+test machine_worktree_http_contract ... FAILED
+
+failures:
+
+failures:
+    machine_worktree_http_contract
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.54s
+
+error: test failed, to rerun pass `--test machine_worktrees`

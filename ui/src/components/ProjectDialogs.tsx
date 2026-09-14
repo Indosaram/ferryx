@@ -10,8 +10,9 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { createPairedWorktreeActions, pairedActionMessage } from "../lib/pairedWorktreeActions";
 import { createRemoteWorktree, registerRemoteProject, toRegisteredProject } from "../lib/remoteProject";
 import { formatSshTarget, useSshHosts } from "../lib/sshHosts";
 import {
@@ -24,6 +25,7 @@ import {
 } from "../lib/tauri";
 import type { Worktree } from "../lib/types";
 import { RemoteDirectoryPicker } from "./RemoteDirectoryPicker";
+import { PairedDaemonProjectForm } from "./PairedDaemonProjectForm";
 
 const fieldClass =
   "h-8 w-full rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none transition-colors placeholder:text-muted-foreground/45 focus:border-ring";
@@ -79,7 +81,8 @@ type AddProjectStep =
   | "local-pending"
   | "local-confirm"
   | "local-manual"
-  | "remote-form";
+  | "remote-form"
+  | "paired-form";
 
 export function AddProjectDialog({
   projects = [],
@@ -299,6 +302,11 @@ export function AddProjectDialog({
     }
   };
 
+  if (step === "paired-form") {
+    return <PairedDaemonProjectForm onBack={() => setStep("choose-location")}
+      onClose={handleDismiss} onRegistered={onRegistered} />;
+  }
+
   // 1. Initial Location Chooser
   if (step === "choose-location") {
     return (
@@ -352,6 +360,14 @@ export function AddProjectDialog({
                   <div className="mt-0.5 text-[11px] leading-normal text-muted-foreground">
                     Connect to a repository hosted on an SSH machine.
                   </div>
+                </div>
+              </button>
+              <button type="button" data-testid="project-type-paired-daemon" onClick={() => setStep("paired-form")}
+                className="flex w-full items-start gap-3 rounded-md border border-border/80 bg-background p-3 text-left hover:bg-accent/40 focus-visible:border-ring">
+                <Radio className="mt-0.5 size-4 shrink-0 text-primary" />
+                <div>
+                  <div className="text-xs font-medium text-foreground">Paired Daemon</div>
+                  <div className="mt-0.5 text-[11px] text-muted-foreground">Choose a folder on a paired machine without SSH.</div>
                 </div>
               </button>
             </div>
@@ -733,7 +749,9 @@ type AddWorktreeDialogProps = {
 
 export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDialogProps) {
   const remoteTarget = project.target?.kind === "ssh" ? project.target : null;
-  const isRemote = remoteTarget !== null;
+  const isPaired = project.target?.kind === "pairedDaemon";
+  const pairedActions = useMemo(() => isPaired ? createPairedWorktreeActions(project) : null, [project, isPaired]);
+  const isRemote = remoteTarget !== null || isPaired;
   const isGitBacked = project.gitRoot !== null;
   const { hosts } = useSshHosts();
   const [branches, setBranches] = useState<LocalBranch[]>([]);
@@ -788,7 +806,9 @@ export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDi
     setSubmitting(true);
     setError(null);
     try {
-      if (isRemote) {
+      if (pairedActions) {
+        await onCreated(await pairedActions.create(trimmedSlug));
+      } else if (isRemote) {
         const created = await createRemoteWorktree({
           workspaceId: project.workspaceId,
           slug: trimmedSlug,
@@ -814,7 +834,7 @@ export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDi
       }
       onClose();
     } catch (cause) {
-      setError(extractErrorMessage(cause, "Could not create the worktree."));
+      setError(isPaired ? pairedActionMessage(cause) : extractErrorMessage(cause, "Could not create the worktree."));
     } finally {
       setSubmitting(false);
     }

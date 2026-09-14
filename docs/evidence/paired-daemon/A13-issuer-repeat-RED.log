@@ -1,0 +1,110 @@
+    Blocking waiting for file lock on build directory
+   Compiling ferryx v2026.908.1 (/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/src-tauri)
+error[E0599]: no method named `json` found for struct `RequestBuilder` in the current scope
+  --> src/daemon/a13_issuer_repeat_fixture.rs:19:47
+   |
+19 |         let response = client.post(&endpoint).json(&serde_json::json!({
+   |                        -----------------------^^^^ method not found in `RequestBuilder`
+
+error[E0282]: type annotations needed
+  --> src/daemon/a13_issuer_repeat_fixture.rs:19:13
+   |
+19 |         let response = client.post(&endpoint).json(&serde_json::json!({
+   |             ^^^^^^^^
+...
+24 |         ensure!(response.status().is_success(), "repeat relay exchange refused");
+   |                 -------- type must be known at this point
+   |
+help: consider giving `response` an explicit type
+   |
+19 |         let response: /* Type */ = client.post(&endpoint).json(&serde_json::json!({
+   |                     ++++++++++++
+
+error[E0599]: no method named `json` found for struct `RequestBuilder` in the current scope
+  --> src/daemon/a13_issuer_repeat_fixture.rs:30:44
+   |
+30 |         let stale = client.post(&endpoint).json(&serde_json::json!({
+   |                     -----------------------^^^^ method not found in `RequestBuilder`
+
+error[E0282]: type annotations needed
+  --> src/daemon/a13_issuer_repeat_fixture.rs:30:13
+   |
+30 |         let stale = client.post(&endpoint).json(&serde_json::json!({
+   |             ^^^^^
+...
+33 |         ensure!(!stale.status().is_success(), "previous PIN redeemed twice");
+   |                  ----- type must be known at this point
+   |
+help: consider giving `stale` an explicit type
+   |
+30 |         let stale: /* Type */ = client.post(&endpoint).json(&serde_json::json!({
+   |                  ++++++++++++
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `token`
+    --> src/remote/auth.rs:1399:14
+     |
+1399 |         let (token, device) = auth
+     |              ^^^^^ help: if this is intentional, prefix it with an underscore: `_token`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `scroll_daemon_client`
+   --> src/lib.rs:916:9
+    |
+916 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+    |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+
+Some errors have detailed explanations: E0282, E0599.
+For more information about an error, try `rustc --explain E0282`.
+warning: `ferryx` (lib test) generated 10 warnings
+error: could not compile `ferryx` (lib test) due to 4 previous errors; 10 warnings emitted

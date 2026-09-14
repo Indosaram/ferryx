@@ -1,0 +1,26 @@
+Controlled pass-through mutation replay; original pre-production RED is recorded in A10-wire-codec.md.
+cwd=/Users/indo/code/project/orca-lite-wt/herdr-wave2
+free_bytes=44590444544
+$ CARGO_BUILD_JOBS=4 RUSTC_WRAPPER= rustc --edition=2021 --test --cfg a10_wire_red src-tauri/tests/a10_terminal_wire_codec.rs -o src-tauri/target/a10-wire-recovery-red
+
+exit=0
+$ CARGO_BUILD_JOBS=4 RUSTC_WRAPPER= src-tauri/target/a10-wire-recovery-red --nocapture
+
+running 1 test
+
+thread 'metadata_is_not_native_terminal_output' (22009876) panicked at src-tauri/tests/a10_terminal_wire_codec.rs:16:5:
+assertion `left == right` failed
+  left: [27, 93, 55, 55, 55, 59, 102, 101, 114, 114, 121, 120, 59, 123, 34, 107, 105, 110, 100, 34, 58, 34, 111, 117, 116, 112, 117, 116, 34, 44, 34, 115, 101, 113, 117, 101, 110, 99, 101, 34, 58, 34, 57, 48, 48, 55, 49, 57, 57, 50, 53, 52, 55, 52, 48, 57, 57, 51, 34, 125, 7, 104, 101, 108, 108, 111, 0, 255]
+ right: [104, 101, 108, 108, 111, 0, 255]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test metadata_is_not_native_terminal_output ... FAILED
+
+failures:
+
+failures:
+    metadata_is_not_native_terminal_output
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+exit=101

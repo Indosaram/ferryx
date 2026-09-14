@@ -1,0 +1,16 @@
+cwd=ui command=['node', 'node_modules/vitest/vitest.mjs', 'run', '--maxWorkers=1', 'src/state/remoteHostStore.native.test.ts', 'src/state/remoteHostStore.test.ts', 'src/lib/pairedHostInventory.test.ts', 'src/remote/RemoteRouting.test.tsx', 'src/remote/MobileHostDrawer.test.tsx', 'src/remote/zeroConfigSecurityProbe.test.tsx']
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+ ✓ src/state/remoteHostStore.native.test.ts (4 tests) 2ms
+ ✓ src/remote/zeroConfigSecurityProbe.test.tsx (7 tests) 130ms
+ ✓ src/remote/RemoteRouting.test.tsx (6 tests) 72ms
+ ✓ src/lib/pairedHostInventory.test.ts (16 tests) 9ms
+ ✓ src/remote/MobileHostDrawer.test.tsx (12 tests) 63ms
+ ✓ src/state/remoteHostStore.test.ts (13 tests) 9ms
+
+ Test Files  6 passed (6)
+      Tests  58 passed (58)
+   Start at  12:31:58
+   Duration  3.68s (transform 159ms, setup 406ms, collect 1.12s, tests 285ms, environment 1.05s, prepare 155ms)
+

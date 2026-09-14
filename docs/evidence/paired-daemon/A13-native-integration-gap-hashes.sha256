@@ -1,0 +1,7 @@
+983a16dfbeb5fb4049aa951b1fbe536f16c8884329fcbba2213de097a3f10944  src-tauri/src/paired_host/service.rs
+1d58f0531f6dcf8b8d92a8f81a004367bf4c47971e479108feb50bf27b031935  src-tauri/src/paired_host/process_tests.rs
+bf7d345bbbb2b24d4479e69bf5b73fe5602f08f912de41ecb6ede6fbe553570a  src-tauri/src/daemon/server.rs
+0eb7d102220ad504049b4c2f1ce06b959aab5ed6837a17eaf6461dcde96ef3d5  docs/evidence/paired-daemon/A13-native-integration-gap-final.log
+08835179fe37272d94ba41839bbc207913af727e3d900eda4f95b3d3a5d21f24  docs/evidence/paired-daemon/A13-native-integration-gap-check.log
+0ca85b066ead93b29e453c4f11cc8936bda6248ac09405e844274d98df2948b1  docs/evidence/paired-daemon/A13-native-integration-gap-build.log
+033ce1014c2607cc8df7f4f4c5b2e3b743a8f60d6e012b1d8e3f2746034d93bf  docs/evidence/paired-daemon/A13-native-integration-gap-report.md

@@ -6,7 +6,7 @@ import { getAgentReconnectAffordance } from "../lib/agentResumeAffordance";
 import { agentDisplayNameForType } from "../lib/agentTitle";
 import { Button } from "./ui/button";
 import { cn } from "../lib/cn";
-import { isRemoteWorkspaceId } from "../lib/remoteProject";
+import { isPairedWorkspaceId, isRemoteWorkspaceId } from "../lib/remoteProject";
 import { toIpcError } from "../lib/tauri";
 import type { TerminalSession } from "../lib/types";
 import { NativeTerminalPane } from "./NativeTerminalPane";
@@ -153,6 +153,19 @@ export function TerminalPane({
       setPendingLocal(false);
     }
   };
+
+  // The native paired proxy is not available. Never mount local path/PTY tooling
+  // or offer SSH/agent respawn as a substitute for attaching the captured target.
+  if (isPairedWorkspaceId(session.workspaceId)) {
+    return <div data-testid="paired-terminal-unavailable" role="status" className="flex h-full items-center justify-center p-6 text-center text-sm text-muted-foreground">
+      <div>
+        <h2 className="font-medium text-foreground">Paired terminal unavailable</h2>
+        <p>Native remote terminal support is not available in this version. The saved pane is retained; no replacement shell has been started.</p>
+        {session.remoteConnectionState === "expired" ? <p>The owning daemon reported this session expired.</p> : null}
+        <p>Reconnect and file or image actions are disabled. No Local or SSH fallback is used.</p>
+      </div>
+    </div>;
+  }
 
   return (
     <div

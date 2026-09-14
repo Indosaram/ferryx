@@ -1,0 +1,51 @@
+src-tauri/src/remote/filesystem_tests.rs:161:        #[cfg(unix)]
+src-tauri/src/remote/filesystem_tests.rs:166:            #[cfg(target_os = "linux")]
+src-tauri/src/remote/filesystem_tests.rs:240:        #[cfg(unix)]
+src-tauri/src/remote/filesystem_tests.rs:315:        #[cfg(unix)]
+src-tauri/src/remote/filesystem_tests.rs:407:        #[cfg(unix)]
+src-tauri/tests/machine_catalog_persistence.rs:72:                    .env("A05_OWNER_ROOT", &root).env("HOME", &root).env("FERRYX_DATA_DIR", root.join("data"))
+src-tauri/tests/machine_catalog_persistence.rs:73:                    .env("FERRYX_RUNTIME_DIR", root.join("runtime"))
+src-tauri/tests/machine_catalog_persistence.rs:168:        #[cfg(unix)]
+src-tauri/tests/machine_catalog_persistence.rs:170:        #[cfg(unix)]
+src-tauri/tests/machine_catalog_persistence.rs:190:        #[cfg(unix)] {
+src-tauri/tests/worktree_safety.rs:6:use tempfile::TempDir;
+src-tauri/tests/worktree_safety.rs:8:fn setup_test_repo() -> (TempDir, WorktreeManager) {
+src-tauri/tests/worktree_safety.rs:9:    let temp_dir = TempDir::new().expect("temp dir");
+src-tauri/tests/worktree_safety.rs:10:    let repo_path = temp_dir.path();
+src-tauri/tests/worktree_safety.rs:20:    (temp_dir, manager)
+src-tauri/tests/worktree_safety.rs:269:    let root = TempDir::new().unwrap();
+src-tauri/tests/relay_pairing_generation_regression.rs:104:async fn isolated_state(tokens: Vec<String>) -> (tempfile::TempDir, RelayState) {
+src-tauri/tests/relay_pairing_generation_regression.rs:185:    dir: tempfile::TempDir,
+src-tauri/src/worktree/git.rs:4:#[cfg(unix)]
+src-tauri/src/worktree/git.rs:7:#[cfg(windows)]
+src-tauri/src/worktree/git.rs:109:#[cfg(all(test, unix))]
+src-tauri/src/worktree/git.rs:111:#[cfg(test)]
+src-tauri/src/worktree/git.rs:161:        #[cfg(all(test, unix))]
+src-tauri/src/worktree/git.rs:194:        #[cfg(test)]
+src-tauri/src/worktree/git.rs:196:        #[cfg(test)]
+src-tauri/src/worktree/git.rs:199:            #[cfg(test)]
+src-tauri/src/worktree/git.rs:216:        #[cfg(test)]
+src-tauri/src/worktree/git.rs:235:#[cfg(test)]
+src-tauri/src/worktree/git.rs:239:    #[cfg(unix)]
+src-tauri/src/worktree/git.rs:250:        #[cfg(target_os = "linux")]
+src-tauri/src/worktree/git.rs:264:        let rows = parse_worktree_list_porcelain("worktree  leading trailing \nHEAD abc\n\nworktree \"/tmp/quote\\\" \\357\\277\\275 \\t\"\nHEAD def\n\n").unwrap();
+src-tauri/src/worktree/git.rs:266:        assert_eq!(rows[1].path, PathBuf::from("/tmp/quote\" \u{fffd} \t"));
+src-tauri/src/worktree/git.rs:267:        assert!(parse_worktree_list_porcelain("worktree \"/tmp/\\377\"\n").is_err());
+src-tauri/src/worktree/git.rs:283:    #[cfg(unix)]
+src-tauri/src/worktree/git.rs:308:    #[cfg(unix)]
+src-tauri/src/worktree/git.rs:356:            #[cfg(target_os = "macos")]
+src-tauri/src/worktree/git.rs:370:            #[cfg(target_os = "macos")]
+src-tauri/src/worktree/git.rs:451:            #[cfg(target_os = "macos")]
+src-tauri/src/worktree/git.rs:485:    #[cfg(unix)]
+src-tauri/src/worktree/git.rs:985:#[cfg(test)]
+src-tauri/tests/machine_worktree_legacy_bounds.rs:43:        #[cfg(unix)] {
+src-tauri/tests/machine_worktree_transports.rs:3:#![cfg(unix)]
+src-tauri/tests/machine_worktree_transports.rs:19:        .env("FERRYX_RUNTIME_DIR", path.join("runtime"))
+src-tauri/tests/machine_worktree_transports.rs:20:        .env("FERRYX_DATA_DIR", path.join("data"))
+src-tauri/tests/machine_worktree_transports.rs:21:        .env("FERRYX_SESSION_DIR", path.join("sessions"))
+src-tauri/tests/machine_worktree_transports.rs:22:        .env("HOME", path.join("home"))
+src-tauri/tests/machine_worktree_transports.rs:23:        .env("XDG_CONFIG_HOME", path.join("home/config"))
+src-tauri/tests/machine_worktree_transports.rs:24:        .env("XDG_DATA_HOME", path.join("home/data"))
+src-tauri/tests/machine_worktree_transports.rs:46:    for name in ["FERRYX_RUNTIME_DIR", "FERRYX_DATA_DIR", "FERRYX_SESSION_DIR", "HOME"] {
+src-tauri/tests/machine_worktrees.rs:239:        #[cfg(unix)] {
+src-tauri/tests/machine_worktrees.rs:344:        #[cfg(unix)] {

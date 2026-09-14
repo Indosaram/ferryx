@@ -1,0 +1,87 @@
+build EXIT=0; WAITED=True
+clipboard EXIT=0; WAITED=True
+warning: method `acquire_writer_lease` is never used
+   --> src\worktree\manager.rs:338:19
+    |
+134 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+338 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: linker stdout: C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\ferryx_lib.dll.lib ?쇱씠釉뚮윭由?諛?C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\ferryx_lib.dll.exp 媛쒖껜瑜??앹꽦?섍퀬 ?덉뒿?덈떎.
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `ferryx` (lib) generated 15 warnings (run `cargo fix --lib -p ferryx` to apply 4 suggestions)
+    Finished `dev` profile [unoptimized] target(s) in 50.82s
+569 |     pub(crate) fn next_snapshot_build(&self) -> impl std::future::Future<Output = ()> + '_ {
+    |                   ^^^^^^^^^^^^^^^^^^^
+...
+574 |     pub(crate) fn set_snapshot_post_build_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `wait_and_reap` is never used
+   --> src\terminal\session.rs:270:19
+    |
+ 61 | impl PtySession {
+    | --------------- method in this implementation
+...
+270 |     pub(crate) fn wait_and_reap(&self) -> Result<Option<i32>, PtyError> {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src\worktree\manager.rs:86:19
+   |
+86 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+   --> src\worktree\manager.rs:93:8
+    |
+ 92 | impl WriterLeaseGuard {
+    | --------------------- associated items in this implementation
+ 93 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+    |        ^^^
+...
+101 |     pub(crate) fn canonical_path(&self) -> &Path {
+    |                   ^^^^^^^^^^^^^^
+...
+105 |     pub(crate) fn owner_id(&self) -> &str {
+    |                   ^^^^^^^^
+
+warning: method `acquire_writer_lease` is never used
+   --> src\worktree\manager.rs:338:19
+    |
+134 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+338 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: static `FERRYX_DATA_DIR_LOCK` is never used
+    --> src\lib.rs:1188:12
+     |
+1188 |     static FERRYX_DATA_DIR_LOCK: Mutex<()> = Mutex::new(());
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `RestoreFerryxDataDir` is never constructed
+    --> src\lib.rs:1190:12
+     |
+1190 |     struct RestoreFerryxDataDir(Option<OsString>);
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib test) generated 26 warnings (run `cargo fix --lib -p ferryx --tests` to apply 13 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 1m 10s
+     Running unittests src\lib.rs (C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\ferryx_lib-c12d60fa37477486.exe)
+
+running 6 tests
+test clipboard_image::tests::an_empty_pasteboard_payload_never_becomes_a_clipboard_image ... ok
+test clipboard_image::tests::unsupported_and_truncated_bitmaps_are_rejected ... ok
+test clipboard_image::tests::real_alpha_channel_survives ... ok
+test clipboard_image::tests::top_down_dib_keeps_row_order ... ok
+test clipboard_image::tests::zeroed_alpha_channel_is_treated_as_opaque ... ok
+test clipboard_image::tests::bottom_up_24bpp_dib_is_flipped_and_converted_to_rgba ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 724 filtered out; finished in 0.00s
+

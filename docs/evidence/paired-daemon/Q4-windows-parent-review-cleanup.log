@@ -1,0 +1,39 @@
+﻿**********************
+Windows PowerShell transcript start
+Start time: 20260913111848
+Username: DESKTOP-1LAPJMP\sook
+RunAs User: DESKTOP-1LAPJMP\sook
+Configuration Name: 
+Machine: DESKTOP-1LAPJMP (Microsoft Windows NT 10.0.26200.0)
+Host Application: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -EncodedCommand JgAgACcAQwA6AFwAVQBzAGUAcgBzAFwAcwBvAG8AawBcAGYAZQByAHIAeQB4AC0AaABlAHIAZAByAC0AcQA0AC0AdwBpAG4AZABvAHcAcwAtADAAMQBhADAAOQA3AGYAOABcAHIAZQB2AGkAZQB3AC0AYwBsAGUAYQBuAHUAcAAuAHAAcwAxACcA
+Process ID: 17824
+PSVersion: 5.1.26100.9444
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.26100.9444
+BuildVersion: 10.0.26100.9444
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+Transcript started, output file is C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\review-cleanup.log
+REPAIRED_SOURCE_MATCH=970
+OWNED_RUNTIME_PROCESSES=0
+relay EXIT=0; WAITED=True
+safety EXIT=0; WAITED=True
+relay EXIT=0; WAITED=True
+safety EXIT=0; WAITED=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\runtime; ABSENT=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\data; ABSENT=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\sessions; ABSENT=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\home; ABSENT=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\config; ABSENT=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\cache; ABSENT=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\temp; ABSENT=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\appdata; ABSENT=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\localappdata; ABSENT=True
+Retained source/target/archive/bundle and tooling. No desktop or real clipboard action.
+**********************
+Windows PowerShell transcript end
+End time: 20260913111850
+**********************

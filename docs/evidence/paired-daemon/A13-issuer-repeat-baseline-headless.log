@@ -1,0 +1,3 @@
+dyld[34046]: Library not loaded: @rpath/libghostty-vt.dylib
+  Referenced from: <A342B357-9E9A-300F-9017-A42E00CF013F> /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/src-tauri/target/debug/deps/ferryx_lib-fede6191c14a3d71
+  Reason: no LC_RPATH's found

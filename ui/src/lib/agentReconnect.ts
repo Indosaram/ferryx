@@ -1,3 +1,4 @@
+import { isPairedWorkspaceId } from "./remoteProject";
 import { getAgentReconnectAffordance } from "./agentResumeAffordance";
 import { safeRandomUUID } from "./uuid";
 import { closeTerminal, spawnTerminalDetailed, toIpcError } from "./tauri";
@@ -40,6 +41,9 @@ export function reconnectAgentSession(
     let spawned: SpawnTerminalResult | null = null;
     try {
       if (!initial) throw invalidReconnect("Terminal session no longer exists");
+      if (isPairedWorkspaceId(initial.workspaceId)) throw {
+        code: "UNSUPPORTED_CAPABILITY", message: "Paired terminal recovery requires native remote terminal support. No local agent was started.",
+      };
       dependencies.dispatch({ type: "SET_RECONNECT_LIFECYCLE", sessionId: localSessionId, lifecycle: "validating" });
       const affordance = getAgentReconnectAffordance(initial, dependencies.getSessions());
       if (!affordance.canReconnect || !affordance.agentType || !affordance.providerSession) {

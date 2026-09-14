@@ -1,0 +1,134 @@
+v22.22.3
+$ vitest run --maxWorkers=1 src/components/Sidebar.paired.test.tsx src/state/inactiveProjectWorktrees.paired.test.tsx src/components/Sidebar.remote.test.tsx src/components/Sidebar.projectIdentity.test.tsx src/components/Sidebar.dnd.test.tsx src/state/inactiveProjectWorktrees.remote.test.tsx src/state/inactiveProjectWorktrees.test.tsx src/state/projectWorkspaceScope.test.tsx src/lib/worktreeOwnership.test.ts src/state/projectSwitchBack.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+ ✓ src/components/Sidebar.remote.test.tsx (11 tests) 195ms
+ ✓ src/state/projectSwitchBack.test.tsx (7 tests) 183ms
+ ✓ src/components/Sidebar.dnd.test.tsx (7 tests) 166ms
+ ✓ src/components/Sidebar.paired.test.tsx (1 test) 84ms
+ ✓ src/components/Sidebar.projectIdentity.test.tsx (2 tests) 79ms
+ ✓ src/state/projectWorkspaceScope.test.tsx (2 tests) 65ms
+ ❯ src/state/inactiveProjectWorktrees.test.tsx (9 tests | 1 failed) 18ms
+   ✓ useInactiveProjectWorktrees > pre-seeds inactive project worktrees synchronously from cached workspace snapshots 6ms
+   ✓ useInactiveProjectWorktrees > publishes freshly registered Git metadata for inactive project grouping 2ms
+   ✓ useInactiveProjectWorktrees > registers then lists worktrees for inactive projects only 1ms
+   ✓ useInactiveProjectWorktrees > falls back to the folder root for inactive plain projects 1ms
+   ✓ useInactiveProjectWorktrees > does not list worktrees for a project whose registration reports a root conflict 1ms
+   × useInactiveProjectWorktrees > keeps other projects usable when one listing fails 3ms
+     → expected undefined to deeply equal []
+   ✓ useInactiveProjectWorktrees > retains outgoing active project rows in cache immediately after active project changes before async listing resolves 1ms
+   ✓ useInactiveProjectWorktrees > re-lists an inactive project when the backend reports one of its worktrees deleted 1ms
+   ✓ useInactiveProjectWorktrees > ignores worktree change events for projects it does not track 1ms
+ ✓ src/state/inactiveProjectWorktrees.remote.test.tsx (2 tests) 10ms
+ ✓ src/state/inactiveProjectWorktrees.paired.test.tsx (1 test) 8ms
+ ✓ src/lib/worktreeOwnership.test.ts (9 tests) 2ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/state/inactiveProjectWorktrees.test.tsx > useInactiveProjectWorktrees > keeps other projects usable when one listing fails
+AssertionError: expected undefined to deeply equal []
+
+[32m- Expected:[39m 
+[]
+
+[31m+ Received:[39m 
+undefined
+
+ ❯ src/state/inactiveProjectWorktrees.test.tsx:167:52
+    165| 
+    166|     await settleServices(services);
+    167|     expect(result.current[gitProject.workspaceId]).toEqual([]);
+       |                                                    ^
+    168|     expect(result.current[plainProject.workspaceId]).toHaveLength(1);
+    169|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 9 passed (10)
+      Tests  1 failed | 50 passed (51)
+   Start at  15:43:30
+   Duration  5.54s (transform 232ms, setup 639ms, collect 1.42s, tests 810ms, environment 1.61s, prepare 247ms)
+
+error: script "test" exited with code 1
+v22.22.3
+$ vitest run --maxWorkers=1 src/components/Sidebar.paired.test.tsx src/state/inactiveProjectWorktrees.paired.test.tsx src/components/Sidebar.remote.test.tsx src/components/Sidebar.projectIdentity.test.tsx src/components/Sidebar.dnd.test.tsx src/state/inactiveProjectWorktrees.remote.test.tsx src/state/inactiveProjectWorktrees.test.tsx src/state/projectWorkspaceScope.test.tsx src/lib/worktreeOwnership.test.ts src/state/projectSwitchBack.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+ ✓ src/state/inactiveProjectWorktrees.test.tsx (9 tests) 15ms
+ ✓ src/components/Sidebar.remote.test.tsx (11 tests) 182ms
+ ✓ src/state/projectSwitchBack.test.tsx (7 tests) 185ms
+ ✓ src/components/Sidebar.dnd.test.tsx (7 tests) 159ms
+ ✓ src/components/Sidebar.paired.test.tsx (1 test) 80ms
+ ✓ src/components/Sidebar.projectIdentity.test.tsx (2 tests) 72ms
+ ✓ src/state/projectWorkspaceScope.test.tsx (2 tests) 64ms
+ ✓ src/state/inactiveProjectWorktrees.remote.test.tsx (2 tests) 9ms
+ ✓ src/state/inactiveProjectWorktrees.paired.test.tsx (1 test) 7ms
+ ✓ src/lib/worktreeOwnership.test.ts (9 tests) 2ms
+
+ Test Files  10 passed (10)
+      Tests  51 passed (51)
+   Start at  15:44:03
+   Duration  5.10s (transform 221ms, setup 538ms, collect 1.32s, tests 776ms, environment 1.46s, prepare 229ms)
+
+$ tsc && vite build
+src/state/inactiveProjectWorktrees.ts(216,29): error TS2345: Argument of type '(current: Record<string, Worktree[]>) => { [x: string]: Worktree[] | readonly [Worktree]; }' is not assignable to parameter of type 'SetStateAction<Record<string, Worktree[]>>'.
+  Type '(current: Record<string, Worktree[]>) => { [x: string]: Worktree[] | readonly [Worktree]; }' is not assignable to type '(prevState: Record<string, Worktree[]>) => Record<string, Worktree[]>'.
+    Type '{ [x: string]: Worktree[] | readonly [Worktree]; }' is not assignable to type 'Record<string, Worktree[]>'.
+      'string' index signatures are incompatible.
+        Type 'Worktree[] | readonly [Worktree]' is not assignable to type 'Worktree[]'.
+          The type 'readonly [Worktree]' is 'readonly' and cannot be assigned to the mutable type 'Worktree[]'.
+v22.22.3
+$ vitest run --maxWorkers=1 src/components/Sidebar.paired.test.tsx src/state/inactiveProjectWorktrees.paired.test.tsx src/components/Sidebar.remote.test.tsx src/components/Sidebar.projectIdentity.test.tsx src/components/Sidebar.dnd.test.tsx src/state/inactiveProjectWorktrees.remote.test.tsx src/state/inactiveProjectWorktrees.test.tsx src/state/projectWorkspaceScope.test.tsx src/lib/worktreeOwnership.test.ts src/state/projectSwitchBack.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+ ✓ src/state/projectSwitchBack.test.tsx (7 tests) 185ms
+ ✓ src/components/Sidebar.remote.test.tsx (11 tests) 194ms
+ ✓ src/components/Sidebar.dnd.test.tsx (7 tests) 170ms
+ ✓ src/components/Sidebar.paired.test.tsx (1 test) 91ms
+ ✓ src/components/Sidebar.projectIdentity.test.tsx (2 tests) 85ms
+ ✓ src/state/projectWorkspaceScope.test.tsx (2 tests) 65ms
+ ✓ src/state/inactiveProjectWorktrees.test.tsx (9 tests) 17ms
+ ✓ src/state/inactiveProjectWorktrees.remote.test.tsx (2 tests) 11ms
+ ✓ src/state/inactiveProjectWorktrees.paired.test.tsx (1 test) 8ms
+ ✓ src/lib/worktreeOwnership.test.ts (9 tests) 2ms
+
+ Test Files  10 passed (10)
+      Tests  51 passed (51)
+   Start at  15:44:50
+   Duration  5.69s (transform 228ms, setup 618ms, collect 1.47s, tests 827ms, environment 1.66s, prepare 262ms)
+
+$ tsc && vite build
+vite v6.4.3 building for production...
+transforming...
+✓ 1889 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                                        3.08 kB │ gzip:   1.10 kB
+dist/assets/crush-DHElXcRZ.png                         5.46 kB
+dist/assets/droid-BhrKLgQ8.svg                         6.30 kB │ gzip:   2.88 kB
+dist/assets/antigravity-DgAQAdn3.svg                   7.63 kB │ gzip:   1.72 kB
+dist/assets/gjc-CmlXGg4z.png                          22.73 kB
+dist/assets/geist-variable-CrgPqtmy.woff2             69.44 kB
+dist/assets/ferryx-icon-OXRkkUvz.png                 805.82 kB
+dist/assets/index-CTJQafPq.css                        78.24 kB │ gzip:  14.21 kB
+dist/assets/server-SoU_gomW.js                         0.51 kB │ gzip:   0.32 kB
+dist/assets/card-DCVQB2NI.js                           2.08 kB │ gzip:   0.88 kB
+dist/assets/remoteHostStore-zQ0lOuUw.js                4.37 kB │ gzip:   1.64 kB
+dist/assets/pairedHostInventory-XuTkBc5x.js            4.59 kB │ gzip:   1.90 kB
+dist/assets/PermissionsOnboardingDialog-Ci_cpQi4.js    6.25 kB │ gzip:   1.85 kB
+dist/assets/browser-CkcrgXYC.js                       25.78 kB │ gzip:  10.13 kB
+dist/assets/RemoteApp-DX2OHXti.js                     61.10 kB │ gzip:  18.05 kB
+dist/assets/sonner-BRIaDGEo.js                        93.62 kB │ gzip:  31.08 kB
+dist/assets/index-DD4f2JNR.js                        187.68 kB │ gzip:  60.14 kB
+dist/assets/SettingsDialog-CPttx63q.js               199.47 kB │ gzip:  59.57 kB
+dist/assets/App-BRQoZ41l.js                          504.89 kB │ gzip: 146.76 kB
+
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+✓ built in 2.22s

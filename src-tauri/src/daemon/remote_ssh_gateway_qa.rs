@@ -54,11 +54,9 @@ pub(super) async fn exercise(daemon: &DaemonServer, workspace: &str, session: &s
     assert_eq!(response.status().as_u16(), 101);
     let mut socket = response.upgrade().await.unwrap();
     let input = b"printf '\\106\\105\\122\\122\\131\\130\\055\\122\\105\\115\\117\\124\\105\\055\\117\\113\\n'\n";
-    let mut frame = vec![0x82, 0x80 | u8::try_from(input.len()).unwrap(), 0, 0, 0, 0];
-    frame.extend_from_slice(input);
-    socket.write_all(&frame).await.unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         let mut output = Vec::new();
+        let mut sent = false;
         loop {
             let mut header = [0; 2];
             socket.read_exact(&mut header).await.unwrap();
@@ -71,6 +69,25 @@ pub(super) async fn exercise(daemon: &DaemonServer, workspace: &str, session: &s
             let mut payload = vec![0; usize::try_from(length).unwrap()];
             socket.read_exact(&mut payload).await.unwrap();
             assert_ne!(header[0] & 15, 8);
+            if header[0] & 15 == 1 && !sent {
+                if let crate::remote::protocol::ServerControlMessage::RemoteStatus {
+                    state: crate::terminal::remote::RemoteConnectionState::Connected,
+                    generation,
+                } = serde_json::from_slice(&payload).unwrap() {
+                    let message = serde_json::to_vec(
+                        &crate::remote::protocol::ClientControlMessage::RemoteWrite {
+                            generation,
+                            data: std::str::from_utf8(input).unwrap().to_owned(),
+                        },
+                    ).unwrap();
+                    let mut frame = vec![0x81, 0x80 | 126];
+                    frame.extend_from_slice(&u16::try_from(message.len()).unwrap().to_be_bytes());
+                    frame.extend_from_slice(&[0; 4]);
+                    frame.extend_from_slice(&message);
+                    socket.write_all(&frame).await.unwrap();
+                    sent = true;
+                }
+            }
             if header[0] & 15 == 2 {
                 output.extend(payload);
                 if String::from_utf8_lossy(&output).contains("FERRYX-REMOTE-OK") { break; }

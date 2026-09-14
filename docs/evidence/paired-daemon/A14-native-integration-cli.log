@@ -1,0 +1,5 @@
+COMMAND: src-tauri/target/debug/ferryx-cli --help
+Ferryx CLI is running in headless mode.
+Usage: ferryx-cli <pair|remote|browser|--daemon>
+
+EXIT: 1

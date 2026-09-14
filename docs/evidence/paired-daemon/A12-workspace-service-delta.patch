@@ -1,0 +1,102 @@
+--- /tmp/st_01a098ac-before.diff	2026-09-13 11:51:44
++++ docs/evidence/paired-daemon/A12-workspace-service-after.patch	2026-09-13 12:25:00
+@@ -1,8 +1,11 @@
+ diff --git a/src-tauri/src/daemon/workspace_service.rs b/src-tauri/src/daemon/workspace_service.rs
+-index 34d411f5..eb33b8b8 100644
++index 34d411f5..b992a7f4 100644
+ --- a/src-tauri/src/daemon/workspace_service.rs
+ +++ b/src-tauri/src/daemon/workspace_service.rs
+-@@ -2,23 +2,53 @@ use crate::worktree::{WorkspaceRegistry, WorktreeManager};
++@@ -1,24 +1,56 @@
+++#[path = "workspace_watcher.rs"]
+++pub(crate) mod workspace_watcher;
++ use crate::worktree::{WorkspaceRegistry, WorktreeManager};
+  use std::{fs, path::PathBuf};
+  use crate::remote::{machine_protocol::Availability, workspace_catalog::{self, Catalog, CatalogRow}};
+  
+@@ -58,7 +61,7 @@
+                      Ok(_) => match WorktreeManager::try_new(&row.repo_root) {
+                          Ok(manager) if manager.repo_root() == row.repo_root => {
+                              // Machine-only entries are not exposed to the legacy mirror registry.
+-@@ -31,13 +61,76 @@ impl DaemonWorkspaceService {
++@@ -31,13 +63,76 @@ impl DaemonWorkspaceService {
+              }
+          }
+          Self {
+@@ -97,8 +100,8 @@
+          }
+ +        Ok(self.catalog()?.revision)
+ +    }
+-+    pub(crate) fn worktree_committed(&self, workspace: &str, removed: bool, revision: crate::scoped_contracts::Epoch) {
+-+        self.machine_events.publish(if removed { "worktreeRemoved" } else { "worktreeCreated" }, Some(workspace), None, serde_json::json!({"catalogRevision":revision}));
+++    pub(crate) fn worktree_committed(&self, workspace: &str, removed: bool, revision: crate::scoped_contracts::Epoch, worktree: &crate::remote::machine_protocol::Worktree) {
+++        self.machine_events.publish_revision(revision.0, if removed { "worktreeRemoved" } else { "worktreeCreated" }, Some(workspace), None, serde_json::json!(worktree));
+ +        self.registry.bump_revision();
+ +        // No receivers is normal until an inventory consumer subscribes.
+ +        let _ = self.worktree_changes.send(WorktreeCommittedChange { workspace_id: workspace.into(), removed, revision });
+@@ -135,16 +138,63 @@
+          let _gate = self.mutation_gate.lock();
+          let workspace_id = WorkspaceRegistry::validate_workspace_id(workspace_id).map_err(|e| e.to_string())?;
+          let path = PathBuf::from(repo_root);
+-@@ -106,6 +199,8 @@ impl DaemonWorkspaceService {
++@@ -66,6 +161,7 @@ impl DaemonWorkspaceService {
++             if existing.repo_root != canonical { return Err("Workspace already registered".into()); }
++             if existing.mirror_exposed && self.registry.contains(workspace_id) { return Ok(()); }
++         }
+++        let mut project = crate::remote::workspace_api::registration_project(workspace_id, &canonical)?;
++         candidate.workspaces.insert(workspace_id.to_string(), CatalogRow {
++             repo_root: canonical, mirror_exposed: true, availability: Availability::Ready,
++         });
++@@ -74,8 +170,11 @@ impl DaemonWorkspaceService {
++             *state = Err(format!("Catalog mutations disabled after persistence failure: {error}"));
++             return Err(error);
++         }
+++        let revision = candidate.revision.0;
++         *state = Ok(candidate);
++         self.registry.publish(workspace_id.to_string(), manager);
+++        project.revision = crate::scoped_contracts::Epoch(revision);
+++        self.machine_events.publish_revision(revision, "projectRegistered", Some(workspace_id), None, serde_json::json!(project));
++         Ok(())
+      }
+  
++@@ -93,6 +192,7 @@ impl DaemonWorkspaceService {
++             return Ok(id.clone());
++         }
++         let id = format!("project-{}", uuid::Uuid::new_v4().simple());
+++        let mut project = crate::remote::workspace_api::registration_project(&id, manager.repo_root())?;
++         candidate.workspaces.insert(id.clone(), CatalogRow {
++             repo_root: manager.repo_root().to_owned(), mirror_exposed: false, availability: Availability::Ready,
++         });
++@@ -101,11 +201,16 @@ impl DaemonWorkspaceService {
++             *state = Err(format!("Catalog mutations disabled after persistence failure: {error}"));
++             return Err(error);
++         }
+++        let revision = candidate.revision.0;
++         *state = Ok(candidate);
+++        project.revision = crate::scoped_contracts::Epoch(revision);
+++        self.machine_events.publish_revision(revision, "projectRegistered", Some(&id), None, serde_json::json!(project));
++         Ok(id)
++     }
++ 
+      pub(crate) fn unregister(&self, workspace_id: &str) -> Result<(), String> {
+ +        let workspace_gate = self.worktree_gate(workspace_id);
+ +        let _workspace_gate = workspace_gate.lock();
+          let _gate = self.mutation_gate.lock();
+          let workspace_id = WorkspaceRegistry::validate_workspace_id(workspace_id).map_err(|e| e.to_string())?;
+          let mut state = self.catalog.lock();
+-@@ -125,6 +220,31 @@ impl DaemonWorkspaceService {
++@@ -116,8 +221,10 @@ impl DaemonWorkspaceService {
++             *state = Err(format!("Catalog mutations disabled after persistence failure: {error}"));
++             return Err(error);
++         }
+++        let revision = candidate.revision.0;
++         *state = Ok(candidate);
++         self.registry.unregister(workspace_id);
+++        self.machine_events.publish_revision(revision, "projectRemoved", Some(workspace_id), None, serde_json::json!({}));
++         Ok(())
++     }
++ }
++@@ -125,6 +232,31 @@ impl DaemonWorkspaceService {
+  #[cfg(test)]
+  mod catalog_tests {
+      use super::*;

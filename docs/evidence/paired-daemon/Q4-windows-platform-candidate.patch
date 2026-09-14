@@ -1,0 +1,473 @@
+--- a/src-tauri/src/remote/filesystem_tests.rs
++++ b/src-tauri/src/remote/filesystem_tests.rs
+@@ -145,7 +145,7 @@
+         std::fs::create_dir(&home).unwrap();
+         for name in [
+             "space dir",
+-            "quote'\"",
++            if cfg!(windows) { "quote'" } else { "quote'\"" },
+             "日本語",
+             ".hidden",
+             "large",
+@@ -233,8 +233,21 @@
+         let listing: machine_protocol::Directories =
+             serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+         assert_eq!(listing.path, listing.home_path);
++        #[cfg(windows)]
++        {
++            for rejected in [r"\\server\share", r"\\?\UNC\server\share", r"\\.\C:\", r"\\?\C:\"] {
++                let response = client.get(&url).bearer_auth(&token).query(&[("path", rejected)]).send().await.unwrap();
++                assert_eq!(response.status(), 422, "network/device input must remain unsupported");
++            }
++            let drive = &listing.home_path[..3];
++            let response = client.get(&url).bearer_auth(&token).query(&[("path", drive)]).send().await.unwrap();
++            assert_eq!(response.status(), 200);
++            let root: machine_protocol::Directories = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
++            assert!(root.parent_path.is_none());
++            assert!(std::fs::create_dir(std::path::Path::new(&listing.home_path).join("invalid\"name")).is_err());
++        }
+         assert!(!listing.entries.iter().any(|e| e.name == "file" || e.hidden));
+-        for name in ["space dir", "quote'\"", "日本語"] {
++        for name in ["space dir", if cfg!(windows) { "quote'" } else { "quote'\"" }, "日本語"] {
+             assert!(listing.entries.iter().any(|e| e.name == name));
+         }
+         #[cfg(unix)]
+--- a/src-tauri/src/remote/relay_server.rs
++++ b/src-tauri/src/remote/relay_server.rs
+@@ -1087,7 +1087,7 @@
+                 frame = data.recv() => match frame {
+                     Some(Ok(Message::Binary(bytes))) => timeout(TRANSFER_TIMEOUT, writer.write_all(&bytes)).await??,
+                     Some(Ok(Message::Text(text))) => timeout(TRANSFER_TIMEOUT, writer.write_all(text.as_bytes())).await??,
+-                    Some(Ok(Message::Close(_))) | None => return Ok(()),
++                    Some(Ok(Message::Close(_))) | None => { writer.shutdown().await?; return Ok(()); },
+                     Some(Err(error)) => return Err(error.into()),
+                     Some(Ok(_)) => {},
+                 }
+@@ -1118,7 +1118,16 @@
+                     };
+                     let close = frame.is_close();
+                     timeout(TRANSFER_TIMEOUT, daemon.send(frame)).await??;
+-                    if close { return Ok(()); }
++                    if close {
++                        while let Some(frame) = timeout(TRANSFER_TIMEOUT, daemon.next()).await? {
++                            if let Wire::Close(_) = frame? {
++                                // Receiving Close queued tungstenite's acknowledgement.
++                                timeout(TRANSFER_TIMEOUT, browser.flush()).await??;
++                                return Ok(());
++                            }
++                        }
++                        anyhow::bail!("daemon closed without terminal close acknowledgement");
++                    }
+                 }
+                 frame = daemon.next() => {
+                     let Some(frame) = frame else { return Ok(()); };
+@@ -1138,9 +1147,13 @@
+         }
+     };
+     tokio::pin!(tunnel);
++    tokio::pin!(application);
+     tokio::select! {
+-        result = &mut tunnel => result,
+-        result = application => {
++        result = &mut tunnel => {
++            result?;
++            timeout(TRANSFER_TIMEOUT, &mut application).await?
++        },
++        result = &mut application => {
+             result?;
+             // Flush the inner close frame before releasing the reverse channel.
+             timeout(TRANSFER_TIMEOUT, &mut tunnel).await?
+@@ -3103,7 +3116,7 @@
+             // Consume any forwarded pong before the close frame.
+             loop {
+                 match ws.next().await.unwrap().unwrap() {
+-                    TMessage::Close(_) => break,
++                    TMessage::Close(_) => { ws.flush().await.unwrap(); break; },
+                     TMessage::Pong(_) => {}
+                     other => panic!("unexpected frame: {other:?}"),
+                 }
+@@ -3124,13 +3137,14 @@
+                 tokio::select! {
+                     frame = data.next() => match frame {
+                         Some(Ok(TMessage::Binary(bytes))) => write.write_all(&bytes).await.unwrap(),
+-                        Some(Ok(TMessage::Close(_))) | None => break,
++                        Some(Ok(TMessage::Close(_))) => { data.flush().await.unwrap(); break; },
++                        None => break,
+                         Some(Ok(_)) => {},
+                         Some(Err(error)) => panic!("data channel failed: {error}"),
+                     },
+                     count = read.read(&mut buffer) => {
+                         let count = count.unwrap();
+-                        if count == 0 { break; }
++                        if count == 0 { data.close(None).await.unwrap(); break; }
+                         data.send(TMessage::Binary(buffer[..count].to_vec().into())).await.unwrap();
+                     }
+                 }
+@@ -3159,6 +3173,9 @@
+                 assert_eq!(ws.next().await.unwrap().unwrap(), expected);
+             }
+             ws.close(None).await.unwrap();
++            while let Some(frame) = ws.next().await {
++                if matches!(frame.unwrap(), TMessage::Close(_)) { break; }
++            }
+         };
+         timeout(Duration::from_secs(5), async {
+             tokio::join!(browser, daemon, gateway);
+@@ -3277,8 +3294,11 @@
+             .register("e2e-workspace", workspace.path())
+             .expect("register workspace");
+         let manager = registry_handle.manager("e2e-workspace").expect("manager");
+-        let mut command = portable_pty::CommandBuilder::new("/bin/sh");
++        let mut command = portable_pty::CommandBuilder::new(if cfg!(windows) { "cmd.exe" } else { "/bin/sh" });
+         command.cwd(workspace.path());
++        #[cfg(windows)]
++        command.args(["/D", "/Q"]);
++
+         let (session_id, _pty_rx) = terminal_handle
+             .spawn_in_worktree(command, 80, 24, &manager, workspace.path())
+             .expect("real gateway PTY session");
+@@ -3356,6 +3376,7 @@
+         // Drive the real PTY and await its echo instead of sleeping: the shell must
+         // return the marker we wrote through the relay-proxied socket.
+         use futures_util::{SinkExt, StreamExt};
++        #[cfg(not(windows))]
+         terminal_socket
+             .send(tokio_tungstenite::tungstenite::Message::Binary(
+                 b"printf 'ferryx_%s_marker\\n' executed\n".to_vec().into(),
+@@ -3369,6 +3390,15 @@
+                 match message {
+                     tokio_tungstenite::tungstenite::Message::Binary(bytes) => {
+                         seen.push_str(&String::from_utf8_lossy(&bytes));
++
++                        #[cfg(windows)]
++                        if seen.contains("\x1b[6n") {
++                            // ConPTY asks the terminal client for its cursor before
++                            // starting the shell. Answer the real terminal query.
++                            terminal_socket.send(TMessage::Binary(b"\x1b[1;1R".to_vec().into())).await.unwrap();
++                            terminal_socket.send(TMessage::Binary(b"set Q4_WORD=executed\recho ferryx_%Q4_WORD%_marker\r".to_vec().into())).await.unwrap();
++                            seen = seen.replace("\x1b[6n", "");
++                        }
+                     }
+                     tokio_tungstenite::tungstenite::Message::Text(text) => {
+                         seen.push_str(&text);
+@@ -3409,7 +3439,7 @@
+         assert!(gateway.await.unwrap_err().is_cancelled());
+         assert!(relay.await.unwrap_err().is_cancelled());
+         workspace.close().unwrap();
+-        println!("R4 PTY: executed marker received; owned sessions explicitly closed; listeners/reverse joined; private workspace removed");
++        println!("R4 PTY cleanup: owned sessions explicitly closed; listeners/reverse joined; private workspace removed");
+         if let Err(panic) = outcome { std::panic::resume_unwind(panic); }
+     }
+ 
+--- a/src-tauri/src/remote/server.rs
++++ b/src-tauri/src/remote/server.rs
+@@ -2728,7 +2728,7 @@
+         let state = RemoteGatewayState::new(Arc::clone(&terminal_service), registry.clone());
+ 
+         let (session_id, mut rx) = pty
+-            .spawn(portable_pty::CommandBuilder::new("/bin/sh"), 80, 24)
++            .spawn(portable_pty::CommandBuilder::new(if cfg!(windows) { "cmd.exe" } else { "/bin/sh" }), 80, 24)
+             .expect("spawn session");
+         hub.register_session(&session_id);
+         let session_id_clone = session_id.clone();
+--- a/src-tauri/src/remote/workspace_api/worktree_authority_tests.rs
++++ b/src-tauri/src/remote/workspace_api/worktree_authority_tests.rs
+@@ -529,7 +529,8 @@
+         crate::remote::auth::write_private_json(&root.join("request.json"), &value).unwrap(); value
+     };
+     if !replay && std::env::var_os("A08_ACTIVE_GIT").is_none() { *service.transaction_probe.write() = Some(Arc::new(|phase| { if phase == "worktreePublication" {
+-        println!("A08_GIT_COMPLETE_BEFORE_PUBLICATION"); std::io::stdout().flush().unwrap();
++        // Serial libtest prints its test-name prefix without a newline.
++        println!("\nA08_GIT_COMPLETE_BEFORE_PUBLICATION"); std::io::stdout().flush().unwrap();
+         let mut line = String::new(); std::io::stdin().lock().read_line(&mut line).unwrap();
+         panic!("unexpected crash barrier release");
+     }})); }
+@@ -550,7 +551,7 @@
+             assert_eq!(listed.iter().filter(|row| row.managed).count(), 1);
+         }).catch_unwind().await;
+         stop.send(()).unwrap(); gateway.await.unwrap(); result.unwrap();
+-        println!("A08_RECONCILED_UNKNOWN_NO_REPEAT listener_joined=true");
++        println!("\nA08_RECONCILED_UNKNOWN_NO_REPEAT listener_joined=true");
+     });
+ }
+ 
+--- a/src-tauri/src/remote/workspace_api/worktrees.rs
++++ b/src-tauri/src/remote/workspace_api/worktrees.rs
+@@ -64,7 +64,7 @@
+     for field in output.split('\0') {
+         if let Some(path) = field.strip_prefix("worktree ") {
+             if let Some(row) = current.take() { listed.push(row); }
+-            current = Some(crate::worktree::Worktree { path: PathBuf::from(path), head: String::new(), branch: None, bare: false, detached: false, locked: None, prunable: None });
++            current = Some(crate::worktree::Worktree { path: crate::worktree::native_git_path(path), head: String::new(), branch: None, bare: false, detached: false, locked: None, prunable: None });
+         } else if let Some(row) = &mut current {
+             if let Some(value) = field.strip_prefix("HEAD ") { row.head = value.into(); }
+             else if let Some(value) = field.strip_prefix("branch ") { row.branch = Some(value.into()); }
+--- a/src-tauri/src/remote/workspace_api.rs
++++ b/src-tauri/src/remote/workspace_api.rs
+@@ -234,7 +234,7 @@
+     if p.parent().is_none() {
+         return Err("INVALID_PATH".into());
+     }
+-    Ok(p)
++    std::fs::canonicalize(p).map_err(|_| "INVALID_PATH".into())
+ }
+ fn git(root: &std::path::Path, args: &[&str], context: &RequestContext) -> Result<Option<String>, String> {
+     let mut command = tokio::process::Command::new("git");
+@@ -571,7 +571,7 @@
+                     (204, OperationOutcome::NoContent)
+                 } else {
+                     let (root, prepared_project) = prepared.expect("register projection");
+-                    if path(root.to_str().ok_or("INVALID_PATH")?)? != root { return Err("INVALID_PATH".into()); }
++                    if path(&crate::worktree::strip_verbatim_prefix(root.to_str().ok_or("INVALID_PATH")?))? != root { return Err("INVALID_PATH".into()); }
+                     // A stable native pathname is not a stable Git identity.
+                     // Refresh under admission using the original request budget;
+                     // project rejects a root now nested in another repository.
+--- a/src-tauri/src/remote/workspace_api_tests.rs
++++ b/src-tauri/src/remote/workspace_api_tests.rs
+@@ -508,7 +508,8 @@
+     if phase != "replay" {
+         *state.machine_services.as_ref().unwrap().workspaces.transaction_probe.write() = Some(std::sync::Arc::new(move |at| {
+             if at == phase {
+-                println!("R12_WINDOW"); std::io::stdout().flush().unwrap();
++                // Serial libtest prints its test-name prefix without a newline.
++                println!("\nR12_WINDOW"); std::io::stdout().flush().unwrap();
+                 let mut line = String::new(); std::io::stdin().lock().read_line(&mut line).unwrap();
+                 panic!("kill window unexpectedly released");
+             }
+@@ -536,13 +537,13 @@
+         if deleting {
+             assert_eq!(status.as_u16(), 204);
+             assert!(root.join("plain").is_dir());
+-            println!("R12_REPLAY unregister 204");
++            println!("\nR12_REPLAY unregister 204");
+         } else {
+             assert_eq!(status.as_u16(), 201);
+             let p: super::machine_protocol::Project = serde_json::from_slice(&body).unwrap();
+             assert_eq!(p.revision.0, 1);
+             std::fs::write(root.join("workspace-id"), &p.workspace_id).unwrap();
+-            println!("R12_REPLAY {} {}", p.workspace_id, p.revision.0);
++            println!("\nR12_REPLAY {} {}", p.workspace_id, p.revision.0);
+         }
+     });
+ }
+--- a/src-tauri/src/ssh/worktree.rs
++++ b/src-tauri/src/ssh/worktree.rs
+@@ -532,7 +532,9 @@
+     fn red_posix_script_builders_executable_behavior() {
+         let dir = tempfile::tempdir().expect("tempdir");
+         let repo_root_path = dir.path().canonicalize().expect("canonicalize");
+-        let repo_root = repo_root_path.to_str().expect("repo root str");
++        let portable_root = crate::worktree::strip_verbatim_prefix(repo_root_path.to_str().expect("repo root str"));
++        let portable_root = if cfg!(windows) { portable_root.replace('\\', "/") } else { portable_root };
++        let repo_root = portable_root.as_str();
+ 
+         let init_status = std::process::Command::new("git")
+             .args(["init", repo_root])
+@@ -570,20 +572,28 @@
+             None,
+         );
+ 
+-        let create_output = std::process::Command::new("bash")
++        let bash = if cfg!(windows) {
++            let git = std::env::split_paths(&std::env::var_os("PATH").expect("PATH"))
++                .map(|dir| dir.join("git.exe"))
++                .find(|path| path.is_file()).expect("Git for Windows on PATH");
++            git.parent().unwrap().parent().unwrap().join("bin/bash.exe")
++        } else { std::path::PathBuf::from("bash") };
++        let create_output = std::process::Command::new(&bash)
+             .args(["-c", &create_script])
+             .output()
+             .expect("run create_script");
+         assert!(
+             create_output.status.success(),
+-            "create_script failed: {}",
++            "create_script failed: status={:?} stdout={} stderr={}",
++            create_output.status,
++            String::from_utf8_lossy(&create_output.stdout),
+             String::from_utf8_lossy(&create_output.stderr)
+         );
+ 
+         let marker = format!("FERRYX_WT_LIST_V1_{}", uuid::Uuid::new_v4().simple());
+         let list_script = worktree_list_script(RemotePlatform::Posix, repo_root, &marker);
+ 
+-        let list_output = std::process::Command::new("bash")
++        let list_output = std::process::Command::new(&bash)
+             .args(["-c", &list_script])
+             .output()
+             .expect("run list_script");
+--- a/src-tauri/src/worktree/git.rs
++++ b/src-tauri/src/worktree/git.rs
+@@ -272,7 +272,7 @@
+         let root = tempfile::tempdir().unwrap();
+         run_git(root.path(), &["init", "--quiet"]).unwrap();
+         run_git(root.path(), &["-c", "user.name=A08", "-c", "user.email=a08@example.invalid", "commit", "--allow-empty", "-m", "base"]).unwrap();
+-        let path = root.path().join(" leading \"\u{fffd} trailing ");
++        let path = root.path().join(if cfg!(windows) { " leading '\u{fffd} trailing" } else { " leading \"\u{fffd} trailing " });
+         git_worktree_add(root.path(), &path, "feature", None).unwrap();
+         let expected = std::fs::canonicalize(&path).unwrap();
+         let rows = git_worktree_list(root.path()).unwrap();
+@@ -648,6 +648,14 @@
+ }
+ 
+ /// Parses the output of `git worktree list --porcelain`.
++pub(crate) fn native_git_path(path: &str) -> PathBuf {
++    #[cfg(windows)]
++    if matches!(Path::new(path).components().next(), Some(std::path::Component::Prefix(p)) if matches!(p.kind(), std::path::Prefix::Disk(_))) {
++        return PathBuf::from(format!(r"\\?\{}", path.replace('/', r"\")));
++    }
++    PathBuf::from(path)
++}
++
+ pub fn parse_worktree_list_porcelain(output: &str) -> Result<Vec<Worktree>, WorktreeError> {
+     let mut worktrees = Vec::new();
+     let mut current_path: Option<PathBuf> = None;
+@@ -710,7 +718,7 @@
+                     &mut prunable_reason,
+                 );
+             }
+-            current_path = Some(PathBuf::from(decode_git_quoted_path(path_str)?));
++            current_path = Some(native_git_path(&decode_git_quoted_path(path_str)?));
+         } else if let Some(head_str) = trimmed.strip_prefix("HEAD ") {
+             current_head = head_str.trim().to_string();
+         } else if let Some(branch_str) = trimmed.strip_prefix("branch ") {
+--- a/src-tauri/tests/machine_catalog_persistence.rs
++++ b/src-tauri/tests/machine_catalog_persistence.rs
+@@ -43,7 +43,8 @@
+     let server = std::sync::Arc::new(DaemonServer::new_with_paths(Some(root.join("data/config")), Some(root.join("data/auth"))));
+     let runtime = tokio::runtime::Runtime::new().unwrap();
+     runtime.block_on(ipc_register(server.clone(), vec![], false));
+-    println!("A05_READY"); std::io::stdout().flush().unwrap();
++    // Serial libtest prints its test-name prefix without a newline.
++    println!("\nA05_READY"); std::io::stdout().flush().unwrap();
+     let mut command = String::new();
+     std::io::stdin().lock().read_line(&mut command).unwrap();
+     if command.trim() == "register" {
+--- a/src-tauri/tests/machine_worktrees.rs
++++ b/src-tauri/tests/machine_worktrees.rs
+@@ -107,7 +107,7 @@
+ async fn machine_worktree_http_contract() {
+     let (root, server, token, repo) = tokio::task::spawn_blocking(|| {
+         let root = tempfile::tempdir().unwrap();
+-        let repo = root.path().join("repo space \"quote\" ü");
++        let repo = root.path().join(if cfg!(windows) { "repo space 'quote' ü" } else { "repo space \"quote\" ü" });
+         std::fs::create_dir(&repo).unwrap();
+         for args in [vec!["init", "--quiet"], vec!["config", "user.name", "A08"], vec!["config", "user.email", "a08@example.invalid"], vec!["commit", "--allow-empty", "-m", "base"]] {
+             ferryx_lib::worktree::run_git(&repo, &args).unwrap();
+@@ -128,7 +128,7 @@
+     let mut gateway = tokio::spawn(async move {
+         axum::serve(listener, create_remote_router(state)).with_graceful_shutdown(async { let _ = stopped.await; }).await.unwrap();
+     });
+-    let mut owned_session = None;
++    let mut owned_session: Option<String> = None;
+     let mut restart_replay = None;
+     let outcome = std::panic::AssertUnwindSafe(async {
+         let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(40)).build().unwrap();
+@@ -286,7 +286,7 @@
+         let initial_preview: serde_json::Value = serde_json::from_str(&initial_preview.text().await.unwrap()).unwrap();
+         let mut observed_revision: u64 = initial_preview["revision"].as_str().unwrap().parse().unwrap();
+         for dirty in [true, false] {
+-            let unusual_name = "space \"quote\" ü.txt";
++            let unusual_name = if cfg!(windows) { "space 'quote' ü.txt" } else { "space \"quote\" ü.txt" };
+             let file = path.join(unusual_name);
+             tokio::task::spawn_blocking(move || if dirty { std::fs::write(file,"dirty") } else { std::fs::remove_file(file) }).await.unwrap().unwrap();
+             let preview = client.get(&preview_url).bearer_auth(&token).send().await.unwrap();
+@@ -407,7 +407,7 @@
+             assert_eq!(error["error"]["code"], if git {"BASE_REF_UNAVAILABLE"} else {"NOT_A_GIT_REPOSITORY"});
+             assert!(!exists(&folder.join(".orca-worktrees")).await);
+         }
+-        let external = root.path().join("external space \"quote\"");
++        let external = root.path().join(if cfg!(windows) { "external space 'quote'" } else { "external space \"quote\"" });
+         let target = external.clone(); let git_root = repo.clone();
+         tokio::task::spawn_blocking(move || ferryx_lib::worktree::run_git(git_root, &["worktree", "add", "--detach", target.to_str().unwrap(), "HEAD"]).unwrap()).await.unwrap();
+         let inventory = client.get(&endpoint).bearer_auth(&token).query(&[("workspaceId",ws)]).send().await.unwrap();
+--- /dev/null
++++ b/src-tauri/tests/q4_windows_paths.rs
+@@ -0,0 +1,13 @@
++#![cfg(windows)]
++use ferryx_lib::worktree::WorktreeManager;
++
++#[test]
++fn git_inventory_and_manager_share_native_identity() {
++    let root = tempfile::tempdir().unwrap();
++    ferryx_lib::worktree::run_git(root.path(), &["init", "--quiet"]).unwrap();
++    ferryx_lib::worktree::run_git(root.path(), &["-c", "user.name=Q4", "-c", "user.email=q4@example.invalid", "commit", "--allow-empty", "-m", "base"]).unwrap();
++    let manager = WorktreeManager::new(root.path());
++    let rows = ferryx_lib::worktree::git_worktree_list(manager.repo_root()).unwrap();
++    assert_eq!(rows[0].path, manager.repo_root(), "native Git inventory identity");
++    root.close().unwrap();
++}
+--- a/src-tauri/tests/relay_pairing_generation_regression.rs
++++ b/src-tauri/tests/relay_pairing_generation_regression.rs
+@@ -58,7 +58,10 @@
+         std::fs::create_dir(path.join("child")).unwrap();
+         let daemon = ferryx_lib::daemon::server::DaemonServer::new_with_paths(
+             Some(dir.path().join("config.json")), Some(dir.path().join("auth.json")));
+-        (dir, daemon, path.canonicalize().unwrap())
++        let canonical = path.canonicalize().unwrap();
++        // Browser requests use navigable drive paths, not OS verbatim syntax.
++        let path = std::path::PathBuf::from(ferryx_lib::worktree::strip_verbatim_prefix(canonical.to_str().unwrap()));
++        (dir, daemon, path)
+     }).await.unwrap();
+     let state = RelayState::new_with_key_store(vec![], dir.path().join("keys.json")).unwrap();
+     let (base, relay) = serve(state).await;
+--- a/src-tauri/tests/worktree_safety.rs
++++ b/src-tauri/tests/worktree_safety.rs
+@@ -130,13 +130,13 @@
+     let canonical = fs::canonicalize(&wt).expect("canonical worktree");
+     let pty = PtyManager::new();
+ 
+-    let mut first_shell = CommandBuilder::new("/bin/sh");
++    let mut first_shell = CommandBuilder::new(if cfg!(windows) { "cmd.exe" } else { "/bin/sh" });
+     first_shell.cwd(&wt);
+     let (first_id, _first_rx) = pty
+         .spawn_in_worktree(first_shell, 80, 24, &manager, &wt)
+         .expect("spawn first terminal");
+ 
+-    let mut second_shell = CommandBuilder::new("/bin/sh");
++    let mut second_shell = CommandBuilder::new(if cfg!(windows) { "cmd.exe" } else { "/bin/sh" });
+     second_shell.cwd(&wt);
+     let (second_id, _second_rx) = pty
+         .spawn_in_worktree(second_shell, 80, 24, &manager, &wt)
+@@ -175,7 +175,7 @@
+     let wt = create_worktree(&manager, "pty-ownership");
+     let pty = PtyManager::new();
+ 
+-    let mut shell = CommandBuilder::new("/bin/sh");
++    let mut shell = CommandBuilder::new(if cfg!(windows) { "cmd.exe" } else { "/bin/sh" });
+     shell.cwd(&wt);
+     let (session_id, _rx) = pty
+         .spawn_in_worktree(shell, 80, 24, &manager, &wt)
+@@ -190,8 +190,8 @@
+         .expect("close terminal");
+     assert!(!pty.has_session(&session_id));
+ 
+-    let mut one_shot = CommandBuilder::new("/bin/sh");
+-    one_shot.arg("-c");
++    let mut one_shot = CommandBuilder::new(if cfg!(windows) { "cmd.exe" } else { "/bin/sh" });
++    one_shot.arg(if cfg!(windows) { "/C" } else { "-c" });
+     one_shot.arg("exit 0");
+     one_shot.cwd(&wt);
+     let (natural_id, mut output) = pty
+@@ -199,7 +199,12 @@
+         .expect("spawn one-shot terminal");
+ 
+     tokio::time::timeout(Duration::from_secs(5), async {
+-        while output.recv().await.is_some() {}
++        while let Some(bytes) = output.recv().await {
++            #[cfg(windows)]
++            if bytes.windows(4).any(|b| b == b"\x1b[6n") { pty.write_input(&natural_id, b"\x1b[1;1R").unwrap(); }
++            #[cfg(not(windows))]
++            let _ = bytes;
++        }
+     })
+     .await
+     .expect("natural session output closure");
+@@ -233,7 +238,7 @@
+     let mut receivers = Vec::with_capacity(worktrees.len());
+ 
+     for worktree in &worktrees {
+-        let mut shell = CommandBuilder::new("/bin/sh");
++        let mut shell = CommandBuilder::new(if cfg!(windows) { "cmd.exe" } else { "/bin/sh" });
+         shell.cwd(worktree);
+         let (session_id, receiver) = pty
+             .spawn_in_worktree(shell, 80, 24, &manager, worktree)

@@ -1,0 +1,38 @@
+[
+  {
+    "name": "paths",
+    "pid": 82884,
+    "exit": 101,
+    "waited": true
+  },
+  {
+    "name": "filesystem",
+    "pid": 83001,
+    "exit": 101,
+    "waited": true
+  },
+  {
+    "name": "worktree",
+    "pid": 83151,
+    "exit": 101,
+    "waited": true
+  },
+  {
+    "name": "relay-close",
+    "pid": 83228,
+    "exit": 101,
+    "waited": true
+  },
+  {
+    "name": "integration",
+    "pid": 83279,
+    "exit": 101,
+    "waited": true
+  },
+  {
+    "name": "build",
+    "pid": 94475,
+    "exit": 0,
+    "waited": true
+  }
+]

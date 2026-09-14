@@ -1,0 +1,19 @@
+source-before 34 MATCH
+source-after-capture 34 MATCH
+Traceback (most recent call last):
+  File "/private/tmp/ferryx-herdr-q4-linux-01a097f8/capture.py", line 29, in <module>
+    check(root,'source-after-capture'); check(dest,'snapshot-baseline')
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/ferryx-herdr-q4-linux-01a097f8/capture.py", line 6, in check
+    rows = {p: {'sha256': hashlib.sha256((base/p).read_bytes()).hexdigest(), 'bytes': (base/p).stat().st_size} for p in expected}
+                                         ^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/indo/.pyenv/versions/3.12.0/lib/python3.12/pathlib.py", line 1020, in read_bytes
+    with self.open(mode='rb') as f:
+         ^^^^^^^^^^^^^^^^^^^^
+  File "/Users/indo/.pyenv/versions/3.12.0/lib/python3.12/pathlib.py", line 1014, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/tmp/ferryx-herdr-q4-linux-01a097f8/source/src-tauri/Cargo.lock'
+source-after-capture 34 MATCH
+snapshot-baseline 34 MATCH
+snapshot_files 6827 archive_sha256 9f0941dc85bce511efe622ed8cf87e8d84185f1e127b57a79e8e5f3576864978

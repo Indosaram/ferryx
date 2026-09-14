@@ -182,6 +182,34 @@ pub fn save_session_to_path(
         })?;
     }
 
+    if path.exists() {
+        let original = fs::read(path).map_err(|e| IpcError::new(IpcErrorCode::IoError, format!("Failed to read pre-migration session: {e}")))?;
+        let previous: serde_json::Value = serde_json::from_slice(&original).map_err(|e| IpcError::new(IpcErrorCode::ParseError, format!("Cannot overwrite unreadable session: {e}")))?;
+        let version = previous.get("version").and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| IpcError::new(IpcErrorCode::ParseError, "Missing session version"))?;
+        if version > u64::from(session.version) {
+            return Err(IpcError::new(IpcErrorCode::ParseError, "Refusing session schema downgrade"));
+        }
+        if version < 3 && session.version >= 3 {
+            let backup = path.with_extension("json.pre-v3");
+            // Linking the old inode publishes a complete snapshot without clobbering an
+            // earlier backup. Atomic replacement below never mutates that inode.
+            match fs::hard_link(path, &backup) {
+                Ok(()) => {},
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {},
+                Err(e) => return Err(IpcError::new(IpcErrorCode::IoError, format!("Failed to back up pre-v3 session: {e}"))),
+            }
+            let verified = fs::read(&backup).map_err(|e| IpcError::new(IpcErrorCode::IoError, format!("Failed to verify pre-v3 backup: {e}")))?;
+            if verified != original {
+                return Err(IpcError::new(IpcErrorCode::IoError, "Pre-v3 backup differs from current legacy session"));
+            }
+            File::open(&backup).and_then(|file| file.sync_all()).map_err(|e| IpcError::new(IpcErrorCode::IoError, format!("Failed to sync pre-v3 backup: {e}")))?;
+            if let Some(parent) = path.parent() {
+                File::open(parent).and_then(|dir| dir.sync_all()).map_err(|e| IpcError::new(IpcErrorCode::IoError, format!("Failed to sync backup directory: {e}")))?;
+            }
+        }
+    }
+
     let serialized = serde_json::to_string(session).map_err(|e| {
         IpcError::new(
             IpcErrorCode::ParseError,

@@ -75,6 +75,42 @@ pub trait RemoteSessionBackend: Send + Sync {
     ) -> BoxFuture<'a, Result<(), String>>;
 }
 
+/// The router retains Local/SSH/legacy transport and generation validation;
+/// the shared service supplies authoritative metadata to HTTP and IPC alike.
+impl RemoteSessionBackend for crate::daemon::session_service::DaemonSessionService {
+    fn recovery<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Option<RecoveryStream>, String>> {
+        self.router().recovery(id)
+    }
+    fn write_generation<'a>(&'a self, id: &'a str, generation: u64, data: &'a [u8]) -> BoxFuture<'a, Result<(), String>> {
+        self.router().write_generation(id, generation, data)
+    }
+    fn resize_generation<'a>(&'a self, id: &'a str, generation: u64, cols: u16, rows: u16) -> BoxFuture<'a, Result<(), String>> {
+        self.router().resize_generation(id, generation, cols, rows)
+    }
+    fn list_sessions(&self) -> BoxFuture<'_, Vec<String>> {
+        RemoteSessionBackend::list_sessions(self.router())
+    }
+    fn describe_session<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<RemoteSessionDetails, String>> {
+        Box::pin(async move {
+            let mut details = self.router().describe_session(id).await?;
+            self.project_session_metadata(&mut details);
+            Ok(details)
+        })
+    }
+    fn attach_with_sequence<'a>(&'a self, id: &'a str, after: Option<u64>) -> BoxFuture<'a, Result<SessionAttachment, String>> {
+        self.router().attach_with_sequence(id, after)
+    }
+    fn write_input<'a>(&'a self, id: &'a str, data: &'a [u8]) -> BoxFuture<'a, Result<(), String>> {
+        self.router().write_input(id, data)
+    }
+    fn resize<'a>(&'a self, id: &'a str, cols: u16, rows: u16) -> BoxFuture<'a, Result<(), String>> {
+        self.router().resize(id, cols, rows)
+    }
+    fn signal<'a>(&'a self, id: &'a str, signal: TerminalSignal) -> BoxFuture<'a, Result<(), String>> {
+        self.router().signal(id, signal)
+    }
+}
+
 impl RemoteSessionBackend for TerminalService {
     fn recovery<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Option<RecoveryStream>, String>> {
         Box::pin(async move {

@@ -1,0 +1,2 @@
+owner=68193 command=cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --test relay_pairing_generation_regression stale_registration_stops_being_claimable_after_control_replacement -- --exact --nocapture 
+exit=0 owner_reaped=true

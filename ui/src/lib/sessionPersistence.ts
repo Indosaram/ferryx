@@ -1,3 +1,4 @@
+import { hasValidProjectTarget } from "./projectIdentity";
 import { createLayoutState, normalizeLayout } from "../state/layout";
 import { collectLeafIds, createLeafNode, removeLeaf, type PaneNode } from "../state/paneTree";
 import type { WorkspaceState } from "../state/workspaceStore";
@@ -27,7 +28,7 @@ import {
   type Worktree,
 } from "./types";
 
-export const WORKSPACE_SESSION_VERSION = 2;
+export const WORKSPACE_SESSION_VERSION = 3;
 
 /**
  * Identity of everything about the live sessions that has to reach disk. Saves are scheduled off
@@ -49,7 +50,7 @@ export function serializeWorkspaceState(
   repoRoot: string,
   state: WorkspaceState,
   existingSession?: PersistedWorkspaceSession | null,
-  project?: Pick<import("./types").RegisteredProject, "target" | "gitRoot" | "gitRemote" | "gitCommonDir" | "gitBranch" | "gitHead" | "hostLabel">,
+  project?: Pick<import("./types").RegisteredProject, "target" | "remoteWorkspaceId" | "gitRoot" | "gitRemote" | "gitCommonDir" | "gitBranch" | "gitHead" | "hostLabel">,
 ): PersistedWorkspaceSession {
   const browserSettings = loadBrowserSettings();
   const restoreBrowserTabs = browserSettings.restoreTabsOnLaunch;
@@ -255,10 +256,12 @@ export function serializeWorkspaceState(
     }
   }
 
+  const target = project?.target ?? existingSession?.workspaces[workspaceId]?.target;
   const workspace: PersistedWorkspace = {
     workspaceId,
     repoRoot,
-    target: project?.target ?? existingSession?.workspaces[workspaceId]?.target,
+    target: target?.kind === "pairedDaemon" ? { kind: "pairedDaemon", hostId: target.hostId } : target,
+    remoteWorkspaceId: project?.remoteWorkspaceId ?? existingSession?.workspaces[workspaceId]?.remoteWorkspaceId,
     gitRoot: project?.gitRoot === undefined ? existingSession?.workspaces[workspaceId]?.gitRoot : project.gitRoot,
     gitRemote: project?.gitRemote === undefined ? existingSession?.workspaces[workspaceId]?.gitRemote : project.gitRemote,
     gitCommonDir: project?.gitCommonDir === undefined ? existingSession?.workspaces[workspaceId]?.gitCommonDir : project.gitCommonDir,
@@ -303,6 +306,7 @@ export function deserializeWorkspaceState(
   liveBackendSessionIds?:
     | Iterable<string | { sessionId: string; daemonEpoch?: string | null; worktreePath?: string | null; running?: boolean }>
     | {
+        complete?: boolean;
         epoch?: string | null;
         daemonEpoch?: string | null;
         sessionIds?: Iterable<string>;
@@ -312,6 +316,8 @@ export function deserializeWorkspaceState(
 ): WorkspaceState | null {
   const ws = persistedSession.workspaces?.[workspaceId];
   if (!ws) return null;
+  if ((workspaceId.startsWith("daemon:") || ws.target?.kind === "pairedDaemon") &&
+    !hasValidProjectTarget({ ...ws, workspaceId })) return null;
   const isV2 = (persistedSession.version ?? 1) >= 2;
 
   const browserSettings = loadBrowserSettings();
@@ -322,7 +328,8 @@ export function deserializeWorkspaceState(
 
   let globalLiveEpoch: string | null = null;
   const liveSessionMap = new Map<string, { daemonEpoch: string | null; running: boolean }>();
-  const hasLiveSessionQuery = liveBackendSessionIds !== null && liveBackendSessionIds !== undefined;
+  const hasLiveSessionQuery = liveBackendSessionIds !== null && liveBackendSessionIds !== undefined &&
+    !(typeof liveBackendSessionIds === "object" && "complete" in liveBackendSessionIds && liveBackendSessionIds.complete === false);
 
   if (hasLiveSessionQuery && liveBackendSessionIds) {
     if (
@@ -368,7 +375,7 @@ export function deserializeWorkspaceState(
 
   const worktrees: Worktree[] = (ws.worktrees || []).map((wt) => ({
     // HMR snapshots predate project metadata but retain the reserved backend ID.
-    ...(ws.target?.kind === "ssh" || workspaceId.startsWith("ssh:") ? { workspaceId } : {}),
+    ...(ws.target?.kind === "pairedDaemon" || ws.target?.kind === "ssh" || workspaceId.startsWith("ssh:") ? { workspaceId } : {}),
     path: wt.path,
     branch: wt.branch ? (wt.branch.startsWith("refs/heads/") ? wt.branch : `refs/heads/${wt.branch}`) : null,
     head: wt.head,
@@ -392,7 +399,15 @@ export function deserializeWorkspaceState(
     let lifecycle: TerminalLifecycle = "exited";
 
     const isSshSession = ws.target?.kind === "ssh" || workspaceId.startsWith("ssh:");
-    if (isSshSession && persistedBackendSessionId) {
+    const isPairedSession = ws.target?.kind === "pairedDaemon";
+    if (isPairedSession) {
+      // Local inventory is not authority for remote liveness or remote epochs.
+      // Retain the proxy binding for exact-target reattach, never create a shell.
+      backendSessionId = persistedBackendSessionId;
+      daemonEpoch = persistedEpoch;
+      lastOutputSequence = null;
+      lifecycle = persistedBackendSessionId ? "working" : "exited";
+    } else if (isSshSession && persistedBackendSessionId) {
       // SSH backend IDs identify persisted remote targets across daemon epochs.
       // List absence/running=false cannot establish remote process death; status can.
       backendSessionId = persistedBackendSessionId;
@@ -472,7 +487,7 @@ export function deserializeWorkspaceState(
       reconnectLifecycle: "idle",
       reconnectError: null,
       reconnectRequestId: null,
-      ...(isSshSession ? { remoteConnectionState: persistedBackendSessionId ? "reconnecting" as const : "legacyLost" as const } : {}),
+      ...(isSshSession || isPairedSession ? { remoteConnectionState: persistedBackendSessionId ? "reconnecting" as const : "legacyLost" as const } : {}),
     };
   }
 

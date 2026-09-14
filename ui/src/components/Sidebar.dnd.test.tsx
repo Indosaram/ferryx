@@ -16,7 +16,7 @@ type DragEnd = (event: {
 }) => void;
 
 const dndHarness = vi.hoisted(() => ({
-  props: null as null | { onDragStart?: DragStart; onDragEnd?: DragEnd },
+  props: null as null | { onDragStart?: DragStart; onDragEnd?: DragEnd; sensors?: unknown },
   sensors: [] as Array<{ sensor: unknown; options?: unknown }>,
 }));
 

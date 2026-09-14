@@ -1,0 +1,21 @@
+{
+  "src-tauri/src/terminal/session.rs": "78652d1e883749c5360dc6a655700ef59b9d3a5612562f96ce0d413de5ae8a2b",
+  "src-tauri/src/terminal/pty.rs": "17dad78db716482ac401960eedbe463e013815718428a4b349ab0865321a1976",
+  "src-tauri/src/terminal/windows_input.rs": "be6e3a30817c45cc3b34207c9ead01bc30ff105d182faf679c524bc3dd7ab771",
+  "src-tauri/Cargo.toml": "43371ac36a7868e8fdd28f4fe039ecc1e5813fc0a9e237d8d170230052fe7e34",
+  "src-tauri/Cargo.lock": "00d0c83c507bdc86356f59277b66aff241d1e7d2400cb3ad9e29439d48ac3f2a",
+  "src-tauri/tests/pty_input_cancellation.rs": "3c177838761be05afb6d8d1c386985ab1db67e4182f8c1dfb790765b0973696a",
+  "src-tauri/vendor/portable-pty/Cargo.toml": "e1a7320efbb4b088352f5ac87c805e2ad96df571b994ac1397e6d6ffdf981c61",
+  "src-tauri/vendor/portable-pty/LICENSE.md": "191c46fcf52061382b1c51a70311eb9081381cc158e5899f3739473a9432185b",
+  "src-tauri/vendor/portable-pty/src/unix.rs": "14c85213b32074d71c8af334531fd027d6a0558dee830282620c88bab056c4b3",
+  "src-tauri/vendor/portable-pty/src/lib.rs": "8e8b19fe1b10de42dad8a64dfee6456f3cfc79b9ac71cb4a4d0465f878df39ef",
+  "src-tauri/vendor/portable-pty/src/cmdbuilder.rs": "db95387276f7f5a2e6bfd27a0c21ad99090f5d29e3663ad0446becec86748283",
+  "src-tauri/vendor/portable-pty/src/serial.rs": "4c1db2410641b15af1c52d17b3e03a294f11d1a843744e27101d22dc91dbd793",
+  "src-tauri/vendor/portable-pty/src/win/procthreadattr.rs": "0483a5b43794181f02b20175ba15dc4e913663208d94e4a48aa9cc2cd77fdb1c",
+  "src-tauri/vendor/portable-pty/src/win/psuedocon.rs": "297d0622d7b0401708f1ce3b92076632dd5a0c188b4a8d09b2f4891190b0e392",
+  "src-tauri/vendor/portable-pty/src/win/mod.rs": "c983e63d15800f73ac05105a69ec2b53fea482c066ea5559682bd024561f999a",
+  "src-tauri/vendor/portable-pty/src/win/conpty.rs": "3b8c8189e2769f4ad4ce0e05e63a2d0e46362759546e5846badf66ff1e4a8178",
+  "src-tauri/tests/pty-input-native/native.rs": "b9588ff16ef2a9a7845155b2cc7becb5cf1aa7541d178170388ddc1b6c6e5dbf",
+  "src-tauri/tests/pty-input-native/Cargo.toml": "4b7686c60dc2f3aff3cfa6f42633ba483089a8bc4a06384e80e1722f8f919813",
+  "src-tauri/tests/pty-input-native/Cargo.lock": "3b6d0d29cba06dba3dea41683becd7ddcf152a48be062442e489f0de40a544a7"
+}

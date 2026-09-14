@@ -1,0 +1,48 @@
+pty EXIT=101; WAITED=True
+worktrees EXIT=101; WAITED=True
+candidate-seams-pty.log
+
+warning: `ferryx` (lib test) generated 26 warnings (run `cargo fix --lib -p ferryx --tests` to apply 13 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 52.97s
+     Running unittests src\lib.rs (C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\ferryx_lib-c12d60fa37477486.exe)
+
+running 1 test
+Q4 PTY wire bytes="\u{1b}]777;ferryx;{\"kind\":\"output\",\"sequence\":\"1\"}\u{7}\u{1b}[6n"
+
+thread 'remote::relay_server::tests::coordinator_pairs_through_relay_to_real_gateway' (20600) panicked at src\remote\relay_server.rs:3386:10:
+terminal output arrived before the deadline: Elapsed(())
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+R4 PTY: executed marker received; owned sessions explicitly closed; listeners/reverse joined; private workspace removed
+test remote::relay_server::tests::coordinator_pairs_through_relay_to_real_gateway ... FAILED
+
+failures:
+
+failures:
+    remote::relay_server::tests::coordinator_pairs_through_relay_to_real_gateway
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 729 filtered out; finished in 20.61s
+
+error: test failed, to rerun pass `--lib`
+candidate-seams-worktrees.log
+A08 LOST_REPLY owner_status=201 forwarded_response_bytes=0 intermediary_joined=true
+A08 STALE_REVISION status=409 target_preserved=true refusal_replayed=true
+
+thread 'machine_worktree_http_contract' (11440) panicked at tests\machine_worktrees.rs:291:143:
+called `Result::unwrap()` on an `Err` value: Os { code: 123, kind: InvalidFilename, message: "?뚯씪 ?대쫫, ?붾젆?곕━ ?대쫫 ?먮뒗 蹂쇰ⅷ ?덉씠釉?援щЦ???섎せ?섏뿀?듬땲??" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+A08 CLEANUP listener_joined=true private_root_removed=true
+test machine_worktree_http_contract ... FAILED
+A08 revision phase=initial listener_joined=true owner_dropped=true connection_refused=true
+A08 revision phase=unchanged listener_joined=true owner_dropped=true connection_refused=true
+A08 revision phase=changed listener_joined=true owner_dropped=true connection_refused=true
+A08 revision post_commit_change=true unchanged_restart_equal=true offline_clean_change_stale_delete=true private_root_removed=true
+test worktree_revision_survives_owner_restart ... ok
+
+failures:
+
+failures:
+    machine_worktree_http_contract
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.50s
+
+error: test failed, to rerun pass `--test machine_worktrees`

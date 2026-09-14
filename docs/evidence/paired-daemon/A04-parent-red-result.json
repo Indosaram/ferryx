@@ -1,0 +1,28 @@
+{
+  "status": "behavioral-red-confirmed",
+  "exitCode": 101,
+  "mutation": "test-only A04_SPLIT_AUTHORITY=1",
+  "failure": "HTTP cannot see original IPC session and workspace",
+  "fixturePid": 83825,
+  "ptyPid": 83858,
+  "cwd": "/private/tmp/a04-DkgEaQ/project",
+  "httpStatus": 200,
+  "httpSessions": [],
+  "registryIpc": 1,
+  "registryHttp": 0,
+  "cleanup": {
+    "pidsAbsent": true,
+    "privateRootRemoved": true,
+    "listenersJoined": true,
+    "ptyReaped": true
+  },
+  "sourceSha256": {
+    "src-tauri/src/daemon/a04_shared_services_tests.rs": "2b87c0765970140a90a08e31af182008ba9f351de2d979b1ae8a4c22522970b4",
+    "src-tauri/src/daemon/server.rs": "668e1710b738c5de019ec447c36bbcf075852f6256c0946d3a47f6838a190345"
+  },
+  "limitations": [
+    "This proves the test detects split authority; production baseline already shares handles.",
+    "A04 extraction, guard mutations, GREEN, failure-cleanup hardening and final review remain incomplete.",
+    "Build began with a build-directory lock wait; no concurrent source change was observed; source hashes matched before and after."
+  ]
+}

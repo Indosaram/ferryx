@@ -1,0 +1,134 @@
+    Blocking waiting for file lock on build directory
+   Compiling ferryx v2026.908.1 (/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/src-tauri)
+error[E0432]: unresolved imports `super::session_service`, `super::workspace_service`
+ --> src/daemon/session_metadata_events.rs:2:13
+  |
+2 | use super::{session_service::StoredSessionMeta, workspace_service::DaemonWorkspaceService};
+  |             ^^^^^^^^^^^^^^^                     ^^^^^^^^^^^^^^^^^ could not find `workspace_service` in `super`
+  |             |
+  |             could not find `session_service` in `super`
+
+error[E0432]: unresolved imports `super::protocol`, `super::session_service`
+ --> src/daemon/session_metadata_provider.rs:2:13
+  |
+2 | use super::{protocol::{AgentStateReport, DaemonRequest, DaemonResponse, TerminalStartup}, session_service::{DaemonSessionService, Provide...
+  |             ^^^^^^^^ could not find `protocol` in `super`                                 ^^^^^^^^^^^^^^^ could not find `session_service` in `super`
+
+error[E0599]: no method named `validate_machine_agent_report` found for struct `std::sync::Arc<session_service::DaemonSessionService>` in the current scope
+    --> src/daemon/server.rs:1493:57
+     |
+1493 |                     match Box::pin(self.session_service.validate_machine_agent_report(target, report)).await {
+     |                                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+help: there is a method `validate_machine_target` with a similar name, but with different arguments
+    --> src/daemon/session_service.rs:240:5
+     |
+ 240 | /     pub(crate) fn validate_machine_target(&self, target: &crate::remote::machine_protocol::RemoteTerminalTarget)
+ 241 | |         -> Result<crate::remote::machine_protocol::Session, String> {
+     | |___________________________________________________________________^
+
+error[E0282]: type annotations needed
+  --> src/daemon/session_metadata_provider.rs:11:28
+   |
+11 | ...   let response = peer.send_request(&DaemonRequest::MachineSessionMetadata { target: target.clone(), report }).await.map_err(|_| "HOST...
+   |                      ^^^^ cannot infer type
+
+error[E0282]: type annotations needed
+  --> src/daemon/session_metadata_provider.rs:11:28
+   |
+11 | ...sponse = peer.send_request(&DaemonRequest::MachineSessionMetadata { target: target.clone(), report }).await.map_err(|_| "HOST_UNAVAILA...
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ cannot infer type
+
+error[E0599]: no method named `validate_machine_agent_report` found for struct `std::sync::Arc<session_service::DaemonSessionService>` in the current scope
+    --> src/daemon/server.rs:1269:66
+     |
+1269 | ...                   if let Err(error) = sessions.validate_machine_agent_report(session.target, hint).await {
+     |                                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+help: there is a method `validate_machine_target` with a similar name, but with different arguments
+    --> src/daemon/session_service.rs:240:5
+     |
+ 240 | /     pub(crate) fn validate_machine_target(&self, target: &crate::remote::machine_protocol::RemoteTerminalTarget)
+ 241 | |         -> Result<crate::remote::machine_protocol::Session, String> {
+     | |___________________________________________________________________^
+
+error[E0282]: type annotations needed
+  --> src/daemon/session_metadata_events.rs:67:24
+   |
+67 |             *session = committed.clone();
+   |                        ^^^^^^^^^ cannot infer type
+
+error[E0282]: type annotations needed
+  --> src/daemon/session_metadata_provider.rs:57:24
+   |
+57 |             *session = committed.clone();
+   |                        ^^^^^^^^^ cannot infer type
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `token`
+    --> src/remote/auth.rs:1399:14
+     |
+1399 |         let (token, device) = auth
+     |              ^^^^^ help: if this is intentional, prefix it with an underscore: `_token`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `scroll_daemon_client`
+   --> src/lib.rs:916:9
+    |
+916 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+    |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+
+Some errors have detailed explanations: E0282, E0432, E0599.
+For more information about an error, try `rustc --explain E0282`.
+warning: `ferryx` (lib test) generated 10 warnings
+error: could not compile `ferryx` (lib test) due to 8 previous errors; 10 warnings emitted

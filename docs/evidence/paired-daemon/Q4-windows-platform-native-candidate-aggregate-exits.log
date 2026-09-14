@@ -1,0 +1,5 @@
+remote EXIT=0; WAITED=True
+integration EXIT=101; WAITED=True
+worktree EXIT=0; WAITED=True
+paths EXIT=0; WAITED=True
+build EXIT=0; WAITED=True

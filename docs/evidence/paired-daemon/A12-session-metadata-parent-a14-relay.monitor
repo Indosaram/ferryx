@@ -1,0 +1,4 @@
+owner=28091 command=cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib paired_host_operation_tests -- --nocapture --test-threads=1 
+  PID  PPID    RSS ELAPSED COMMAND
+28091 28088    528   00:00 cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib paired_host_operation_tests -- --nocapture --test-threads=1
+exit=0 owner_reaped=true

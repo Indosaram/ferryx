@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import {
   listWorktrees as defaultListWorktrees,
@@ -9,6 +9,8 @@ import type { RegisteredProject, Worktree, WorktreeChangedPayload } from "../lib
 import { switchDebug } from "../lib/switchDebug";
 import { projectRootWorktree as plainRootWorktree } from "../lib/projectIdentity";
 import { getWorkspaceSnapshot } from "./workspaceSnapshotCache";
+import { listPairedProjectWorktrees } from "./pairedProjectWorktrees";
+import { remoteHostStore } from "./remoteHostStore";
 
 export type InactiveProjectWorktreeServices = {
   registerProject: (request: { workspaceId: string; repoPath: string }) => Promise<RegisteredProject>;
@@ -59,7 +61,12 @@ export function useInactiveProjectWorktrees(
     }
   }, [activeProjectId, activeWorktrees]);
 
-  const inactiveTargets = projects.filter((project) => project.workspaceId !== activeProjectId);
+  const remoteState = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
+  const pairedRefreshKey = JSON.stringify(projects.filter(project => project.target?.kind === "pairedDaemon").map(project => {
+    const host = project.target?.kind === "pairedDaemon" ? remoteState.hosts[project.target.hostId] : undefined;
+    return [project.workspaceId, host?.generation, host?.online, host?.authStatus, remoteState.nativeStatus, remoteState.machineFeaturesEnabled];
+  }));
+  const inactiveTargets = projects.filter((project) => project.workspaceId !== activeProjectId || project.target?.kind === "pairedDaemon");
   const inactiveKey = JSON.stringify(inactiveTargets.map(({ workspaceId, repoRoot, gitRoot, target }) => ({
     workspaceId, repoRoot, gitRoot, target,
   })));
@@ -85,6 +92,12 @@ export function useInactiveProjectWorktrees(
       const target = inactiveTargetsRef.current.find((project) => project.workspaceId === workspaceId);
       if (!target) return;
 
+      if (target.target?.kind === "pairedDaemon") {
+        void listPairedProjectWorktrees(target).then(listed => {
+          if (!cancelled && listed !== null) setWorktreesByProject(current => ({ ...current, [workspaceId]: listed }));
+        }).catch(error => switchDebug("inactive-worktrees.relist.error", { workspaceId, error: String(error) }));
+        return;
+      }
       const isSsh = target.target?.kind === "ssh";
       if (!isSsh) {
         // Rescan-emitted `created`/`updated` events carry worktrees the sidebar
@@ -141,6 +154,15 @@ export function useInactiveProjectWorktrees(
     void (async () => {
       const resolved = await Promise.all(
         targets.map(async (project) => {
+          if (project.target?.kind === "pairedDaemon") {
+            try {
+              const listed = await listPairedProjectWorktrees(project);
+              return [project.workspaceId, listed] as const;
+            } catch (error) {
+              switchDebug("inactive-worktrees.error", { workspaceId: project.workspaceId, error: String(error) });
+              return [project.workspaceId, null] as const;
+            }
+          }
           // Inactive SSH targets skip local project registration, but git-backed
           // SSH projects still list their remote worktrees on initial load.
           if (project.target?.kind === "ssh") {
@@ -151,8 +173,9 @@ export function useInactiveProjectWorktrees(
               const listed = await services.listWorktrees(project.workspaceId);
               const worktrees = listed.length > 0 ? listed : [plainRootWorktree(project)];
               return [project.workspaceId, worktrees] as const;
-            } catch {
-              return [project.workspaceId, [plainRootWorktree(project)]] as const;
+            } catch (error) {
+              switchDebug("inactive-worktrees.error", { workspaceId: project.workspaceId, error: String(error) });
+              return [project.workspaceId, null] as const;
             }
           }
           try {
@@ -181,7 +204,7 @@ export function useInactiveProjectWorktrees(
               workspaceId: project.workspaceId,
               error: String(error),
             });
-            return [project.workspaceId, [] as Worktree[]] as const;
+            return [project.workspaceId, null] as const;
           }
         }),
       );
@@ -197,7 +220,13 @@ export function useInactiveProjectWorktrees(
       });
       setWorktreesByProject((current) => ({
         ...current,
-        ...Object.fromEntries(resolved),
+        ...Object.fromEntries(resolved.flatMap(([id, rows]) => {
+          if (rows !== null) return [[id, [...rows]]];
+          // Preserve existing data on error. Keep the legacy local empty-cache
+          // shape only when this workspace has never produced any rows.
+          const project = targets.find(target => target.workspaceId === id);
+          return !current[id] && (!project?.target || project.target.kind === "local") ? [[id, []]] : [];
+        })),
       }));
     })();
 
@@ -207,7 +236,7 @@ export function useInactiveProjectWorktrees(
         activeProjectId,
       });
     };
-  }, [activeProjectId, inactiveKey, services]);
+  }, [activeProjectId, inactiveKey, pairedRefreshKey, services]);
 
   return worktreesByProject;
 }

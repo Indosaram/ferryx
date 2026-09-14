@@ -1,0 +1,16 @@
+Transcript started, output file is C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\cleanup.log
+POST_BUILD_SOURCE_HASHES=969
+OWNED_EXECUTABLE_PROCESSES=0
+BUILD_EXIT=101; WAITED=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\runtime; ABSENT=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\data; ABSENT=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\sessions; ABSENT=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\home; ABSENT=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\config; ABSENT=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\cache; ABSENT=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\temp; ABSENT=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\appdata; ABSENT=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\localappdata; ABSENT=True
+No test binaries, daemons, PTYs, HTTP/WS listeners or Git runtime fixtures were launched.
+Retained: source, target, archive, bundle, manifests, scripts and command logs for coordinated repair review.
+Transcript stopped, output file is C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\cleanup.log

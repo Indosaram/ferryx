@@ -1,0 +1,74 @@
+A09 resume cleanup receipts (derived from executed validator output)
+
+SOURCE A09-resume-RED.log
+A09 cleanup: private listener joined; owned sessions closed; private root removed
+
+SOURCE A09-resume-legacy-RED.log
+R3 CLEANUP listener_joined=true connection_refused=true private_root_removed=true no_pty=true
+EXIT=101 PRIVATE_SUPERVISOR_REMOVED=/tmp/a09-r3-red.sOXHiL
+
+SOURCE A09-resume-legacy-GREEN.log
+R3 CLEANUP listener_joined=true connection_refused=true private_root_removed=true no_pty=true
+EXIT=0 PRIVATE_SUPERVISOR_REMOVED=/tmp/a09-r3-green.w7KT22
+
+SOURCE A09-resume-final-validation.log
+A09 cleanup: private listener joined; owned sessions closed; private root removed
+EXIT=0 SELECTOR=machine_sessions
+A09 interrupted owner cleanup: every owned PTY reaped and private root removed
+A09 crash cleanup: private owner waited, listener dropped, root removed
+A09 crash cleanup: private owner waited, listener dropped, root removed
+A09 crash cleanup: private owner waited, listener dropped, root removed
+A09 lost-reply cleanup: listener joined; private PTY reaped; lifecycle writer joined; root removed
+A09 interrupted owner cleanup: every owned PTY reaped and private root removed
+A09 provider fixture cleanup: private child waited; PTY lifecycle joined; private executable/transcript/root removed
+A09 capacity cleanup: all 64 PTYs reaped; all lifecycle writers completed; root removed
+EXIT=0 SELECTOR=authority
+R3 CLEANUP listener_joined=true connection_refused=true private_root_removed=true no_pty=true
+EXIT=0 SELECTOR=legacy
+EXIT=0 SELECTOR=absent
+A04 CLEANUP listener=IPC joined=true
+A04 CLEANUP listeners_joined=true socket_removed=true closed=0 injection=IpcSetup errors=[]
+A04 CLEANUP child_pid=55428 reaped=true exit=exit status: 0
+A04 CLEANUP private_root_removed=true
+A04 CLEANUP listener=IPC joined=true
+A04 CLEANUP listener=HTTP joined=true
+A04 CLEANUP listeners_joined=true socket_removed=true closed=0 injection=HttpSetup errors=[]
+A04 CLEANUP child_pid=55430 reaped=true exit=exit status: 0
+A04 CLEANUP private_root_removed=true
+A04 CLEANUP listener=IPC joined=true
+A04 CLEANUP listener=HTTP joined=true
+A04 CLEANUP listener=IPC joined=true
+A04 CLEANUP listener=HTTP joined=true
+A04 CLEANUP session=b2c9a501-f7eb-4c56-bd1f-e23a38538f57 pty_pid=Some(55468) reaped=true
+A04 CLEANUP listeners_joined=true socket_removed=true closed=1 injection=Scenario errors=[]
+A04 CLEANUP child_pid=55446 reaped=true exit=exit status: 0
+A04 CLEANUP private_root_removed=true
+A04 CLEANUP session=6d3bb83b-c9c1-4560-914e-2fa6eaf87941 pty_pid=Some(55469) reaped=true
+A04 CLEANUP listeners_joined=true socket_removed=true closed=1 injection=None errors=[]
+A04 CLEANUP child_pid=55429 reaped=true exit=exit status: 0
+A04 CLEANUP private_root_removed=true
+A04 CLEANUP listener=IPC joined=true
+A04 CLEANUP listener=HTTP joined=true
+A04 CLEANUP session=8f28ea04-ca19-40cb-bd9e-97c2c7a3582e pty_pid=Some(55494) reaped=true
+A04 CLEANUP session=a5a3ec0e-db57-4a33-9808-9c19626a0650 pty_pid=Some(55493) reaped=true
+A04 CLEANUP listeners_joined=true socket_removed=true closed=2 injection=Cleanup errors=["close 8f28ea04-ca19-40cb-bd9e-97c2c7a3582e: General error: injected close failure"]
+A04 CLEANUP child_pid=55474 reaped=true exit=exit status: 0
+A04 CLEANUP private_root_removed=true
+A04 CLEANUP listener=IPC joined=true
+A04 CLEANUP listener=HTTP joined=true
+A04 CLEANUP session=aecd5c74-6338-462c-bc00-a2b70e1910e3 pty_pid=Some(55536) reaped=true
+A04 CLEANUP listeners_joined=true socket_removed=true closed=1 injection=Cancel errors=[]
+A04 CLEANUP child_pid=55517 reaped=true exit=exit status: 0
+A04 CLEANUP private_root_removed=true
+A04 CLEANUP listener=IPC joined=true
+A04 CLEANUP listener=HTTP joined=true
+A04 CLEANUP session=5bc9fb37-3c42-411a-8556-88312b4901e9 pty_pid=Some(55556) reaped=true
+A04 CLEANUP listeners_joined=true socket_removed=true closed=1 injection=Deadline errors=[]
+A04 CLEANUP child_pid=55537 reaped=true exit=exit status: 0
+A04 CLEANUP private_root_removed=true
+EXIT=0 SELECTOR=shared
+PRIVATE_SUPERVISOR_REMOVED=/tmp/a09-verification.eW3Prv EXIT=0
+
+SOURCE A09-resume-SSH-provisioned.log
+QA_HELPER_REAPED 9047
+

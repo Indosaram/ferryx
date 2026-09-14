@@ -1,0 +1,5 @@
+{
+  "path": "src-tauri/src/clipboard_image.rs",
+  "before": "e107b1f49a1c7a77df858d4d877a6db7fa5e301261a7ca46282413ae4e97423d",
+  "after": "4ee03a13564a2245129eeb7ccba334a5e0147922e6dd78eb77a0b7948288156e"
+}

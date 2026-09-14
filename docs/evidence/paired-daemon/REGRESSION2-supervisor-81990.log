@@ -1,0 +1,12 @@
+RUN full /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/docs/evidence/paired-daemon/REGRESSION2-full-82016.log
+RESULT {'label': 'full', 'exit': 101, 'seconds': 297.52110712500144, 'log': '/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/docs/evidence/paired-daemon/REGRESSION2-full-82016.log'}
+RUN paired-host /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/docs/evidence/paired-daemon/REGRESSION2-paired-host-82016.log
+RESULT {'label': 'paired-host', 'exit': 0, 'seconds': 1.3158559580042493, 'log': '/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/docs/evidence/paired-daemon/REGRESSION2-paired-host-82016.log'}
+RUN check-lib /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/docs/evidence/paired-daemon/REGRESSION2-check-lib-82016.log
+RESULT {'label': 'check-lib', 'exit': 0, 'seconds': 10.71620137499849, 'log': '/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/docs/evidence/paired-daemon/REGRESSION2-check-lib-82016.log'}
+RUN check-bins /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/docs/evidence/paired-daemon/REGRESSION2-check-bins-82016.log
+RESULT {'label': 'check-bins', 'exit': 0, 'seconds': 0.46574612500262447, 'log': '/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/docs/evidence/paired-daemon/REGRESSION2-check-bins-82016.log'}
+RUN build-entrypoint /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/docs/evidence/paired-daemon/REGRESSION2-build-entrypoint-82016.log
+RESULT {'label': 'build-entrypoint', 'exit': 0, 'seconds': 20.539326124999207, 'log': '/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/docs/evidence/paired-daemon/REGRESSION2-build-entrypoint-82016.log'}
+RUN relay-entrypoint /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/docs/evidence/paired-daemon/REGRESSION2-relay-entrypoint-82016.log
+RESULT {'label': 'relay-entrypoint', 'exit': 2, 'seconds': 0.5724487499974202, 'log': '/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/docs/evidence/paired-daemon/REGRESSION2-relay-entrypoint-82016.log'}

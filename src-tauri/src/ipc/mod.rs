@@ -13,6 +13,7 @@ pub mod native_terminal;
 pub mod native_terminal_disabled;
 pub mod notifications;
 pub mod permissions;
+pub mod paired_host;
 pub mod preferences;
 pub mod project;
 pub mod project_remote;

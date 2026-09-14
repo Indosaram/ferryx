@@ -1,0 +1,7 @@
+error: process didn't exit successfully: `C:\Users\sook\AppData\Local\Microsoft\WinGet\Links\sccache.exe C:\Users\sook\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\rustc.exe -vV` (exit code: 101)
+--- stderr
+
+thread 'main' (7704) panicked at src\config.rs:1252:55:
+Unable to get config directory
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+

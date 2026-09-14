@@ -1,0 +1,48 @@
+relay EXIT=0; WAITED=True
+safety EXIT=0; WAITED=True
+review-relay.log
+warning: static `FERRYX_DATA_DIR_LOCK` is never used
+    --> src\lib.rs:1188:12
+     |
+1188 |     static FERRYX_DATA_DIR_LOCK: Mutex<()> = Mutex::new(());
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `RestoreFerryxDataDir` is never constructed
+    --> src\lib.rs:1190:12
+     |
+1190 |     struct RestoreFerryxDataDir(Option<OsString>);
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib test) generated 26 warnings (run `cargo fix --lib -p ferryx --tests` to apply 13 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 53.96s
+     Running unittests src\lib.rs (C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\ferryx_lib-c12d60fa37477486.exe)
+
+running 1 test
+Q4 browser close acknowledgement observed=true
+test remote::relay_server::tests::test_relay_browser_ws_terminal_bridge_success ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 729 filtered out; finished in 0.03s
+
+review-safety.log
+warning: linker stdout: C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\ferryx_lib.dll.lib ?쇱씠釉뚮윭由?諛?C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\ferryx_lib.dll.exp 媛쒖껜瑜??앹꽦?섍퀬 ?덉뒿?덈떎.
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `ferryx` (lib) generated 15 warnings (run `cargo fix --lib -p ferryx` to apply 4 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 53.16s
+     Running tests\worktree_safety.rs (C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\worktree_safety-d7606df9c56537a2.exe)
+
+running 9 tests
+test unavailable_base_ref_leaves_no_managed_parent_directory ... ok
+test active_writer_blocks_delete ... ok
+test second_writer_is_rejected_and_release_allows_reacquire ... ok
+test pty_spawn_failure_does_not_claim_exclusive_writer ... ok
+Q4 natural-exit ConPTY cursor query answered
+test same_worktree_supports_multiple_interactive_pty_sessions ... ok
+test default_delete_rejects_clean_unmerged_branch ... ok
+test pty_worktree_ownership_clears_on_close_and_natural_exit ... ok
+test explicit_destructive_delete_removes_clean_unmerged_branch ... ok
+test five_concurrent_worktree_terminal_lifecycles_remain_isolated ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.90s
+

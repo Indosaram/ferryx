@@ -8,11 +8,14 @@ import {
   previewWorktreeDelete,
   toIpcError,
 } from "../lib/tauri";
-import { createRemoteWorktreeDeleteServices } from "../lib/remoteProject";
+import { createRemoteWorktreeDeleteServices, isPairedWorkspaceId } from "../lib/remoteProject";
+import { createPairedWorktreeActions, pairedActionMessage } from "../lib/pairedWorktreeActions";
+import { PairedOperationError } from "../lib/pairedDaemonProject";
 import {
   worktreeIdentity,
   type BranchDeletionPreview,
   type DirtyFile,
+  type RegisteredProject,
   type StructuredIpcError,
   type Worktree,
 } from "../lib/types";
@@ -21,6 +24,7 @@ import {
 // discarded rather than describing it in the abstract. Long lists are truncated with a
 // remainder count so the dialog cannot be pushed off-screen by a large dirty worktree.
 const DIRTY_FILES_SHOWN = 8;
+type DeletePreview = BranchDeletionPreview | Awaited<ReturnType<ReturnType<typeof createPairedWorktreeActions>["previewDelete"]>>;
 
 export type WorktreeDeleteServices = {
   previewDelete: (worktree: Worktree) => Promise<BranchDeletionPreview>;
@@ -30,6 +34,7 @@ export type WorktreeDeleteServices = {
 
 type WorktreeDeleteDialogProps = {
   workspaceId?: string;
+  project?: RegisteredProject;
   worktree: Worktree;
   onClose: () => void;
   onDeleted: () => void;
@@ -38,7 +43,12 @@ type WorktreeDeleteDialogProps = {
   dirtyFiles?: DirtyFile[];
 };
 
-function createDefaultServices(workspaceId: string): WorktreeDeleteServices {
+function createDefaultServices(workspaceId: string, paired: boolean): WorktreeDeleteServices {
+  // Either ownership signal must prevent Local/SSH fallback without a paired project.
+  if (paired) {
+    const unsupported = async (): Promise<never> => { throw new PairedOperationError("PAIRED_OWNER_REQUIRED"); };
+    return { previewDelete: unsupported, deleteSafe: unsupported, deleteDestructive: unsupported };
+  }
   return {
     previewDelete: async (worktree) => {
       const identity = requireIdentity(worktree);
@@ -57,24 +67,30 @@ function createDefaultServices(workspaceId: string): WorktreeDeleteServices {
 
 export function WorktreeDeleteDialog({
   workspaceId = DEFAULT_WORKSPACE_ID,
+  project,
   worktree,
   onClose,
   onDeleted,
   services,
   initialDirty = false,
 }: WorktreeDeleteDialogProps) {
-  const isRemoteWorkspace = Boolean(
+  const paired = project?.target?.kind === "pairedDaemon" || isPairedWorkspaceId(workspaceId) || isPairedWorkspaceId(worktree.workspaceId);
+  const isRemoteWorkspace = paired || Boolean(
     workspaceId?.startsWith("ssh:") || worktree.workspaceId?.startsWith("ssh:"),
   );
   const resolvedServices = useMemo(
-    () =>
-      services ??
-      (isRemoteWorkspace
-        ? createRemoteWorktreeDeleteServices(worktree.workspaceId ?? workspaceId)
-        : createDefaultServices(workspaceId)),
-    [services, isRemoteWorkspace, worktree.workspaceId, workspaceId],
+    () => services ?? (project?.target?.kind === "pairedDaemon"
+      ? createPairedWorktreeActions(project)
+      : paired
+        ? createDefaultServices(worktree.workspaceId ?? workspaceId, true)
+        : isRemoteWorkspace
+          ? createRemoteWorktreeDeleteServices(worktree.workspaceId ?? workspaceId)
+          : createDefaultServices(worktree.workspaceId ?? workspaceId, false)),
+    [services, project, paired, isRemoteWorkspace, worktree.workspaceId, workspaceId],
   );
-  const [preview, setPreview] = useState<BranchDeletionPreview | null>(null);
+  const actionError = (cause: unknown): StructuredIpcError => cause instanceof PairedOperationError
+    ? { code: cause.code, message: pairedActionMessage(cause) } : toIpcError(cause);
+  const [preview, setPreview] = useState<DeletePreview | null>(null);
   const [error, setError] = useState<StructuredIpcError | null>(
     initialDirty
       ? {
@@ -85,10 +101,12 @@ export function WorktreeDeleteDialog({
         }
       : null,
   );
-  const [destructiveRequired, setDestructiveRequired] = useState(initialDirty);
+  const [destructiveRequired, setDestructiveRequired] = useState(initialDirty && !paired);
   const [busy, setBusy] = useState(false);
-  const dirtyFiles = preview?.dirtyState.files ?? [];
-  const hasDirtyLoss = preview?.dirtyState.isDirty || error?.code === "DIRTY_WORKTREE";
+  // Paired previews carry branch metadata only; force deletion remains unavailable there.
+  const dirtyState = preview && "dirtyState" in preview ? preview.dirtyState : undefined;
+  const dirtyFiles = dirtyState?.files ?? [];
+  const hasDirtyLoss = dirtyState?.isDirty || error?.code === "DIRTY_WORKTREE";
 
   useEffect(() => {
     let cancelled = false;
@@ -100,7 +118,7 @@ export function WorktreeDeleteDialog({
           "Safe deletion refused because the worktree has uncommitted or untracked changes. Destructive deletion will discard all changes permanently.",
         details: {},
       });
-      setDestructiveRequired(true);
+      setDestructiveRequired(!paired);
     } else {
       setError(null);
       setDestructiveRequired(false);
@@ -108,15 +126,15 @@ export function WorktreeDeleteDialog({
     setBusy(true);
     void resolvedServices
       .previewDelete(worktree)
-      .then((result) => {
+      .then((result: DeletePreview) => {
         if (!cancelled) {
           setPreview(result);
-          setDestructiveRequired(result.dirtyState.isDirty);
+          setDestructiveRequired(!paired && "dirtyState" in result && result.dirtyState.isDirty);
           setError(null);
         }
       })
       .catch((cause) => {
-        if (!cancelled) setError(toIpcError(cause));
+        if (!cancelled) setError(actionError(cause));
       })
       .finally(() => {
         if (!cancelled) setBusy(false);
@@ -124,7 +142,7 @@ export function WorktreeDeleteDialog({
     return () => {
       cancelled = true;
     };
-  }, [resolvedServices, worktree, initialDirty]);
+  }, [resolvedServices, worktree, initialDirty, paired]);
 
   const finishDelete = () => {
     onDeleted();
@@ -138,16 +156,16 @@ export function WorktreeDeleteDialog({
       await resolvedServices.deleteSafe(worktree);
       finishDelete();
     } catch (cause) {
-      const ipcError = toIpcError(cause);
+      const ipcError = actionError(cause);
       setError(ipcError);
-      const requiresDestructive = ipcError.code === "UNMERGED_BRANCH" || ipcError.code === "DIRTY_WORKTREE";
+      const requiresDestructive = !paired && (ipcError.code === "UNMERGED_BRANCH" || ipcError.code === "DIRTY_WORKTREE");
       setDestructiveRequired(requiresDestructive);
       if (requiresDestructive) {
         setPreview(null);
         try {
           setPreview(await resolvedServices.previewDelete(worktree));
         } catch (previewError) {
-          setError(toIpcError(previewError));
+          setError(actionError(previewError));
         }
       }
     } finally {
@@ -163,7 +181,7 @@ export function WorktreeDeleteDialog({
       await resolvedServices.deleteDestructive(worktree);
       finishDelete();
     } catch (cause) {
-      setError(toIpcError(cause));
+      setError(actionError(cause));
     } finally {
       setBusy(false);
     }

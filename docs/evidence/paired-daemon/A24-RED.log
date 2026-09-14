@@ -1,0 +1,55 @@
+$ vitest run --maxWorkers=1 src/lib/pairedDaemonRollout.test.ts
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+ ❯ src/lib/pairedDaemonRollout.test.ts (5 tests | 4 failed) 11ms
+   ✓ new local accepts an older epoch with fewer capabilities but never dispatches unsupported operations 3ms
+   × failed renegotiation revokes prior admission: {"apiVersion":0,"daemonEpoch":"1","capabilities":[]} 5ms
+     → promise resolved "{ path: '/', parentPath: null, …(3) }" instead of rejecting
+   × failed renegotiation revokes prior admission: {"capabilities":["directoryBrowseV1","futureV9"]} 1ms
+     → promise resolved "{ path: '/', parentPath: null, …(3) }" instead of rejecting
+   × failed renegotiation revokes prior admission: {"accessScope":"mirror"} 1ms
+     → promise resolved "{ path: '/', parentPath: null, …(3) }" instead of rejecting
+   × failed renegotiation revokes prior admission: {"machineId":"other-machine"} 1ms
+     → promise resolved "{ path: '/', parentPath: null, …(3) }" instead of rejecting
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 4 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/pairedDaemonRollout.test.ts > failed renegotiation revokes prior admission: {"apiVersion":0,"daemonEpoch":"1","capabilities":[]}
+ FAIL  src/lib/pairedDaemonRollout.test.ts > failed renegotiation revokes prior admission: {"capabilities":["directoryBrowseV1","futureV9"]}
+ FAIL  src/lib/pairedDaemonRollout.test.ts > failed renegotiation revokes prior admission: {"accessScope":"mirror"}
+ FAIL  src/lib/pairedDaemonRollout.test.ts > failed renegotiation revokes prior admission: {"machineId":"other-machine"}
+AssertionError: promise resolved "{ path: '/', parentPath: null, …(3) }" instead of rejecting
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- Error {[39m
+[32m-   "message": "rejected promise",[39m
+[31m+ {[39m
+[31m+   "entries": [],[39m
+[31m+   "homePath": "/",[39m
+[31m+   "parentPath": null,[39m
+[31m+   "path": "/",[39m
+[31m+   "truncated": false,[39m
+[2m  }[22m
+
+ ❯ src/lib/pairedDaemonRollout.test.ts:37:39
+     35|   await expect(f.adapter.capabilities()).rejects.toMatchObject({ code …
+     36|   const count = f.invoke.mock.calls.length;
+     37|   await expect(f.adapter.directories()).rejects.toMatchObject({ code: …
+       |                                       ^
+     38|   expect(f.invoke).toHaveBeenCalledTimes(count);
+     39|   expect(f.adapter.context.hostId).toBe(f.host.hostId);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/4]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  4 failed | 1 passed (5)
+   Start at  15:44:08
+   Duration  464ms (transform 44ms, setup 81ms, collect 29ms, tests 11ms, environment 157ms, prepare 25ms)
+
+error: script "test" exited with code 1
+
+EXIT=1

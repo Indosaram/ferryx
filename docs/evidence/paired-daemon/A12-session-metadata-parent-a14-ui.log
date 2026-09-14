@@ -1,0 +1,13 @@
+$ vitest run --maxWorkers=1 src/lib/pairedDaemonProject.test.ts src/lib/pairedDaemonContracts.test.ts src/state/remoteHostStore.test.ts
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+ ✓ src/lib/pairedDaemonProject.test.ts (19 tests) 15ms
+ ✓ src/state/remoteHostStore.test.ts (13 tests) 10ms
+ ✓ src/lib/pairedDaemonContracts.test.ts (78 tests) 8ms
+
+ Test Files  3 passed (3)
+      Tests  110 passed (110)
+   Start at  14:26:51
+   Duration  1.22s (transform 70ms, setup 236ms, collect 61ms, tests 32ms, environment 553ms, prepare 83ms)
+

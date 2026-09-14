@@ -1,0 +1,19 @@
+Transcript started, output file is C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\repaired-cleanup.log
+REPAIRED_SOURCE_MATCH=969
+
+
+ProcessId       : 9388
+ParentProcessId : 17880
+Name            : pwsh.exe
+ExecutablePath  : c:\program files\powershell\7\pwsh.exe
+CommandLine     : "c:\program files\powershell\7\pwsh.exe" -c "powershell -NoProfile -File C:\Users\sook\ferryx-herdr-q
+                  4-windows-01a097f8\repaired-cleanup.ps1"
+
+OWNED_RUNTIME_PROCESSES=1
+Owned process remains; inspect before cleanup
+At C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\repaired-cleanup.ps1:13 char:19
++ ... $owned.Count) {throw 'Owned process remains; inspect before cleanup'}
++                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : OperationStopped: (Owned process r... before cleanup:String) [], RuntimeException
+    + FullyQualifiedErrorId : Owned process remains; inspect before cleanup
+ 

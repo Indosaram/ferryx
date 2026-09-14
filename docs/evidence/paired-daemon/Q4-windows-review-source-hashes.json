@@ -1,0 +1,58 @@
+{
+  "src-tauri/src/remote/filesystem_tests.rs": {
+    "before": "d8e5d329e1f6b1f3d9049180fcc7ca0c08b219ad8aaa0bd9ee3c9b3a373dbeb8",
+    "after": "460e947665b461be7ae66ab75390b8d9212479c420d79a350ddef1b690ee1ee6"
+  },
+  "src-tauri/src/remote/relay_server.rs": {
+    "before": "89157d33216802f1f63dc85a4ba34807e58731ef697ef852578fa5517d2223f3",
+    "after": "b37da97b7d960fa174027d6a5f7f7666dfa01b305988db2bccba7faf86f6bc24"
+  },
+  "src-tauri/src/remote/server.rs": {
+    "before": "4a762a4fd2cc68ee2ed7e810ba726fea9e8fd5bafba397aa32ca35d5b7e3b5ca",
+    "after": "92f5e4b87478c1bad8f22b61ea6702b03998b2cf86d26b64669f70d038ac2c34"
+  },
+  "src-tauri/src/remote/workspace_api/worktree_authority_tests.rs": {
+    "before": "6e5c092e24fe5115b0bd266651d1e8c5a5f4fdc06bfd5bb4e8c4cfa3b52861eb",
+    "after": "97538465d9f639c14f18004b09d20baa9e840f3ebd1f95b153f013b5d251f3c5"
+  },
+  "src-tauri/src/remote/workspace_api/worktrees.rs": {
+    "before": "9eac20aa3f043708fec39daa513e1fd8ed777a5069f5a924e922cfdab2bcad33",
+    "after": "46fe10d8cb36dc9697f966edd8ed9905603701852a82c5792218182825ea1cf7"
+  },
+  "src-tauri/src/remote/workspace_api.rs": {
+    "before": "ceb911a549905b57e4bbd333502190e1ef6a7a13cca458270843d2debff277a4",
+    "after": "a2a5a19ec90c2d7cd99ad661a54b693dcb1dae0dbd3f0911deff0029318b3d56"
+  },
+  "src-tauri/src/remote/workspace_api_tests.rs": {
+    "before": "acd98884243be442d615efe39b614064a3ff71353596b22ae0403dd660938b1c",
+    "after": "0c30c7da1b1460bdbe555f3442c0919ca9e0361926a71ac4d1ee1b4548a84857"
+  },
+  "src-tauri/src/ssh/worktree.rs": {
+    "before": "b5df04c06badb58841cfa39f9ed89c11470f3a19c6ee3c41825ba4ebaf304be1",
+    "after": "7f2930294f3a74201347a9aeac40bc4a85a17446c69f2f8dd0568087b7818a7b"
+  },
+  "src-tauri/src/worktree/git.rs": {
+    "before": "fa31173cea551b5edbbe8370814b5879bd1d6fb1cf70abbe9115bbc6b8c702a4",
+    "after": "2df70a1ef81bb3acf5afa40ebe76b12116b3e3de6d99aa4e5494b5b10ed62a94"
+  },
+  "src-tauri/tests/machine_catalog_persistence.rs": {
+    "before": "fd4cbb35061a5cae09ee4bd657907a7433c4966dd50cc88630316f2af78cc8f4",
+    "after": "4d492f1010c3bc3b68b959fab94eb4a2cfece4be18fdb8359e570ed2a7ed9322"
+  },
+  "src-tauri/tests/machine_worktrees.rs": {
+    "before": "ef0a128e4c0d41b776c3908a9165121abd2b5e732b2bc6b3c1050af1fdde70b4",
+    "after": "838737ef15d50503f54ad2fc38d52334a79c09c0998c800336ef477ad67e55a3"
+  },
+  "src-tauri/tests/q4_windows_paths.rs": {
+    "before": null,
+    "after": "3a74566f4b7988d869e0615e86ac97f9b0d7d9bb55fda25dcd7a251cd36ba1c8"
+  },
+  "src-tauri/tests/relay_pairing_generation_regression.rs": {
+    "before": "ea07bf77ac64e915e1001dcc701bb3789609f8257614e7188ce8e99161de12f0",
+    "after": "8d190f4d5e2c2b1de83714a3989cb6757f30795af689021c2a1cee6dc1ee28e2"
+  },
+  "src-tauri/tests/worktree_safety.rs": {
+    "before": "bdea33980f0641ed2dabffb474c6c31a03edf38498045aba11d485e3b05263cb",
+    "after": "d02e6af3dd3d9072052ac7189fd94a0bdf1b4dbaada135d0b04b7d7d4700a477"
+  }
+}

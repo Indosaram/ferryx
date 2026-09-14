@@ -1,0 +1,7 @@
+paths EXIT=0; WAITED=True
+project EXIT=0; WAITED=True
+directories EXIT=0; WAITED=True
+identity EXIT=0; WAITED=True
+relay EXIT=0; WAITED=True
+pty EXIT=101; WAITED=True
+worktrees EXIT=101; WAITED=True

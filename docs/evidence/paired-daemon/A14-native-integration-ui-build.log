@@ -1,0 +1,29 @@
+COMMAND: bun run --cwd ui build
+$ tsc && vite build
+vite v6.4.3 building for production...
+transforming...
+✓ 1884 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                                        3.08 kB │ gzip:   1.10 kB
+dist/assets/crush-DHElXcRZ.png                         5.46 kB
+dist/assets/droid-BhrKLgQ8.svg                         6.30 kB │ gzip:   2.88 kB
+dist/assets/antigravity-DgAQAdn3.svg                   7.63 kB │ gzip:   1.72 kB
+dist/assets/gjc-CmlXGg4z.png                          22.73 kB
+dist/assets/geist-variable-CrgPqtmy.woff2             69.44 kB
+dist/assets/ferryx-icon-OXRkkUvz.png                 805.82 kB
+dist/assets/index-DglER3B1.css                        78.14 kB │ gzip:  14.20 kB
+dist/assets/server-CLQMWrdJ.js                         0.51 kB │ gzip:   0.32 kB
+dist/assets/card-Cp6kgwaB.js                           2.08 kB │ gzip:   0.87 kB
+dist/assets/pairedHostInventory-Do0I92Mw.js            4.22 kB │ gzip:   1.77 kB
+dist/assets/remoteHostStore-CwIx0Pt3.js                4.37 kB │ gzip:   1.64 kB
+dist/assets/PermissionsOnboardingDialog-C-i3LwNQ.js    6.25 kB │ gzip:   1.85 kB
+dist/assets/browser-BxnKUDCX.js                       25.78 kB │ gzip:  10.13 kB
+dist/assets/RemoteApp-B8Vf9S8b.js                     61.10 kB │ gzip:  18.05 kB
+dist/assets/sonner-BCpxGVWx.js                        93.62 kB │ gzip:  31.08 kB
+dist/assets/index-NmvO915p.js                        187.68 kB │ gzip:  60.14 kB
+dist/assets/SettingsDialog-JX2e3N4s.js               192.35 kB │ gzip:  57.38 kB
+dist/assets/App-C2p3R-NI.js                          480.23 kB │ gzip: 139.72 kB
+✓ built in 2.37s
+
+EXIT: 0

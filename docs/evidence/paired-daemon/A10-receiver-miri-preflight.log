@@ -1,0 +1,4 @@
+stage=/tmp/a10-receiver.zr7WJm
+command=cargo +nightly miri --version
+miri 0.1.0 (daf2e5e18b 2026-07-13)
+exit=0

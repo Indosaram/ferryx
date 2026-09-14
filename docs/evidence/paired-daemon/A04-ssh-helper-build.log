@@ -1,0 +1,38 @@
+status: completed exit_code: 0
+   Compiling libc v0.2.189
+   Compiling proc-macro2 v1.0.107         ] 0/60: libc(build.rs)
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling cfg-if v1.0.4                ] 0/60: unicode-ident, quote(build.rs), libc(build.rs), proc-macro2(build.r…
+   Compiling zerocopy v0.8.57             ] 4/60: proc-macro2(build), cfg-if, libc(build), quote(build)
+   Compiling serde_core v1.0.229          ] 7/60: proc-macro2(build), zerocopy(build), libc, quote(build)
+   Compiling cfg_aliases v0.1.1           ] 8/60: proc-macro2(build), zerocopy(build), libc, serde_core(build.rs)
+   Compiling thiserror v1.0.69            ] 9/60: proc-macro2(build), cfg_aliases, libc, serde_core(build.rs)
+   Compiling nix v0.28.0                 ] 10/60: proc-macro2(build), cfg_aliases, libc, thiserror(build.rs)
+   Compiling getrandom v0.4.3            ] 15/60: proc-macro2, libc, zerocopy, thiserror(build)
+   Compiling getrandom v0.2.17           ] 16/60: getrandom(build.rs), proc-macro2, libc, zerocopy
+   Compiling zmij v1.0.23                ] 17/60: getrandom(build.rs), proc-macro2, zerocopy, getrandom
+   Compiling anyhow v1.0.104             ] 18/60: zmij(build.rs), proc-macro2, zerocopy, getrandom
+   Compiling rand_core v0.6.4            ] 20/60: proc-macro2, zerocopy, getrandom, anyhow(build)
+   Compiling syn v2.0.119                ] 25/60: serde_core, getrandom(build), zerocopy, quote
+   Compiling syn v3.0.5=>                ] 26/60: serde_core, getrandom(build), zerocopy, syn
+   Compiling ppv-lite86 v0.2.21          ] 27/60: serde_core, syn, zerocopy, syn
+   Compiling serde v1.0.229              ] 29/60: serde_core, ppv-lite86, nix(build), syn
+   Compiling thiserror-impl v1.0.69      ] 30/60: ppv-lite86, nix(build), serde(build.rs), syn
+   Compiling serde_json v1.0.151         ] 31/60: ppv-lite86, thiserror-impl, nix(build), serde(build.rs)
+   Compiling bitflags v2.13.1            ] 32/60: thiserror-impl, nix(build), serde_json(build.rs), serde(build.rs)
+   Compiling rand_chacha v0.3.1          ] 37/60: nix, thiserror, serde(build), serde_json(build)
+   Compiling serde_derive v1.0.229       ] 38/60: nix, rand_chacha, thiserror, serde_json(build)
+   Compiling filedescriptor v0.8.3       ] 39/60: nix, rand_chacha, thiserror, serde_derive
+   Compiling serial2 v0.2.38====>        ] 43/60: nix, getrandom, anyhow, zmij
+   Compiling shell-words v1.1.1=>        ] 44/60: nix, serial2, anyhow, zmij
+   Compiling itoa v1.0.18========>       ] 45/60: nix, serial2, shell-words, zmij
+   Compiling downcast-rs v1.2.1==>       ] 46/60: nix, serial2, shell-words, itoa
+   Compiling log v0.4.34==========>      ] 47/60: nix, serial2, itoa, downcast-rs
+   Compiling memchr v2.8.3========>      ] 48/60: nix, itoa, downcast-rs, log
+   Compiling uuid v1.26.0==========>     ] 49/60: memchr, itoa, downcast-rs, log
+   Compiling portable-pty v0.9.0===>     ] 51/60: memchr, serde, uuid, log
+   Compiling rand v0.8.8============>    ] 52/60: memchr, serde, portable-pty, uuid
+   Compiling base64 v0.22.1==========>   ] 54/60: serde, rand, portable-pty, serde_json
+   Compiling ferryx-remote-helper v2026.908.1 (/Users/indo/code/project/orca-lite-wt/herdr-wave1/remote-helper)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 34.20sin)

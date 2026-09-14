@@ -1,0 +1,35 @@
+{
+  "status": "blocked-on-required-guard-red-not-green-ready",
+  "cwd": "/Users/indo/code/project/orca-lite-wt/herdr-wave1",
+  "productionEdited": false,
+  "sourceSha256": {
+    "src-tauri/src/daemon/a04_shared_services_tests.rs": "2b87c0765970140a90a08e31af182008ba9f351de2d979b1ae8a4c22522970b4",
+    "src-tauri/src/daemon/server.rs": "668e1710b738c5de019ec447c36bbcf075852f6256c0946d3a47f6838a190345"
+  },
+  "executionReason": "Child has bash but no monitor. Required independent guard RED must precede production seam extraction. Parent must execute monitored mutations serially and restore baseline after each. Do not repeat split-authority RED.",
+  "command": "CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR=/Users/indo/code/project/orca-lite-wt/herdr-wave1/src-tauri/target cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib daemon::server::a04_shared_services_tests::a04_shared_authority_runtime -- --exact --nocapture",
+  "environment": { "A04_SPLIT_AUTHORITY": "unset", "A04_PRIVATE_ROOT": "unset in outer runner" },
+  "mutations": [
+    {
+      "id": "unregistered-admission",
+      "file": "src-tauri/src/daemon/server.rs",
+      "replace": ".resolve_terminal_target(workspace_id, worktree.as_ref())\n                .map_err(|e| SpawnError::Other(e.to_string()))?;",
+      "with": ".resolve_terminal_target(workspace_id, worktree.as_ref())\n                .or_else(|_| { let root = std::env::var_os(\"A04_PRIVATE_ROOT\").expect(\"private fixture root\"); let root = PathBuf::from(root); WorktreeManager::try_new(&root).map(|mgr| (mgr, root)) })\n                .map_err(|e| SpawnError::Other(e.to_string()))?;",
+      "expectedBehavioralFailure": "unregistered spawn admitted",
+      "log": "docs/evidence/paired-daemon/A04-red-unregistered-g2.log",
+      "note": "resolve_terminal_target returns (WorktreeManager, PathBuf). This is a requested controlled mutation, not a compiled patch. No production fallback may survive restoration."
+    },
+    {
+      "id": "cwd-admission",
+      "file": "src-tauri/src/daemon/server.rs",
+      "replace": "let resolved_cwd = if let Some(ref custom_cwd_str) = cwd {",
+      "with": "let cwd = cwd.filter(|_| false);\n            let resolved_cwd = if let Some(ref custom_cwd_str) = cwd {",
+      "expectedBehavioralFailure": "cwd escape admitted",
+      "log": "docs/evidence/paired-daemon/A04-red-cwd-g2.log",
+      "note": "Ignoring the requested cwd admits an invalid IPC request while retaining the lower PTY path guard. Merely deleting canonical_allowed_path is insufficient because PTY spawn independently rechecks its worktree path."
+    }
+  ],
+  "safetyBlocker": "Existing fixture cleanup is proven for scenario assertion failure only. Before mutations run, harden setup/teardown and timeout orphan handling. PTY children may have separate sessions; killing only the test process group is not sufficient. Use exact owned PTY PID receipts plus bounded reap signals. Do not kill unrelated daemons.",
+  "resultFile": "docs/evidence/paired-daemon/A04-parent-guard-red-result-g2.json",
+  "requiredResult": "Exact commands, pre/post/restored hashes, exit codes, expected assertion rather than compile/setup error, original owner/PTY PID and cwd, HTTP/IPC observations when reached, all owned PIDs absent and private root removed."
+}

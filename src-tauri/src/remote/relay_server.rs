@@ -95,6 +95,7 @@ struct WaitingHalf {
     active: bool,
 }
 
+#[derive(Clone)]
 struct ControlChannel {
     generation: u64,
     tx: mpsc::Sender<IncomingSessionNotice>,
@@ -517,13 +518,15 @@ impl RelayState {
         (generation, rx)
     }
 
-    fn unregister_control_channel(&self, machine_token: &str, generation: u64) {
+    fn unregister_control_channel(&self, _machine_token: &str, generation: u64) {
         let mut channels = self.inner.control_channels.lock();
-        if channels
-            .get(machine_token)
-            .is_some_and(|channel| channel.generation == generation)
-        {
-            channels.remove(machine_token);
+        channels.retain(|_, channel| channel.generation != generation);
+    }
+
+    pub fn bind_control_alias(&self, machine_token: &str, alias: String) {
+        let mut channels = self.inner.control_channels.lock();
+        if let Some(channel) = channels.get(machine_token).cloned() {
+            channels.insert(alias, channel);
         }
     }
 
@@ -948,8 +951,23 @@ struct SocketQuery {
 pub struct TerminalSocketQuery {
     pub ticket: String,
     pub render: Option<String>,
+    #[serde(default, deserialize_with = "canonical_socket_dimension")]
     pub cols: Option<u16>,
+    #[serde(default, deserialize_with = "canonical_socket_dimension")]
     pub rows: Option<u16>,
+    #[serde(rename = "daemonEpoch")]
+    pub daemon_epoch: Option<crate::scoped_contracts::Epoch>,
+    #[serde(rename = "afterSequence")]
+    pub after_sequence: Option<crate::scoped_contracts::Epoch>,
+}
+
+fn canonical_socket_dimension<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<u16>, D::Error> {
+    let value = String::deserialize(deserializer)?;
+    let number: u16 = value.parse().map_err(serde::de::Error::custom)?;
+    if number.to_string() != value {
+        return Err(serde::de::Error::custom("noncanonical socket dimension"));
+    }
+    Ok(Some(number))
 }
 
 fn consume_socket_ticket(
@@ -993,6 +1011,11 @@ async fn browser_terminal_handler(
 ) -> Result<Response, StatusCode> {
     let Query(query) = query.map_err(|_| StatusCode::UNAUTHORIZED)?;
     let target = format!("/api/v1/terminal/{terminal}");
+    if !valid_socket_target(&target)
+        || query.render.as_ref().is_some_and(|value| value.chars().any(char::is_control))
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let device_token = consume_socket_ticket(
         &state,
         Ok(Query(SocketQuery {
@@ -1003,7 +1026,8 @@ async fn browser_terminal_handler(
     )?;
     let mut uri = reqwest::Url::parse(&format!("ws://localhost{target}"))
         .map_err(|_| StatusCode::BAD_REQUEST)?;
-    if query.render.is_some() || query.cols.is_some() || query.rows.is_some() {
+    if query.render.is_some() || query.cols.is_some() || query.rows.is_some()
+        || query.daemon_epoch.is_some() || query.after_sequence.is_some() {
         let mut params = uri.query_pairs_mut();
         if let Some(render) = query.render {
             params.append_pair("render", &render);
@@ -1013,6 +1037,12 @@ async fn browser_terminal_handler(
         }
         if let Some(rows) = query.rows {
             params.append_pair("rows", &rows.to_string());
+        }
+        if let Some(epoch) = query.daemon_epoch {
+            params.append_pair("daemonEpoch", &epoch.0.to_string());
+        }
+        if let Some(sequence) = query.after_sequence {
+            params.append_pair("afterSequence", &sequence.0.to_string());
         }
     }
     let target = match uri.query() {
@@ -1076,7 +1106,7 @@ async fn bridge_browser_socket(
                 frame = data.recv() => match frame {
                     Some(Ok(Message::Binary(bytes))) => timeout(TRANSFER_TIMEOUT, writer.write_all(&bytes)).await??,
                     Some(Ok(Message::Text(text))) => timeout(TRANSFER_TIMEOUT, writer.write_all(text.as_bytes())).await??,
-                    Some(Ok(Message::Close(_))) | None => return Ok(()),
+                    Some(Ok(Message::Close(_))) | None => { writer.shutdown().await?; return Ok(()); },
                     Some(Err(error)) => return Err(error.into()),
                     Some(Ok(_)) => {},
                 }
@@ -1107,7 +1137,16 @@ async fn bridge_browser_socket(
                     };
                     let close = frame.is_close();
                     timeout(TRANSFER_TIMEOUT, daemon.send(frame)).await??;
-                    if close { return Ok(()); }
+                    if close {
+                        while let Some(frame) = timeout(TRANSFER_TIMEOUT, daemon.next()).await? {
+                            if let Wire::Close(_) = frame? {
+                                // Receiving Close queued tungstenite's acknowledgement.
+                                timeout(TRANSFER_TIMEOUT, browser.flush()).await??;
+                                return Ok(());
+                            }
+                        }
+                        anyhow::bail!("daemon closed without terminal close acknowledgement");
+                    }
                 }
                 frame = daemon.next() => {
                     let Some(frame) = frame else { return Ok(()); };
@@ -1127,9 +1166,13 @@ async fn bridge_browser_socket(
         }
     };
     tokio::pin!(tunnel);
+    tokio::pin!(application);
     tokio::select! {
-        result = &mut tunnel => result,
-        result = application => {
+        result = &mut tunnel => {
+            result?;
+            timeout(TRANSFER_TIMEOUT, &mut application).await?
+        },
+        result = &mut application => {
             result?;
             // Flush the inner close frame before releasing the reverse channel.
             timeout(TRANSFER_TIMEOUT, &mut tunnel).await?
@@ -1151,24 +1194,10 @@ async fn host_http_handler(
     peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
     request: Request<Body>,
 ) -> Result<Response, StatusCode> {
-    if !(matches!(
-        path.as_str(),
-        "health" | "events" | "socket-ticket" | "pair/exchange"
-    ) || ["workspace/", "terminal/", "push/"]
-        .iter()
-        .any(|prefix| path.starts_with(prefix))
-        || path.strip_prefix("session/").is_some_and(|id| {
-            !id.is_empty()
-                && id
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':'))
-        }))
-        || path
-            .split('/')
-            .any(|part| matches!(part, "." | "..") || part.contains(['%', '\\']))
-    {
+    if !allowed_http_route(request.method(), &path) {
         return Err(StatusCode::FORBIDDEN);
     }
+    validate_http_query(&path, request.uri().query())?;
     if path == "pair/exchange" && request.method() == Method::POST {
         return exchange_http(state, peer_ip(peer), Some(&machine), request).await;
     }
@@ -1182,7 +1211,7 @@ async fn host_http_handler(
         None => uri_path.to_owned(),
     };
     let (parts, body) = request.into_parts();
-    let body = to_bytes(body, MAX_HTTP_SIZE)
+    let body = to_bytes(body, 64 * 1024)
         .await
         .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
     proxy_http(
@@ -1198,6 +1227,92 @@ async fn host_http_handler(
 }
 
 const MAX_HTTP_SIZE: usize = 8 * 1024 * 1024;
+
+// This literal HTTP endpoint must outrank /terminal/{terminal_id}. Reuse the
+// same method/query/body checks; no other terminal path becomes an HTTP proxy.
+async fn terminal_preferences_handler(
+    state: State<RelayState>,
+    AxumPath(machine): AxumPath<String>,
+    peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
+    request: Request<Body>,
+) -> Result<Response, StatusCode> {
+    host_http_handler(state, AxumPath((machine, "terminal/preferences".into())), peer, request).await
+}
+
+fn allowed_http_route(method: &Method, path: &str) -> bool {
+    let parts: Vec<_> = path.split('/').collect();
+    if parts.iter().any(|part| part.is_empty() || matches!(*part, "." | "..")
+        || !part.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':' | b'.' | b'~'))) {
+        return false;
+    }
+    matches!((method.as_str(), parts.as_slice()),
+        ("GET", ["health" | "capabilities" | "sessions"])
+        | ("POST", ["sessions"])
+        | ("GET" | "DELETE", ["sessions", _])
+        | ("GET", ["fs", "directories"])
+        | ("GET" | "POST", ["workspace", "projects"])
+        | ("DELETE", ["workspace", "projects", _])
+        | ("GET" | "POST" | "DELETE", ["workspace", "worktrees"])
+        | ("GET", ["workspace", "worktrees", "status"])
+        | ("GET", ["workspace", "operations", _])
+        | ("GET", ["workspace", "state"])
+        | ("GET", ["terminal", "preferences"])
+        | ("POST", ["workspace", "select" | "selection"])
+        | ("POST", ["pair", "exchange"])
+        | ("POST", ["push", "subscribe" | "unsubscribe"])
+        | ("GET", ["session", _]))
+}
+
+fn decode_http_query_component(value: &str) -> Result<String, StatusCode> {
+    let mut decoded = Vec::with_capacity(value.len());
+    let mut bytes = value.bytes();
+    while let Some(byte) = bytes.next() {
+        decoded.push(match byte {
+            b'+' => b' ',
+            b'%' => {
+                let hi = bytes.next().and_then(|b| (b as char).to_digit(16)).ok_or(StatusCode::BAD_REQUEST)?;
+                let lo = bytes.next().and_then(|b| (b as char).to_digit(16)).ok_or(StatusCode::BAD_REQUEST)?;
+                (hi * 16 + lo) as u8
+            }
+            byte => byte,
+        });
+    }
+    String::from_utf8(decoded).map_err(|_| StatusCode::BAD_REQUEST)
+}
+
+fn validate_http_query(path: &str, query: Option<&str>) -> Result<(), StatusCode> {
+    let Some(query) = query else { return Ok(()); };
+    if query.len() > 16 * 1024 { return Err(StatusCode::BAD_REQUEST); }
+    // Validate one decoded view, but forward the original bytes without decoding
+    // again: a literal %2F in a filename must not become a separator.
+    let bytes = query.as_bytes();
+    for (i, byte) in bytes.iter().enumerate() {
+        if *byte == b'%' && (i + 2 >= bytes.len() || !bytes[i+1].is_ascii_hexdigit() || !bytes[i+2].is_ascii_hexdigit()) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
+    let allowed: &[&str] = match path.split('/').collect::<Vec<_>>().as_slice() {
+        ["fs", "directories"] => &["path", "includeHidden"],
+        ["workspace", "worktrees"] => &["workspaceId"],
+        ["workspace", "worktrees", "status"] => &["workspaceId", "wsId", "slug"],
+        // Session listing is workspace-scoped; a single session is epoch-fenced.
+        ["sessions"] => &["workspaceId", "daemonEpoch"],
+        ["sessions", _] => &["daemonEpoch"],
+        _ => &[],
+    };
+    let mut seen = std::collections::HashSet::new();
+    for field in query.split('&').filter(|field| !field.is_empty()) {
+        let (key, value) = field.split_once('=').ok_or(StatusCode::BAD_REQUEST)?;
+        let key = decode_http_query_component(key)?;
+        let value = decode_http_query_component(value)?;
+        if !allowed.contains(&key.as_str()) || !seen.insert(key.clone())
+            || value.chars().any(char::is_control)
+            || (key == "includeHidden" && !matches!(value.as_str(), "true" | "false")) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
+    Ok(())
+}
 
 async fn exchange_http(
     state: RelayState,
@@ -1331,7 +1446,9 @@ async fn proxy_http(
             }
         }
     };
-    timeout(TRANSFER_TIMEOUT, transfer)
+    // Machine Git mutations have a 30-second child deadline. Leave time for
+    // admission and the final response without relaxing socket write deadlines.
+    timeout(Duration::from_secs(40), transfer)
         .await
         .map_err(|_| StatusCode::GATEWAY_TIMEOUT)?
 }
@@ -1500,6 +1617,10 @@ pub fn relay_router(state: RelayState) -> Router {
             "/host/{machine_id}/api/v1/terminal/{terminal_id}",
             get(browser_terminal_handler),
         )
+        .route(
+            "/host/{machine_id}/api/v1/terminal/preferences",
+            get(terminal_preferences_handler),
+        )
         .route("/host/{machine_id}/api/v1/{*path}", any(host_http_handler))
         .route("/tunnel/control", get(control_handler))
         .route("/tunnel/data/{session_id}", get(data_handler))
@@ -1555,6 +1676,11 @@ async fn control_handler(
         ));
     }
     let token = extract_bearer_token(&headers, query.token.as_deref());
+    let machine_id = headers
+        .get("x-ferryx-machine-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     if let Some(token) = &token {
         // Legacy identities remain token-keyed. Never allow a bearer to replace
         // a previously bound Ed25519 identity, even if their strings coincide.
@@ -1569,7 +1695,7 @@ async fn control_handler(
     Ok(ws
         .max_message_size(MAX_MESSAGE_SIZE)
         .max_frame_size(MAX_MESSAGE_SIZE)
-        .on_upgrade(move |socket| authenticate_control_socket(socket, state, token, ip)))
+        .on_upgrade(move |socket| authenticate_control_socket(socket, state, token, machine_id, ip)))
 }
 
 // Do not trust forwarding headers. Servers must supply ConnectInfo from the
@@ -1583,11 +1709,12 @@ async fn authenticate_control_socket(
     mut socket: WebSocket,
     state: RelayState,
     token: Option<String>,
+    machine_id: Option<String>,
     ip: IpAddr,
 ) {
     if let Some(token) = token {
         state.record_auth(ip, true);
-        handle_control_socket(socket, state, token).await;
+        handle_control_socket(socket, state, token, machine_id).await;
         return;
     }
     let challenge = ControlChallenge {
@@ -1655,7 +1782,7 @@ async fn authenticate_control_socket(
         return;
     }
     match result {
-        Ok(machine_id) => handle_control_socket(socket, state, machine_id).await,
+        Ok(machine_id) => handle_control_socket(socket, state, machine_id, None).await,
         Err(_) => {
             if !matches!(
                 timeout(CONTROL_AUTH_TIMEOUT, socket.close()).await,
@@ -1667,8 +1794,18 @@ async fn authenticate_control_socket(
     }
 }
 
-async fn handle_control_socket(mut socket: WebSocket, state: RelayState, machine_token: String) {
+async fn handle_control_socket(
+    mut socket: WebSocket,
+    state: RelayState,
+    machine_token: String,
+    machine_id: Option<String>,
+) {
     let (generation, mut notices) = state.register_control_channel(machine_token.clone());
+    if let Some(ref id) = machine_id {
+        if id != &machine_token {
+            state.bind_control_alias(&machine_token, id.clone());
+        }
+    }
     loop {
         tokio::select! {
             notice = notices.recv() => {
@@ -1694,11 +1831,19 @@ async fn handle_control_socket(mut socket: WebSocket, state: RelayState, machine
                                 }
                             }
                             Ok(ControlRequest::RegisterPairingPin(registration)) => {
+                                if !registration.machine_id.is_empty() && registration.machine_id != machine_token {
+                                    state.bind_control_alias(&machine_token, registration.machine_id.clone());
+                                }
+                                let target_machine = if !registration.machine_id.is_empty() {
+                                    registration.machine_id.clone()
+                                } else {
+                                    machine_token.clone()
+                                };
                                 let ack = RegisterPairingPinAck {
                                     generation: registration.generation,
                                     pin: registration.pin.clone(),
-                                    machine_id: machine_token.clone(),
-                                    status: match state.register_pairing(&machine_token, generation, registration) {
+                                    machine_id: target_machine.clone(),
+                                    status: match state.register_pairing(&target_machine, generation, registration) {
                                         Ok(()) => "ready",
                                         Err(error) => error,
                                     }.into(),
@@ -1709,6 +1854,15 @@ async fn handle_control_socket(mut socket: WebSocket, state: RelayState, machine
                                 }
                             }
                             Err(error) => tracing::warn!(%error, "invalid relay control request"),
+                        }
+                    }
+                    Some(Ok(Message::Ping(payload))) => {
+                        if !matches!(
+                            timeout(TRANSFER_TIMEOUT, socket.send(Message::Pong(payload))).await,
+                            Ok(Ok(()))
+                        ) {
+                            tracing::warn!("relay control pong failed or timed out");
+                            break;
                         }
                     }
                     Some(Ok(_)) => {}
@@ -1947,6 +2101,94 @@ mod tests {
         restarted.bind_machine_key(&auth(41, "alpha-machine")).unwrap();
         restarted.bind_machine_key(&auth(42, "beta-machine")).unwrap();
         assert!(restarted.bind_machine_key(&auth(43, "alpha-machine")).is_err());
+    }
+
+    #[test]
+    fn machine_query_admission() {
+        for query in ["ticket=t&daemonEpoch=01", "ticket=t&daemonEpoch=-1",
+            "ticket=t&afterSequence=18446744073709551616", "ticket=t&daemonEpoch=1&daemonEpoch=2",
+            "ticket=t&token=secret", "ticket=t&afterSequence=1.0"] {
+            assert!(axum::extract::Query::<super::TerminalSocketQuery>::try_from_uri(
+                &format!("http://localhost/?{query}").parse().unwrap()).is_err(), "{query}");
+        }
+        for query in ["path=a&path=b", "token=secret", "includeHidden=1", "path=%00", "path=%GG"] {
+            assert!(super::validate_http_query("fs/directories", Some(query)).is_err());
+        }
+        assert!(super::validate_http_query("fs/directories", Some("path=%2Fa%252Fb&includeHidden=true")).is_ok());
+    }
+    #[test]
+    fn r4_strict_utf8_query() {
+        assert!(validate_http_query("fs/directories", Some("path=%2Ftmp%2F%EF%BF%BD")).is_ok());
+        for query in ["path=%FF", "path=%C0%AF", "path=%ED%A0%80", "path=%E2%82", "path=%GG"] {
+            assert_eq!(validate_http_query("fs/directories", Some(query)), Err(StatusCode::BAD_REQUEST));
+        }
+    }
+
+    #[tokio::test]
+    async fn r4_preference_route_not_intercepted_by_websocket() {
+        let (base, server) = spawn_test_relay().await;
+        let outcome = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {
+            let response = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(5)).build().unwrap()
+                .get(format!("{}/host/offline/api/v1/terminal/preferences", base.replace("ws://", "http://")))
+                .send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        })).await;
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        if let Err(panic) = outcome { std::panic::resume_unwind(panic); }
+    }
+    #[test]
+    fn r4_sustained_admission_and_cancel_cleanup() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.block_on(async {
+            let state = test_state(vec![]);
+            let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+            let (generation, mut notices) = state.register_control_channel("load".into());
+            for window in 0..2 {
+                for request in 0..30 {
+                    let http = proxy_http(&state, "load", Some(generation), Method::GET,
+                        "/api/v1/fs/directories?path=%2Ftmp", HeaderMap::new(), Vec::new());
+                    let peer = async {
+                        let notice = notices.recv().await.unwrap();
+                        let (mut data, _) = tokio_tungstenite::connect_async(format!("{base}/tunnel/data/{}", notice.session_id)).await.unwrap();
+                        let bytes = data.next().await.unwrap().unwrap().into_data();
+                        assert!(bytes.starts_with(b"GET /api/v1/fs/directories?path=%2Ftmp HTTP/1.1\r\n"));
+                        data.send(TMessage::Binary(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".to_vec().into())).await.unwrap();
+                    };
+                    let (response, ()) = timeout(Duration::from_secs(5), async { tokio::join!(http, peer) }).await.unwrap();
+                    assert_eq!(response.unwrap().status(), StatusCode::OK, "window={window} request={request}");
+                    assert!(state.inner.pending_sessions.lock().is_empty());
+                }
+                let mut pending = Box::pin(state.open_session_channel("load", Some(generation)));
+                let notice = tokio::select! {
+                    result = &mut pending => panic!("unexpected completion: {:?}", result.err()),
+                    notice = timeout(Duration::from_secs(5), notices.recv()) => notice.unwrap().unwrap(),
+                };
+                assert_socket_rejected(&base, &format!("/tunnel/data/{}", notice.session_id), StatusCode::TOO_MANY_REQUESTS).await;
+                drop(pending);
+                assert!(state.inner.pending_sessions.lock().is_empty());
+                // Time itself is under test; inject the window boundary, never sleep.
+                state.inner.admission.lock().get_mut(&"127.0.0.1".parse::<IpAddr>().unwrap()).unwrap().started = Instant::now() - ADMISSION_WINDOW;
+            }
+            let mut waiting = Vec::new();
+            for _ in 0..MAX_PENDING_SESSIONS {
+                let mut request = Box::pin(state.open_session_channel("load", Some(generation)));
+                tokio::select! {
+                    result = &mut request => panic!("unexpected completion: {:?}", result.err()),
+                    notice = timeout(Duration::from_secs(5), notices.recv()) => { notice.unwrap().unwrap(); }
+                }
+                waiting.push(request);
+            }
+            assert_eq!(state.open_session_channel("load", Some(generation)).await.err(), Some(StatusCode::SERVICE_UNAVAILABLE));
+            drop(waiting);
+            assert!(state.inner.pending_sessions.lock().is_empty());
+            state.unregister_control_channel("load", generation);
+            server.abort();
+            assert!(server.await.unwrap_err().is_cancelled());
+            println!("R4 admission: 60 completed data-channel HTTP requests; two exact 429 boundaries; injected-window recovery; 100 waiting requests/503; cancellation registry=0");
+        })));
+        drop(runtime);
+        if let Err(panic) = outcome { std::panic::resume_unwind(panic); }
     }
 
     fn test_state(tokens: Vec<String>) -> RelayState {
@@ -2573,6 +2815,23 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a11_expired_ticket_wire_boundary() {
+        let state = test_state(vec![]);
+        let (_generation, _control) = state.register_control_channel("browser-machine".into());
+        let ticket = issue_test_ticket(&state, "/api/v1/events").await;
+        // Inject time's exact boundary, never wait for wall-clock expiry.
+        state.inner.pending_socket_tickets.lock().get_mut(&ticket.ticket).unwrap().3 = current_time_secs();
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let outcome = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {
+            assert_socket_rejected(&base, &format!("/host/browser-machine/api/v1/events?ticket={}", ticket.ticket), StatusCode::UNAUTHORIZED).await;
+            assert!(!state.inner.pending_socket_tickets.lock().contains_key(&ticket.ticket));
+            println!("A11 expired ticket exact boundary: actual WS401; single-use record consumed");
+        })).await;
+        server.abort(); assert!(server.await.unwrap_err().is_cancelled());
+        if let Err(panic) = outcome { std::panic::resume_unwind(panic); }
+    }
+
     /// `claim_pairing` validates against a control generation and then releases the
     /// lock; dispatch happens afterwards and picks the then-current channel. If the
     /// owner reconnects inside that window, the replacement must not be handed a claim
@@ -2581,7 +2840,7 @@ mod tests {
     async fn test_relay_dispatch_rejects_a_replaced_control_channel() {
         let state = test_state(vec![]);
         let machine = "dispatch-window";
-        let (tx, _rx) = mpsc::channel(4);
+        let (tx, mut rx) = mpsc::channel(4);
         state
             .inner
             .control_channels
@@ -2599,17 +2858,18 @@ mod tests {
             "dispatch must refuse a generation the current control channel never held"
         );
 
-        // Positive control: with the matching generation the guard is passed, so the
-        // call proceeds to await the daemon's data half instead of returning an error.
-        assert!(
-            timeout(
-                Duration::from_millis(300),
-                state.open_session_channel(machine, Some(5))
-            )
-            .await
-            .is_err(),
-            "a matching generation must pass the guard and wait for the data half"
-        );
+        assert!(matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
+        assert!(state.inner.pending_sessions.lock().is_empty());
+        // Observe the exact dispatch boundary, then cancel the pending request.
+        let mut dispatch = Box::pin(state.open_session_channel(machine, Some(5)));
+        let notice = tokio::select! {
+            result = &mut dispatch => panic!("dispatch returned before its data half: {:?}", result.err()),
+            notice = timeout(Duration::from_secs(5), rx.recv()) => notice.unwrap().unwrap(),
+        };
+        assert!(state.inner.pending_sessions.lock().contains_key(&notice.session_id));
+        // Dropping the owning future (not a Pin reference) runs SessionGuard.
+        drop(dispatch);
+        assert!(state.inner.pending_sessions.lock().is_empty());
     }
 
     #[test]
@@ -3017,7 +3277,8 @@ mod tests {
                 tcp,
                 |request: &tokio_tungstenite::tungstenite::handshake::server::Request, response| {
                     assert_eq!(request.uri().path(), "/api/v1/terminal/t1");
-                    assert!(request.uri().query().is_none());
+                    assert_eq!(request.uri().query(), Some("daemonEpoch=9007199254740993&afterSequence=18446744073709551615"));
+                    assert_eq!(request.headers()["authorization"], "Bearer test-device-token");
                     Ok(response)
                 },
             )
@@ -3039,7 +3300,7 @@ mod tests {
             // Consume any forwarded pong before the close frame.
             loop {
                 match ws.next().await.unwrap().unwrap() {
-                    TMessage::Close(_) => break,
+                    TMessage::Close(_) => { ws.flush().await.unwrap(); break; },
                     TMessage::Pong(_) => {}
                     other => panic!("unexpected frame: {other:?}"),
                 }
@@ -3060,13 +3321,14 @@ mod tests {
                 tokio::select! {
                     frame = data.next() => match frame {
                         Some(Ok(TMessage::Binary(bytes))) => write.write_all(&bytes).await.unwrap(),
-                        Some(Ok(TMessage::Close(_))) | None => break,
+                        Some(Ok(TMessage::Close(_))) => { data.flush().await.unwrap(); break; },
+                        None => break,
                         Some(Ok(_)) => {},
                         Some(Err(error)) => panic!("data channel failed: {error}"),
                     },
                     count = read.read(&mut buffer) => {
                         let count = count.unwrap();
-                        if count == 0 { break; }
+                        if count == 0 { data.close(None).await.unwrap(); break; }
                         data.send(TMessage::Binary(buffer[..count].to_vec().into())).await.unwrap();
                     }
                 }
@@ -3074,7 +3336,7 @@ mod tests {
         };
         let browser = async {
             let url = format!(
-                "{base}/host/browser-machine/api/v1/terminal/t1?ticket={}",
+                "{base}/host/browser-machine/api/v1/terminal/t1?ticket={}&daemonEpoch=9007199254740993&afterSequence=18446744073709551615",
                 ticket.ticket
             );
             let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
@@ -3095,6 +3357,15 @@ mod tests {
                 assert_eq!(ws.next().await.unwrap().unwrap(), expected);
             }
             ws.close(None).await.unwrap();
+            let mut observed_close = false;
+            while let Some(frame) = ws.next().await {
+                if matches!(frame.unwrap(), TMessage::Close(_)) {
+                    observed_close = true;
+                    break;
+                }
+            }
+            assert!(observed_close, "browser EOF is not a close acknowledgement");
+            eprintln!("Q4 browser close acknowledgement observed=true");
         };
         timeout(Duration::from_secs(5), async {
             tokio::join!(browser, daemon, gateway);
@@ -3104,8 +3375,15 @@ mod tests {
         server.abort();
     }
 
-    #[tokio::test]
-    async fn coordinator_pairs_through_relay_to_real_gateway() {
+    #[test]
+    fn coordinator_pairs_through_relay_to_real_gateway() {
+        let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.block_on(real_gateway_fixture())));
+        drop(runtime); // Joins all Axum upgrade/connection and reverse-channel tasks.
+        if let Err(panic) = outcome { std::panic::resume_unwind(panic); }
+    }
+
+    async fn real_gateway_fixture() {
         use crate::remote::{relay_client::RelayClient, state::RemoteGatewayState};
         let (base, relay) = spawn_test_relay().await;
         let terminal = Arc::new(crate::terminal::TerminalService::new(
@@ -3136,6 +3414,8 @@ mod tests {
         .with_auth_manager((*state.auth_manager).clone());
         let coordinator = client.pairing_coordinator();
         let control = tokio::spawn(async move { client.run().await });
+        let workspace = tempfile::tempdir().unwrap();
+        let outcome = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {
         let session = coordinator
             .generate_pairing(Duration::from_secs(60))
             .await
@@ -3199,18 +3479,16 @@ mod tests {
         // over the relay and prove real bytes flow from the real gateway's PTY.
         let device_token = body["token"].as_str().unwrap().to_owned();
         // Spawn a real PTY on the real gateway's terminal service, in a real worktree.
-        let workspace = tempfile::tempdir().unwrap();
-        std::process::Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(workspace.path())
-            .status()
-            .expect("git init");
+
         registry_handle
             .register("e2e-workspace", workspace.path())
             .expect("register workspace");
         let manager = registry_handle.manager("e2e-workspace").expect("manager");
-        let mut command = portable_pty::CommandBuilder::new("/bin/sh");
+        let mut command = portable_pty::CommandBuilder::new(if cfg!(windows) { "cmd.exe" } else { "/bin/sh" });
         command.cwd(workspace.path());
+        #[cfg(windows)]
+        command.args(["/D", "/Q"]);
+
         let (session_id, _pty_rx) = terminal_handle
             .spawn_in_worktree(command, 80, 24, &manager, workspace.path())
             .expect("real gateway PTY session");
@@ -3254,15 +3532,9 @@ mod tests {
             ))
             .await
             {
-                let delivered = timeout(Duration::from_secs(5), refused.next()).await;
-                let served_payload = matches!(
-                    delivered,
-                    Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(ref b)))) if !b.is_empty()
-                );
-                assert!(
-                    !served_payload,
-                    "a ticket must not stream terminal data for a session the desktop has not selected"
-                );
+                let delivered = timeout(Duration::from_secs(5), refused.next()).await.unwrap();
+                assert!(matches!(delivered, None | Some(Err(_)) | Some(Ok(TMessage::Close(_)))),
+                    "non-selected terminal must close, not merely remain silent: {delivered:?}");
             }
         }
 
@@ -3303,9 +3575,10 @@ mod tests {
         // Drive the real PTY and await its echo instead of sleeping: the shell must
         // return the marker we wrote through the relay-proxied socket.
         use futures_util::{SinkExt, StreamExt};
+        #[cfg(not(windows))]
         terminal_socket
             .send(tokio_tungstenite::tungstenite::Message::Binary(
-                b"echo ferryx_e2e_marker\n".to_vec().into(),
+                b"printf 'ferryx_%s_marker\\n' executed\n".to_vec().into(),
             ))
             .await
             .unwrap();
@@ -3316,13 +3589,22 @@ mod tests {
                 match message {
                     tokio_tungstenite::tungstenite::Message::Binary(bytes) => {
                         seen.push_str(&String::from_utf8_lossy(&bytes));
+
+                        #[cfg(windows)]
+                        if seen.contains("\x1b[6n") {
+                            // ConPTY asks the terminal client for its cursor before
+                            // starting the shell. Answer the real terminal query.
+                            terminal_socket.send(TMessage::Binary(b"\x1b[1;1R".to_vec().into())).await.unwrap();
+                            terminal_socket.send(TMessage::Binary(b"set Q4_WORD=executed\recho ferryx_%Q4_WORD%_marker\r".to_vec().into())).await.unwrap();
+                            seen = seen.replace("\x1b[6n", "");
+                        }
                     }
                     tokio_tungstenite::tungstenite::Message::Text(text) => {
                         seen.push_str(&text);
                     }
                     _ => {}
                 }
-                if seen.contains("ferryx_e2e_marker") {
+                if seen.contains("ferryx_executed_marker") {
                     return true;
                 }
             }
@@ -3343,9 +3625,21 @@ mod tests {
         .await
         .is_err());
 
+        terminal_socket.close(None).await.unwrap();
+        })).await;
+        for id in terminal_handle.list_sessions() {
+            terminal_handle.close_session(&id).await.expect("close owned real PTY");
+        }
+        assert!(terminal_handle.list_sessions().is_empty());
         control.abort();
         gateway.abort();
         relay.abort();
+        assert!(control.await.unwrap_err().is_cancelled());
+        assert!(gateway.await.unwrap_err().is_cancelled());
+        assert!(relay.await.unwrap_err().is_cancelled());
+        workspace.close().unwrap();
+        println!("R4 PTY cleanup: owned sessions explicitly closed; listeners/reverse joined; private workspace removed");
+        if let Err(panic) = outcome { std::panic::resume_unwind(panic); }
     }
 
     #[tokio::test]

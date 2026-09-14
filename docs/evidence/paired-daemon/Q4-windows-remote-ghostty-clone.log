@@ -1,0 +1,19 @@
+Cloning into 'source\src-tauri\vendor\ghostty'...
+Note: switching to '6a508fd5e34c7e222c052a6d00bb3891ff3feace'.
+
+You are in 'detached HEAD' state. You can look around, make experimental
+changes and commit them, and you can discard any commits you make in this
+state without impacting any branches by switching back to a branch.
+
+If you want to create a new branch to retain commits you create, you may
+do so (now or later) by using -c with the switch command. Example:
+
+  git switch -c <new-branch-name>
+
+Or undo this operation with:
+
+  git switch -
+
+Turn off this advice by setting config variable advice.detachedHead to false
+
+Updating files:  27% (1607/5864)Updating files:  28% (1642/5864)Updating files:  29% (1701/5864)Updating files:  30% (1760/5864)Updating files:  31% (1818/5864)Updating files:  32% (1877/5864)Updating files:  33% (1936/5864)Updating files:  34% (1994/5864)Updating files:  35% (2053/5864)Updating files:  36% (2112/5864)Updating files:  37% (2170/5864)Updating files:  38% (2229/5864)Updating files:  39% (2287/5864)Updating files:  40% (2346/5864)Updating files:  41% (2405/5864)Updating files:  42% (2463/5864)Updating files:  43% (2522/5864)Updating files:  44% (2581/5864)Updating files:  45% (2639/5864)Updating files:  46% (2698/5864)Updating files:  47% (2757/5864)Updating files:  48% (2815/5864)Updating files:  49% (2874/5864)Updating files:  50% (2932/5864)Updating files:  51% (2991/5864)Updating files:  52% (3050/5864)Updating files:  53% (3108/5864)Updating files:  54% (3167/5864)Updating files:  55% (3226/5864)Updating files:  56% (3284/5864)Updating files:  57% (3343/5864)Updating files:  58% (3402/5864)Updating files:  59% (3460/5864)Updating files:  60% (3519/5864)Updating files:  61% (3578/5864)Updating files:  61% (3587/5864)Updating files:  62% (3636/5864)Updating files:  63% (3695/5864)Updating files:  64% (3753/5864)Updating files:  65% (3812/5864)Updating files:  66% (3871/5864)Updating files:  67% (3929/5864)Updating files:  68% (3988/5864)Updating files:  69% (4047/5864)Updating files:  70% (4105/5864)Updating files:  71% (4164/5864)Updating files:  72% (4223/5864)Updating files:  73% (4281/5864)Updating files:  74% (4340/5864)Updating files:  75% (4398/5864)Updating files:  76% (4457/5864)Updating files:  77% (4516/5864)Updating files:  78% (4574/5864)Updating files:  79% (4633/5864)Updating files:  80% (4692/5864)Updating files:  81% (4750/5864)Updating files:  82% (4809/5864)Updating files:  83% (4868/5864)Updating files:  84% (4926/5864)Updating files:  85% (4985/5864)Updating files:  86% (5044/5864)Updating files:  87% (5102/5864)Updating files:  88% (5161/5864)Updating files:  89% (5219/5864)Updating files:  90% (5278/5864)Updating files:  91% (5337/5864)Updating files:  92% (5395/5864)Updating files:  93% (5454/5864)Updating files:  94% (5513/5864)Updating files:  95% (5571/5864)Updating files:  96% (5630/5864)Updating files:  97% (5689/5864)Updating files:  97% (5692/5864)Updating files:  98% (5747/5864)Updating files:  99% (5806/5864)Updating files: 100% (5864/5864)Updating files: 100% (5864/5864), done.

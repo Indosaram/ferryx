@@ -1,0 +1,44 @@
+aefbade7090292f6f50ff53568fc2aebbb3e29697846ce3284144a6df4f35c0b  src-tauri/src/worktree/registry.rs
+c38272ba24e4bb0b32e7179b3af4a88b82fd41b1698d6453133eaa6ea179eba9  src-tauri/src/daemon/workspace_service.rs
+f5a49b27f1ae7e117ed60618b26fa5ab5726083cff30cb9c743973eb9e9aab14  src-tauri/src/daemon/server.rs
+64039d545231e38f6dda6e9ce5d1cc05fac7c98620b502d2031d6111af480501  src-tauri/src/daemon/session_service.rs
+96c94183c78d1ecfe311bb82d1fca9691c29f08f5f5ed7d126fa2cfeda4ec703  src-tauri/src/remote/mod.rs
+f6ffbf841ba3468c2941dee994d686090f2ce142a55762a8eaec73f7ede0f69e  src-tauri/src/remote/workspace_catalog.rs
+fd4cbb35061a5cae09ee4bd657907a7433c4966dd50cc88630316f2af78cc8f4  src-tauri/tests/machine_catalog_persistence.rs
+CLEANUP root=/private/tmp/a04-H6EVo6 independently_absent=true
+CLEANUP root=/private/tmp/a04-NztIo9 independently_absent=true
+CLEANUP root=/private/tmp/a04-RFF7cI independently_absent=true
+CLEANUP root=/private/tmp/a04-ars1sV independently_absent=true
+CLEANUP root=/private/tmp/a04-peWUZr independently_absent=true
+CLEANUP root=/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/.tmp1h2PHQ independently_absent=true
+CLEANUP root=/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/.tmp1h2PHQ/.tmpg3Aegd independently_absent=true
+CLEANUP root=/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/.tmp1h2PHQ/.tmphuvrja independently_absent=true
+CLEANUP root=/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/.tmp2JKEgk independently_absent=true
+CLEANUP root=/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/.tmp7YsHxT independently_absent=true
+CLEANUP root=/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/.tmpHslSP2 independently_absent=true
+CLEANUP root=/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/.tmpKeH7ke independently_absent=true
+CLEANUP root=/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/.tmpYaeO1m independently_absent=true
+CLEANUP root=/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/.tmpZHC64X independently_absent=true
+CLEANUP root=/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/.tmphuDkGG independently_absent=true
+CLEANUP root=/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/.tmpqIitgA independently_absent=true
+CLEANUP root=/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/.tmpvMsEu4 independently_absent=true
+CLEANUP pid=80490 independently_absent=true
+CLEANUP pid=81571 independently_absent=true
+CLEANUP pid=83512 independently_absent=true
+CLEANUP pid=84593 independently_absent=true
+CLEANUP pid=84793 independently_absent=true
+CLEANUP pid=84823 independently_absent=true
+IPC A05 sockets=[] (duplex); owner child waits/reaps recorded in runtime logs.
+A04 CLEANUP pid=85289 independently_absent=true
+A04 CLEANUP pid=85290 independently_absent=true
+A04 CLEANUP pid=85291 independently_absent=true
+A04 CLEANUP pid=85296 independently_absent=true
+A04 CLEANUP pid=85342 independently_absent=true
+A04 CLEANUP pid=85343 independently_absent=true
+A04 CLEANUP pid=85344 independently_absent=true
+A04 CLEANUP pid=85371 independently_absent=true
+A04 CLEANUP pid=85373 independently_absent=true
+A04 CLEANUP pid=85492 independently_absent=true
+A04 CLEANUP pid=85513 independently_absent=true
+A04 CLEANUP pid=85516 independently_absent=true
+A04 CLEANUP pid=85536 independently_absent=true

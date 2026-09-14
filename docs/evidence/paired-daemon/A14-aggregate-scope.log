@@ -1,0 +1,31 @@
+COMMAND rg -n MachineClient|createPairedDaemonProjectAdapter|paired_host_operation|PairedHostOperation src-tauri/src ui/src src-tauri/tests
+src-tauri/src/paired_host/client.rs:257:pub struct MachineClient {
+src-tauri/src/paired_host/client.rs:260:impl Default for MachineClient {
+src-tauri/src/paired_host/client.rs:265:impl MachineClient {
+src-tauri/src/paired_host/client_tests.rs:96:        let error = MachineClient::new()
+src-tauri/src/paired_host/client_tests.rs:128:    let client = MachineClient::new();
+src-tauri/src/paired_host/client_tests.rs:175:    let error = MachineClient::new()
+src-tauri/src/paired_host/client_tests.rs:200:    let error = MachineClient::new()
+src-tauri/src/paired_host/client_tests.rs:227:    let error = MachineClient::new()
+src-tauri/src/paired_host/client_tests.rs:237:    let error = MachineClient::new()
+src-tauri/src/paired_host/client_tests.rs:321:    let client = MachineClient::new();
+ui/src/lib/pairedDaemonProject.test.ts:3:import { createPairedDaemonProjectAdapter, type PairedHostOperationRequest } from "./pairedDaemonProject";
+ui/src/lib/pairedDaemonProject.test.ts:28:  let respond: (request: PairedHostOperationRequest) => Promise<unknown> = async request => {
+ui/src/lib/pairedDaemonProject.test.ts:37:  const invoke = vi.fn(async (_command: "paired_host_operation", { request }: { request: PairedHostOperationRequest }) => {
+ui/src/lib/pairedDaemonProject.test.ts:43:  const adapters = hosts.map(host => createPairedDaemonProjectAdapter(host, { store, invoke, isNative: () => true }));
+ui/src/lib/pairedDaemonProject.test.ts:85:    const browser = createPairedDaemonProjectAdapter(s.hosts[0], { store: s.store, invoke: s.invoke, isNative: () => false });
+ui/src/lib/pairedDaemonProject.test.ts:96:    const a = createPairedDaemonProjectAdapter(s.hosts[0], { store: s.store, invoke, isNative: () => true });
+ui/src/lib/pairedDaemonProject.ts:17:export type PairedHostOperation =
+ui/src/lib/pairedDaemonProject.ts:30:export interface PairedHostOperationRequest extends PairedHostContext { operation: PairedHostOperation }
+ui/src/lib/pairedDaemonProject.ts:31:export type PairedHostInvoke = (command: "paired_host_operation", args: { request: PairedHostOperationRequest }) => Promise<unknown>;
+ui/src/lib/pairedDaemonProject.ts:98:export function createPairedDaemonProjectAdapter(
+ui/src/lib/pairedDaemonProject.ts:115:  async function execute<T>(operation: PairedHostOperation, parse: (value: unknown) => T): Promise<T> {
+ui/src/lib/pairedDaemonProject.ts:126:    try { raw = await call("paired_host_operation", { request: { hostId, generation, operation } }); }
+ui/src/lib/pairedDaemonProject.ts:181:export type PairedDaemonProjectAdapter = ReturnType<typeof createPairedDaemonProjectAdapter>;
+EXIT=0
+COMMAND rg -n pairedDaemonProxyV1|pairedHostInventoryV1 src-tauri/src/daemon/client.rs src-tauri/src/daemon/server.rs
+src-tauri/src/daemon/server.rs:1922:                    if self.paired_hosts.available().await { capabilities.push("pairedHostInventoryV1".into()); }
+src-tauri/src/daemon/client.rs:430:            if !matches!(capabilities, DaemonResponse::CapabilitiesOk { capabilities } if capabilities.iter().any(|c| c == "pairedHostInventoryV1")) { return Err(ServiceError::unavailable()); }
+src-tauri/src/daemon/client.rs:446:        Ok(serde_json::json!({"pairedHostInventoryV1": true, "pairedDaemonProxyV1": false}))
+EXIT=0
+A14 producer reports: A14-native-client-report.md, A14-ui-adapter-report.md

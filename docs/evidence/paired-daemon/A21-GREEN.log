@@ -1,0 +1,60 @@
+v22.22.3
+$ vitest run --maxWorkers=1 src/lib/pairedActionBoundaries.test.tsx src/lib/pairedWorktreeActions.test.ts src/lib/pairedDaemonProject.test.ts src/lib/remoteProject.test.ts src/lib/agentReconnect.test.ts src/lib/shellReplacement.test.ts src/components/ProjectDialogs.test.tsx src/components/WorktreeDeleteDialog.test.tsx src/components/TerminalPane.sshReconnect.test.tsx src/state/workspaceNativeActivity.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+ ✓ src/lib/pairedActionBoundaries.test.tsx (5 tests) 14ms
+ ✓ src/components/ProjectDialogs.test.tsx (44 tests) 378ms
+ ✓ src/lib/agentReconnect.test.ts (9 tests) 111ms
+ ✓ src/components/WorktreeDeleteDialog.test.tsx (6 tests) 117ms
+ ✓ src/components/TerminalPane.sshReconnect.test.tsx (7 tests) 69ms
+ ✓ src/state/workspaceNativeActivity.test.tsx (11 tests) 38ms
+ ✓ src/lib/pairedDaemonProject.test.ts (19 tests) 16ms
+ ✓ src/lib/pairedWorktreeActions.test.ts (4 tests) 5ms
+ ✓ src/lib/remoteProject.test.ts (7 tests) 3ms
+ ✓ src/lib/shellReplacement.test.ts (2 tests) 2ms
+
+ Test Files  10 passed (10)
+      Tests  114 passed (114)
+   Start at  16:01:25
+   Duration  6.40s (transform 279ms, setup 736ms, collect 1.72s, tests 752ms, environment 1.84s, prepare 276ms)
+
+
+TEST EXIT: 0
+
+$ tsc && vite build
+vite v6.4.3 building for production...
+transforming...
+✓ 1890 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                                        3.08 kB │ gzip:   1.10 kB
+dist/assets/crush-DHElXcRZ.png                         5.46 kB
+dist/assets/droid-BhrKLgQ8.svg                         6.30 kB │ gzip:   2.88 kB
+dist/assets/antigravity-DgAQAdn3.svg                   7.63 kB │ gzip:   1.72 kB
+dist/assets/gjc-CmlXGg4z.png                          22.73 kB
+dist/assets/geist-variable-CrgPqtmy.woff2             69.44 kB
+dist/assets/ferryx-icon-OXRkkUvz.png                 805.82 kB
+dist/assets/index-CTJQafPq.css                        78.24 kB │ gzip:  14.21 kB
+dist/assets/server-DQXHg8Is.js                         0.51 kB │ gzip:   0.32 kB
+dist/assets/card-Bh1F646h.js                           2.08 kB │ gzip:   0.88 kB
+dist/assets/remoteHostStore-CiZKg9LI.js                4.37 kB │ gzip:   1.64 kB
+dist/assets/pairedHostInventory-BvBWSBuJ.js            4.59 kB │ gzip:   1.90 kB
+dist/assets/PermissionsOnboardingDialog-BpdF5LID.js    6.25 kB │ gzip:   1.85 kB
+dist/assets/browser-B2Tgx6-n.js                       25.78 kB │ gzip:  10.13 kB
+dist/assets/RemoteApp-eMXOrwos.js                     61.10 kB │ gzip:  18.05 kB
+dist/assets/sonner-BVIZLDAQ.js                        93.62 kB │ gzip:  31.08 kB
+dist/assets/index-Bz3C89gS.js                        187.71 kB │ gzip:  60.16 kB
+dist/assets/SettingsDialog-VwpMm1lq.js               199.47 kB │ gzip:  59.57 kB
+dist/assets/App-DtZo48iy.js                          510.40 kB │ gzip: 148.67 kB
+
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+✓ built in 2.31s
+
+BUILD EXIT: 0
+
+LSP diagnostics: no diagnostics on all 11 changed/new TypeScript files.
+Cleanup assertion: no temporary git repositories, worktrees, sockets, or fixture files were created by A21. The intentional test assertion mutation was restored.

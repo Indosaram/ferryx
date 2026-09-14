@@ -7,9 +7,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::PathBuf;
-#[cfg(test)]
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 #[cfg(test)]
 use tokio::sync::Notify;
@@ -536,7 +534,19 @@ pub struct RemoteGatewayState {
     pub config: RwLock<RemoteGatewayConfig>,
     pub auth_manager: Arc<AuthManager>,
     pub terminal_service: Arc<TerminalService>,
+    /// Session-owning daemon epoch, supplied by the daemon at construction.
+    pub daemon_epoch: AtomicU64,
+    /// Explicit stores keep identity alongside auth, including private fixtures.
+    pub(crate) identity_dir: Option<PathBuf>,
+    #[cfg(test)]
+    pub(crate) identity_probe: RwLock<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    pub(crate) browse_home: RwLock<Option<PathBuf>>,
+    #[cfg(test)]
+    pub(crate) browse_probe: RwLock<Option<Arc<dyn Fn() + Send + Sync>>>,
     pub session_backend: Arc<dyn RemoteSessionBackend>,
+    /// Absent for legacy/test constructors. Presence enables no future API.
+    pub machine_services: Option<Arc<crate::daemon::MachineServices>>,
     pub workspace_registry: WorkspaceRegistry,
     pub ssh_store_path: RwLock<Option<PathBuf>>,
     pub active_selection: RwLock<Option<RemoteActiveDesktopSelection>>,
@@ -575,6 +585,18 @@ pub struct RemoteGatewayState {
 }
 
 impl RemoteGatewayState {
+    /// Derive both gateway handles from the authority before publication.
+    pub(crate) fn with_machine_services(
+        mut self,
+        sessions: Arc<crate::daemon::session_service::DaemonSessionService>,
+    ) -> Self {
+        let workspaces = Arc::clone(&sessions.workspace_service);
+        self.workspace_registry = workspaces.registry.clone();
+        self.session_backend = sessions.clone();
+        self.machine_services = Some(Arc::new(crate::daemon::MachineServices { sessions, workspaces }));
+        self
+    }
+
     pub fn new(
         terminal_service: Arc<TerminalService>,
         workspace_registry: WorkspaceRegistry,
@@ -691,10 +713,19 @@ impl RemoteGatewayState {
             .unwrap_or_default();
         Self {
             config: RwLock::new(config),
+            identity_dir: auth_path.as_deref().and_then(|path| path.parent()).map(PathBuf::from),
+            #[cfg(test)]
+            identity_probe: RwLock::new(None),
+            #[cfg(test)]
+            browse_home: RwLock::new(None),
+            #[cfg(test)]
+            browse_probe: RwLock::new(None),
             auth_manager: Arc::new(AuthManager::with_persistence(auth_path)),
             terminal_service,
+            daemon_epoch: AtomicU64::new(0),
             session_backend,
             workspace_registry,
+            machine_services: None,
             active_selection: RwLock::new(None),
             ssh_store_path: RwLock::new(None),
             active_session_tx,
@@ -842,7 +873,23 @@ impl RemoteGatewayState {
         *self.snapshot_post_build_hook.write() = hook;
     }
 
-    pub fn set_active_selection(&self, selection: RemoteActiveDesktopSelection) {
+    pub fn set_active_selection(&self, mut selection: RemoteActiveDesktopSelection) {
+        // This broadcaster belongs to the legacy mirror. Machine ownership must
+        // also fence selection snapshots/events, not just the session list/socket.
+        if let Some(services) = &self.machine_services {
+            let Ok(catalog) = services.workspaces.catalog() else {
+                self.clear_active_selection();
+                return;
+            };
+            let private_workspace = |id: &str| catalog.workspaces.get(id).is_some_and(|row| !row.mirror_exposed);
+            if selection.session_id.as_deref().is_some_and(|id| services.sessions.machine_only(id))
+                || selection.workspace_id.as_deref().is_some_and(private_workspace) {
+                self.clear_active_selection();
+                return;
+            }
+            selection.terminal_tabs.retain(|tab| !tab.session_id.as_deref().is_some_and(|id| services.sessions.machine_only(id)));
+            selection.attention_inventory.retain(|entry| !private_workspace(&entry.workspace_id));
+        }
         let session_id = selection.session_id.clone();
         let payload = serde_json::to_value(&selection).unwrap_or(serde_json::Value::Null);
         *self.active_selection.write() = Some(selection);

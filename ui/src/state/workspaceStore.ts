@@ -484,7 +484,8 @@ export function useWorkspaceStore({
         isSnapshot: payload.isSnapshot,
       });
       if (
-        !payload.providerSession
+        !stateRef.current.sessions[resolved.sessionId]?.workspaceId.startsWith("daemon:")
+        && !payload.providerSession
         && payload.manifestId
         && ["claude", "codex", "copilot", "cursor", "cursor-agent", "kimi", "omo", "gjc", "antigravity"].includes(payload.manifestId)
       ) {

@@ -12,6 +12,16 @@ export function validateHost(host: HostConfig): string | null {
   return null;
 }
 export function resolveRunTarget(target: RunTarget | undefined, hosts: readonly HostConfig[]): RunTarget {
-  if (target?.kind === "ssh" && !hosts.some(host => host.id === target.hostId)) throw new Error("HOST_UNAVAILABLE");
-  return target ?? { kind: "local" };
+  if (target === undefined) return { kind: "local" };
+  switch (target.kind) {
+    case "local": return target;
+    case "pairedDaemon": return target;
+    case "ssh":
+      if (!hosts.some(host => host.id === target.hostId)) throw new Error("HOST_UNAVAILABLE");
+      return target;
+    default: {
+      const exhaustive: never = target;
+      return exhaustive;
+    }
+  }
 }

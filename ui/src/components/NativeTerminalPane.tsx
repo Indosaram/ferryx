@@ -531,12 +531,16 @@ export function NativeTerminalPane({
   const [presentation, setPresentation] = useState<{
     readonly paneIdentity: string | undefined;
     readonly backendSessionId: string;
+    readonly bindingKey: string | null;
   } | null>(null);
   const retainedPresentation = presentation?.paneIdentity === paneIdentity ? presentation : null;
   const surfaceSessionId = targetSessionId ?? (isExited && isMacShortcutPlatform() ? retainedPresentation?.backendSessionId ?? null : null);
+  // Exiting stops input, not the presented surface's attachment lifetime.
+  // Keep its exact identity even if the exited session drops epoch/generation metadata.
   const bindingKey = targetSessionId
     ? `${targetSessionId}:${session?.daemonEpoch ?? ""}:${session?.remoteGeneration ?? 0}:${session?.remoteConnectionState ?? ""}`
-    : null;
+    : surfaceSessionId ? retainedPresentation?.bindingKey ?? null : null;
+  const lastAttachBindingRef = useRef<{ readonly sessionId: string; readonly bindingKey: string | null } | null>(null);
   // Hoisted to render scope so the input/paste/mouse callbacks can list the two
   // values they actually read. Both change on an SSH reconnect while
   // `targetSessionId` and `visible` stay put, so omitting them froze the
@@ -571,7 +575,7 @@ export function NativeTerminalPane({
   useLayoutEffect(() => {
     surfaceOwnerRef.current = visible && targetSessionId ? { sessionId: targetSessionId } : null;
     return () => { surfaceOwnerRef.current = null; };
-  }, [targetSessionId, visible]);
+  }, [bindingKey, targetSessionId, visible]);
   const previousTargetSessionIdRef = useRef(targetSessionId);
   const isBackendRebind = previousTargetSessionIdRef.current === null && targetSessionId !== null;
 
@@ -802,7 +806,10 @@ export function NativeTerminalPane({
       scaleFactor: initialGeometry?.scaleFactor,
       force,
     });
-    const attachOp = force ? reattachNativeTerminalLifecycle : attachNativeTerminalLifecycle;
+    // The lifecycle queue deduplicates by backend ID, not daemon identity.
+    const bindingChanged = lastAttachBindingRef.current?.sessionId === targetId && lastAttachBindingRef.current.bindingKey !== owner.bindingKey;
+    lastAttachBindingRef.current = { sessionId: targetId, bindingKey: owner.bindingKey };
+    const attachOp = force || bindingChanged ? reattachNativeTerminalLifecycle : attachNativeTerminalLifecycle;
     return attachOp(targetId, async () => {
       if (attachmentOwnerRef.current !== owner) return;
       if (quarantinedBindingRef.current?.sessionId === targetId) return;
@@ -948,7 +955,7 @@ export function NativeTerminalPane({
     };
 
     void executeInput(false);
-  }, [performAttach, remoteConnectionState, remoteGeneration, targetSessionId, visible]);
+  }, [bindingKey, performAttach, remoteConnectionState, remoteGeneration, targetSessionId, visible]);
 
   const sendCtrlC = useCallback(() => {
     sendInput({
@@ -1813,9 +1820,9 @@ export function NativeTerminalPane({
             updateImeAnchor(receipt);
             if (receipt?.presented) {
               setPresentation((current) =>
-                current?.backendSessionId === targetSessionId && current.paneIdentity === paneIdentity
+                current?.backendSessionId === targetSessionId && current.paneIdentity === paneIdentity && current.bindingKey === bindingKey
                   ? current
-                  : { paneIdentity, backendSessionId: targetSessionId },
+                  : { paneIdentity, backendSessionId: targetSessionId, bindingKey },
               );
             }
             presentNativeTerminalLifecycle(targetSessionId);

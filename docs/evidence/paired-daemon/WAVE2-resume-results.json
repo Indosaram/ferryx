@@ -1,0 +1,54 @@
+{
+  "commands": [
+    {
+      "name": "integration",
+      "command": [
+        "cargo",
+        "--config",
+        "target.aarch64-apple-darwin.runner=[\"sh\", \"/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/docs/evidence/paired-daemon/WAVE2-resume-runner.sh\"]",
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--no-default-features",
+        "--test",
+        "machine_catalog_persistence",
+        "--test",
+        "machine_worktrees",
+        "--test",
+        "machine_sessions",
+        "--test",
+        "machine_terminal_stream",
+        "--test",
+        "machine_events",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "seconds": 60.71771001815796
+    },
+    {
+      "name": "remote",
+      "command": [
+        "cargo",
+        "--config",
+        "target.aarch64-apple-darwin.runner=[\"sh\", \"/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/docs/evidence/paired-daemon/WAVE2-resume-runner.sh\"]",
+        "test",
+        "--locked",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--no-default-features",
+        "--lib",
+        "remote::",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit": 101,
+      "seconds": 23.590226888656616
+    }
+  ],
+  "sourceChangesDuringRun": [],
+  "qaRoot": "/tmp/wave2-aggregate-obciu2q0"
+}

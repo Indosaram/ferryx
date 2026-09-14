@@ -1,0 +1,724 @@
+$ vitest run --maxWorkers=1 src/components/ProjectDialogs.pairedDaemon.test.tsx src/components/ProjectDialogs.test.tsx src/components/RemoteDirectoryPicker.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+ ✓ src/components/ProjectDialogs.pairedDaemon.test.tsx (7 tests) 120ms
+ ❯ src/components/ProjectDialogs.test.tsx (44 tests | 1 failed) 381ms
+   ✓ deriveWorkspaceId helper > derives workspaceId by slugifying basename and deduplicating 1ms
+   ✓ AddProjectDialog Location Chooser > shows Local and Remote chooser on initial mount and makes zero native picker calls 35ms
+   ✓ AddProjectDialog Location Chooser > closes dialog when Cancel button is clicked in the location chooser 5ms
+   ✓ AddProjectDialog Location Chooser > preserves role='dialog' and aria-label='Add Project' across all states 10ms
+   ✓ AddProjectDialog Local flow > opens native picker on explicit Local click and closes dialog when cancelled (null result) 4ms
+   ✓ AddProjectDialog Local flow > surfaces the structured IPC error reason when registration fails 15ms
+   ✓ AddProjectDialog Local flow > shows confirmation dialog with the selected path 7ms
+   ✓ AddProjectDialog Local flow > submits with derived slugified id from basename and calls registerProject + onRegistered 8ms
+   ✓ AddProjectDialog Local flow > appends -2 suffix when derived workspaceId conflicts with existing projects 9ms
+   ✓ AddProjectDialog Local flow > keeps dialog mounted with manual form and shows error when picker is rejected 15ms
+   ✓ AddProjectDialog Local flow > allows retrying the native picker when navigating Back from the manual error view 7ms
+   ✓ AddProjectDialog Local flow > shows confirmation dialog after selection under StrictMode double-mounted effects 4ms
+   ✓ AddProjectDialog Local flow > keeps a dialog surface mounted while the native picker is still pending 5ms
+   ✓ AddProjectDialog Local flow > does not re-invoke picker when parent re-renders with new onClose identity 3ms
+   ✓ AddProjectDialog non-Tauri fallback flow > keeps manual form in non-Tauri runtime and registers project 8ms
+   ✓ AddProjectDialog non-Tauri fallback flow > uses neutral placeholder for workspace id input 3ms
+   ✓ AddProjectDialog Remote flow > keeps the settings-selected host while its inventory loads 15ms
+   ✓ AddProjectDialog Remote flow > navigates nested folders and registers the canonical selected path 17ms
+   ✓ AddProjectDialog Remote flow > ignores an older folder response after a newer keyboard navigation 8ms
+   ✓ AddProjectDialog Remote flow > discards old host responses and caches when the selected host changes 8ms
+   × AddProjectDialog Remote flow > filters hidden folders locally and refreshes cached directory data 48ms
+     → Unable to find an accessible element with the role "option" and name ".config"
+
+Here are the accessible roles:
+
+  presentation:
+
+  Name "":
+  [36m<div[39m
+    [33mclass[39m=[32m"fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6"[39m
+    [33mrole[39m=[32m"presentation"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+  dialog:
+
+  Name "Add Project":
+  [36m<form[39m
+    [33maria-label[39m=[32m"Add Project"[39m
+    [33mclass[39m=[32m"flex max-h-[calc(100dvh-3rem)] w-full max-w-xl flex-col overflow-hidden rounded-lg border border-border bg-card shadow-2xl"[39m
+    [33mrole[39m=[32m"dialog"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+  button:
+
+  Name "Back":
+  [36m<button[39m
+    [33maria-label[39m=[32m"Back"[39m
+    [33mclass[39m=[32m"mr-1.5 rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-45"[39m
+    [33mdata-testid[39m=[32m"add-project-back"[39m
+    [33mtype[39m=[32m"button"[39m
+  [36m/>[39m
+
+  Name "Close Add Project":
+  [36m<button[39m
+    [33maria-label[39m=[32m"Close Add Project"[39m
+    [33mclass[39m=[32m"ml-auto rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"[39m
+    [33mtype[39m=[32m"button"[39m
+  [36m/>[39m
+
+  Name "Remote home":
+  [36m<button[39m
+    [33maria-label[39m=[32m"Remote home"[39m
+    [33mclass[39m=[32m"inline-flex items-center justify-center gap-2 whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 hover:bg-accent hover:text-accent-foreground h-8 rounded-md px-3 text-xs"[39m
+    [33mtitle[39m=[32m"Remote home"[39m
+    [33mtype[39m=[32m"button"[39m
+  [36m/>[39m
+
+  Name "Parent folder":
+  [36m<button[39m
+    [33maria-label[39m=[32m"Parent folder"[39m
+    [33mclass[39m=[32m"inline-flex items-center justify-center gap-2 whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 hover:bg-accent hover:text-accent-foreground h-8 rounded-md px-3 text-xs"[39m
+    [33mdisabled[39m=[32m""[39m
+    [33mtitle[39m=[32m"Parent folder"[39m
+    [33mtype[39m=[32m"button"[39m
+  [36m/>[39m
+
+  Name "Refresh folders":
+  [36m<button[39m
+    [33maria-label[39m=[32m"Refresh folders"[39m
+    [33mclass[39m=[32m"inline-flex items-center justify-center gap-2 whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 hover:bg-accent hover:text-accent-foreground h-8 rounded-md px-3 text-xs"[39m
+    [33mtitle[39m=[32m"Refresh folders"[39m
+    [33mtype[39m=[32m"button"[39m
+  [36m/>[39m
+
+  Name "Back":
+  [36m<button[39m
+    [33mclass[39m=[32m"h-7 rounded-md border border-border px-2.5 text-xs text-muted-foreground hover:bg-accent disabled:opacity-45"[39m
+    [33mtype[39m=[32m"button"[39m
+  [36m/>[39m
+
+  Name "Cancel":
+  [36m<button[39m
+    [33mclass[39m=[32m"h-7 rounded-md border border-border px-2.5 text-xs text-muted-foreground hover:bg-accent"[39m
+    [33mtype[39m=[32m"button"[39m
+  [36m/>[39m
+
+  Name "Add this folder":
+  [36m<button[39m
+    [33mclass[39m=[32m"inline-flex h-7 items-center gap-1.5 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground disabled:opacity-45"[39m
+    [33mdata-testid[39m=[32m"add-project-confirm-remote"[39m
+    [33mdisabled[39m=[32m""[39m
+    [33mtype[39m=[32m"submit"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+  heading:
+
+  Name "Add Remote Project":
+  [36m<h2[39m
+    [33mclass[39m=[32m"text-[13px] font-medium"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+  combobox:
+
+  Name "SSH Machine":
+  [36m<select[39m
+    [33maria-label[39m=[32m"SSH Machine"[39m
+    [33mclass[39m=[32m"h-8 w-full rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none transition-colors placeholder:text-muted-foreground/45 focus:border-ring"[39m
+    [33mdata-testid[39m=[32m"remote-host-select"[39m
+    [33mid[39m=[32m"remote-host-select"[39m
+  [36m/>[39m
+
+  Name "Remote repository path":
+  [36m<input[39m
+    [33maria-autocomplete[39m=[32m"list"[39m
+    [33maria-controls[39m=[32m":r5:"[39m
+    [33maria-expanded[39m=[32m"true"[39m
+    [33maria-label[39m=[32m"Remote repository path"[39m
+    [33mautocomplete[39m=[32m"off"[39m
+    [33mclass[39m=[32m"flex w-full rounded-md border border-input bg-transparent px-3 py-1 shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium file:text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 md:text-sm h-8 min-w-0 font-mono text-xs"[39m
+    [33mdata-testid[39m=[32m"remote-repo-path-input"[39m
+    [33mid[39m=[32m"remote-repo-path"[39m
+    [33mplaceholder[39m=[32m"~"[39m
+    [33mrole[39m=[32m"combobox"[39m
+    [33mspellcheck[39m=[32m"false"[39m
+    [33mvalue[39m=[32m"~"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+  option:
+
+  Name "Dev Server (ubuntu@dev.internal)":
+  [36m<option[39m
+    [33mvalue[39m=[32m"host-1"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+  group:
+
+  Name "Remote folders":
+  [36m<fieldset[39m
+    [33maria-label[39m=[32m"Remote folders"[39m
+    [33mclass[39m=[32m"min-w-0 space-y-2"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+  listbox:
+
+  Name "Remote folder suggestions":
+  [36m<ul[39m
+    [33maria-label[39m=[32m"Remote folder suggestions"[39m
+    [33mclass[39m=[32m"p-1"[39m
+    [33mid[39m=[32m":r5:"[39m
+    [33mrole[39m=[32m"listbox"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+  status:
+
+  Name "":
+  [36m<div[39m
+    [33mclass[39m=[32m"flex items-center justify-center gap-2 p-4 text-xs text-muted-foreground"[39m
+    [33mrole[39m=[32m"status"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+  switch:
+
+  Name "Hidden folders":
+  [36m<button[39m
+    [33maria-checked[39m=[32m"true"[39m
+    [33mclass[39m=[32m"peer inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-primary data-[state=unchecked]:bg-input"[39m
+    [33mdata-state[39m=[32m"checked"[39m
+    [33mid[39m=[32m"remote-show-hidden"[39m
+    [33mrole[39m=[32m"switch"[39m
+    [33mtype[39m=[32m"button"[39m
+    [33mvalue[39m=[32m"on"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mclass[39m=[32m"fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6"[39m
+      [33mrole[39m=[32m"presentation"[39m
+    [36m>[39m
+      [36m<form[39m
+        [33maria-label[39m=[32m"Add Project"[39m
+        [33mclass[39m=[32m"flex max-h-[calc(100dvh-3rem)] w-full max-w-xl flex-col overflow-hidden rounded-lg border border-border bg-card shadow-2xl"[39m
+        [33mrole[39m=[32m"dialog"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex h-9 items-center border-b border-border px-3"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33maria-label[39m=[32m"Back"[39m
+            [33mclass[39m=[32m"mr-1.5 rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-45"[39m
+            [33mdata-testid[39m=[32m"add-project-back"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [36m<svg[39m
+              [33mclass[39m=[32m"lucide lucide-arrow-left size-3.5"[39m
+              [33mfill[39m=[32m"none"[39m
+              [33mheight[39m=[32m"24"[39m
+              [33mstroke[39m=[32m"currentColor"[39m
+              [33mstroke-linecap[39m=[32m"round"[39m
+              [33mstroke-linejoin[39m=[32m"round"[39m
+              [33mstroke-width[39m=[32m"2"[39m
+              [33mviewBox[39m=[32m"0 0 24 24"[39m
+              [33mwidth[39m=[32m"24"[39m
+              [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+            [36m>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m12 19-7-7 7-7"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M19 12H5"[39m
+              [36m/>[39m
+            [36m</svg>[39m
+          [36m</button>[39m
+          [36m<svg[39m
+            [33mclass[39m=[32m"lucide lucide-radio mr-2 size-3.5 text-muted-foreground"[39m
+            [33mfill[39m=[32m"none"[39m
+            [33mheight[39m=[32m"24"[39m
+            [33mstroke[39m=[32m"currentColor"[39m
+            [33mstroke-linecap[39m=[32m"round"[39m
+            [33mstroke-linejoin[39m=[32m"round"[39m
+            [33mstroke-width[39m=[32m"2"[39m
+            [33mviewBox[39m=[32m"0 0 24 24"[39m
+            [33mwidth[39m=[32m"24"[39m
+            [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+          [36m>[39m
+            [36m<path[39m
+              [33md[39m=[32m"M4.9 19.1C1 15.2 1 8.8 4.9 4.9"[39m
+            [36m/>[39m
+            [36m<path[39m
+              [33md[39m=[32m"M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"[39m
+            [36m/>[39m
+            [36m<circle[39m
+              [33mcx[39m=[32m"12"[39m
+              [33mcy[39m=[32m"12"[39m
+              [33mr[39m=[32m"2"[39m
+            [36m/>[39m
+            [36m<path[39m
+              [33md[39m=[32m"M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"[39m
+            [36m/>[39m
+            [36m<path[39m
+              [33md[39m=[32m"M19.1 4.9C23 8.8 23 15.1 19.1 19"[39m
+            [36m/>[39m
+          [36m</svg>[39m
+          [36m<h2[39m
+            [33mclass[39m=[32m"text-[13px] font-medium"[39m
+          [36m>[39m
+            [0mAdd Remote Project[0m
+          [36m</h2>[39m
+          [36m<button[39m
+            [33maria-label[39m=[32m"Close Add Project"[39m
+            [33mclass[39m=[32m"ml-auto rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [36m<svg[39m
+              [33mclass[39m=[32m"lucide lucide-x size-3.5"[39m
+              [33mfill[39m=[32m"none"[39m
+              [33mheight[39m=[32m"24"[39m
+              [33mstroke[39m=[32m"currentColor"[39m
+              [33mstroke-linecap[39m=[32m"round"[39m
+              [33mstroke-linejoin[39m=[32m"round"[39m
+              [33mstroke-width[39m=[32m"2"[39m
+              [33mviewBox[39m=[32m"0 0 24 24"[39m
+              [33mwidth[39m=[32m"24"[39m
+              [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+            [36m>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M18 6 6 18"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m6 6 12 12"[39m
+              [36m/>[39m
+            [36m</svg>[39m
+          [36m</button>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"min-h-0 space-y-3 overflow-y-auto p-3"[39m
+        [36m>[39m
+          [36m<label[39m
+            [33mclass[39m=[32m"block space-y-1 text-[11px] text-muted-foreground"[39m
+            [33mfor[39m=[32m"remote-host-select"[39m
+          [36m>[39m
+            [36m<span>[39m
+              [0mSSH Machine[0m
+            [36m</span>[39m
+            [36m<select[39m
+              [33maria-label[39m=[32m"SSH Machine"[39m
+              [33mclass[39m=[32m"h-8 w-full rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none transition-colors placeholder:text-muted-foreground/45 focus:border-ring"[39m
+              [33mdata-testid[39m=[32m"remote-host-select"[39m
+              [33mid[39m=[32m"remote-host-select"[39m
+            [36m>[39m
+              [36m<option[39m
+                [33mvalue[39m=[32m"host-1"[39m
+              [36m>[39m
+                [0mDev Server[0m
+                [0m ([0m
+                [0mubuntu@dev.internal[0m
+                [0m)[0m
+              [36m</option>[39m
+            [36m</select>[39m
+          [36m</label>[39m
+          [36m<fieldset[39m
+            [33maria-label[39m=[32m"Remote folders"[39m
+            [33mclass[39m=[32m"min-w-0 space-y-2"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"space-y-1"[39m
+            [36m>[39m
+              [36m<label[39m
+                [33mclass[39m=[32m"text-[11px] text-muted-foreground"[39m
+                [33mfor[39m=[32m"remote-repo-path"[39m
+              [36m>[39m
+                [0mRemote folder[0m
+              [36m</label>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"flex gap-2"[39m
+              [36m>[39m
+                [36m<input[39m
+                  [33maria-autocomplete[39m=[32m"list"[39m
+                  [33maria-controls[39m=[32m":r5:"[39m
+                  [33maria-expanded[39m=[32m"true"[39m
+                  [33maria-label[39m=[32m"Remote repository path"[39m
+                  [33mautocomplete[39m=[32m"off"[39m
+                  [33mclass[39m=[32m"flex w-full rounded-md border border-input bg-transparent px-3 py-1 shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium file:text-foreground placeholder:text-muted-foreground focus-visible:outlin...
+   ✓ AddProjectDialog Remote flow > invalidates cached and pending selections when the same host ID changes configuration 9ms
+   ✓ AddProjectDialog Remote flow > invalidates selection on errors and enables it only after retry succeeds 11ms
+   ✓ AddProjectDialog Remote flow > shows the attempted child path when navigation fails and retries that path 13ms
+   ✓ AddProjectDialog Remote flow > opens a remote folder browser after choosing SSH 11ms
+   ✓ AddProjectDialog Remote flow > renders empty state and Settings CTA button when 0 active hosts exist and makes zero native picker calls 3ms
+   ✓ AddProjectDialog Remote flow > renders empty state when all configured hosts are disabled 2ms
+   ✓ AddProjectDialog Remote flow > renders loading indicator when SSH hosts are loading 2ms
+   ✓ AddProjectDialog Remote flow > allows returning to location chooser using the Back button 8ms
+   ✓ AddProjectDialog Remote flow > requires browsing the typed path and derives the internal id on registration 9ms
+   ✓ AddProjectDialog Remote flow > registers remote project successfully and maps identity to RegisteredProject target { kind: 'ssh', hostId } 7ms
+   ✓ AddProjectDialog Remote flow > fails closed when authoritative refreshHosts fails at submit and does not call registerRemoteProject 6ms
+   ✓ AddProjectDialog Remote flow > clears selection when selected host is removed or disabled instead of silently retargeting to another host 5ms
+   ✓ AddProjectDialog Remote flow > suppresses callbacks when externally unmounted while registration is in flight 7ms
+   ✓ AddProjectDialog Remote flow > prevents stale host submission when host was removed or disabled before submit 6ms
+   ✓ AddProjectDialog Remote flow > surfaces structured IPC error without closing dialog on remote registration failure 10ms
+   ✓ AddProjectDialog Remote flow > prevents callbacks and state updates when remote registration resolves after dialog dismissal 10ms
+   ✓ AddWorktreeDialog flow > loads local branches and uses a real branch dropdown for Add Worktree 8ms
+   ✓ AddWorktreeDialog flow > explains that a plain folder project has no branches instead of leaving a dead dialog 3ms
+   ✓ AddWorktreeDialog flow > renders slug-only in remote mode and calls createRemoteWorktree without invoking listProjectBranches 5ms
+   ✓ RemoveProjectDialog flow > renders remote folder and configured SSH host label for remote project while preserving backend removal 3ms
+   ✓ RemoveProjectDialog flow > falls back to hostId when host is not in SSH inventory for remote project 1ms
+   ✓ RemoveProjectDialog flow > renders project id, path notice, and invokes onConfirm when Remove Project is clicked 3ms
+   ✓ RemoveProjectDialog flow > invokes onClose when Cancel is clicked 2ms
+ ✓ src/components/RemoteDirectoryPicker.test.tsx (12 tests) 136ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/ProjectDialogs.test.tsx > AddProjectDialog Remote flow > filters hidden folders locally and refreshes cached directory data
+TestingLibraryElementError: Unable to find an accessible element with the role "option" and name ".config"
+
+Here are the accessible roles:
+
+  presentation:
+
+  Name "":
+  [36m<div[39m
+    [33mclass[39m=[32m"fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6"[39m
+    [33mrole[39m=[32m"presentation"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+  dialog:
+
+  Name "Add Project":
+  [36m<form[39m
+    [33maria-label[39m=[32m"Add Project"[39m
+    [33mclass[39m=[32m"flex max-h-[calc(100dvh-3rem)] w-full max-w-xl flex-col overflow-hidden rounded-lg border border-border bg-card shadow-2xl"[39m
+    [33mrole[39m=[32m"dialog"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+  button:
+
+  Name "Back":
+  [36m<button[39m
+    [33maria-label[39m=[32m"Back"[39m
+    [33mclass[39m=[32m"mr-1.5 rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-45"[39m
+    [33mdata-testid[39m=[32m"add-project-back"[39m
+    [33mtype[39m=[32m"button"[39m
+  [36m/>[39m
+
+  Name "Close Add Project":
+  [36m<button[39m
+    [33maria-label[39m=[32m"Close Add Project"[39m
+    [33mclass[39m=[32m"ml-auto rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"[39m
+    [33mtype[39m=[32m"button"[39m
+  [36m/>[39m
+
+  Name "Remote home":
+  [36m<button[39m
+    [33maria-label[39m=[32m"Remote home"[39m
+    [33mclass[39m=[32m"inline-flex items-center justify-center gap-2 whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 hover:bg-accent hover:text-accent-foreground h-8 rounded-md px-3 text-xs"[39m
+    [33mtitle[39m=[32m"Remote home"[39m
+    [33mtype[39m=[32m"button"[39m
+  [36m/>[39m
+
+  Name "Parent folder":
+  [36m<button[39m
+    [33maria-label[39m=[32m"Parent folder"[39m
+    [33mclass[39m=[32m"inline-flex items-center justify-center gap-2 whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 hover:bg-accent hover:text-accent-foreground h-8 rounded-md px-3 text-xs"[39m
+    [33mdisabled[39m=[32m""[39m
+    [33mtitle[39m=[32m"Parent folder"[39m
+    [33mtype[39m=[32m"button"[39m
+  [36m/>[39m
+
+  Name "Refresh folders":
+  [36m<button[39m
+    [33maria-label[39m=[32m"Refresh folders"[39m
+    [33mclass[39m=[32m"inline-flex items-center justify-center gap-2 whitespace-nowrap font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 hover:bg-accent hover:text-accent-foreground h-8 rounded-md px-3 text-xs"[39m
+    [33mtitle[39m=[32m"Refresh folders"[39m
+    [33mtype[39m=[32m"button"[39m
+  [36m/>[39m
+
+  Name "Back":
+  [36m<button[39m
+    [33mclass[39m=[32m"h-7 rounded-md border border-border px-2.5 text-xs text-muted-foreground hover:bg-accent disabled:opacity-45"[39m
+    [33mtype[39m=[32m"button"[39m
+  [36m/>[39m
+
+  Name "Cancel":
+  [36m<button[39m
+    [33mclass[39m=[32m"h-7 rounded-md border border-border px-2.5 text-xs text-muted-foreground hover:bg-accent"[39m
+    [33mtype[39m=[32m"button"[39m
+  [36m/>[39m
+
+  Name "Add this folder":
+  [36m<button[39m
+    [33mclass[39m=[32m"inline-flex h-7 items-center gap-1.5 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground disabled:opacity-45"[39m
+    [33mdata-testid[39m=[32m"add-project-confirm-remote"[39m
+    [33mdisabled[39m=[32m""[39m
+    [33mtype[39m=[32m"submit"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+  heading:
+
+  Name "Add Remote Project":
+  [36m<h2[39m
+    [33mclass[39m=[32m"text-[13px] font-medium"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+  combobox:
+
+  Name "SSH Machine":
+  [36m<select[39m
+    [33maria-label[39m=[32m"SSH Machine"[39m
+    [33mclass[39m=[32m"h-8 w-full rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none transition-colors placeholder:text-muted-foreground/45 focus:border-ring"[39m
+    [33mdata-testid[39m=[32m"remote-host-select"[39m
+    [33mid[39m=[32m"remote-host-select"[39m
+  [36m/>[39m
+
+  Name "Remote repository path":
+  [36m<input[39m
+    [33maria-autocomplete[39m=[32m"list"[39m
+    [33maria-controls[39m=[32m":r5:"[39m
+    [33maria-expanded[39m=[32m"true"[39m
+    [33maria-label[39m=[32m"Remote repository path"[39m
+    [33mautocomplete[39m=[32m"off"[39m
+    [33mclass[39m=[32m"flex w-full rounded-md border border-input bg-transparent px-3 py-1 shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium file:text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 md:text-sm h-8 min-w-0 font-mono text-xs"[39m
+    [33mdata-testid[39m=[32m"remote-repo-path-input"[39m
+    [33mid[39m=[32m"remote-repo-path"[39m
+    [33mplaceholder[39m=[32m"~"[39m
+    [33mrole[39m=[32m"combobox"[39m
+    [33mspellcheck[39m=[32m"false"[39m
+    [33mvalue[39m=[32m"~"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+  option:
+
+  Name "Dev Server (ubuntu@dev.internal)":
+  [36m<option[39m
+    [33mvalue[39m=[32m"host-1"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+  group:
+
+  Name "Remote folders":
+  [36m<fieldset[39m
+    [33maria-label[39m=[32m"Remote folders"[39m
+    [33mclass[39m=[32m"min-w-0 space-y-2"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+  listbox:
+
+  Name "Remote folder suggestions":
+  [36m<ul[39m
+    [33maria-label[39m=[32m"Remote folder suggestions"[39m
+    [33mclass[39m=[32m"p-1"[39m
+    [33mid[39m=[32m":r5:"[39m
+    [33mrole[39m=[32m"listbox"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+  status:
+
+  Name "":
+  [36m<div[39m
+    [33mclass[39m=[32m"flex items-center justify-center gap-2 p-4 text-xs text-muted-foreground"[39m
+    [33mrole[39m=[32m"status"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+  switch:
+
+  Name "Hidden folders":
+  [36m<button[39m
+    [33maria-checked[39m=[32m"true"[39m
+    [33mclass[39m=[32m"peer inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-primary data-[state=unchecked]:bg-input"[39m
+    [33mdata-state[39m=[32m"checked"[39m
+    [33mid[39m=[32m"remote-show-hidden"[39m
+    [33mrole[39m=[32m"switch"[39m
+    [33mtype[39m=[32m"button"[39m
+    [33mvalue[39m=[32m"on"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mclass[39m=[32m"fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6"[39m
+      [33mrole[39m=[32m"presentation"[39m
+    [36m>[39m
+      [36m<form[39m
+        [33maria-label[39m=[32m"Add Project"[39m
+        [33mclass[39m=[32m"flex max-h-[calc(100dvh-3rem)] w-full max-w-xl flex-col overflow-hidden rounded-lg border border-border bg-card shadow-2xl"[39m
+        [33mrole[39m=[32m"dialog"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex h-9 items-center border-b border-border px-3"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33maria-label[39m=[32m"Back"[39m
+            [33mclass[39m=[32m"mr-1.5 rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-45"[39m
+            [33mdata-testid[39m=[32m"add-project-back"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [36m<svg[39m
+              [33mclass[39m=[32m"lucide lucide-arrow-left size-3.5"[39m
+              [33mfill[39m=[32m"none"[39m
+              [33mheight[39m=[32m"24"[39m
+              [33mstroke[39m=[32m"currentColor"[39m
+              [33mstroke-linecap[39m=[32m"round"[39m
+              [33mstroke-linejoin[39m=[32m"round"[39m
+              [33mstroke-width[39m=[32m"2"[39m
+              [33mviewBox[39m=[32m"0 0 24 24"[39m
+              [33mwidth[39m=[32m"24"[39m
+              [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+            [36m>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m12 19-7-7 7-7"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M19 12H5"[39m
+              [36m/>[39m
+            [36m</svg>[39m
+          [36m</button>[39m
+          [36m<svg[39m
+            [33mclass[39m=[32m"lucide lucide-radio mr-2 size-3.5 text-muted-foreground"[39m
+            [33mfill[39m=[32m"none"[39m
+            [33mheight[39m=[32m"24"[39m
+            [33mstroke[39m=[32m"currentColor"[39m
+            [33mstroke-linecap[39m=[32m"round"[39m
+            [33mstroke-linejoin[39m=[32m"round"[39m
+            [33mstroke-width[39m=[32m"2"[39m
+            [33mviewBox[39m=[32m"0 0 24 24"[39m
+            [33mwidth[39m=[32m"24"[39m
+            [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+          [36m>[39m
+            [36m<path[39m
+              [33md[39m=[32m"M4.9 19.1C1 15.2 1 8.8 4.9 4.9"[39m
+            [36m/>[39m
+            [36m<path[39m
+              [33md[39m=[32m"M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"[39m
+            [36m/>[39m
+            [36m<circle[39m
+              [33mcx[39m=[32m"12"[39m
+              [33mcy[39m=[32m"12"[39m
+              [33mr[39m=[32m"2"[39m
+            [36m/>[39m
+            [36m<path[39m
+              [33md[39m=[32m"M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"[39m
+            [36m/>[39m
+            [36m<path[39m
+              [33md[39m=[32m"M19.1 4.9C23 8.8 23 15.1 19.1 19"[39m
+            [36m/>[39m
+          [36m</svg>[39m
+          [36m<h2[39m
+            [33mclass[39m=[32m"text-[13px] font-medium"[39m
+          [36m>[39m
+            [0mAdd Remote Project[0m
+          [36m</h2>[39m
+          [36m<button[39m
+            [33maria-label[39m=[32m"Close Add Project"[39m
+            [33mclass[39m=[32m"ml-auto rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [36m<svg[39m
+              [33mclass[39m=[32m"lucide lucide-x size-3.5"[39m
+              [33mfill[39m=[32m"none"[39m
+              [33mheight[39m=[32m"24"[39m
+              [33mstroke[39m=[32m"currentColor"[39m
+              [33mstroke-linecap[39m=[32m"round"[39m
+              [33mstroke-linejoin[39m=[32m"round"[39m
+              [33mstroke-width[39m=[32m"2"[39m
+              [33mviewBox[39m=[32m"0 0 24 24"[39m
+              [33mwidth[39m=[32m"24"[39m
+              [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+            [36m>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M18 6 6 18"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m6 6 12 12"[39m
+              [36m/>[39m
+            [36m</svg>[39m
+          [36m</button>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"min-h-0 space-y-3 overflow-y-auto p-3"[39m
+        [36m>[39m
+          [36m<label[39m
+            [33mclass[39m=[32m"block space-y-1 text-[11px] text-muted-foreground"[39m
+            [33mfor[39m=[32m"remote-host-select"[39m
+          [36m>[39m
+            [36m<span>[39m
+              [0mSSH Machine[0m
+            [36m</span>[39m
+            [36m<select[39m
+              [33maria-label[39m=[32m"SSH Machine"[39m
+              [33mclass[39m=[32m"h-8 w-full rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none transition-colors placeholder:text-muted-foreground/45 focus:border-ring"[39m
+              [33mdata-testid[39m=[32m"remote-host-select"[39m
+              [33mid[39m=[32m"remote-host-select"[39m
+            [36m>[39m
+              [36m<option[39m
+                [33mvalue[39m=[32m"host-1"[39m
+              [36m>[39m
+                [0mDev Server[0m
+                [0m ([0m
+                [0mubuntu@dev.internal[0m
+                [0m)[0m
+              [36m</option>[39m
+            [36m</select>[39m
+          [36m</label>[39m
+          [36m<fieldset[39m
+            [33maria-label[39m=[32m"Remote folders"[39m
+            [33mclass[39m=[32m"min-w-0 space-y-2"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"space-y-1"[39m
+            [36m>[39m
+              [36m<label[39m
+                [33mclass[39m=[32m"text-[11px] text-muted-foreground"[39m
+                [33mfor[39m=[32m"remote-repo-path"[39m
+              [36m>[39m
+                [0mRemote folder[0m
+              [36m</label>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"flex gap-2"[39m
+              [36m>[39m
+                [36m<input[39m
+                  [33maria-autocomplete[39m=[32m"list"[39m
+                  [33maria-controls[39m=[32m":r5:"[39m
+                  [33maria-expanded[39m=[32m"true"[39m
+                  [33maria-label[39m=[32m"Remote repository path"[39m
+                  [33mautocomplete[39m=[32m"off"[39m
+                  [33mclass[39m=[32m"flex w-full rounded-md border border-input bg-transparent px-3 py-1 shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium file:text-foreground placeholder:text-muted-foreground focus-visible:outlin...
+ ❯ Object.getElementError ../../herdr-wave1/ui/node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ ../../herdr-wave1/ui/node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ ../../herdr-wave1/ui/node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ ../../herdr-wave1/ui/node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/components/ProjectDialogs.test.tsx:622:19
+    620|     expect(screen.queryByRole("option", { name: ".config" })).not.toBe…
+    621|     fireEvent.click(screen.getByRole("switch", { name: "Hidden folders…
+    622|     expect(screen.getByRole("option", { name: ".config" })).toBeInTheD…
+       |                   ^
+    623|     await act(async () => {
+    624|       fireEvent.change(screen.getByRole("combobox", { name: "Remote re…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 2 passed (3)
+      Tests  1 failed | 62 passed (63)
+   Start at  15:36:54
+   Duration  3.18s (transform 154ms, setup 238ms, collect 1.15s, tests 637ms, environment 587ms, prepare 82ms)
+
+error: script "test" exited with code 1

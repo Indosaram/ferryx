@@ -1,0 +1,291 @@
+{
+  "sourceRoot": "/Users/indo/code/project/orca-lite-wt/herdr-wave2",
+  "base": "e1a00339a5339ed4d9c9634e26b86f41111d49f6",
+  "files": [
+    {
+      "path": "src-tauri/src/daemon/a03_owner_cli_fixture.rs",
+      "sha256": "ce8e0210b2ca0ab512114ea76ddad5dd3f14b2b4a253b8fc3af5b02c3d0190e2",
+      "match": true
+    },
+    {
+      "path": "src-tauri/src/daemon/client.rs",
+      "sha256": "ff4a8bb9198dee8d774721e4738405e0716a0f8e1ca85a86ae6aa5680b44a85f",
+      "match": true
+    },
+    {
+      "path": "src-tauri/src/daemon/protocol.rs",
+      "sha256": "833afcbbe451b10cfe5ee0a9d02102386cec55999e751586e0d129f5b8b17163",
+      "match": true
+    },
+    {
+      "path": "src-tauri/src/daemon/server.rs",
+      "sha256": "cfe478dd02a7b643163c3ae1c4c89278faabae65440c24caff47dba7da7e99b1",
+      "match": true
+    },
+    {
+      "path": "src-tauri/src/daemon/session_service.rs",
+      "sha256": "e16eaa317ad02282a235350cf55263533af989962613221ce1156f56fcf567c7",
+      "match": true
+    },
+    {
+      "path": "src-tauri/src/daemon/workspace_service.rs",
+      "sha256": "0083415853602390e6cc7b7d7aa07496a9fa1491da50f825630a0f494084431c",
+      "match": true
+    },
+    {
+      "path": "src-tauri/src/ipc/error.rs",
+      "sha256": "e94ad81ba61a9e9cbc59d64c7d1378469e45664d3ccc3996bc84f0097d701d82",
+      "match": true
+    },
+    {
+      "path": "src-tauri/src/ipc/worktree.rs",
+      "sha256": "591f65074281005e8cf7d475999554eac73d7c15b185d32209e8128b5e1c55f9",
+      "match": true
+    },
+    {
+      "path": "src-tauri/src/remote/mod.rs",
+      "sha256": "db21688496000d96012919796b565c70a02aefc941d9b902b80ad933b15b605b",
+      "match": true
+    },
+    {
+      "path": "src-tauri/src/remote/relay_server.rs",
+      "sha256": "89157d33216802f1f63dc85a4ba34807e58731ef697ef852578fa5517d2223f3",
+      "match": true
+    },
+    {
+      "path": "src-tauri/src/remote/server.rs",
+      "sha256": "4a762a4fd2cc68ee2ed7e810ba726fea9e8fd5bafba397aa32ca35d5b7e3b5ca",
+      "match": true
+    },
+    {
+      "path": "src-tauri/src/remote/state.rs",
+      "sha256": "f646c3bfb45b2f5b4893781758f171f0cc29f74c9ea4cafe04f52dadece78c27",
+      "match": true
+    },
+    {
+      "path": "src-tauri/src/remote/workspace_catalog.rs",
+      "sha256": "e25dd4f78ba21cec19949bab6a1ff73b6719bac20c8773cc42d76efcde0e7683",
+      "match": true
+    },
+    {
+      "path": "src-tauri/src/terminal/pty.rs",
+      "sha256": "d12528276e6b252eff8ad28e0aab8ed90643eda7a6bece75b39b5eec6030c6a9",
+      "match": true
+    },
+    {
+      "path": "src-tauri/src/terminal/service.rs",
+      "sha256": "2cb2a9709d469b4a66e097362c569a4ffb2926e7fbf470ab80e9bb02f8a45b5b",
+      "match": true
+    },
+    {
+      "path": "src-tauri/src/worktree/git.rs",
+      "sha256": "fa31173cea551b5edbbe8370814b5879bd1d6fb1cf70abbe9115bbc6b8c702a4",
+      "match": true
+    },
+    {
+      "path": "src-tauri/src/worktree/manager.rs",
+      "sha256": "4776271ea9a2c5bacc1b2500651ee787c03dc96021813fe0aa35d61f2bf19798",
+      "match": true
+    },
+    {
+      "path": "src-tauri/src/worktree/model.rs",
+      "sha256": "447fa2786cefb6a57ddd22de78f7dea3baea6a68436d99e170ca6f98c7c74e5d",
+      "match": true
+    },
+    {
+      "path": "src-tauri/tests/relay_pairing_generation_regression.rs",
+      "sha256": "ea07bf77ac64e915e1001dcc701bb3789609f8257614e7188ce8e99161de12f0",
+      "match": true
+    },
+    {
+      "path": "src-tauri/tests/worktree_safety.rs",
+      "sha256": "bdea33980f0641ed2dabffb474c6c31a03edf38498045aba11d485e3b05263cb",
+      "match": true
+    },
+    {
+      "path": "docs/evidence/paired-daemon/A09-GREEN.log",
+      "sha256": "54610bb81a8adfffb67111a36b446597e983cfde9ed284075e70321ff679c66b",
+      "match": true
+    },
+    {
+      "path": "docs/evidence/paired-daemon/A09-RED.log",
+      "sha256": "8f328184e0b7bd2769080f720463dfd661055e90a2f527c0e07900af34b4587b",
+      "match": true
+    },
+    {
+      "path": "docs/evidence/paired-daemon/A09-cleanup.log",
+      "sha256": "e5597d71df96b950eee3b8e6bb78a61ab002fdb18a555ba594359f598c76679e",
+      "match": true
+    },
+    {
+      "path": "docs/evidence/paired-daemon/A09-implementation.md",
+      "sha256": "2307e5deec3f176566dd837d9928238fb8117f42e2b395ad771fc261386581a7",
+      "match": true
+    },
+    {
+      "path": "docs/evidence/paired-daemon/A10-implementation.md",
+      "sha256": "19f0b44eaa0ce84c3166bb866c45f78f3daf65146569f4501c9becbae2e72f12",
+      "match": true
+    },
+    {
+      "path": "docs/evidence/paired-daemon/A10-wire-codec.md",
+      "sha256": "9faf2a468878f61df190e4c10f55e13094aef48d827b27df268fa7722c40e710",
+      "match": true
+    },
+    {
+      "path": "docs/evidence/paired-daemon/A10-wire-parent-green.log",
+      "sha256": "6f2fa928b1c9fc847c7174ddd1f6ffaa583f8a9b736c10fd768be4da4f8e0fde",
+      "match": true
+    },
+    {
+      "path": "docs/evidence/paired-daemon/A10-wire-parent-verification.md",
+      "sha256": "736a6dc01049b37a3600186a811bd4b7d65e552c32f1e5d50df0b6ca66cf8d1b",
+      "match": true
+    },
+    {
+      "path": "docs/evidence/paired-daemon/A10-wire-recovery-GREEN.log",
+      "sha256": "6a9f036d02aef56b8aa2cc970abfb9d1b0f728a1ddc45a92386ca0475caa070f",
+      "match": true
+    },
+    {
+      "path": "docs/evidence/paired-daemon/A10-wire-recovery-RED.log",
+      "sha256": "2f6efc63c403f1a072d2e038927896d69b636c912032178062ac4ae8f1712e26",
+      "match": true
+    },
+    {
+      "path": "docs/evidence/paired-daemon/A10-wire-recovery.md",
+      "sha256": "f72cd9328ddbbe440fd27fc11d8a3cc5aca4894c57f89d2822d3dcc32f21b6ba",
+      "match": true
+    },
+    {
+      "path": "docs/evidence/paired-daemon/A11-joint-implementation.md",
+      "sha256": "525e6e0301d2d468e692dead125ba29ef5457d900f3ab5e1b980aa096a97ab0d",
+      "match": true
+    },
+    {
+      "path": "docs/evidence/paired-daemon/A12-implementation.md",
+      "sha256": "2ac1ae714848684e859675ff9e96c763c9b8d2f8b57de9b86dc74b18179ad993",
+      "match": true
+    },
+    {
+      "path": "docs/evidence/paired-daemon/WAVE2-parent-seed.json",
+      "sha256": "f5bd0ae00279014a8fb1ba08f31ac9ca874965c170b7bb3568a012bce7b155ec",
+      "match": true
+    },
+    {
+      "path": "docs/evidence/paired-daemon/WAVE2-verification-commands.log",
+      "sha256": "4582abccaae0161373e8fc342a2f9d28918ffe736f543c7104f48097efe6c1ea",
+      "match": true
+    },
+    {
+      "path": "docs/evidence/paired-daemon/WAVE2-verification-source-after.json",
+      "sha256": "104f6ec105fe6a32c37613a033f07ce178b8faab31a56f34002392637b8ee81f",
+      "match": true
+    },
+    {
+      "path": "docs/evidence/paired-daemon/WAVE2-verification-source-before.json",
+      "sha256": "104f6ec105fe6a32c37613a033f07ce178b8faab31a56f34002392637b8ee81f",
+      "match": true
+    },
+    {
+      "path": "docs/evidence/paired-daemon/WAVE2-verification-source-delta.json",
+      "sha256": "666766963b52345e44b78fc169671a308a9a7592211955d867b7c7d44189d6c7",
+      "match": true
+    },
+    {
+      "path": "docs/evidence/paired-daemon/WAVE2-verification.md",
+      "sha256": "0bb4fb6616e39865280ae7215aac37ee91a3a654539c8058bcb00c0625d98131",
+      "match": true
+    },
+    {
+      "path": "src-tauri/src/remote/filesystem.rs",
+      "sha256": "6972c6ef1a17f2b3ccb1865b04fd44826ec182282d4d90d3deec518e1e98ab3b",
+      "match": true
+    },
+    {
+      "path": "src-tauri/src/remote/filesystem_tests.rs",
+      "sha256": "d8e5d329e1f6b1f3d9049180fcc7ca0c08b219ad8aaa0bd9ee3c9b3a373dbeb8",
+      "match": true
+    },
+    {
+      "path": "src-tauri/src/remote/machine_operation_journal.rs",
+      "sha256": "1a6da5d9b87b2f61e55792d159ac3d1d79f93309ea72de2bb21c98e1ae5afe06",
+      "match": true
+    },
+    {
+      "path": "src-tauri/src/remote/preference_http_tests.rs",
+      "sha256": "c605b6c844b37a764d1bf7d3b0aa2f7bf899b58c88eddfbeb017ddbf7ce5b301",
+      "match": true
+    },
+    {
+      "path": "src-tauri/src/remote/terminal_wire.rs",
+      "sha256": "52a91ccdf54a3453bdbaee14b4cc93d8b1cb926b696bb19ebd93d44614a9f9b7",
+      "match": true
+    },
+    {
+      "path": "src-tauri/src/remote/workspace_api.rs",
+      "sha256": "ceb911a549905b57e4bbd333502190e1ef6a7a13cca458270843d2debff277a4",
+      "match": true
+    },
+    {
+      "path": "src-tauri/src/remote/workspace_api/worktree_authority_tests.rs",
+      "sha256": "6e5c092e24fe5115b0bd266651d1e8c5a5f4fdc06bfd5bb4e8c4cfa3b52861eb",
+      "match": true
+    },
+    {
+      "path": "src-tauri/src/remote/workspace_api/worktrees.rs",
+      "sha256": "9eac20aa3f043708fec39daa513e1fd8ed777a5069f5a924e922cfdab2bcad33",
+      "match": true
+    },
+    {
+      "path": "src-tauri/src/remote/workspace_api_tests.rs",
+      "sha256": "acd98884243be442d615efe39b614064a3ff71353596b22ae0403dd660938b1c",
+      "match": true
+    },
+    {
+      "path": "src-tauri/src/worktree/git/drain.rs",
+      "sha256": "b412ca14686bd3da3cf1ae86bcc2ec0659901c9168c11ade88bb6a009167393a",
+      "match": true
+    },
+    {
+      "path": "src-tauri/src/worktree/git/unix.rs",
+      "sha256": "64097c49009b811b401326cb79b2324aa245cabe3d22191c4d33b208facdc0ea",
+      "match": true
+    },
+    {
+      "path": "src-tauri/src/worktree/git/windows.rs",
+      "sha256": "259acec0f1641933af900bfe94e33863e595b842d88d9b29a07e044e6506818c",
+      "match": true
+    },
+    {
+      "path": "src-tauri/tests/a10_terminal_wire_codec.rs",
+      "sha256": "849472b3276429ec1c828682b2cfa35b2d0308286e85fe838817bf45536ed894",
+      "match": true
+    },
+    {
+      "path": "src-tauri/tests/machine_sessions.rs",
+      "sha256": "5f9b115e24891a5db19b21d3e4f9160e069e960584c4265ba6aec6d99821a411",
+      "match": true
+    },
+    {
+      "path": "src-tauri/tests/machine_worktree_legacy_bounds.rs",
+      "sha256": "0fce5030a530f10384584a7d148f7ee0834ac0e016d614a77f0d16ff3f65bf71",
+      "match": true
+    },
+    {
+      "path": "src-tauri/tests/machine_worktree_transports.rs",
+      "sha256": "94d227a022116031552f24a61c1dd60fd0a2567c4ac2aeaab22fc1596ae20451",
+      "match": true
+    },
+    {
+      "path": "src-tauri/tests/machine_worktrees.rs",
+      "sha256": "ef0a128e4c0d41b776c3908a9165121abd2b5e732b2bc6b3c1050af1fdde70b4",
+      "match": true
+    },
+    {
+      "path": "src-tauri/Cargo.lock",
+      "sha256": "3bf80308ad89556f9a6904c8e13ad467906e27bb1875c87b1f6b19ee06ddffb5",
+      "match": true
+    }
+  ]
+}

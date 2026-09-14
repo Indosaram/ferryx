@@ -1,0 +1,4 @@
+removed_owned_root=/tmp/a12-watch-red.NOhvGL receipt=docs/evidence/paired-daemon/A12-watch-red-root.txt
+removed_owned_root=/tmp/a12-watch-green.eWpZrJ receipt=docs/evidence/paired-daemon/A12-watch-green-root.txt
+removed_owned_root=/tmp/a12-watch-integration.wfoaYA receipt=docs/evidence/paired-daemon/A12-watch-integration-root.txt
+owned supervisor pid 34117 exited; cargo/test children completed with recorded exit receipts

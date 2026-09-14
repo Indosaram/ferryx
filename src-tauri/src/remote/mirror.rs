@@ -3,18 +3,14 @@ use crate::remote::protocol::{
 };
 use crate::terminal::output_hub::HistorySegment;
 
-#[cfg(feature = "native-terminal")]
 use crate::native_terminal::{
     CellSnapshot, CellWide, ColorRgb, CursorSnapshot, CursorVisualStyle, NativeTerminal,
     NativeTerminalError, RenderSnapshot, ScrollViewport, TerminalEngine,
 };
 
-#[cfg(feature = "native-terminal")]
 const REMOTE_CELL_WIDTH_PX: u32 = 8;
-#[cfg(feature = "native-terminal")]
 const REMOTE_CELL_HEIGHT_PX: u32 = 16;
 
-#[cfg(feature = "native-terminal")]
 pub struct RemoteTerminalMirror {
     engine: NativeTerminal,
     last_cols: Option<u16>,
@@ -22,7 +18,6 @@ pub struct RemoteTerminalMirror {
     last_lines: Option<Vec<Vec<RemoteGridRun>>>,
 }
 
-#[cfg(feature = "native-terminal")]
 impl RemoteTerminalMirror {
     pub fn new(cols: u16, rows: u16) -> Result<Self, NativeTerminalError> {
         let mut engine = NativeTerminal::new(cols, rows)?;
@@ -202,7 +197,6 @@ fn fragments_to_runs(mut fragments: Vec<RunFragment>) -> Vec<RemoteGridRun> {
     runs
 }
 
-#[cfg(feature = "native-terminal")]
 fn build_runs(cells: &[CellSnapshot]) -> Vec<RemoteGridRun> {
     let mut fragments = Vec::with_capacity(cells.len());
     for cell in cells {
@@ -224,7 +218,6 @@ fn build_runs(cells: &[CellSnapshot]) -> Vec<RemoteGridRun> {
     fragments_to_runs(fragments)
 }
 
-#[cfg(feature = "native-terminal")]
 fn cell_attrs(cell: &CellSnapshot) -> u8 {
     u8::from(cell.bold)
         | (u8::from(cell.italic) << 1)
@@ -232,12 +225,10 @@ fn cell_attrs(cell: &CellSnapshot) -> u8 {
         | (u8::from(cell.inverse) << 3)
 }
 
-#[cfg(feature = "native-terminal")]
 fn color_array(color: ColorRgb) -> [u8; 3] {
     [color.r, color.g, color.b]
 }
 
-#[cfg(feature = "native-terminal")]
 fn map_cursor(cursor: CursorSnapshot) -> RemoteGridCursor {
     RemoteGridCursor {
         x: cursor.x,
@@ -1186,10 +1177,7 @@ pub mod headless {
     }
 }
 
-#[cfg(not(feature = "native-terminal"))]
-pub use headless::RemoteTerminalMirror;
-
-#[cfg(all(test, feature = "native-terminal"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

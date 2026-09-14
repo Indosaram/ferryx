@@ -1,0 +1,73 @@
+$ vitest run --maxWorkers=1 src/lib/pairedDaemonProject.test.ts
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+ ❯ src/lib/pairedDaemonProject.test.ts (18 tests | 3 failed) 19ms
+   ✓ paired desktop operation boundary > captures equal-path owners independently of selection and preserves Rust IDs 3ms
+   × paired desktop operation boundary > rejects late registration after re-pair 5ms
+     → promise resolved "{ …(11) }" instead of rejecting
+   × paired desktop operation boundary > rejects late registration after forget 1ms
+     → promise resolved "{ …(11) }" instead of rejecting
+   × paired desktop operation boundary > rejects late registration after revoke 1ms
+     → promise resolved "{ …(11) }" instead of rejecting
+   ✓ paired desktop operation boundary > requires native context and negotiated capabilities before dispatch 1ms
+   ✓ paired desktop operation boundary > rejects invalid capability generation 1ms
+   ✓ paired desktop operation boundary > rejects invalid capability hostId 1ms
+   ✓ paired desktop operation boundary > rejects invalid capability kind 1ms
+   ✓ paired desktop operation boundary > rejects invalid capability machineId 1ms
+   ✓ paired desktop operation boundary > rejects invalid capability unknownCapability 0ms
+   ✓ paired desktop operation boundary > rejects invalid remote ID "" before dispatch 0ms
+   ✓ paired desktop operation boundary > rejects invalid remote ID "../project" before dispatch 0ms
+   ✓ paired desktop operation boundary > rejects invalid remote ID "daemon:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" before dispatch 0ms
+   ✓ paired desktop operation boundary > rejects invalid remote ID "project/a" before dispatch 0ms
+   ✓ paired desktop operation boundary > rejects invalid remote ID "project\u0000a" before dispatch 0ms
+   ✓ paired desktop operation boundary > validates project mapping, metadata and desktop unavailable IDs 1ms
+   ✓ paired desktop operation boundary > preserves structured machine failure but drops raw native bodies without retry 0ms
+   ✓ paired desktop operation boundary > exposes directory, worktree, session and reconciliation parsers 1ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > rejects late registration after re-pair
+ FAIL  src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > rejects late registration after forget
+ FAIL  src/lib/pairedDaemonProject.test.ts > paired desktop operation boundary > rejects late registration after revoke
+AssertionError: promise resolved "{ …(11) }" instead of rejecting
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- Error {[39m
+[32m-   "message": "rejected promise",[39m
+[31m+ {[39m
+[31m+   "availability": "ready",[39m
+[31m+   "gitBranch": null,[39m
+[31m+   "gitCommonDir": null,[39m
+[31m+   "gitHead": null,[39m
+[31m+   "gitRemote": null,[39m
+[31m+   "gitRoot": null,[39m
+[31m+   "remoteWorkspaceId": "project-a",[39m
+[31m+   "repoRoot": "/home/test/app",[39m
+[31m+   "revision": "7",[39m
+[31m+   "target": {[39m
+[31m+     "hostId": "https://relay.test/host/machine-a",[39m
+[31m+     "kind": "pairedDaemon",[39m
+[31m+   },[39m
+[31m+   "workspaceId": "daemon:f3fa4269ab5d5b3189945b790e708994534625e0166dc326e02aeca25537ac17",[39m
+[2m  }[22m
+
+ ❯ src/lib/pairedDaemonProject.test.ts:74:36
+     72|     s.respond(async () => { entered.resolve(); return release.promise;…
+     73|     const pending = s.adapters[0].registerProject({ requestId, repoPat…
+     74|     const rejected = expect(pending).rejects.toMatchObject({ code: cha…
+       |                                    ^
+     75|     await entered.promise;
+     76|     if (change === "forget") s.store.removeHost(s.hosts[0].hostId);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  3 failed | 15 passed (18)
+   Start at  14:01:34
+   Duration  839ms (transform 57ms, setup 141ms, collect 37ms, tests 19ms, environment 271ms, prepare 32ms)
+
+error: script "test" exited with code 1

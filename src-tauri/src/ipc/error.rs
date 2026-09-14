@@ -6,6 +6,10 @@ use serde_json::{json, Value};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum IpcErrorCode {
+    WorktreeBusy,
+    WorktreeLocked,
+    WorktreeRemovedBranchRetained,
+    WorktreeRemovedPruneFailed,
     DirtyWorktree,
     WriterAlreadyActive,
     WriterLeaseOwnerMismatch,
@@ -98,6 +102,28 @@ impl From<WorktreeError> for IpcError {
     fn from(error: WorktreeError) -> Self {
         let message = error.to_string();
         match error {
+            WorktreeError::WorktreeBusy { path, live_session_ids } => {
+                Self::new(IpcErrorCode::WorktreeBusy, message).with_details(json!({
+                    "path": path, "liveSessionIds": live_session_ids,
+                }))
+            }
+            WorktreeError::WorktreeLocked { path, reason } => {
+                Self::new(IpcErrorCode::WorktreeLocked, message).with_details(json!({
+                    "path": path, "reason": reason,
+                }))
+            }
+            WorktreeError::WorktreeRemovedBranchRetained { path, branch, source } => {
+                Self::new(IpcErrorCode::WorktreeRemovedBranchRetained, message).with_details(json!({
+                    "path": path, "branch": branch, "worktreeRemoved": true,
+                    "branchDeleted": false, "cause": Self::from(*source),
+                }))
+            }
+            WorktreeError::WorktreeRemovedPruneFailed { path, source } => {
+                Self::new(IpcErrorCode::WorktreeRemovedPruneFailed, message).with_details(json!({
+                    "path": path, "worktreeRemoved": true, "pruned": false,
+                    "branchDeleted": false, "cause": Self::from(*source),
+                }))
+            }
             WorktreeError::DirtyWorktree { path, count, files } => {
                 Self::new(IpcErrorCode::DirtyWorktree, message).with_details(json!({
                     "path": path,

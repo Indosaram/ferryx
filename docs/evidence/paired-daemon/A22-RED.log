@@ -1,0 +1,70 @@
+$ vitest run --maxWorkers=1 src/components/settings/PairedMachinesSection.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+
+⎯⎯⎯⎯⎯⎯ Failed Suites 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/settings/PairedMachinesSection.test.tsx [ src/components/settings/PairedMachinesSection.test.tsx ]
+Error: Failed to resolve import "./PairedMachinesSection" from "src/components/settings/PairedMachinesSection.test.tsx". Does the file exist?
+  Plugin: vite:import-analysis
+  File: /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/src/components/settings/PairedMachinesSection.test.tsx:5:0
+  4  |  const __vi_import_2__ = await import("../../state/remoteHostStore");
+  5  |  const __vi_import_3__ = await import("../../lib/pairedHostInventory");
+  6  |  const __vi_import_4__ = await import("./PairedMachinesSection");
+     |                                       ^
+  7  |  
+  8  |  
+ ❯ TransformPluginContext._formatLog ../../herdr-wave1/ui/node_modules/vitest/node_modules/vite/dist/node/chunks/config.js:29079:43
+ ❯ TransformPluginContext.error ../../herdr-wave1/ui/node_modules/vitest/node_modules/vite/dist/node/chunks/config.js:29076:14
+ ❯ normalizeUrl ../../herdr-wave1/ui/node_modules/vitest/node_modules/vite/dist/node/chunks/config.js:27199:18
+ ❯ ../../herdr-wave1/ui/node_modules/vitest/node_modules/vite/dist/node/chunks/config.js:27257:32
+ ❯ TransformPluginContext.transform ../../herdr-wave1/ui/node_modules/vitest/node_modules/vite/dist/node/chunks/config.js:27225:4
+ ❯ EnvironmentPluginContainer.transform ../../herdr-wave1/ui/node_modules/vitest/node_modules/vite/dist/node/chunks/config.js:28877:14
+ ❯ loadAndTransform ../../herdr-wave1/ui/node_modules/vitest/node_modules/vite/dist/node/chunks/config.js:22746:26
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  no tests
+   Start at  15:35:48
+   Duration  766ms (transform 31ms, setup 135ms, collect 0ms, tests 0ms, environment 273ms, prepare 32ms)
+
+error: script "test" exited with code 1
+$ vitest run --maxWorkers=1 src/components/settings/pairedDaemonGate.test.ts
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+ ❯ src/components/settings/pairedDaemonGate.test.ts (1 test | 1 failed) 4ms
+   × pairedDaemonProjectsV1 defaults off even when the proxy is advertised 4ms
+     → expected true to be false // Object.is equality
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/settings/pairedDaemonGate.test.ts > pairedDaemonProjectsV1 defaults off even when the proxy is advertised
+AssertionError: expected true to be false // Object.is equality
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- false[39m
+[31m+ true[39m
+
+ ❯ src/components/settings/pairedDaemonGate.test.ts:10:51
+      8|   const inventory = createPairedHostInventory(store, commands);
+      9|   await inventory.refresh();
+     10|   expect(store.getState().machineFeaturesEnabled).toBe(false);
+       |                                                   ^
+     11| });
+     12| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed (1)
+   Start at  15:36:17
+   Duration  755ms (transform 41ms, setup 131ms, collect 19ms, tests 4ms, environment 276ms, prepare 32ms)
+
+error: script "test" exited with code 1

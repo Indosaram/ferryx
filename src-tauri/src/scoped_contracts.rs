@@ -38,9 +38,21 @@ pub enum RunTarget {
     #[default]
     Local,
     Ssh {
-        #[serde(rename = "hostId")]
+        #[serde(rename = "hostId", deserialize_with = "nonempty_host_id")]
         host_id: String,
     },
+    PairedDaemon {
+        #[serde(rename = "hostId", deserialize_with = "nonempty_host_id")]
+        host_id: String,
+    },
+}
+
+fn nonempty_host_id<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let value = String::deserialize(d)?;
+    if value.trim().is_empty() {
+        return Err(serde::de::Error::custom("hostId is required"));
+    }
+    Ok(value)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,0 +1,3 @@
+16b4eb10cb9af48d78394c3048d05c8d1a1e7e1d1b74ca2d4cc82dd503725b0b  src-tauri/src/remote/machine_events.rs
+ba6ac772cf1b484dfb33a37a8f2ac2ab4f1a6b6eb9d2f51f0bbe5c1cc1f1b187  src-tauri/src/remote/machine_event_cancellation_tests.rs
+2e2772077a55791b811fcf226cc5c9a5cd46e0aefb0d229a73c65c372b38050b  src-tauri/src/daemon/workspace_watcher.rs

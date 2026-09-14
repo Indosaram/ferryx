@@ -1,0 +1,35 @@
+{
+  "qaRoot": "/tmp/fix3-st_01a099da-6p0w2jp_",
+  "results": [
+    {
+      "label": "full",
+      "exit": 0,
+      "seconds": 290.62701504099823,
+      "log": "/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/docs/evidence/paired-daemon/REGRESSION2-full-8371.log"
+    },
+    {
+      "label": "paired-host",
+      "exit": 0,
+      "seconds": 1.5261447919983766,
+      "log": "/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/docs/evidence/paired-daemon/REGRESSION2-paired-host-8371.log"
+    },
+    {
+      "label": "check-lib",
+      "exit": 0,
+      "seconds": 10.287914374996035,
+      "log": "/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/docs/evidence/paired-daemon/REGRESSION2-check-lib-8371.log"
+    },
+    {
+      "label": "check-bins",
+      "exit": 0,
+      "seconds": 0.4602683330012951,
+      "log": "/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/docs/evidence/paired-daemon/REGRESSION2-check-bins-8371.log"
+    },
+    {
+      "label": "build-entrypoint",
+      "exit": 0,
+      "seconds": 20.482860625001194,
+      "log": "/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/docs/evidence/paired-daemon/REGRESSION2-build-entrypoint-8371.log"
+    }
+  ]
+}

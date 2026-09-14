@@ -1,0 +1,21 @@
+v22.22.3
+$ vitest run --maxWorkers=1 src/lib/pairedActionBoundaries.test.tsx src/lib/pairedWorktreeActions.test.ts src/lib/pairedDaemonProject.test.ts src/lib/remoteProject.test.ts src/lib/agentReconnect.test.ts src/lib/shellReplacement.test.ts src/components/ProjectDialogs.test.tsx src/components/WorktreeDeleteDialog.test.tsx src/components/TerminalPane.sshReconnect.test.tsx src/state/workspaceNativeActivity.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+ ✓ src/lib/pairedActionBoundaries.test.tsx (5 tests) 14ms
+ ✓ src/components/ProjectDialogs.test.tsx (44 tests) 378ms
+ ✓ src/lib/agentReconnect.test.ts (9 tests) 111ms
+ ✓ src/components/WorktreeDeleteDialog.test.tsx (6 tests) 117ms
+ ✓ src/components/TerminalPane.sshReconnect.test.tsx (7 tests) 69ms
+ ✓ src/state/workspaceNativeActivity.test.tsx (11 tests) 38ms
+ ✓ src/lib/pairedDaemonProject.test.ts (19 tests) 16ms
+ ✓ src/lib/pairedWorktreeActions.test.ts (4 tests) 5ms
+ ✓ src/lib/remoteProject.test.ts (7 tests) 3ms
+ ✓ src/lib/shellReplacement.test.ts (2 tests) 2ms
+
+ Test Files  10 passed (10)
+      Tests  114 passed (114)
+   Start at  16:01:25
+   Duration  6.40s (transform 279ms, setup 736ms, collect 1.72s, tests 752ms, environment 1.84s, prepare 276ms)
+

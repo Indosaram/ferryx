@@ -1,0 +1,21 @@
+
+running 1 test
+A10 owner handover original_pid=Some(76841) current_pid=Some(76841) owner_epoch=1789265760910 gateway_epoch=1789265760911 old_detail={"session":{"cols":80,"cwd":"/private/tmp/a10-owner-parent.VKMzCC/tmp/.tmp7LE8Pz/project","endSequence":"2","providerSession":null,"rows":24,"running":true,"startSequence":"1","target":{"daemonEpoch":"1789265760910","machineId":"e631b6e6-3cce-4d0a-8d60-dba633a1b8fe","sessionId":"f2f4f009-ceb4-4191-91e5-c9a97f69c632"},"workspaceId":"project-f874d6ae57bb413f8abb15c669001e52","worktree":null},"status":"running"} new_detail={"status":"expired","target":{"daemonEpoch":"1789265760910","machineId":"e631b6e6-3cce-4d0a-8d60-dba633a1b8fe","sessionId":"f2f4f009-ceb4-4191-91e5-c9a97f69c632"}}
+A10 routed HTTP/WS/PTY proof=76841:/private/tmp/a10-owner-parent.VKMzCC/tmp/.tmp7LE8Pz/project generation="2" geometry=103x37
+
+thread 'original_target_remains_running_when_gateway_hands_over' (1382024) panicked at tests/machine_owner_handover.rs:103:9:
+assertion `left == right` failed: a routed live PTY must not expire at the replacement gateway
+  left: String("expired")
+ right: "running"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+A10 owner cleanup reaped pid=None
+A10 owner cleanup gateway/legacy tasks joined; PTYs reaped; fixture root removed
+test original_target_remains_running_when_gateway_hands_over ... FAILED
+
+failures:
+
+failures:
+    original_target_remains_running_when_gateway_hands_over
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.54s
+

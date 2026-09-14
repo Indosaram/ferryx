@@ -1,0 +1,18 @@
+{
+  "before": {
+    "src-tauri/examples/r9_eager_upload_probe.rs": "2d5f7151fbfff64b13d544b287d53dd25046a3be85739126f8a01617299d2b4c",
+    "src-tauri/src/remote/server.rs": "5e537a246cc4159a6fa65eabcafe7642cfc6ccdb52026174b5d4242acd084f21",
+    "src-tauri/src/remote/workspace_api.rs": "ceb911a549905b57e4bbd333502190e1ef6a7a13cca458270843d2debff277a4",
+    "src-tauri/src/remote/auth.rs": "8d9468845f28f6113419a9e05867227705f8f786c159fe4ecf057b1748125bf5",
+    "src-tauri/src/daemon/server.rs": "f4c02ae7589ec1589a75a0c2c19f9841ccd5dec252ebec3c4013bb580cb722ca",
+    "src-tauri/Cargo.lock": "3bf80308ad89556f9a6904c8e13ad467906e27bb1875c87b1f6b19ee06ddffb5"
+  },
+  "after": {
+    "src-tauri/examples/r9_eager_upload_probe.rs": "2d5f7151fbfff64b13d544b287d53dd25046a3be85739126f8a01617299d2b4c",
+    "src-tauri/src/remote/server.rs": "5e537a246cc4159a6fa65eabcafe7642cfc6ccdb52026174b5d4242acd084f21",
+    "src-tauri/src/remote/workspace_api.rs": "ceb911a549905b57e4bbd333502190e1ef6a7a13cca458270843d2debff277a4",
+    "src-tauri/src/remote/auth.rs": "8d9468845f28f6113419a9e05867227705f8f786c159fe4ecf057b1748125bf5",
+    "src-tauri/src/daemon/server.rs": "f4c02ae7589ec1589a75a0c2c19f9841ccd5dec252ebec3c4013bb580cb722ca",
+    "src-tauri/Cargo.lock": "3bf80308ad89556f9a6904c8e13ad467906e27bb1875c87b1f6b19ee06ddffb5"
+  }
+}

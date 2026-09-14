@@ -1,0 +1,2 @@
+owner=80517 command=cargo build --locked --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli --bin ferryx-relay 
+exit=0 owner_reaped=true

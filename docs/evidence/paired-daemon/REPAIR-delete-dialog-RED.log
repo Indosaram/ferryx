@@ -1,0 +1,108 @@
+v22.22.3
+$ vitest run --maxWorkers=1 src/App.pairedDaemon.test.tsx "--cache=false"
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+ ❯ src/App.pairedDaemon.test.tsx (3 tests | 1 failed) 111ms
+   × App paired desktop shell > routes deletion of an inactive paired project's worktree through its owning project 62ms
+     → expected "spy" to be called with arguments: [ { …(5) } ][90m
+
+Number of calls: [1m0[22m
+[39m
+   ✓ App paired desktop shell > preserves paired ownership and reports disabled native support without local registration 8ms
+   ✓ App paired desktop shell > keeps local tabs and the palette mounted when inventory selection changes 40ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/App.pairedDaemon.test.tsx > App paired desktop shell > routes deletion of an inactive paired project's worktree through its owning project
+AssertionError: expected "spy" to be called with arguments: [ { …(5) } ][90m
+
+Number of calls: [1m0[22m
+[39m
+ ❯ src/App.pairedDaemon.test.tsx:135:50
+    133|     await act(async () => { fireEvent.click(screen.getByRole("button",…
+    134|     // On the broken App call site this renders PAIRED_OWNER_REQUIRED …
+    135|     expect(deletion.createPairedWorktreeActions).toHaveBeenCalledWith(…
+       |                                                  ^
+    136|     expect(deletion.previewDelete).toHaveBeenCalledWith(pairedWorktree…
+    137|     await act(async () => { fireEvent.click(screen.getByRole("button",…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 2 passed (3)
+   Start at  16:06:27
+   Duration  1.55s (transform 258ms, setup 127ms, collect 771ms, tests 111ms, environment 258ms, prepare 36ms)
+
+error: script "test" exited with code 1
+TEST_EXIT=1
+v22.22.3
+$ vitest run --maxWorkers=1 src/components/WorktreeDeleteDialog.owner.test.tsx "--cache=false"
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+ ❯ src/components/WorktreeDeleteDialog.owner.test.tsx (3 tests | 1 failed) 51ms
+   ✓ delete dialog missing paired owner > fails closed when the row workspace is undefined 39ms
+   × delete dialog missing paired owner > fails closed when the row workspace is local-row 6ms
+     → expected "spy" to not be called at all, but actually been called 1 times[90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m    Array [
+      Object {
+        "workspaceId": "local-row",
+        "worktree": Object {
+          "slug": "feature",
+          "wsId": "remote-project",
+        },
+      },
+    ]
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+   ✓ delete dialog missing paired owner > fails closed when the row workspace is daemon:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 6ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/WorktreeDeleteDialog.owner.test.tsx > delete dialog missing paired owner > fails closed when the row workspace is local-row
+AssertionError: expected "spy" to not be called at all, but actually been called 1 times[90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m    Array [
+      Object {
+        "workspaceId": "local-row",
+        "worktree": Object {
+          "slug": "feature",
+          "wsId": "remote-project",
+        },
+      },
+    ]
+[39m[90m
+
+Number of calls: [1m1[22m
+[39m
+ ❯ src/components/WorktreeDeleteDialog.owner.test.tsx:20:46
+     18|       }} onClose={vi.fn()} onDeleted={vi.fn()} />);
+     19|     });
+     20|     expect(native.previewWorktreeDelete).not.toHaveBeenCalled();
+       |                                              ^
+     21|     expect(screen.getByText("PAIRED_OWNER_REQUIRED")).toBeInTheDocumen…
+     22|     expect(screen.getByRole("button", { name: "Delete worktree and bra…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 2 passed (3)
+   Start at  16:07:02
+   Duration  715ms (transform 70ms, setup 72ms, collect 270ms, tests 51ms, environment 148ms, prepare 23ms)
+
+error: script "test" exited with code 1
+OWNER_TEST_EXIT=1

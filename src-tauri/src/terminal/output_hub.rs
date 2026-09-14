@@ -381,7 +381,11 @@ pub fn segment_history(
     segments
 }
 
+#[path = "machine_output.rs"]
+pub mod machine_output;
+
 struct SessionHub {
+    machine_senders: Vec<machine_output::MachineSender>,
     buffer: BoundedBuffer,
     sender: broadcast::Sender<OutputChunk>,
     raw_sender: broadcast::Sender<Vec<u8>>,
@@ -432,6 +436,7 @@ impl TerminalOutputHub {
         let (tx, rx) = broadcast::channel(BROADCAST_CAPACITY);
         let (raw_tx, raw_rx) = broadcast::channel(BROADCAST_CAPACITY);
         let hub = SessionHub {
+            machine_senders: Vec::new(),
             buffer: BoundedBuffer::new(self.capacity),
             sender: tx,
             raw_sender: raw_tx,
@@ -471,6 +476,7 @@ impl TerminalOutputHub {
             metrics_read_unix_micros: None,
             replay_gap: Some(gap),
         };
+        hub.machine_senders.retain(|sender| sender.publish(&boundary));
         let _ = hub.sender.send(boundary.clone());
         Some(boundary)
     }
@@ -491,6 +497,7 @@ impl TerminalOutputHub {
             .buffer
             .push_with_read_timestamp(chunk_bytes, metrics_read_unix_micros)?;
 
+        hub.machine_senders.retain(|sender| sender.publish(&chunk));
         // Broadcast to sequence subscribers (cheap Arc refcount bump on the payload).
         let _ = hub.sender.send(chunk.clone());
         // Broadcast to legacy raw receivers

@@ -82,6 +82,19 @@ describe("workspaceRestore coordinator", () => {
     tauriMocks.spawnTerminal.mockReset();
   });
 
+  it("preloads mixed local and paired layouts while the local daemon is unavailable", async () => {
+    const pairedId = `daemon:${"a".repeat(64)}`;
+    const local = persistedSingleTerminal("local", "local-proxy");
+    const paired = persistedSingleTerminal(pairedId, "paired-proxy", "42");
+    const persisted = { ...local, workspaces: { ...local.workspaces, [pairedId]: {
+      ...paired.workspaces[pairedId], target: { kind: "pairedDaemon" as const, hostId: "host-a" }, remoteWorkspaceId: "remote-root",
+    } } };
+    await preloadWorkspaceSnapshots(["local", pairedId], async () => persisted, async () => { throw new Error("offline"); });
+    expect(getWorkspaceSnapshot(pairedId)?.sessions["sess-1"]).toMatchObject({ backendSessionId: "paired-proxy", remoteConnectionState: "reconnecting", lastOutputSequence: null });
+    expect(getWorkspaceSnapshot("local")?.layout.tabs[0].id).toBe("tab-1");
+    expect(tauriMocks.spawnTerminal).not.toHaveBeenCalled();
+  });
+
   it("preserves newer HMR state and does not restore stale preloaded snapshot when recoveredFromHmr is true", async () => {
     const workspaceId = "ws-returned-hmr";
     const persisted = persistedSingleTerminal(workspaceId, "backend-1");

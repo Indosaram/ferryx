@@ -146,6 +146,7 @@ fn browser_cli_request(command: BrowserCliCommand) -> BrowserCliRequest {
 pub enum PairCliCommand {
     List,
     GeneratePin,
+    GenerateMachinePin,
     Approve { pin: String },
 }
 
@@ -160,7 +161,12 @@ fn parse_pair_subcommand(
 ) -> Result<PairCliCommand, String> {
     match args.get(subcommand_index).map(String::as_str) {
         Some("list") => Ok(PairCliCommand::List),
-        Some("--generate-pin") | Some("generate") => Ok(PairCliCommand::GeneratePin),
+        Some("--generate-pin") | Some("generate") => match &args[subcommand_index + 1..] {
+            [] => Ok(PairCliCommand::GeneratePin),
+            [flag, scope] if flag == "--access" && scope == "mirror" => Ok(PairCliCommand::GeneratePin),
+            [flag, scope] if flag == "--access" && scope == "machine" => Ok(PairCliCommand::GenerateMachinePin),
+            _ => Err("expected pair generate [--access mirror|machine]".into()),
+        },
         Some("approve") => {
             let pin = args
                 .get(subcommand_index + 1)
@@ -229,7 +235,8 @@ pub fn run_pair_cli(command: PairCliCommand) -> Result<(), String> {
             }
             Ok(())
         }
-        PairCliCommand::GeneratePin => {
+        PairCliCommand::GeneratePin | PairCliCommand::GenerateMachinePin => {
+            let machine = command == PairCliCommand::GenerateMachinePin;
             if let Ok(val) = std::env::var("FERRYX_RELAY_URL") {
                 if val.trim().is_empty() {
                     return Err("Pairing requires a configured relay URL (FERRYX_RELAY_URL)".to_string());
@@ -243,15 +250,26 @@ pub fn run_pair_cli(command: PairCliCommand) -> Result<(), String> {
 
             let answer = daemon_runtime.block_on(async {
                 let client = crate::daemon::client::DaemonClient::new();
-                client
-                    .remote_create_pairing_code_detailed(Some(
-                        crate::remote::auth::DevicePermission::Control,
-                    ))
-                    .await
+                if machine {
+                    use crate::daemon::protocol::{DaemonRequest, DaemonResponse};
+                    match client.send_request(DaemonRequest::RemoteCreateMachinePairingCode).await? {
+                        DaemonResponse::RemotePairingCodeOk { code, pairing_token, machine_id, relay_url } =>
+                            Ok((code, pairing_token, machine_id, relay_url)),
+                        DaemonResponse::Error { message } => Err(crate::ipc::IpcError::new(crate::ipc::IpcErrorCode::InternalError, message)),
+                        _ => Err(crate::ipc::IpcError::new(crate::ipc::IpcErrorCode::InternalError, "Daemon does not support machine pairing")),
+                    }
+                } else {
+                    client.remote_create_pairing_code_detailed(Some(crate::remote::auth::DevicePermission::Control)).await
+                }
             });
 
             match answer {
                 Ok((code, pairing_token, _machine_id, daemon_relay_url)) => {
+                    if machine {
+                        eprintln!("Access: machine; permits browsing and executing programs as the daemon OS user.");
+                    } else {
+                        eprintln!("Access: mirror; controls only exposed desktop sessions.");
+                    }
                     println!("{code}");
                     if let Some(token) = pairing_token {
                         let relay_url = daemon_relay_url
@@ -267,6 +285,7 @@ pub fn run_pair_cli(command: PairCliCommand) -> Result<(), String> {
                     eprintln!(
                         "Pairing registered by the running daemon; it holds the relay control connection."
                     );
+                    eprintln!("Enter this PIN in the desktop's Paired machines settings. Mirror PINs stay valid for one minute; machine PINs for ten minutes.");
                     std::io::stdout().flush().map_err(|error| error.to_string())?;
                     Ok(())
                 }

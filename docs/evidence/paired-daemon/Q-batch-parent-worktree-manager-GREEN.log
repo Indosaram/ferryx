@@ -1,0 +1,200 @@
+status: completed exit_code: 0
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `token`
+    --> src/remote/auth.rs:1399:14
+     |
+1399 |         let (token, device) = auth
+     |              ^^^^^ help: if this is intentional, prefix it with an underscore: `_token`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `scroll_daemon_client`
+   --> src/lib.rs:915:9
+    |
+915 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+    |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+
+warning: field `app` is never read
+  --> src/ipc/notifications.rs:28:5
+   |
+27 | pub struct TauriNotificationBackend<R: Runtime> {
+   |            ------------------------ field in this struct
+28 |     app: AppHandle<R>,
+   |     ^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `GHOSTTY_TERMINAL_SCREEN_PRIMARY` is never used
+  --> src/native_terminal/sys/constants.rs:56:11
+   |
+56 | pub const GHOSTTY_TERMINAL_SCREEN_PRIMARY: c_int = 0;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `no_auth_query` is never used
+    --> src/remote/server.rs:2883:12
+     |
+2883 |         fn no_auth_query() -> AuthQuery {
+     |            ^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src/worktree/manager.rs:86:19
+   |
+86 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+   --> src/worktree/manager.rs:93:8
+    |
+ 92 | impl WriterLeaseGuard {
+    | --------------------- associated items in this implementation
+ 93 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+    |        ^^^
+...
+101 |     pub(crate) fn canonical_path(&self) -> &Path {
+    |                   ^^^^^^^^^^^^^^
+...
+105 |     pub(crate) fn owner_id(&self) -> &str {
+    |                   ^^^^^^^^
+
+warning: method `acquire_writer_lease` is never used
+   --> src/worktree/manager.rs:338:19
+    |
+134 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+338 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib test) generated 16 warnings (run `cargo fix --lib -p ferryx --tests` to apply 2 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 29.52s
+     Running unittests src/lib.rs (src-tauri/target/debug/deps/ferryx_lib-82e1988715e4a304)
+
+running 44 tests
+test ssh::worktree::tests::red_derive_ws_segment_malformed_rejected ... ok
+test ssh::worktree::tests::red_list_script_marker_framed_both_platforms ... ok
+test ssh::worktree::tests::red_path_inside_root_guard ... ok
+test ssh::worktree::tests::red_malformed_porcelain_tolerated ... ok
+test ssh::worktree::tests::red_parse_porcelain_entries ... ok
+test ssh::worktree::tests::red_porcelain_parsing_of_created_output ... ok
+test ssh::worktree::tests::red_create_remote_rejects_base_ref_option_injection ... ok
+test ssh::worktree::tests::red_create_script_quoting_and_sanitized_branch ... ok
+test ssh::worktree::tests::test_resolve_remote_spawn_root ... ok
+test worktree::git::local_budget_tests::a08_git_legacy_path_fidelity ... ok
+test ssh::worktree::tests::red_create_remote_option_injection_async_guard ... ok
+test worktree::git::local_budget_tests::local_mutation_budget_is_scoped_and_preserves_remote_deadline ... ok
+test worktree::git::tests::git_path_argument_normalization_strips_windows_verbatim_prefixes ... ok
+test worktree::manager::host_scoped_session_id_tests::test_host_scoped_worktree_session_id ... ok
+test worktree::registry::tests::unregister_unknown_workspace_returns_false_without_revision_change ... ok
+test worktree::tests::branch_namespace_formatting_and_validation ... ok
+A08 Git pid=40249 mode=revoke killed=true reaped=true private_root_removed=true
+test worktree::registry::tests::unregister_is_idempotent_on_the_same_id ... ok
+test worktree::registry::tests::unregister_removes_registered_workspace_and_bumps_revision ... ok
+Initialized empty Git repository in /private/tmp/ferryx-parent-q-worktree-manager-XMVOxl/tmp/.tmpSm5nhz/.git/
+test worktree::registry::tests::register_replaces_bogus_root_entry ... ok
+test worktree::registry::tests::register_unique_root_replaces_bogus_root_entry ... ok
+test worktree::tests::parse_status_porcelain_v1_and_v2 ... ok
+test worktree::tests::parse_worktree_list_porcelain ... ok
+test worktree::registry::tests::unregister_rejects_unsafe_workspace_id ... ok
+test worktree::tests::plain_folder_without_git_registers_and_guards_worktrees ... ok
+
+thread 'tokio-rt-worker' (618919) panicked at src/worktree/git.rs:200:31:
+A08_DRAIN_WORKER_FAILURE
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+A08 exceptional cleanup cwd="/tmp/ferryx-parent-q-worktree-manager-XMVOxl/tmp/.tmp04FPnY" explicit_wait=Ok(ExitStatus(unix_wait_status(0)))
+A08 exceptional Git pid=40281 root_removed=true result=Err(ParseError("Failed to parse git output: Git group drain: task 16 panicked with message \"A08_DRAIN_WORKER_FAILURE\""))
+test worktree::git::local_budget_tests::a08_git_exceptional_cleanup_waits_before_error ... ok
+test worktree::registry::tests::register_unique_root_disambiguates_conflicting_ids ... ok
+A08 byte fixture cwd="/tmp/ferryx-parent-q-worktree-manager-XMVOxl/tmp/.tmp7fdwPv" result=Err(ParseError("Invalid UTF-8 in Git stdout"))
+test worktree::git::local_budget_tests::a08_git_native_byte_fidelity ... ok
+test worktree::tests::worktree_manager_rejects_filesystem_root ... ok
+test worktree::git::local_budget_tests::bounded_git_rejects_large_output_and_expired_or_revoked_admission ... ok
+A08 Git pid=40285 mode=deadline killed=true reaped=true private_root_removed=true
+[main (root-commit) 0cf7665] init
+A08 Git pid=41234 mode=cancel killed=true reaped=true private_root_removed=true
+test worktree::git::local_budget_tests::running_git_revocation_and_deadline_kill_and_reap ... ok
+test worktree::tests::existing_target_and_missing_status_are_rejected ... ok
+test worktree::git::local_budget_tests::a08_git_real_legacy_worktree_path ... ok
+test ssh::worktree::tests::red_posix_script_builders_executable_behavior ... ok
+test worktree::tests::registry_resolves_only_registered_workspace_identity ... ok
+test worktree::tests::worktree_manager_resolves_nested_git_directory_to_canonical_root ... ok
+test worktree::git::local_budget_tests::local_budget_runs_existing_manager_create_delete ... ok
+test worktree::tests::create_find_and_list_worktree ... ok
+test worktree::tests::resolve_worktree_by_path_and_identity ... ok
+test worktree::tests::safe_delete_clean_worktree ... ok
+test worktree::tests::dirty_worktree_survives_force_remove_but_yields_to_explicit_destructive_delete ... ok
+test worktree::tests::git_merge_base_is_ancestor_and_branch_merge_detection ... ok
+test worktree::tests::safe_branch_delete_removes_merged_branch ... ok
+test worktree::tests::multiple_worktrees_remain_isolated ... ok
+A08 hook mode=cancel git=40444 leaf=44159 pgid=40444 uid=501 hook=40831 intermediate=44158 test_pgid=39621
+A08 mode=cancel cleanup worker_joined=true descendant_joined=true sibling_waited=true root_removed=true errors=[]
+A08 hook mode=revoke git=44463 leaf=45590 pgid=44463 uid=501 hook=44469 intermediate=45589 test_pgid=39621
+A08 mode=revoke cleanup worker_joined=true descendant_joined=true sibling_waited=true root_removed=true errors=[]
+A08 hook mode=deadline git=45890 leaf=46236 pgid=45890 uid=501 hook=45905 intermediate=46235 test_pgid=39621
+A08 mode=deadline cleanup worker_joined=true descendant_joined=true sibling_waited=true root_removed=true errors=[]
+A08 hook mode=output git=48175 leaf=48208 pgid=48175 uid=501 hook=48176 intermediate=48207 test_pgid=39621
+A08 mode=output cleanup worker_joined=true descendant_joined=true sibling_waited=true root_removed=true errors=[]
+A08 hook mode=success git=48270 leaf=48544 pgid=48270 uid=501 hook=48271 intermediate=48542 test_pgid=39621
+A08 mode=success cleanup worker_joined=true descendant_joined=true sibling_waited=true root_removed=true errors=[]
+A08 hook mode=failure git=48783 leaf=49266 pgid=48783 uid=501 hook=48800 intermediate=49265 test_pgid=39621
+A08 mode=failure cleanup worker_joined=true descendant_joined=true sibling_waited=true root_removed=true errors=[]
+A08 hook mode=injected git=49453 leaf=50271 pgid=49453 uid=501 hook=49482 intermediate=50270 test_pgid=39621
+
+thread 'worktree::git::local_budget_tests::git_hook_descendant_containment' (618659) panicked at src/worktree/git.rs:397:37:
+A08_INJECTED_READY_FAILURE
+A08 mode=injected cleanup worker_joined=true descendant_joined=true sibling_waited=true root_removed=true errors=[]
+test worktree::git::local_budget_tests::git_hook_descendant_containment ... ok
+
+test result: ok. 44 passed; 0 failed; 0 ignored; 0 measured; 917 filtered out; finished in 8.73s
+
+PARENT_Q_COMPLETE worktree-manager exit=0 root=/tmp/ferryx-parent-q-worktree-manager-XMVOxl absent=true

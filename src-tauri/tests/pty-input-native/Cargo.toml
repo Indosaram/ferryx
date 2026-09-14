@@ -1,0 +1,17 @@
+[package]
+name = "ferryx-pty-input-native-proof"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+portable-pty = { path = "../../vendor/portable-pty" }
+parking_lot = "0.12"
+tokio = { version = "1.53", features = ["full", "test-util"] }
+futures-util = "0.3"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO"] }
+
+[[test]]
+name = "native"
+path = "native.rs"

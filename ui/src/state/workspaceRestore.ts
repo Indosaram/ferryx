@@ -60,6 +60,7 @@ export type UseWorkspaceRestoreOptions = {
   listLiveBackendSessionIdsFn?: () => Promise<
     | Iterable<string | { sessionId: string; daemonEpoch?: string | null; worktreePath?: string | null; running?: boolean }>
     | {
+        complete?: boolean;
         epoch?: string | null;
         daemonEpoch?: string | null;
         sessionIds?: Iterable<string>;
@@ -120,8 +121,9 @@ export async function preloadWorkspaceSnapshots(
   let liveBackendIds;
   try { liveBackendIds = await listLiveBackendSessionIdsFn(); }
   catch (error) {
-    if (!workspaceIds.every(id => id.startsWith("ssh:"))) throw error;
-    console.warn("SSH restore deferred daemon reconciliation:", error);
+    if (!workspaceIds.every(id => id.startsWith("ssh:")) &&
+      !workspaceIds.some(id => persistedSession.workspaces[id]?.target?.kind === "pairedDaemon")) throw error;
+    console.warn("Remote restore deferred daemon reconciliation:", error);
     liveBackendIds = null;
   }
   switchDebug("workspace.preload.loaded", {
@@ -262,8 +264,8 @@ export function useWorkspaceRestore({
         let liveBackendIds;
         try { liveBackendIds = await listLiveBackendSessionIdsFn(); }
         catch (error) {
-          if (!workspaceId.startsWith("ssh:")) throw error;
-          console.warn("SSH restore deferred daemon reconciliation:", error);
+          if (!workspaceId.startsWith("ssh:") && session.workspaces?.[workspaceId]?.target?.kind !== "pairedDaemon") throw error;
+          console.warn("Remote restore deferred daemon reconciliation:", error);
           liveBackendIds = null;
         }
         if (cancelled) return;

@@ -61,6 +61,17 @@ fn producer_boundaries_roundtrip() {
 }
 
 #[test]
+fn paired_daemon_target_decodes_without_local_fallback() {
+    // Given the new target's public JSON shape on the old contract.
+    let wire = json!({"kind":"pairedDaemon","hostId":"https://relay.example|machine-a"});
+    // When the production Serde boundary decodes it.
+    let decoded = serde_json::from_value::<RunTarget>(wire.clone());
+    // Then preserve its explicit non-local identity, never substitute Local.
+    assert!(decoded.is_ok(), "paired target rejected: {decoded:?}");
+    assert_eq!(serde_json::to_value(decoded.unwrap()).unwrap(), wire);
+}
+
+#[test]
 fn target_roundtrip_preserves_full_u64_epoch_as_string() {
     // Given a runtime identity beyond JS integer precision.
     let target = TargetRef {

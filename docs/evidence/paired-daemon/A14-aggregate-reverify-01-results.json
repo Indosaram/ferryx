@@ -1,0 +1,37 @@
+{
+  "runtime": {
+    "command": "node --version && command -v node && bun --version",
+    "exit": 0,
+    "tail": "v22.23.0\n/Users/indo/.nvm/versions/node/v22.23.0/bin/node\n1.4.0\n"
+  },
+  "rust": {
+    "command": "cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib paired_host::",
+    "exit": 101,
+    "tail": "never_overwrite ... ok\ntest paired_host::inventory_tests::re_pair_forget_and_revoke_cancel_only_captured_host_across_restart ... ok\ntest paired_host::client::tests::real_http_non_json_redirect_and_body_limit ... ok\ntest paired_host::service::native_transport_tests::paused_authenticated_response_cannot_adopt_after_repair_or_forget ... ok\ntest paired_host::client::tests::real_machine_catalog_replay_checks_digest_and_preserves_metadata ... FAILED\ntest paired_host::client::tests::response_provenance_is_fenced_over_http ... ok\n\nfailures:\n\n---- paired_host::client::tests::real_machine_catalog_replay_checks_digest_and_preserves_metadata stdout ----\n\nthread 'paired_host::client::tests::real_machine_catalog_replay_checks_digest_and_preserves_metadata' (2359274) panicked at src/paired_host/client_tests.rs:368:5:\nassertion failed: project.metadata.git_root.is_none()\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    paired_host::client::tests::real_machine_catalog_replay_checks_digest_and_preserves_metadata\n\ntest result: FAILED. 23 passed; 1 failed; 0 ignored; 0 measured; 994 filtered out; finished in 0.62s\n\nerror: test failed, to rerun pass `--lib`\n"
+  },
+  "integration": {
+    "command": "cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib daemon::server::paired_host_operation_tests::native_operations_force_relay_equal_paths_restart -- --exact --nocapture",
+    "exit": 0,
+    "tail": "105 |     pub(crate) fn owner_id(&self) -> &str {\n    |                   ^^^^^^^^\n\nwarning: method `acquire_writer_lease` is never used\n   --> src/worktree/manager.rs:338:19\n    |\n134 | impl WorktreeManager {\n    | -------------------- method in this implementation\n...\n338 |     pub(crate) fn acquire_writer_lease(\n    |                   ^^^^^^^^^^^^^^^^^^^^\n\nwarning: `ferryx` (lib test) generated 17 warnings (run `cargo fix --lib -p ferryx --tests` to apply 2 suggestions)\n    Finished `test` profile [unoptimized] target(s) in 0.53s\n     Running unittests src/lib.rs (src-tauri/target/debug/deps/ferryx_lib-fede6191c14a3d71)\n\nrunning 1 test\nA14 cleanup owned tasks joined; relay/gateway listeners refused\nA14 real_uds=true forced_relay=true independent_gateways=2 equal_paths=true distinct_ids=true native_credentials=true all_owners_restarted=true stale_generation_rejected=true proxy=false\nA14 exercise result=Ok(Ok(()))\nA14 cleanup owned tasks joined; relay/gateway listeners refused\ntest daemon::server::paired_host_operation_tests::native_operations_force_relay_equal_paths_restart ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1017 filtered out; finished in 1.26s\n\n"
+  },
+  "ui-tests": {
+    "command": "bun run --cwd ui test src/lib/pairedDaemonProject.test.ts src/lib/pairedDaemonContracts.test.ts src/state/remoteHostStore.test.ts",
+    "exit": 0,
+    "tail": "$ vitest run --maxWorkers=1 src/lib/pairedDaemonProject.test.ts src/lib/pairedDaemonContracts.test.ts src/state/remoteHostStore.test.ts\n\n RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui\n\n \u2713 src/lib/pairedDaemonProject.test.ts (19 tests) 15ms\n \u2713 src/state/remoteHostStore.test.ts (13 tests) 18ms\n \u2713 src/lib/pairedDaemonContracts.test.ts (78 tests) 8ms\n\n Test Files  3 passed (3)\n      Tests  110 passed (110)\n   Start at  14:46:22\n   Duration  1.66s (transform 81ms, setup 308ms, collect 135ms, tests 41ms, environment 772ms, prepare 134ms)\n\n"
+  },
+  "ui-build": {
+    "command": "bun run --cwd ui build",
+    "exit": 0,
+    "tail": " kB \u2502 gzip:   1.72 kB\ndist/assets/gjc-CmlXGg4z.png                          22.73 kB\ndist/assets/geist-variable-CrgPqtmy.woff2             69.44 kB\ndist/assets/ferryx-icon-OXRkkUvz.png                 805.82 kB\ndist/assets/index-DglER3B1.css                        78.14 kB \u2502 gzip:  14.20 kB\ndist/assets/server-CLQMWrdJ.js                         0.51 kB \u2502 gzip:   0.32 kB\ndist/assets/card-Cp6kgwaB.js                           2.08 kB \u2502 gzip:   0.87 kB\ndist/assets/pairedHostInventory-Do0I92Mw.js            4.22 kB \u2502 gzip:   1.77 kB\ndist/assets/remoteHostStore-CwIx0Pt3.js                4.37 kB \u2502 gzip:   1.64 kB\ndist/assets/PermissionsOnboardingDialog-C-i3LwNQ.js    6.25 kB \u2502 gzip:   1.85 kB\ndist/assets/browser-BxnKUDCX.js                       25.78 kB \u2502 gzip:  10.13 kB\ndist/assets/RemoteApp-B8Vf9S8b.js                     61.10 kB \u2502 gzip:  18.05 kB\ndist/assets/sonner-BCpxGVWx.js                        93.62 kB \u2502 gzip:  31.08 kB\ndist/assets/index-NmvO915p.js                        187.68 kB \u2502 gzip:  60.14 kB\ndist/assets/SettingsDialog-JX2e3N4s.js               192.35 kB \u2502 gzip:  57.38 kB\ndist/assets/App-C2p3R-NI.js                          480.23 kB \u2502 gzip: 139.72 kB\n\u2713 built in 2.09s\n"
+  },
+  "headless": {
+    "command": "cargo check --locked --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli --bin ferryx-relay",
+    "exit": 0,
+    "tail": "ed\n  --> src/worktree/manager.rs:86:19\n   |\n86 | pub(crate) struct WriterLeaseGuard {\n   |                   ^^^^^^^^^^^^^^^^\n\nwarning: associated items `new`, `canonical_path`, and `owner_id` are never used\n   --> src/worktree/manager.rs:93:8\n    |\n 92 | impl WriterLeaseGuard {\n    | --------------------- associated items in this implementation\n 93 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {\n    |        ^^^\n...\n101 |     pub(crate) fn canonical_path(&self) -> &Path {\n    |                   ^^^^^^^^^^^^^^\n...\n105 |     pub(crate) fn owner_id(&self) -> &str {\n    |                   ^^^^^^^^\n\nwarning: method `acquire_writer_lease` is never used\n   --> src/worktree/manager.rs:338:19\n    |\n134 | impl WorktreeManager {\n    | -------------------- method in this implementation\n...\n338 |     pub(crate) fn acquire_writer_lease(\n    |                   ^^^^^^^^^^^^^^^^^^^^\n\nwarning: `ferryx` (lib) generated 19 warnings (run `cargo fix --lib -p ferryx` to apply 2 suggestions)\n    Checking ferryx v2026.908.1 (/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/src-tauri)\n    Finished `dev` profile [unoptimized] target(s) in 1.05s\n"
+  },
+  "diff": {
+    "command": "git diff --check",
+    "exit": 0,
+    "tail": ""
+  }
+}

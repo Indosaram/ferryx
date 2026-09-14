@@ -14,6 +14,11 @@ use std::sync::Arc;
 
 const ORCA_WORKTREE_DIR: &str = ".orca-worktrees";
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static PRUNE_PROBE: std::cell::RefCell<Option<Box<dyn Fn(&Path, bool)>>> = const { std::cell::RefCell::new(None) };
+}
+
 /// Formats a worktree session ID scoped to a remote host, e.g. `"host-abc::sess-123"`.
 pub fn format_host_scoped_session_id(host_id: &str, session_id: &str) -> String {
     format!("{host_id}::{session_id}")
@@ -481,6 +486,12 @@ impl WorktreeManager {
             return Err(WorktreeError::WorktreeAlreadyExists { path: options.path });
         }
 
+        // Resolve before creating even parent directories; never pass an option-like ref.
+        let base = options.base_ref.as_deref().unwrap_or("HEAD");
+        if base.is_empty() || base.starts_with('-') || base.chars().any(char::is_control) {
+            return Err(WorktreeError::InvalidNamespace { reason: "Invalid base ref".into() });
+        }
+        let commit = run_git(&self.repo_root, &["rev-parse", "--verify", "--end-of-options", &format!("{base}^{{commit}}")])?;
         let parent = options
             .path
             .parent()
@@ -496,7 +507,7 @@ impl WorktreeManager {
             &self.repo_root,
             &options.path,
             &branch_name,
-            options.base_ref.as_deref(),
+            Some(commit.trim()),
         )?;
 
         let target_canonical = self.canonical_allowed_path(&options.path)?;
@@ -567,7 +578,22 @@ impl WorktreeManager {
     pub fn check_dirty(&self, worktree_path: &Path) -> Result<DirtyState, WorktreeError> {
         self.require_git_backed()?;
         let canonical = self.canonical_worktree_path(worktree_path)?;
-        git_status_porcelain(&canonical)
+        let output = run_git(&canonical, &["status", "--porcelain=v1", "-z"])?;
+        let mut fields = output.split('\0').filter(|field| !field.is_empty());
+        let mut files = Vec::new();
+        while let Some(field) = fields.next() {
+            if field.len() < 4 || !field.is_char_boundary(3) || field.as_bytes()[2] != b' ' {
+                return Err(WorktreeError::ParseError("Invalid status record".into()));
+            }
+            let status_code = field[..2].to_owned();
+            let path = field[3..].to_owned();
+            // In -z mode rename/copy destinations come first, followed by the source.
+            if status_code.contains(['R', 'C']) && fields.next().is_none() {
+                return Err(WorktreeError::ParseError("Missing rename source".into()));
+            }
+            files.push(crate::worktree::DirtyFile { status_code, path });
+        }
+        Ok(DirtyState::dirty(files))
     }
 
     /// Deletion-only resolution; ordinary consumers still require existing paths.
@@ -721,13 +747,21 @@ impl WorktreeManager {
             .branch_short_name()
             .ok_or_else(|| WorktreeError::ParseError("Detached worktree has no branch".into()))?
             .to_string();
-        let head = if existing.head.is_empty() {
-            run_git(&self.repo_root, &["rev-parse", "--verify", &branch])?
-                .trim()
-                .to_string()
-        } else {
-            existing.head
-        };
+        let mut preview = self.branch_deletion_preview_for_ref(&branch)?;
+        preview.dirty_state = dirty_state;
+        preview.missing = missing;
+        Ok(preview)
+    }
+
+    /// Repository-ref inspection does not require a linked checkout to exist.
+    /// Callers must first validate the managed identity and its path jail.
+    pub(crate) fn branch_deletion_preview_for_ref(
+        &self,
+        branch: &str,
+    ) -> Result<BranchDeletionPreview, WorktreeError> {
+        let branch = branch.to_owned();
+        let head = run_git(&self.repo_root, &["rev-parse", "--verify", "--end-of-options", &format!("refs/heads/{branch}^{{commit}}")])?
+            .trim().to_owned();
         let merged = self.branch_is_merged(&branch)?;
         let upstream = run_git(
             &self.repo_root,
@@ -760,8 +794,9 @@ impl WorktreeManager {
         };
 
         Ok(BranchDeletionPreview {
-            dirty_state,
-            missing,
+            // Ref-only inspection has no checkout state; path-aware callers fill it in.
+            dirty_state: DirtyState::clean(),
+            missing: true,
             branch,
             head,
             upstream,

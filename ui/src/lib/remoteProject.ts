@@ -25,6 +25,10 @@ export interface RemoteClipboardImagePaste {
   byteLength: number;
 }
 
+export function isPairedWorkspaceId(workspaceId: string | null | undefined): boolean {
+  return typeof workspaceId === "string" && workspaceId.startsWith("daemon:");
+}
+
 export function isRemoteWorkspaceId(workspaceId: string | null | undefined): boolean {
   return typeof workspaceId === "string" && workspaceId.startsWith("ssh:");
 }
@@ -36,6 +40,9 @@ export function isRemoteWorkspaceId(workspaceId: string | null | undefined): boo
 export async function pasteClipboardImageToRemote(
   workspaceId: string,
 ): Promise<RemoteClipboardImagePaste | null> {
+  if (!isRemoteWorkspaceId(workspaceId)) {
+    throw { code: "UNSUPPORTED_CAPABILITY", message: "Clipboard image upload is not supported for this target." };
+  }
   if (!isTauri()) {
     return null;
   }

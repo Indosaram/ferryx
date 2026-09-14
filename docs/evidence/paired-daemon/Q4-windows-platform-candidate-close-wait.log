@@ -1,0 +1,72 @@
+pty EXIT=0; WAITED=True
+relay EXIT=101; WAITED=True
+ssh EXIT=0; WAITED=True
+candidate-close-pty.log
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `RestoreFerryxDataDir` is never constructed
+    --> src\lib.rs:1190:12
+     |
+1190 |     struct RestoreFerryxDataDir(Option<OsString>);
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib test) generated 26 warnings (run `cargo fix --lib -p ferryx --tests` to apply 13 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 54.49s
+     Running unittests src\lib.rs (C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\ferryx_lib-c12d60fa37477486.exe)
+
+running 1 test
+Q4 terminal received="\u{1b}]777;ferryx;{\"kind\":\"replay\",\"sequence\":\"1\",\"startSequence\":\"1\",\"endSequence\":\"1\"}\u{7}\u{1b}[6n"
+Q4 terminal received="\u{1b}]777;ferryx;{\"kind\":\"output\",\"sequence\":\"2\"}\u{7}\u{1b}[?9001h\u{1b}[?1004h"
+Q4 terminal received="\u{1b}]777;ferryx;{\"kind\":\"output\",\"sequence\":\"3\"}\u{7}\u{1b}[m\u{1b}]0;C:\\Windows\\system32\\cmd.exe\u{7}\u{1b}[?25h"
+Q4 terminal received="\u{1b}]777;ferryx;{\"kind\":\"output\",\"sequence\":\"4\"}\u{7}\u{1b}[?25lMicrosoft Windows [Version 10.0.26200.9445]\r\n(c) Microsoft Corporation. All rights reserved.\u{1b}[4;1Hsook@DESKTOP-1LAPJMP C:\\Users\\sook\\ferryx-herdr-q4-windows-01a097f8\\temp\\.tmpIqq7wD>set Q4_WORD=executed\u{1b}[7;1Hsook@DESKTOP-1LAPJMP C:\\Users\\sook\\ferryx-herdr-q4-windows-01a097f8\\temp\\.tmpIqq7wD>echo ferryx_%Q4_WORD%_marker\r\nferryx_executed_marker\u{1b}[11;1Hsook@DESKTOP-1LAPJMP C:\\Users\\sook\\ferryx-herdr-q4-windows-01a097f8\\temp\\.tmpIqq7wD>\u{1b}]0;愿由ъ옄: C:\\Windows\\system32\\cmd.exe\u{7}\u{1b}[?25h"
+R4 PTY: executed marker received; owned sessions explicitly closed; listeners/reverse joined; private workspace removed
+test remote::relay_server::tests::coordinator_pairs_through_relay_to_real_gateway ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 729 filtered out; finished in 0.63s
+
+candidate-close-relay.log
+1190 |     struct RestoreFerryxDataDir(Option<OsString>);
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib test) generated 26 warnings (run `cargo fix --lib -p ferryx --tests` to apply 13 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 1.06s
+     Running unittests src\lib.rs (C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\ferryx_lib-c12d60fa37477486.exe)
+
+running 1 test
+
+thread 'remote::relay_server::tests::test_relay_browser_ws_terminal_bridge_success' (23028) panicked at src\remote\relay_server.rs:3174:35:
+called `Result::unwrap()` on an `Err` value: Protocol(ResetWithoutClosingHandshake)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test remote::relay_server::tests::test_relay_browser_ws_terminal_bridge_success ... FAILED
+
+failures:
+
+failures:
+    remote::relay_server::tests::test_relay_browser_ws_terminal_bridge_success
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 729 filtered out; finished in 0.05s
+
+error: test failed, to rerun pass `--lib`
+candidate-close-ssh.log
+     Running unittests src\lib.rs (C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\ferryx_lib-c12d60fa37477486.exe)
+
+running 1 test
+hint: Using 'master' as the name for the initial branch. This default branch name
+hint: will change to "main" in Git 3.0. To configure the initial branch name
+hint: to use in all of your new repositories, which will suppress this warning,
+hint: call:
+hint:
+hint: 	git config --global init.defaultBranch <name>
+hint:
+hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+hint: 'development'. The just-created branch can be renamed via this command:
+hint:
+hint: 	git branch -m <name>
+hint:
+hint: Disable this message with "git config set advice.defaultBranchName false"
+Initialized empty Git repository in C:/Users/sook/ferryx-herdr-q4-windows-01a097f8/temp/.tmpFbxAs7/.git/
+[master (root-commit) e4eabe9] init
+test ssh::worktree::tests::red_posix_script_builders_executable_behavior ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 729 filtered out; finished in 0.55s
+

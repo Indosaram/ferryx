@@ -1,0 +1,6 @@
+{
+  "src-tauri/gen/schemas/linux-schema.json": {
+    "before": "db7f71ef0dc1889e37b1a95b03ec71b36b797429845bb8f4d3b7f8fb5482e288",
+    "after": "223fd6e9b6f563223374f0bd9b075f566e27ade097ebb3c475abae666e71c5ab"
+  }
+}

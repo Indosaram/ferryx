@@ -1,0 +1,2 @@
+owner=309 command=cargo check --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib 
+exit=0 owner_reaped=true

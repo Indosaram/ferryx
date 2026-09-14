@@ -1,0 +1,234 @@
+   Compiling ferryx v2026.908.1 (/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/src-tauri)
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `token`
+    --> src/remote/auth.rs:1399:14
+     |
+1399 |         let (token, device) = auth
+     |              ^^^^^ help: if this is intentional, prefix it with an underscore: `_token`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `scroll_daemon_client`
+   --> src/lib.rs:915:9
+    |
+915 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+    |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+
+warning: field `app` is never read
+  --> src/ipc/notifications.rs:28:5
+   |
+27 | pub struct TauriNotificationBackend<R: Runtime> {
+   |            ------------------------ field in this struct
+28 |     app: AppHandle<R>,
+   |     ^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `GHOSTTY_TERMINAL_SCREEN_PRIMARY` is never used
+  --> src/native_terminal/sys/constants.rs:56:11
+   |
+56 | pub const GHOSTTY_TERMINAL_SCREEN_PRIMARY: c_int = 0;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `no_auth_query` is never used
+    --> src/remote/server.rs:2871:12
+     |
+2871 |         fn no_auth_query() -> AuthQuery {
+     |            ^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src/worktree/manager.rs:86:19
+   |
+86 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+   --> src/worktree/manager.rs:93:8
+    |
+ 92 | impl WriterLeaseGuard {
+    | --------------------- associated items in this implementation
+ 93 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+    |        ^^^
+...
+101 |     pub(crate) fn canonical_path(&self) -> &Path {
+    |                   ^^^^^^^^^^^^^^
+...
+105 |     pub(crate) fn owner_id(&self) -> &str {
+    |                   ^^^^^^^^
+
+warning: method `acquire_writer_lease` is never used
+   --> src/worktree/manager.rs:338:19
+    |
+134 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+338 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib test) generated 16 warnings (run `cargo fix --lib -p ferryx --tests` to apply 2 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 23.20s
+     Running unittests src/lib.rs (src-tauri/target/debug/deps/ferryx_lib-82e1988715e4a304)
+
+running 4 tests
+A04 ROOT path=/private/tmp/a04-twGwjc
+A04 ROOT path=/private/tmp/a04-8q6tJc
+test daemon::server::a04_shared_services_tests::a04_legacy_constructors_have_no_machine_authority ... ok
+test daemon::server::a04_shared_services_tests::a04_services_have_no_strong_owner_cycle ... ok
+
+running 1 test
+
+running 1 test
+A04 AUTHORITY session=0x1096ade00 workspace=0x1096ad8a0 backend=Pointer { addr: 0x1096ade00, metadata: DynMetadata(0x10670a4c0) }
+A04 AUTHORITY session=0x10b578d00 workspace=0x10b578800 backend=Pointer { addr: 0x10b578d00, metadata: DynMetadata(0x10863e4c0) }
+A04 CLEANUP listener=IPC joined=true
+A04 CLEANUP listeners_joined=true socket_removed=true closed=0 injection=IpcSetup errors=[]
+test daemon::server::a04_shared_services_tests::a04_shared_authority_runtime ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 959 filtered out; finished in 0.00s
+
+A04 CLEANUP child_pid=4285 reaped=true exit=exit status: 0
+A04 CLEANUP private_root_removed=true
+A04 ROOT path=/private/tmp/a04-wJf6Ra
+
+running 1 test
+A04 AUTHORITY session=0x1095397c0 workspace=0x109539370 backend=Pointer { addr: 0x1095397c0, metadata: DynMetadata(0x1065b24c0) }
+A04 CLEANUP listener=IPC joined=true
+A04 CLEANUP listener=HTTP joined=true
+A04 CLEANUP listeners_joined=true socket_removed=true closed=0 injection=HttpSetup errors=[]
+test daemon::server::a04_shared_services_tests::a04_shared_authority_runtime ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 959 filtered out; finished in 0.00s
+
+A04 CLEANUP child_pid=4287 reaped=true exit=exit status: 0
+A04 CLEANUP private_root_removed=true
+A04 ROOT path=/private/tmp/a04-8qAijX
+
+running 1 test
+A04 AUTHORITY session=0x10aff8dc0 workspace=0x10aff8810 backend=Pointer { addr: 0x10aff8dc0, metadata: DynMetadata(0x1080c24c0) }
+A04 OWNED owner_pid=4286 session=da63424a-bbc1-444f-b78b-f472bb0a57f4 pty_pid=4326 root=/private/tmp/a04-8q6tJc
+A04 OWNED owner_pid=4303 session=8ef720f9-e63a-483c-866f-458f8277afc8 pty_pid=4327 root=/private/tmp/a04-8qAijX
+A04 CLEANUP listener=IPC joined=true
+A04 CLEANUP listener=HTTP joined=true
+A04 LIVE owner_pid=4286 pty_pid=4326 ipc=/private/tmp/a04-8q6tJc/fixture.sock http=127.0.0.1:49955 metadata={"session":{"cols":80,"cwd":"/private/tmp/a04-8q6tJc/project","endSequence":null,"rows":24,"running":true,"sessionId":"da63424a-bbc1-444f-b78b-f472bb0a57f4","startSequence":null,"workspaceId":"a04","worktree":null},"type":"describeSessionOk"} process_cwd=Some("/private/tmp/a04-8q6tJc/project")
+A04 HTTP status=200 sessions=[{"running":true,"sessionId":"da63424a-bbc1-444f-b78b-f472bb0a57f4","title":null,"workspaceId":"a04","worktreeLabel":"project"}] registry_ipc=1 registry_http=1
+A04 CLEANUP listener=IPC joined=true
+A04 CLEANUP listener=HTTP joined=true
+A04 CLEANUP session=8ef720f9-e63a-483c-866f-458f8277afc8 pty_pid=Some(4327) reaped=true
+A04 CLEANUP listeners_joined=true socket_removed=true closed=1 injection=Scenario errors=[]
+test daemon::server::a04_shared_services_tests::a04_shared_authority_runtime ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 959 filtered out; finished in 0.26s
+
+A04 CLEANUP child_pid=4303 reaped=true exit=exit status: 0
+A04 CLEANUP private_root_removed=true
+A04 ROOT path=/private/tmp/a04-bfmE26
+
+running 1 test
+A04 AUTHORITY session=0x10b079990 workspace=0x10b0794d0 backend=Pointer { addr: 0x10b079990, metadata: DynMetadata(0x1080a64c0) }
+A04 OWNED owner_pid=4334 session=571589ea-d20d-4183-9c59-9d89d90c2ea6 pty_pid=4363 root=/private/tmp/a04-bfmE26
+A04 OWNED owner_pid=4334 session=5fd717f4-f86b-4d99-a9e8-54df870ceec1 pty_pid=Some(4364) root=/private/tmp/a04-bfmE26
+A04 LIVE owner_pid=4334 pty_pid=4363 ipc=/private/tmp/a04-bfmE26/fixture.sock http=127.0.0.1:49959 metadata={"session":{"cols":80,"cwd":"/private/tmp/a04-bfmE26/project","endSequence":null,"rows":24,"running":true,"sessionId":"571589ea-d20d-4183-9c59-9d89d90c2ea6","startSequence":null,"workspaceId":"a04","worktree":null},"type":"describeSessionOk"} process_cwd=Some("/private/tmp/a04-bfmE26/project")
+A04 HTTP status=200 sessions=[{"running":true,"sessionId":"571589ea-d20d-4183-9c59-9d89d90c2ea6","title":null,"workspaceId":"a04","worktreeLabel":"project"},{"running":true,"sessionId":"5fd717f4-f86b-4d99-a9e8-54df870ceec1","title":null,"workspaceId":"a04","worktreeLabel":"project"}] registry_ipc=1 registry_http=1
+A04 CLEANUP listener=IPC joined=true
+A04 CLEANUP listener=HTTP joined=true
+A04 CLEANUP session=da63424a-bbc1-444f-b78b-f472bb0a57f4 pty_pid=Some(4326) reaped=true
+A04 CLEANUP listeners_joined=true socket_removed=true closed=1 injection=None errors=[]
+test daemon::server::a04_shared_services_tests::a04_shared_authority_runtime ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 959 filtered out; finished in 1.35s
+
+A04 CLEANUP child_pid=4286 reaped=true exit=exit status: 0
+A04 CLEANUP private_root_removed=true
+test daemon::server::a04_shared_services_tests::a04_shared_authority_runtime ... ok
+A04 CLEANUP session=571589ea-d20d-4183-9c59-9d89d90c2ea6 pty_pid=Some(4363) reaped=true
+A04 CLEANUP session=5fd717f4-f86b-4d99-a9e8-54df870ceec1 pty_pid=Some(4364) reaped=true
+A04 CLEANUP listeners_joined=true socket_removed=true closed=2 injection=Cleanup errors=["close 571589ea-d20d-4183-9c59-9d89d90c2ea6: General error: injected close failure"]
+test daemon::server::a04_shared_services_tests::a04_shared_authority_runtime ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 959 filtered out; finished in 2.23s
+
+A04 CLEANUP child_pid=4334 reaped=true exit=exit status: 0
+A04 CLEANUP private_root_removed=true
+A04 ROOT path=/private/tmp/a04-j2LW0X
+
+running 1 test
+A04 AUTHORITY session=0x109984d10 workspace=0x109984810 backend=Pointer { addr: 0x109984d10, metadata: DynMetadata(0x106a8a4c0) }
+A04 OWNED owner_pid=4374 session=3480b956-064e-4dfe-9f2c-21ac691bacc0 pty_pid=4395 root=/private/tmp/a04-j2LW0X
+A04 CLEANUP listener=IPC joined=true
+A04 CLEANUP listener=HTTP joined=true
+A04 CLEANUP session=3480b956-064e-4dfe-9f2c-21ac691bacc0 pty_pid=Some(4395) reaped=true
+A04 CLEANUP listeners_joined=true socket_removed=true closed=1 injection=Cancel errors=[]
+test daemon::server::a04_shared_services_tests::a04_shared_authority_runtime ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 959 filtered out; finished in 0.15s
+
+A04 CLEANUP child_pid=4374 reaped=true exit=exit status: 0
+A04 CLEANUP private_root_removed=true
+A04 ROOT path=/private/tmp/a04-Bnpf8h
+
+running 1 test
+A04 AUTHORITY session=0x1072019b0 workspace=0x107201590 backend=Pointer { addr: 0x1072019b0, metadata: DynMetadata(0x1042124c0) }
+A04 OWNED owner_pid=4396 session=42819d65-2d21-434c-9656-0fc36cdabaa9 pty_pid=4415 root=/private/tmp/a04-Bnpf8h
+A04 CLEANUP listener=IPC joined=true
+A04 CLEANUP listener=HTTP joined=true
+A04 CLEANUP session=42819d65-2d21-434c-9656-0fc36cdabaa9 pty_pid=Some(4415) reaped=true
+A04 CLEANUP listeners_joined=true socket_removed=true closed=1 injection=Deadline errors=[]
+test daemon::server::a04_shared_services_tests::a04_shared_authority_runtime ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 959 filtered out; finished in 0.15s
+
+A04 CLEANUP child_pid=4396 reaped=true exit=exit status: 0
+A04 CLEANUP private_root_removed=true
+test daemon::server::a04_shared_services_tests::a04_cleanup_failure_paths ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 956 filtered out; finished in 2.83s
+

@@ -1,0 +1,295 @@
+   Compiling ferryx v2026.908.1 (C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\source\src-tauri)
+warning: unused import: `AgentState`
+ --> src\daemon\server.rs:2:34
+  |
+2 | use crate::daemon::agent_state::{AgentState, AgentStateHub, AgentStateSubscription};
+  |                                  ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::time::Duration`
+  --> src\daemon\server.rs:28:5
+   |
+28 | use std::time::Duration;
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `NotificationAuthorization`
+ --> src\notification\permission.rs:4:5
+  |
+4 |     NotificationAuthorization, NotificationPermissionRequestDto, NotificationPermissionStatusDto,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `scroll_daemon_client`
+   --> src\lib.rs:915:9
+    |
+915 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+    |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `publish_canonical` is never used
+  --> src\daemon\agent_state.rs:46:12
+   |
+38 | impl AgentStateHub {
+   | ------------------ method in this implementation
+...
+46 |     pub fn publish_canonical(&self, state: AgentState) {
+   |            ^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated function `parse_agent_state_report` is never used
+    --> src\daemon\server.rs:1060:8
+     |
+ 875 | impl DaemonServer {
+     | ----------------- associated function in this implementation
+...
+1060 |     fn parse_agent_state_report(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `GHOSTTY_TERMINAL_SCREEN_PRIMARY` is never used
+  --> src\native_terminal\sys\constants.rs:56:11
+   |
+56 | pub const GHOSTTY_TERMINAL_SCREEN_PRIMARY: c_int = 0;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `synchronized_output_deadline`, `expire_synchronized_output`, and `finish_synchronized_output` are never used
+   --> src\native_terminal\terminal.rs:169:19
+    |
+133 | impl NativeTerminal {
+    | ------------------- methods in this implementation
+...
+169 |     pub(crate) fn synchronized_output_deadline(&self) -> Option<tokio::time::Instant> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+173 |     pub(crate) fn expire_synchronized_output(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+184 |     pub(crate) fn finish_synchronized_output(&mut self) -> Result<(), NativeTerminalError> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `home_dir` is never used
+  --> src\permissions\mod.rs:43:4
+   |
+43 | fn home_dir() -> Option<PathBuf> {
+   |    ^^^^^^^^
+
+warning: method `wait_and_reap` is never used
+   --> src\terminal\session.rs:270:19
+    |
+ 61 | impl PtySession {
+    | --------------- method in this implementation
+...
+270 |     pub(crate) fn wait_and_reap(&self) -> Result<Option<i32>, PtyError> {
+    |                   ^^^^^^^^^^^^^
+
+warning: function `with_local_worktree_budget` is never used
+   --> src\worktree\git.rs:115:15
+    |
+115 | pub(crate) fn with_local_worktree_budget<T>(work: impl FnOnce() -> T) -> T {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src\worktree\manager.rs:86:19
+   |
+86 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+   --> src\worktree\manager.rs:93:8
+    |
+ 92 | impl WriterLeaseGuard {
+    | --------------------- associated items in this implementation
+ 93 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+    |        ^^^
+...
+101 |     pub(crate) fn canonical_path(&self) -> &Path {
+    |                   ^^^^^^^^^^^^^^
+...
+105 |     pub(crate) fn owner_id(&self) -> &str {
+    |                   ^^^^^^^^
+
+warning: method `acquire_writer_lease` is never used
+   --> src\worktree\manager.rs:338:19
+    |
+134 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+338 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: linker stdout: C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\ferryx_lib.dll.lib 라이브러리 및 C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\ferryx_lib.dll.exp 개체를 생성하고 있습니다.
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `ferryx` (lib) generated 15 warnings (run `cargo fix --lib -p ferryx` to apply 4 suggestions)
+warning: variable does not need to be mutable
+   --> tests\machine_worktrees.rs:131:9
+    |
+131 |     let mut owned_session: Option<String> = None;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `inject_readiness_failure`
+  --> tests\machine_worktree_legacy_bounds.rs:15:31
+   |
+15 | async fn service_less_fixture(inject_readiness_failure: bool) {
+   |                               ^^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_inject_readiness_failure`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `auth`
+  --> tests\machine_worktree_legacy_bounds.rs:30:9
+   |
+30 |     let auth = state.auth_manager.clone();
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_auth`
+
+warning: `ferryx` (test "machine_worktree_legacy_bounds") generated 2 warnings (run `cargo fix --test "machine_worktree_legacy_bounds" -p ferryx` to apply 2 suggestions)
+warning: unused variable: `services`
+   --> tests\machine_catalog_persistence.rs:166:13
+    |
+166 |         let services = restored.remote_state().machine_services.as_ref().unwrap();
+    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_services`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `ferryx` (test "machine_worktrees") generated 1 warning (run `cargo fix --test "machine_worktrees" -p ferryx` to apply 1 suggestion)
+warning: `ferryx` (test "machine_catalog_persistence") generated 1 warning (run `cargo fix --test "machine_catalog_persistence" -p ferryx` to apply 1 suggestion)
+    Finished `test` profile [unoptimized] target(s) in 59.17s
+     Running tests\machine_catalog_persistence.rs (C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\machine_catalog_persistence-680806415812c134.exe)
+
+running 4 tests
+test catalog_owner_process ... ok
+READY isolated service root=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\temp\.tmpTrDUKN
+IPC cleanup client_joined=true handler_joined=true duplex_closed=true injected=false
+OWNER readiness=Ping/Pong pid=15124 command=register
+IPC cleanup client_joined=true handler_joined=true duplex_closed=true injected=false
+IPC cleanup client_joined=true handler_joined=true duplex_closed=true injected=false
+OWNER cleanup pid=15124 reaped=true status=exit code: 0 sockets=[] command=register
+NORMALIZATION trimmed identity; unchanged revision; explicit exposure promotion verified
+NORMALIZATION CLEANUP root=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\temp\.tmpSFjQUF absent=true
+test normalized_registration_is_idempotent ... ok
+RESTART isolated service
+RESTORE invalid root retained without overwrite
+RESTORE missing row retained without recreation
+IPC cleanup client_joined=true handler_joined=true duplex_closed=true injected=false
+OWNER readiness=Ping/Pong pid=16656 command=restore
+OWNER cleanup pid=16656 reaped=true status=exit code: 0 sockets=[] command=restore
+WRITE_FAILURE rename target directory: no success or published revision; mutations fenced
+QUARANTINE invalid/newer catalog preserved; mutation refused
+IPC cleanup client_joined=true handler_joined=true duplex_closed=true injected=false
+OWNER readiness=Ping/Pong pid=17316 command=inject
+QUARANTINE invalid/newer catalog preserved; mutation refused
+CLEANUP root=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\temp\.tmpTrDUKN absent=true daemon_pids=[] sockets=[]
+test registration_survives_isolated_service_restart ... ok
+OWNER cleanup pid=17316 reaped=true status=exit code: 1 sockets=[] command=inject
+
+thread 'tokio-rt-worker' (4820) panicked at tests\machine_catalog_persistence.rs:23:13:
+injected IPC assertion after Pong
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+IPC cleanup client_joined=true handler_joined=true duplex_closed=true injected=true
+OWNER CLEANUP root=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\temp\.tmpQB8tEF absent=true
+test isolated_owner_restart_and_failure_cleanup ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+
+     Running tests\machine_worktree_legacy_bounds.rs (C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\machine_worktree_legacy_bounds-705e15b03cf7e7df.exe)
+
+running 2 tests
+A08 service-less legacy listener_joined=true private_root_removed=true
+A08 service-less legacy oversized=413 explicit_HEAD_create=200 delete=204
+test service_less_legacy_body_and_git_are_bounded ... ok
+A08 service-less legacy listener_joined=true private_root_removed=true
+A08 service-less legacy oversized=413 explicit_HEAD_create=200 delete=204
+test followthrough_service_less_readiness_failure_cleanup ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.99s
+
+     Running tests\machine_worktree_transports.rs (C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\machine_worktree_transports-48b5baccd1eebd61.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\machine_worktrees.rs (C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\machine_worktrees-526b1ae24c7692d4.exe)
+
+running 2 tests
+A08 HTTP GET worktrees status=200 body={"revision":"2","worktrees":[{"bare":false,"branch":"refs/heads/master","detached":false,"head":"0eedc94bb6a58544ff5f61378c8378f84b22c7cd","identity":null,"locked":null,"managed":false,"path":"\\\\?\\C:\\Users\\sook\\ferryx-herdr-q4-windows-01a097f8\\temp\\.tmpWJaSMO\\repo space 'quote' ü","prunable":null,"workspaceId":"project-52a7683acb574ee39327e331da39e8c9"}]}
+A08 LOST_REPLY owner_status=201 forwarded_response_bytes=0 intermediary_joined=true
+A08 STALE_REVISION status=409 target_preserved=true refusal_replayed=true
+A08 revision phase=initial listener_joined=true owner_dropped=true connection_refused=true
+A08 revision phase=unchanged listener_joined=true owner_dropped=true connection_refused=true
+A08 delete scenario=locked status=409 body={"error":{"code":"WORKTREE_LOCKED","message":"WORKTREE_LOCKED","retryable":false,"requestId":"cc67fcfb-7642-45af-b458-a87645f617d2","details":{}}}
+A08 revision phase=changed listener_joined=true owner_dropped=true connection_refused=true
+A08 revision post_commit_change=true unchanged_restart_equal=true offline_clean_change_stale_delete=true private_root_removed=true
+test worktree_revision_survives_owner_restart ... ok
+A08 delete scenario=unmerged status=409 body={"error":{"code":"UNMERGED_BRANCH","message":"UNMERGED_BRANCH","retryable":false,"requestId":"0435dd8f-ed18-458d-acfd-c4a0d19f8f22","details":{}}}
+A08 delete scenario=partial status=409 body={"error":{"code":"WORKTREE_REMOVED_BRANCH_RETAINED","message":"WORKTREE_REMOVED_BRANCH_RETAINED","retryable":false,"requestId":"58d2f782-3cef-453c-b5be-78bceebddd57","details":{"branch":"orca/project-52a7683acb574ee39327e331da39e8c9/partial","branchDeleted":false,"worktreeRemoved":true}}}
+A08 delete scenario=remove-branch status=204 body=
+A08 RESTART same_request_same_row=true managed_target_count=1
+A08 CLEANUP listener_joined=true private_root_removed=true
+test machine_worktree_http_contract ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.66s
+
+     Running tests\relay_pairing_generation_regression.rs (C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\relay_pairing_generation_regression-37f67d22874c98f9.exe)
+
+running 6 tests
+R4 CLEANUP runtime/connection tasks joined; private directory explicitly removed; failed_scenario=false
+test machine_routes_reach_relay_admission ... ok
+
+thread 'r4_failure_path_joins_connections_and_removes_store' (20972) panicked at tests\relay_pairing_generation_regression.rs:125:9:
+injected failure after live control registration
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+R4 CLEANUP runtime/connection tasks joined; private directory explicitly removed; failed_scenario=true
+R4 CLEANUP runtime/connection tasks joined; private directory explicitly removed; failed_scenario=false
+R4 CLEANUP runtime/connection tasks joined; private directory explicitly removed; failed_scenario=false
+test machine_http_transport ... ok
+R4 CLEANUP runtime/connection tasks joined; private directory explicitly removed; failed_scenario=false
+test second_machine_first_pairing_is_not_blocked_by_an_unrelated_connection ... ok
+R4 CLEANUP runtime/connection tasks joined; private directory explicitly removed; failed_scenario=false
+test stale_registration_stops_being_claimable_after_control_replacement ... ok
+R4 real gateway: absolute U+FFFD direct=200 relay=200 equal; malformed direct=400 relay=400; preferences direct=200 relay=200
+R4 CLEANUP runtime/connection tasks joined; private directory explicitly removed; failed_scenario=false
+test r4_absolute_replacement_filename_direct_and_relay ... ok
+R4 injected failure: panic propagated after runtime joined; store absent; listener refused
+test r4_failure_path_joins_connections_and_removes_store ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.05s
+
+     Running tests\worktree_safety.rs (C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\target\debug\deps\worktree_safety-d7606df9c56537a2.exe)
+
+running 9 tests
+test unavailable_base_ref_leaves_no_managed_parent_directory ... ok
+test second_writer_is_rejected_and_release_allows_reacquire ... ok
+test active_writer_blocks_delete ... ok
+
+thread 'same_worktree_supports_multiple_interactive_pty_sessions' (20772) panicked at tests\worktree_safety.rs:137:10:
+spawn first terminal: SpawnError("Failed to spawn command: CreateProcessW `\"/bin/sh\\0\"` in cwd `Some(\"\\\\\\\\?\\\\C:\\\\Users\\\\sook\\\\ferryx-herdr-q4-windows-01a097f8\\\\temp\\\\.tmpj2olYa\\\\wt-multi-pty\\0\")` failed: 지정된 경로를 찾을 수 없습니다. (os error 3)")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'pty_worktree_ownership_clears_on_close_and_natural_exit' (23296) panicked at tests\worktree_safety.rs:182:10:
+spawn terminal: SpawnError("Failed to spawn command: CreateProcessW `\"/bin/sh\\0\"` in cwd `Some(\"\\\\\\\\?\\\\C:\\\\Users\\\\sook\\\\ferryx-herdr-q4-windows-01a097f8\\\\temp\\\\.tmplQrZmQ\\\\wt-pty-ownership\\0\")` failed: 지정된 경로를 찾을 수 없습니다. (os error 3)")
+test pty_worktree_ownership_clears_on_close_and_natural_exit ... FAILED
+test same_worktree_supports_multiple_interactive_pty_sessions ... FAILED
+test pty_spawn_failure_does_not_claim_exclusive_writer ... ok
+test default_delete_rejects_clean_unmerged_branch ... ok
+test explicit_destructive_delete_removes_clean_unmerged_branch ... ok
+
+thread 'five_concurrent_worktree_terminal_lifecycles_remain_isolated' (18060) panicked at tests\worktree_safety.rs:240:14:
+spawn terminal: SpawnError("Failed to spawn command: CreateProcessW `\"/bin/sh\\0\"` in cwd `Some(\"\\\\\\\\?\\\\C:\\\\Users\\\\sook\\\\ferryx-herdr-q4-windows-01a097f8\\\\temp\\\\.tmpuQjDPo\\\\wt-concurrent-0\\0\")` failed: 지정된 경로를 찾을 수 없습니다. (os error 3)")
+test five_concurrent_worktree_terminal_lifecycles_remain_isolated ... FAILED
+
+failures:
+
+failures:
+    five_concurrent_worktree_terminal_lifecycles_remain_isolated
+    pty_worktree_ownership_clears_on_close_and_natural_exit
+    same_worktree_supports_multiple_interactive_pty_sessions
+
+test result: FAILED. 6 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.09s
+
+error: test failed, to rerun pass `--test worktree_safety`

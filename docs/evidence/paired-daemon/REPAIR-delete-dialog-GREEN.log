@@ -1,0 +1,49 @@
+v22.22.3
+$ vitest run --maxWorkers=1 src/App.pairedDaemon.test.tsx src/components/WorktreeDeleteDialog.owner.test.tsx src/components/WorktreeDeleteDialog.test.tsx src/lib/pairedWorktreeActions.test.ts src/lib/worktreeOwnership.test.ts "--cache=false"
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+ ✓ src/App.pairedDaemon.test.tsx (3 tests) 118ms
+ ✓ src/components/WorktreeDeleteDialog.test.tsx (6 tests) 108ms
+ ✓ src/lib/pairedWorktreeActions.test.ts (4 tests) 4ms
+ ✓ src/lib/worktreeOwnership.test.ts (9 tests) 2ms
+ ✓ src/components/WorktreeDeleteDialog.owner.test.tsx (3 tests) 50ms
+
+ Test Files  5 passed (5)
+      Tests  25 passed (25)
+   Start at  16:08:04
+   Duration  2.73s (transform 257ms, setup 275ms, collect 964ms, tests 282ms, environment 724ms, prepare 114ms)
+
+TEST_EXIT=0
+$ tsc && vite build
+vite v6.4.3 building for production...
+transforming...
+✓ 1890 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                                        3.08 kB │ gzip:   1.10 kB
+dist/assets/crush-DHElXcRZ.png                         5.46 kB
+dist/assets/droid-BhrKLgQ8.svg                         6.30 kB │ gzip:   2.88 kB
+dist/assets/antigravity-DgAQAdn3.svg                   7.63 kB │ gzip:   1.72 kB
+dist/assets/gjc-CmlXGg4z.png                          22.73 kB
+dist/assets/geist-variable-CrgPqtmy.woff2             69.44 kB
+dist/assets/ferryx-icon-OXRkkUvz.png                 805.82 kB
+dist/assets/index-CTJQafPq.css                        78.24 kB │ gzip:  14.21 kB
+dist/assets/server-BL18W7d0.js                         0.51 kB │ gzip:   0.32 kB
+dist/assets/card-DPaC7yy0.js                           2.08 kB │ gzip:   0.87 kB
+dist/assets/remoteHostStore-CaRR-DcW.js                4.37 kB │ gzip:   1.63 kB
+dist/assets/pairedHostInventory-DSTN0wVe.js            4.59 kB │ gzip:   1.90 kB
+dist/assets/PermissionsOnboardingDialog-GNMVnuI5.js    6.25 kB │ gzip:   1.85 kB
+dist/assets/browser-CID0poRf.js                       25.78 kB │ gzip:  10.13 kB
+dist/assets/RemoteApp-CxCt7FPd.js                     61.10 kB │ gzip:  18.05 kB
+dist/assets/sonner-BRj50RTG.js                        93.62 kB │ gzip:  31.08 kB
+dist/assets/index-lcQKGpi0.js                        187.71 kB │ gzip:  60.15 kB
+dist/assets/SettingsDialog-CrcJ38ns.js               199.47 kB │ gzip:  59.56 kB
+dist/assets/App-C1yKwKAc.js                          510.41 kB │ gzip: 148.69 kB
+
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+✓ built in 1.98s
+BUILD_EXIT=0

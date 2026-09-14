@@ -12,7 +12,7 @@ use ferryx_lib::session::{
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tempfile::{tempdir, TempDir};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -22,44 +22,107 @@ use tokio::time::timeout;
 /// Harness managing the standalone `ferryx --daemon` process lifecycle with deterministic
 /// readiness awaiting, clean shutdown, and safe cleanup of socket/lock artifacts on drop.
 struct DaemonProcessHarness {
-    child: std::process::Child,
+    child: Child,
     socket_path: PathBuf,
-    // Declared after child: the owned endpoint tree outlives process cleanup.
-    root: TempDir,
+    // Dropped only after the owned child has been killed and reaped.
+    private_dir: TempDir,
     pub daemon_pid: u32,
+}
+
+fn private_daemon_command(root: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ferryx"));
+    command
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .env("HOME", root.join("home"))
+        .env("USERPROFILE", root.join("home"))
+        .env("XDG_CONFIG_HOME", root.join("home/config"))
+        .env("XDG_DATA_HOME", root.join("home/data"))
+        .env("TERM", "xterm-256color")
+        .current_dir(root.join("home"))
+        .env("FERRYX_RUNTIME_DIR", root.join("run"))
+        .env("FERRYX_DATA_DIR", root.join("data"))
+        .env("FERRYX_SESSION_DIR", root.join("sessions"))
+        .env("SHELL", "/bin/sh")
+        .env("PS1", "")
+        .env("PS2", "")
+        .arg("--daemon")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    command
+}
+
+fn assert_private_command(command: &Command, root: &Path) {
+    for (key, directory) in [
+        ("HOME", "home"),
+        ("FERRYX_RUNTIME_DIR", "run"),
+        ("FERRYX_DATA_DIR", "data"),
+        ("FERRYX_SESSION_DIR", "sessions"),
+    ] {
+        let value = command.get_envs().find(|(name, _)| *name == key);
+        assert_eq!(
+            value.and_then(|(_, value)| value),
+            Some(root.join(directory).as_os_str()),
+            "private child override required: {key}"
+        );
+    }
+    assert_eq!(command.get_args().collect::<Vec<_>>(), ["--daemon"]);
+}
+
+#[test]
+fn a17_pre_v3_backup_is_required_and_never_replaced() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("session.json");
+    let legacy = PersistedWorkspaceSession { version: 2, ..Default::default() };
+    save_session_to_path(&path, &legacy).unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let backup = path.with_extension("json.pre-v3");
+    std::fs::create_dir(&backup).unwrap();
+    let v3 = PersistedWorkspaceSession { version: 3, ..legacy };
+    assert!(save_session_to_path(&path, &v3).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    std::fs::remove_dir(&backup).unwrap();
+    save_session_to_path(&path, &v3).unwrap();
+    assert_eq!(std::fs::read(&backup).unwrap(), original);
+    save_session_to_path(&path, &v3).unwrap();
+    assert_eq!(std::fs::read(&backup).unwrap(), original);
+    assert!(save_session_to_path(&path, &PersistedWorkspaceSession { version: 2, ..v3 }).is_err());
+    assert_eq!(load_session_from_path(&path).unwrap().unwrap().version, 3);
+}
+
+#[test]
+fn test_private_daemon_command_safety() {
+    // No spawn or connect: mutation RED is safe even on a live-app workstation.
+    let root = tempfile::Builder::new()
+        .prefix("fx-v01-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let mut command = private_daemon_command(root.path());
+    if std::env::var_os("FERRYX_V01_SAFETY_MUTATION").is_some() {
+        command.env_remove("FERRYX_RUNTIME_DIR");
+    }
+    assert_private_command(&command, root.path());
 }
 
 impl DaemonProcessHarness {
     async fn start() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let bin_path = env!("CARGO_BIN_EXE_ferryx");
-        // Short explicit root also avoids Darwin's 104-byte sockaddr_un limit.
-        let root = tempfile::Builder::new().prefix("p19-").tempdir_in("/tmp")?;
-        let runtime = root.path().join("run");
-        let home = root.path().join("home");
-        std::fs::create_dir(&home)?;
-        let child = std::process::Command::new(bin_path)
-            .arg("--daemon")
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .env("HOME", &home)
-            .env("USERPROFILE", &home)
-            .env("XDG_CONFIG_HOME", home.join("config"))
-            .env("XDG_DATA_HOME", home.join("data"))
-            .env("FERRYX_RUNTIME_DIR", &runtime)
-            .env("FERRYX_DATA_DIR", root.path().join("data"))
-            .env("FERRYX_SESSION_DIR", root.path().join("sessions"))
-            .env("SHELL", "/bin/sh")
-            .env("TERM", "xterm-256color")
-            .current_dir(&home)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()?;
+        let private_dir = tempfile::Builder::new()
+            .prefix("fx-v01-")
+            .tempdir_in("/tmp")?;
+        for directory in ["home", "run", "data", "sessions"] {
+            std::fs::create_dir(private_dir.path().join(directory))?;
+        }
+        let socket_path = private_dir.path().join("run/daemon.sock");
+        let mut command = private_daemon_command(private_dir.path());
+        assert_private_command(&command, private_dir.path());
+        let child = command.spawn()?;
+        // Install the guard before any fallible readiness or handshake operation.
         let daemon_pid = child.id();
-        // Install ownership before the first fallible read or await.
         let mut harness = Self {
             child,
-            socket_path: runtime.join("daemon.sock"),
-            root,
+            socket_path,
+            private_dir,
             daemon_pid,
         };
         let stdout = harness
@@ -94,36 +157,73 @@ impl DaemonProcessHarness {
     async fn connect_client(
         &self,
     ) -> Result<TestDaemonClient, Box<dyn std::error::Error + Send + Sync>> {
-        TestDaemonClient::connect(&self.socket_path, self.daemon_pid).await
+        timeout(
+            Duration::from_secs(5),
+            TestDaemonClient::connect(&self.socket_path, self.daemon_pid),
+        )
+        .await?
     }
 
     async fn shutdown(self) {
-        // Kill/wait only the spawn handle, never a PID received over the wire.
-        // Drop is also the panic, readiness-failure and cancellation path.
-        drop(self);
+        // Shutdown exits without closing local PTYs gracefully. Close every owned
+        // session first; CloseOk guarantees the daemon has reaped the shell.
+        let mut client = self.connect_client().await.expect("shutdown handshake");
+        for session in client.list_sessions().await.expect("shutdown sessions") {
+            client
+                .close(&session)
+                .await
+                .expect("shutdown close session");
+        }
+        // No Shutdown request is needed: Drop cancels and reaps our Child.
     }
 }
 
 impl Drop for DaemonProcessHarness {
     fn drop(&mut self) {
-        match self.child.try_wait() {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                if let Err(error) = self.child.kill() {
-                    eprintln!("P19 owned child kill failed: {error}");
-                }
-                if let Err(error) = self.child.wait() {
-                    eprintln!("P19 owned child reap failed: {error}");
-                }
+        // A separate runtime also works while unwinding a current-thread test.
+        if self.child.try_wait().is_ok_and(|status| status.is_none()) {
+            let cleanup = std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        let runtime = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()?;
+                        runtime.block_on(timeout_cleanup(&self.socket_path, self.daemon_pid))
+                    })
+                    .join()
+            });
+            match cleanup {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => eprintln!("Owned daemon session cleanup: {error}"),
+                Err(_) => eprintln!("Owned daemon session cleanup thread panicked"),
             }
-            Err(error) => eprintln!("P19 owned child status failed: {error}"),
+        }
+        if let Err(error) = self.child.kill() {
+            eprintln!("Owned daemon kill (possibly already exited): {error}");
+        }
+        if let Err(error) = self.child.wait() {
+            eprintln!("Owned daemon reap failed: {error}");
         }
         eprintln!(
-            "P19 reaped owned child {} at {}",
+            "V01 reaped owned daemon {}; removing {}",
             self.daemon_pid,
-            self.root.path().display()
+            self.private_dir.path().display()
         );
     }
+}
+
+async fn timeout_cleanup(
+    socket: &Path,
+    pid: u32,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    timeout(Duration::from_secs(10), async {
+        let mut client = TestDaemonClient::connect(socket, pid).await?;
+        for session in client.list_sessions().await? {
+            client.close(&session).await?;
+        }
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+    })
+    .await?
 }
 
 /// Helper client wrapping a command UDS stream connection to the daemon.
@@ -137,9 +237,6 @@ impl TestDaemonClient {
         socket_path: &Path,
         expected_pid: u32,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        // RED staging: the owned fake endpoint regression below must reject this
-        // missing identity check before the final validation is installed.
-        let _ = expected_pid;
         let stream = UnixStream::connect(socket_path).await?;
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
@@ -159,7 +256,13 @@ impl TestDaemonClient {
         }
         let resp: DaemonResponse = serde_json::from_str(line.trim())?;
         match resp {
-            DaemonResponse::HandshakeOk { .. } => {}
+            DaemonResponse::HandshakeOk { pid, version, .. } => {
+                if pid != expected_pid || version != DAEMON_PROTOCOL_VERSION {
+                    return Err(format!(
+                        "Handshake must identify our owned child: expected PID {expected_pid} and version {DAEMON_PROTOCOL_VERSION}, got PID {pid} and version {version}"
+                    ).into());
+                }
+            }
             other => return Err(format!("Expected HandshakeOk, got {other:?}").into()),
         };
 
@@ -458,13 +561,35 @@ async fn test_daemon_cli_selection_headless_readiness_and_cancellation() {
     let daemon = DaemonProcessHarness::start()
         .await
         .expect("owned headless daemon");
-    let root = daemon.root.path().to_owned();
+    let root = daemon.private_dir.path().to_owned();
     let mut client = daemon.connect_client().await.expect("owned handshake");
     assert!(matches!(
         client.send_request(&DaemonRequest::Ping).await.unwrap(),
         DaemonResponse::Pong
     ));
     daemon.shutdown().await;
+    assert!(!root.exists(), "owned runtime removed after child reap");
+}
+
+#[tokio::test]
+async fn test_daemon_cli_owned_child_cancellation() {
+    let mut daemon = DaemonProcessHarness::start()
+        .await
+        .expect("start isolated headless daemon");
+    let root = daemon.private_dir.path().to_owned();
+    let mut client = daemon.connect_client().await.expect("owned daemon handshake");
+    assert!(daemon.daemon_pid > 0);
+    assert!(matches!(
+        client.send_request(&DaemonRequest::Ping).await.expect("ping"),
+        DaemonResponse::Pong
+    ));
+    daemon.child.kill().expect("cancel owned daemon");
+    let exit_status = daemon.child.wait().expect("reap cancelled daemon");
+    assert!(
+        !exit_status.success() || exit_status.code().unwrap_or(0) == 0,
+        "Child process terminated"
+    );
+    drop(daemon);
     assert!(!root.exists(), "owned runtime removed after child reap");
 }
 
@@ -529,8 +654,8 @@ async fn test_harness_panic_cleanup_preserves_concurrent_owned_daemon() {
     let second = second.expect("second owned daemon");
     assert_ne!(first.socket_path, second.socket_path);
     assert_ne!(first.daemon_pid, second.daemon_pid);
-    let first_root = first.root.path().to_owned();
-    let second_root = second.root.path().to_owned();
+    let first_root = first.private_dir.path().to_owned();
+    let second_root = second.private_dir.path().to_owned();
     let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         let _owned = first;
         panic!("injected harness owner panic");
@@ -551,6 +676,28 @@ async fn test_harness_panic_cleanup_preserves_concurrent_owned_daemon() {
     ));
     second.shutdown().await;
     assert!(!second_root.exists());
+}
+
+#[tokio::test]
+async fn test_private_daemon_cleanup_on_panic() {
+    let daemon = DaemonProcessHarness::start()
+        .await
+        .expect("isolated daemon");
+    let root = daemon.private_dir.path().to_path_buf();
+    let pid = daemon.daemon_pid;
+    let panic = tokio::spawn(async move {
+        let _owned = daemon;
+        panic!("exercise harness unwind cleanup");
+    })
+    .await
+    .expect_err("task must panic");
+    assert!(panic.is_panic());
+    assert!(!root.exists(), "private artifacts removed after unwind");
+    let status = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "pid="])
+        .output()
+        .expect("inspect only owned PID");
+    assert!(status.stdout.is_empty(), "owned daemon must be reaped");
 }
 
 #[tokio::test]
@@ -912,17 +1059,18 @@ async fn test_daemon_output_sequence_contiguity_and_replay_gap() {
     client
         .write_input(
             &session_id,
-            b"PS1=''; stty -echo; for i in 1 2 3 4 5; do printf '__SEQ_%s__\\n' \"$i\"; done\n",
+            b"stty -echo; for i in 1 2 3 4 5; do printf 'SEQ_BURST_%s\\n' \"$i\"; done; printf 'SEQ_%s\\n' DONE; read barrier\n",
         )
         .await
         .expect("write");
 
-    // Accumulate across arbitrary PTY chunk boundaries; command echo cannot
-    // contain the expanded fifth sentinel. Empty PS1 prevents trailing output
-    // racing DescribeSession versus the subsequent attach snapshot.
-    let mut burst_output = String::new();
-    while !burst_output.contains("__SEQ_5__\r\n") {
-        let msg = attach.next_message().await.expect("next message");
+    let mut output = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !output.contains("SEQ_DONE\r\n") {
+        let msg = tokio::time::timeout_at(deadline, attach.next_message())
+            .await
+            .expect("burst deadline")
+            .expect("next message");
         if let DaemonStreamMessage::Output { sequence, data, .. } = msg {
             assert!(
                 sequence > last_seq,
@@ -934,15 +1082,21 @@ async fn test_daemon_output_sequence_contiguity_and_replay_gap() {
                 "Output chunk sequence must be strictly contiguous without drops"
             );
             last_seq = sequence;
-            burst_output.push_str(&String::from_utf8_lossy(&data));
+            output.push_str(&String::from_utf8_lossy(&data));
         }
     }
-
     for index in 1..=5 {
-        assert!(burst_output.contains(&format!("__SEQ_{index}__")));
+        assert_eq!(
+            output
+                .lines()
+                .filter(|line| *line == format!("SEQ_BURST_{index}"))
+                .count(),
+            1
+        );
     }
 
-    // The fifth completed line is the final-output barrier (PS1 is empty).
+    // Shell is blocked in read with echo disabled, so no prompt/output can race
+    // DescribeSession -> Attach. The stream sentinel is split-chunk safe.
     let desc = client
         .describe_session(&session_id)
         .await

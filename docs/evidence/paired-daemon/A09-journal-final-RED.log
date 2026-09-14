@@ -1,0 +1,111 @@
+supervisor=3312 root=/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/a09-final-twgzx0lq command=['cargo', 'test', '--locked', '--manifest-path', 'src-tauri/Cargo.toml', '--no-default-features', '--lib', 'journal_final_spawn_revocation', '--', '--nocapture']
+owned_cargo_pid=3342
+    Blocking waiting for file lock on build directory
+   Compiling ferryx v2026.908.1 (/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/src-tauri)
+error[E0616]: field `spawn_lock` of struct `session_service::DaemonSessionService` is private
+  --> src/remote/journal_spawn_contention_tests.rs:25:34
+   |
+25 |     let mut gate = Some(sessions.spawn_lock.clone().lock_owned().await);
+   |                                  ^^^^^^^^^^ private field
+
+error[E0616]: field `spawn_lock` of struct `session_service::DaemonSessionService` is private
+  --> src/remote/journal_spawn_contention_tests.rs:79:26
+   |
+79 |         assert!(sessions.spawn_lock.try_lock().is_err());
+   |                          ^^^^^^^^^^ private field
+
+error[E0616]: field `spawn_lock` of struct `session_service::DaemonSessionService` is private
+  --> src/remote/journal_spawn_contention_tests.rs:89:26
+   |
+89 |         assert!(sessions.spawn_lock.try_lock().is_err());
+   |                          ^^^^^^^^^^ private field
+
+error[E0616]: field `spawn_lock` of struct `session_service::DaemonSessionService` is private
+   --> src/remote/journal_spawn_contention_tests.rs:100:80
+    |
+100 |     let spawn_drained = tokio::time::timeout(Duration::from_secs(10), sessions.spawn_lock.clone().lock_owned()).await.unwrap();
+    |                                                                                ^^^^^^^^^^ private field
+
+error[E0282]: type annotations needed
+   --> src/remote/journal_spawn_contention_tests.rs:100:25
+    |
+100 |     let spawn_drained = tokio::time::timeout(Duration::from_secs(10), sessions.spawn_lock.clone().lock_owned()).await.unwrap();
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ cannot infer type
+
+error[E0616]: field `terminal_service` of struct `session_service::DaemonSessionService` is private
+   --> src/remote/journal_spawn_contention_tests.rs:101:27
+    |
+101 |     let no_pty = sessions.terminal_service.list_sessions().is_empty();
+    |                           ^^^^^^^^^^^^^^^^ private field
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `token`
+    --> src/remote/auth.rs:1399:14
+     |
+1399 |         let (token, device) = auth
+     |              ^^^^^ help: if this is intentional, prefix it with an underscore: `_token`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `scroll_daemon_client`
+   --> src/lib.rs:916:9
+    |
+916 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+    |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+
+Some errors have detailed explanations: E0282, E0616.
+For more information about an error, try `rustc --explain E0282`.
+warning: `ferryx` (lib test) generated 10 warnings
+error: could not compile `ferryx` (lib test) due to 6 previous errors; 10 warnings emitted
+exit=101 cargo_reaped=true
+remaining=[]
+supervisor_root_removed=true

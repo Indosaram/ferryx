@@ -91,6 +91,18 @@ impl PtyManager {
         worktree_path: &Path,
     ) -> Result<(String, mpsc::Receiver<Vec<u8>>), PtyError> {
         let session_id = Uuid::new_v4().to_string();
+        self.spawn_in_worktree_with_id(session_id, cmd, cols, rows, worktree_manager, worktree_path)
+    }
+
+    pub(crate) fn spawn_in_worktree_with_id(
+        &self,
+        session_id: String,
+        cmd: CommandBuilder,
+        cols: u16,
+        rows: u16,
+        worktree_manager: &WorktreeManager,
+        worktree_path: &Path,
+    ) -> Result<(String, mpsc::Receiver<Vec<u8>>), PtyError> {
         let canonical_worktree = worktree_manager
             .canonical_allowed_path(worktree_path)
             .map_err(|error| PtyError::Other(error.to_string()))?;
@@ -182,6 +194,30 @@ impl PtyManager {
                 .map_err(|e| PtyError::PtyCreationError(e.to_string()))?
         };
 
+        // Input registration and session tasks require an entered runtime. Reject
+        // synchronous callers before creating a child, rather than panicking in
+        // AsyncFd and bypassing the fallible spawn API.
+        #[cfg(unix)]
+        let _runtime = tokio::runtime::Handle::try_current().map_err(|error| {
+            PtyError::SpawnError(format!("Failed to spawn command: {error}"))
+        })?;
+
+        #[cfg(unix)]
+        let input = {
+            use std::os::fd::{FromRawFd, AsRawFd};
+            let raw = pair.master.as_raw_fd().ok_or_else(|| PtyError::IoError("PTY descriptor unavailable".into()))?;
+            let duplicate = unsafe { libc::fcntl(raw, libc::F_DUPFD_CLOEXEC, 0) };
+            if duplicate < 0 { return Err(PtyError::IoError(std::io::Error::last_os_error().to_string())); }
+            let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(duplicate) };
+            let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+            if flags < 0 || unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+                return Err(PtyError::IoError(std::io::Error::last_os_error().to_string()));
+            }
+            tokio::io::unix::AsyncFd::new(fd).map_err(|e| PtyError::IoError(e.to_string()))?
+        };
+
+        #[cfg(windows)]
+        let input = super::session::windows_input::WindowsInput(pair.master.try_clone_input_handle().map_err(|e| PtyError::IoError(e.to_string()))?);
         let reader = pair
             .master
             .try_clone_reader()
@@ -201,6 +237,7 @@ impl PtyManager {
 
         let (tx, rx) = mpsc::channel::<Vec<u8>>(1024);
         let session = Arc::new(PtySession::new(PtySessionConfig {
+            input,
             id: session_id.clone(),
             master: pair.master,
             child,
@@ -338,6 +375,12 @@ impl PtyManager {
     }
 
     pub async fn close_session(&self, session_id: &str) -> Result<(), PtyError> {
+        self.close_authorized(session_id, TERM_GRACE_TIMEOUT, Arc::new(|| Ok(()))).await
+    }
+
+    pub(crate) async fn close_authorized(&self, session_id: &str, grace: Duration,
+        authorize: Arc<dyn Fn() -> Result<(), String> + Send + Sync>) -> Result<(), PtyError> {
+        authorize().map_err(PtyError::Other)?;
         let Some(session) = self.get_session(session_id) else {
             return Ok(());
         };
@@ -385,7 +428,7 @@ impl PtyManager {
                     signal_error
                 );
             } else {
-                match Self::poll_reap_bounded(&session, TERM_GRACE_TIMEOUT).await {
+                match Self::poll_reap_bounded(&session, grace).await {
                     Ok(Some(code)) => exit_code = Some(code),
                     Ok(None) => {}
                     Err(error) => {
@@ -398,6 +441,10 @@ impl PtyManager {
         }
 
         if exit_code.is_none() && !session.is_reaped() {
+            if let Err(error) = authorize() {
+                session.mark_running();
+                return Err(PtyError::Other(error));
+            }
             if let Err(signal_error) = session
                 .signal(TerminalSignal::Kill)
                 .or_else(|_| session.kill())

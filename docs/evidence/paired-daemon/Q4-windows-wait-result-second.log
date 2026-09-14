@@ -1,0 +1,51 @@
+ 10 | #[cfg(feature = "native-terminal")]
+    |       --------------------------- the item is gated behind the `native-terminal` feature
+ 11 | pub mod native_terminal;
+    |         ^^^^^^^^^^^^^^^
+
+error[E0433]: cannot find `native_terminal` in `ipc`
+   --> src\clipboard_image.rs:128:38
+    |
+128 |             || format == crate::ipc::native_terminal::CF_DIBV5_ID
+    |                                      ^^^^^^^^^^^^^^^ could not find `native_terminal` in `ipc`
+    |
+note: found an item that was configured out
+   --> src\ipc\mod.rs:11:9
+    |
+ 10 | #[cfg(feature = "native-terminal")]
+    |       --------------------------- the item is gated behind the `native-terminal` feature
+ 11 | pub mod native_terminal;
+    |         ^^^^^^^^^^^^^^^
+
+warning: unused import: `AgentState`
+ --> src\daemon\server.rs:2:34
+  |
+2 | use crate::daemon::agent_state::{AgentState, AgentStateHub, AgentStateSubscription};
+  |                                  ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::time::Duration`
+  --> src\daemon\server.rs:28:5
+   |
+28 | use std::time::Duration;
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `NotificationAuthorization`
+ --> src\notification\permission.rs:4:5
+  |
+4 |     NotificationAuthorization, NotificationPermissionRequestDto, NotificationPermissionStatusDto,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `scroll_daemon_client`
+   --> src\lib.rs:915:9
+    |
+915 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+    |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+For more information about this error, try `rustc --explain E0433`.
+warning: `ferryx` (lib) generated 4 warnings
+error: could not compile `ferryx` (lib) due to 2 previous errors; 4 warnings emitted
+BUILD_EXIT=101; WAITED=True

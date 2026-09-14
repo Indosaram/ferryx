@@ -1,0 +1,549 @@
+$ cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib paired_host::native_ambiguity_tests:: -- --nocapture
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling syn v3.0.5
+   Compiling cfg-if v1.0.4
+   Compiling syn v2.0.119
+   Compiling libc v0.2.189
+   Compiling serde_core v1.0.229
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.12
+   Compiling cc v1.4.5
+   Compiling synstructure v0.13.2
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling zerofrom v0.1.8
+   Compiling itoa v1.0.18
+   Compiling serde_derive v1.0.229
+   Compiling zerovec-derive v0.11.6
+   Compiling scopeguard v1.2.0
+   Compiling displaydoc v0.2.7
+   Compiling bitflags v2.13.2
+   Compiling memchr v2.8.3
+   Compiling litemap v0.8.3
+   Compiling writeable v0.6.4
+   Compiling bytes v1.12.1
+   Compiling parking_lot_core v0.9.12
+   Compiling utf8_iter v1.0.4
+   Compiling siphasher v1.0.3
+   Compiling lock_api v0.4.14
+   Compiling icu_properties_data v2.3.0
+   Compiling icu_normalizer_data v2.3.0
+   Compiling phf_shared v0.13.1
+   Compiling zmij v1.0.23
+   Compiling fastrand v2.5.0
+   Compiling phf_generator v0.13.1
+   Compiling stable_deref_trait v1.2.1
+   Compiling log v0.4.34
+   Compiling http v1.5.0
+   Compiling getrandom v0.4.3
+   Compiling serde v1.0.229
+   Compiling smallvec v1.16.1
+   Compiling yoke v0.8.3
+   Compiling thiserror v2.0.20
+   Compiling autocfg v1.5.1
+   Compiling zerovec v0.11.8
+   Compiling thiserror-impl v2.0.20
+   Compiling time-core v0.1.9
+   Compiling num-conv v0.2.2
+   Compiling phf_macros v0.13.1
+   Compiling objc2-exception-helper v0.1.1
+   Compiling powerfmt v0.2.0
+   Compiling winnow v1.0.4
+   Compiling toml_parser v1.1.3+spec-1.1.0
+   Compiling toml_writer v1.1.2+spec-1.1.0
+   Compiling tinystr v0.8.4
+   Compiling phf_codegen v0.13.1
+   Compiling objc2 v0.6.4
+   Compiling ident_case v1.0.1
+   Compiling serde_json v1.0.151
+   Compiling thiserror v1.0.69
+   Compiling typeid v1.0.3
+   Compiling strsim v0.11.1
+   Compiling darling_core v0.24.1
+   Compiling icu_locale_core v2.3.0
+   Compiling potential_utf v0.1.6
+   Compiling zerotrie v0.2.5
+   Compiling semver v1.0.28
+   Compiling thiserror-impl v1.0.69
+   Compiling erased-serde v0.4.10
+   Compiling objc2-encode v4.1.0
+   Compiling byteorder v1.5.0
+   Compiling icu_provider v2.3.1
+   Compiling icu_collections v2.3.0
+   Compiling darling_macro v0.24.1
+   Compiling aho-corasick v1.1.5
+   Compiling fnv v1.0.7
+   Compiling regex-syntax v0.8.11
+   Compiling unic-common v0.9.0
+   Compiling unic-char-range v0.9.0
+   Compiling new_debug_unreachable v1.0.6
+   Compiling unic-char-property v0.9.0
+   Compiling unic-ucd-version v0.9.0
+   Compiling darling v0.24.1
+   Compiling regex-automata v0.4.18
+   Compiling phf v0.13.1
+   Compiling string_cache_codegen v0.6.1
+   Compiling alloc-no-stdlib v2.0.4
+   Compiling hashbrown v0.17.1
+   Compiling equivalent v1.0.2
+   Compiling anyhow v1.0.104
+   Compiling base64 v0.23.1
+   Compiling precomputed-hash v0.1.1
+   Compiling indexmap v2.14.2
+   Compiling alloc-stdlib v0.2.4
+   Compiling regex v1.13.1
+   Compiling web_atoms v0.2.6
+   Compiling parking_lot v0.12.5
+   Compiling serde_with_macros v3.23.0
+   Compiling unic-ucd-ident v0.9.0
+   Compiling icu_properties v2.3.0
+   Compiling icu_normalizer v2.3.0
+   Compiling block2 v0.6.2
+   Compiling quick-xml v0.42.0
+   Compiling serde_spanned v1.1.1
+   Compiling same-file v1.0.6
+   Compiling walkdir v2.5.0
+   Compiling dispatch2 v0.3.1
+   Compiling idna_adapter v1.2.2
+   Compiling string_cache v0.9.0
+   Compiling brotli-decompressor v5.0.3
+   Compiling percent-encoding v2.3.2
+   Compiling dtoa v1.0.11
+   Compiling once_cell v1.21.4
+   Compiling dunce v1.0.5
+   Compiling ctor-proc-macro v0.0.7
+   Compiling dtoa-short v0.3.5
+   Compiling form_urlencoded v1.2.2
+   Compiling ctor v0.8.0
+   Compiling uuid v1.26.1
+   Compiling brotli v8.0.4
+   Compiling idna v1.1.0
+   Compiling objc2-core-foundation v0.3.2
+   Compiling tendril v0.5.1
+   Compiling selectors v0.36.1
+   Compiling indexmap v1.9.3
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling derive_more-impl v2.1.1
+   Compiling cssparser-macros v0.6.1
+   Compiling version_check v0.9.5
+   Compiling camino v1.2.5
+   Compiling glob v0.3.4
+   Compiling derive_more v2.1.1
+   Compiling cssparser v0.36.0
+   Compiling toml v1.1.6+spec-1.1.0
+   Compiling markup5ever v0.38.0
+   Compiling url v2.5.8
+   Compiling swift-rs v1.0.8
+   Compiling servo_arc v0.4.3
+   Compiling serde_derive_internals v0.29.1
+   Compiling schemars v0.8.22
+   Compiling deranged v0.5.8
+   Compiling rustc-hash v2.1.3
+   Compiling bit-vec v0.8.0
+   Compiling hashbrown v0.12.3
+   Compiling time v0.3.55
+   Compiling bit-set v0.8.0
+   Compiling schemars_derive v0.8.22
+   Compiling html5ever v0.38.0
+   Compiling cfb v0.7.3
+   Compiling jsonptr v0.6.3
+   Compiling cargo-platform v0.1.9
+   Compiling dyn-clone v1.0.20
+   Compiling foldhash v0.2.0
+   Compiling base64 v0.21.7
+   Compiling dom_query v0.27.0
+   Compiling serde-untagged v0.1.9
+   Compiling cargo_metadata v0.19.2
+   Compiling json-patch v3.0.1
+   Compiling infer v0.19.0
+   Compiling plist v1.10.1
+   Compiling urlpattern v0.3.0
+   Compiling objc2-foundation v0.3.2
+   Compiling serde_with v3.23.0
+   Compiling errno v0.3.14
+   Compiling pin-project-lite v0.2.17
+   Compiling tauri-utils v2.9.3
+   Compiling bitflags v1.3.2
+   Compiling rustc_version v0.4.1
+   Compiling core-foundation-sys v0.8.7
+   Compiling option-ext v0.2.0
+   Compiling generic-array v0.14.7
+   Compiling signal-hook-registry v1.4.8
+   Compiling socket2 v0.6.5
+   Compiling mio v1.2.3
+   Compiling tokio-macros v2.7.2
+   Compiling bytemuck v1.25.2
+   Compiling typenum v1.20.1
+   Compiling tokio v1.53.1
+   Compiling winnow v0.7.15
+   Compiling toml_datetime v0.7.5+spec-1.1.0
+   Compiling futures-core v0.3.34
+   Compiling toml v0.9.12+spec-1.1.0
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling dirs-sys v0.5.0
+   Compiling embed-resource v3.0.11
+   Compiling heck v0.5.0
+   Compiling simd-adler32 v0.3.10
+   Compiling tauri-winres v0.3.6
+   Compiling dirs v6.0.0
+   Compiling digest v0.10.7
+   Compiling cargo_toml v0.22.3
+   Compiling objc2-app-kit v0.3.2
+   Compiling tauri-plugin v2.6.3
+   Compiling getrandom v0.2.17
+   Compiling zeroize v1.9.0
+   Compiling crc32fast v1.5.1
+   Compiling adler2 v2.0.1
+   Compiling tauri-build v2.6.3
+   Compiling time-macros v0.2.32
+   Compiling lazy_static v1.5.0
+   Compiling rustversion v1.0.23
+   Compiling miniz_oxide v0.9.1
+   Compiling num-traits v0.2.19
+   Compiling ring v0.17.14
+   Compiling getrandom v0.3.4
+   Compiling flate2 v1.1.10
+   Compiling tauri v2.11.5
+   Compiling miniz_oxide v0.8.9
+   Compiling rustls-pki-types v1.15.1
+   Compiling fdeflate v0.3.7
+   Compiling core-foundation v0.10.1
+   Compiling tracing-core v0.1.36
+   Compiling arrayvec v0.7.8
+   Compiling base64 v0.22.1
+   Compiling symphonia-core v0.5.5
+   Compiling encoding_rs v0.8.41
+   Compiling subtle v2.6.1
+   Compiling crossbeam-utils v0.8.23
+   Compiling untrusted v0.9.0
+   Compiling raw-window-handle v0.6.2
+   Compiling dpi v0.1.2
+   Compiling cookie v0.18.2
+   Compiling http-body v1.1.0
+   Compiling tracing-attributes v0.1.31
+   Compiling multiversion_no_op v1.0.0
+   Compiling httparse v1.10.1
+   Compiling zerocopy v0.8.57
+   Compiling simdutf8 v0.1.5
+   Compiling futures-sink v0.3.34
+   Compiling rustls v0.23.44
+   Compiling tracing v0.1.44
+   Compiling rustls-webpki v0.103.15
+   Compiling futures-macro v0.3.34
+   Compiling foreign-types-macros v0.2.4
+   Compiling tower-service v0.3.3
+   Compiling futures-task v0.3.34
+   Compiling foreign-types-shared v0.3.1
+   Compiling slab v0.4.12
+   Compiling foreign-types v0.5.0
+   Compiling futures-util v0.3.34
+   Compiling crossbeam-channel v0.5.17
+   Compiling symphonia-metadata v0.5.5
+   Compiling core-graphics-types v0.2.0
+   Compiling png v0.17.16
+   Compiling objc2-web-kit v0.3.2
+   Compiling cpufeatures v0.2.17
+   Compiling system-configuration-sys v0.6.0
+   Compiling wry v0.55.1
+   Compiling tauri-runtime v2.11.3
+   Compiling mime v0.3.17
+   Compiling sha2 v0.10.9
+   Compiling ico v0.5.0
+   Compiling core-graphics v0.25.0
+   Compiling ppv-lite86 v0.2.21
+   Compiling png v0.18.1
+   Compiling tower-layer v0.3.3
+   Compiling unicode-segmentation v1.13.3
+   Compiling pxfm v0.1.30
+   Compiling try-lock v0.2.5
+   Compiling tauri-runtime-wry v2.11.4
+   Compiling want v0.3.1
+   Compiling moxcms v0.8.1
+   Compiling keyboard-types v0.7.0
+   Compiling tao v0.35.3
+   Compiling tauri-codegen v2.6.3
+   Compiling webpki-roots v1.0.9
+   Compiling futures-channel v0.3.34
+   Compiling sync_wrapper v1.0.2
+   Compiling core-foundation v0.9.4
+   Compiling serialize-to-javascript-impl v0.1.2
+   Compiling atomic-waker v1.1.2
+   Compiling httpdate v1.0.3
+   Compiling byteorder-lite v0.1.0
+   Compiling hyper v1.11.1
+   Compiling image v0.25.10
+   Compiling serialize-to-javascript v0.1.2
+   Compiling system-configuration v0.7.0
+   Compiling tauri-macros v2.6.3
+   Compiling muda v0.19.3
+   Compiling symphonia-utils-xiph v0.5.5
+   Compiling tokio-rustls v0.26.5
+   Compiling window-vibrancy v0.6.0
+   Compiling rand_core v0.9.5
+   Compiling serde_repr v0.1.21
+   Compiling embed_plist v1.2.2
+   Compiling ipnet v2.12.2
+   Compiling rustix v1.1.4
+   Compiling hyper-util v0.1.20
+   Compiling rand_chacha v0.9.0
+   Compiling tower v0.5.3
+   Compiling http-body-util v0.1.5
+   Compiling tauri-plugin-fs v2.5.2
+   Compiling objc2-core-audio-types v0.3.2
+   Compiling objc2-core-audio v0.3.2
+   Compiling rand v0.9.5
+   Compiling security-framework-sys v2.17.0
+   Compiling mac-notification-sys v0.6.15
+   Compiling cfg_aliases v0.1.1
+   Compiling nix v0.28.0
+   Compiling security-framework v3.7.0
+   Compiling objc2-audio-toolbox v0.3.2
+   Compiling tower-http v0.6.11
+   Compiling hyper-rustls v0.27.9
+   Compiling sha1 v0.10.7
+   Compiling tokio-util v0.7.19
+   Compiling num-integer v0.1.47
+   Compiling rand_core v0.6.4
+   Compiling tauri-plugin-updater v2.11.0
+   Compiling tauri-plugin-process v2.3.1
+   Compiling tauri-plugin-dialog v2.7.3
+   Compiling tauri-plugin-notification v2.4.0
+   Compiling curve25519-dalek v4.1.3
+   Compiling rfd v0.16.0
+   Compiling data-encoding v2.11.1
+   Compiling extended v0.1.0
+   Compiling ryu v1.0.23
+   Compiling unicase v2.9.0
+   Compiling cpal v0.17.3
+   Compiling mime_guess v2.0.5
+   Compiling serde_urlencoded v0.7.1
+   Compiling tungstenite v0.29.0
+   Compiling symphonia-format-riff v0.5.5
+   Compiling num-bigint v0.4.8
+   Compiling coreaudio-rs v0.14.2
+   Compiling rustls-platform-verifier v0.7.0
+   Compiling xattr v1.6.1
+   Compiling symphonia-format-ogg v0.5.5
+   Compiling symphonia-bundle-flac v0.5.5
+   Compiling symphonia-codec-vorbis v0.5.5
+   Compiling symphonia-format-isomp4 v0.5.5
+   Compiling webpki-roots v0.26.11
+   Compiling symphonia-bundle-mp3 v0.5.5
+   Compiling symphonia-codec-aac v0.5.5
+   Compiling symphonia-codec-pcm v0.5.5
+   Compiling objc2-osa-kit v0.3.2
+   Compiling mach2 v0.5.0
+   Compiling filetime v0.2.29
+   Compiling dasp_sample v0.11.0
+   Compiling signature v2.2.0
+   Compiling ed25519 v2.2.3
+   Compiling tempfile v3.27.0
+   Compiling tar v0.4.46
+   Compiling osakit v0.3.1
+   Compiling symphonia v0.5.5
+   Compiling tokio-tungstenite v0.29.0
+   Compiling notify-rust v4.18.0
+   Compiling reqwest v0.13.5
+   Compiling num-rational v0.4.2
+   Compiling rand_chacha v0.3.1
+   Compiling axum-core v0.5.6
+   Compiling tracing-log v0.2.0
+   Compiling sharded-slab v0.1.7
+   Compiling ferryx v2026.908.1 (/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/src-tauri)
+   Compiling tokio-stream v0.1.19
+   Compiling filedescriptor v0.8.3
+warning: stripping debug info with `rust-objcopy` failed: signal: 6 (SIGABRT)
+  |
+  = note: dyld[46391]: Library not loaded: @rpath/libLLVM.dylib
+            Referenced from: <AC0D75A8-23BF-301F-B7CE-3E5CC0C1BC06> /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/.a14-ambiguity-tools/toolchain/lib/rustlib/aarch64-apple-darwin/bin/rust-objcopy
+            Reason: tried: '/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/.a14-ambiguity-tools/toolchain/lib/rustlib/aarch64-apple-darwin/bin/../lib/libLLVM.dylib' (no such file), '/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/.a14-ambiguity-tools/toolchain/lib/rustlib/aarch64-apple-darwin/bin/../lib/libLLVM.dylib' (no such file), '/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/src-tauri/target/debug/deps/libLLVM.dylib' (no such file), '/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/.a14a/home/lib/libLLVM.dylib' (no such file), '/usr/local/lib/libLLVM.dylib' (no such file), '/usr/lib/libLLVM.dylib' (no such file, not in dyld cache)
+          
+
+warning: `ferryx` (build script) generated 1 warning
+   Compiling notify-types v2.1.0
+   Compiling serde_path_to_error v0.1.20
+   Compiling serial2 v0.2.38
+   Compiling fsevent-sys v4.1.0
+   Compiling thread_local v1.1.10
+   Compiling matchit v0.8.4
+   Compiling shell-words v1.1.1
+   Compiling minisign-verify v0.2.5
+   Compiling nu-ansi-term v0.50.3
+   Compiling downcast-rs v1.2.1
+   Compiling portable-pty v0.9.0 (/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/src-tauri/vendor/portable-pty)
+   Compiling tracing-subscriber v0.3.23
+   Compiling axum v0.8.9
+   Compiling notify v8.2.0
+   Compiling tokio-test v0.4.5
+   Compiling ed25519-dalek v2.2.0
+   Compiling rand v0.8.8
+   Compiling rodio v0.22.2
+   Compiling reqwest v0.12.28
+   Compiling tower-http v0.7.1
+   Compiling objc2-user-notifications v0.3.2
+   Compiling objc2-core-graphics v0.3.2
+   Compiling objc2-core-text v0.3.2
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `token`
+    --> src/remote/auth.rs:1399:14
+     |
+1399 |         let (token, device) = auth
+     |              ^^^^^ help: if this is intentional, prefix it with an underscore: `_token`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `scroll_daemon_client`
+   --> src/lib.rs:916:9
+    |
+916 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+    |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+
+warning: method `machine_sessions` is never used
+   --> src/daemon/session_service.rs:366:19
+    |
+227 | impl DaemonSessionService {
+    | ------------------------- method in this implementation
+...
+366 |     pub(crate) fn machine_sessions(&self, epoch: crate::scoped_contracts::Epoch) -> Result<crate::remote::machine_protocol::Session...
+    |                   ^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `app` is never read
+  --> src/ipc/notifications.rs:28:5
+   |
+27 | pub struct TauriNotificationBackend<R: Runtime> {
+   |            ------------------------ field in this struct
+28 |     app: AppHandle<R>,
+   |     ^^^
+
+warning: constant `GHOSTTY_TERMINAL_SCREEN_PRIMARY` is never used
+  --> src/native_terminal/sys/constants.rs:56:11
+   |
+56 | pub const GHOSTTY_TERMINAL_SCREEN_PRIMARY: c_int = 0;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `no_auth_query` is never used
+    --> src/remote/server.rs:3135:12
+     |
+3135 |         fn no_auth_query() -> AuthQuery {
+     |            ^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src/worktree/manager.rs:86:19
+   |
+86 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+   --> src/worktree/manager.rs:93:8
+    |
+ 92 | impl WriterLeaseGuard {
+    | --------------------- associated items in this implementation
+ 93 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+    |        ^^^
+...
+101 |     pub(crate) fn canonical_path(&self) -> &Path {
+    |                   ^^^^^^^^^^^^^^
+...
+105 |     pub(crate) fn owner_id(&self) -> &str {
+    |                   ^^^^^^^^
+
+warning: method `acquire_writer_lease` is never used
+   --> src/worktree/manager.rs:338:19
+    |
+134 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+338 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: stripping debug info with `rust-objcopy` failed: signal: 6 (SIGABRT)
+  |
+  = note: dyld[46812]: Library not loaded: @rpath/libLLVM.dylib
+            Referenced from: <AC0D75A8-23BF-301F-B7CE-3E5CC0C1BC06> /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/.a14-ambiguity-tools/toolchain/lib/rustlib/aarch64-apple-darwin/bin/rust-objcopy
+            Reason: tried: '/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/.a14-ambiguity-tools/toolchain/lib/rustlib/aarch64-apple-darwin/bin/../lib/libLLVM.dylib' (no such file), '/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/.a14-ambiguity-tools/toolchain/lib/rustlib/aarch64-apple-darwin/bin/../lib/libLLVM.dylib' (no such file), '/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/src-tauri/target/debug/deps/libLLVM.dylib' (no such file), '/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/.a14a/home/lib/libLLVM.dylib' (no such file), '/usr/local/lib/libLLVM.dylib' (no such file), '/usr/lib/libLLVM.dylib' (no such file, not in dyld cache)
+          
+
+warning: `ferryx` (lib test) generated 18 warnings (run `cargo fix --lib -p ferryx --tests` to apply 2 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 2m 41s
+     Running unittests src/lib.rs (src-tauri/target/debug/deps/ferryx_lib-440e89c5cc51db01)
+
+running 3 tests
+A14 mutation error=ClientError { code: "PAIRED_HOST_UNAVAILABLE", machine_error: None, request_id: None, ambiguous: false } cleanup=true
+A14 native_35s_deadline error=ClientError { code: "
+thread 'paired_host::native_ambiguity_tests::mutation_native_transport_failure_retains_identity' (2515316) panicked at src/paired_host/native_ambiguity_tests.rs:77:13:
+mutation receipt followed by transport failure: ClientError { code: "PAIRED_HOST_UNAVAILABLE", machine_error: None, request_id: None, ambiguous: false }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+PAIRED_HOST_UNAVAILABLE", machine_error: None, request_id: None, ambiguous: false } peer_still_in_flight=true cleanup=true
+
+thread 'paired_host::native_ambiguity_tests::native_35s_deadline_retains_mutation_reconciliation' (2515317) panicked at src/paired_host/native_ambiguity_tests.rs:108:5:
+assertion failed: error.ambiguous
+test paired_host::native_ambiguity_tests::mutation_native_transport_failure_retains_identity ... FAILED
+test paired_host::native_ambiguity_tests::native_35s_deadline_retains_mutation_reconciliation ... FAILED
+A14 all_read_only_non_ambiguous=true lookup_id_not_mutation=true cleanup=true
+test paired_host::native_ambiguity_tests::read_only_native_transport_failure_is_not_ambiguous ... ok
+
+failures:
+
+failures:
+    paired_host::native_ambiguity_tests::mutation_native_transport_failure_retains_identity
+    paired_host::native_ambiguity_tests::native_35s_deadline_retains_mutation_reconciliation
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 1018 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `--lib`
+
+EXIT_CODE=101

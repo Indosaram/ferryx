@@ -1,0 +1,130 @@
+$ vitest run --maxWorkers=1 src/lib/pairedDaemonContracts.test.ts src/lib/pairedDaemonParity.test.ts
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+ ✓ src/lib/pairedDaemonParity.test.ts (2143 tests) 80ms
+ ❯ src/lib/pairedDaemonContracts.test.ts (78 tests | 1 failed) 11ms
+   ✓ machine target boundary > parses Rust-owned full hash identity for 'relay/machine-a' 1ms
+   ✓ machine target boundary > parses Rust-owned full hash identity for 'relay/machine-b' 0ms
+   ✓ machine target boundary > rejects descriptor missing nativeAttachment 0ms
+   ✓ machine target boundary > rejects descriptor missing remoteTarget 0ms
+   ✓ machine target boundary > rejects descriptor missing remoteCursor 0ms
+   ✓ machine target boundary > rejects descriptor missing localProxyId 0ms
+   ✓ machine target boundary > rejects descriptor missing hostId 0ms
+   ✓ machine target boundary > does not persist transient connected state as liveness 0ms
+   ✓ machine target boundary > rejects paired project missing target 0ms
+   ✓ machine target boundary > rejects paired project missing remoteWorkspaceId 0ms
+   ✓ machine target boundary > bounds UTF-8 JSON for project 0ms
+   ✓ machine target boundary > bounds UTF-8 JSON for directories 1ms
+   ✓ machine target boundary > bounds UTF-8 JSON for control 0ms
+   ✓ machine target boundary > preserves separate native and remote descriptor epochs and cursors 0ms
+   ✓ machine target boundary > roundtrips lifecycle/request 'worktreeStatus' 0ms
+   ✓ machine target boundary > roundtrips lifecycle/request 'sessionDetail' 0ms
+   ✓ machine target boundary > roundtrips lifecycle/request 'sessionDetail' 0ms
+   ✓ machine target boundary > roundtrips lifecycle/request 'operation' 0ms
+   ✓ machine target boundary > roundtrips lifecycle/request 'operation' 0ms
+   ✓ machine target boundary > roundtrips lifecycle/request 'operation' 0ms
+   ✓ machine target boundary > roundtrips lifecycle/request 'operation' 0ms
+   ✓ machine target boundary > roundtrips lifecycle/request 'control' 0ms
+   ✓ machine target boundary > roundtrips lifecycle/request 'control' 0ms
+   ✓ machine target boundary > roundtrips lifecycle/request 'control' 0ms
+   ✓ machine target boundary > roundtrips lifecycle/request 'control' 0ms
+   ✓ machine target boundary > roundtrips lifecycle/request 'control' 0ms
+   ✓ machine target boundary > roundtrips lifecycle/request 'control' 0ms
+   ✓ machine target boundary > roundtrips lifecycle/request 'control' 0ms
+   ✓ machine target boundary > roundtrips lifecycle/request 'registerRequest' 0ms
+   ✓ machine target boundary > roundtrips lifecycle/request 'unregisterRequest' 0ms
+   ✓ machine target boundary > roundtrips lifecycle/request 'createWorktreeRequest' 0ms
+   ✓ machine target boundary > roundtrips lifecycle/request 'deleteWorktreeRequest' 0ms
+   ✓ machine target boundary > roundtrips lifecycle/request 'createSessionRequest' 0ms
+   ✓ machine target boundary > roundtrips lifecycle/request 'closeSessionRequest' 0ms
+   ✓ machine target boundary > rejects shared invalid fixture: 'session cols exceeds u16' 0ms
+   ✓ machine target boundary > rejects shared invalid fixture: 'session rows exceeds u16' 0ms
+   ✓ machine target boundary > rejects shared invalid fixture: 'attached cols exceeds u16' 0ms
+   ✓ machine target boundary > rejects shared invalid fixture: 'attached rows exceeds u16' 0ms
+   ✓ machine target boundary > rejects shared invalid fixture: 'limits exceed u32' 0ms
+   ✓ machine target boundary > rejects shared invalid fixture: 'session limit exceeds u32' 0ms
+   ✓ machine target boundary > rejects shared invalid fixture: 'unknown API version' 0ms
+   ✓ machine target boundary > rejects shared invalid fixture: 'project root empty' 0ms
+   ✓ machine target boundary > rejects shared invalid fixture: 'project identity empty' 0ms
+   ✓ machine target boundary > rejects shared invalid fixture: 'worktree path empty' 0ms
+   ✓ machine target boundary > rejects shared invalid fixture: 'directory path empty' 0ms
+   ✓ machine target boundary > rejects shared invalid fixture: 'directory home empty' 0ms
+   ✓ machine target boundary > rejects shared invalid fixture: 'missing nullable gitRoot' 0ms
+   ✓ machine target boundary > rejects shared invalid fixture: 'missing nullable parentPath' 0ms
+   ✓ machine target boundary > rejects shared invalid fixture: 'missing nullable worktree identity' 0ms
+   ✓ machine target boundary > rejects shared invalid fixture: 'missing nullable session worktree' 0ms
+   ✓ machine target boundary > rejects shared invalid fixture: 'missing nullable providerSession' 0ms
+   ✓ machine target boundary > rejects shared invalid fixture: 'missing nullable replayGap' 0ms
+   ✓ machine target boundary > rejects shared invalid fixture: 'revision noncanonical' 0ms
+   ✓ machine target boundary > rejects shared invalid fixture: 'revision overflow' 0ms
+   ✓ machine target boundary > rejects shared invalid fixture: 'revision number' 0ms
+   ✓ machine target boundary > rejects shared invalid fixture: 'epoch noncanonical' 0ms
+   ✓ machine target boundary > rejects shared invalid fixture: 'epoch fractional' 0ms
+   ✓ machine target boundary > rejects shared invalid fixture: 'epoch negative' 0ms
+   ✓ machine target boundary > rejects shared invalid fixture: 'epoch whitespace' 0ms
+   ✓ machine target boundary > roundtrips 'capabilities' through the public decoder 0ms
+   ✓ machine target boundary > roundtrips 'directories' through the public decoder 0ms
+   ✓ machine target boundary > roundtrips 'project' through the public decoder 0ms
+   ✓ machine target boundary > roundtrips 'projects' through the public decoder 0ms
+   ✓ machine target boundary > roundtrips 'worktree' through the public decoder 0ms
+   ✓ machine target boundary > roundtrips 'worktrees' through the public decoder 0ms
+   ✓ machine target boundary > roundtrips 'session' through the public decoder 0ms
+   × machine target boundary > roundtrips 'session' through the public decoder 4ms
+     → expected { target: { …(3) }, …(9) } to deeply equal { target: { …(3) }, …(11) }
+   ✓ machine target boundary > roundtrips 'sessions' through the public decoder 0ms
+   ✓ machine target boundary > roundtrips 'error' through the public decoder 0ms
+   ✓ machine target boundary > roundtrips 'attached' through the public decoder 0ms
+   ✓ machine target boundary > preserves an explicit 'local' target 0ms
+   ✓ machine target boundary > preserves an explicit 'ssh' target 0ms
+   ✓ machine target boundary > preserves an explicit 'pairedDaemon' target 0ms
+   ✓ machine target boundary > rejects incomplete/unknown targets {} 0ms
+   ✓ machine target boundary > rejects incomplete/unknown targets null 0ms
+   ✓ machine target boundary > rejects incomplete/unknown targets {"kind":"future"} 0ms
+   ✓ machine target boundary > rejects incomplete/unknown targets {"kind":"pairedDaemon"} 0ms
+   ✓ machine target boundary > rejects incomplete/unknown targets {"kind":"pairedDaemon","hostId":" "} 0ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/pairedDaemonContracts.test.ts > machine target boundary > roundtrips 'session' through the public decoder
+AssertionError: expected { target: { …(3) }, …(9) } to deeply equal { target: { …(3) }, …(11) }
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[33m@@ -1,7 +1,6 @@[39m
+[2m  {[22m
+[32m-   "agentType": "omo",[39m
+[2m    "cols": 120,[22m
+[2m    "cwd": "/home/test/app",[22m
+[2m    "endSequence": "12",[22m
+[2m    "providerSession": {[22m
+[2m      "id": "owner-provider",[22m
+[33m@@ -13,9 +12,8 @@[39m
+[2m    "target": {[22m
+[2m      "daemonEpoch": "9007199254740993",[22m
+[2m      "machineId": "machine-a",[22m
+[2m      "sessionId": "pty-metadata",[22m
+[2m    },[22m
+[32m-   "title": "agent terminal",[39m
+[2m    "workspaceId": "project-a",[22m
+[2m    "worktree": null,[22m
+[2m  }[22m
+
+ ❯ src/lib/pairedDaemonContracts.test.ts:48:76
+     46|   });
+     47|   it.each(fixtures)("roundtrips $kind through the public decoder", fix…
+     48|     expect(decodeMachineJson(fixture.kind, JSON.stringify(fixture.valu…
+       |                                                                            ^
+     49|   });
+     50|   it.each([
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 1 passed (2)
+      Tests  1 failed | 2220 passed (2221)
+   Start at  14:03:54
+   Duration  1.14s (transform 48ms, setup 168ms, collect 54ms, tests 91ms, environment 392ms, prepare 52ms)
+
+error: script "test" exited with code 1

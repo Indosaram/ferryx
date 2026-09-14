@@ -1,0 +1,2 @@
+owner=67494 command=cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib remote::relay_client::tests::test_pairing_coordinator -- --nocapture 
+exit=0 owner_reaped=true

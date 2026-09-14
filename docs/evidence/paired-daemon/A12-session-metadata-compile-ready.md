@@ -1,0 +1,3 @@
+# Compile readiness
+
+Production schema + metadata hooks composed. `A12-session-metadata-GREEN-composed.log` compiled library and integration test successfully (Finished test profile), then ran a behavioral assertion: first metadata event was CWD-only before title event. This is not final GREEN. Test now awaits exact title-bearing state and includes rejection/exit retention assertions. Constructor missing title/agent_type reported by parent is fixed. Shared production files may be compiled by parent; no whole-file formatting performed. Revision composition proposal remains in A12-session-metadata-expanded-coordination.md, machine_events.rs untouched by this lane.

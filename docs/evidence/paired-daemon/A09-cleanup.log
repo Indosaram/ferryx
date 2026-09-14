@@ -1,0 +1,9 @@
+Build command exited 101 before test execution (ENOSPC).
+No private owner, HTTP listener, shell or PTY was launched by this test.
+Command: ps -axo pid,ppid,command | rg 'herdr-wave2|machine_sessions'
+Exit: 0. Matches: inspection bash PID 20249 and rg PID 20253 only.
+Command: df -h .
+Exit: 0. Available 119Mi, capacity 100%.
+Command: du -sh src-tauri/target
+Exit: 0. 6.1G; inherited private target preserved.
+No canonical daemon termination, dependency-link writes, commits or deployments.

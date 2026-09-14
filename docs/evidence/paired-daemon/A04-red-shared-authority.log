@@ -1,0 +1,484 @@
+status: exited_101 exit_code: 101
+    Blocking waiting for file lock on build directory
+   Compiling cfg-if v1.0.4
+   Compiling libc v0.2.189
+   Compiling serde_core v1.0.229
+   Compiling zerofrom v0.1.8
+   Compiling itoa v1.0.18               ] 18/547: zerofrom, cfg-if, libc, serde_core
+   Compiling scopeguard v1.2.0          ] 22/547: itoa, zerofrom, libc, serde_core
+   Compiling memchr v2.8.3              ] 26/547: itoa, scopeguard, libc, serde_core
+   Compiling writeable v0.6.4           ] 28/547: itoa, memchr, libc, serde_core
+   Compiling litemap v0.8.3             ] 29/547: writeable, memchr, libc, serde_core
+   Compiling bytes v1.12.1              ] 30/547: memchr, litemap, libc, serde_core
+   Compiling utf8_iter v1.0.4           ] 32/547: bytes, memchr, libc, serde_core
+   Compiling siphasher v1.0.3           ] 34/547: bytes, memchr, utf8_iter, serde_core
+   Compiling lock_api v0.4.14           ] 35/547: bytes, utf8_iter, siphasher, serde_core
+   Compiling phf_shared v0.13.1         ] 36/547: lock_api, bytes, siphasher, serde_core
+   Compiling icu_properties_data v2.3.0 ] 41/547: lock_api, bytes, phf_shared, serde_core
+   Compiling icu_normalizer_data v2.3.0 ] 44/547: bytes, phf_shared, icu_properties_data, serde_core
+   Compiling phf_generator v0.13.1      ] 45/547: bytes, icu_normalizer_data, icu_properties_data, serde_core
+   Compiling zmij v1.0.23               ] 47/547: icu_normalizer_data, icu_properties_data, phf_generator, serde_core
+   Compiling log v0.4.34                ] 48/547: icu_properties_data, phf_generator, zmij, serde_core
+   Compiling bitflags v2.13.2           ] 49/547: phf_generator, log, zmij, serde_core
+   Compiling http v1.5.0                ] 50/547: bitflags, phf_generator, log, zmij
+   Compiling yoke v0.8.3                ] 54/547: bitflags, http, log, zmij
+   Compiling num-conv v0.2.2            ] 61/547: bitflags, yoke, http, zmij
+   Compiling zerovec v0.11.8            ] 67/547: bitflags, yoke, http, num-conv
+   Compiling time-core v0.1.9           ] 68/547: bitflags, http, zerovec, num-conv
+   Compiling thiserror v2.0.20          ] 69/547: time-core, bitflags, http, zerovec
+   Compiling phf_macros v0.13.1         ] 70/547: time-core, http, zerovec, thiserror
+   Compiling winnow v1.0.4              ] 71/547: phf_macros, http, zerovec, thiserror
+   Compiling powerfmt v0.2.0            ] 73/547: winnow, http, zerovec, thiserror
+   Compiling toml_writer v1.1.2+spec-1.1.074/547: winnow, powerfmt, http, thiserror
+   Compiling toml_parser v1.1.3+spec-1.1.076/547: winnow, powerfmt, thiserror, toml_writer
+   Compiling tinystr v0.8.4             ] 77/547: powerfmt, toml_parser, thiserror, toml_writer
+   Compiling phf_codegen v0.13.1        ] 78/547: tinystr, toml_parser, thiserror, toml_writer
+   Compiling objc2-exception-helper v0.1.179/547: tinystr, toml_parser, phf_codegen, toml_writer
+   Compiling potential_utf v0.1.6       ] 91/547: tinystr, toml_parser, phf_codegen, objc2-exception-helper
+   Compiling zerotrie v0.2.5            ] 92/547: potential_utf, tinystr, toml_parser, objc2-exception-helper
+   Compiling icu_locale_core v2.3.0     ] 93/547: zerotrie, potential_utf, tinystr, toml_parser
+   Compiling semver v1.0.28             ] 94/547: zerotrie, potential_utf, icu_locale_core, toml_parser
+   Compiling objc2-encode v4.1.0        ] 95/547: zerotrie, icu_locale_core, toml_parser, semver
+   Compiling byteorder v1.5.0           ] 98/547: zerotrie, icu_locale_core, objc2-encode, semver
+   Compiling smallvec v1.16.1           ] 99/547: icu_locale_core, byteorder, objc2-encode, semver
+   Compiling thiserror v1.0.69         ] 100/547: icu_locale_core, byteorder, objc2-encode, smallvec
+   Compiling objc2 v0.6.4              ] 102/547: icu_locale_core, thiserror, objc2-encode, smallvec
+   Compiling icu_collections v2.3.0    ] 103/547: icu_locale_core, thiserror, smallvec, objc2
+   Compiling typeid v1.0.3             ] 104/547: icu_collections, icu_locale_core, thiserror, objc2
+   Compiling serde_json v1.0.151       ] 105/547: icu_collections, icu_locale_core, typeid, objc2
+   Compiling icu_provider v2.3.1       ] 107/547: icu_collections, icu_locale_core, serde_json, objc2
+   Compiling aho-corasick v1.1.5       ] 108/547: icu_provider, icu_collections, serde_json, objc2
+   Compiling regex-syntax v0.8.11      ] 109/547: icu_provider, serde_json, aho-corasick, objc2
+   Compiling fnv v1.0.7                ] 111/547: serde_json, aho-corasick, regex-syntax, objc2
+   Compiling unic-common v0.9.0        ] 112/547: fnv, aho-corasick, regex-syntax, objc2
+   Compiling unic-char-range v0.9.0    ] 113/547: unic-common, aho-corasick, regex-syntax, objc2
+   Compiling unic-ucd-version v0.9.0   ] 114/547: unic-char-range, aho-corasick, regex-syntax, objc2
+   Compiling unic-char-property v0.9.0 ] 115/547: unic-ucd-version, unic-char-range, aho-corasick, regex-syntax
+   Compiling phf v0.13.1               ] 116/547: unic-ucd-version, aho-corasick, regex-syntax, unic-char-property
+   Compiling parking_lot_core v0.9.12  ] 118/547: phf, aho-corasick, regex-syntax, unic-char-property
+   Compiling string_cache_codegen v0.6.1 119/547: phf, aho-corasick, regex-syntax, parking_lot_core
+   Compiling alloc-no-stdlib v2.0.4    ] 120/547: phf, string_cache_codegen, regex-syntax, parking_lot_core
+   Compiling equivalent v1.0.2
+   Compiling base64 v0.23.1            ] 122/547: alloc-no-stdlib, string_cache_codegen, equivalent, regex-syntax
+   Compiling hashbrown v0.17.1         ] 123/547: base64, alloc-no-stdlib, string_cache_codegen, regex-syntax
+   Compiling web_atoms v0.2.6          ] 124/547: base64, hashbrown, string_cache_codegen, regex-syntax
+   Compiling alloc-stdlib v0.2.4       ] 128/547: base64, hashbrown, regex-syntax, web_atoms(build.rs)
+   Compiling parking_lot v0.12.5       ] 129/547: base64, hashbrown, alloc-stdlib, regex-syntax
+   Compiling unic-ucd-ident v0.9.0     ] 130/547: base64, hashbrown, parking_lot, regex-syntax
+   Compiling indexmap v2.14.2          ] 131/547: hashbrown, parking_lot, unic-ucd-ident, regex-syntax
+   Compiling block2 v0.6.2             ] 132/547: indexmap, parking_lot, unic-ucd-ident, regex-syntax
+   Compiling regex-automata v0.4.18    ] 134/547: indexmap, unic-ucd-ident, regex-syntax, block2
+   Compiling icu_properties v2.3.0     ] 135/547: indexmap, regex-automata, unic-ucd-ident, block2
+   Compiling icu_normalizer v2.3.0     ] 136/547: indexmap, regex-automata, icu_properties, block2
+   Compiling quick-xml v0.42.0         ] 137/547: indexmap, regex-automata, icu_normalizer, icu_properties
+   Compiling serde_spanned v1.1.1      ] 138/547: regex-automata, icu_normalizer, quick-xml, icu_properties
+   Compiling same-file v1.0.6          ] 139/547: serde_spanned, regex-automata, quick-xml, icu_properties
+   Compiling walkdir v2.5.0            ] 140/547: regex-automata, quick-xml, same-file, icu_properties
+   Compiling idna_adapter v1.2.2       ] 141/547: regex-automata, walkdir, quick-xml, icu_properties
+   Compiling dispatch2 v0.3.1          ] 142/547: regex-automata, walkdir, idna_adapter, quick-xml
+   Compiling string_cache v0.9.0
+   Compiling brotli-decompressor v5.0.3] 144/547: dispatch2, regex-automata, walkdir, string_cache
+   Compiling anyhow v1.0.104           ] 146/547: dispatch2, regex-automata, brotli-decompressor, web_atoms(build)
+   Compiling getrandom v0.4.3          ] 147/547: dispatch2, regex-automata, brotli-decompressor, anyhow
+   Compiling dunce v1.0.5              ] 148/547: regex-automata, brotli-decompressor, anyhow, getrandom
+   Compiling once_cell v1.21.4         ] 151/547: regex-automata, anyhow, getrandom, dunce
+   Compiling ctor v0.8.0               ] 153/547: regex-automata, anyhow, once_cell, dunce
+   Compiling regex v1.13.1             ] 156/547: regex-automata, ctor, anyhow, once_cell
+   Compiling uuid v1.26.1              ] 157/547: ctor, anyhow, once_cell, regex
+   Compiling brotli v8.0.4             ] 158/547: uuid, ctor, anyhow, regex
+   Compiling objc2-core-foundation v0.3.2160/547: uuid, brotli, anyhow, regex
+   Compiling idna v1.1.0               ] 162/547: uuid, brotli, objc2-core-foundation, web_atoms
+   Compiling selectors v0.36.1         ] 163/547: idna, brotli, objc2-core-foundation, web_atoms
+   Compiling toml_datetime v1.1.1+spec-1.1.0/547: idna, brotli, objc2-core-foundation, selectors(build.rs)
+   Compiling stable_deref_trait v1.2.1 ] 167/547: idna, toml_datetime, brotli, objc2-core-foundation
+   Compiling glob v0.3.4               ] 172/547: idna, brotli, objc2-core-foundation, stable_deref_trait
+   Compiling url v2.5.8                ] 174/547: idna, brotli, objc2-core-foundation, glob
+   Compiling cssparser v0.36.0         ] 176/547: yoke, brotli, objc2-core-foundation, url
+   Compiling toml v1.1.6+spec-1.1.0    ] 180/547: brotli, objc2-core-foundation, cssparser, url
+   Compiling markup5ever v0.38.0       ] 183/547: brotli, selectors(build), cssparser, toml
+   Compiling swift-rs v1.0.8           ] 184/547: brotli, selectors(build), markup5ever, toml
+   Compiling html5ever v0.38.0         ] 196/547: selectors, swift-rs(build), markup5ever, toml
+   Compiling time v0.3.55              ] 197/547: selectors, swift-rs(build), html5ever, toml
+   Compiling serde v1.0.229            ] 200/547: selectors, html5ever, time, toml
+   Compiling cfb v0.7.3                ] 202/547: selectors, serde, html5ever, time
+   Compiling jsonptr v0.6.3            ] 204/547: selectors, serde, cfb, time
+   Compiling erased-serde v0.4.10      ] 205/547: selectors, cfb, jsonptr, time
+   Compiling json-patch v3.0.1         ] 211/547: cfb, jsonptr, erased-serde, swift-rs
+   Compiling infer v0.19.0             ] 212/547: cfb, json-patch, erased-serde, swift-rs
+   Compiling serde-untagged v0.1.9     ] 213/547: json-patch, erased-serde, swift-rs, infer
+   Compiling dom_query v0.27.0         ] 214/547: serde-untagged, json-patch, swift-rs, infer
+   Compiling schemars v0.8.22          ] 215/547: serde-untagged, json-patch, dom_query, infer
+   Compiling cargo_metadata v0.19.2    ] 216/547: serde-untagged, dom_query, infer, schemars
+   Compiling plist v1.10.1             ] 217/547: serde-untagged, cargo_metadata, dom_query, schemars
+   Compiling objc2-foundation v0.3.2   ] 218/547: plist, cargo_metadata, dom_query, schemars
+   Compiling urlpattern v0.3.0         ] 219/547: cargo_metadata, objc2-foundation, dom_query, schemars
+   Compiling serde_with v3.23.0        ] 221/547: cargo_metadata, urlpattern, objc2-foundation, zerovec
+   Compiling errno v0.3.14             ] 222/547: urlpattern, objc2-foundation, zerovec, serde_with
+   Compiling pin-project-lite v0.2.17  ] 223/547: errno, urlpattern, objc2-foundation, serde_with
+   Compiling bitflags v1.3.2           ] 224/547: errno, pin-project-lite, objc2-foundation, serde_with
+   Compiling rustc_version v0.4.1      ] 226/547: bitflags, tinystr, objc2-foundation, serde_with
+   Compiling percent-encoding v2.3.2   ] 227/547: tinystr, objc2-foundation, rustc_version, serde_with
+   Compiling option-ext v0.2.0         ] 228/547: percent-encoding, objc2-foundation, rustc_version, serde_with
+   Compiling core-foundation-sys v0.8.7] 229/547: percent-encoding, objc2-foundation, serde_with, option-ext
+   Compiling tauri-utils v2.9.3        ] 232/547: potential_utf, icu_locale_core, objc2-foundation, serde_with
+   Compiling signal-hook-registry v1.4.8 240/547: icu_collections, tauri-utils, parking_lot, objc2-foundation
+   Compiling socket2 v0.6.5            ] 241/547: icu_collections, tauri-utils, objc2-foundation, signal-hook-registry
+   Compiling mio v1.2.3=>              ] 242/547: icu_collections, tauri-utils, objc2-foundation, socket2
+   Compiling bytemuck v1.25.2          ] 243/547: tauri-utils, mio, objc2-foundation, socket2
+   Compiling typenum v1.20.1           ] 245/547: tauri-utils, mio, objc2-foundation, bytemuck
+   Compiling tokio v1.53.1             ] 246/547: tauri-utils, mio, objc2-foundation, typenum
+   Compiling generic-array v0.14.7     ] 247/547: tauri-utils, objc2-foundation, typenum, tokio
+   Compiling winnow v0.7.15            ] 248/547: tauri-utils, generic-array, objc2-foundation, tokio
+   Compiling form_urlencoded v1.2.2    ] 251/547: icu_properties, tauri-utils, objc2-foundation, tokio
+   Compiling toml_datetime v0.7.5+spec-1.1.0/547: icu_properties, form_urlencoded, objc2-foundation, tokio
+   Compiling futures-core v0.3.34      ] 253/547: icu_properties, objc2-foundation, toml_datetime, tokio
+   Compiling toml v0.9.12+spec-1.1.0   ] 254/547: objc2-foundation, futures-core, toml_datetime, tokio
+   Compiling crypto-common v0.1.7      ] 256/547: idna_adapter, objc2-foundation, toml, tokio
+   Compiling block-buffer v0.10.4      ] 257/547: crypto-common, objc2-foundation, toml, tokio
+   Compiling dirs-sys v0.5.0           ] 258/547: block-buffer, objc2-foundation, toml, tokio
+   Compiling embed-resource v3.0.11    ] 259/547: dirs-sys, block-buffer, objc2-foundation, tokio
+   Compiling heck v0.5.0>              ] 260/547: dirs-sys, embed-resource, objc2-foundation, tokio
+   Compiling simd-adler32 v0.3.10      ] 261/547: dirs-sys, heck, embed-resource, objc2-foundation
+   Compiling tauri-winres v0.3.6       ] 263/547: heck, embed-resource, objc2-foundation, simd-adler32
+   Compiling dirs v6.0.0=>             ] 264/547: heck, tauri-winres, objc2-foundation, simd-adler32
+   Compiling digest v0.10.7            ] 266/547: dirs, tauri-winres, objc2-foundation, simd-adler32
+   Compiling cargo_toml v0.22.3        ] 267/547: dirs, tauri-winres, objc2-foundation, digest
+   Compiling tauri-plugin v2.6.3       ] 268/547: tauri-winres, objc2-foundation, digest, cargo_toml
+   Compiling getrandom v0.2.17         ] 270/547: tauri-plugin, objc2-foundation, idna, cargo_toml
+   Compiling zeroize v1.9.0            ] 271/547: tauri-plugin, objc2-foundation, getrandom, cargo_toml
+   Compiling adler2 v2.0.1             ] 273/547: zeroize, objc2-foundation, getrandom, cargo_toml
+   Compiling tauri-build v2.6.3        ] 277/547: url, serde_json, objc2-foundation, cargo_toml
+   Compiling time-macros v0.2.32       ] 278/547: url, tauri-build, serde_json, objc2-foundation
+   Compiling deranged v0.5.8           ] 280/547: tauri-build, serde_json, getrandom, objc2-foundation
+   Compiling lazy_static v1.5.0        ] 281/547: tauri-build, deranged, getrandom, objc2-foundation
+   Compiling miniz_oxide v0.9.1        ] 283/547: deranged, getrandom, objc2-foundation, lazy_static
+   Compiling crc32fast v1.5.1          ] 285/547: miniz_oxide, deranged, objc2-foundation, lazy_static
+   Compiling num-traits v0.2.19        ] 286/547: miniz_oxide, deranged, objc2-foundation, crc32fast
+   Compiling flate2 v1.1.10            ] 292/547: num-traits(build), miniz_oxide, deranged, objc2-foundation
+   Compiling tauri v2.11.5>            ] 295/547: deranged, flate2, objc2-foundation, uuid
+   Compiling miniz_oxide v0.8.9        ] 296/547: tauri(build.rs), deranged, objc2-foundation, uuid
+   Compiling rustls-pki-types v1.15.1  ] 298/547: miniz_oxide, objc2-foundation, uuid, time
+   Compiling fdeflate v0.3.7           ] 299/547: rustls-pki-types, objc2-foundation, uuid, time
+   Compiling core-foundation v0.10.1   ] 300/547: rustls-pki-types, fdeflate, objc2-foundation, time
+   Compiling tracing-core v0.1.36      ] 301/547: rustls-pki-types, objc2-foundation, time, core-foundation
+   Compiling base64 v0.22.1            ] 302/547: tracing-core, objc2-foundation, time, core-foundation
+   Compiling arrayvec v0.7.8           ] 303/547: tracing-core, objc2-foundation, time, base64
+   Compiling objc2-app-kit v0.3.2      ] 304/547: arrayvec, objc2-foundation, time, base64
+   Compiling symphonia-core v0.5.5     ] 306/547: arrayvec, tauri(build), objc2-app-kit, base64
+   Compiling getrandom v0.3.4          ] 309/547: tauri(build), objc2-app-kit, symphonia-core, num-traits
+   Compiling raw-window-handle v0.6.2  ] 310/547: getrandom, objc2-app-kit, symphonia-core, num-traits
+   Compiling untrusted v0.9.0          ] 311/547: objc2-app-kit, symphonia-core, num-traits, raw-window-handle
+   Compiling subtle v2.6.1=>           ] 312/547: objc2-app-kit, symphonia-core, num-traits, untrusted
+   Compiling ring v0.17.14=>           ] 313/547: objc2-app-kit, symphonia-core, untrusted, subtle
+   Compiling dpi v0.1.2====>           ] 316/547: objc2-app-kit, symphonia-core, ring, subtle
+   Compiling http-body v1.1.0          ] 318/547: dpi, objc2-app-kit, symphonia-core, ring
+   Compiling zerocopy v0.8.57          ] 321/547: objc2-app-kit, ring, serde_spanned, http-body
+   Compiling simdutf8 v0.1.5           ] 324/547: objc2-app-kit, ring, serde_spanned, zerocopy(build.rs)
+   Compiling futures-sink v0.3.34      ] 327/547: simdutf8, objc2-app-kit, ring, zerocopy(build.rs)
+   Compiling encoding_rs v0.8.41       ] 329/547: objc2-app-kit, ring, futures-sink, zerocopy(build)
+   Compiling tracing v0.1.44>          ] 330/547: objc2-app-kit, encoding_rs, ring, zerocopy(build)
+   Compiling rustls-webpki v0.103.15   ] 333/547: objc2-app-kit, encoding_rs, ring, tracing
+   Compiling crossbeam-utils v0.8.23   ] 334/547: objc2-app-kit, encoding_rs, tracing, rustls-webpki
+   Compiling tower-service v0.3.3      ] 341/547: erased-serde, objc2-app-kit, phf_shared, toml_datetime
+   Compiling slab v0.4.12===>          ] 344/547: erased-serde, objc2-app-kit, tower-service, toml_datetime
+   Compiling futures-task v0.3.34      ] 345/547: erased-serde, objc2-app-kit, tower-service, slab
+   Compiling foreign-types-shared v0.3.1 346/547: objc2-app-kit, tower-service, futures-task, slab
+   Compiling foreign-types v0.5.0      ] 347/547: objc2-app-kit, futures-task, slab, foreign-types-shared
+   Compiling futures-util v0.3.34      ] 349/547: objc2-app-kit, foreign-types, futures-task, serde-untagged
+   Compiling symphonia-metadata v0.5.5 ] 353/547: toml, objc2-app-kit, json-patch, futures-util
+   Compiling rustls v0.23.44=>         ] 355/547: objc2-app-kit, infer, futures-util, symphonia-metadata
+   Compiling crossbeam-channel v0.5.17 ] 356/547: objc2-app-kit, infer, futures-util, rustls
+   Compiling cookie v0.18.2==>         ] 357/547: objc2-app-kit, futures-util, rustls, crossbeam-channel
+   Compiling httparse v1.10.1>         ] 358/547: objc2-app-kit, cookie, rustls, crossbeam-channel
+   Compiling objc2-web-kit v0.3.2      ] 361/547: objc2-app-kit, plist, zerocopy, rustls
+   Compiling core-graphics-types v0.2.0] 362/547: objc2-web-kit, plist, zerocopy, rustls
+   Compiling png v0.17.16====>         ] 363/547: objc2-web-kit, zerocopy, rustls, core-graphics-types
+   Compiling cpufeatures v0.2.17       ] 367/547: png, urlpattern, serde_with, zerocopy
+   Compiling mime v0.3.17====>         ] 369/547: urlpattern, serde_with, zerocopy, semver
+   Compiling sha2 v0.10.9=====>        ] 373/547: serde_with, zerocopy, mime, semver
+   Compiling ico v0.5.0=======>        ] 377/547: serde_with, zerocopy, mime, sha2
+   Compiling ppv-lite86 v0.2.21        ] 378/547: serde_with, ico, zerocopy, mime
+   Compiling core-graphics v0.25.0     ] 381/547: dirs, mime, ppv-lite86, tauri-utils
+   Compiling png v0.18.1======>        ] 382/547: core-graphics, dirs, ppv-lite86, tauri-utils
+   Compiling try-lock v0.2.5
+   Compiling unicode-segmentation v1.13.3384/547: core-graphics, try-lock, png, tauri-utils
+   Compiling tower-layer v0.3.3        ] 385/547: core-graphics, unicode-segmentation, png, tauri-utils
+   Compiling pxfm v0.1.30=====>        ] 386/547: unicode-segmentation, png, tower-layer, tauri-utils
+   Compiling tao v0.35.3======>        ] 388/547: unicode-segmentation, pxfm, png, tauri-utils
+   Compiling keyboard-types v0.7.0     ] 390/547: tao, unicode-segmentation, pxfm, tauri-utils
+   Compiling want v0.3.1======>        ] 391/547: tao, pxfm, keyboard-types, tauri-utils
+   Compiling wry v0.55.1======>        ] 392/547: tao, want, pxfm, tauri-utils
+   Compiling tauri-codegen v2.6.3      ] 393/547: tao, pxfm, wry, tauri-utils
+   Compiling moxcms v0.8.1=====>       ] 394/547: pxfm, tauri-codegen, wry, tauri-utils
+   Compiling system-configuration-sys v0.6.0/547: moxcms, tauri-codegen, wry, tauri-utils
+   Compiling webpki-roots v1.0.9       ] 396/547: moxcms, system-configuration-sys, tauri-codegen, tauri-utils
+   Compiling futures-channel v0.3.34   ] 397/547: webpki-roots, moxcms, tauri-codegen, tauri-utils
+   Compiling sync_wrapper v1.0.2       ] 398/547: webpki-roots, futures-channel, moxcms, tauri-utils
+   Compiling core-foundation v0.9.4    ] 399/547: futures-channel, moxcms, sync_wrapper, tauri-utils
+   Compiling byteorder-lite v0.1.0     ] 400/547: core-foundation, futures-channel, moxcms, tauri-utils
+   Compiling httpdate v1.0.3===>       ] 402/547: core-foundation, byteorder-lite, moxcms, tauri-utils
+   Compiling atomic-waker v1.1.2       ] 403/547: core-foundation, httpdate, moxcms, tauri-utils
+   Compiling system-configuration v0.7.0 404/547: httpdate, moxcms, atomic-waker, tauri-utils
+   Compiling hyper v1.11.1=====>       ] 405/547: system-configuration, moxcms, atomic-waker, tauri-utils
+   Compiling serialize-to-javascript v0.1.26/547: hyper, system-configuration, moxcms, tauri-utils
+   Compiling tauri-macros v2.6.3       ] 407/547: hyper, serialize-to-javascript, moxcms, tauri-utils
+   Compiling tauri-runtime v2.11.3     ] 408/547: hyper, tauri-macros, moxcms, tauri-utils
+   Compiling muda v0.19.3======>       ] 409/547: hyper, tauri-macros, moxcms, tauri-runtime
+   Compiling tauri-runtime-wry v2.11.4 ] 410/547: hyper, moxcms, tauri-runtime, muda
+   Compiling tokio-rustls v0.26.5      ] 411/547: hyper, moxcms, tauri-runtime-wry, muda
+   Compiling window-vibrancy v0.6.0    ] 412/547: moxcms, tauri-runtime-wry, muda, tokio-rustls
+   Compiling image v0.25.10====>       ] 413/547: moxcms, tauri-runtime-wry, window-vibrancy, muda
+   Compiling symphonia-utils-xiph v0.5.5 414/547: tauri-runtime-wry, window-vibrancy, muda, image
+   Compiling rand_core v0.9.5==>       ] 415/547: symphonia-utils-xiph, window-vibrancy, muda, image
+   Compiling ipnet v2.12.2======>      ] 417/547: symphonia-utils-xiph, rand_core, cpufeatures, image
+   Compiling embed_plist v1.2.2=>      ] 420/547: rand_core, cpufeatures, ipnet, image
+   Compiling rand_chacha v0.9.0=>      ] 421/547: cpufeatures, embed_plist, ipnet, image
+   Compiling tower v0.5.3=======>      ] 422/547: rand_chacha, embed_plist, ipnet, image
+   Compiling hyper-util v0.1.20=>      ] 424/547: rand_chacha, tower, ipnet, image
+   Compiling http-body-util v0.1.5     ] 425/547: rand_chacha, tower, hyper-util, image
+   Compiling tauri-plugin-fs v2.5.2    ] 426/547: tower, hyper-util, http-body-util, image
+   Compiling objc2-core-audio-types v0.3.227/547: tower, hyper-util, tauri-plugin-fs(build.rs), image
+   Compiling rand v0.9.5========>      ] 429/547: tauri-plugin-fs(build), hyper-util, objc2-core-audio-types, image
+   Compiling objc2-core-audio v0.3.2   ] 430/547: hyper-util, objc2-core-audio-types, rand, image
+   Compiling rustix v1.1.4======>      ] 432/547: objc2-core-audio, tauri, rand, image
+   Compiling security-framework-sys v2.17.03/547: objc2-core-audio, tauri, rand, rustix
+   Compiling objc2-audio-toolbox v0.3.2] 434/547: objc2-core-audio, tauri, security-framework-sys, rustix
+   Compiling security-framework v3.7.0 ] 439/547: tauri, security-framework-sys, objc2-audio-toolbox, rustix
+   Compiling hyper-rustls v0.27.9>     ] 440/547: security-framework, tauri, objc2-audio-toolbox, rustix
+   Compiling tower-http v0.6.11==>     ] 441/547: security-framework, tauri, hyper-rustls, rustix
+   Compiling sha1 v0.10.7========>     ] 442/547: security-framework, tauri, hyper-rustls, tower-http
+   Compiling tokio-util v0.7.19==>     ] 443/547: tauri, hyper-rustls, sha1, tower-http
+   Compiling num-integer v0.1.47=>     ] 444/547: tauri, tokio-util, sha1, tower-http
+   Compiling rand_core v0.6.4====>     ] 445/547: tauri, num-integer, tokio-util, tower-http
+   Compiling tauri-plugin-process v2.3.1 446/547: tauri, num-integer, rand_core, tokio-util
+   Compiling tauri-plugin-updater v2.11.0447/547: tauri, num-integer, tokio-util, tauri-plugin-process(build.rs)
+   Compiling tauri-plugin-dialog v2.7.3] 448/547: tauri, num-integer, tokio-util, tauri-plugin-updater(build.rs)
+   Compiling tauri-plugin-notification v2.4.0547: tauri, num-integer, tauri-plugin-dialog(build.rs), tauri-plugin-upd…
+   Compiling curve25519-dalek v4.1.3   ] 450/547: tauri-plugin-notification(build.rs), tauri, tauri-plugin-dialog(bui…
+   Compiling ryu v1.0.23=========>     ] 451/547: tauri-plugin-notification(build.rs), tauri, curve25519-dalek(build.…
+   Compiling extended v0.1.0=====>     ] 453/547: tauri-plugin-notification(build.rs), tauri, curve25519-dalek(build.…
+   Compiling data-encoding v2.11.1     ] 454/547: tauri-plugin-notification(build.rs), tauri, extended, ryu
+   Compiling unicase v2.9.0======>     ] 456/547: tauri, extended, ryu, data-encoding
+   Compiling serde_urlencoded v0.7.1   ] 457/547: tauri, unicase, ryu, data-encoding
+   Compiling mime_guess v2.0.5===>     ] 458/547: tauri, unicase, data-encoding, serde_urlencoded
+   Compiling symphonia-format-riff v0.5.5459/547: tauri, data-encoding, serde_urlencoded, mime_guess(build.rs)
+   Compiling tungstenite v0.29.0==>    ] 462/547: tauri, tauri-plugin-notification(build), data-encoding, symphonia-f…
+   Compiling num-bigint v0.4.8====>    ] 467/547: tauri-plugin-updater(build), tauri, tungstenite, tauri-plugin-dialo…
+   Compiling rustls-platform-verifier v0.7.0/547: tauri-plugin-updater(build), tauri, tauri-plugin-process(build), nu…
+   Compiling xattr v1.6.1=========>    ] 470/547: tauri, tauri-plugin-process(build), num-bigint, rustls-platform-ver…
+   Compiling coreaudio-rs v0.14.2=>    ] 471/547: tauri, xattr, num-bigint, rustls-platform-verifier
+   Compiling mac-notification-sys v0.6.15472/547: tauri, xattr, num-bigint, coreaudio-rs
+   Compiling symphonia-format-isomp4 v0.5.53/547: tauri, num-bigint, mac-notification-sys, coreaudio-rs
+   Compiling symphonia-bundle-flac v0.5.5475/547: tauri, symphonia-format-isomp4, mac-notification-sys, coreaudio-rs
+   Compiling symphonia-format-ogg v0.5.5 476/547: symphonia-bundle-flac, tauri, symphonia-format-isomp4, coreaudio-rs
+   Compiling symphonia-codec-vorbis v0.5.577/547: symphonia-bundle-flac, tauri, symphonia-format-isomp4, symphonia-fo…
+   Compiling webpki-roots v0.26.11>    ] 478/547: tauri, symphonia-format-isomp4, symphonia-format-ogg, symphonia-cod…
+   Compiling objc2-osa-kit v0.3.2=>    ] 479/547: tauri, symphonia-format-isomp4, webpki-roots, symphonia-codec-vorbis
+   Compiling symphonia-bundle-mp3 v0.5.5 480/547: tauri, objc2-osa-kit, webpki-roots, symphonia-codec-vorbis
+   Compiling symphonia-codec-pcm v0.5.5] 481/547: tauri, objc2-osa-kit, symphonia-bundle-mp3, symphonia-codec-vorbis
+   Compiling symphonia-codec-aac v0.5.5] 482/547: tauri, objc2-osa-kit, symphonia-bundle-mp3, symphonia-codec-pcm
+   Compiling filetime v0.2.29======>   ] 483/547: tauri, symphonia-bundle-mp3, symphonia-codec-pcm, symphonia-codec-a…
+   Compiling mach2 v0.5.0==========>   ] 484/547: tauri, symphonia-bundle-mp3, symphonia-codec-aac, filetime
+   Compiling fastrand v2.5.0=======>   ] 485/547: mach2, tauri, symphonia-codec-aac, filetime
+   Compiling signature v2.2.0======>   ] 486/547: tauri, fastrand, symphonia-codec-aac, filetime
+   Compiling dasp_sample v0.11.0===>   ] 487/547: tauri, fastrand, signature, symphonia-codec-aac
+   Compiling ed25519 v2.2.3========>   ] 488/547: tauri, fastrand, signature, dasp_sample
+   Compiling symphonia v0.5.5======>   ] 489/547: tauri, fastrand, dasp_sample, ed25519
+   Compiling cpal v0.17.3==========>   ] 490/547: tauri, fastrand, dasp_sample, symphonia
+   Compiling tar v0.4.46===========>   ] 491/547: tauri, fastrand, cpal, symphonia
+   Compiling tempfile v3.27.0======>   ] 492/547: tauri, fastrand, cpal, tar
+   Compiling osakit v0.3.1=========>   ] 493/547: tauri, tempfile, cpal, tar
+   Compiling tokio-tungstenite v0.29.0 ] 494/547: tauri, cpal, osakit, tar
+   Compiling notify-rust v4.18.0
+   Compiling nix v0.28.0===========>   ] 496/547: tauri, notify-rust, tokio-tungstenite, tar
+   Compiling num-rational v0.4.2===>   ] 498/547: nix, notify-rust, tokio-tungstenite, tauri-plugin-fs
+   Compiling reqwest v0.13.5=======>   ] 499/547: nix, num-rational, tokio-tungstenite, tauri-plugin-fs
+   Compiling rfd v0.16.0===========>   ] 501/547: nix, reqwest, tauri-plugin-fs, curve25519-dalek
+   Compiling rand_chacha v0.3.1====>   ] 503/547: nix, reqwest, rfd, mime_guess(build)
+   Compiling axum-core v0.5.6=======>  ] 504/547: reqwest, rfd, mime_guess(build), rand_chacha
+   Compiling tracing-log v0.2.0=====>  ] 506/547: axum-core, reqwest, rfd, sha2
+   Compiling sharded-slab v0.1.7====>  ] 507/547: tracing-log, axum-core, reqwest, sha2
+   Compiling ferryx v2026.908.1 (/Users/indo/code/project/orca-lite-wt/herdr-wave1/src-tauri)
+   Compiling tokio-stream v0.1.19===>  ] 509/547: ferryx(build.rs), sharded-slab, axum-core, reqwest
+   Compiling filedescriptor v0.8.3==>  ] 510/547: ferryx(build.rs), sharded-slab, reqwest, tokio-stream
+   Compiling notify-types v2.1.0====>  ] 511/547: ferryx(build.rs), filedescriptor, reqwest, tokio-stream
+   Compiling serde_path_to_error v0.1.20 512/547: ferryx(build.rs), filedescriptor, tokio-stream, notify-types
+   Compiling fsevent-sys v4.1.0=====>  ] 514/547: toml_datetime, tokio-stream, notify-types, serde_path_to_error
+   Compiling serial2 v0.2.38========>  ] 515/547: toml_datetime, fsevent-sys, notify-types, serde_path_to_error
+   Compiling thread_local v1.1.10===>  ] 516/547: toml_datetime, fsevent-sys, serial2, serde_path_to_error
+   Compiling downcast-rs v1.2.1=====>  ] 517/547: thread_local, toml_datetime, serial2, serde_path_to_error
+   Compiling minisign-verify v0.2.5=>  ] 518/547: thread_local, downcast-rs, serial2, serde_path_to_error
+   Compiling nu-ansi-term v0.50.3===>  ] 519/547: thread_local, downcast-rs, serial2, minisign-verify
+   Compiling shell-words v1.1.1=====>  ] 520/547: thread_local, nu-ansi-term, serial2, minisign-verify
+   Compiling matchit v0.8.4=========>  ] 521/547: thread_local, shell-words, nu-ansi-term, minisign-verify
+   Compiling portable-pty v0.9.0====>  ] 522/547: shell-words, nu-ansi-term, matchit, minisign-verify
+   Compiling tracing-subscriber v0.3.23] 523/547: portable-pty, nu-ansi-term, matchit, minisign-verify
+   Compiling axum v0.8.9============>  ] 525/547: tracing-subscriber, portable-pty, tauri-plugin-updater, matchit
+   Compiling notify v8.2.0===========> ] 526/547: tracing-subscriber, portable-pty, tauri-plugin-updater, axum
+   Compiling tokio-test v0.4.5=======> ] 528/547: tracing-subscriber, toml, notify, axum
+   Compiling ed25519-dalek v2.2.0====> ] 530/547: toml, tokio-test, ferryx(build), axum
+   Compiling rand v0.8.8=============> ] 532/547: toml, tauri-plugin-dialog, ferryx(build), axum
+   Compiling rodio v0.22.2===========> ] 534/547: mime_guess, rand, ferryx(build), axum
+   Compiling reqwest v0.12.28========> ] 537/547: rodio, tauri-plugin-notification, ferryx(build), tauri-plugin-proce…
+   Compiling tower-http v0.7.1=======> ] 538/547: rodio, tauri-plugin-notification, ferryx(build), reqwest
+   Compiling objc2-user-notifications v0.3.2/547: tower-http, rodio, ferryx(build), reqwest
+   Compiling objc2-core-graphics v0.3.2] 540/547: tower-http, objc2-user-notifications, ferryx(build), reqwest
+   Compiling objc2-core-text v0.3.2==> ] 541/547: tower-http, objc2-core-graphics, ferryx(build), reqwest
+warning: unnecessary `unsafe` block==> ] 546/547: ferryx_lib(test)
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block==> ] 546/547: ferryx_lib(test)
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block==> ] 546/547: ferryx_lib(test)
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block==> ] 546/547: ferryx_lib(test)
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block==> ] 546/547: ferryx_lib(test)
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block==> ] 546/547: ferryx_lib(test)
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `token`====> ] 546/547: ferryx_lib(test)
+    --> src/remote/auth.rs:1399:14
+     |
+1399 |         let (token, device) = auth
+     |              ^^^^^ help: if this is intentional, prefix it with an underscore: `_token`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `scroll_daemon_client`: ferryx_lib(test)
+   --> src/lib.rs:915:9
+    |
+915 |     let scroll_daemon_client = Arc::clone(&daemon_client);
+    |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scroll_daemon_client`
+
+warning: field `app` is never read===> ] 546/547: ferryx_lib(test)
+  --> src/ipc/notifications.rs:28:5
+   |
+27 | pub struct TauriNotificationBackend<R: Runtime> {
+   |            ------------------------ field in this struct
+28 |     app: AppHandle<R>,
+   |     ^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `GHOSTTY_TERMINAL_SCREEN_PRIMARY` is never used)
+  --> src/native_terminal/sys/constants.rs:56:11
+   |
+56 | pub const GHOSTTY_TERMINAL_SCREEN_PRIMARY: c_int = 0;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `no_auth_query` is never used7: ferryx_lib(test)
+    --> src/remote/server.rs:2597:12
+     |
+2597 |         fn no_auth_query() -> AuthQuery {
+     |            ^^^^^^^^^^^^^
+
+warning: method `wait_and_reap` is never used547: ferryx_lib(test)
+   --> src/terminal/session.rs:270:19
+    |
+ 61 | impl PtySession {
+    | --------------- method in this implementation
+...
+270 |     pub(crate) fn wait_and_reap(&self) -> Result<Option<i32>, PtyError> {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructedx_lib(test)
+  --> src/worktree/manager.rs:81:19
+   |
+81 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+   --> src/worktree/manager.rs:88:8
+    |
+ 87 | impl WriterLeaseGuard {
+    | --------------------- associated items in this implementation
+ 88 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+    |        ^^^
+...
+ 96 |     pub(crate) fn canonical_path(&self) -> &Path {
+    |                   ^^^^^^^^^^^^^^
+...
+100 |     pub(crate) fn owner_id(&self) -> &str {
+    |                   ^^^^^^^^
+
+warning: method `acquire_writer_lease` is never used
+   --> src/worktree/manager.rs:333:19
+    |
+129 | impl WorktreeManager {
+    | -------------------- method in this implementation
+...
+333 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib test) generated 17 warnings (run `cargo fix --lib -p ferryx --tests` to apply 2 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6m 06s
+     Running unittests src/lib.rs (src-tauri/target/debug/deps/ferryx_lib-a8f661fd9c0ae1d6)
+
+running 1 test
+
+running 1 test
+A04 LIVE owner_pid=83825 pty_pid=83858 ipc=/private/tmp/a04-DkgEaQ/fixture.sock http=127.0.0.1:63100 metadata={"session":{"cols":80,"cwd":"/private/tmp/a04-DkgEaQ/project","endSequence":null,"rows":24,"running":true,"sessionId":"4ac61709-11d9-475e-9269-21a31e1ca373","startSequence":null,"workspaceId":"a04","worktree":null},"type":"describeSessionOk"} process_cwd=Some("/private/tmp/a04-DkgEaQ/project")
+A04 HTTP status=200 sessions=[] registry_ipc=1 registry_http=0
+A04 CLEANUP session=4ac61709-11d9-475e-9269-21a31e1ca373 reaped=true
+A04 CLEANUP listeners_joined=true socket_removed=true
+Error: HTTP cannot see original IPC session and workspace
+test daemon::server::a04_shared_services_tests::a04_shared_authority_runtime ... FAILED
+
+failures:
+
+failures:
+    daemon::server::a04_shared_services_tests::a04_shared_authority_runtime
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 887 filtered out; finished in 1.34s
+
+A04 CLEANUP child_pid=83825 reaped=true exit=exit status: 101
+A04 CLEANUP private_root_removed=true
+Error: private runtime failed
+test daemon::server::a04_shared_services_tests::a04_shared_authority_runtime ... FAILED
+
+failures:
+
+failures:
+    daemon::server::a04_shared_services_tests::a04_shared_authority_runtime
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 887 filtered out; finished in 1.34s
+
+error: test failed, to rerun pass `--lib`

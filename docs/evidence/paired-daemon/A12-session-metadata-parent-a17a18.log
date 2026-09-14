@@ -1,0 +1,859 @@
+$ vitest run --maxWorkers=1 --run src/state/workspaceRestore.test.tsx src/lib/sessionPersistence.test.ts src/components/ProjectDialogs.pairedDaemon.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+ ✓ src/components/ProjectDialogs.pairedDaemon.test.tsx (10 tests) 107ms
+stderr | src/state/workspaceRestore.test.tsx > workspaceRestore coordinator > preloads mixed local and paired layouts while the local daemon is unavailable
+Remote restore deferred daemon reconciliation: Error: offline
+    at [90m/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/workspaceRestore.test.tsx:92:101
+    at Module.preloadWorkspaceSnapshots [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/workspaceRestore.ts:122:32[90m)[39m
+[90m    at processTicksAndRejections (node:internal/process/task_queues:104:5)[39m
+    at [90m/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/workspaceRestore.test.tsx:92:5
+    at file:///Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4m@vitest/runner[24m/dist/chunk-hooks.js:752:20
+
+stderr | src/state/workspaceRestore.test.tsx > workspaceRestore coordinator > transitions from idle -> loading -> restored on successful disk restore
+Session restore on boot skipped: TypeError: storage.getItem is not a function
+    at applyHistorySettingOverride [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/browserSettings.ts:209:23[90m)[39m
+    at loadBrowserSettings [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/browserSettings.ts:225:12[90m)[39m
+    at deserializeWorkspaceState [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/sessionPersistence.ts:323:27[90m)[39m
+    at runRestore [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/workspaceRestore.ts:282:31[90m)[39m
+[90m    at processTicksAndRejections (node:internal/process/task_queues:104:5)[39m
+
+(node:54563) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | src/state/workspaceRestore.test.tsx > workspaceRestore coordinator > does not start restore when enabled is false, and runs restore when enabled becomes true
+Session restore on boot skipped: TypeError: storage.getItem is not a function
+    at applyHistorySettingOverride [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/browserSettings.ts:209:23[90m)[39m
+    at loadBrowserSettings [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/browserSettings.ts:225:12[90m)[39m
+    at deserializeWorkspaceState [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/sessionPersistence.ts:323:27[90m)[39m
+    at runRestore [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/workspaceRestore.ts:282:31[90m)[39m
+
+stderr | src/state/workspaceRestore.test.tsx > workspaceRestore coordinator > safely cancels in-flight restore on StrictMode unmount and allows second mount to complete
+Session restore on boot skipped: TypeError: storage.getItem is not a function
+    at applyHistorySettingOverride [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/browserSettings.ts:209:23[90m)[39m
+    at loadBrowserSettings [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/browserSettings.ts:225:12[90m)[39m
+    at deserializeWorkspaceState [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/sessionPersistence.ts:323:27[90m)[39m
+    at runRestore [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/workspaceRestore.ts:282:31[90m)[39m
+
+stderr | src/state/workspaceRestore.test.tsx > workspaceRestore coordinator > reconciles stale session to null backendId on HMR recovery when live daemon session list is empty
+Session restore on boot skipped: TypeError: storage.getItem is not a function
+    at applyHistorySettingOverride [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/browserSettings.ts:209:23[90m)[39m
+    at loadBrowserSettings [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/browserSettings.ts:225:12[90m)[39m
+    at serializeWorkspaceState [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/sessionPersistence.ts:55:27[90m)[39m
+    at runRestore [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/workspaceRestore.ts:245:21[90m)[39m
+    at [90m/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/workspaceRestore.ts:332:10
+    at commitHookEffectListMount (/Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4mreact-dom[24m/cjs/react-dom.development.js:23189:26)
+    at commitPassiveMountOnFiber (/Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4mreact-dom[24m/cjs/react-dom.development.js:24970:11)
+    at commitPassiveMountEffects_complete (/Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4mreact-dom[24m/cjs/react-dom.development.js:24930:9)
+    at commitPassiveMountEffects_begin (/Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4mreact-dom[24m/cjs/react-dom.development.js:24917:7)
+    at commitPassiveMountEffects (/Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4mreact-dom[24m/cjs/react-dom.development.js:24905:3)
+
+stderr | src/state/workspaceRestore.test.tsx > workspaceRestore coordinator > preserves live backendId on HMR recovery when daemon session remains live
+Session restore on boot skipped: TypeError: storage.getItem is not a function
+    at applyHistorySettingOverride [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/browserSettings.ts:209:23[90m)[39m
+    at loadBrowserSettings [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/browserSettings.ts:225:12[90m)[39m
+    at serializeWorkspaceState [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/sessionPersistence.ts:55:27[90m)[39m
+    at runRestore [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/workspaceRestore.ts:245:21[90m)[39m
+    at [90m/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/workspaceRestore.ts:332:10
+    at commitHookEffectListMount (/Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4mreact-dom[24m/cjs/react-dom.development.js:23189:26)
+    at commitPassiveMountOnFiber (/Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4mreact-dom[24m/cjs/react-dom.development.js:24970:11)
+    at commitPassiveMountEffects_complete (/Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4mreact-dom[24m/cjs/react-dom.development.js:24930:9)
+    at commitPassiveMountEffects_begin (/Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4mreact-dom[24m/cjs/react-dom.development.js:24917:7)
+    at commitPassiveMountEffects (/Users/indo/code/project/orca-lite-wt/herdr-wave1/ui/node_modules/[4mreact-dom[24m/cjs/react-dom.development.js:24905:3)
+
+stderr | src/state/workspaceRestore.test.tsx > workspaceRestore coordinator > restores again after the workspace was switched away and back
+Session restore on boot skipped: TypeError: storage.getItem is not a function
+    at applyHistorySettingOverride [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/browserSettings.ts:209:23[90m)[39m
+    at loadBrowserSettings [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/browserSettings.ts:225:12[90m)[39m
+    at deserializeWorkspaceState [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/lib/sessionPersistence.ts:323:27[90m)[39m
+    at runRestore [90m(/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui/[39msrc/state/workspaceRestore.ts:282:31[90m)[39m
+
+ ❯ src/state/workspaceRestore.test.tsx (19 tests | 15 failed) 1025ms
+   × workspaceRestore coordinator > preloads mixed local and paired layouts while the local daemon is unavailable 5ms
+     → storage.getItem is not a function
+   × workspaceRestore coordinator > preserves newer HMR state and does not restore stale preloaded snapshot when recoveredFromHmr is true 0ms
+     → storage.getItem is not a function
+   × workspaceRestore coordinator > preloads every persisted workspace snapshot before project switching 0ms
+     → storage.getItem is not a function
+   × workspaceRestore coordinator > exposes preloaded tabs on the first render of a project switch 0ms
+     → storage.getItem is not a function
+   × workspaceRestore coordinator > transitions from idle -> loading -> restored on successful disk restore 7ms
+     → expected "spy" to be called 1 times, but got 0 times
+   × workspaceRestore coordinator > does not start restore when enabled is false, and runs restore when enabled becomes true 2ms
+     → expected 'failed' to be 'restored' // Object.is equality
+   × workspaceRestore coordinator > safely cancels in-flight restore on StrictMode unmount and allows second mount to complete 2ms
+     → expected "spy" to be called 1 times, but got 0 times
+   ✓ workspaceRestore coordinator > marks workspace as restored immediately on HMR recovery without disk read when no HMR state is registered 0ms
+   × workspaceRestore coordinator > reconciles stale session to null backendId on HMR recovery when live daemon session list is empty 3ms
+     → expected "spy" to be called 1 times, but got 0 times
+   × workspaceRestore coordinator > preserves live backendId on HMR recovery when daemon session remains live 1ms
+     → expected "spy" to be called 1 times, but got 0 times
+   × workspaceRestore coordinator > restores again after the workspace was switched away and back 1ms
+     → expected 'failed' to be 'restored' // Object.is equality
+   ✓ workspaceRestore coordinator > isolates restore status per workspace 0ms
+   ✓ workspaceRestore coordinator > transitions to failed status if loadSession throws an unhandled error 1ms
+   ✓ workspaceRestore coordinator > propagates daemon list failure instead of treating it as an empty live-session set 1ms
+   × workspaceRestore coordinator > restores SSH pane identity while the daemon list is temporarily unavailable 1001ms
+     → Test timed out in 1000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+   × workspaceRestore coordinator > keeps persisted backend mappings untouched and fails restore when daemon listing fails 1ms
+     → expected 'idle' to be 'failed' // Object.is equality
+   × workspaceRestore coordinator > reconciles sessions with daemon epoch and backend ID matching from live session query 0ms
+     → expected "spy" to be called 1 times, but got 0 times
+   × workspaceRestore coordinator > marks session as exited without auto-respawn when daemon epoch has changed 0ms
+     → expected "spy" to be called 1 times, but got 0 times
+   × workspaceRestore coordinator > preserves live backend session identity, agent metadata, and tab ownership without calling spawnTerminal 0ms
+     → expected "spy" to be called 1 times, but got 0 times
+(node:54578) Warning: `--localstorage-file` was provided without a valid path
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/lib/sessionPersistence.test.ts (35 tests | 31 failed) 11ms
+   × sessionPersistence v3 serialization and migration > preserves paired ownership and proxy identity despite local inventory absence 4ms
+     → storage.getItem is not a function
+   × sessionPersistence v3 serialization and migration > projects paired targets without embedding credential fields 0ms
+     → storage.getItem is not a function
+   × sessionPersistence v3 serialization and migration > does not trust incomplete inventory as proof of local process death 0ms
+     → storage.getItem is not a function
+   × sessionPersistence v3 serialization and migration > quarantines an invalid paired workspace without affecting another row 0ms
+     → storage.getItem is not a function
+   × sessionPersistence v3 serialization and migration > retains Git grouping metadata in session snapshots and subsequent saves 0ms
+     → storage.getItem is not a function
+   × sessionPersistence v3 serialization and migration > serializes typed terminal tabs, pane ownership, pinned/expanded state, and separate local/backend identities 0ms
+     → storage.getItem is not a function
+   × sessionPersistence v3 serialization and migration > does not serialize terminal sessions that no tab or pane references 0ms
+     → storage.getItem is not a function
+   × sessionPersistence v3 serialization and migration > round-trips Orca-style split tab groups without changing either tab's pane ownership 2ms
+     → storage.getItem is not a function
+   × sessionPersistence v3 serialization and migration > matches live native PTYs by backendSessionId instead of the frontend-local session id 0ms
+     → storage.getItem is not a function
+   × sessionPersistence v3 serialization and migration > drops persisted terminal sessions that no restored tab or pane references 0ms
+     → storage.getItem is not a function
+   × sessionPersistence v3 serialization and migration > round-trips explicit browser metadata rather than guessing browser kind from a pane tree 0ms
+     → storage.getItem is not a function
+   × sessionPersistence v3 serialization and migration > migrates v1 worktree identity and legacy session identifiers 0ms
+     → storage.getItem is not a function
+   × sessionPersistence v3 serialization and migration > maps a v1 pane tree with no per-leaf mapping by leafId rather than tab id 0ms
+     → storage.getItem is not a function
+   × sessionPersistence v3 serialization and migration > round-trips multi-worktree workspace state with active and parked worktree layouts without session leakage 0ms
+     → storage.getItem is not a function
+   × sessionPersistence v3 serialization and migration > deserializes existing v2 terminal sessionIdsByLeafId into terminal PaneContent for every leaf 0ms
+     → storage.getItem is not a function
+   × sessionPersistence v3 serialization and migration > round-trips mixed terminal/browser content preserving tree, browser metadata, and terminal session ownership with runtime browserId policy 0ms
+     → storage.getItem is not a function
+   × sessionPersistence v3 serialization and migration > persists decimal-string daemonEpoch and lastOutputSequence separately from local/backend IDs 0ms
+     → storage.getItem is not a function
+   × sessionPersistence v3 serialization and migration > reconciles only when both daemon epoch and backendSessionId match current daemon ListSessions result 0ms
+     → storage.getItem is not a function
+   × sessionPersistence v3 serialization and migration > marks sessions exited/lost on daemon epoch change without auto-respawn 0ms
+     → storage.getItem is not a function
+   × sessionPersistence v3 serialization and migration > persists and restores activityBySessionId for active referenced tabs and drops orphan session activity 0ms
+     → storage.getItem is not a function
+   × sessionPersistence v3 serialization and migration > preserves live working and waiting claims for surviving daemon sessions, but drops working claim for dead sessions 0ms
+     → storage.getItem is not a function
+   × sessionPersistence v3 serialization and migration > marks session exited and settles working activity to done when daemon reports running: false 0ms
+     → storage.getItem is not a function
+   × sessionPersistence v3 serialization and migration > restores activities with seen: true so startup does not trigger attention frames on any pane 0ms
+     → storage.getItem is not a function
+   × sessionPersistence v3 serialization and migration > persists and restores agentType and agentSessionId across serialization and deserialization 0ms
+     → storage.getItem is not a function
+   × sessionPersistence v3 serialization and migration > preserves agentType and agentSessionId when daemon epoch mismatch marks session exited and nulls backendSessionId 0ms
+     → storage.getItem is not a function
+   × sessionPersistence v3 serialization and migration > loads legacy save files without agent fields without throwing and sets agentType/agentSessionId to null 0ms
+     → storage.getItem is not a function
+   × sessionPersistence v3 serialization and migration > keeps live backend identity, pane leaf ownership, agent metadata, CWD, and output sequence across warm disk restore 0ms
+     → storage.getItem is not a function
+   × sessionPersistence v3 serialization and migration > persists providerSession and never serializes transient reconnect locks or in-flight state 0ms
+     → storage.getItem is not a function
+   × sessionPersistence v3 serialization and migration > falls back to activityBySessionId agentType during serialization and deserialization when session.agentType is unset 0ms
+     → storage.getItem is not a function
+   ✓ sessionPersistence v3 serialization and migration > migrateLegacyAgentType > migrates legacy gemini agent type to antigravity and preserves other inputs 0ms
+   × sessionPersistence v3 serialization and migration > migrates legacy gemini agentType to antigravity and generates providerSession during restore 0ms
+     → storage.getItem is not a function
+   × sessionPersistence v3 serialization and migration > migrates restored activityBySessionId agentType from gemini to antigravity while leaving non-legacy untouched 0ms
+     → storage.getItem is not a function
+   ✓ sessionPersistenceKey > changes when an agent rotates its conversation id inside the same pane 0ms
+   ✓ sessionPersistenceKey > is stable while nothing persistable changed 0ms
+   ✓ sessionPersistenceKey > still changes on backend rebinding and lifecycle transitions 0ms
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 46 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/state/workspaceRestore.test.tsx > workspaceRestore coordinator > preloads mixed local and paired layouts while the local daemon is unavailable
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ deserializeWorkspaceState src/lib/sessionPersistence.ts:323:27
+ ❯ Module.preloadWorkspaceSnapshots src/state/workspaceRestore.ts:140:27
+ ❯ src/state/workspaceRestore.test.tsx:92:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/46]⎯
+
+ FAIL  src/state/workspaceRestore.test.tsx > workspaceRestore coordinator > preserves newer HMR state and does not restore stale preloaded snapshot when recoveredFromHmr is true
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ deserializeWorkspaceState src/lib/sessionPersistence.ts:323:27
+ ❯ Module.preloadWorkspaceSnapshots src/state/workspaceRestore.ts:140:27
+ ❯ src/state/workspaceRestore.test.tsx:102:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/46]⎯
+
+ FAIL  src/state/workspaceRestore.test.tsx > workspaceRestore coordinator > preloads every persisted workspace snapshot before project switching
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ deserializeWorkspaceState src/lib/sessionPersistence.ts:323:27
+ ❯ Module.preloadWorkspaceSnapshots src/state/workspaceRestore.ts:140:27
+ ❯ src/state/workspaceRestore.test.tsx:179:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/46]⎯
+
+ FAIL  src/state/workspaceRestore.test.tsx > workspaceRestore coordinator > exposes preloaded tabs on the first render of a project switch
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ deserializeWorkspaceState src/lib/sessionPersistence.ts:323:27
+ ❯ Module.preloadWorkspaceSnapshots src/state/workspaceRestore.ts:140:27
+ ❯ src/state/workspaceRestore.test.tsx:227:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/46]⎯
+
+ FAIL  src/state/workspaceRestore.test.tsx > workspaceRestore coordinator > transitions from idle -> loading -> restored on successful disk restore
+AssertionError: expected "spy" to be called 1 times, but got 0 times
+ ❯ src/state/workspaceRestore.test.tsx:308:30
+    306|     });
+    307| 
+    308|     expect(restoreWorkspace).toHaveBeenCalledTimes(1);
+       |                              ^
+    309|     expect(getWorkspaceRestoreStatus(workspaceId)).toBe("restored");
+    310|     unmount();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/46]⎯
+
+ FAIL  src/state/workspaceRestore.test.tsx > workspaceRestore coordinator > does not start restore when enabled is false, and runs restore when enabled becomes true
+AssertionError: expected 'failed' to be 'restored' // Object.is equality
+
+Expected: [32m"[7mrestor[27med"[39m
+Received: [31m"[7mfail[27med"[39m
+
+ ❯ src/state/workspaceRestore.test.tsx:343:52
+    341|     });
+    342| 
+    343|     expect(getWorkspaceRestoreStatus(workspaceId)).toBe("restored");
+       |                                                    ^
+    344|     expect(loadSessionFn).toHaveBeenCalledTimes(1);
+    345|     expect(restoreWorkspace).toHaveBeenCalledTimes(1);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/46]⎯
+
+ FAIL  src/state/workspaceRestore.test.tsx > workspaceRestore coordinator > safely cancels in-flight restore on StrictMode unmount and allows second mount to complete
+AssertionError: expected "spy" to be called 1 times, but got 0 times
+ ❯ src/state/workspaceRestore.test.tsx:403:30
+    401|       await secondSessionPromise;
+    402|     });
+    403|     expect(restoreWorkspace).toHaveBeenCalledTimes(1);
+       |                              ^
+    404|     expect(getWorkspaceRestoreStatus(workspaceId)).toBe("restored");
+    405|     secondMount.unmount();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/46]⎯
+
+ FAIL  src/state/workspaceRestore.test.tsx > workspaceRestore coordinator > reconciles stale session to null backendId on HMR recovery when live daemon session list is empty
+AssertionError: expected "spy" to be called 1 times, but got 0 times
+ ❯ src/state/workspaceRestore.test.tsx:472:30
+    470| 
+    471|     expect(loadSessionFn).not.toHaveBeenCalled();
+    472|     expect(restoreWorkspace).toHaveBeenCalledTimes(1);
+       |                              ^
+    473|     const restored = restoreWorkspace.mock.calls[0][0] as WorkspaceSta…
+    474|     expect(restored.sessions["sess-stale"]).toMatchObject({
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[8/46]⎯
+
+ FAIL  src/state/workspaceRestore.test.tsx > workspaceRestore coordinator > preserves live backendId on HMR recovery when daemon session remains live
+AssertionError: expected "spy" to be called 1 times, but got 0 times
+ ❯ src/state/workspaceRestore.test.tsx:530:30
+    528| 
+    529|     expect(loadSessionFn).not.toHaveBeenCalled();
+    530|     expect(restoreWorkspace).toHaveBeenCalledTimes(1);
+       |                              ^
+    531|     const restored = restoreWorkspace.mock.calls[0][0] as WorkspaceSta…
+    532|     expect(restored.sessions["sess-live"]).toMatchObject({
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[9/46]⎯
+
+ FAIL  src/state/workspaceRestore.test.tsx > workspaceRestore coordinator > restores again after the workspace was switched away and back
+AssertionError: expected 'failed' to be 'restored' // Object.is equality
+
+Expected: [32m"[7mrestor[27med"[39m
+Received: [31m"[7mfail[27med"[39m
+
+ ❯ src/state/workspaceRestore.test.tsx:562:52
+    560|       await Promise.resolve();
+    561|     });
+    562|     expect(getWorkspaceRestoreStatus("project-a")).toBe("restored");
+       |                                                    ^
+    563|     const callsAfterFirstRestore = loadSessionFn.mock.calls.length;
+    564| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[10/46]⎯
+
+ FAIL  src/state/workspaceRestore.test.tsx > workspaceRestore coordinator > restores SSH pane identity while the daemon list is temporarily unavailable
+Error: Test timed out in 1000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+ ❯ src/state/workspaceRestore.test.tsx:618:3
+    616|   });
+    617| 
+    618|   it("restores SSH pane identity while the daemon list is temporarily …
+       |   ^
+    619|     const workspaceId = "ssh:list-unavailable";
+    620|     const persisted = persistedSingleTerminal(workspaceId, "stable", "…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[11/46]⎯
+
+ FAIL  src/state/workspaceRestore.test.tsx > workspaceRestore coordinator > keeps persisted backend mappings untouched and fails restore when daemon listing fails
+AssertionError: expected 'idle' to be 'failed' // Object.is equality
+
+Expected: [32m"[7mfa[27mile[7md[27m"[39m
+Received: [31m"i[7md[27mle"[39m
+
+ ❯ src/state/workspaceRestore.test.tsx:661:52
+    659|     });
+    660| 
+    661|     expect(getWorkspaceRestoreStatus(workspaceId)).toBe("failed");
+       |                                                    ^
+    662|     expect(restoreWorkspace).not.toHaveBeenCalled();
+    663|     expect(tauriMocks.spawnTerminal).not.toHaveBeenCalled();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[12/46]⎯
+
+ FAIL  src/state/workspaceRestore.test.tsx > workspaceRestore coordinator > reconciles sessions with daemon epoch and backend ID matching from live session query
+AssertionError: expected "spy" to be called 1 times, but got 0 times
+ ❯ src/state/workspaceRestore.test.tsx:691:30
+    689|       await Promise.resolve();
+    690|     });
+    691|     expect(restoreWorkspace).toHaveBeenCalledTimes(1);
+       |                              ^
+    692|     const restored = restoreWorkspace.mock.calls[0][0] as WorkspaceSta…
+    693|     expect(restored.sessions["sess-1"]).toMatchObject({
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[13/46]⎯
+
+ FAIL  src/state/workspaceRestore.test.tsx > workspaceRestore coordinator > marks session as exited without auto-respawn when daemon epoch has changed
+AssertionError: expected "spy" to be called 1 times, but got 0 times
+ ❯ src/state/workspaceRestore.test.tsx:724:30
+    722|       await Promise.resolve();
+    723|     });
+    724|     expect(restoreWorkspace).toHaveBeenCalledTimes(1);
+       |                              ^
+    725|     const restored = restoreWorkspace.mock.calls[0][0] as WorkspaceSta…
+    726|     expect(restored.sessions["sess-1"]).toMatchObject({
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[14/46]⎯
+
+ FAIL  src/state/workspaceRestore.test.tsx > workspaceRestore coordinator > preserves live backend session identity, agent metadata, and tab ownership without calling spawnTerminal
+AssertionError: expected "spy" to be called 1 times, but got 0 times
+ ❯ src/state/workspaceRestore.test.tsx:827:30
+    825|     });
+    826| 
+    827|     expect(restoreWorkspace).toHaveBeenCalledTimes(1);
+       |                              ^
+    828|     const restored = restoreWorkspace.mock.calls[0][0] as WorkspaceSta…
+    829| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[15/46]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > preserves paired ownership and proxy identity despite local inventory absence
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ serializeWorkspaceState src/lib/sessionPersistence.ts:55:27
+ ❯ src/lib/sessionPersistence.test.ts:100:19
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[16/46]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > projects paired targets without embedding credential fields
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ serializeWorkspaceState src/lib/sessionPersistence.ts:55:27
+ ❯ src/lib/sessionPersistence.test.ts:113:19
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[17/46]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > does not trust incomplete inventory as proof of local process death
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ serializeWorkspaceState src/lib/sessionPersistence.ts:55:27
+ ❯ src/lib/sessionPersistence.test.ts:118:19
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[18/46]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > quarantines an invalid paired workspace without affecting another row
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ serializeWorkspaceState src/lib/sessionPersistence.ts:55:27
+ ❯ src/lib/sessionPersistence.test.ts:124:19
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[19/46]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > retains Git grouping metadata in session snapshots and subsequent saves
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ serializeWorkspaceState src/lib/sessionPersistence.ts:55:27
+ ❯ src/lib/sessionPersistence.test.ts:137:19
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[20/46]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > serializes typed terminal tabs, pane ownership, pinned/expanded state, and separate local/backend identities
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ serializeWorkspaceState src/lib/sessionPersistence.ts:55:27
+ ❯ src/lib/sessionPersistence.test.ts:143:24
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[21/46]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > does not serialize terminal sessions that no tab or pane references
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ serializeWorkspaceState src/lib/sessionPersistence.ts:55:27
+ ❯ src/lib/sessionPersistence.test.ts:179:24
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[22/46]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > round-trips Orca-style split tab groups without changing either tab's pane ownership
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ serializeWorkspaceState src/lib/sessionPersistence.ts:55:27
+ ❯ src/lib/sessionPersistence.test.ts:200:24
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[23/46]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > matches live native PTYs by backendSessionId instead of the frontend-local session id
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ serializeWorkspaceState src/lib/sessionPersistence.ts:55:27
+ ❯ src/lib/sessionPersistence.test.ts:214:24
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[24/46]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > drops persisted terminal sessions that no restored tab or pane references
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ serializeWorkspaceState src/lib/sessionPersistence.ts:55:27
+ ❯ src/lib/sessionPersistence.test.ts:226:24
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[25/46]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > round-trips explicit browser metadata rather than guessing browser kind from a pane tree
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ saveBrowserSettings src/lib/browserSettings.ts:233:46
+ ❯ src/lib/sessionPersistence.test.ts:242:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[26/46]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > migrates v1 worktree identity and legacy session identifiers
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ deserializeWorkspaceState src/lib/sessionPersistence.ts:323:27
+ ❯ src/lib/sessionPersistence.test.ts:318:22
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[27/46]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > maps a v1 pane tree with no per-leaf mapping by leafId rather than tab id
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ deserializeWorkspaceState src/lib/sessionPersistence.ts:323:27
+ ❯ src/lib/sessionPersistence.test.ts:364:22
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[28/46]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > round-trips multi-worktree workspace state with active and parked worktree layouts without session leakage
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ saveBrowserSettings src/lib/browserSettings.ts:233:46
+ ❯ src/lib/sessionPersistence.test.ts:373:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[29/46]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > deserializes existing v2 terminal sessionIdsByLeafId into terminal PaneContent for every leaf
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ deserializeWorkspaceState src/lib/sessionPersistence.ts:323:27
+ ❯ src/lib/sessionPersistence.test.ts:631:22
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[30/46]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > round-trips mixed terminal/browser content preserving tree, browser metadata, and terminal session ownership with runtime browserId policy
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ saveBrowserSettings src/lib/browserSettings.ts:233:46
+ ❯ src/lib/sessionPersistence.test.ts:650:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[31/46]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > persists decimal-string daemonEpoch and lastOutputSequence separately from local/backend IDs
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ serializeWorkspaceState src/lib/sessionPersistence.ts:55:27
+ ❯ src/lib/sessionPersistence.test.ts:800:24
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[32/46]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > reconciles only when both daemon epoch and backendSessionId match current daemon ListSessions result
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ serializeWorkspaceState src/lib/sessionPersistence.ts:55:27
+ ❯ src/lib/sessionPersistence.test.ts:831:24
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[33/46]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > marks sessions exited/lost on daemon epoch change without auto-respawn
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ serializeWorkspaceState src/lib/sessionPersistence.ts:55:27
+ ❯ src/lib/sessionPersistence.test.ts:881:24
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[34/46]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > persists and restores activityBySessionId for active referenced tabs and drops orphan session activity
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ serializeWorkspaceState src/lib/sessionPersistence.ts:55:27
+ ❯ src/lib/sessionPersistence.test.ts:928:24
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[35/46]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > preserves live working and waiting claims for surviving daemon sessions, but drops working claim for dead sessions
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ serializeWorkspaceState src/lib/sessionPersistence.ts:55:27
+ ❯ src/lib/sessionPersistence.test.ts:1017:24
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[36/46]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > marks session exited and settles working activity to done when daemon reports running: false
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ serializeWorkspaceState src/lib/sessionPersistence.ts:55:27
+ ❯ src/lib/sessionPersistence.test.ts:1054:24
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[37/46]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > restores activities with seen: true so startup does not trigger attention frames on any pane
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ serializeWorkspaceState src/lib/sessionPersistence.ts:55:27
+ ❯ src/lib/sessionPersistence.test.ts:1086:24
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[38/46]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > persists and restores agentType and agentSessionId across serialization and deserialization
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ serializeWorkspaceState src/lib/sessionPersistence.ts:55:27
+ ❯ src/lib/sessionPersistence.test.ts:1111:24
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[39/46]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > preserves agentType and agentSessionId when daemon epoch mismatch marks session exited and nulls backendSessionId
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ serializeWorkspaceState src/lib/sessionPersistence.ts:55:27
+ ❯ src/lib/sessionPersistence.test.ts:1143:24
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[40/46]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > loads legacy save files without agent fields without throwing and sets agentType/agentSessionId to null
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ deserializeWorkspaceState src/lib/sessionPersistence.ts:323:27
+ ❯ src/lib/sessionPersistence.test.ts:1215:22
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[41/46]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > keeps live backend identity, pane leaf ownership, agent metadata, CWD, and output sequence across warm disk restore
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ serializeWorkspaceState src/lib/sessionPersistence.ts:55:27
+ ❯ src/lib/sessionPersistence.test.ts:1243:24
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[42/46]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > persists providerSession and never serializes transient reconnect locks or in-flight state
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ serializeWorkspaceState src/lib/sessionPersistence.ts:55:27
+ ❯ src/lib/sessionPersistence.test.ts:1307:24
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[43/46]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > falls back to activityBySessionId agentType during serialization and deserialization when session.agentType is unset
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ serializeWorkspaceState src/lib/sessionPersistence.ts:55:27
+ ❯ src/lib/sessionPersistence.test.ts:1353:24
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[44/46]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > migrates legacy gemini agentType to antigravity and generates providerSession during restore
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ deserializeWorkspaceState src/lib/sessionPersistence.ts:323:27
+ ❯ src/lib/sessionPersistence.test.ts:1426:22
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[45/46]⎯
+
+ FAIL  src/lib/sessionPersistence.test.ts > sessionPersistence v3 serialization and migration > migrates restored activityBySessionId agentType from gemini to antigravity while leaving non-legacy untouched
+TypeError: storage.getItem is not a function
+ ❯ applyHistorySettingOverride src/lib/browserSettings.ts:209:23
+    207| 
+    208| function applyHistorySettingOverride(settings: BrowserSettingsState, s…
+    209|   const raw = storage.getItem(BROWSER_HISTORY_ENABLED_STORAGE_KEY);
+       |                       ^
+    210|   if (raw === "true" || raw === "false") {
+    211|     return { ...settings, rememberBrowsingHistory: raw === "true" };
+ ❯ loadBrowserSettings src/lib/browserSettings.ts:225:12
+ ❯ deserializeWorkspaceState src/lib/sessionPersistence.ts:323:27
+ ❯ src/lib/sessionPersistence.test.ts:1516:22
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[46/46]⎯
+
+
+ Test Files  2 failed | 1 passed (3)
+      Tests  46 failed | 18 passed (64)
+   Start at  15:44:37
+   Duration  2.65s (transform 199ms, setup 141ms, collect 467ms, tests 1.14s, environment 392ms, prepare 75ms)
+
+error: script "test" exited with code 1

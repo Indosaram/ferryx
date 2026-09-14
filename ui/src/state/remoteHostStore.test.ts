@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   createRemoteHostStore,
@@ -22,12 +22,17 @@ function makeHost(overrides: Partial<HostEndpoint> = {}): HostEndpoint {
 
 describe("remoteHostStore", () => {
   let store: RemoteHostStore;
-
   beforeEach(() => {
     if (typeof localStorage !== "undefined") {
       localStorage.clear();
     }
     store = createRemoteHostStore();
+  });
+
+  afterEach(() => {
+    if (typeof localStorage !== "undefined") {
+      localStorage.clear();
+    }
   });
 
   it("starts with no hosts, no active host, and discovery off", () => {

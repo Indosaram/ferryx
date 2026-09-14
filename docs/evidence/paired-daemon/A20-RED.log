@@ -1,0 +1,124 @@
+v22.22.3
+$ vitest run --maxWorkers=1 src/App.pairedDaemon.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+ ❯ src/App.pairedDaemon.test.tsx (2 tests | 2 failed) 127ms
+   × App paired desktop shell > preserves paired ownership and reports disabled native support without local registration 66ms
+     → expected "spy" to not be called at all, but actually been called 2 times[90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m    Array [
+      Object {
+        "repoPath": "/srv/repo",
+        "workspaceId": "daemon:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      },
+    ]
+
+[1m  2nd spy call:
+
+[22m    Array [
+      Object {
+        "repoPath": "/srv/repo",
+        "workspaceId": "daemon:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      },
+    ]
+[39m[90m
+
+Number of calls: [1m2[22m
+[39m
+   × App paired desktop shell > keeps local tabs and the palette mounted when inventory selection changes 61ms
+     → expected "spy" to be called 2 times, but got 0 times
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/App.pairedDaemon.test.tsx > App paired desktop shell > preserves paired ownership and reports disabled native support without local registration
+AssertionError: expected "spy" to not be called at all, but actually been called 2 times[90m
+
+Received: 
+
+[1m  1st spy call:
+
+[22m    Array [
+      Object {
+        "repoPath": "/srv/repo",
+        "workspaceId": "daemon:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      },
+    ]
+
+[1m  2nd spy call:
+
+[22m    Array [
+      Object {
+        "repoPath": "/srv/repo",
+        "workspaceId": "daemon:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      },
+    ]
+[39m[90m
+
+Number of calls: [1m2[22m
+[39m
+ ❯ src/App.pairedDaemon.test.tsx:110:40
+    108|     seed([paired]);
+    109|     await mount();
+    110|     expect(native.registerProject).not.toHaveBeenCalled();
+       |                                        ^
+    111|     expect(native.registerRemoteProject).not.toHaveBeenCalled();
+    112|     expect(screen.getByRole("main")).toBeInTheDocument();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+ FAIL  src/App.pairedDaemon.test.tsx > App paired desktop shell > keeps local tabs and the palette mounted when inventory selection changes
+AssertionError: expected "spy" to be called 2 times, but got 0 times
+ ❯ src/App.pairedDaemon.test.tsx:131:42
+    129|     expect(screen.getByTestId("active-tab").textContent).toBe(tab);
+    130|     await act(async () => { fireEvent.click(screen.getByRole("button",…
+    131|     expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(2);
+       |                                          ^
+    132|     expect(native.spawnTerminalDetailed).toHaveBeenLastCalledWith(expe…
+    133|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  2 failed (2)
+   Start at  15:53:54
+   Duration  1.93s (transform 332ms, setup 154ms, collect 956ms, tests 127ms, environment 303ms, prepare 35ms)
+
+error: script "test" exited with code 1
+
+ASSERTION MUTATION: invert no-local-registration assertion
+$ vitest run --maxWorkers=1 src/App.pairedDaemon.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+ ❯ src/App.pairedDaemon.test.tsx (2 tests | 1 failed) 137ms
+   × App paired desktop shell > preserves paired ownership and reports disabled native support without local registration 52ms
+     → expected "spy" to be called at least once
+   ✓ App paired desktop shell > keeps local tabs and the palette mounted when inventory selection changes 85ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/App.pairedDaemon.test.tsx > App paired desktop shell > preserves paired ownership and reports disabled native support without local registration
+AssertionError: expected "spy" to be called at least once
+ ❯ src/App.pairedDaemon.test.tsx:109:36
+    107|     seed([paired]);
+    108|     await mount();
+    109|     expect(native.registerProject).toHaveBeenCalled();
+       |                                    ^
+    110|     expect(native.registerRemoteProject).not.toHaveBeenCalled();
+    111|     expect(screen.getByRole("main")).toBeInTheDocument();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 1 passed (2)
+   Start at  15:56:38
+   Duration  1.74s (transform 312ms, setup 161ms, collect 990ms, tests 137ms, environment 335ms, prepare 31ms)
+
+error: script "test" exited with code 1

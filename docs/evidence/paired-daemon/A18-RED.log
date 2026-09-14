@@ -1,0 +1,2086 @@
+$ vitest run --maxWorkers=1 src/components/ProjectDialogs.pairedDaemon.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+ ❯ src/components/ProjectDialogs.pairedDaemon.test.tsx (7 tests | 7 failed) 36ms
+   × browses paired home, cancels stale host results, requests hidden folders, and adopts canonical registration without SSH/local IPC 20ms
+     → Unable to find an element by: [data-testid="project-type-paired-daemon"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mclass[39m=[32m"fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6"[39m
+      [33mrole[39m=[32m"presentation"[39m
+    [36m>[39m
+      [36m<div[39m
+        [33maria-label[39m=[32m"Add Project"[39m
+        [33mclass[39m=[32m"w-full max-w-[420px] overflow-hidden rounded-lg border border-border bg-card shadow-2xl"[39m
+        [33mrole[39m=[32m"dialog"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex h-9 items-center border-b border-border px-3"[39m
+        [36m>[39m
+          [36m<svg[39m
+            [33mclass[39m=[32m"lucide lucide-folder-git2 mr-2 size-3.5 text-muted-foreground"[39m
+            [33mfill[39m=[32m"none"[39m
+            [33mheight[39m=[32m"24"[39m
+            [33mstroke[39m=[32m"currentColor"[39m
+            [33mstroke-linecap[39m=[32m"round"[39m
+            [33mstroke-linejoin[39m=[32m"round"[39m
+            [33mstroke-width[39m=[32m"2"[39m
+            [33mviewBox[39m=[32m"0 0 24 24"[39m
+            [33mwidth[39m=[32m"24"[39m
+            [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+          [36m>[39m
+            [36m<path[39m
+              [33md[39m=[32m"M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"[39m
+            [36m/>[39m
+            [36m<circle[39m
+              [33mcx[39m=[32m"13"[39m
+              [33mcy[39m=[32m"12"[39m
+              [33mr[39m=[32m"2"[39m
+            [36m/>[39m
+            [36m<path[39m
+              [33md[39m=[32m"M18 19c-2.8 0-5-2.2-5-5v8"[39m
+            [36m/>[39m
+            [36m<circle[39m
+              [33mcx[39m=[32m"20"[39m
+              [33mcy[39m=[32m"19"[39m
+              [33mr[39m=[32m"2"[39m
+            [36m/>[39m
+          [36m</svg>[39m
+          [36m<h2[39m
+            [33mclass[39m=[32m"text-[13px] font-medium"[39m
+          [36m>[39m
+            [0mAdd Project[0m
+          [36m</h2>[39m
+          [36m<button[39m
+            [33maria-label[39m=[32m"Close Add Project"[39m
+            [33mclass[39m=[32m"ml-auto rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [36m<svg[39m
+              [33mclass[39m=[32m"lucide lucide-x size-3.5"[39m
+              [33mfill[39m=[32m"none"[39m
+              [33mheight[39m=[32m"24"[39m
+              [33mstroke[39m=[32m"currentColor"[39m
+              [33mstroke-linecap[39m=[32m"round"[39m
+              [33mstroke-linejoin[39m=[32m"round"[39m
+              [33mstroke-width[39m=[32m"2"[39m
+              [33mviewBox[39m=[32m"0 0 24 24"[39m
+              [33mwidth[39m=[32m"24"[39m
+              [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+            [36m>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M18 6 6 18"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m6 6 12 12"[39m
+              [36m/>[39m
+            [36m</svg>[39m
+          [36m</button>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"space-y-3 p-3"[39m
+        [36m>[39m
+          [36m<p[39m
+            [33mclass[39m=[32m"text-xs text-muted-foreground"[39m
+          [36m>[39m
+            [0mSelect where the project repository is located.[0m
+          [36m</p>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"space-y-2"[39m
+          [36m>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"group flex w-full items-start gap-3 rounded-md border border-border/80 bg-background p-3 text-left transition-colors hover:bg-accent/40 focus-visible:border-ring focus:outline-none focus:ring-1 focus:ring-ring"[39m
+              [33mdata-testid[39m=[32m"project-type-local"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-folder-git2 mt-0.5 size-4 text-primary shrink-0 transition-transform group-hover:scale-105"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"[39m
+                [36m/>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"13"[39m
+                  [33mcy[39m=[32m"12"[39m
+                  [33mr[39m=[32m"2"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M18 19c-2.8 0-5-2.2-5-5v8"[39m
+                [36m/>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"20"[39m
+                  [33mcy[39m=[32m"19"[39m
+                  [33mr[39m=[32m"2"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [36m<div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"text-xs font-medium text-foreground"[39m
+                [36m>[39m
+                  [0mLocal Project[0m
+                [36m</div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"mt-0.5 text-[11px] leading-normal text-muted-foreground"[39m
+                [36m>[39m
+                  [0mChoose a folder on this machine using the folder picker.[0m
+                [36m</div>[39m
+              [36m</div>[39m
+            [36m</button>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"group flex w-full items-start gap-3 rounded-md border border-border/80 bg-background p-3 text-left transition-colors hover:bg-accent/40 focus-visible:border-ring focus:outline-none focus:ring-1 focus:ring-ring"[39m
+              [33mdata-testid[39m=[32m"project-type-remote"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-radio mt-0.5 size-4 text-primary shrink-0 transition-transform group-hover:scale-105"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M4.9 19.1C1 15.2 1 8.8 4.9 4.9"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"[39m
+                [36m/>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"12"[39m
+                  [33mcy[39m=[32m"12"[39m
+                  [33mr[39m=[32m"2"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M19.1 4.9C23 8.8 23 15.1 19.1 19"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [36m<div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"text-xs font-medium text-foreground"[39m
+                [36m>[39m
+                  [0mRemote (SSH)[0m
+                [36m</div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"mt-0.5 text-[11px] leading-normal text-muted-foreground"[39m
+                [36m>[39m
+                  [0mConnect to a repository hosted on an SSH machine.[0m
+                [36m</div>[39m
+              [36m</div>[39m
+            [36m</button>[39m
+          [36m</div>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex justify-end gap-2 border-t border-border px-3 py-2"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"h-7 rounded-md border border-border px-2.5 text-xs text-muted-foreground hover:bg-accent"[39m
+            [33mdata-testid[39m=[32m"add-project-cancel"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0mCancel[0m
+          [36m</button>[39m
+        [36m</div>[39m
+      [36m</div>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+   × fails closed for empty machines 3ms
+     → Unable to find an element by: [data-testid="project-type-paired-daemon"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mclass[39m=[32m"fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6"[39m
+      [33mrole[39m=[32m"presentation"[39m
+    [36m>[39m
+      [36m<div[39m
+        [33maria-label[39m=[32m"Add Project"[39m
+        [33mclass[39m=[32m"w-full max-w-[420px] overflow-hidden rounded-lg border border-border bg-card shadow-2xl"[39m
+        [33mrole[39m=[32m"dialog"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex h-9 items-center border-b border-border px-3"[39m
+        [36m>[39m
+          [36m<svg[39m
+            [33mclass[39m=[32m"lucide lucide-folder-git2 mr-2 size-3.5 text-muted-foreground"[39m
+            [33mfill[39m=[32m"none"[39m
+            [33mheight[39m=[32m"24"[39m
+            [33mstroke[39m=[32m"currentColor"[39m
+            [33mstroke-linecap[39m=[32m"round"[39m
+            [33mstroke-linejoin[39m=[32m"round"[39m
+            [33mstroke-width[39m=[32m"2"[39m
+            [33mviewBox[39m=[32m"0 0 24 24"[39m
+            [33mwidth[39m=[32m"24"[39m
+            [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+          [36m>[39m
+            [36m<path[39m
+              [33md[39m=[32m"M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"[39m
+            [36m/>[39m
+            [36m<circle[39m
+              [33mcx[39m=[32m"13"[39m
+              [33mcy[39m=[32m"12"[39m
+              [33mr[39m=[32m"2"[39m
+            [36m/>[39m
+            [36m<path[39m
+              [33md[39m=[32m"M18 19c-2.8 0-5-2.2-5-5v8"[39m
+            [36m/>[39m
+            [36m<circle[39m
+              [33mcx[39m=[32m"20"[39m
+              [33mcy[39m=[32m"19"[39m
+              [33mr[39m=[32m"2"[39m
+            [36m/>[39m
+          [36m</svg>[39m
+          [36m<h2[39m
+            [33mclass[39m=[32m"text-[13px] font-medium"[39m
+          [36m>[39m
+            [0mAdd Project[0m
+          [36m</h2>[39m
+          [36m<button[39m
+            [33maria-label[39m=[32m"Close Add Project"[39m
+            [33mclass[39m=[32m"ml-auto rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [36m<svg[39m
+              [33mclass[39m=[32m"lucide lucide-x size-3.5"[39m
+              [33mfill[39m=[32m"none"[39m
+              [33mheight[39m=[32m"24"[39m
+              [33mstroke[39m=[32m"currentColor"[39m
+              [33mstroke-linecap[39m=[32m"round"[39m
+              [33mstroke-linejoin[39m=[32m"round"[39m
+              [33mstroke-width[39m=[32m"2"[39m
+              [33mviewBox[39m=[32m"0 0 24 24"[39m
+              [33mwidth[39m=[32m"24"[39m
+              [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+            [36m>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M18 6 6 18"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m6 6 12 12"[39m
+              [36m/>[39m
+            [36m</svg>[39m
+          [36m</button>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"space-y-3 p-3"[39m
+        [36m>[39m
+          [36m<p[39m
+            [33mclass[39m=[32m"text-xs text-muted-foreground"[39m
+          [36m>[39m
+            [0mSelect where the project repository is located.[0m
+          [36m</p>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"space-y-2"[39m
+          [36m>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"group flex w-full items-start gap-3 rounded-md border border-border/80 bg-background p-3 text-left transition-colors hover:bg-accent/40 focus-visible:border-ring focus:outline-none focus:ring-1 focus:ring-ring"[39m
+              [33mdata-testid[39m=[32m"project-type-local"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-folder-git2 mt-0.5 size-4 text-primary shrink-0 transition-transform group-hover:scale-105"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"[39m
+                [36m/>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"13"[39m
+                  [33mcy[39m=[32m"12"[39m
+                  [33mr[39m=[32m"2"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M18 19c-2.8 0-5-2.2-5-5v8"[39m
+                [36m/>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"20"[39m
+                  [33mcy[39m=[32m"19"[39m
+                  [33mr[39m=[32m"2"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [36m<div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"text-xs font-medium text-foreground"[39m
+                [36m>[39m
+                  [0mLocal Project[0m
+                [36m</div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"mt-0.5 text-[11px] leading-normal text-muted-foreground"[39m
+                [36m>[39m
+                  [0mChoose a folder on this machine using the folder picker.[0m
+                [36m</div>[39m
+              [36m</div>[39m
+            [36m</button>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"group flex w-full items-start gap-3 rounded-md border border-border/80 bg-background p-3 text-left transition-colors hover:bg-accent/40 focus-visible:border-ring focus:outline-none focus:ring-1 focus:ring-ring"[39m
+              [33mdata-testid[39m=[32m"project-type-remote"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-radio mt-0.5 size-4 text-primary shrink-0 transition-transform group-hover:scale-105"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M4.9 19.1C1 15.2 1 8.8 4.9 4.9"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"[39m
+                [36m/>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"12"[39m
+                  [33mcy[39m=[32m"12"[39m
+                  [33mr[39m=[32m"2"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M19.1 4.9C23 8.8 23 15.1 19.1 19"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [36m<div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"text-xs font-medium text-foreground"[39m
+                [36m>[39m
+                  [0mRemote (SSH)[0m
+                [36m</div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"mt-0.5 text-[11px] leading-normal text-muted-foreground"[39m
+                [36m>[39m
+                  [0mConnect to a repository hosted on an SSH machine.[0m
+                [36m</div>[39m
+              [36m</div>[39m
+            [36m</button>[39m
+          [36m</div>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex justify-end gap-2 border-t border-border px-3 py-2"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"h-7 rounded-md border border-border px-2.5 text-xs text-muted-foreground hover:bg-accent"[39m
+            [33mdata-testid[39m=[32m"add-project-cancel"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0mCancel[0m
+          [36m</button>[39m
+        [36m</div>[39m
+      [36m</div>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+   × fails closed for unpaired machines 3ms
+     → Unable to find an element by: [data-testid="project-type-paired-daemon"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mclass[39m=[32m"fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6"[39m
+      [33mrole[39m=[32m"presentation"[39m
+    [36m>[39m
+      [36m<div[39m
+        [33maria-label[39m=[32m"Add Project"[39m
+        [33mclass[39m=[32m"w-full max-w-[420px] overflow-hidden rounded-lg border border-border bg-card shadow-2xl"[39m
+        [33mrole[39m=[32m"dialog"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex h-9 items-center border-b border-border px-3"[39m
+        [36m>[39m
+          [36m<svg[39m
+            [33mclass[39m=[32m"lucide lucide-folder-git2 mr-2 size-3.5 text-muted-foreground"[39m
+            [33mfill[39m=[32m"none"[39m
+            [33mheight[39m=[32m"24"[39m
+            [33mstroke[39m=[32m"currentColor"[39m
+            [33mstroke-linecap[39m=[32m"round"[39m
+            [33mstroke-linejoin[39m=[32m"round"[39m
+            [33mstroke-width[39m=[32m"2"[39m
+            [33mviewBox[39m=[32m"0 0 24 24"[39m
+            [33mwidth[39m=[32m"24"[39m
+            [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+          [36m>[39m
+            [36m<path[39m
+              [33md[39m=[32m"M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"[39m
+            [36m/>[39m
+            [36m<circle[39m
+              [33mcx[39m=[32m"13"[39m
+              [33mcy[39m=[32m"12"[39m
+              [33mr[39m=[32m"2"[39m
+            [36m/>[39m
+            [36m<path[39m
+              [33md[39m=[32m"M18 19c-2.8 0-5-2.2-5-5v8"[39m
+            [36m/>[39m
+            [36m<circle[39m
+              [33mcx[39m=[32m"20"[39m
+              [33mcy[39m=[32m"19"[39m
+              [33mr[39m=[32m"2"[39m
+            [36m/>[39m
+          [36m</svg>[39m
+          [36m<h2[39m
+            [33mclass[39m=[32m"text-[13px] font-medium"[39m
+          [36m>[39m
+            [0mAdd Project[0m
+          [36m</h2>[39m
+          [36m<button[39m
+            [33maria-label[39m=[32m"Close Add Project"[39m
+            [33mclass[39m=[32m"ml-auto rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [36m<svg[39m
+              [33mclass[39m=[32m"lucide lucide-x size-3.5"[39m
+              [33mfill[39m=[32m"none"[39m
+              [33mheight[39m=[32m"24"[39m
+              [33mstroke[39m=[32m"currentColor"[39m
+              [33mstroke-linecap[39m=[32m"round"[39m
+              [33mstroke-linejoin[39m=[32m"round"[39m
+              [33mstroke-width[39m=[32m"2"[39m
+              [33mviewBox[39m=[32m"0 0 24 24"[39m
+              [33mwidth[39m=[32m"24"[39m
+              [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+            [36m>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M18 6 6 18"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m6 6 12 12"[39m
+              [36m/>[39m
+            [36m</svg>[39m
+          [36m</button>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"space-y-3 p-3"[39m
+        [36m>[39m
+          [36m<p[39m
+            [33mclass[39m=[32m"text-xs text-muted-foreground"[39m
+          [36m>[39m
+            [0mSelect where the project repository is located.[0m
+          [36m</p>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"space-y-2"[39m
+          [36m>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"group flex w-full items-start gap-3 rounded-md border border-border/80 bg-background p-3 text-left transition-colors hover:bg-accent/40 focus-visible:border-ring focus:outline-none focus:ring-1 focus:ring-ring"[39m
+              [33mdata-testid[39m=[32m"project-type-local"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-folder-git2 mt-0.5 size-4 text-primary shrink-0 transition-transform group-hover:scale-105"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"[39m
+                [36m/>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"13"[39m
+                  [33mcy[39m=[32m"12"[39m
+                  [33mr[39m=[32m"2"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M18 19c-2.8 0-5-2.2-5-5v8"[39m
+                [36m/>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"20"[39m
+                  [33mcy[39m=[32m"19"[39m
+                  [33mr[39m=[32m"2"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [36m<div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"text-xs font-medium text-foreground"[39m
+                [36m>[39m
+                  [0mLocal Project[0m
+                [36m</div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"mt-0.5 text-[11px] leading-normal text-muted-foreground"[39m
+                [36m>[39m
+                  [0mChoose a folder on this machine using the folder picker.[0m
+                [36m</div>[39m
+              [36m</div>[39m
+            [36m</button>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"group flex w-full items-start gap-3 rounded-md border border-border/80 bg-background p-3 text-left transition-colors hover:bg-accent/40 focus-visible:border-ring focus:outline-none focus:ring-1 focus:ring-ring"[39m
+              [33mdata-testid[39m=[32m"project-type-remote"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-radio mt-0.5 size-4 text-primary shrink-0 transition-transform group-hover:scale-105"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M4.9 19.1C1 15.2 1 8.8 4.9 4.9"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"[39m
+                [36m/>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"12"[39m
+                  [33mcy[39m=[32m"12"[39m
+                  [33mr[39m=[32m"2"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M19.1 4.9C23 8.8 23 15.1 19.1 19"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [36m<div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"text-xs font-medium text-foreground"[39m
+                [36m>[39m
+                  [0mRemote (SSH)[0m
+                [36m</div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"mt-0.5 text-[11px] leading-normal text-muted-foreground"[39m
+                [36m>[39m
+                  [0mConnect to a repository hosted on an SSH machine.[0m
+                [36m</div>[39m
+              [36m</div>[39m
+            [36m</button>[39m
+          [36m</div>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex justify-end gap-2 border-t border-border px-3 py-2"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"h-7 rounded-md border border-border px-2.5 text-xs text-muted-foreground hover:bg-accent"[39m
+            [33mdata-testid[39m=[32m"add-project-cancel"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0mCancel[0m
+          [36m</button>[39m
+        [36m</div>[39m
+      [36m</div>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+   × fails closed for offline machines 2ms
+     → Unable to find an element by: [data-testid="project-type-paired-daemon"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mclass[39m=[32m"fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6"[39m
+      [33mrole[39m=[32m"presentation"[39m
+    [36m>[39m
+      [36m<div[39m
+        [33maria-label[39m=[32m"Add Project"[39m
+        [33mclass[39m=[32m"w-full max-w-[420px] overflow-hidden rounded-lg border border-border bg-card shadow-2xl"[39m
+        [33mrole[39m=[32m"dialog"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex h-9 items-center border-b border-border px-3"[39m
+        [36m>[39m
+          [36m<svg[39m
+            [33mclass[39m=[32m"lucide lucide-folder-git2 mr-2 size-3.5 text-muted-foreground"[39m
+            [33mfill[39m=[32m"none"[39m
+            [33mheight[39m=[32m"24"[39m
+            [33mstroke[39m=[32m"currentColor"[39m
+            [33mstroke-linecap[39m=[32m"round"[39m
+            [33mstroke-linejoin[39m=[32m"round"[39m
+            [33mstroke-width[39m=[32m"2"[39m
+            [33mviewBox[39m=[32m"0 0 24 24"[39m
+            [33mwidth[39m=[32m"24"[39m
+            [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+          [36m>[39m
+            [36m<path[39m
+              [33md[39m=[32m"M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"[39m
+            [36m/>[39m
+            [36m<circle[39m
+              [33mcx[39m=[32m"13"[39m
+              [33mcy[39m=[32m"12"[39m
+              [33mr[39m=[32m"2"[39m
+            [36m/>[39m
+            [36m<path[39m
+              [33md[39m=[32m"M18 19c-2.8 0-5-2.2-5-5v8"[39m
+            [36m/>[39m
+            [36m<circle[39m
+              [33mcx[39m=[32m"20"[39m
+              [33mcy[39m=[32m"19"[39m
+              [33mr[39m=[32m"2"[39m
+            [36m/>[39m
+          [36m</svg>[39m
+          [36m<h2[39m
+            [33mclass[39m=[32m"text-[13px] font-medium"[39m
+          [36m>[39m
+            [0mAdd Project[0m
+          [36m</h2>[39m
+          [36m<button[39m
+            [33maria-label[39m=[32m"Close Add Project"[39m
+            [33mclass[39m=[32m"ml-auto rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [36m<svg[39m
+              [33mclass[39m=[32m"lucide lucide-x size-3.5"[39m
+              [33mfill[39m=[32m"none"[39m
+              [33mheight[39m=[32m"24"[39m
+              [33mstroke[39m=[32m"currentColor"[39m
+              [33mstroke-linecap[39m=[32m"round"[39m
+              [33mstroke-linejoin[39m=[32m"round"[39m
+              [33mstroke-width[39m=[32m"2"[39m
+              [33mviewBox[39m=[32m"0 0 24 24"[39m
+              [33mwidth[39m=[32m"24"[39m
+              [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+            [36m>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M18 6 6 18"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m6 6 12 12"[39m
+              [36m/>[39m
+            [36m</svg>[39m
+          [36m</button>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"space-y-3 p-3"[39m
+        [36m>[39m
+          [36m<p[39m
+            [33mclass[39m=[32m"text-xs text-muted-foreground"[39m
+          [36m>[39m
+            [0mSelect where the project repository is located.[0m
+          [36m</p>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"space-y-2"[39m
+          [36m>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"group flex w-full items-start gap-3 rounded-md border border-border/80 bg-background p-3 text-left transition-colors hover:bg-accent/40 focus-visible:border-ring focus:outline-none focus:ring-1 focus:ring-ring"[39m
+              [33mdata-testid[39m=[32m"project-type-local"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-folder-git2 mt-0.5 size-4 text-primary shrink-0 transition-transform group-hover:scale-105"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"[39m
+                [36m/>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"13"[39m
+                  [33mcy[39m=[32m"12"[39m
+                  [33mr[39m=[32m"2"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M18 19c-2.8 0-5-2.2-5-5v8"[39m
+                [36m/>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"20"[39m
+                  [33mcy[39m=[32m"19"[39m
+                  [33mr[39m=[32m"2"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [36m<div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"text-xs font-medium text-foreground"[39m
+                [36m>[39m
+                  [0mLocal Project[0m
+                [36m</div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"mt-0.5 text-[11px] leading-normal text-muted-foreground"[39m
+                [36m>[39m
+                  [0mChoose a folder on this machine using the folder picker.[0m
+                [36m</div>[39m
+              [36m</div>[39m
+            [36m</button>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"group flex w-full items-start gap-3 rounded-md border border-border/80 bg-background p-3 text-left transition-colors hover:bg-accent/40 focus-visible:border-ring focus:outline-none focus:ring-1 focus:ring-ring"[39m
+              [33mdata-testid[39m=[32m"project-type-remote"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-radio mt-0.5 size-4 text-primary shrink-0 transition-transform group-hover:scale-105"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M4.9 19.1C1 15.2 1 8.8 4.9 4.9"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"[39m
+                [36m/>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"12"[39m
+                  [33mcy[39m=[32m"12"[39m
+                  [33mr[39m=[32m"2"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M19.1 4.9C23 8.8 23 15.1 19.1 19"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [36m<div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"text-xs font-medium text-foreground"[39m
+                [36m>[39m
+                  [0mRemote (SSH)[0m
+                [36m</div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"mt-0.5 text-[11px] leading-normal text-muted-foreground"[39m
+                [36m>[39m
+                  [0mConnect to a repository hosted on an SSH machine.[0m
+                [36m</div>[39m
+              [36m</div>[39m
+            [36m</button>[39m
+          [36m</div>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex justify-end gap-2 border-t border-border px-3 py-2"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"h-7 rounded-md border border-border px-2.5 text-xs text-muted-foreground hover:bg-accent"[39m
+            [33mdata-testid[39m=[32m"add-project-cancel"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0mCancel[0m
+          [36m</button>[39m
+        [36m</div>[39m
+      [36m</div>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+   × fails closed for incompatible machines 3ms
+     → Unable to find an element by: [data-testid="project-type-paired-daemon"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mclass[39m=[32m"fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6"[39m
+      [33mrole[39m=[32m"presentation"[39m
+    [36m>[39m
+      [36m<div[39m
+        [33maria-label[39m=[32m"Add Project"[39m
+        [33mclass[39m=[32m"w-full max-w-[420px] overflow-hidden rounded-lg border border-border bg-card shadow-2xl"[39m
+        [33mrole[39m=[32m"dialog"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex h-9 items-center border-b border-border px-3"[39m
+        [36m>[39m
+          [36m<svg[39m
+            [33mclass[39m=[32m"lucide lucide-folder-git2 mr-2 size-3.5 text-muted-foreground"[39m
+            [33mfill[39m=[32m"none"[39m
+            [33mheight[39m=[32m"24"[39m
+            [33mstroke[39m=[32m"currentColor"[39m
+            [33mstroke-linecap[39m=[32m"round"[39m
+            [33mstroke-linejoin[39m=[32m"round"[39m
+            [33mstroke-width[39m=[32m"2"[39m
+            [33mviewBox[39m=[32m"0 0 24 24"[39m
+            [33mwidth[39m=[32m"24"[39m
+            [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+          [36m>[39m
+            [36m<path[39m
+              [33md[39m=[32m"M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"[39m
+            [36m/>[39m
+            [36m<circle[39m
+              [33mcx[39m=[32m"13"[39m
+              [33mcy[39m=[32m"12"[39m
+              [33mr[39m=[32m"2"[39m
+            [36m/>[39m
+            [36m<path[39m
+              [33md[39m=[32m"M18 19c-2.8 0-5-2.2-5-5v8"[39m
+            [36m/>[39m
+            [36m<circle[39m
+              [33mcx[39m=[32m"20"[39m
+              [33mcy[39m=[32m"19"[39m
+              [33mr[39m=[32m"2"[39m
+            [36m/>[39m
+          [36m</svg>[39m
+          [36m<h2[39m
+            [33mclass[39m=[32m"text-[13px] font-medium"[39m
+          [36m>[39m
+            [0mAdd Project[0m
+          [36m</h2>[39m
+          [36m<button[39m
+            [33maria-label[39m=[32m"Close Add Project"[39m
+            [33mclass[39m=[32m"ml-auto rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [36m<svg[39m
+              [33mclass[39m=[32m"lucide lucide-x size-3.5"[39m
+              [33mfill[39m=[32m"none"[39m
+              [33mheight[39m=[32m"24"[39m
+              [33mstroke[39m=[32m"currentColor"[39m
+              [33mstroke-linecap[39m=[32m"round"[39m
+              [33mstroke-linejoin[39m=[32m"round"[39m
+              [33mstroke-width[39m=[32m"2"[39m
+              [33mviewBox[39m=[32m"0 0 24 24"[39m
+              [33mwidth[39m=[32m"24"[39m
+              [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+            [36m>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M18 6 6 18"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m6 6 12 12"[39m
+              [36m/>[39m
+            [36m</svg>[39m
+          [36m</button>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"space-y-3 p-3"[39m
+        [36m>[39m
+          [36m<p[39m
+            [33mclass[39m=[32m"text-xs text-muted-foreground"[39m
+          [36m>[39m
+            [0mSelect where the project repository is located.[0m
+          [36m</p>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"space-y-2"[39m
+          [36m>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"group flex w-full items-start gap-3 rounded-md border border-border/80 bg-background p-3 text-left transition-colors hover:bg-accent/40 focus-visible:border-ring focus:outline-none focus:ring-1 focus:ring-ring"[39m
+              [33mdata-testid[39m=[32m"project-type-local"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-folder-git2 mt-0.5 size-4 text-primary shrink-0 transition-transform group-hover:scale-105"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"[39m
+                [36m/>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"13"[39m
+                  [33mcy[39m=[32m"12"[39m
+                  [33mr[39m=[32m"2"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M18 19c-2.8 0-5-2.2-5-5v8"[39m
+                [36m/>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"20"[39m
+                  [33mcy[39m=[32m"19"[39m
+                  [33mr[39m=[32m"2"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [36m<div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"text-xs font-medium text-foreground"[39m
+                [36m>[39m
+                  [0mLocal Project[0m
+                [36m</div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"mt-0.5 text-[11px] leading-normal text-muted-foreground"[39m
+                [36m>[39m
+                  [0mChoose a folder on this machine using the folder picker.[0m
+                [36m</div>[39m
+              [36m</div>[39m
+            [36m</button>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"group flex w-full items-start gap-3 rounded-md border border-border/80 bg-background p-3 text-left transition-colors hover:bg-accent/40 focus-visible:border-ring focus:outline-none focus:ring-1 focus:ring-ring"[39m
+              [33mdata-testid[39m=[32m"project-type-remote"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-radio mt-0.5 size-4 text-primary shrink-0 transition-transform group-hover:scale-105"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M4.9 19.1C1 15.2 1 8.8 4.9 4.9"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"[39m
+                [36m/>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"12"[39m
+                  [33mcy[39m=[32m"12"[39m
+                  [33mr[39m=[32m"2"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M19.1 4.9C23 8.8 23 15.1 19.1 19"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [36m<div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"text-xs font-medium text-foreground"[39m
+                [36m>[39m
+                  [0mRemote (SSH)[0m
+                [36m</div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"mt-0.5 text-[11px] leading-normal text-muted-foreground"[39m
+                [36m>[39m
+                  [0mConnect to a repository hosted on an SSH machine.[0m
+                [36m</div>[39m
+              [36m</div>[39m
+            [36m</button>[39m
+          [36m</div>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex justify-end gap-2 border-t border-border px-3 py-2"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"h-7 rounded-md border border-border px-2.5 text-xs text-muted-foreground hover:bg-accent"[39m
+            [33mdata-testid[39m=[32m"add-project-cancel"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0mCancel[0m
+          [36m</button>[39m
+        [36m</div>[39m
+      [36m</div>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+   × fails closed for disabled machines 2ms
+     → Unable to find an element by: [data-testid="project-type-paired-daemon"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mclass[39m=[32m"fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6"[39m
+      [33mrole[39m=[32m"presentation"[39m
+    [36m>[39m
+      [36m<div[39m
+        [33maria-label[39m=[32m"Add Project"[39m
+        [33mclass[39m=[32m"w-full max-w-[420px] overflow-hidden rounded-lg border border-border bg-card shadow-2xl"[39m
+        [33mrole[39m=[32m"dialog"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex h-9 items-center border-b border-border px-3"[39m
+        [36m>[39m
+          [36m<svg[39m
+            [33mclass[39m=[32m"lucide lucide-folder-git2 mr-2 size-3.5 text-muted-foreground"[39m
+            [33mfill[39m=[32m"none"[39m
+            [33mheight[39m=[32m"24"[39m
+            [33mstroke[39m=[32m"currentColor"[39m
+            [33mstroke-linecap[39m=[32m"round"[39m
+            [33mstroke-linejoin[39m=[32m"round"[39m
+            [33mstroke-width[39m=[32m"2"[39m
+            [33mviewBox[39m=[32m"0 0 24 24"[39m
+            [33mwidth[39m=[32m"24"[39m
+            [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+          [36m>[39m
+            [36m<path[39m
+              [33md[39m=[32m"M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"[39m
+            [36m/>[39m
+            [36m<circle[39m
+              [33mcx[39m=[32m"13"[39m
+              [33mcy[39m=[32m"12"[39m
+              [33mr[39m=[32m"2"[39m
+            [36m/>[39m
+            [36m<path[39m
+              [33md[39m=[32m"M18 19c-2.8 0-5-2.2-5-5v8"[39m
+            [36m/>[39m
+            [36m<circle[39m
+              [33mcx[39m=[32m"20"[39m
+              [33mcy[39m=[32m"19"[39m
+              [33mr[39m=[32m"2"[39m
+            [36m/>[39m
+          [36m</svg>[39m
+          [36m<h2[39m
+            [33mclass[39m=[32m"text-[13px] font-medium"[39m
+          [36m>[39m
+            [0mAdd Project[0m
+          [36m</h2>[39m
+          [36m<button[39m
+            [33maria-label[39m=[32m"Close Add Project"[39m
+            [33mclass[39m=[32m"ml-auto rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [36m<svg[39m
+              [33mclass[39m=[32m"lucide lucide-x size-3.5"[39m
+              [33mfill[39m=[32m"none"[39m
+              [33mheight[39m=[32m"24"[39m
+              [33mstroke[39m=[32m"currentColor"[39m
+              [33mstroke-linecap[39m=[32m"round"[39m
+              [33mstroke-linejoin[39m=[32m"round"[39m
+              [33mstroke-width[39m=[32m"2"[39m
+              [33mviewBox[39m=[32m"0 0 24 24"[39m
+              [33mwidth[39m=[32m"24"[39m
+              [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+            [36m>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M18 6 6 18"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m6 6 12 12"[39m
+              [36m/>[39m
+            [36m</svg>[39m
+          [36m</button>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"space-y-3 p-3"[39m
+        [36m>[39m
+          [36m<p[39m
+            [33mclass[39m=[32m"text-xs text-muted-foreground"[39m
+          [36m>[39m
+            [0mSelect where the project repository is located.[0m
+          [36m</p>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"space-y-2"[39m
+          [36m>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"group flex w-full items-start gap-3 rounded-md border border-border/80 bg-background p-3 text-left transition-colors hover:bg-accent/40 focus-visible:border-ring focus:outline-none focus:ring-1 focus:ring-ring"[39m
+              [33mdata-testid[39m=[32m"project-type-local"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-folder-git2 mt-0.5 size-4 text-primary shrink-0 transition-transform group-hover:scale-105"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"[39m
+                [36m/>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"13"[39m
+                  [33mcy[39m=[32m"12"[39m
+                  [33mr[39m=[32m"2"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M18 19c-2.8 0-5-2.2-5-5v8"[39m
+                [36m/>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"20"[39m
+                  [33mcy[39m=[32m"19"[39m
+                  [33mr[39m=[32m"2"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [36m<div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"text-xs font-medium text-foreground"[39m
+                [36m>[39m
+                  [0mLocal Project[0m
+                [36m</div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"mt-0.5 text-[11px] leading-normal text-muted-foreground"[39m
+                [36m>[39m
+                  [0mChoose a folder on this machine using the folder picker.[0m
+                [36m</div>[39m
+              [36m</div>[39m
+            [36m</button>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"group flex w-full items-start gap-3 rounded-md border border-border/80 bg-background p-3 text-left transition-colors hover:bg-accent/40 focus-visible:border-ring focus:outline-none focus:ring-1 focus:ring-ring"[39m
+              [33mdata-testid[39m=[32m"project-type-remote"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-radio mt-0.5 size-4 text-primary shrink-0 transition-transform group-hover:scale-105"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M4.9 19.1C1 15.2 1 8.8 4.9 4.9"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"[39m
+                [36m/>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"12"[39m
+                  [33mcy[39m=[32m"12"[39m
+                  [33mr[39m=[32m"2"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M19.1 4.9C23 8.8 23 15.1 19.1 19"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [36m<div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"text-xs font-medium text-foreground"[39m
+                [36m>[39m
+                  [0mRemote (SSH)[0m
+                [36m</div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"mt-0.5 text-[11px] leading-normal text-muted-foreground"[39m
+                [36m>[39m
+                  [0mConnect to a repository hosted on an SSH machine.[0m
+                [36m</div>[39m
+              [36m</div>[39m
+            [36m</button>[39m
+          [36m</div>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex justify-end gap-2 border-t border-border px-3 py-2"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"h-7 rounded-md border border-border px-2.5 text-xs text-muted-foreground hover:bg-accent"[39m
+            [33mdata-testid[39m=[32m"add-project-cancel"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0mCancel[0m
+          [36m</button>[39m
+        [36m</div>[39m
+      [36m</div>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+   × invalidates a selected folder when its host generation changes 2ms
+     → Unable to find an element by: [data-testid="project-type-paired-daemon"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mclass[39m=[32m"fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6"[39m
+      [33mrole[39m=[32m"presentation"[39m
+    [36m>[39m
+      [36m<div[39m
+        [33maria-label[39m=[32m"Add Project"[39m
+        [33mclass[39m=[32m"w-full max-w-[420px] overflow-hidden rounded-lg border border-border bg-card shadow-2xl"[39m
+        [33mrole[39m=[32m"dialog"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex h-9 items-center border-b border-border px-3"[39m
+        [36m>[39m
+          [36m<svg[39m
+            [33mclass[39m=[32m"lucide lucide-folder-git2 mr-2 size-3.5 text-muted-foreground"[39m
+            [33mfill[39m=[32m"none"[39m
+            [33mheight[39m=[32m"24"[39m
+            [33mstroke[39m=[32m"currentColor"[39m
+            [33mstroke-linecap[39m=[32m"round"[39m
+            [33mstroke-linejoin[39m=[32m"round"[39m
+            [33mstroke-width[39m=[32m"2"[39m
+            [33mviewBox[39m=[32m"0 0 24 24"[39m
+            [33mwidth[39m=[32m"24"[39m
+            [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+          [36m>[39m
+            [36m<path[39m
+              [33md[39m=[32m"M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"[39m
+            [36m/>[39m
+            [36m<circle[39m
+              [33mcx[39m=[32m"13"[39m
+              [33mcy[39m=[32m"12"[39m
+              [33mr[39m=[32m"2"[39m
+            [36m/>[39m
+            [36m<path[39m
+              [33md[39m=[32m"M18 19c-2.8 0-5-2.2-5-5v8"[39m
+            [36m/>[39m
+            [36m<circle[39m
+              [33mcx[39m=[32m"20"[39m
+              [33mcy[39m=[32m"19"[39m
+              [33mr[39m=[32m"2"[39m
+            [36m/>[39m
+          [36m</svg>[39m
+          [36m<h2[39m
+            [33mclass[39m=[32m"text-[13px] font-medium"[39m
+          [36m>[39m
+            [0mAdd Project[0m
+          [36m</h2>[39m
+          [36m<button[39m
+            [33maria-label[39m=[32m"Close Add Project"[39m
+            [33mclass[39m=[32m"ml-auto rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [36m<svg[39m
+              [33mclass[39m=[32m"lucide lucide-x size-3.5"[39m
+              [33mfill[39m=[32m"none"[39m
+              [33mheight[39m=[32m"24"[39m
+              [33mstroke[39m=[32m"currentColor"[39m
+              [33mstroke-linecap[39m=[32m"round"[39m
+              [33mstroke-linejoin[39m=[32m"round"[39m
+              [33mstroke-width[39m=[32m"2"[39m
+              [33mviewBox[39m=[32m"0 0 24 24"[39m
+              [33mwidth[39m=[32m"24"[39m
+              [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+            [36m>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M18 6 6 18"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m6 6 12 12"[39m
+              [36m/>[39m
+            [36m</svg>[39m
+          [36m</button>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"space-y-3 p-3"[39m
+        [36m>[39m
+          [36m<p[39m
+            [33mclass[39m=[32m"text-xs text-muted-foreground"[39m
+          [36m>[39m
+            [0mSelect where the project repository is located.[0m
+          [36m</p>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"space-y-2"[39m
+          [36m>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"group flex w-full items-start gap-3 rounded-md border border-border/80 bg-background p-3 text-left transition-colors hover:bg-accent/40 focus-visible:border-ring focus:outline-none focus:ring-1 focus:ring-ring"[39m
+              [33mdata-testid[39m=[32m"project-type-local"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-folder-git2 mt-0.5 size-4 text-primary shrink-0 transition-transform group-hover:scale-105"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"[39m
+                [36m/>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"13"[39m
+                  [33mcy[39m=[32m"12"[39m
+                  [33mr[39m=[32m"2"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M18 19c-2.8 0-5-2.2-5-5v8"[39m
+                [36m/>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"20"[39m
+                  [33mcy[39m=[32m"19"[39m
+                  [33mr[39m=[32m"2"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [36m<div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"text-xs font-medium text-foreground"[39m
+                [36m>[39m
+                  [0mLocal Project[0m
+                [36m</div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"mt-0.5 text-[11px] leading-normal text-muted-foreground"[39m
+                [36m>[39m
+                  [0mChoose a folder on this machine using the folder picker.[0m
+                [36m</div>[39m
+              [36m</div>[39m
+            [36m</button>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"group flex w-full items-start gap-3 rounded-md border border-border/80 bg-background p-3 text-left transition-colors hover:bg-accent/40 focus-visible:border-ring focus:outline-none focus:ring-1 focus:ring-ring"[39m
+              [33mdata-testid[39m=[32m"project-type-remote"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-radio mt-0.5 size-4 text-primary shrink-0 transition-transform group-hover:scale-105"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M4.9 19.1C1 15.2 1 8.8 4.9 4.9"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"[39m
+                [36m/>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"12"[39m
+                  [33mcy[39m=[32m"12"[39m
+                  [33mr[39m=[32m"2"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M19.1 4.9C23 8.8 23 15.1 19.1 19"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [36m<div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"text-xs font-medium text-foreground"[39m
+                [36m>[39m
+                  [0mRemote (SSH)[0m
+                [36m</div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"mt-0.5 text-[11px] leading-normal text-muted-foreground"[39m
+                [36m>[39m
+                  [0mConnect to a repository hosted on an SSH machine.[0m
+                [36m</div>[39m
+              [36m</div>[39m
+            [36m</button>[39m
+          [36m</div>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex justify-end gap-2 border-t border-border px-3 py-2"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"h-7 rounded-md border border-border px-2.5 text-xs text-muted-foreground hover:bg-accent"[39m
+            [33mdata-testid[39m=[32m"add-project-cancel"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0mCancel[0m
+          [36m</button>[39m
+        [36m</div>[39m
+      [36m</div>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 7 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/ProjectDialogs.pairedDaemon.test.tsx > browses paired home, cancels stale host results, requests hidden folders, and adopts canonical registration without SSH/local IPC
+TestingLibraryElementError: Unable to find an element by: [data-testid="project-type-paired-daemon"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mclass[39m=[32m"fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6"[39m
+      [33mrole[39m=[32m"presentation"[39m
+    [36m>[39m
+      [36m<div[39m
+        [33maria-label[39m=[32m"Add Project"[39m
+        [33mclass[39m=[32m"w-full max-w-[420px] overflow-hidden rounded-lg border border-border bg-card shadow-2xl"[39m
+        [33mrole[39m=[32m"dialog"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex h-9 items-center border-b border-border px-3"[39m
+        [36m>[39m
+          [36m<svg[39m
+            [33mclass[39m=[32m"lucide lucide-folder-git2 mr-2 size-3.5 text-muted-foreground"[39m
+            [33mfill[39m=[32m"none"[39m
+            [33mheight[39m=[32m"24"[39m
+            [33mstroke[39m=[32m"currentColor"[39m
+            [33mstroke-linecap[39m=[32m"round"[39m
+            [33mstroke-linejoin[39m=[32m"round"[39m
+            [33mstroke-width[39m=[32m"2"[39m
+            [33mviewBox[39m=[32m"0 0 24 24"[39m
+            [33mwidth[39m=[32m"24"[39m
+            [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+          [36m>[39m
+            [36m<path[39m
+              [33md[39m=[32m"M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"[39m
+            [36m/>[39m
+            [36m<circle[39m
+              [33mcx[39m=[32m"13"[39m
+              [33mcy[39m=[32m"12"[39m
+              [33mr[39m=[32m"2"[39m
+            [36m/>[39m
+            [36m<path[39m
+              [33md[39m=[32m"M18 19c-2.8 0-5-2.2-5-5v8"[39m
+            [36m/>[39m
+            [36m<circle[39m
+              [33mcx[39m=[32m"20"[39m
+              [33mcy[39m=[32m"19"[39m
+              [33mr[39m=[32m"2"[39m
+            [36m/>[39m
+          [36m</svg>[39m
+          [36m<h2[39m
+            [33mclass[39m=[32m"text-[13px] font-medium"[39m
+          [36m>[39m
+            [0mAdd Project[0m
+          [36m</h2>[39m
+          [36m<button[39m
+            [33maria-label[39m=[32m"Close Add Project"[39m
+            [33mclass[39m=[32m"ml-auto rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [36m<svg[39m
+              [33mclass[39m=[32m"lucide lucide-x size-3.5"[39m
+              [33mfill[39m=[32m"none"[39m
+              [33mheight[39m=[32m"24"[39m
+              [33mstroke[39m=[32m"currentColor"[39m
+              [33mstroke-linecap[39m=[32m"round"[39m
+              [33mstroke-linejoin[39m=[32m"round"[39m
+              [33mstroke-width[39m=[32m"2"[39m
+              [33mviewBox[39m=[32m"0 0 24 24"[39m
+              [33mwidth[39m=[32m"24"[39m
+              [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+            [36m>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M18 6 6 18"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m6 6 12 12"[39m
+              [36m/>[39m
+            [36m</svg>[39m
+          [36m</button>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"space-y-3 p-3"[39m
+        [36m>[39m
+          [36m<p[39m
+            [33mclass[39m=[32m"text-xs text-muted-foreground"[39m
+          [36m>[39m
+            [0mSelect where the project repository is located.[0m
+          [36m</p>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"space-y-2"[39m
+          [36m>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"group flex w-full items-start gap-3 rounded-md border border-border/80 bg-background p-3 text-left transition-colors hover:bg-accent/40 focus-visible:border-ring focus:outline-none focus:ring-1 focus:ring-ring"[39m
+              [33mdata-testid[39m=[32m"project-type-local"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-folder-git2 mt-0.5 size-4 text-primary shrink-0 transition-transform group-hover:scale-105"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"[39m
+                [36m/>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"13"[39m
+                  [33mcy[39m=[32m"12"[39m
+                  [33mr[39m=[32m"2"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M18 19c-2.8 0-5-2.2-5-5v8"[39m
+                [36m/>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"20"[39m
+                  [33mcy[39m=[32m"19"[39m
+                  [33mr[39m=[32m"2"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [36m<div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"text-xs font-medium text-foreground"[39m
+                [36m>[39m
+                  [0mLocal Project[0m
+                [36m</div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"mt-0.5 text-[11px] leading-normal text-muted-foreground"[39m
+                [36m>[39m
+                  [0mChoose a folder on this machine using the folder picker.[0m
+                [36m</div>[39m
+              [36m</div>[39m
+            [36m</button>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"group flex w-full items-start gap-3 rounded-md border border-border/80 bg-background p-3 text-left transition-colors hover:bg-accent/40 focus-visible:border-ring focus:outline-none focus:ring-1 focus:ring-ring"[39m
+              [33mdata-testid[39m=[32m"project-type-remote"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-radio mt-0.5 size-4 text-primary shrink-0 transition-transform group-hover:scale-105"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M4.9 19.1C1 15.2 1 8.8 4.9 4.9"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"[39m
+                [36m/>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"12"[39m
+                  [33mcy[39m=[32m"12"[39m
+                  [33mr[39m=[32m"2"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M19.1 4.9C23 8.8 23 15.1 19.1 19"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [36m<div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"text-xs font-medium text-foreground"[39m
+                [36m>[39m
+                  [0mRemote (SSH)[0m
+                [36m</div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"mt-0.5 text-[11px] leading-normal text-muted-foreground"[39m
+                [36m>[39m
+                  [0mConnect to a repository hosted on an SSH machine.[0m
+                [36m</div>[39m
+              [36m</div>[39m
+            [36m</button>[39m
+          [36m</div>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex justify-end gap-2 border-t border-border px-3 py-2"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"h-7 rounded-md border border-border px-2.5 text-xs text-muted-foreground hover:bg-accent"[39m
+            [33mdata-testid[39m=[32m"add-project-cancel"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0mCancel[0m
+          [36m</button>[39m
+        [36m</div>[39m
+      [36m</div>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ Object.getElementError ../../herdr-wave1/ui/node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ ../../herdr-wave1/ui/node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ ../../herdr-wave1/ui/node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ ../../herdr-wave1/ui/node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/components/ProjectDialogs.pairedDaemon.test.tsx:39:50
+     37|   expect(screen.getByTestId("project-type-local")).toBeEnabled();
+     38|   expect(screen.getByTestId("project-type-remote")).toBeEnabled();
+     39|   await act(async () => { fireEvent.click(screen.getByTestId("project-…
+       |                                                  ^
+     40|   return registered;
+     41| }
+ ❯ ../../herdr-wave1/ui/node_modules/@testing-library/react/dist/act-compat.js:47:24
+ ❯ act ../../herdr-wave1/ui/node_modules/react/cjs/react.development.js:2512:16
+ ❯ Proxy.<anonymous> ../../herdr-wave1/ui/node_modules/@testing-library/react/dist/act-compat.js:46:25
+ ❯ mount src/components/ProjectDialogs.pairedDaemon.test.tsx:39:9
+ ❯ src/components/ProjectDialogs.pairedDaemon.test.tsx:48:28
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/7]⎯
+
+ FAIL  src/components/ProjectDialogs.pairedDaemon.test.tsx > fails closed for empty machines
+ FAIL  src/components/ProjectDialogs.pairedDaemon.test.tsx > fails closed for unpaired machines
+ FAIL  src/components/ProjectDialogs.pairedDaemon.test.tsx > fails closed for offline machines
+ FAIL  src/components/ProjectDialogs.pairedDaemon.test.tsx > fails closed for incompatible machines
+ FAIL  src/components/ProjectDialogs.pairedDaemon.test.tsx > fails closed for disabled machines
+TestingLibraryElementError: Unable to find an element by: [data-testid="project-type-paired-daemon"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mclass[39m=[32m"fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6"[39m
+      [33mrole[39m=[32m"presentation"[39m
+    [36m>[39m
+      [36m<div[39m
+        [33maria-label[39m=[32m"Add Project"[39m
+        [33mclass[39m=[32m"w-full max-w-[420px] overflow-hidden rounded-lg border border-border bg-card shadow-2xl"[39m
+        [33mrole[39m=[32m"dialog"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex h-9 items-center border-b border-border px-3"[39m
+        [36m>[39m
+          [36m<svg[39m
+            [33mclass[39m=[32m"lucide lucide-folder-git2 mr-2 size-3.5 text-muted-foreground"[39m
+            [33mfill[39m=[32m"none"[39m
+            [33mheight[39m=[32m"24"[39m
+            [33mstroke[39m=[32m"currentColor"[39m
+            [33mstroke-linecap[39m=[32m"round"[39m
+            [33mstroke-linejoin[39m=[32m"round"[39m
+            [33mstroke-width[39m=[32m"2"[39m
+            [33mviewBox[39m=[32m"0 0 24 24"[39m
+            [33mwidth[39m=[32m"24"[39m
+            [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+          [36m>[39m
+            [36m<path[39m
+              [33md[39m=[32m"M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"[39m
+            [36m/>[39m
+            [36m<circle[39m
+              [33mcx[39m=[32m"13"[39m
+              [33mcy[39m=[32m"12"[39m
+              [33mr[39m=[32m"2"[39m
+            [36m/>[39m
+            [36m<path[39m
+              [33md[39m=[32m"M18 19c-2.8 0-5-2.2-5-5v8"[39m
+            [36m/>[39m
+            [36m<circle[39m
+              [33mcx[39m=[32m"20"[39m
+              [33mcy[39m=[32m"19"[39m
+              [33mr[39m=[32m"2"[39m
+            [36m/>[39m
+          [36m</svg>[39m
+          [36m<h2[39m
+            [33mclass[39m=[32m"text-[13px] font-medium"[39m
+          [36m>[39m
+            [0mAdd Project[0m
+          [36m</h2>[39m
+          [36m<button[39m
+            [33maria-label[39m=[32m"Close Add Project"[39m
+            [33mclass[39m=[32m"ml-auto rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [36m<svg[39m
+              [33mclass[39m=[32m"lucide lucide-x size-3.5"[39m
+              [33mfill[39m=[32m"none"[39m
+              [33mheight[39m=[32m"24"[39m
+              [33mstroke[39m=[32m"currentColor"[39m
+              [33mstroke-linecap[39m=[32m"round"[39m
+              [33mstroke-linejoin[39m=[32m"round"[39m
+              [33mstroke-width[39m=[32m"2"[39m
+              [33mviewBox[39m=[32m"0 0 24 24"[39m
+              [33mwidth[39m=[32m"24"[39m
+              [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+            [36m>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M18 6 6 18"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m6 6 12 12"[39m
+              [36m/>[39m
+            [36m</svg>[39m
+          [36m</button>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"space-y-3 p-3"[39m
+        [36m>[39m
+          [36m<p[39m
+            [33mclass[39m=[32m"text-xs text-muted-foreground"[39m
+          [36m>[39m
+            [0mSelect where the project repository is located.[0m
+          [36m</p>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"space-y-2"[39m
+          [36m>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"group flex w-full items-start gap-3 rounded-md border border-border/80 bg-background p-3 text-left transition-colors hover:bg-accent/40 focus-visible:border-ring focus:outline-none focus:ring-1 focus:ring-ring"[39m
+              [33mdata-testid[39m=[32m"project-type-local"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-folder-git2 mt-0.5 size-4 text-primary shrink-0 transition-transform group-hover:scale-105"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"[39m
+                [36m/>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"13"[39m
+                  [33mcy[39m=[32m"12"[39m
+                  [33mr[39m=[32m"2"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M18 19c-2.8 0-5-2.2-5-5v8"[39m
+                [36m/>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"20"[39m
+                  [33mcy[39m=[32m"19"[39m
+                  [33mr[39m=[32m"2"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [36m<div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"text-xs font-medium text-foreground"[39m
+                [36m>[39m
+                  [0mLocal Project[0m
+                [36m</div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"mt-0.5 text-[11px] leading-normal text-muted-foreground"[39m
+                [36m>[39m
+                  [0mChoose a folder on this machine using the folder picker.[0m
+                [36m</div>[39m
+              [36m</div>[39m
+            [36m</button>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"group flex w-full items-start gap-3 rounded-md border border-border/80 bg-background p-3 text-left transition-colors hover:bg-accent/40 focus-visible:border-ring focus:outline-none focus:ring-1 focus:ring-ring"[39m
+              [33mdata-testid[39m=[32m"project-type-remote"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-radio mt-0.5 size-4 text-primary shrink-0 transition-transform group-hover:scale-105"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M4.9 19.1C1 15.2 1 8.8 4.9 4.9"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"[39m
+                [36m/>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"12"[39m
+                  [33mcy[39m=[32m"12"[39m
+                  [33mr[39m=[32m"2"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M19.1 4.9C23 8.8 23 15.1 19.1 19"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [36m<div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"text-xs font-medium text-foreground"[39m
+                [36m>[39m
+                  [0mRemote (SSH)[0m
+                [36m</div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"mt-0.5 text-[11px] leading-normal text-muted-foreground"[39m
+                [36m>[39m
+                  [0mConnect to a repository hosted on an SSH machine.[0m
+                [36m</div>[39m
+              [36m</div>[39m
+            [36m</button>[39m
+          [36m</div>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex justify-end gap-2 border-t border-border px-3 py-2"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"h-7 rounded-md border border-border px-2.5 text-xs text-muted-foreground hover:bg-accent"[39m
+            [33mdata-testid[39m=[32m"add-project-cancel"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0mCancel[0m
+          [36m</button>[39m
+        [36m</div>[39m
+      [36m</div>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ Object.getElementError ../../herdr-wave1/ui/node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ ../../herdr-wave1/ui/node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ ../../herdr-wave1/ui/node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ ../../herdr-wave1/ui/node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/components/ProjectDialogs.pairedDaemon.test.tsx:39:50
+     37|   expect(screen.getByTestId("project-type-local")).toBeEnabled();
+     38|   expect(screen.getByTestId("project-type-remote")).toBeEnabled();
+     39|   await act(async () => { fireEvent.click(screen.getByTestId("project-…
+       |                                                  ^
+     40|   return registered;
+     41| }
+ ❯ ../../herdr-wave1/ui/node_modules/@testing-library/react/dist/act-compat.js:47:24
+ ❯ act ../../herdr-wave1/ui/node_modules/react/cjs/react.development.js:2512:16
+ ❯ Proxy.<anonymous> ../../herdr-wave1/ui/node_modules/@testing-library/react/dist/act-compat.js:46:25
+ ❯ mount src/components/ProjectDialogs.pairedDaemon.test.tsx:39:9
+ ❯ src/components/ProjectDialogs.pairedDaemon.test.tsx:64:9
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/7]⎯
+
+ FAIL  src/components/ProjectDialogs.pairedDaemon.test.tsx > invalidates a selected folder when its host generation changes
+TestingLibraryElementError: Unable to find an element by: [data-testid="project-type-paired-daemon"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mclass[39m=[32m"fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6"[39m
+      [33mrole[39m=[32m"presentation"[39m
+    [36m>[39m
+      [36m<div[39m
+        [33maria-label[39m=[32m"Add Project"[39m
+        [33mclass[39m=[32m"w-full max-w-[420px] overflow-hidden rounded-lg border border-border bg-card shadow-2xl"[39m
+        [33mrole[39m=[32m"dialog"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex h-9 items-center border-b border-border px-3"[39m
+        [36m>[39m
+          [36m<svg[39m
+            [33mclass[39m=[32m"lucide lucide-folder-git2 mr-2 size-3.5 text-muted-foreground"[39m
+            [33mfill[39m=[32m"none"[39m
+            [33mheight[39m=[32m"24"[39m
+            [33mstroke[39m=[32m"currentColor"[39m
+            [33mstroke-linecap[39m=[32m"round"[39m
+            [33mstroke-linejoin[39m=[32m"round"[39m
+            [33mstroke-width[39m=[32m"2"[39m
+            [33mviewBox[39m=[32m"0 0 24 24"[39m
+            [33mwidth[39m=[32m"24"[39m
+            [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+          [36m>[39m
+            [36m<path[39m
+              [33md[39m=[32m"M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"[39m
+            [36m/>[39m
+            [36m<circle[39m
+              [33mcx[39m=[32m"13"[39m
+              [33mcy[39m=[32m"12"[39m
+              [33mr[39m=[32m"2"[39m
+            [36m/>[39m
+            [36m<path[39m
+              [33md[39m=[32m"M18 19c-2.8 0-5-2.2-5-5v8"[39m
+            [36m/>[39m
+            [36m<circle[39m
+              [33mcx[39m=[32m"20"[39m
+              [33mcy[39m=[32m"19"[39m
+              [33mr[39m=[32m"2"[39m
+            [36m/>[39m
+          [36m</svg>[39m
+          [36m<h2[39m
+            [33mclass[39m=[32m"text-[13px] font-medium"[39m
+          [36m>[39m
+            [0mAdd Project[0m
+          [36m</h2>[39m
+          [36m<button[39m
+            [33maria-label[39m=[32m"Close Add Project"[39m
+            [33mclass[39m=[32m"ml-auto rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [36m<svg[39m
+              [33mclass[39m=[32m"lucide lucide-x size-3.5"[39m
+              [33mfill[39m=[32m"none"[39m
+              [33mheight[39m=[32m"24"[39m
+              [33mstroke[39m=[32m"currentColor"[39m
+              [33mstroke-linecap[39m=[32m"round"[39m
+              [33mstroke-linejoin[39m=[32m"round"[39m
+              [33mstroke-width[39m=[32m"2"[39m
+              [33mviewBox[39m=[32m"0 0 24 24"[39m
+              [33mwidth[39m=[32m"24"[39m
+              [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+            [36m>[39m
+              [36m<path[39m
+                [33md[39m=[32m"M18 6 6 18"[39m
+              [36m/>[39m
+              [36m<path[39m
+                [33md[39m=[32m"m6 6 12 12"[39m
+              [36m/>[39m
+            [36m</svg>[39m
+          [36m</button>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"space-y-3 p-3"[39m
+        [36m>[39m
+          [36m<p[39m
+            [33mclass[39m=[32m"text-xs text-muted-foreground"[39m
+          [36m>[39m
+            [0mSelect where the project repository is located.[0m
+          [36m</p>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"space-y-2"[39m
+          [36m>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"group flex w-full items-start gap-3 rounded-md border border-border/80 bg-background p-3 text-left transition-colors hover:bg-accent/40 focus-visible:border-ring focus:outline-none focus:ring-1 focus:ring-ring"[39m
+              [33mdata-testid[39m=[32m"project-type-local"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-folder-git2 mt-0.5 size-4 text-primary shrink-0 transition-transform group-hover:scale-105"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"[39m
+                [36m/>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"13"[39m
+                  [33mcy[39m=[32m"12"[39m
+                  [33mr[39m=[32m"2"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M18 19c-2.8 0-5-2.2-5-5v8"[39m
+                [36m/>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"20"[39m
+                  [33mcy[39m=[32m"19"[39m
+                  [33mr[39m=[32m"2"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [36m<div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"text-xs font-medium text-foreground"[39m
+                [36m>[39m
+                  [0mLocal Project[0m
+                [36m</div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"mt-0.5 text-[11px] leading-normal text-muted-foreground"[39m
+                [36m>[39m
+                  [0mChoose a folder on this machine using the folder picker.[0m
+                [36m</div>[39m
+              [36m</div>[39m
+            [36m</button>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"group flex w-full items-start gap-3 rounded-md border border-border/80 bg-background p-3 text-left transition-colors hover:bg-accent/40 focus-visible:border-ring focus:outline-none focus:ring-1 focus:ring-ring"[39m
+              [33mdata-testid[39m=[32m"project-type-remote"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [36m<svg[39m
+                [33mclass[39m=[32m"lucide lucide-radio mt-0.5 size-4 text-primary shrink-0 transition-transform group-hover:scale-105"[39m
+                [33mfill[39m=[32m"none"[39m
+                [33mheight[39m=[32m"24"[39m
+                [33mstroke[39m=[32m"currentColor"[39m
+                [33mstroke-linecap[39m=[32m"round"[39m
+                [33mstroke-linejoin[39m=[32m"round"[39m
+                [33mstroke-width[39m=[32m"2"[39m
+                [33mviewBox[39m=[32m"0 0 24 24"[39m
+                [33mwidth[39m=[32m"24"[39m
+                [33mxmlns[39m=[32m"http://www.w3.org/2000/svg"[39m
+              [36m>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M4.9 19.1C1 15.2 1 8.8 4.9 4.9"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"[39m
+                [36m/>[39m
+                [36m<circle[39m
+                  [33mcx[39m=[32m"12"[39m
+                  [33mcy[39m=[32m"12"[39m
+                  [33mr[39m=[32m"2"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"[39m
+                [36m/>[39m
+                [36m<path[39m
+                  [33md[39m=[32m"M19.1 4.9C23 8.8 23 15.1 19.1 19"[39m
+                [36m/>[39m
+              [36m</svg>[39m
+              [36m<div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"text-xs font-medium text-foreground"[39m
+                [36m>[39m
+                  [0mRemote (SSH)[0m
+                [36m</div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"mt-0.5 text-[11px] leading-normal text-muted-foreground"[39m
+                [36m>[39m
+                  [0mConnect to a repository hosted on an SSH machine.[0m
+                [36m</div>[39m
+              [36m</div>[39m
+            [36m</button>[39m
+          [36m</div>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"flex justify-end gap-2 border-t border-border px-3 py-2"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"h-7 rounded-md border border-border px-2.5 text-xs text-muted-foreground hover:bg-accent"[39m
+            [33mdata-testid[39m=[32m"add-project-cancel"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0mCancel[0m
+          [36m</button>[39m
+        [36m</div>[39m
+      [36m</div>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ Object.getElementError ../../herdr-wave1/ui/node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ ../../herdr-wave1/ui/node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ ../../herdr-wave1/ui/node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ ../../herdr-wave1/ui/node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/components/ProjectDialogs.pairedDaemon.test.tsx:39:50
+     37|   expect(screen.getByTestId("project-type-local")).toBeEnabled();
+     38|   expect(screen.getByTestId("project-type-remote")).toBeEnabled();
+     39|   await act(async () => { fireEvent.click(screen.getByTestId("project-…
+       |                                                  ^
+     40|   return registered;
+     41| }
+ ❯ ../../herdr-wave1/ui/node_modules/@testing-library/react/dist/act-compat.js:47:24
+ ❯ act ../../herdr-wave1/ui/node_modules/react/cjs/react.development.js:2512:16
+ ❯ Proxy.<anonymous> ../../herdr-wave1/ui/node_modules/@testing-library/react/dist/act-compat.js:46:25
+ ❯ mount src/components/ProjectDialogs.pairedDaemon.test.tsx:39:9
+ ❯ src/components/ProjectDialogs.pairedDaemon.test.tsx:70:28
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/7]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  7 failed (7)
+   Start at  15:34:34
+   Duration  1.44s (transform 109ms, setup 122ms, collect 625ms, tests 36ms, environment 263ms, prepare 34ms)
+
+error: script "test" exited with code 1

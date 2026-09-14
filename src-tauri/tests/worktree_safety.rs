@@ -148,13 +148,13 @@ async fn same_worktree_supports_multiple_interactive_pty_sessions() {
     let canonical = fs::canonicalize(&wt).expect("canonical worktree");
     let pty = PtyManager::new();
 
-    let mut first_shell = CommandBuilder::new("/bin/sh");
+    let mut first_shell = CommandBuilder::new(if cfg!(windows) { "cmd.exe" } else { "/bin/sh" });
     first_shell.cwd(&wt);
     let (first_id, _first_rx) = pty
         .spawn_in_worktree(first_shell, 80, 24, &manager, &wt)
         .expect("spawn first terminal");
 
-    let mut second_shell = CommandBuilder::new("/bin/sh");
+    let mut second_shell = CommandBuilder::new(if cfg!(windows) { "cmd.exe" } else { "/bin/sh" });
     second_shell.cwd(&wt);
     let (second_id, _second_rx) = pty
         .spawn_in_worktree(second_shell, 80, 24, &manager, &wt)
@@ -193,7 +193,7 @@ async fn pty_worktree_ownership_clears_on_close_and_natural_exit() {
     let wt = create_worktree(&manager, "pty-ownership");
     let pty = PtyManager::new();
 
-    let mut shell = CommandBuilder::new("/bin/sh");
+    let mut shell = CommandBuilder::new(if cfg!(windows) { "cmd.exe" } else { "/bin/sh" });
     shell.cwd(&wt);
     let (session_id, _rx) = pty
         .spawn_in_worktree(shell, 80, 24, &manager, &wt)
@@ -208,8 +208,8 @@ async fn pty_worktree_ownership_clears_on_close_and_natural_exit() {
         .expect("close terminal");
     assert!(!pty.has_session(&session_id));
 
-    let mut one_shot = CommandBuilder::new("/bin/sh");
-    one_shot.arg("-c");
+    let mut one_shot = CommandBuilder::new(if cfg!(windows) { "cmd.exe" } else { "/bin/sh" });
+    one_shot.arg(if cfg!(windows) { "/C" } else { "-c" });
     one_shot.arg("exit 0");
     one_shot.cwd(&wt);
     let (natural_id, mut output) = pty
@@ -217,7 +217,25 @@ async fn pty_worktree_ownership_clears_on_close_and_natural_exit() {
         .expect("spawn one-shot terminal");
 
     tokio::time::timeout(Duration::from_secs(5), async {
-        while output.recv().await.is_some() {}
+        #[cfg(windows)]
+        let mut cursor_query = Vec::new();
+        while let Some(bytes) = output.recv().await {
+            #[cfg(windows)]
+            {
+                cursor_query.extend_from_slice(&bytes);
+                if cursor_query.windows(4).any(|b| b == b"\x1b[6n") {
+                    pty.write_input(&natural_id, b"\x1b[1;1R").unwrap();
+                    cursor_query.clear();
+                    eprintln!("Q4 natural-exit ConPTY cursor query answered");
+                } else {
+                    // Retain a possible query prefix across arbitrary PTY chunks.
+                    let discard = cursor_query.len().saturating_sub(3);
+                    cursor_query.drain(..discard);
+                }
+            }
+            #[cfg(not(windows))]
+            let _ = bytes;
+        }
     })
     .await
     .expect("natural session output closure");
@@ -251,7 +269,7 @@ async fn five_concurrent_worktree_terminal_lifecycles_remain_isolated() {
     let mut receivers = Vec::with_capacity(worktrees.len());
 
     for worktree in &worktrees {
-        let mut shell = CommandBuilder::new("/bin/sh");
+        let mut shell = CommandBuilder::new(if cfg!(windows) { "cmd.exe" } else { "/bin/sh" });
         shell.cwd(worktree);
         let (session_id, receiver) = pty
             .spawn_in_worktree(shell, 80, 24, &manager, worktree)
@@ -280,4 +298,17 @@ async fn five_concurrent_worktree_terminal_lifecycles_remain_isolated() {
         1
     );
     drop(receivers);
+}
+
+#[test]
+fn unavailable_base_ref_leaves_no_managed_parent_directory() {
+    let root = TempDir::new().unwrap();
+    ferryx_lib::worktree::run_git(root.path(), &["init", "--quiet"]).unwrap();
+    let manager = WorktreeManager::new(root.path());
+    let target = manager.worktree_path_for("ws-base", "feature").unwrap();
+    let result = manager.create_worktree(CreateWorktreeOptions::new("ws-base", "feature", &target));
+    assert!(result.is_err());
+    assert!(!target.exists());
+    assert!(!manager.repo_root().join(".orca-worktrees").exists());
+    root.close().unwrap();
 }

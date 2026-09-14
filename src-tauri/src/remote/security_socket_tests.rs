@@ -5,6 +5,100 @@ use futures_util::future::BoxFuture;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Notify;
 
+#[test]
+fn a10_controller_generation_disconnect_and_exact_reservation_boundary() {
+    use crate::daemon::session_service::DaemonSessionService;
+    let mut controllers = std::collections::HashMap::new();
+    let original = DaemonSessionService::acquire_machine_controller(&mut controllers, "one", "a").unwrap();
+    let old_cancelled = original.cancelled.clone();
+    let replacement = DaemonSessionService::acquire_machine_controller(&mut controllers, "one", "a").unwrap();
+    assert!(*old_cancelled.borrow());
+    assert_eq!(replacement.generation, original.generation + 1);
+    drop(original);
+    assert!(controllers["one"].disconnected.lock().is_none());
+    assert!(DaemonSessionService::acquire_machine_controller(&mut controllers, "one", "b").is_err());
+    drop(replacement);
+    assert!(controllers["one"].disconnected.lock().is_some());
+    let disconnected = controllers["one"].disconnected.lock().unwrap();
+    assert!(controllers["one"].reserved_at(disconnected + Duration::from_millis(14999)));
+    assert!(!controllers["one"].reserved_at(disconnected + Duration::from_secs(15)));
+    // Controlled clock values exercise the production reservation predicate;
+    // no wall-clock wait or probabilistic negative assertion.
+    *controllers["one"].disconnected.lock() = Some(tokio::time::Instant::now() - Duration::from_secs(16));
+    let other = DaemonSessionService::acquire_machine_controller(&mut controllers, "one", "b").unwrap();
+    assert_eq!(controllers["one"].device, "b");
+    drop(other);
+    eprintln!("A10 sole controller: old drop cannot release replacement; disconnect records reservation; controlled expiry permits other device");
+}
+
+#[tokio::test]
+async fn a10_real_socket_reservation_transfers_http_close_authority() {
+    use futures_util::FutureExt;
+    let (root, owner, request) = tokio::task::spawn_blocking(|| {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("project")).unwrap();
+        let owner = crate::daemon::server::DaemonServer::new_with_paths(Some(root.path().join("config")), Some(root.path().join("auth")));
+        let services = owner.remote_state().machine_services.as_ref().unwrap();
+        let workspace = services.workspaces.register_machine(root.path().join("project").to_str().unwrap()).unwrap();
+        let request = serde_json::json!({"requestId":uuid::Uuid::new_v4().to_string(),"workspaceId":workspace,"worktree":null,"inheritFromSessionId":null,"cwdRelative":null,"cols":80,"rows":24,"startup":{"kind":"shell"}});
+        (root, owner, request)
+    }).await.unwrap();
+    let state = owner.remote_state().clone();
+    let services = state.machine_services.as_ref().unwrap().clone();
+    let backend = owner.terminal_service().clone();
+    let machine_pair = |name: &str| {
+        let pin = state.auth_manager.create_scoped_pairing_code(DevicePermission::Control, crate::remote::DeviceAccessScope::Machine).unwrap();
+        state.auth_manager.exchange_pairing_code(&pin, name).unwrap()
+    };
+    let (token, device) = machine_pair("creator");
+    let (other, other_device) = machine_pair("other");
+    let server = SecurityServer::start(state.clone()).await;
+    let result = std::panic::AssertUnwindSafe(async {
+        let (status, body) = server.request("POST", "/api/v1/sessions", Some(&token), Some(&request.to_string())).await;
+        assert_eq!(status, 201, "{body}");
+        let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let id = created["target"]["sessionId"].as_str().unwrap();
+        let epoch = created["target"]["daemonEpoch"].as_str().unwrap();
+        let pty = backend.get_session(id).unwrap();
+        let pid = pty.pid();
+        let path = format!("/api/v1/terminal/{id}?daemonEpoch={epoch}");
+        let mut first = open_ws_stream(server.addr, &path, Some(&token)).await;
+        assert!(matches!(frame(&mut first).await, ServerWebSocketFrame::Text(_)));
+        write_client_ws_frame(&mut first, 8, &[]).await;
+        while !matches!(frame(&mut first).await, ServerWebSocketFrame::Close) {}
+        drop(first);
+        assert!(services.sessions.machine_controllers.lock().await[id].disconnected.lock().is_some());
+        assert_eq!(ws_handshake_status(server.addr, &path, Some(&other)).await, 409);
+        *services.sessions.machine_controllers.lock().await[id].disconnected.lock() = Some(tokio::time::Instant::now() - Duration::from_secs(15));
+        let mut second = open_ws_stream(server.addr, &path, Some(&other)).await;
+        assert!(matches!(frame(&mut second).await, ServerWebSocketFrame::Text(_)));
+        assert_eq!(pty.pid(), pid);
+        let close = serde_json::json!({"requestId":uuid::Uuid::new_v4().to_string(),"daemonEpoch":epoch}).to_string();
+        assert_eq!(server.request("DELETE", &format!("/api/v1/sessions/{id}"), Some(&token), Some(&close)).await.0, 409);
+        let close = serde_json::json!({"requestId":uuid::Uuid::new_v4().to_string(),"daemonEpoch":epoch}).to_string();
+        assert_eq!(server.request("DELETE", &format!("/api/v1/sessions/{id}"), Some(&other), Some(&close)).await.0, 204);
+        assert!(pty.is_reaped());
+        while !matches!(frame(&mut second).await, ServerWebSocketFrame::Close) {}
+        drop(second);
+        eprintln!("A10 actual socket release: reserved other=409; controlled15s expiry=attach; creator close=409; sole current controller close=204; original_pid={pid:?} epoch={epoch} reaped=true");
+    }).catch_unwind().await;
+    state.auth_manager.revoke_device(&device.id); state.auth_manager.revoke_device(&other_device.id);
+    for id in backend.list_sessions() { backend.close_session(&id).await.unwrap(); services.sessions.wait_machine_lifecycle(&id).await.unwrap(); }
+    server.stop().await;
+    drop(services); drop(state); drop(owner);
+    tokio::task::spawn_blocking(move || root.close().unwrap()).await.unwrap();
+    eprintln!("A10 joint socket-close cleanup: listener stopped, original PTYs/lifecycles reaped, root removed");
+    if let Err(panic) = result { std::panic::resume_unwind(panic); }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a10_pending_machine_input_is_dropped_on_disconnect_and_revoke() {
+    // The machine branch writes to the real PtySession, not SocketBackend.
+    // Preserve both lifetime assertions at that production boundary.
+    crate::remote::server::machine_input_cancellation_tests::disconnect_and_revoke().await;
+}
+
 #[derive(Default)]
 struct Gate {
     entered: Notify,

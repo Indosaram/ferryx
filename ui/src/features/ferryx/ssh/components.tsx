@@ -7,7 +7,21 @@ import { Label } from "../../../components/ui/label";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "../../../components/ui/select";
 
 export function RunOn({ value = { kind: "local" }, hosts, immutable, onChange }: { value?: RunTarget; hosts: readonly HostConfig[]; immutable?: boolean; onChange: (target: RunTarget) => void }) {
-  const hostId = value.kind === "ssh" ? value.hostId : undefined;
+  let hostId: string | undefined;
+  switch (value.kind) {
+    case "pairedDaemon":
+      return <div className="space-y-1 text-sm">
+        <Button disabled aria-label="Run on" data-testid="run-on" data-host-id={value.hostId} data-target-kind={value.kind}>
+          Paired Daemon: {value.hostId} (unavailable here)
+        </Button>
+      </div>;
+    case "local": hostId = undefined; break;
+    case "ssh": hostId = value.hostId; break;
+    default: {
+      const exhaustive: never = value;
+      return exhaustive;
+    }
+  }
   const missing = hostId !== undefined && !hosts.some(host => host.id === hostId);
   return <div className="space-y-1 text-sm">
     <Select value={hostId ? `ssh:${hostId}` : "local"} disabled={immutable || missing} onValueChange={value => onChange(value === "local" ? { kind: "local" } : { kind: "ssh", hostId: value.slice(4) })}>

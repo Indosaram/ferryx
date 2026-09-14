@@ -1,0 +1,352 @@
+diff --git a/src-tauri/src/daemon/server.rs b/src-tauri/src/daemon/server.rs
+index f08a52c2..7f877bd1 100644
+--- a/src-tauri/src/daemon/server.rs
++++ b/src-tauri/src/daemon/server.rs
+@@ -1,4 +1,6 @@
+ // allow: SIZE_OK — daemon IPC server implementation with routing, session persistence offloading, remote control, and streaming
++#[path = "machine_gateway.rs"]
++mod machine_gateway;
+ use crate::daemon::agent_state::{AgentState, AgentStateHub, AgentStateSubscription};
+ use crate::daemon::protocol::{
+     AgentStateReport, DaemonRemoteEvent, DaemonRemoteStatus,
+@@ -758,6 +760,7 @@ fn daemon_ssh_store_path() -> PathBuf {
+ }
+ 
+ pub struct DaemonServer {
++    paired_hosts: crate::paired_host::service::PairedHostService,
+     pub session_router: Arc<crate::daemon::proxy::SessionRouter>,
+     pub handover_manager: Arc<crate::daemon::handover::HandoverManager>,
+     terminal_service: Arc<TerminalService>,
+@@ -853,6 +856,152 @@ mod a05_compatibility_tests {
+     }
+ }
+ 
++#[cfg(all(test, unix))]
++#[path = "../paired_host/process_tests.rs"]
++mod paired_host_process_tests;
++
++#[cfg(all(test, unix))]
++#[path = "../paired_host/native_operation_tests.rs"]
++mod paired_host_operation_tests;
++
++#[cfg(all(test, unix))]
++mod paired_host_native_tests {
++    use super::*;
++    use crate::paired_host::{inventory::{AuthStatus, MigrationReceipt}, service::{PairRequest, Secret}};
++
++    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++    async fn native_daemon_relay_inventory_roundtrip() {
++        let root = tempfile::tempdir().unwrap();
++        let outcome = tokio::time::timeout(Duration::from_secs(60), exercise(root.path())).await;
++        let path = root.path().to_owned();
++        root.close().unwrap();
++        eprintln!("A13 cleanup private_root={} absent={}", path.display(), !path.exists());
++        outcome.unwrap().unwrap();
++    }
++    struct GatewayGuard(Arc<DaemonServer>);
++    impl Drop for GatewayGuard {
++        fn drop(&mut self) {
++            if let Some(handle) = self.0.remote_server_handle.lock().take() { handle.stop(); }
++        }
++    }
++    async fn exercise(root: &Path) -> anyhow::Result<()> {
++        use anyhow::{ensure, Context};
++        let data = root.join("data");
++        fs::create_dir_all(&data)?;
++        let mut daemon = DaemonServer::new_with_paths(Some(data.join("config")), Some(data.join("auth")));
++        daemon.paired_hosts = crate::paired_host::service::PairedHostService::open_test_loopback(data.clone());
++        let daemon = Arc::new(daemon);
++        let _gateway_guard = GatewayGuard(Arc::clone(&daemon));
++        let socket = root.join("native.sock");
++        let listener = tokio::net::UnixListener::bind(&socket)?;
++        let owner = Arc::clone(&daemon);
++        let mut tasks = tokio::task::JoinSet::new();
++        tasks.spawn(async move {
++            let mut clients = tokio::task::JoinSet::new();
++            loop {
++                match listener.accept().await {
++                    Ok((stream, _)) => {
++                        let owner = Arc::clone(&owner);
++                        clients.spawn(async move { owner.handle_client(stream).await });
++                    }
++                    Err(error) => return Err(error),
++                }
++            }
++        });
++        let relay_state = crate::remote::relay_server::RelayState::new_with_key_store(vec![], root.join("relay-keys.json"))
++            .map_err(anyhow::Error::msg)?;
++        let relay_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
++        let origin = format!("http://{}", relay_listener.local_addr()?);
++        tasks.spawn(async move {
++            axum::serve(relay_listener, crate::remote::relay_server::relay_router(relay_state)
++                .into_make_service_with_connect_info::<std::net::SocketAddr>()).await
++        });
++        let result = async {
++            daemon.configure_gateway(RemoteGatewayConfig { mode: RemoteNetworkMode::Relay, port: 0,
++                relay_url: Some(origin.clone()), ..Default::default() }).await.map_err(anyhow::Error::msg)?;
++            let client = crate::daemon::client::DaemonClient::new_with_socket(socket.clone());
++            ensure!(client.paired_host_list().await.map_err(|e| anyhow::anyhow!(e.code))?.is_empty(), "new inventory not empty");
++            let coordinator = daemon.remote_state.relay_pairing.read().as_ref()
++                .map(|p| p.coordinator.clone()).context("published relay coordinator")?;
++            let issue = |scope| {
++                let coordinator = coordinator.clone();
++                async move {
++                    // The existing issuer does not receive relay-consumed notifications.
++                    // Explicitly expire its completed PIN before the next issuance.
++                    if coordinator.state() == crate::remote::protocol::PairingState::Ready {
++                        coordinator.transition(crate::remote::protocol::PairingState::Expired)?;
++                    }
++                    coordinator.generate_scoped_pairing(Duration::from_secs(60), DevicePermission::Control, scope).await
++                }
++            };
++            let first = issue(crate::remote::auth::DeviceAccessScope::Machine).await.map_err(anyhow::Error::msg)?;
++            let host = client.paired_host_pair(PairRequest { relay_origin: origin.clone(), pin: Secret(first.pin), display_label: "Fixture host".into() })
++                .await.map_err(|e| anyhow::anyhow!(e.code))?;
++            ensure!(host.generation.0 == 1 && host.auth_status == AuthStatus::Paired, "first adoption mismatch");
++            // An independent gateway on the same relay establishes real credential isolation.
++            let other_data = root.join("other");
++            fs::create_dir_all(&other_data)?;
++            let other = Arc::new(DaemonServer::new_with_paths(Some(other_data.join("config")), Some(other_data.join("auth"))));
++            let _other_guard = GatewayGuard(Arc::clone(&other));
++            other.configure_gateway(RemoteGatewayConfig { mode: RemoteNetworkMode::Relay, port: 0,
++                relay_url: Some(origin.clone()), ..Default::default() }).await.map_err(anyhow::Error::msg)?;
++            let other_coordinator = other.remote_state.relay_pairing.read().as_ref().map(|p| p.coordinator.clone()).context("other coordinator")?;
++            let other_pin = other_coordinator.generate_scoped_pairing(Duration::from_secs(60), DevicePermission::Control,
++                crate::remote::auth::DeviceAccessScope::Machine).await.map_err(anyhow::Error::msg)?;
++            let other_host = client.paired_host_pair(PairRequest { relay_origin: origin.clone(), pin: Secret(other_pin.pin), display_label: "Other host".into() })
++                .await.map_err(|e| anyhow::anyhow!(e.code))?;
++            ensure!(other_host.host_id != host.host_id, "gateway identities aliased");
++            let other_lease = daemon.paired_hosts.test_capture(other_host.host_id.clone(), other_host.generation).await.map_err(|e| anyhow::anyhow!(e.code))?;
++            client.paired_host_forget(other_host.host_id.clone(), other_host.generation).await.map_err(|e| anyhow::anyhow!(e.code))?;
++            ensure!(other_lease.token().is_err(), "other forget did not cancel its lease");
++            ensure!(client.paired_host_read(MigrationReceipt { host_id: host.host_id.clone(), generation: host.generation }).await.map_err(|e| anyhow::anyhow!(e.code))? == host, "cross-host forget mutated first host");
++            ensure!(!other.remote_state.auth_manager.list_devices().is_empty(), "other forget revoked remote grant");
++            let lease = daemon.paired_hosts.test_capture(host.host_id.clone(), host.generation).await.map_err(|e| anyhow::anyhow!(e.code))?;
++            let mut cancelled = lease.cancellation();
++            let token = lease.token()?.to_owned();
++            let migrated = client.paired_host_migrate_legacy(crate::paired_host::service::MigrationRequest {
++                relay_origin: origin.clone(), machine_id: host.machine_id.clone(), display_label: host.display_label.clone(), device_token: Secret(token.clone()),
++            }).await.map_err(|e| anyhow::anyhow!(e.code))?;
++            ensure!(migrated.generation == host.generation && migrated.host_id == host.host_id, "migration retry changed authority");
++            ensure!(client.paired_host_read(migrated).await.map_err(|e| anyhow::anyhow!(e.code))? == host, "migration durable receipt failed");
++            let serialized = serde_json::to_string(&host)?;
++            ensure!(!serialized.contains(&token) && !serialized.contains("deviceToken"), "native projection leaked credential");
++            use std::os::unix::fs::PermissionsExt;
++            ensure!(fs::metadata(data.join("paired-hosts.v1.json"))?.permissions().mode() & 0o777 == 0o600, "credential file not private");
++            ensure!(fs::metadata(&data)?.permissions().mode() & 0o777 == 0o700, "credential directory not private");
++            let second = issue(crate::remote::auth::DeviceAccessScope::Machine).await.map_err(anyhow::Error::msg)?;
++            let repaired = client.paired_host_pair(PairRequest { relay_origin: origin.clone(), pin: Secret(second.pin), display_label: "Fixture host".into() })
++                .await.map_err(|e| anyhow::anyhow!(e.code))?;
++            ensure!(repaired.generation.0 == 2 && repaired.host_id == host.host_id, "re-pair identity/generation mismatch");
++            cancelled.changed().await?;
++            ensure!(*cancelled.borrow() && lease.token().is_err(), "lease not cancelled");
++            ensure!(client.paired_host_forget(host.host_id.clone(), host.generation).await.unwrap_err().code == "PAIRED_HOST_STALE_GENERATION", "stale forget admitted");
++            let receipt = MigrationReceipt { host_id: repaired.host_id.clone(), generation: repaired.generation };
++            ensure!(client.paired_host_read(receipt).await.map_err(|e| anyhow::anyhow!(e.code))? == repaired, "durable readback mismatch");
++            let restart = crate::paired_host::service::PairedHostService::open_test_loopback(data.clone());
++            ensure!(restart.list().await.map_err(|e| anyhow::anyhow!(e.code))? == vec![repaired.clone()], "restart persistence mismatch");
++            drop(restart);
++            let migration = crate::paired_host::service::MigrationRequest { relay_origin: origin.clone(), machine_id: repaired.machine_id.clone(), display_label: repaired.display_label.clone(), device_token: Secret(token.clone()) };
++            ensure!(client.paired_host_migrate_legacy(migration).await.unwrap_err().code == "PAIRED_HOST_MIGRATION_PENDING", "old credential replaced re-pair");
++            ensure!(client.paired_host_list().await.map_err(|e| anyhow::anyhow!(e.code))? == vec![repaired.clone()], "failed migration damaged inventory");
++            let mirror = issue(crate::remote::auth::DeviceAccessScope::Mirror).await.map_err(anyhow::Error::msg)?;
++            let mirrored = client.paired_host_pair(PairRequest { relay_origin: origin.clone(), pin: Secret(mirror.pin), display_label: "Fixture host".into() })
++                .await.map_err(|e| anyhow::anyhow!(e.code))?;
++            ensure!(mirrored.generation.0 == 3 && mirrored.auth_status == AuthStatus::NeedsMachineGrant, "mirror elevated");
++            client.paired_host_forget(mirrored.host_id, mirrored.generation).await.map_err(|e| anyhow::anyhow!(e.code))?;
++            ensure!(client.paired_host_list().await.map_err(|e| anyhow::anyhow!(e.code))?.is_empty(), "forget retained local host");
++            ensure!(!daemon.remote_state.auth_manager.list_devices().is_empty(), "forget revoked remote devices");
++            eprintln!("A13 real_uds=true relay_pair_exchange=true scope_negotiation=true re_pair=1,2,3 stale_forget=rejected lease_cancelled=true durable_readback=true restart=true failed_migration_preserved=true local_forget=true cross_host_isolation=true modes=700,600");
++            Ok::<_, anyhow::Error>(())
++        }.await;
++        if let Some(handle) = daemon.remote_server_handle.lock().take() { handle.stop(); }
++        tasks.shutdown().await;
++        drop(daemon);
++        fs::remove_file(socket)?;
++        result
++    }
++}
++
+ #[cfg(all(test, unix))]
+ #[path = "a03_owner_cli_fixture.rs"]
+ mod a03_owner_cli_fixture;
+@@ -895,6 +1044,9 @@ impl DaemonServer {
+             .map(Path::to_path_buf);
+         #[cfg(test)]
+         let isolated_dir = isolated_dir.or_else(|| catalog_fixture.as_ref().map(|dir| dir.path().to_owned()));
++        let paired_hosts = crate::paired_host::service::PairedHostService::open(
++            isolated_dir.clone().unwrap_or_else(|| crate::remote::auth::canonical_identity_dir()
++                .expect("daemon requires a private data directory")));
+         let pty_manager = Arc::new(PtyManager::new());
+         let output_hub = Arc::new(TerminalOutputHub::default());
+         let terminal_service = Arc::new(TerminalService::new(
+@@ -927,6 +1079,8 @@ impl DaemonServer {
+             agent_states: Arc::new(AgentStateHub::default()),
+             spawn_idempotency_cache: Arc::new(Mutex::new(HashMap::new())),
+             spawn_lock: Arc::new(tokio::sync::Mutex::new(())),
++            machine_controllers: tokio::sync::Mutex::new(HashMap::new()),
++            machine_lifecycles: Arc::new(Mutex::new(HashMap::new())),
+             remote_persistence_lock: Arc::new(tokio::sync::Mutex::new(())),
+             remote_sessions_path: isolated_dir
+                 .clone()
+@@ -1005,6 +1159,7 @@ impl DaemonServer {
+         }
+ 
+         Self {
++            paired_hosts,
+             session_router,
+             handover_manager,
+             terminal_service,
+@@ -1083,14 +1238,14 @@ impl DaemonServer {
+     }
+ 
+     #[cfg(unix)]
+-    fn spawn_agent_state_listener(self: &Arc<Self>) {
++    pub fn spawn_agent_state_listener(self: &Arc<Self>) -> Option<tokio::task::JoinHandle<()>> {
+         let path = get_agent_state_socket_path();
+         let _ = fs::remove_file(&path);
+         let listener = match UnixListener::bind(&path) {
+             Ok(listener) => listener,
+             Err(error) => {
+                 tracing::warn!(%error, "Failed to bind agent state socket");
+-                return;
++                return None;
+             }
+         };
+         if let Err(error) = fs::set_permissions(&path, fs::Permissions::from_mode(0o600)) {
+@@ -1098,17 +1253,35 @@ impl DaemonServer {
+         }
+ 
+         let states = Arc::clone(&self.agent_states);
+-        tokio::spawn(async move {
++        let sessions = self.session_service.clone();
++        let epoch = crate::scoped_contracts::Epoch(self.epoch);
++        Some(tokio::spawn(async move {
++            let mut clients = tokio::task::JoinSet::new();
+             loop {
+                 let Ok((stream, _)) = listener.accept().await else {
+                     continue;
+                 };
+                 let states = Arc::clone(&states);
+-                tokio::spawn(async move {
++                let sessions = sessions.clone();
++                while clients.try_join_next().is_some() {}
++                clients.spawn(async move {
+                     let mut reader = BufReader::new(stream);
+                     let mut line = String::new();
+                     while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                         if let Some(report) = Self::parse_agent_state_report(&line) {
++                            match sessions.machine_detail_routed(&report.0, epoch).await {
++                                Ok(crate::remote::machine_protocol::SessionDetail::Running { session }) => {
++                                    let hint = AgentStateReport { session_id: report.0.clone(), state: report.1.clone(), agent: report.2.clone(), provider_session: report.3.clone() };
++                                    if let Err(error) = sessions.validate_machine_agent_report(session.target, hint).await {
++                                        tracing::debug!(%error, "Machine agent metadata rejected");
++                                        line.clear();
++                                        continue;
++                                    }
++                                },
++                                Ok(_) => { line.clear(); continue; },
++                                Err(error) if error == "SESSION_NOT_FOUND" => {},
++                                Err(error) => { tracing::debug!(%error, "Machine agent owner unavailable"); line.clear(); continue; },
++                            }
+                             states.publish_canonical(AgentState {
+                                 session_id: report.0,
+                                 state: report.1,
+@@ -1120,7 +1293,7 @@ impl DaemonServer {
+                     }
+                 });
+             }
+-        });
++        }))
+     }
+ 
+     pub async fn run_server(self: Arc<Self>) -> Result<(), String> {
+@@ -1314,6 +1487,32 @@ impl DaemonServer {
+                     let legacy_direct_ssh = details.is_none() && self.session_metadata.read().get(&session_id).is_some_and(|m| crate::ssh::projects::is_remote(&m.workspace_id));
+                     DaemonResponse::RemoteSessionDetailsOk { details, legacy_direct_ssh }
+                 }
++                Ok(DaemonRequest::MachineGateway) => {
++                    if let Err(error) = write_half.write_all(b"{\"type\":\"machineGatewayOk\"}\n").await {
++                        tracing::warn!(%error, "Legacy machine gateway admission failed");
++                        return;
++                    }
++                    Box::pin(machine_gateway::serve(tokio::io::join(reader, write_half), self.remote_state().clone())).await;
++                    return;
++                }
++                Ok(DaemonRequest::MachineMetadataSubscribe { target }) => {
++                    if let Err(error) = self.session_service.serve_metadata(tokio::io::join(reader, write_half), target).await {
++                        tracing::debug!(%error, "Owner metadata subscription ended");
++                    }
++                    return;
++                }
++                Ok(DaemonRequest::MachineSessionMetadata { target, report }) => {
++                    match Box::pin(self.session_service.validate_machine_agent_report(target, report)).await {
++                        Ok(session) => DaemonResponse::MachineSessionDetailOk { detail: crate::remote::machine_protocol::SessionDetail::Running { session } },
++                        Err(message) => DaemonResponse::Error { message },
++                    }
++                }
++                Ok(DaemonRequest::MachineSessionDetail { session_id }) => {
++                    match Box::pin(self.session_service.machine_detail_routed(&session_id, crate::scoped_contracts::Epoch(self.epoch))).await {
++                        Ok(detail) => DaemonResponse::MachineSessionDetailOk { detail },
++                        Err(message) => DaemonResponse::Error { message },
++                    }
++                }
+                 Ok(DaemonRequest::RetryRemoteSession { session_id }) => {
+                     match self.validate_session_ssh_target(&session_id).await {
+                         Err(e) => DaemonResponse::Error { message: e.to_string() },
+@@ -1341,6 +1540,18 @@ impl DaemonServer {
+                         }
+                     }
+                 },
++                Ok(DaemonRequest::CreateWorktree { workspace_id, worktree, base_ref }) => {
++                    match crate::remote::workspace_api::worktrees::owner_mutation(self.remote_state().clone(), workspace_id, worktree, base_ref, None).await {
++                        Ok(response) => response,
++                        Err(message) => DaemonResponse::Error { message },
++                    }
++                }
++                Ok(DaemonRequest::DeleteWorktree { workspace_id, worktree, delete_branch, destructive }) => {
++                    match crate::remote::workspace_api::worktrees::owner_mutation(self.remote_state().clone(), workspace_id, worktree, None, Some((delete_branch, destructive))).await {
++                        Ok(response) => response,
++                        Err(message) => DaemonResponse::Error { message },
++                    }
++                }
+                 Ok(DaemonRequest::RegisterWorkspace {
+                     workspace_id,
+                     repo_root,
+@@ -1690,8 +1901,34 @@ impl DaemonServer {
+                         Err(e) => DaemonResponse::Error { message: e },
+                     }
+                 }
+-                Ok(DaemonRequest::GetCapabilities) => DaemonResponse::CapabilitiesOk {
+-                    capabilities: vec!["machinePairingV1".into()],
++                Ok(DaemonRequest::PairedHostOperation { request }) => match crate::paired_host::client::MachineClient::new().execute(&self.paired_hosts, request).await {
++                    Ok(response) => DaemonResponse::PairedHostOperationOk { response },
++                    Err(error) => DaemonResponse::PairedHostOperationError { error },
++                },
++                Ok(DaemonRequest::PairedHostRead { request }) => match self.paired_hosts.read(request).await {
++                    Ok(host) => DaemonResponse::PairedHostReadOk { host },
++                    Err(error) => DaemonResponse::PairedHostError { error },
++                },
++                Ok(DaemonRequest::PairedHostList) => match self.paired_hosts.list().await {
++                    Ok(hosts) => DaemonResponse::PairedHostListOk { hosts },
++                    Err(error) => DaemonResponse::PairedHostError { error },
++                },
++                Ok(DaemonRequest::PairedHostPair { request }) => match self.paired_hosts.pair(request).await {
++                    Ok(host) => DaemonResponse::PairedHostPairOk { host },
++                    Err(error) => DaemonResponse::PairedHostError { error },
++                },
++                Ok(DaemonRequest::PairedHostMigrateLegacy { request }) => match self.paired_hosts.migrate_legacy(request).await {
++                    Ok(receipt) => DaemonResponse::PairedHostMigrateLegacyOk { receipt },
++                    Err(error) => DaemonResponse::PairedHostError { error },
++                },
++                Ok(DaemonRequest::PairedHostForget { host_id, expected_generation }) => match self.paired_hosts.forget(host_id, expected_generation).await {
++                    Ok(()) => DaemonResponse::PairedHostForgetOk,
++                    Err(error) => DaemonResponse::PairedHostError { error },
++                },
++                Ok(DaemonRequest::GetCapabilities) => {
++                    let mut capabilities = vec!["machinePairingV1".into()];
++                    if self.paired_hosts.available().await { capabilities.push("pairedHostInventoryV1".into()); }
++                    DaemonResponse::CapabilitiesOk { capabilities }
+                 },
+                 Ok(request @ (DaemonRequest::RemoteCreatePairingCode { .. }
+                     | DaemonRequest::RemoteCreateMachinePairingCode)) => {

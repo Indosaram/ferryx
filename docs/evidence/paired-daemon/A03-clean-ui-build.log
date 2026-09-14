@@ -1,0 +1,25 @@
+Command: bun run --cwd ui build
+Worktree: /Users/indo/code/project/orca-lite-wt/herdr-wave0-clean
+Monitor: mon_SK9CCY29YMSJ947M
+status: completed exit_code: 0
+$ tsc && vite build
+vite v6.4.3 building for production...
+transforming (1) src/main.tsxtransforming (15) node_modules/react/index.jstransforming (27) node_modules/@tauri-apps/api/core.jstransforming (67) src/index.csstransforming (1092) node_modules/lucide-react/dist/esm/icons/message-circle-code.jstransforming (1663) node_modules/@dnd-kit/utilities/dist/utilities.esm.jstransforming (1712) node_modules/react-dom/client.jstransforming (1858) node_modules/use-callback-ref/dist/es2015/assignRef.js✓ 1883 modules transformed.
+rendering chunks (1)...rendering chunks (2)...rendering chunks (3)...rendering chunks (4)...rendering chunks (5)...rendering chunks (6)...rendering chunks (7)...rendering chunks (8)...rendering chunks (9)...computing gzip size (0)...computing gzip size (1)...computing gzip size (2)...computing gzip size (3)...computing gzip size (4)...computing gzip size (5)...computing gzip size (6)...computing gzip size (7)...computing gzip size (8)...computing gzip size (9)...computing gzip size (10)...computing gzip size (11)...computing gzip size (12)...computing gzip size (13)...dist/index.html                                        3.08 kB │ gzip:   1.10 kB
+dist/assets/crush-DHElXcRZ.png                         5.46 kB
+dist/assets/droid-BhrKLgQ8.svg                         6.30 kB │ gzip:   2.88 kB
+dist/assets/antigravity-DgAQAdn3.svg                   7.63 kB │ gzip:   1.72 kB
+dist/assets/gjc-CmlXGg4z.png                          22.73 kB
+dist/assets/geist-variable-CrgPqtmy.woff2             69.44 kB
+dist/assets/ferryx-icon-OXRkkUvz.png                 805.82 kB
+dist/assets/index-DglER3B1.css                        78.14 kB │ gzip:  14.20 kB
+dist/assets/server-Bjtd7a27.js                         0.51 kB │ gzip:   0.32 kB
+dist/assets/card-DpwlfC1s.js                           2.08 kB │ gzip:   0.88 kB
+dist/assets/PermissionsOnboardingDialog-krOhn58p.js    6.21 kB │ gzip:   1.82 kB
+dist/assets/browser-CSjRRPAf.js                       25.78 kB │ gzip:  10.13 kB
+dist/assets/RemoteApp-k-8u2jVG.js                     61.06 kB │ gzip:  18.03 kB
+dist/assets/sonner-DcTH8xUI.js                        96.55 kB │ gzip:  32.05 kB
+dist/assets/index-BRjKmuJv.js                        187.38 kB │ gzip:  60.03 kB
+dist/assets/SettingsDialog-B-uJbSa-.js               192.13 kB │ gzip:  57.27 kB
+dist/assets/App-D_yyty1r.js                          479.91 kB │ gzip: 139.63 kB
+✓ built in 5.68s

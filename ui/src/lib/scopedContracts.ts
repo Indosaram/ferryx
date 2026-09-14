@@ -8,7 +8,9 @@ export interface TargetRef {
   readonly backendSessionId: string;
 }
 
-export type RunTarget = { readonly kind: "local" } | { readonly kind: "ssh"; readonly hostId: string };
+export type RunTarget = { readonly kind: "local" }
+  | { readonly kind: "ssh"; readonly hostId: string }
+  | { readonly kind: "pairedDaemon"; readonly hostId: string };
 export type ScopeCapability = "scopeControlV1" | "sshHelperV1" | "managedCodexV1" | "captureV1";
 export type InventoryCompleteness = "complete" | "partial" | "unknown";
 export interface InventorySnapshot<T> {

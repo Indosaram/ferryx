@@ -1,0 +1,12 @@
+$ vitest run --maxWorkers=1 src/lib/pairedWorktreeActions.test.ts src/lib/pairedActionBoundaries.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/ui
+
+ ✓ src/lib/pairedWorktreeActions.test.ts (4 tests) 5ms
+ ✓ src/lib/pairedActionBoundaries.test.tsx (5 tests) 15ms
+
+ Test Files  2 passed (2)
+      Tests  9 passed (9)
+   Start at  15:59:45
+   Duration  1.77s (transform 139ms, setup 311ms, collect 690ms, tests 20ms, environment 503ms, prepare 69ms)
+

@@ -1,0 +1,4 @@
+owner=26376 command=cargo check --locked --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli --bin ferryx-relay 
+  PID  PPID    RSS ELAPSED COMMAND
+26376 26373    336   00:00 cargo check --locked --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli --bin ferryx-relay
+exit=0 owner_reaped=true

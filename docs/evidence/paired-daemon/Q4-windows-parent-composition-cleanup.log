@@ -1,0 +1,3 @@
+Runtime root removed: /tmp/ferryx-herdr-q4-windows-01a097f8/parent-composition-runtime
+Absent: True
+All six immediate cargo processes waited; see exits.json. No fixture execution in first four compile failures. No canonical daemon or desktop used.

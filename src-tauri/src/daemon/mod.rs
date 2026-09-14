@@ -8,6 +8,14 @@ pub mod manifest;
 pub mod protocol;
 pub mod proxy;
 pub mod server;
+pub mod session_service;
+pub mod workspace_service;
+
+/// Shared headless authority supplied only by the session-owning daemon.
+pub struct MachineServices {
+    pub sessions: std::sync::Arc<session_service::DaemonSessionService>,
+    pub workspaces: std::sync::Arc<workspace_service::DaemonWorkspaceService>,
+}
 
 pub use client::*;
 pub use handover::*;

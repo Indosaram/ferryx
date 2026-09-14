@@ -130,8 +130,30 @@ impl PairingCoordinator {
         timeout: Duration,
         permission: DevicePermission,
     ) -> Result<PairingSessionInfo, String> {
-        // Gateway pairing credentials have a maximum lifetime of sixty seconds.
-        let timeout = timeout.min(Duration::from_secs(60));
+        self.generate_scoped_pairing(timeout, permission, crate::remote::auth::DeviceAccessScope::Mirror).await
+    }
+
+    pub async fn generate_scoped_pairing(
+        &self,
+        timeout: Duration,
+        permission: DevicePermission,
+        scope: crate::remote::auth::DeviceAccessScope,
+    ) -> Result<PairingSessionInfo, String> {
+        if scope == crate::remote::auth::DeviceAccessScope::Machine && permission != DevicePermission::Control {
+            return Err("Machine access requires Control permission".into());
+        }
+        // Gateway (phone mirror) pairing codes are typed into the paired browser
+        // within seconds of being shown, so they stay at sixty seconds.
+        // Machine-scope pairing codes are redeemed from another machine's settings
+        // UI after an operator shells in and runs the CLI, which routinely takes
+        // longer than a minute; they get the full relay lease (ten minutes) and
+        // remain single-use and revoked on redemption.
+        let max_lifetime = if scope == crate::remote::auth::DeviceAccessScope::Machine {
+            Duration::from_secs(600)
+        } else {
+            Duration::from_secs(60)
+        };
+        let timeout = timeout.min(max_lifetime);
         let expires_at = SystemTime::now()
             .checked_add(timeout)
             .ok_or("Invalid pairing lifetime")?
@@ -140,6 +162,16 @@ impl PairingCoordinator {
             .as_secs();
         let (generation, pin, pairing_token) = {
             let mut generation = self.generation_id.write();
+            // An owner request replaces the previous offer, including after a
+            // redemption that does not send a control-channel state transition.
+            // Retire both local capabilities before publishing the next generation.
+            match self.state() {
+                PairingState::Ready | PairingState::Claimed | PairingState::Cancelled => {
+                    self.transition(PairingState::Expired)?;
+                }
+                PairingState::Created | PairingState::Registering
+                | PairingState::Consumed | PairingState::Expired => {}
+            }
             self.transition(PairingState::Registering)?;
             *generation = generation
                 .checked_add(1)
@@ -149,9 +181,11 @@ impl PairingCoordinator {
             *self.active_pin.write() = Some(pin.clone());
             *self.active_token.write() = Some(pairing_token.clone());
             self.auth
-                .register_pairing_capability_with_permission(&pairing_token, permission);
+                .register_scoped_pairing_capability(&pairing_token, permission, scope)
+                .map_err(|error| error.to_string())?;
             self.auth
-                .register_pairing_capability_with_permission(&pin, permission);
+                .register_scoped_pairing_capability(&pin, permission, scope)
+                .map_err(|error| error.to_string())?;
             (*generation, pin, pairing_token)
         };
         let registration = RegisterPairingPin {
@@ -303,6 +337,11 @@ impl RelayClient {
         }
     }
 
+    pub fn with_machine_id(mut self, machine_id: impl Into<String>) -> Self {
+        self.pairing.machine_id = machine_id.into();
+        self
+    }
+
     pub fn with_identity(
         relay_url: impl Into<String>,
         identity: MachineIdentity,
@@ -337,6 +376,16 @@ impl RelayClient {
                 AUTHORIZATION,
                 format!("Bearer {}", self.machine_token).parse()?,
             );
+        }
+        let machine_id = self
+            .identity
+            .as_ref()
+            .map(|i| i.machine_id.as_str())
+            .unwrap_or(&self.pairing.machine_id);
+        if !machine_id.is_empty() {
+            if let Ok(val) = machine_id.parse() {
+                request.headers_mut().insert("x-ferryx-machine-id", val);
+            }
         }
         let (mut socket, _) = tokio_tungstenite::connect_async(request).await?;
         if let Some(identity) = &self.identity {
@@ -428,9 +477,18 @@ impl RelayClient {
         let (mut write, mut read) = socket.split();
         // Dropping the control future also aborts its data channels.
         let mut sessions = tokio::task::JoinSet::new();
+        let mut ping_interval = tokio::time::interval(Duration::from_secs(15));
+        ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             let message = tokio::select! {
+                _ = ping_interval.tick() => {
+                    if let Err(err) = write.send(Message::Ping(Vec::new().into())).await {
+                        tracing::warn!("relay control ping failed: {err}");
+                        break;
+                    }
+                    continue;
+                }
                 registration = registrations.recv(), if pending.is_none() => {
                     if let Some(registration) = registration {
                         if registration.ack.is_closed() { continue; }
@@ -747,6 +805,10 @@ mod tests {
         assert_eq!(registration.pairing_token.len(), 32);
         assert!(u128::from_str_radix(&registration.pairing_token, 16).is_ok());
         assert!(coordinator.transition(PairingState::Consumed).is_err());
+        assert!(coordinator
+            .generate_pairing(Duration::from_secs(60))
+            .await
+            .is_err());
         release_tx.send(()).unwrap();
         let session = tokio::time::timeout(Duration::from_secs(5), generation)
             .await
@@ -756,10 +818,6 @@ mod tests {
         assert_eq!(session.pin, registration.pin);
         assert_eq!(session.pairing_token, registration.pairing_token);
         assert_eq!(coordinator.state(), PairingState::Ready);
-        assert!(coordinator
-            .generate_pairing(Duration::from_secs(60))
-            .await
-            .is_err());
         coordinator.transition(PairingState::Claimed).unwrap();
         coordinator.transition(PairingState::Consumed).unwrap();
         assert!(coordinator.transition(PairingState::Expired).is_err());
@@ -792,18 +850,26 @@ mod tests {
                     .unwrap();
             }
         });
+        let mut previous: Option<PairingSessionInfo> = None;
         for generation in 1..=4 {
-            coordinator
+            // Given an earlier offer, when the owner issues its replacement,
+            // then neither local credential from that offer remains redeemable.
+            let session = coordinator
                 .generate_pairing(Duration::from_secs(60))
                 .await
                 .unwrap();
+            if let Some(old) = previous {
+                assert!(coordinator.auth.exchange_pairing_code(&old.pin, "stale").is_err());
+                assert!(coordinator.auth.exchange_pairing_code(&old.pairing_token, "stale").is_err());
+            }
+            previous = Some(session);
             assert_eq!(*coordinator.generation_id.read(), generation);
             coordinator.expire_generation(generation - 1);
             assert_eq!(coordinator.state(), PairingState::Ready);
             if generation % 2 == 0 {
                 coordinator.transition(PairingState::Claimed).unwrap();
                 coordinator.transition(PairingState::Consumed).unwrap();
-            } else {
+            } else if generation == 3 {
                 coordinator.expire_generation(generation);
                 assert_eq!(coordinator.state(), PairingState::Expired);
             }

@@ -1,0 +1,14 @@
+{
+  "src-tauri/tests/machine_catalog_persistence.rs": {
+    "before": "fd4cbb35061a5cae09ee4bd657907a7433c4966dd50cc88630316f2af78cc8f4",
+    "after": "4d492f1010c3bc3b68b959fab94eb4a2cfece4be18fdb8359e570ed2a7ed9322"
+  },
+  "src-tauri/src/remote/workspace_api_tests.rs": {
+    "before": "acd98884243be442d615efe39b614064a3ff71353596b22ae0403dd660938b1c",
+    "after": "0c30c7da1b1460bdbe555f3442c0919ca9e0361926a71ac4d1ee1b4548a84857"
+  },
+  "src-tauri/src/remote/workspace_api/worktree_authority_tests.rs": {
+    "before": "6e5c092e24fe5115b0bd266651d1e8c5a5f4fdc06bfd5bb4e8c4cfa3b52861eb",
+    "after": "97538465d9f639c14f18004b09d20baa9e840f3ebd1f95b153f013b5d251f3c5"
+  }
+}

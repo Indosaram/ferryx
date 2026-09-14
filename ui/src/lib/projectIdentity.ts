@@ -1,17 +1,24 @@
 import type { RegisteredProject, Worktree } from "./types";
 
-/** Persisted data is untrusted: an invalid SSH target must never become local. */
-export function hasValidProjectTarget(project: { workspaceId: string; target?: unknown }): boolean {
+/** Persisted data is untrusted: invalid remote targets must never become local. */
+export function hasValidProjectTarget(project: { workspaceId: string; target?: unknown; remoteWorkspaceId?: unknown }): boolean {
   const target = project.target;
-  if (target === undefined) return !project.workspaceId.startsWith("ssh:");
+  const pairedId = project.workspaceId.startsWith("daemon:");
+  if (target === undefined) return !pairedId && !project.workspaceId.startsWith("ssh:");
   if (!target || typeof target !== "object" || !("kind" in target)) return false;
-  if (target.kind === "local") return !project.workspaceId.startsWith("ssh:");
-  return target.kind === "ssh" && "hostId" in target &&
-    typeof target.hostId === "string" && target.hostId.trim().length > 0;
+  switch (target.kind) {
+    case "local": return !pairedId && !project.workspaceId.startsWith("ssh:");
+    case "ssh": return !pairedId && "hostId" in target &&
+      typeof target.hostId === "string" && target.hostId.trim().length > 0;
+    case "pairedDaemon": return /^daemon:[a-f0-9]{64}$/.test(project.workspaceId) &&
+      "hostId" in target && typeof target.hostId === "string" && target.hostId.trim().length > 0 &&
+      typeof project.remoteWorkspaceId === "string" && project.remoteWorkspaceId.trim().length > 0;
+    default: return false;
+  }
 }
 
 export function projectRootWorktree(project: RegisteredProject, hostLabel?: string): Worktree {
-  const isRemote = project.target?.kind === "ssh";
+  const isRemote = project.target?.kind === "ssh" || project.target?.kind === "pairedDaemon";
   const branch = project.gitBranch !== undefined ? project.gitBranch : null;
   const head = project.gitHead ?? "";
   const detached = Boolean(head && !branch);

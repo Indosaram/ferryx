@@ -1,0 +1,25 @@
+{
+  "src-tauri/src/remote/relay_server.rs": "0ccad7f19422b34ac8bedf3f3077b20af06b52370d52f8b12bd117116c541e57",
+  "src-tauri/src/remote/relay_client.rs": "386abd5a2c71c0889912d6790b74bbf77352e2b75fab7d9bf0ac3f48a8786c0e",
+  "src-tauri/tests/relay_pairing_generation_regression.rs": "5813c51e43b8c51eb222136de7f4afa44d93641c08959f7ab3eff1f5fb195a6c",
+  "environment": {
+    "FERRYX_AGENT_STATE_SOCKET": "/tmp/rorca-501/agent-state.sock",
+    "HOME": "/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/a11-followthrough-owned-jj99l1p4/home",
+    "TMPDIR": "/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/a11-followthrough-owned-jj99l1p4/tmp",
+    "FERRYX_SESSION_ID": "03525739-f668-41cf-aa99-d1284fc0921f",
+    "FERRYX_RUNTIME_DIR": "/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/a11-followthrough-owned-jj99l1p4/run",
+    "FERRYX_DATA_DIR": "/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/a11-followthrough-owned-jj99l1p4/data",
+    "FERRYX_SESSION_DIR": "/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/a11-followthrough-owned-jj99l1p4/session",
+    "XDG_CONFIG_HOME": "/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/a11-followthrough-owned-jj99l1p4/config",
+    "XDG_DATA_HOME": "/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/a11-followthrough-owned-jj99l1p4/xdgdata",
+    "XDG_CACHE_HOME": "/var/folders/zh/7cc25lt91b1_dj577306nwdh0000gn/T/a11-followthrough-owned-jj99l1p4/cache",
+    "CARGO_HOME": "/Users/indo/.cargo",
+    "RUSTUP_HOME": "/Users/indo/.rustup",
+    "CARGO_TARGET_DIR": "/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/src-tauri/target",
+    "CARGO_BUILD_JOBS": "2",
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0",
+    "CARGO_INCREMENTAL": "0",
+    "RUSTC_WRAPPER": ""
+  }
+}

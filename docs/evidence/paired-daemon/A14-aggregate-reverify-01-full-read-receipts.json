@@ -1,0 +1,72 @@
+{
+  "src-tauri/src/paired_host/client.rs": {
+    "lines": 545,
+    "bytes": 21878,
+    "sha256": "1a6e5b05d0e00e69cddfb3ff93371225b814db89506a22effc527c4cc52c150e"
+  },
+  "src-tauri/src/paired_host/projects.rs": {
+    "lines": 52,
+    "bytes": 1681,
+    "sha256": "0e7efc8dba2f7a7af4aad7959aec3709f6d0927d0f6678fd27b21d1a59e43c55"
+  },
+  "src-tauri/src/paired_host/client_tests.rs": {
+    "lines": 437,
+    "bytes": 19129,
+    "sha256": "d812a5f2b5348376d705dcc43bc622b32cc45dd07d663eb29de17c78c1cf5fc8"
+  },
+  "src-tauri/src/paired_host/projects_tests.rs": {
+    "lines": 18,
+    "bytes": 918,
+    "sha256": "7c88ab4f78570c58cd702e6910e3d008b99986c2539a18d175a6d60d8e314be0"
+  },
+  "src-tauri/src/paired_host/mod.rs": {
+    "lines": 8,
+    "bytes": 189,
+    "sha256": "2c51a1c627385f9a53835c758820f54a18a99299689b2ec8d79181c246147f60"
+  },
+  "src-tauri/src/paired_host/service.rs": {
+    "lines": 298,
+    "bytes": 18083,
+    "sha256": "0fbb184ace3ed7d47f4845d6efb0e10b5aae610abfce78fa466f2d51072194c1"
+  },
+  "src-tauri/src/paired_host/native_operation_tests.rs": {
+    "lines": 165,
+    "bytes": 12079,
+    "sha256": "61792592d0b0719ecf7e58dcac7b87204e1cf8e08736c5aa48787c5efe54154c"
+  },
+  "ui/src/lib/pairedDaemonProject.ts": {
+    "lines": 181,
+    "bytes": 13587,
+    "sha256": "9bf51ced8bd2db11e002d2667517ead9b985417f1e9dd7027acad93169254a3e"
+  },
+  "ui/src/lib/pairedDaemonProject.test.ts": {
+    "lines": 155,
+    "bytes": 10620,
+    "sha256": "d98d5ee0f26bcc1517e00b3b900fe7798aa980b298f4372ef00b3aef8b872678"
+  },
+  "src-tauri/src/daemon/protocol.rs": {
+    "lines": 1218,
+    "bytes": 46639,
+    "sha256": "5916a5a04040ea3b4dd1e7efb2eb7db521156d219e646d3915bf355d37f1fc32"
+  },
+  "src-tauri/src/daemon/client.rs": {
+    "lines": 2646,
+    "bytes": 105042,
+    "sha256": "6f260618b6310b329986c164c3c7eb175bbd9481b5dbcfcf8c22519a38895f05"
+  },
+  "src-tauri/src/daemon/server.rs": {
+    "lines": 4224,
+    "bytes": 180799,
+    "sha256": "47e13ee08a8089325ca9d4bf253b0f2794b57af96e0223be8ba30ee4d1ee4668"
+  },
+  "src-tauri/src/ipc/paired_host.rs": {
+    "lines": 34,
+    "bytes": 1664,
+    "sha256": "0a996b54d8f34947b6e5973558733d15196f91aa0d00dfd92b294614c7e9d766"
+  },
+  "src-tauri/src/lib.rs": {
+    "lines": 1839,
+    "bytes": 71257,
+    "sha256": "c5112ebeaa49f49043681203b99b7a3424a71a4cd1222ebd7d5007a7fb1343c4"
+  }
+}

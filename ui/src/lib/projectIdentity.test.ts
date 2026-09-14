@@ -13,6 +13,17 @@ function state(project: RegisteredProject): WorkspaceState {
 }
 
 describe("project target identity", () => {
+  it("accepts complete paired identity and rejects missing or contradictory metadata", () => {
+    const paired = { workspaceId: `daemon:${"a".repeat(64)}`, target: { kind: "pairedDaemon", hostId: "relay/machine" }, remoteWorkspaceId: "project-a" };
+    expect(hasValidProjectTarget(paired)).toBe(true);
+    expect(hasValidProjectTarget({ ...paired, remoteWorkspaceId: undefined })).toBe(false);
+    expect(hasValidProjectTarget({ ...paired, remoteWorkspaceId: " " })).toBe(false);
+    expect(hasValidProjectTarget({ ...paired, target: undefined })).toBe(false);
+    expect(hasValidProjectTarget({ ...paired, target: { kind: "local" } })).toBe(false);
+    expect(hasValidProjectTarget({ ...paired, target: { kind: "ssh", hostId: "h" } })).toBe(false);
+    expect(hasValidProjectTarget({ ...paired, workspaceId: "local" })).toBe(false);
+    expect(hasValidProjectTarget({ ...paired, target: { kind: "pairedDaemon" } })).toBe(false);
+  });
   it("keeps absent targets local but rejects missing or malformed targets for reserved remote identities", () => {
     expect(hasValidProjectTarget(local)).toBe(true);
     expect(hasValidProjectTarget(remote)).toBe(true);

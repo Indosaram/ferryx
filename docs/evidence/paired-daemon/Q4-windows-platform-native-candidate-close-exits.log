@@ -1,0 +1,3 @@
+pty EXIT=0; WAITED=True
+relay EXIT=101; WAITED=True
+ssh EXIT=0; WAITED=True

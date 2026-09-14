@@ -1,0 +1,44 @@
+{
+  "sourceHashes": {
+    "src-tauri/src/remote/filesystem.rs": "c0c3ff7b5258817c123b698da3802a4840d3500d852cde5d7d320b00ebaa3432",
+    "src-tauri/src/remote/filesystem_tests.rs": "e7f8425ce165c84a9b48d69a9b9659224199ab804ac04607decf5fa3ef3d5c52",
+    "src-tauri/src/remote/workspace_api/worktrees.rs": "702488a1da896b284c050952980650bd1aaff85e30678c159ea44d36f6aa08d4",
+    "src-tauri/src/remote/workspace_api/worktree_authority_tests.rs": "7231b3ce6150caf0689a827ec3c2922cd95f757e367f217d9ce6edc699308dbb",
+    "src-tauri/src/remote/workspace_api/worktree_wire_proof_tests.rs": "49404309e49d8e24b3072cf1ba61cb11ef17fe7ff3ab8cc5e0ef059797de1971",
+    "src-tauri/src/worktree/manager.rs": "838bb13869c8bce7e704bbecbad224dd720452c3b9d4f53121af4d58970bea52",
+    "src-tauri/tests/machine_prunable_preview.rs": "0dab956b0304cdff8827ae9a2ebabe548741f41d02fdd5775975122c3bc7dbea"
+  },
+  "changedDuringCorrected": [],
+  "correctedCommands": [
+    {
+      "label": "filesystem",
+      "command": "cd '/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8' || exit 1\nqa_root=$(mktemp -d \"/tmp/ferryx-parent-q-filesystem-XXXXXX\") || exit 1\ntrap 'status=$?; rm -rf -- \"$qa_root\"; cleanup=$?; if [ \"$cleanup\" -ne 0 ] || [ -e \"$qa_root\" ]; then printf \"PARENT_Q_CLEANUP_FAILED root=%s\\n\" \"$qa_root\"; exit 1; fi; printf \"PARENT_Q_COMPLETE filesystem exit=%s root=%s absent=true\\n\" \"$status\" \"$qa_root\"; exit \"$status\"' EXIT\nmkdir -p \"$qa_root/home\" \"$qa_root/runtime\" \"$qa_root/data\" \"$qa_root/sessions\" \"$qa_root/tmp\" \"$qa_root/config\" \"$qa_root/xdg-data\" \"$qa_root/cache\" || exit 1\nHOME=\"$qa_root/home\" FERRYX_RUNTIME_DIR=\"$qa_root/runtime\" FERRYX_DATA_DIR=\"$qa_root/data\" FERRYX_SESSION_DIR=\"$qa_root/sessions\" TMPDIR=\"$qa_root/tmp\" XDG_CONFIG_HOME=\"$qa_root/config\" XDG_DATA_HOME=\"$qa_root/xdg-data\" XDG_CACHE_HOME=\"$qa_root/cache\" CARGO_HOME=/Users/indo/.cargo RUSTUP_HOME=/Users/indo/.rustup CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 RUSTC_WRAPPER= CARGO_TARGET_DIR=\"$PWD/src-tauri/target\" /Users/indo/.cargo/bin/cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib remote::filesystem -- --nocapture",
+      "monitor_id": "mon_GNRBT082343ATJKR",
+      "bash_id": "bash_7",
+      "monitor": true
+    },
+    {
+      "label": "worktree-http-safety",
+      "command": "cd '/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8' || exit 1\nqa_root=$(mktemp -d \"/tmp/ferryx-parent-q-worktree-http-safety-XXXXXX\") || exit 1\ntrap 'status=$?; rm -rf -- \"$qa_root\"; cleanup=$?; if [ \"$cleanup\" -ne 0 ] || [ -e \"$qa_root\" ]; then printf \"PARENT_Q_CLEANUP_FAILED root=%s\\n\" \"$qa_root\"; exit 1; fi; printf \"PARENT_Q_COMPLETE worktree-http-safety exit=%s root=%s absent=true\\n\" \"$status\" \"$qa_root\"; exit \"$status\"' EXIT\nmkdir -p \"$qa_root/home\" \"$qa_root/runtime\" \"$qa_root/data\" \"$qa_root/sessions\" \"$qa_root/tmp\" \"$qa_root/config\" \"$qa_root/xdg-data\" \"$qa_root/cache\" || exit 1\nHOME=\"$qa_root/home\" FERRYX_RUNTIME_DIR=\"$qa_root/runtime\" FERRYX_DATA_DIR=\"$qa_root/data\" FERRYX_SESSION_DIR=\"$qa_root/sessions\" TMPDIR=\"$qa_root/tmp\" XDG_CONFIG_HOME=\"$qa_root/config\" XDG_DATA_HOME=\"$qa_root/xdg-data\" XDG_CACHE_HOME=\"$qa_root/cache\" CARGO_HOME=/Users/indo/.cargo RUSTUP_HOME=/Users/indo/.rustup CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 RUSTC_WRAPPER= CARGO_TARGET_DIR=\"$PWD/src-tauri/target\" /Users/indo/.cargo/bin/cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --test machine_prunable_preview --test machine_worktrees --test worktree_safety -- --nocapture",
+      "monitor_id": "mon_ZRQ0G7JGSJF2FTTY",
+      "bash_id": "bash_8",
+      "monitor": true
+    },
+    {
+      "label": "worktree-manager",
+      "command": "cd '/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8' || exit 1\nqa_root=$(mktemp -d \"/tmp/ferryx-parent-q-worktree-manager-XXXXXX\") || exit 1\ntrap 'status=$?; rm -rf -- \"$qa_root\"; cleanup=$?; if [ \"$cleanup\" -ne 0 ] || [ -e \"$qa_root\" ]; then printf \"PARENT_Q_CLEANUP_FAILED root=%s\\n\" \"$qa_root\"; exit 1; fi; printf \"PARENT_Q_COMPLETE worktree-manager exit=%s root=%s absent=true\\n\" \"$status\" \"$qa_root\"; exit \"$status\"' EXIT\nmkdir -p \"$qa_root/home\" \"$qa_root/runtime\" \"$qa_root/data\" \"$qa_root/sessions\" \"$qa_root/tmp\" \"$qa_root/config\" \"$qa_root/xdg-data\" \"$qa_root/cache\" || exit 1\nHOME=\"$qa_root/home\" FERRYX_RUNTIME_DIR=\"$qa_root/runtime\" FERRYX_DATA_DIR=\"$qa_root/data\" FERRYX_SESSION_DIR=\"$qa_root/sessions\" TMPDIR=\"$qa_root/tmp\" XDG_CONFIG_HOME=\"$qa_root/config\" XDG_DATA_HOME=\"$qa_root/xdg-data\" XDG_CACHE_HOME=\"$qa_root/cache\" CARGO_HOME=/Users/indo/.cargo RUSTUP_HOME=/Users/indo/.rustup CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 RUSTC_WRAPPER= CARGO_TARGET_DIR=\"$PWD/src-tauri/target\" /Users/indo/.cargo/bin/cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib worktree:: -- --nocapture",
+      "monitor_id": "mon_Y24VQARXN22H7F1Q",
+      "bash_id": "bash_9",
+      "monitor": true
+    }
+  ],
+  "allCorrectedExitCodes": 0,
+  "accidentalWorktreeCleanup": {
+    "path": "/Users/indo/code/project/orca-lite-wt/herdr-resume-01a097f8/.orca-worktrees/project-f76664532ee84a8aba7ceb5f5014a9fc/no-partial",
+    "worktreeRemoveExit": 0,
+    "mergedBranchDeleteExit": 0,
+    "pathAbsent": true,
+    "registrationAbsent": true,
+    "branchAbsent": true
+  }
+}

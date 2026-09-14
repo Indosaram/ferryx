@@ -1,0 +1,14 @@
+Traceback (most recent call last):
+  File "/private/tmp/ferryx-herdr-q4-windows-01a097f8/snapshot.py", line 31, in <module>
+    check(root,'source-after'); check(dest,'snapshot-34')
+                                ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/ferryx-herdr-q4-windows-01a097f8/snapshot.py", line 6, in check
+    rows={p:{'sha256':hashlib.sha256((base/p).read_bytes()).hexdigest(),'expected':v['sha256']} for p,v in expected.items()}
+                                     ^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/indo/.pyenv/versions/3.12.0/lib/python3.12/pathlib.py", line 1020, in read_bytes
+    with self.open(mode='rb') as f:
+         ^^^^^^^^^^^^^^^^^^^^
+  File "/Users/indo/.pyenv/versions/3.12.0/lib/python3.12/pathlib.py", line 1014, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/tmp/ferryx-herdr-q4-windows-01a097f8/source/src-tauri/Cargo.lock'

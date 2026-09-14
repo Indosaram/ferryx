@@ -1,0 +1,61 @@
+--- a/src-tauri/tests/machine_catalog_persistence.rs
++++ b/src-tauri/tests/machine_catalog_persistence.rs
+@@ -43,7 +43,8 @@
+     let server = std::sync::Arc::new(DaemonServer::new_with_paths(Some(root.join("data/config")), Some(root.join("data/auth"))));
+     let runtime = tokio::runtime::Runtime::new().unwrap();
+     runtime.block_on(ipc_register(server.clone(), vec![], false));
+-    println!("A05_READY"); std::io::stdout().flush().unwrap();
++    // Serial libtest prints its test-name prefix without a newline.
++    println!("\nA05_READY"); std::io::stdout().flush().unwrap();
+     let mut command = String::new();
+     std::io::stdin().lock().read_line(&mut command).unwrap();
+     if command.trim() == "register" {
+--- a/src-tauri/src/remote/workspace_api_tests.rs
++++ b/src-tauri/src/remote/workspace_api_tests.rs
+@@ -508,7 +508,8 @@
+     if phase != "replay" {
+         *state.machine_services.as_ref().unwrap().workspaces.transaction_probe.write() = Some(std::sync::Arc::new(move |at| {
+             if at == phase {
+-                println!("R12_WINDOW"); std::io::stdout().flush().unwrap();
++                // Serial libtest prints its test-name prefix without a newline.
++                println!("\nR12_WINDOW"); std::io::stdout().flush().unwrap();
+                 let mut line = String::new(); std::io::stdin().lock().read_line(&mut line).unwrap();
+                 panic!("kill window unexpectedly released");
+             }
+@@ -536,13 +537,13 @@
+         if deleting {
+             assert_eq!(status.as_u16(), 204);
+             assert!(root.join("plain").is_dir());
+-            println!("R12_REPLAY unregister 204");
++            println!("\nR12_REPLAY unregister 204");
+         } else {
+             assert_eq!(status.as_u16(), 201);
+             let p: super::machine_protocol::Project = serde_json::from_slice(&body).unwrap();
+             assert_eq!(p.revision.0, 1);
+             std::fs::write(root.join("workspace-id"), &p.workspace_id).unwrap();
+-            println!("R12_REPLAY {} {}", p.workspace_id, p.revision.0);
++            println!("\nR12_REPLAY {} {}", p.workspace_id, p.revision.0);
+         }
+     });
+ }
+--- a/src-tauri/src/remote/workspace_api/worktree_authority_tests.rs
++++ b/src-tauri/src/remote/workspace_api/worktree_authority_tests.rs
+@@ -529,7 +529,8 @@
+         crate::remote::auth::write_private_json(&root.join("request.json"), &value).unwrap(); value
+     };
+     if !replay && std::env::var_os("A08_ACTIVE_GIT").is_none() { *service.transaction_probe.write() = Some(Arc::new(|phase| { if phase == "worktreePublication" {
+-        println!("A08_GIT_COMPLETE_BEFORE_PUBLICATION"); std::io::stdout().flush().unwrap();
++        // Serial libtest prints its test-name prefix without a newline.
++        println!("\nA08_GIT_COMPLETE_BEFORE_PUBLICATION"); std::io::stdout().flush().unwrap();
+         let mut line = String::new(); std::io::stdin().lock().read_line(&mut line).unwrap();
+         panic!("unexpected crash barrier release");
+     }})); }
+@@ -550,7 +551,7 @@
+             assert_eq!(listed.iter().filter(|row| row.managed).count(), 1);
+         }).catch_unwind().await;
+         stop.send(()).unwrap(); gateway.await.unwrap(); result.unwrap();
+-        println!("A08_RECONCILED_UNKNOWN_NO_REPEAT listener_joined=true");
++        println!("\nA08_RECONCILED_UNKNOWN_NO_REPEAT listener_joined=true");
+     });
+ }
+ 

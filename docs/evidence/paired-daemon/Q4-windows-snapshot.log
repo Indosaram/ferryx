@@ -1,0 +1,10 @@
+{
+  "head": "e1a00339a5339ed4d9c9634e26b86f41111d49f6",
+  "files": 969,
+  "skipped": [
+    "src-tauri/vendor/ghostty"
+  ],
+  "ghostty": "6a508fd5e34c7e222c052a6d00bb3891ff3feace",
+  "archive_sha256": "c35fdc9be7cc5b7ef20bb25d341b26b7a28818a4571be9162aef1f98beab399f",
+  "bundle_sha256": "6032eb88ddc9bc4e18c439ccd79729bab92535fa19d22408aa66dd6e829b5ae3"
+}

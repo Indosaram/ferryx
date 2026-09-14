@@ -1,0 +1,14 @@
+COMMAND catalog ['/home/indo/ferryx-herdr-q4-linux-01a097f8/target/debug/deps/machine_catalog_persistence-805569d44134018f', '--exact', 'catalog_owner_process', '--nocapture'] RUST_TEST_THREADS 1
+MARKER_BYTES catalog pid 313243 b'\nrunning 1 test\ntest catalog_owner_process ... A05_READY\n'
+RESULT catalog pid 313243 exit 0
+[master (root-commit) 50345c8] base
+COMMAND worktree-barrier ['/home/indo/ferryx-herdr-q4-linux-01a097f8/target/debug/deps/ferryx_lib-29d5e12f5ed6e1ba', '--exact', 'remote::workspace_api::worktrees::authority_tests::interrupted_worktree_owner_child', '--nocapture'] RUST_TEST_THREADS 1
+MARKER_BYTES worktree-barrier pid 313265 b'\nrunning 1 test\ntest remote::workspace_api::worktrees::authority_tests::interrupted_worktree_owner_child ... A08_GIT_COMPLETE_BEFORE_PUBLICATION\n'
+RESULT worktree-barrier pid 313265 exit -9
+COMMAND worktree-replay ['/home/indo/ferryx-herdr-q4-linux-01a097f8/target/debug/deps/ferryx_lib-29d5e12f5ed6e1ba', '--exact', 'remote::workspace_api::worktrees::authority_tests::interrupted_worktree_owner_child', '--nocapture'] RUST_TEST_THREADS 1
+MARKER_BYTES worktree-replay pid 313295 b'\nrunning 1 test\ntest remote::workspace_api::worktrees::authority_tests::interrupted_worktree_owner_child ... A08_RECONCILED_UNKNOWN_NO_REPEAT listener_joined=true\n'
+RESULT worktree-replay pid 313295 exit 0
+COMMAND project-barrier ['/home/indo/ferryx-herdr-q4-linux-01a097f8/target/debug/deps/ferryx_lib-29d5e12f5ed6e1ba', '--exact', 'remote::workspace_api_tests::r12_crash_owner', '--nocapture'] RUST_TEST_THREADS 1
+MARKER_BYTES project-barrier pid 313313 b'\nrunning 1 test\ntest remote::workspace_api_tests::r12_crash_owner ... R12_WINDOW\n'
+RESULT project-barrier pid 313313 exit -9
+CAPTURE_QA_REMOVED True

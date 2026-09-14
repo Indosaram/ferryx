@@ -99,6 +99,8 @@ const native = {
 
 const updater = {
   check: vi.fn(),
+  startUpdatePolling: vi.fn(),
+  stopUpdatePolling: vi.fn(),
 };
 
 const defaultTabPaneLayout: TabPaneLayout = {
@@ -229,6 +231,20 @@ vi.mock("./lib/tauri", () => ({
 vi.mock("@tauri-apps/plugin-updater", () => ({
   check: (...args: unknown[]) => updater.check(...args),
 }));
+vi.mock("./lib/updater", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./lib/updater")>();
+  return {
+    ...actual,
+    startUpdatePolling: (...args: Parameters<typeof actual.startUpdatePolling>) => {
+      updater.startUpdatePolling(...args);
+      const stop = actual.startUpdatePolling(...args);
+      return () => {
+        stop();
+        updater.stopUpdatePolling();
+      };
+    },
+  };
+});
 
 const workspaceStoreModule = await import("./state/workspaceStore");
 let storeSpy: any;
@@ -506,6 +522,8 @@ describe("App project workspace flow", () => {
     native.onRemoteSelectionRequested.mockReset();
     updater.check.mockReset();
     updater.check.mockResolvedValue(null);
+    updater.startUpdatePolling.mockReset();
+    updater.stopUpdatePolling.mockReset();
     native.remoteSelectionHandler = null;
     native.onRemoteSelectionRequested.mockImplementation(async (handler: (payload: any) => void) => {
       native.remoteSelectionHandler = handler;
@@ -1052,6 +1070,15 @@ describe("App project workspace flow", () => {
     render(<App />);
 
     expect(await screen.findByText("Active project my-project")).toBeInTheDocument();
+  });
+
+  it("starts update polling on native mount and stops it on unmount", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+    let view!: ReturnType<typeof render>;
+    await act(async () => { view = render(<App />); });
+    expect(updater.startUpdatePolling).toHaveBeenCalledOnce();
+    view.unmount();
+    expect(updater.stopUpdatePolling).toHaveBeenCalledOnce();
   });
 
   it("renders genuine empty state and does not create phantom default workspace when getInitialProject rejects without stored projects", async () => {

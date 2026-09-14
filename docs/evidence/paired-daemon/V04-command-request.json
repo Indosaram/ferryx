@@ -1,0 +1,78 @@
+{
+  "task_id": "st_01a093a2",
+  "status": "source_ready_for_parent_diagnostics_and_verification",
+  "worktree": "/Users/indo/code/project/orca-lite-wt/herdr-wave0-clean",
+  "base": "0ce84a11e7c7b0c671771f88cdb053d50731a1c0",
+  "candidate_validated": false,
+  "implementation": "Mandatory existing real Ghostty VT and remote grid handler; native-terminal remains default-enabled optional GPU/native presentation. Extracted existing viewport types and FFI operations unchanged into viewport.rs. No new terminal emulator or runtime fallback.",
+  "ownership_manifest": [
+    {"path":"src-tauri/Cargo.toml","sha256":"fb29881c005c5dfa63d9d203b4bd41fe1659278ff719c4429f1c460ed0fbc46b","ownership":"Feature semantics comment only; dependencies unchanged."},
+    {"path":"src-tauri/build.rs","sha256":"27ab1f42b37a3bb205d42dc72030c004081df51119c395e1f69d0d2cc0c8a10f","ownership":"Always invoke pinned Ghostty build helper; preserve errors and Windows manifests."},
+    {"path":"src-tauri/src/lib.rs","sha256":"747e0036d4d14c41f829e820fe4df98d175e72b92df22ed0cab36e53c46968aa","ownership":"Remove native_terminal umbrella feature gate only."},
+    {"path":"src-tauri/src/native_terminal/engine.rs","sha256":"67c7ef164354b9efa37069593787266e5309b23c1d13abfef981517f45616ed7","ownership":"Core viewport import path only."},
+    {"path":"src-tauri/src/native_terminal/mod.rs","sha256":"fd1f47771d00d7509e93e4eb59d470f23aa6eb6ea0decd4f78acb1fcfc9a4d78","ownership":"Retain feature gates on presentation modules/exports, expose real engine and viewport unconditionally."},
+    {"path":"src-tauri/src/native_terminal/scroll.rs","sha256":"96546523c6ff37211b5baaa6a7845ede1b62b67036fe8a9f990c612b5ac4dc69","ownership":"Move CPU VT types/functions to viewport.rs; retain presentation type re-exports, overlays and all existing tests."},
+    {"path":"src-tauri/src/native_terminal/selection.rs","sha256":"16bf8030d5750df01123d48b215c28573e909601504b100d42dfe43b04b26b9b","ownership":"Core query_scrollbar path only."},
+    {"path":"src-tauri/src/native_terminal/terminal.rs","sha256":"b1340ef00ad2e392d823616620e7f235bb1117d409a8d96b4914106ae75d14b5","ownership":"Core viewport import path only."},
+    {"path":"src-tauri/src/native_terminal/viewport.rs","sha256":"b2ecf6644495d22170d51ab962b5041c47986c45fda221ec39cfb71d2c50b1dc","ownership":"New file containing unchanged real Ghostty viewport types/functions extracted from scroll.rs."},
+    {"path":"src-tauri/src/remote/mirror.rs","sha256":"121138716ad315e303e67809472fad3575ed16c087a1e017a9b80681084ab8d3","ownership":"Remove presentation guards from existing real mirror; expand all nine existing CPU mirror tests to no-default builds, assertions unchanged."},
+    {"path":"src-tauri/src/remote/server.rs","sha256":"92a8783066a14d45d9819a37f47c02032985f28f126cbf8ecee3f46decd4a671","ownership":"Only grid imports/helpers/handler feature boundary and real-handler dispatch; preserve A03 auth, active selection, typed errors, recovery and tests."}
+  ],
+  "verification_observed": [
+    "Initial tracked tree clean at 0ce84a11e7c7b0c671771f88cdb053d50731a1c0; only V04 proposal untracked.",
+    "git diff --check exited 0 after source edits.",
+    "Static Python assertions passed: mirror equals base with only feature guards removed; viewport types/functions copied exactly; scroll test module byte-identical; remote/tests.rs and remote/machine_auth_tests.rs byte-identical to base.",
+    "Read-only diff inspection confirms remote/server.rs changes limited to grid feature boundaries, not A03 logic.",
+    "Initial static audit attempted comparison of src-tauri/Cargo.lock against git base and failed because that path is not tracked. Corrected audit excludes that invalid comparison; no claim of git-backed lockfile equality. No lockfile edits performed."
+  ],
+  "tests": {
+    "new_tests": "None required: existing nine real CPU mirror regressions now execute with no default features, and all five existing real PTY/socket failures remain unchanged.",
+    "red": "Already captured in A03-clean-baseline-remote.log and A03-clean-runtime.log; not rerun.",
+    "runtime_status": "No Cargo check/build/test, UI commands or runtime/desktop/daemon controls executed by V04. No runtime green claim.",
+    "preservation": "No assertions weakened, tests deleted, ignored or newly hidden. Presentation tests remain behind their pre-existing effective umbrella feature boundary; mirror/CPU coverage expands."
+  },
+  "parent_preparation": {
+    "ghostty": "Parent reports independent clean-tree clone at 6a508fd5e34c7e222c052a6d00bb3891ff3feace and Zig 0.16.0 prepared.",
+    "target": "Reuse existing parent-owned private CARGO_TARGET_DIR; do not create target-v04 or clean existing targets.",
+    "scheduling": "Parent owns every long command; sequential Cargo gates under 13 GiB headroom, CARGO_BUILD_JOBS=4. No installation, checkout, commit, release, desktop or canonical daemon operations requested.",
+    "isolation": "Use parent-prepared private HOME/FERRYX_DATA_DIR/FERRYX_RUNTIME_DIR for tests where applicable. Clear ambient A03_PRIVATE_ROOT/A03_CLI_BINARY and remote credentials. Do not run concurrent copies of fixed-temp-path Ghostty build contract fixtures."
+  },
+  "diagnostics_request": {
+    "tool": "lsp_diagnostics",
+    "severity": "all",
+    "timing": "Before Cargo builds, run in parallel on each Rust source/build file in ownership_manifest; inspect Cargo.toml with its supported validator. Do not let language-server auto-check create a new/shared target or launch unbudgeted builds.",
+    "status": "Delegated to parent as requested; not executed by this child. Report diagnostic availability and all errors/warnings rather than claiming success without results."
+  },
+  "exact_command_request": {
+    "shell": "bash",
+    "cwd": "/Users/indo/code/project/orca-lite-wt/herdr-wave0-clean",
+    "environment_prelude": ": \"${CARGO_TARGET_DIR:?Parent must export existing private target directory}\"; export CARGO_BUILD_JOBS=4; unset A03_PRIVATE_ROOT A03_CLI_BINARY FERRYX_MACHINE_TOKEN FERRYX_RELAY_URL",
+    "commands_in_order": [
+      "cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib remote:: -- --nocapture",
+      "cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --test ghostty_build_contract --test ghostty_build_info_ffi --test native_terminal_engine_contract --test native_terminal_capability_contract",
+      "cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib native_terminal:: -- --nocapture",
+      "cargo build --locked --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli --bin ferryx-relay",
+      "cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib a03_ -- --nocapture",
+      "cargo test --locked --manifest-path src-tauri/Cargo.toml --lib remote:: -- --nocapture",
+      "cargo test --locked --manifest-path src-tauri/Cargo.toml --lib native_terminal:: -- --nocapture",
+      "cargo build --locked --manifest-path src-tauri/Cargo.toml --bin ferryx",
+      "cargo tree --locked --manifest-path src-tauri/Cargo.toml --no-default-features -e features",
+      "git diff --check"
+    ],
+    "execution_policy": "Run each gate once, retain full output and stop on failure for diagnosis; no retries until green, skip flags or added features on the mandated no-default remote gate. Default-feature GPU tests require appropriate hardware/runtime. Disk exhaustion or pre-existing failures must be reported, not bypassed."
+  },
+  "acceptance": [
+    "All five historical failing remote tests execute and pass unchanged, plus all nine existing real CPU mirror tests under no-default features.",
+    "Real Ghostty FFI and engine/viewport contracts pass without native presentation; feature graph does not enable the five optional presentation dependencies through this repair.",
+    "A03 isolated owner/CLI fixture uses the freshly built CLI and confirms existing authorization behavior; unchanged raw socket and revocation regressions remain green.",
+    "Default-feature remote/native tests and desktop binary link catch broken presentation exports; native-terminal default remains enabled.",
+    "Cross-platform link/runtime and actual desktop native rendering still require parent-owned follow-up validation; source readiness and headless tests are not evidence of native desktop pixels."
+  ],
+  "preserved_foreign_work": [
+    "Original herdr-wave0 overlay read-only; no diff imported.",
+    "A03 committed ownership preserved; no changes outside listed source scope.",
+    "Concurrent parent V05-ui-direct-node-red.json and V05-ui-red-tail.log untouched.",
+    "Pinned vendor preparation and existing target owned by parent; untouched by V04."
+  ],
+  "source_control": "Unstaged and uncommitted. V04 owns listed source hunks, viewport.rs, V04-repair-proposal.md and this request only."
+}

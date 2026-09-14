@@ -1,0 +1,6 @@
+EXACT_SOURCE_DELTA ['src-tauri/gen/schemas/linux-schema.json', 'src-tauri/src/remote/workspace_api/worktree_authority_tests.rs', 'src-tauri/src/remote/workspace_api_tests.rs', 'src-tauri/tests/machine_catalog_persistence.rs']
+OWNED_LIVE_PROCESSES []
+LOGGED_PIDS_ABSENT [313243, 313265, 313295, 313313, 313886, 314336, 314884, 314939, 314962, 314965, 314966, 315084, 315114, 315288, 315397, 315416, 315432, 315448, 315464, 315483, 315499, 315515, 315601, 315606, 315612, 315692, 315710, 315727, 315784]
+EXPLICIT_TMP_ROOTS_ABSENT ['/tmp/a08-typed-owner-oTLahw']
+READINESS_QA_REMOVED True
+RETAINED_PRIVATE_SOURCE_TARGET_LOGS /home/indo/ferryx-herdr-q4-linux-01a097f8

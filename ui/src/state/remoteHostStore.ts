@@ -1,7 +1,8 @@
+import { isTauri } from "@tauri-apps/api/core";
 import type { CandidateEndpoint } from "../lib/directPathUpgrade";
 
 export type TransportType = "tailscale" | "mdns" | "sshTunnel" | "relay";
-export type HostAuthStatus = "paired" | "unpaired" | "unknown";
+export type HostAuthStatus = "paired" | "unpaired" | "needsMachineGrant" | "revoked" | "unknown";
 
 export interface HostEndpoint {
   hostId: string;
@@ -14,7 +15,10 @@ export interface HostEndpoint {
   machineId?: string;
   displayName?: string;
   relayOrigin?: string;
+  /** Browser mirror only; never present in desktop state. */
   deviceToken?: string | null;
+  generation?: string;
+  grantScope?: "mirror" | "machine";
   lastSeenAt?: number | null;
   directHints?: CandidateEndpoint[];
 }
@@ -88,6 +92,9 @@ export interface RemoteHostState {
   readonly hosts: Readonly<Record<string, HostEndpoint>>;
   readonly activeHostId: string | null; // null represents local host
   readonly discovering: boolean;
+  readonly migrationStatus?: "pending" | "complete";
+  readonly nativeStatus?: "ready" | "unavailable";
+  readonly machineFeaturesEnabled?: boolean;
 }
 
 export type RemoteHostActions = {
@@ -130,7 +137,21 @@ export function createRemoteHostStore(
   initialState?: RemoteHostState,
   storage: Storage | undefined = typeof localStorage === "undefined" ? undefined : localStorage,
 ): RemoteHostStore {
-  let state = initialState ?? readInventory(storage);
+  const desktop = isTauri();
+  // Native inventory is the only authority. Do not even read legacy credentials here.
+  let state = desktop ? INITIAL_STATE : initialState ?? readInventory(storage);
+  const generations = new Map<string, bigint>();
+  const forgotten = new Set<string>();
+
+  function sanitize(host: HostEndpoint): HostEndpoint {
+    return {
+      hostId: host.hostId, name: host.displayName ?? host.name,
+      displayName: host.displayName ?? host.name, address: host.address,
+      transport: host.transport, machineId: host.machineId, relayOrigin: host.relayOrigin,
+      generation: host.generation, grantScope: host.grantScope,
+      authStatus: host.generation ? host.authStatus : "unknown", online: host.online,
+    };
+  }
   const listeners = new Set<(s: RemoteHostState) => void>();
 
   function getState(): RemoteHostState {
@@ -140,9 +161,28 @@ export function createRemoteHostStore(
   function setState(updater: (prev: RemoteHostState) => RemoteHostState): void {
     const nextState = updater(state);
     if (nextState === state) return;
-    state = nextState;
+    if (desktop) {
+      const hosts: Record<string, HostEndpoint> = {};
+      for (const input of Object.values(nextState.hosts)) {
+        const host = sanitize(input);
+        const generation = host.generation && /^(0|[1-9][0-9]*)$/.test(host.generation)
+          ? BigInt(host.generation) : 0n;
+        const previous = generations.get(host.hostId);
+        if (previous !== undefined && (generation < previous || (forgotten.has(host.hostId) && generation <= previous))) {
+          if (state.hosts[host.hostId]) hosts[host.hostId] = state.hosts[host.hostId];
+          continue;
+        }
+        generations.set(host.hostId, generation);
+        forgotten.delete(host.hostId);
+        hosts[host.hostId] = host;
+      }
+      for (const id of Object.keys(state.hosts)) if (!nextState.hosts[id]) forgotten.add(id);
+      state = { hosts, activeHostId: nextState.activeHostId, discovering: nextState.discovering,
+        migrationStatus: nextState.migrationStatus, nativeStatus: nextState.nativeStatus,
+        machineFeaturesEnabled: nextState.machineFeaturesEnabled };
+    } else state = nextState;
     try {
-      storage?.setItem(REMOTE_HOST_STORAGE_KEY, JSON.stringify({ ...state, discovering: false }));
+      if (!desktop) storage?.setItem(REMOTE_HOST_STORAGE_KEY, JSON.stringify({ ...state, discovering: false }));
     } catch (error) {
       console.warn("Unable to persist remote host inventory", error);
     }
@@ -159,6 +199,14 @@ export function createRemoteHostStore(
   }
 
   function mergeHost(input: HostEndpoint | PairedRemoteHost, prev: RemoteHostState): HostEndpoint {
+    if (desktop) {
+      const legacy = "hostId" in input ? input : null;
+      return sanitize({ hostId: "hostId" in input ? input.hostId : remoteHostKey(input.relayOrigin, input.machineId),
+        name: input.displayName ?? legacy?.name ?? "", displayName: input.displayName,
+        address: input.relayOrigin ?? legacy?.address ?? "", transport: legacy?.transport ?? "relay",
+        machineId: input.machineId, relayOrigin: input.relayOrigin, online: legacy?.online ?? false,
+        authStatus: legacy?.authStatus ?? "unknown", generation: legacy?.generation, grantScope: legacy?.grantScope });
+    }
     const host = normalizeHost(input, storage);
     const existing = prev.hosts[host.hostId];
     return normalizeHost({ ...existing, ...host,
@@ -172,7 +220,7 @@ export function createRemoteHostStore(
       ...prev,
       // Discovery refreshes must not erase paired machines that are offline.
       hosts: {
-        ...Object.fromEntries(Object.entries(prev.hosts).filter(([, host]) => host.deviceToken)),
+        ...Object.fromEntries(Object.entries(prev.hosts).filter(([, host]) => desktop || host.deviceToken)),
         ...Object.fromEntries(hosts.map((input) => {
           const host = mergeHost(input, prev);
           return [host.hostId, host];

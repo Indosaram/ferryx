@@ -1,0 +1,42 @@
+﻿**********************
+Windows PowerShell transcript start
+Start time: 20260913102559
+Username: DESKTOP-1LAPJMP\sook
+RunAs User: DESKTOP-1LAPJMP\sook
+Configuration Name: 
+Machine: DESKTOP-1LAPJMP (Microsoft Windows NT 10.0.26200.0)
+Host Application: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -File C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\repaired-cleanup.ps1
+Process ID: 24272
+PSVersion: 5.1.26100.9444
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.26100.9444
+BuildVersion: 10.0.26100.9444
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+Transcript started, output file is C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\repaired-cleanup.log
+REPAIRED_SOURCE_MATCH=969
+
+
+ProcessId       : 9388
+ParentProcessId : 17880
+Name            : pwsh.exe
+ExecutablePath  : c:\program files\powershell\7\pwsh.exe
+CommandLine     : "c:\program files\powershell\7\pwsh.exe" -c "powershell -NoProfile -File C:\Users\sook\ferryx-herdr-q
+                  4-windows-01a097f8\repaired-cleanup.ps1"
+
+OWNED_RUNTIME_PROCESSES=1
+>> TerminatingError(): "Owned process remains; inspect before cleanup"
+Owned process remains; inspect before cleanup
+At C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\repaired-cleanup.ps1:13 char:19
++ ... $owned.Count) {throw 'Owned process remains; inspect before cleanup'}
++                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : OperationStopped: (Owned process r... before cleanup:String) [], RuntimeException
+    + FullyQualifiedErrorId : Owned process remains; inspect before cleanup
+
+**********************
+Windows PowerShell transcript end
+End time: 20260913102601
+**********************

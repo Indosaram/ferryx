@@ -1,0 +1,26 @@
+Transcript started, output file is C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\candidate-cleanup.log
+REPAIRED_SOURCE_MATCH=970
+
+
+ProcessId       : 24220
+ParentProcessId : 20508
+Name            : pwsh.exe
+ExecutablePath  : c:\program files\powershell\7\pwsh.exe
+CommandLine     : "c:\program files\powershell\7\pwsh.exe" -c "powershell -NoProfile -File C:\Users\sook\ferryx-herdr-q
+                  4-windows-01a097f8\candidate-cleanup.ps1"
+
+OWNED_RUNTIME_PROCESSES=0
+suite EXIT=0; WAITED=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\runtime; ABSENT=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\data; ABSENT=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\sessions; ABSENT=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\home; ABSENT=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\config; ABSENT=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\cache; ABSENT=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\temp; ABSENT=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\appdata; ABSENT=True
+REMOVED=C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\localappdata; ABSENT=True
+Retained source/target/archive/bundle and tooling. No desktop or real clipboard action.
+Transcript stopped, output file is C:\Users\sook\ferryx-herdr-q4-windows-01a097f8\candidate-cleanup.log
+
+

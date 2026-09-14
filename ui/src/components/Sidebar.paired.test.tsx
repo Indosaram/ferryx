@@ -1,0 +1,26 @@
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, expect, it, vi } from "vitest";
+import { Sidebar, SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY } from "./Sidebar";
+import { remoteHostStore } from "../state/remoteHostStore";
+import { projectRootWorktree } from "../lib/projectIdentity";
+import { groupProjects } from "../lib/projectGrouping";
+import type { RegisteredProject } from "../lib/types";
+vi.mock("../lib/sshHosts", () => ({ useSshHosts: () => ({ hosts: [{ id: "ssh", label: "SSH machine" }] }) }));
+afterEach(() => { cleanup(); localStorage.clear(); remoteHostStore.reset(); });
+it("keeps identical local, SSH and paired paths separate and selects explicit paired roots with machine status", () => {
+  const base = { repoRoot: "/srv/repo", gitRoot: "/srv/repo", gitCommonDir: "/srv/repo/.git", gitBranch: "main" };
+  const local: RegisteredProject = { ...base, workspaceId: "repo" };
+  const ssh: RegisteredProject = { ...base, workspaceId: "ssh:repo", target: { kind: "ssh", hostId: "ssh" } };
+  const paired = ["a", "b"].map((id): RegisteredProject => ({ ...base, workspaceId: `daemon:${id.repeat(64)}`, remoteWorkspaceId: "repo", target: { kind: "pairedDaemon", hostId: id } }));
+  remoteHostStore.setState(s => ({ ...s, nativeStatus: "ready", machineFeaturesEnabled: true, hosts: Object.fromEntries(["a", "b"].map(id => [id, { hostId: id, name: id === "a" ? "Alpha" : "Beta", address: "", transport: "relay", online: id === "a", authStatus: "paired", grantScope: "machine" }])) }));
+  expect(groupProjects([local, ssh, ...paired])).toHaveLength(4);
+  expect(projectRootWorktree(paired[0]).workspaceId).toBe(paired[0].workspaceId);
+  localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, "[]");
+  const select = vi.fn();
+  render(<Sidebar projects={[local, ssh, ...paired]} activeProjectId={paired[0].workspaceId} activePath="/srv/repo" worktrees={[]} agents={[]} onSelectWorktree={select} onCreateWorktree={vi.fn()} />);
+  expect(screen.getByRole("button", { name: "repo (Alpha)" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "repo (Beta)" })).toBeInTheDocument();
+  expect(screen.getAllByText("Offline").length).toBeGreaterThan(0);
+  fireEvent.click(screen.getByRole("button", { name: /main.*Beta/ }));
+  expect(select).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: paired[1].workspaceId, path: "/srv/repo" }));
+});

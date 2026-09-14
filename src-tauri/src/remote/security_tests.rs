@@ -6,6 +6,9 @@ const DEADLINE: Duration = Duration::from_secs(15);
 #[path = "security_socket_tests.rs"]
 mod sockets;
 
+#[path = "resize_security_tests.rs"]
+mod resize;
+
 struct SecurityServer {
     addr: std::net::SocketAddr,
     tasks: tokio::task::JoinSet<()>,

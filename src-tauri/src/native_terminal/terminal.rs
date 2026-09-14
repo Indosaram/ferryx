@@ -25,7 +25,7 @@ use super::queries::{
     query_title, query_total_rows,
 };
 use super::render_pass::capture_render_snapshot;
-use super::scroll::{query_scrollbar, scroll_viewport, ScrollViewport, ScrollbarState};
+use super::viewport::{query_scrollbar, scroll_viewport, ScrollViewport, ScrollbarState};
 use super::search::search_grid;
 use super::selection::{
     apply_mouse_gesture, clear_selection, create_selection_gesture, line_text_at,

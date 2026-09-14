@@ -1,4 +1,6 @@
-use crate::remote::auth::{AuthError, DeviceInfo, DevicePermission};
+#[path = "machine_owner_socket.rs"]
+mod machine_owner_socket;
+use crate::remote::auth::{AuthError, DeviceAccessScope, DeviceInfo, DevicePermission};
 use crate::remote::backend::{RecoveryStream, RemoteRecoveryStatus, RemoteSessionBackend};
 use crate::remote::mirror::RemoteTerminalMirror;
 use crate::remote::protocol::RemoteGridFrame;
@@ -176,6 +178,7 @@ struct PairExchangeResponse {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct AuthQuery {
     /// Single-use credential minted by `/api/v1/socket-ticket`, used instead of a
     /// permanent device token because a browser WebSocket cannot send headers.
@@ -183,6 +186,8 @@ struct AuthQuery {
     render: Option<String>,
     cols: Option<u16>,
     rows: Option<u16>,
+    daemon_epoch: Option<crate::scoped_contracts::Epoch>,
+    after_sequence: Option<crate::scoped_contracts::Epoch>,
 }
 
 fn validated_grid_geometry(cols: u16, rows: u16) -> Option<(u16, u16)> {
@@ -202,7 +207,7 @@ fn requested_grid_geometry(query: &AuthQuery) -> Option<(u16, u16)> {
 /// browser history and gateway access logs long after the request. Sockets, which
 /// cannot set headers from a browser, use a single-use ticket instead
 /// (`POST /api/v1/socket-ticket`).
-fn extract_token(headers: &HeaderMap) -> Option<String> {
+pub(super) fn extract_token(headers: &HeaderMap) -> Option<String> {
     headers
         .get("authorization")
         .and_then(|h| h.to_str().ok())
@@ -334,17 +339,8 @@ async fn health_check() -> Json<HealthResponse> {
 async fn pair_exchange(
     State(state): State<Arc<RemoteGatewayState>>,
     Json(payload): Json<PairExchangeRequest>,
-) -> Result<Json<PairExchangeResponse>, Response> {
-    let identity = crate::remote::auth::canonical_identity_dir()
-        .and_then(|dir| crate::remote::auth::load_or_generate_machine_identity(&dir))
-        .map_err(|error| {
-            tracing::error!(%error, "Unable to load pairing machine identity");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Machine identity unavailable",
-            )
-                .into_response()
-        })?;
+) -> Result<Response, Response> {
+    let identity = load_gateway_identity(Arc::clone(&state)).await?;
     let (token, device) = state
         .auth_manager
         .exchange_pairing_code_with_installation(
@@ -367,12 +363,12 @@ async fn pair_exchange(
             AuthError::Unauthorized => (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(),
         })?;
 
-    Ok(Json(PairExchangeResponse {
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(PairExchangeResponse {
         token,
         device,
         machine_id: identity.machine_id,
         display_name: identity.display_name,
-    }))
+    })).into_response())
 }
 
 /// Canonicalize a filesystem path for comparison purposes. When the path itself
@@ -662,6 +658,12 @@ pub(crate) async fn get_active_running_sessions(
     let mut sessions = Vec::new();
 
     for session_id in state.session_backend.list_sessions().await {
+        if let Some(services) = &state.machine_services {
+            match services.sessions.machine_only_async(&session_id).await {
+                Ok(false) => {},
+                Ok(true) | Err(_) => continue,
+            }
+        }
         let Ok(details) = state.session_backend.describe_session(&session_id).await else {
             continue;
         };
@@ -767,7 +769,7 @@ pub(crate) async fn get_active_running_sessions(
     sessions
 }
 
-async fn list_sessions(
+async fn list_legacy_sessions(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<RemoteTerminalSession>>, (StatusCode, String)> {
@@ -1080,7 +1082,7 @@ async fn select_workspace(
     Ok(Json(event_payload))
 }
 
-async fn create_worktree(
+fn create_worktree_blocking(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
     Json(payload): Json<RemoteCreateWorktreeRequest>,
@@ -1126,7 +1128,7 @@ async fn create_worktree(
     }))
 }
 
-async fn delete_worktree(
+fn delete_worktree_blocking(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
     Json(payload): Json<RemoteDeleteWorktreeRequest>,
@@ -1214,6 +1216,18 @@ async fn ws_events_handler(
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
 
     // Subscribe before reading the snapshot: a desktop focus change in between
+    if device.access_scope == DeviceAccessScope::Machine {
+        if device.permission != DevicePermission::Control {
+            return Err((StatusCode::FORBIDDEN, "MACHINE_ACCESS_REQUIRED".into()));
+        }
+        let services = state.machine_services.as_ref().ok_or((StatusCode::SERVICE_UNAVAILABLE, "MACHINE_SERVICE_UNAVAILABLE".into()))?;
+        let receiver = services.workspaces.machine_events.subscribe();
+        return Ok(ws.on_upgrade(move |socket| async move {
+            let _ = while_device_authorized(&mut revocation, super::machine_events::serve(socket, state, receiver)).await;
+        }));
+    }
+
+    // Subscribe before reading the snapshot: a desktop focus change in between
     // is then queued as a follow-up event, never missed by this client.
     let rx = state.event_tx.subscribe();
     let active_selection = state.active_selection();
@@ -1273,9 +1287,6 @@ async fn ws_terminal_handler(
     // "<host_id>::<session_id>" (see `worktree::parse_host_scoped_session_id`). The
     // session backend itself only knows about raw session IDs, so unwrap the scope
     // (if present) before doing any lookups or routing.
-    let session_id = parse_host_scoped_session_id(&requested_session_id)
-        .map(|(_host_id, session_id)| session_id.to_string())
-        .unwrap_or_else(|| requested_session_id.clone());
     let token = socket_credential(
         &state,
         &headers,
@@ -1296,7 +1307,22 @@ async fn ws_terminal_handler(
         .auth_manager
         .device_revocation(&device.id)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
+    if device.access_scope == DeviceAccessScope::Machine {
+        if let Some(peer) = state.machine_services.as_ref().and_then(|services| services.sessions.router().find_legacy_peer_for_session(&requested_session_id)) {
+            return machine_owner_socket::upgrade(ws, peer, requested_session_id, query, token, revocation).await;
+        }
+        return machine_terminal_upgrade(ws, requested_session_id, query, device, revocation, state).await;
+    }
+    let session_id = parse_host_scoped_session_id(&requested_session_id)
+        .map(|(_, id)| id.to_string()).unwrap_or(requested_session_id);
     let render_grid = query.render.as_deref() == Some("grid");
+    if let Some(services) = &state.machine_services {
+        match services.sessions.machine_only_async(&session_id).await {
+            Ok(false) => {},
+            Ok(true) => return Err((StatusCode::FORBIDDEN, "MACHINE_ACCESS_REQUIRED".into())),
+            Err(code) => return Err(machine_socket_error(&code)),
+        }
+    }
     let requested_geometry = render_grid
         .then(|| requested_grid_geometry(&query))
         .flatten();
@@ -1377,6 +1403,228 @@ async fn ws_terminal_handler(
         )
         .await;
     }))
+}
+
+fn machine_socket_error(code: &str) -> (StatusCode, String) {
+    let status = match code {
+        "UNAUTHORIZED" => StatusCode::UNAUTHORIZED,
+        "MACHINE_ACCESS_REQUIRED" => StatusCode::FORBIDDEN,
+        "SESSION_NOT_FOUND" => StatusCode::NOT_FOUND,
+        "CONTROL_CONFLICT" | "STALE_EPOCH" | "SESSION_EXPIRED" | "SESSION_OWNERSHIP_CHANGED" => StatusCode::CONFLICT,
+        "MACHINE_SERVICE_UNAVAILABLE" | "HOST_UNAVAILABLE" => StatusCode::SERVICE_UNAVAILABLE,
+        "MACHINE_OWNER_UNSUPPORTED" => StatusCode::UNPROCESSABLE_ENTITY,
+        "TIMEOUT" => StatusCode::GATEWAY_TIMEOUT,
+        _ => StatusCode::BAD_REQUEST,
+    };
+    (status, code.into())
+}
+
+async fn machine_terminal_upgrade(
+    ws: WebSocketUpgrade, id: String, query: AuthQuery, device: DeviceInfo,
+    mut revoked: tokio::sync::watch::Receiver<bool>, state: Arc<RemoteGatewayState>,
+) -> Result<Response, (StatusCode, String)> {
+    use crate::daemon::session_service::DaemonSessionService;
+    if device.permission != DevicePermission::Control { return Err(machine_socket_error("MACHINE_ACCESS_REQUIRED")); }
+    // No host-scope stripping, grid negotiation or query-driven geometry in v1.
+    if id.contains("::") || query.render.is_some() || query.cols.is_some() || query.rows.is_some() {
+        return Err(machine_socket_error("INVALID_REQUEST"));
+    }
+    let epoch = query.daemon_epoch.ok_or_else(|| machine_socket_error("STALE_EPOCH"))?;
+    let services = state.machine_services.as_ref().ok_or_else(|| machine_socket_error("MACHINE_SERVICE_UNAVAILABLE"))?;
+    let identity = load_gateway_identity(state.clone()).await.map_err(|_| machine_socket_error("MACHINE_SERVICE_UNAVAILABLE"))?;
+    let target = crate::remote::machine_protocol::RemoteTerminalTarget { machine_id: identity.machine_id, daemon_epoch: epoch, session_id: id };
+    let admission = async {
+        let mut controllers = services.sessions.machine_controllers.lock().await;
+        let session = services.sessions.validate_machine_target(&target).await?;
+        let attachment = services.sessions.attach_machine_output(&target.session_id, query.after_sequence.map(|s| s.0))
+            .ok_or("SESSION_NOT_FOUND")?.map_err(|_| "CAPACITY_EXCEEDED")?;
+        services.sessions.validate_machine_target(&target).await?;
+        let lease = DaemonSessionService::acquire_machine_controller(&mut controllers, &target.session_id, &device.id)?;
+        Ok::<_, String>((session, attachment, lease))
+    };
+    let (session, attachment, lease) = while_device_authorized(&mut revoked,
+        tokio::time::timeout(Duration::from_secs(10), admission)).await
+        .ok_or_else(|| machine_socket_error("UNAUTHORIZED"))?
+        .map_err(|_| machine_socket_error("TIMEOUT"))?
+        .map_err(|e| machine_socket_error(&e))?;
+    let response = ws.max_message_size(64 * 1024).max_frame_size(64 * 1024)
+        .max_write_buffer_size(1024 * 1024).write_buffer_size(0)
+        .on_upgrade(move |socket| async move {
+            let mut fenced = lease.cancelled.clone();
+            let generation = lease.generation;
+            let work = handle_machine_terminal_socket(socket, session, attachment, generation, device, state);
+            tokio::select! {
+                biased;
+                _ = revoked.wait_for(|v| *v) => {},
+                _ = fenced.wait_for(|v| *v) => {},
+                _ = work => {},
+            }
+            // No task is detached, no input survives this scope, and failed
+            // upgrades also drop the captured lease without closing the PTY.
+            drop(lease);
+        });
+    Ok(([(header::CACHE_CONTROL, "no-store")], response).into_response())
+}
+
+#[cfg(test)]
+#[path = "machine_input_probe.rs"]
+mod machine_input_probe;
+#[cfg(all(test, unix))]
+#[path = "../../tests/support/machine_input_cancellation.rs"]
+pub(crate) mod machine_input_cancellation_tests;
+
+fn machine_control_message(value: serde_json::Value) -> Message { Message::Text(value.to_string().into()) }
+
+#[path = "machine_output_writer.rs"]
+mod machine_output_writer;
+use machine_output_writer::{machine_send, machine_control, machine_frame};
+
+async fn handle_machine_terminal_socket(
+    socket: WebSocket, session: crate::remote::machine_protocol::Session,
+    attachment: crate::terminal::output_hub::machine_output::MachineAttachment,
+    generation: u64, device: DeviceInfo, state: Arc<RemoteGatewayState>,
+) {
+    use crate::remote::terminal_wire::{encode_frame, Metadata, ReplayGap};
+    use crate::remote::protocol::MachineTerminalControl;
+    use crate::scoped_contracts::Epoch;
+    let services = state.machine_services.as_ref().expect("admitted services");
+    let target = &session.target;
+    let Some(pty) = services.sessions.machine_pty(&target.session_id) else { return; };
+    let (mut sender, mut receiver) = socket.split();
+    let crate::terminal::output_hub::machine_output::MachineAttachment { snapshot: charged_snapshot, receiver: mut output } = attachment;
+    let mut termination = output.termination();
+    let snapshot = &charged_snapshot.value;
+    let gap = snapshot.gap.as_ref().map(|g| crate::remote::machine_protocol::ReplayGap {
+        requested_after_sequence: Epoch(g.requested_after_sequence), available_from_sequence: Epoch(g.available_from_sequence) });
+    let boundary = crate::remote::machine_protocol::Attached::Attached {
+        target: target.clone(), generation: Epoch(generation), cols: session.cols, rows: session.rows,
+        start_sequence: Epoch(snapshot.history_start_sequence.unwrap_or(0)), end_sequence: Epoch(snapshot.history_end_sequence.unwrap_or(0)), replay_gap: gap,
+    };
+    let Ok(boundary) = serde_json::to_string(&boundary) else { return; };
+    let Ok(boundary) = machine_control(Message::Text(boundary.into())) else { return; };
+    if machine_send(&mut sender, boundary, &mut termination).await.is_err() { return; }
+    let replay = |snapshot: &AttachmentSnapshot, reset| encode_frame(Metadata::Replay {
+        start: snapshot.history_start_sequence, end: snapshot.history_end_sequence,
+        gap: snapshot.gap.as_ref().map(|g| ReplayGap { requested_after_sequence: g.requested_after_sequence, available_from_sequence: g.available_from_sequence }),
+    }, &snapshot.history, reset);
+    let mut last = snapshot.history_end_sequence;
+    if !snapshot.history.is_empty() || snapshot.gap.is_some() {
+        let Ok(frame) = replay(&snapshot, snapshot.gap.is_some()) else { return; };
+        let Ok(frame) = machine_frame(frame, snapshot.history.len()) else { return; };
+        if machine_send(&mut sender, frame, &mut termination).await.is_err() { return; }
+    }
+    drop(charged_snapshot);
+    // Eight queued controls plus one in flight and one being admitted each fit
+    // a 1KiB slot, below the hub's permanent 16KiB control reservation.
+    let (controls, mut control_rx) = mpsc::channel::<Message>(8);
+    let send = async {
+        loop {
+            let next = tokio::select! {
+                biased;
+                control = control_rx.recv() => {
+                    let Some(control) = control else { return; };
+                    if machine_send(&mut sender, control, &mut termination).await.is_err() { return; }
+                    continue;
+                }
+                next = output.recv() => next,
+            };
+            match next {
+                Ok(charged) => {
+                    let chunk = &charged.value;
+                    if services.sessions.validate_machine_target(target).await.is_err() { return; }
+                    if chunk.replay_gap.is_none() && last.is_some_and(|last| chunk.sequence <= last) { continue; }
+                    let Ok(frame) = encode_frame(Metadata::Output { sequence: chunk.sequence,
+                        gap: chunk.replay_gap.as_ref().map(|g| ReplayGap { requested_after_sequence: g.requested_after_sequence, available_from_sequence: g.available_from_sequence }) }, &chunk.bytes, false) else { return; };
+                    let Ok(frame) = machine_frame(frame, chunk.bytes.len()) else { return; };
+                    if machine_send(&mut sender, frame, &mut termination).await.is_err() { return; }
+                    last = Some(chunk.sequence);
+                    drop(charged);
+                }
+                Err(crate::terminal::output_hub::machine_output::MachineOutputError::Overflow) => return,
+                Err(crate::terminal::output_hub::machine_output::MachineOutputError::Closed) => {
+                    let status = match pty.state() {
+                        crate::terminal::PtySessionState::Exited { code } => serde_json::json!({"type":"exit","target":target,"exit":{"code":code,"signal":null}}),
+                        _ => serde_json::json!({"type":"status","status":"disconnected","target":target}),
+                    };
+                    if let Ok(status) = machine_control(machine_control_message(status)) {
+                        let _ = machine_send(&mut sender, status, &mut termination).await;
+                    }
+                    return;
+                }
+            }
+        }
+    };
+    let (input_tx, mut input_rx) = mpsc::channel(1);
+    let read = async {
+        loop {
+            let Ok(Some(Ok(message))) = tokio::time::timeout(Duration::from_secs(10), receiver.next()).await else { return; };
+            if matches!(message, Message::Close(_)) { return; }
+            // One bounded in-flight frame; all pending input is dropped when
+            // either the reader, writer, grant or controller lifetime ends.
+            #[cfg(test)]
+            if input_tx.capacity() == 0 { machine_input_probe::queue_full(&target.session_id); }
+            // Preserve ordinary bursts with bounded backpressure, but keep one
+            // lookahead read live so Close/EOF can cancel a saturated writer.
+            // Further data beyond this bounded window ends the socket; it is
+            // never buffered for delivery after reconnect.
+            tokio::select! {
+                biased;
+                result = input_tx.send(message) => { if result.is_err() { return; } }
+                _ = receiver.next() => return,
+            }
+        }
+    };
+    let receive = async {
+        loop {
+            let Some(message) = input_rx.recv().await else { return; };
+            if matches!(&message, Message::Text(text) if text.len() > 16 * 1024) { return; }
+            let controllers = services.sessions.machine_controllers.lock().await;
+            if controllers.get(&target.session_id).is_none_or(|c| c.device != device.id || c.generation != generation || c.disconnected.lock().is_some()) { return; }
+            let authority = controllers[&target.session_id].cancelled.subscribe();
+            drop(controllers);
+            if services.sessions.validate_machine_target(target).await.is_err() { return; }
+            let operation = async { match message {
+                Message::Binary(bytes) if bytes.len() <= 64 * 1024 => {
+                    let input = pty.write_input_cancellable(&bytes);
+                    #[cfg(test)]
+                    let input = machine_input_probe::observe(&target.session_id, input);
+                    input.await.map_err(|error| error.to_string())
+                }
+                Message::Text(text) if text.len() <= 16 * 1024 => {
+                    match serde_json::from_str::<MachineTerminalControl>(&text) {
+                        Ok(MachineTerminalControl::Resize { generation: supplied, cols, rows }) if supplied.0 == generation && cols > 0 && rows > 0 && cols <= 1000 && rows <= 1000 => state.session_backend.resize(&target.session_id, cols, rows).await,
+                        Ok(MachineTerminalControl::Signal { generation: supplied, signal }) if supplied.0 == generation && signal == "interrupt" => state.session_backend.signal(&target.session_id, TerminalSignal::Interrupt).await,
+                        Ok(MachineTerminalControl::Ping) => {
+                            let control = machine_control(machine_control_message(serde_json::json!({"type":"pong"}))).map_err(|_| "CONTROL_OVERFLOW".to_owned())?;
+                            controls.try_send(control).map_err(|_| "CONTROL_OVERFLOW".to_owned())?;
+                            Ok(())
+                        }
+                        _ => Err("INVALID_CONTROL_OR_GENERATION".into()),
+                    }
+                }
+                Message::Ping(bytes) => {
+                    let control = machine_control(Message::Pong(bytes)).map_err(|_| "CONTROL_OVERFLOW".to_owned())?;
+                    controls.try_send(control).map_err(|_| "CONTROL_OVERFLOW".to_owned())?; Ok(())
+                }
+                Message::Pong(_) => Ok(()),
+                _ => Err("INVALID_CONTROL".into()),
+            } };
+            tokio::pin!(operation);
+            // The per-generation watch read guard covers each IO poll, never
+            // an await. Replacement's send_replace takes its write guard, so
+            // fencing cannot race a stale IO poll after authority is revoked.
+            let result = std::future::poll_fn(|cx| {
+                let cancelled = authority.borrow();
+                if *cancelled { return std::task::Poll::Ready(Err("STALE_GENERATION".into())); }
+                std::future::Future::poll(operation.as_mut(), cx)
+            }).await;
+            if let Err(code) = result {
+                let Ok(control) = machine_control(machine_control_message(serde_json::json!({"type":"error","code":code}))) else { return; };
+                if controls.try_send(control).is_err() { return; }
+            }
+        }
+    };
+    tokio::select! { biased; _ = read => {}, _ = send => {}, _ = receive => {} }
 }
 
 async fn handle_terminal_socket(
@@ -1521,6 +1769,9 @@ async fn handle_terminal_socket(
                             ClientControlMessage::RemoteWrite { .. }
                             | ClientControlMessage::RemoteResize { .. } => {}
                             ClientControlMessage::Resize { cols, rows } => {
+                                if !can_control {
+                                    continue;
+                                }
                                 if let Some((cols, rows)) = validated_grid_geometry(cols, rows) {
                                     let _ =
                                         session_backend.resize(&session_id_clone, cols, rows).await;
@@ -1902,6 +2153,9 @@ async fn handle_terminal_grid_socket(
                             ClientControlMessage::RemoteWrite { .. }
                             | ClientControlMessage::RemoteResize { .. } => {}
                             ClientControlMessage::Resize { cols, rows } => {
+                                if !can_control {
+                                    continue;
+                                }
                                 if let Some((cols, rows)) = validated_grid_geometry(cols, rows) {
                                     let _ =
                                         session_backend.resize(&session_id_clone, cols, rows).await;
@@ -2062,6 +2316,9 @@ fn static_relative_path(raw: &str) -> Option<PathBuf> {
 }
 
 pub(crate) async fn serve_static_or_index(uri: axum::http::Uri) -> Response {
+    if uri.path().starts_with("/api/") {
+        return machine_error(StatusCode::NOT_FOUND, "NOT_FOUND");
+    }
     let Some(path) = static_relative_path(uri.path()) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
@@ -2109,11 +2366,22 @@ async fn get_terminal_preferences(
 ) -> Result<Json<crate::terminal::TerminalPreferences>, (StatusCode, String)> {
     let token = extract_token(&headers)
         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
-    let _device = state
-        .auth_manager
-        .validate_token(&token)
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
-    Ok(Json(crate::terminal::load_terminal_preferences()))
+    crate::ipc::run_blocking(move || {
+        Ok((|| {
+            state.auth_manager.validate_token(&token)
+                .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
+            let preferences = crate::terminal::load_terminal_preferences();
+            // This legacy display endpoint is not machine execution configuration.
+            let remote = crate::terminal::TerminalPreferences {
+                source_path: None,
+                default_shell: None,
+                ..preferences
+            };
+            state.auth_manager.validate_token(&token)
+                .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
+            Ok(Json(remote))
+        })())
+    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Preferences unavailable".into()))?
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2151,6 +2419,197 @@ async fn push_unsubscribe(
     Ok(StatusCode::NO_CONTENT)
 }
 
+pub(super) fn machine_error(status: StatusCode, code: &str) -> Response {
+    use crate::remote::machine_protocol::{ErrorEnvelope, MachineError};
+    (status, [(header::CACHE_CONTROL, "no-store")], Json(ErrorEnvelope {
+        error: MachineError {
+            code: code.into(), message: code.into(),
+            retryable: matches!(code, "TIMEOUT" | "HOST_UNAVAILABLE" | "MACHINE_SERVICE_UNAVAILABLE" | "RATE_LIMITED" | "CAPACITY_EXCEEDED"),
+            request_id: uuid::Uuid::new_v4().to_string(), details: serde_json::Map::new(),
+        },
+    })).into_response()
+}
+
+pub(super) fn authenticate_machine_request(
+    state: &RemoteGatewayState,
+    headers: &HeaderMap,
+) -> Result<DeviceInfo, Response> {
+    let token = extract_token(headers).ok_or_else(|| machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
+    state.auth_manager.validate_token(&token)
+        .map_err(|_| machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))
+}
+
+async fn get_capabilities(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+) -> Result<Response, Response> {
+    // Authentication precedes even the identity-file lookup. No workspace or
+    // session service is probed or advertised until its implementation ships.
+    authenticate_machine_request(&state, &headers)?;
+    let identity = load_gateway_identity(Arc::clone(&state)).await?;
+    let device = authenticate_machine_request(&state, &headers)?;
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(serde_json::json!({
+        "apiVersion": 1,
+        "machineId": identity.machine_id,
+        "daemonEpoch": state.daemon_epoch.load(std::sync::atomic::Ordering::Acquire).to_string(),
+        "platform": std::env::consts::OS,
+        "accessScope": device.access_scope,
+        "permission": device.permission,
+        "capabilities": if state.machine_services.is_some() && device.access_scope == DeviceAccessScope::Machine && device.permission == DevicePermission::Control {
+            let mut capabilities = vec!["directoryBrowseV1", "machineWorkspaceV1", "managedWorktreesV1"];
+            if state.machine_services.as_ref().is_some_and(|services| services.workspaces.catalog().is_ok() && services.workspaces.journal.session_revision().is_ok()) {
+                capabilities.push("terminalCreateV1");
+            }
+            capabilities
+        } else { vec![] },
+        "limits": { "directoryEntries": 1000, "terminalSessions": 64 }
+    }))).into_response())
+}
+
+pub(super) async fn load_gateway_identity(state: Arc<RemoteGatewayState>) -> Result<crate::remote::auth::MachineIdentity, Response> {
+    crate::ipc::run_blocking(move || {
+        #[cfg(test)]
+        if let Some(probe) = state.identity_probe.read().clone() { probe(); }
+        let dir = match &state.identity_dir {
+            Some(dir) => dir.clone(),
+            None => crate::remote::auth::canonical_identity_dir().map_err(crate::ipc::IpcError::internal)?,
+        };
+        crate::remote::auth::load_or_generate_machine_identity(&dir).map_err(crate::ipc::IpcError::internal)
+    }).await.map_err(|_| machine_error(StatusCode::SERVICE_UNAVAILABLE, "MACHINE_SERVICE_UNAVAILABLE"))
+}
+
+async fn list_sessions(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> Result<Response, Response> {
+    let auth_state = state.clone();
+    let auth_headers = headers.clone();
+    // This is an existing legacy route: until a grant selects the machine
+    // projection, retain its original missing/invalid-credential response.
+    let device = crate::ipc::run_blocking(move || Ok((|| {
+        let token = extract_token(&auth_headers)
+            .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Missing auth token").into_response())?;
+        auth_state.auth_manager.validate_token(&token)
+            .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token").into_response())
+    })())).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Session authorization unavailable").into_response())??;
+    if device.access_scope == DeviceAccessScope::Machine {
+        super::session_api::list(State(state), headers, uri).await
+    } else {
+        list_legacy_sessions(State(state), headers).await.map(IntoResponse::into_response).map_err(IntoResponse::into_response)
+    }
+}
+
+// These adapters own only HTTP extraction. Authorization precedes path/body
+// rejection; domain successes and errors pass through unchanged. In particular,
+// do not normalize arbitrary responses from legacy routes in middleware.
+
+pub(super) async fn project_body(request: axum::extract::Request, admission: &super::workspace_api::Admission) -> Result<axum::body::Bytes, Response> {
+    use axum::extract::FromRequest;
+    let mut revoked = admission.revoked.clone();
+    let deadline = admission.deadline.min(std::time::Instant::now() + Duration::from_secs(10));
+    let extracted = tokio::select! {
+        biased;
+        _ = revoked.wait_for(|v| *v) => return Err(machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED")),
+        result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), axum::body::Bytes::from_request(request, &())) => result.map_err(|_| machine_error(StatusCode::GATEWAY_TIMEOUT, "TIMEOUT"))?,
+    };
+    extracted.map_err(|error| {
+        let too_large = error.status() == StatusCode::PAYLOAD_TOO_LARGE;
+        if too_large { machine_error(StatusCode::PAYLOAD_TOO_LARGE, "PAYLOAD_TOO_LARGE") }
+        else { machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST") }
+    })
+}
+
+async fn worktree_mutation_boundary(State(state): State<Arc<RemoteGatewayState>>, headers: HeaderMap, request: axum::extract::Request) -> Result<Response, Response> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(40);
+    let auth_state = state.clone();
+    let auth_headers = headers.clone();
+    let permit = super::workspace_api::AUTH_SLOTS.clone().try_acquire_owned().map_err(|_| machine_error(StatusCode::TOO_MANY_REQUESTS, "CAPACITY_EXCEEDED"))?;
+    let device = tokio::time::timeout(Duration::from_secs(10), crate::ipc::run_blocking(move || {
+        let _permit = permit;
+        Ok(authenticate_machine_request(&auth_state, &auth_headers))
+    })).await.map_err(|_| machine_error(StatusCode::GATEWAY_TIMEOUT, "TIMEOUT"))?
+        .map_err(|_| machine_error(StatusCode::SERVICE_UNAVAILABLE, "MACHINE_SERVICE_UNAVAILABLE"))??;
+    let delete = request.method() == axum::http::Method::DELETE;
+    if device.access_scope == DeviceAccessScope::Machine {
+        let admission = super::workspace_api::admit_until(state.clone(), headers.clone(), true, &uuid::Uuid::new_v4().to_string(), deadline).await?;
+        let body = project_body(request, &admission).await?;
+        return Ok(super::workspace_api::ADMISSION.scope(admission, super::workspace_api::worktrees::mutate_worktree(state, headers, body, delete)).await);
+    }
+    use axum::extract::FromRequest;
+    if state.machine_services.is_some() {
+        let body = tokio::time::timeout(Duration::from_secs(10), axum::body::Bytes::from_request(request, &())).await
+            .map_err(|_| machine_error(StatusCode::GATEWAY_TIMEOUT, "TIMEOUT"))?
+            .map_err(IntoResponse::into_response)?;
+        return Ok(super::workspace_api::worktrees::legacy(state, headers, body, delete, deadline).await);
+    }
+    let revoked = state.auth_manager.device_revocation(&device.id)
+        .map_err(|_| machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
+    let cancelled = super::workspace_api::CancelWork(Arc::new(std::sync::atomic::AtomicBool::new(false)), Arc::new(tokio::sync::Notify::new()));
+    let budget = crate::worktree::git::GitBudget { deadline, revoked, cancelled: cancelled.0.clone(), cancellation: Some(cancelled.1.clone()) };
+    let body = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), axum::body::to_bytes(request.into_body(), super::machine_protocol::MACHINE_JSON_MAX_BYTES)).await
+        .map_err(|_| machine_error(StatusCode::GATEWAY_TIMEOUT, "TIMEOUT"))?
+        .map_err(|_| machine_error(StatusCode::PAYLOAD_TOO_LARGE, "PAYLOAD_TOO_LARGE"))?;
+    let worker = crate::ipc::run_blocking(move || Ok(crate::worktree::git::with_git_budget(budget, || {
+        let auth_state = state.clone();
+        let token = extract_token(&headers).ok_or_else(|| machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
+        let response = if delete {
+            let payload = serde_json::from_slice::<RemoteDeleteWorktreeRequest>(&body)
+                .map_err(|_| machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST"))?;
+            delete_worktree_blocking(State(state), headers, Json(payload)).into_response()
+        } else {
+            let payload = serde_json::from_slice::<RemoteCreateWorktreeRequest>(&body)
+                .map_err(|_| machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST"))?;
+            create_worktree_blocking(State(state), headers, Json(payload)).into_response()
+        };
+        auth_state.auth_manager.validate_token(&token).map_err(|_| machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
+        Ok(response)
+    })));
+    tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), worker).await
+        .map_err(|_| machine_error(StatusCode::GATEWAY_TIMEOUT, "TIMEOUT"))?
+        .map_err(|_| machine_error(StatusCode::SERVICE_UNAVAILABLE, "MACHINE_SERVICE_UNAVAILABLE"))?
+}
+async fn worktree_list_boundary(State(state): State<Arc<RemoteGatewayState>>, headers: HeaderMap, uri: axum::http::Uri) -> Response {
+    super::workspace_api::worktrees::read(state, headers, uri.query().map(str::to_owned), false).await
+}
+async fn worktree_status_boundary(State(state): State<Arc<RemoteGatewayState>>, headers: HeaderMap, uri: axum::http::Uri) -> Response {
+    super::workspace_api::worktrees::read(state, headers, uri.query().map(str::to_owned), true).await
+}
+
+async fn register_project_boundary(State(state): State<Arc<RemoteGatewayState>>, headers: HeaderMap, request: axum::extract::Request) -> Result<Response, Response> {
+    let admission = super::workspace_api::admit(state.clone(), headers.clone(), true, &uuid::Uuid::new_v4().to_string()).await?;
+    #[cfg(test)]
+    if let Some(probe) = state.machine_services.as_ref().expect("admitted").workspaces.transaction_probe.read().clone() { probe("bodyEntry"); }
+    let body = project_body(request, &admission).await?;
+    Ok(super::workspace_api::ADMISSION.scope(admission, super::workspace_api::register(State(state), headers, body)).await)
+}
+
+async fn unregister_project_boundary(State(state): State<Arc<RemoteGatewayState>>, path: Result<AxumPath<String>, axum::extract::rejection::PathRejection>, headers: HeaderMap, request: axum::extract::Request) -> Result<Response, Response> {
+    let admission = super::workspace_api::admit(state.clone(), headers.clone(), true, &uuid::Uuid::new_v4().to_string()).await?;
+    let path = path.map_err(|_| machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST"))?;
+    let body = project_body(request, &admission).await?;
+    Ok(super::workspace_api::ADMISSION.scope(admission, super::workspace_api::unregister(State(state), path, headers, body)).await)
+}
+
+async fn operation_boundary(State(state): State<Arc<RemoteGatewayState>>, path: Result<AxumPath<String>, axum::extract::rejection::PathRejection>, headers: HeaderMap) -> Result<Response, Response> {
+    let id = path.as_ref().ok().map(|p| p.0.clone()).filter(|id| uuid::Uuid::parse_str(id).is_ok()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let admission = super::workspace_api::admit(state.clone(), headers.clone(), false, &id).await?;
+    let path = path.map_err(|_| machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST"))?;
+    Ok(super::workspace_api::ADMISSION.scope(admission, super::workspace_api::operation(State(state), path, headers)).await)
+}
+
+async fn remote_fallback(method: axum::http::Method, uri: axum::http::Uri) -> Response {
+    if uri.path().starts_with("/api/") { return machine_error(StatusCode::NOT_FOUND, "NOT_FOUND"); }
+    if method != axum::http::Method::GET && method != axum::http::Method::HEAD {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    }
+    serve_static_or_index(uri).await
+}
+
+async fn remote_method_not_allowed() -> Response {
+    machine_error(StatusCode::METHOD_NOT_ALLOWED, "METHOD_NOT_ALLOWED")
+}
+
 pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -2159,9 +2618,15 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
 
     Router::new()
         .route("/api/v1/health", get(health_check))
+        .route("/api/v1/capabilities", get(get_capabilities))
+        .route("/api/v1/fs/directories", get(super::filesystem::directories))
         .route("/api/v1/pair/exchange", post(pair_exchange))
-        .route("/api/v1/sessions", get(list_sessions))
+        .route("/api/v1/sessions", get(list_sessions).post(super::session_api::create).layer(axum::extract::DefaultBodyLimit::max(super::machine_protocol::MACHINE_JSON_MAX_BYTES)))
+        .route("/api/v1/sessions/{sessionId}", get(super::session_api::detail).delete(super::session_api::close).layer(axum::extract::DefaultBodyLimit::max(super::machine_protocol::MACHINE_JSON_MAX_BYTES)))
         .route("/api/v1/workspace/state", get(get_workspace_state))
+        .route("/api/v1/workspace/projects", get(super::workspace_api::list).post(register_project_boundary).layer(axum::extract::DefaultBodyLimit::max(super::machine_protocol::MACHINE_JSON_MAX_BYTES)))
+        .route("/api/v1/workspace/projects/{workspaceId}", axum::routing::delete(unregister_project_boundary).layer(axum::extract::DefaultBodyLimit::max(super::machine_protocol::MACHINE_JSON_MAX_BYTES)))
+        .route("/api/v1/workspace/operations/{requestId}", get(operation_boundary))
         .route("/api/v1/workspace/select", post(select_workspace))
         .route("/api/v1/workspace/selection", post(select_workspace))
         .route(
@@ -2170,8 +2635,9 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         )
         .route(
             "/api/v1/workspace/worktrees",
-            post(create_worktree).delete(delete_worktree),
+            get(worktree_list_boundary).post(worktree_mutation_boundary).delete(worktree_mutation_boundary).layer(axum::extract::DefaultBodyLimit::max(super::machine_protocol::MACHINE_JSON_MAX_BYTES)),
         )
+        .route("/api/v1/workspace/worktrees/status", get(worktree_status_boundary))
         .route("/api/v1/devices", get(list_devices))
         .route("/api/v1/devices/{id}/revoke", post(revoke_device))
         .route("/api/v1/socket-ticket", post(issue_socket_ticket))
@@ -2179,8 +2645,10 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route("/api/v1/terminal/{sessionId}", get(ws_terminal_handler))
         .route("/api/push/subscribe", post(push_subscribe))
         .route("/api/push/unsubscribe", post(push_unsubscribe))
-        .fallback(get(serve_static_or_index))
+        .fallback(remote_fallback)
+        .method_not_allowed_fallback(remote_method_not_allowed)
         .layer(cors)
+        .layer(axum::Extension(Arc::new(super::filesystem::BrowseLimits::default())))
         .with_state(state)
 }
 
@@ -2306,10 +2774,9 @@ pub async fn start_remote_server_with_resolver(
     let relay_token = std::env::var("FERRYX_MACHINE_TOKEN")
         .ok()
         .filter(|token| !token.trim().is_empty());
-    let relay_identity = if config.mode == RemoteNetworkMode::Relay && relay_token.is_none() {
-        Some(crate::remote::auth::load_or_generate_machine_identity(
-            &crate::remote::auth::canonical_identity_dir()?,
-        )?)
+    let relay_identity = if config.mode == RemoteNetworkMode::Relay {
+        Some(load_gateway_identity(Arc::clone(&state)).await
+            .map_err(|_| "Machine identity unavailable".to_string())?)
     } else {
         None
     };
@@ -2365,7 +2832,7 @@ pub async fn start_remote_server_with_resolver(
     let relay_task = relay_url
         .filter(|_| config.mode == RemoteNetworkMode::Relay)
         .map(|url| {
-            let client = match relay_token {
+            let mut client = match relay_token {
                 Some(token) => crate::remote::relay_client::RelayClient::with_gateway(
                     url,
                     token,
@@ -2373,11 +2840,14 @@ pub async fn start_remote_server_with_resolver(
                 ),
                 None => crate::remote::relay_client::RelayClient::with_identity(
                     url,
-                    relay_identity.expect("relay identity loaded before binding"),
+                    relay_identity.clone().expect("relay identity loaded before binding"),
                     primary_local_addr.to_string(),
                 ),
+            };
+            if let Some(identity) = &relay_identity {
+                client = client.with_machine_id(&identity.machine_id);
             }
-            .with_auth_manager((*state.auth_manager).clone());
+            let client = client.with_auth_manager((*state.auth_manager).clone());
             // Publish the one relay pairing authority so daemon/GUI pairing registers
             // its PIN with the relay instead of minting a local-only code.
             let epoch = crate::remote::state::RELAY_PAIRING_EPOCH
@@ -2403,12 +2873,240 @@ pub async fn start_remote_server_with_resolver(
 }
 
 #[cfg(test)]
+#[path = "preference_http_tests.rs"]
+mod preference_http_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::remote::state::RemoteGatewayState;
     use crate::terminal::TerminalOutputHub;
     use crate::terminal::TerminalService;
     use crate::worktree::WorkspaceRegistry;
+
+    #[tokio::test]
+    async fn r3_http_boundary_contract() {
+        use futures_util::FutureExt;
+        let root = tempfile::tempdir().unwrap();
+        let server = crate::daemon::server::DaemonServer::new_with_paths(
+            Some(root.path().join("data/config")), Some(root.path().join("data/auth")),
+        );
+        let state = server.remote_state().clone();
+        let mut grants = Vec::new();
+        for scope in [DeviceAccessScope::Machine, DeviceAccessScope::Mirror] {
+            let pin = state.auth_manager.create_scoped_pairing_code(DevicePermission::Control, scope).unwrap();
+            grants.push(state.auth_manager.exchange_pairing_code(&pin, "boundary").unwrap());
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let mut task = tokio::spawn(async move {
+            // Inject complete bodies ahead of the real router, without TCP upload races.
+            let router = create_remote_router(state).layer(axum::middleware::from_fn(|mut request: axum::extract::Request, next: axum::middleware::Next| async move {
+                if let Some(size) = request.headers_mut().remove("x-r3-body-size") {
+                    let size = size.to_str().unwrap().parse::<usize>().unwrap();
+                    assert!(matches!(size, 65_537 | 2_097_153));
+                    request.headers_mut().remove(header::CONTENT_LENGTH);
+                    let bytes = axum::body::Bytes::from(vec![b' '; size]);
+                    *request.body_mut() = if request.headers_mut().remove("x-r3-stream").is_some() {
+                        axum::body::Body::from_stream(futures_util::stream::once(async move { Ok::<_, std::convert::Infallible>(bytes) }))
+                    } else {
+                        axum::body::Body::from(bytes)
+                    };
+                }
+                next.run(request).await
+            }));
+            axum::serve(listener, router).with_graceful_shutdown(async { let _ = stopped.await; }).await.unwrap();
+        });
+        let result = std::panic::AssertUnwindSafe(async {
+            let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(10)).build().unwrap();
+            let mut failures = Vec::new();
+            for (method, path, size, expected, code) in [
+                ("POST", "workspace/projects", 65_537, 413, "PAYLOAD_TOO_LARGE"),
+                ("POST", "workspace/projects", 2_097_153, 413, "PAYLOAD_TOO_LARGE"),
+                ("DELETE", "workspace/projects/missing", 2_097_153, 413, "PAYLOAD_TOO_LARGE"),
+                ("DELETE", "workspace/projects/%FF", 0, 400, "INVALID_REQUEST"),
+                ("GET", "workspace/operations/%FF", 0, 400, "INVALID_REQUEST"),
+                ("POST", "unknown", 0, 404, "NOT_FOUND"),
+                ("DELETE", "unknown", 0, 404, "NOT_FOUND"),
+                ("PATCH", "workspace/projects", 0, 405, "METHOD_NOT_ALLOWED"),
+            ] {
+                for (credential, status, error) in [(Some(grants[0].0.as_str()), expected, code), (Some(grants[1].0.as_str()), if expected == 404 || expected == 405 { expected } else {403}, if expected == 404 || expected == 405 {code} else {"MACHINE_ACCESS_REQUIRED"}), (None, if expected == 404 || expected == 405 {expected} else {401}, if expected == 404 || expected == 405 {code} else {"UNAUTHORIZED"})] {
+                    let response = if size > 0 {
+                        // Unauthorized requests send no body; authorized requests send
+                        // exactly limit+1 bytes, then stop writing before reading refusal.
+                        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                        tokio::time::timeout(Duration::from_secs(10), async {
+                            let mut tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+                            let auth = credential.map(|token| format!("Authorization: Bearer {token}\r\n")).unwrap_or_default();
+                            tcp.write_all(format!("{method} /api/v1/{path} HTTP/1.1\r\nHost: {addr}\r\n{auth}Content-Length: {size}\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+                            let mut wire = Vec::new();
+                            if status == 413 { tcp.write_all(&vec![b' '; 65_537]).await.unwrap(); }
+                            tcp.take(4097).read_to_end(&mut wire).await.unwrap();
+                            assert!(wire.len() <= 4096, "bounded early refusal response");
+                            let boundary = wire.windows(4).position(|v| v == b"\r\n\r\n").unwrap();
+                            let head = std::str::from_utf8(&wire[..boundary]).unwrap();
+                            let mut lines = head.split("\r\n");
+                            let actual = lines.next().unwrap().split_whitespace().nth(1).unwrap().parse::<u16>().unwrap();
+                            let mut response = axum::http::Response::builder().status(actual);
+                            for line in lines {
+                                let (name, value) = line.split_once(':').unwrap();
+                                response = response.header(name, value.trim());
+                            }
+                            let response = response.body(wire[boundary + 4..].to_vec()).unwrap();
+                            assert_eq!(response.headers()["content-length"].to_str().unwrap().parse::<usize>().unwrap(), response.body().len());
+                            reqwest::Response::from(response)
+                        }).await.expect("early refusal must respond before body upload")
+                    } else {
+                        let mut request = client.request(method.parse().unwrap(), format!("http://{addr}/api/v1/{path}")).body(vec![b' '; size]);
+                        if let Some(token) = credential { request = request.bearer_auth(token); }
+                        request.send().await.unwrap()
+                    };
+                    let actual = response.status().as_u16();
+                    let private = response.headers().get("cache-control").is_some_and(|v| v == "no-store");
+                    let bytes = response.bytes().await.unwrap();
+                    let envelope = serde_json::from_slice::<crate::remote::machine_protocol::ErrorEnvelope>(&bytes);
+                    let valid = actual == status && private && envelope.as_ref().is_ok_and(|e| e.error.code == error && !e.error.retryable && uuid::Uuid::parse_str(&e.error.request_id).is_ok());
+                    println!("R3 {method} {path} bytes={size} auth={} status={actual} no_store={private} expected={status}/{error} valid={valid}", credential.is_some());
+                    if !valid { failures.push(format!("{method} {path}: {actual}/{private}")); }
+                    if size > 0 {
+                        for framing in ["full", "stream"] {
+                            // Given the exact original bytes, with no Content-Length hint.
+                            let mut request = client.request(method.parse().unwrap(), format!("http://{addr}/api/v1/{path}")).header("x-r3-body-size", size);
+                            if framing == "stream" { request = request.header("x-r3-stream", "true"); }
+                            if let Some(token) = credential { request = request.bearer_auth(token); }
+                            // When the real router extracts a full or unknown-length body.
+                            let response = request.send().await.unwrap();
+                            // Then the same authorization and body-limit contract holds.
+                            assert_eq!(response.status().as_u16(), status);
+                            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+                            let body: crate::remote::machine_protocol::ErrorEnvelope = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+                            assert_eq!(body.error.code, error);
+                            assert!(!body.error.retryable);
+                            assert!(uuid::Uuid::parse_str(&body.error.request_id).is_ok());
+                            println!("R3 body {framing} {method} {path} bytes={size} status={status} valid=true");
+                        }
+                    }
+                }
+            }
+            for (status, code, retryable) in [(503, "HOST_UNAVAILABLE", true), (504, "TIMEOUT", true), (503, "MACHINE_SERVICE_UNAVAILABLE", true), (429, "CAPACITY_EXCEEDED", true), (400, "INVALID_REQUEST", false), (409, "OPERATION_OUTCOME_UNKNOWN", false)] {
+                let response = machine_error(StatusCode::from_u16(status).unwrap(), code);
+                let bytes = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+                let body: crate::remote::machine_protocol::ErrorEnvelope = serde_json::from_slice(&bytes).unwrap();
+                println!("R3 classification {code} retryable={} expected={retryable}", body.error.retryable);
+                if body.error.retryable != retryable { failures.push(code.into()); }
+            }
+            // Existing legacy errors and successful payloads must not be rewritten.
+            let legacy = client.get(format!("http://{addr}/api/v1/sessions")).send().await.unwrap();
+            assert_eq!(legacy.status(), 401);
+            assert_eq!(legacy.text().await.unwrap(), "Missing auth token");
+            let health = client.get(format!("http://{addr}/api/v1/health")).send().await.unwrap();
+            assert_eq!(health.status(), 200);
+            assert_eq!(serde_json::from_str::<serde_json::Value>(&health.text().await.unwrap()).unwrap()["status"], "ok");
+            assert!(failures.is_empty(), "boundary failures: {failures:?}");
+        }).catch_unwind().await;
+        stop.send(()).unwrap();
+        if tokio::time::timeout(Duration::from_secs(10), &mut task).await.is_err() { task.abort(); let _ = task.await; panic!("boundary listener shutdown timed out"); }
+        assert!(tokio::net::TcpStream::connect(addr).await.is_err());
+        drop(server);
+        root.close().unwrap();
+        println!("R3 CLEANUP listener_joined=true connection_refused=true private_root_removed=true no_pty=true");
+        if let Err(panic) = result { std::panic::resume_unwind(panic); }
+    }
+    #[cfg(not(feature = "native-terminal"))]
+    use std::time::Duration;
+
+    #[test]
+    fn a03_forged_exchange_fields_cannot_upgrade_mirror_authority() {
+        let auth = crate::remote::auth::AuthManager::new();
+        let code = auth.create_pairing_code(DevicePermission::Control);
+        // The actual request decoder discards client authority claims. Only the
+        // persisted owner-issued record supplies the exchange grant.
+        let request: PairExchangeRequest = serde_json::from_value(serde_json::json!({
+            "code": code, "deviceName": "forged desktop", "installationId": "attacker",
+            "accessScope": "machine", "permission": "control", "clientType": "desktop"
+        })).unwrap();
+        let (_, device) = auth.exchange_pairing_code_with_installation(
+            &request.code, &request.device_name, request.installation_id.as_deref(),
+        ).unwrap();
+        assert_eq!(device.access_scope, DeviceAccessScope::Mirror);
+    }
+
+    #[tokio::test]
+    async fn a03_machine_auth_errors_are_private_json() {
+        let state = Arc::new(RemoteGatewayState::new(
+            Arc::new(TerminalService::default()), WorkspaceRegistry::new(),
+        ));
+        let response = get_capabilities(State(state), HeaderMap::new()).await.unwrap_err();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.headers().get(header::CACHE_CONTROL).and_then(|v| v.to_str().ok()), Some("no-store"));
+        let bytes = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "UNAUTHORIZED");
+        let typed = crate::remote::machine_protocol::decode_json::<crate::remote::machine_protocol::ErrorEnvelope>(&bytes, 4096)
+            .expect("actual authentication response must satisfy A02 error contract");
+        assert_eq!(typed.error.code, "UNAUTHORIZED");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a03_identity_runs_offthread_and_revocation_fences_response() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(RemoteGatewayState::new_with_paths(
+            Arc::new(TerminalService::default()), WorkspaceRegistry::new(),
+            Some(dir.path().join("config.json")), Some(dir.path().join("auth.json")),
+        ));
+        let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+        let (token, device) = state.auth_manager.exchange_pairing_code(&pin, "fixture").unwrap();
+        let runtime_thread = std::thread::current().id();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let entered_tx = std::sync::Mutex::new(Some(entered_tx));
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        *state.identity_probe.write() = Some(Arc::new(move || {
+            let offthread = std::thread::current().id() != runtime_thread;
+            if let Some(tx) = entered_tx.lock().unwrap().take() { let _ = tx.send(offthread); }
+            if offthread { release_rx.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap(); }
+        }));
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+        let request_state = Arc::clone(&state);
+        let request = tokio::spawn(async move { get_capabilities(State(request_state), headers).await });
+        let entered = tokio::time::timeout(Duration::from_secs(5), entered_rx).await;
+        state.auth_manager.revoke_device(&device.id);
+        let released = release_tx.send(());
+        let response = tokio::time::timeout(Duration::from_secs(5), request).await;
+        assert!(entered.unwrap().unwrap(), "identity work must run off reactor");
+        released.unwrap();
+        let response = response.unwrap().unwrap().unwrap_err();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.headers().get(header::CACHE_CONTROL).unwrap(), "no-store");
+        *state.identity_probe.write() = Some(Arc::new(|| panic!("revoked request probed identity")));
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+        assert_eq!(get_capabilities(State(state), headers).await.unwrap_err().status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn a03_absent_machine_service_is_private_and_unavailable() {
+        let state = Arc::new(RemoteGatewayState::new(
+            Arc::new(TerminalService::default()), WorkspaceRegistry::new(),
+        ));
+        let pin = state.auth_manager.create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine).unwrap();
+        let (token, _) = state.auth_manager.exchange_pairing_code(&pin, "machine").unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+        let request = axum::http::Request::builder().method("POST").uri("/api/v1/sessions")
+            .body(axum::body::Body::empty()).unwrap();
+        let response = super::super::session_api::create(State(state), headers, request).await.unwrap_err();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers().get(header::CACHE_CONTROL).unwrap(), "no-store");
+        let bytes = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "MACHINE_SERVICE_UNAVAILABLE");
+        let typed = crate::remote::machine_protocol::decode_json::<crate::remote::machine_protocol::ErrorEnvelope>(&bytes, 4096)
+            .expect("actual service response must satisfy A02 error contract");
+        assert_eq!(typed.error.code, "MACHINE_SERVICE_UNAVAILABLE");
+    }
 
     #[tokio::test]
     async fn relay_startup_connects_without_machine_token() {
@@ -2647,6 +3345,8 @@ mod tests {
                 render: None,
                 cols: None,
                 rows: None,
+                daemon_epoch: None,
+                after_sequence: None,
             }
         }
 

@@ -1,0 +1,697 @@
+[
+  {
+    "kind": "capabilities",
+    "value": {
+      "apiVersion": 1,
+      "machineId": "machine-a",
+      "daemonEpoch": "9007199254740993",
+      "platform": "linux",
+      "accessScope": "machine",
+      "permission": "control",
+      "capabilities": [
+        "machineWorkspaceV1",
+        "directoryBrowseV1",
+        "managedWorktreesV1",
+        "terminalCreateV1",
+        "terminalStreamV1",
+        "machineEventsV1"
+      ],
+      "limits": {
+        "directoryEntries": 1000,
+        "terminalSessions": 64
+      }
+    }
+  },
+  {
+    "kind": "directories",
+    "value": {
+      "path": "/home/test",
+      "parentPath": "/home",
+      "homePath": "/home/test",
+      "entries": [
+        {
+          "name": "app",
+          "path": "/home/test/app",
+          "hidden": false
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "kind": "project",
+    "value": {
+      "workspaceId": "project-a",
+      "repoRoot": "/home/test/app",
+      "gitRoot": null,
+      "gitCommonDir": null,
+      "gitRemote": null,
+      "gitBranch": null,
+      "gitHead": null,
+      "availability": "ready",
+      "revision": "7"
+    }
+  },
+  {
+    "kind": "projects",
+    "value": {
+      "revision": "7",
+      "completeness": "partial",
+      "projects": [],
+      "unavailableWorkspaceIds": [
+        "project-a"
+      ]
+    }
+  },
+  {
+    "kind": "worktree",
+    "value": {
+      "workspaceId": "project-a",
+      "identity": {
+        "wsId": "project-a",
+        "slug": "feature"
+      },
+      "path": "/home/test/app/feature",
+      "head": "abc",
+      "branch": "orca/project-a/feature",
+      "bare": false,
+      "detached": false,
+      "locked": null,
+      "prunable": null,
+      "managed": true
+    }
+  },
+  {
+    "kind": "worktrees",
+    "value": {
+      "revision": "8",
+      "worktrees": []
+    }
+  },
+  {
+    "kind": "session",
+    "value": {
+      "target": {
+        "machineId": "machine-a",
+        "daemonEpoch": "9007199254740993",
+        "sessionId": "pty-1"
+      },
+      "workspaceId": "project-a",
+      "worktree": null,
+      "cwd": "/home/test/app",
+      "cols": 120,
+      "rows": 36,
+      "running": true,
+      "providerSession": null,
+      "startSequence": "0",
+      "endSequence": "18446744073709551615"
+    }
+  },
+  {
+    "kind": "sessions",
+    "value": {
+      "revision": "8",
+      "completeness": "complete",
+      "sessions": [],
+      "unavailableWorkspaceIds": []
+    }
+  },
+  {
+    "kind": "error",
+    "value": {
+      "error": {
+        "code": "HOST_UNAVAILABLE",
+        "message": "Unavailable",
+        "retryable": true,
+        "requestId": "3941b9de-b16d-4d9a-ae0a-118f90fd91f4",
+        "details": {}
+      }
+    }
+  },
+  {
+    "kind": "attached",
+    "value": {
+      "type": "attached",
+      "target": {
+        "machineId": "machine-a",
+        "daemonEpoch": "9007199254740993",
+        "sessionId": "pty-1"
+      },
+      "generation": "9",
+      "cols": 120,
+      "rows": 36,
+      "startSequence": "0",
+      "endSequence": "12",
+      "replayGap": null
+    }
+  },
+  {
+    "kind": "worktreeStatus",
+    "value": {
+      "workspaceId": "project-a",
+      "worktree": {
+        "wsId": "project-a",
+        "slug": "feature"
+      },
+      "dirty": {
+        "isDirty": true,
+        "files": [
+          {
+            "statusCode": "M",
+            "path": "src/main.rs"
+          }
+        ]
+      },
+      "dirtyCount": 1,
+      "branchDeletion": {
+        "branch": "feature",
+        "head": "abc",
+        "upstream": null,
+        "merged": false,
+        "ahead": 1,
+        "behind": 0
+      },
+      "locked": null,
+      "prunable": null,
+      "liveSessionIds": [
+        "pty-1"
+      ],
+      "revision": "9007199254740993"
+    }
+  },
+  {
+    "kind": "sessionDetail",
+    "value": {
+      "status": "exited",
+      "session": {
+        "target": {
+          "machineId": "machine-a",
+          "daemonEpoch": "9007199254740993",
+          "sessionId": "pty-1"
+        },
+        "workspaceId": "project-a",
+        "worktree": null,
+        "cwd": "/home/test/app",
+        "cols": 120,
+        "rows": 36,
+        "running": false,
+        "providerSession": null,
+        "startSequence": "0",
+        "endSequence": "12"
+      },
+      "exit": {
+        "code": 0,
+        "signal": null
+      }
+    }
+  },
+  {
+    "kind": "sessionDetail",
+    "value": {
+      "status": "expired",
+      "target": {
+        "machineId": "machine-a",
+        "daemonEpoch": "9007199254740993",
+        "sessionId": "pty-1"
+      }
+    }
+  },
+  {
+    "kind": "operation",
+    "value": {
+      "state": "pending",
+      "requestId": "3941b9de-b16d-4d9a-ae0a-118f90fd91f4"
+    }
+  },
+  {
+    "kind": "operation",
+    "value": {
+      "state": "outcomeUnknown",
+      "requestId": "3941b9de-b16d-4d9a-ae0a-118f90fd91f4"
+    }
+  },
+  {
+    "kind": "operation",
+    "value": {
+      "state": "resultExpired",
+      "requestId": "3941b9de-b16d-4d9a-ae0a-118f90fd91f4"
+    }
+  },
+  {
+    "kind": "operation",
+    "value": {
+      "state": "completed",
+      "requestId": "3941b9de-b16d-4d9a-ae0a-118f90fd91f4",
+      "outcome": {
+        "kind": "noContent"
+      }
+    }
+  },
+  {
+    "kind": "control",
+    "value": {
+      "type": "resize",
+      "generation": "9007199254740993",
+      "cols": 120,
+      "rows": 36
+    }
+  },
+  {
+    "kind": "control",
+    "value": {
+      "type": "signal",
+      "generation": "9",
+      "signal": "interrupt"
+    }
+  },
+  {
+    "kind": "control",
+    "value": {
+      "type": "ping"
+    }
+  },
+  {
+    "kind": "control",
+    "value": {
+      "type": "pong"
+    }
+  },
+  {
+    "kind": "control",
+    "value": {
+      "type": "exit",
+      "target": {
+        "machineId": "machine-a",
+        "daemonEpoch": "9007199254740993",
+        "sessionId": "pty-1"
+      },
+      "exit": {
+        "code": 0,
+        "signal": null
+      }
+    }
+  },
+  {
+    "kind": "control",
+    "value": {
+      "type": "status",
+      "target": {
+        "machineId": "machine-a",
+        "daemonEpoch": "9007199254740993",
+        "sessionId": "pty-1"
+      },
+      "status": "running"
+    }
+  },
+  {
+    "kind": "control",
+    "value": {
+      "type": "error",
+      "error": {
+        "code": "CONTROL_CONFLICT",
+        "message": "Conflict",
+        "retryable": false,
+        "requestId": "3941b9de-b16d-4d9a-ae0a-118f90fd91f4",
+        "details": {}
+      }
+    }
+  },
+  {
+    "kind": "registerRequest",
+    "value": {
+      "requestId": "f017b031-d884-44ae-9b0c-767467032b48",
+      "repoPath": "~/app"
+    }
+  },
+  {
+    "kind": "unregisterRequest",
+    "value": {
+      "requestId": "f017b031-d884-44ae-9b0c-767467032b48",
+      "expectedRevision": "7"
+    }
+  },
+  {
+    "kind": "createWorktreeRequest",
+    "value": {
+      "requestId": "f017b031-d884-44ae-9b0c-767467032b48",
+      "workspaceId": "project-a",
+      "worktree": {
+        "wsId": "project-a",
+        "slug": "feature"
+      },
+      "baseRef": "HEAD"
+    }
+  },
+  {
+    "kind": "deleteWorktreeRequest",
+    "value": {
+      "requestId": "f017b031-d884-44ae-9b0c-767467032b48",
+      "workspaceId": "project-a",
+      "worktree": {
+        "wsId": "project-a",
+        "slug": "feature"
+      },
+      "deleteBranch": false,
+      "expectedRevision": "7"
+    }
+  },
+  {
+    "kind": "createSessionRequest",
+    "value": {
+      "requestId": "3941b9de-b16d-4d9a-ae0a-118f90fd91f4",
+      "workspaceId": "project-a",
+      "worktree": null,
+      "cols": 120,
+      "rows": 36,
+      "inheritFromSessionId": null,
+      "cwdRelative": null,
+      "startup": {
+        "kind": "shell"
+      }
+    }
+  },
+  {
+    "kind": "closeSessionRequest",
+    "value": {
+      "requestId": "3941b9de-b16d-4d9a-ae0a-118f90fd91f4",
+      "daemonEpoch": "9007199254740993"
+    }
+  },
+  {
+    "kind": "descriptor",
+    "value": {
+      "hostId": "relay/machine-a",
+      "remoteWorkspaceId": "project-a",
+      "workspaceId": "daemon:f3fa4269ab5d5b3189945b790e708994534625e0166dc326e02aeca25537ac17",
+      "localProxyId": "daemon-session:c92715a3edd4d610415fd36294ee13f4393f93d772921dec49c43e923cdee909",
+      "worktree": null,
+      "remoteTarget": {
+        "machineId": "machine",
+        "daemonEpoch": "9007199254740993",
+        "sessionId": "pty-1"
+      },
+      "remoteCursor": "9007199254740995",
+      "nativeAttachment": {
+        "daemonEpoch": "17",
+        "lastOutputSequence": "23"
+      },
+      "cols": 120,
+      "rows": 36,
+      "requestId": "3941b9de-b16d-4d9a-ae0a-118f90fd91f4",
+      "processStatus": "running",
+      "transportStatus": "disconnected"
+    }
+  },
+  {
+    "kind": "session",
+    "value": {
+      "target": {
+        "machineId": "machine-a",
+        "daemonEpoch": "9007199254740993",
+        "sessionId": "pty-1"
+      },
+      "workspaceId": "project-a",
+      "worktree": {
+        "wsId": "project-a",
+        "slug": "feature"
+      },
+      "cwd": "/home/test/app",
+      "cols": 120,
+      "rows": 36,
+      "running": true,
+      "providerSession": {
+        "key": "session_id",
+        "id": "provider-a",
+        "transcriptPath": "/home/test/transcript.jsonl"
+      },
+      "startSequence": "0",
+      "endSequence": "18446744073709551615"
+    }
+  },
+  {
+    "kind": "sessionDetail",
+    "value": {
+      "status": "running",
+      "session": {
+        "target": {
+          "machineId": "machine-a",
+          "daemonEpoch": "9007199254740993",
+          "sessionId": "pty-1"
+        },
+        "workspaceId": "project-a",
+        "worktree": {
+          "wsId": "project-a",
+          "slug": "feature"
+        },
+        "cwd": "/home/test/app",
+        "cols": 120,
+        "rows": 36,
+        "running": true,
+        "providerSession": {
+          "key": "session_id",
+          "id": "provider-a",
+          "transcriptPath": "/home/test/transcript.jsonl"
+        },
+        "startSequence": "0",
+        "endSequence": "18446744073709551615"
+      }
+    }
+  },
+  {
+    "kind": "createSessionRequest",
+    "value": {
+      "requestId": "3941b9de-b16d-4d9a-ae0a-118f90fd91f4",
+      "workspaceId": "project-a",
+      "worktree": {
+        "wsId": "project-a",
+        "slug": "feature"
+      },
+      "cols": 120,
+      "rows": 36,
+      "inheritFromSessionId": "pty-1",
+      "cwdRelative": "src",
+      "startup": {
+        "kind": "agentResume",
+        "agentType": "claude",
+        "providerSession": {
+          "key": "session_id",
+          "id": "provider-a",
+          "transcriptPath": "/home/test/transcript.jsonl"
+        }
+      }
+    }
+  },
+  {
+    "kind": "attached",
+    "value": {
+      "type": "attached",
+      "target": {
+        "machineId": "machine-a",
+        "daemonEpoch": "9007199254740993",
+        "sessionId": "pty-1"
+      },
+      "generation": "9",
+      "cols": 120,
+      "rows": 36,
+      "startSequence": "0",
+      "endSequence": "12",
+      "replayGap": {
+        "requestedAfterSequence": "1",
+        "availableFromSequence": "3"
+      }
+    }
+  },
+  {
+    "kind": "projects",
+    "value": {
+      "revision": "7",
+      "completeness": "partial",
+      "projects": [
+        {
+          "workspaceId": "project-a",
+          "repoRoot": "/home/test/app",
+          "gitRoot": null,
+          "gitCommonDir": null,
+          "gitRemote": null,
+          "gitBranch": null,
+          "gitHead": null,
+          "availability": "ready",
+          "revision": "7"
+        }
+      ],
+      "unavailableWorkspaceIds": [
+        "project-a"
+      ]
+    }
+  },
+  {
+    "kind": "worktrees",
+    "value": {
+      "revision": "8",
+      "worktrees": [
+        {
+          "workspaceId": "project-a",
+          "identity": {
+            "wsId": "project-a",
+            "slug": "feature"
+          },
+          "path": "/home/test/app/feature",
+          "head": "abc",
+          "branch": "orca/project-a/feature",
+          "bare": false,
+          "detached": false,
+          "locked": null,
+          "prunable": null,
+          "managed": true
+        }
+      ]
+    }
+  },
+  {
+    "kind": "sessions",
+    "value": {
+      "revision": "8",
+      "completeness": "complete",
+      "sessions": [
+        {
+          "target": {
+            "machineId": "machine-a",
+            "daemonEpoch": "9007199254740993",
+            "sessionId": "pty-1"
+          },
+          "workspaceId": "project-a",
+          "worktree": null,
+          "cwd": "/home/test/app",
+          "cols": 120,
+          "rows": 36,
+          "running": true,
+          "providerSession": null,
+          "startSequence": "0",
+          "endSequence": "18446744073709551615"
+        }
+      ],
+      "unavailableWorkspaceIds": []
+    }
+  },
+  {
+    "kind": "operation",
+    "value": {
+      "state": "completed",
+      "requestId": "3941b9de-b16d-4d9a-ae0a-118f90fd91f4",
+      "outcome": {
+        "kind": "project",
+        "project": {
+          "workspaceId": "project-a",
+          "repoRoot": "/home/test/app",
+          "gitRoot": null,
+          "gitCommonDir": null,
+          "gitRemote": null,
+          "gitBranch": null,
+          "gitHead": null,
+          "availability": "ready",
+          "revision": "7"
+        }
+      }
+    }
+  },
+  {
+    "kind": "operation",
+    "value": {
+      "state": "completed",
+      "requestId": "3941b9de-b16d-4d9a-ae0a-118f90fd91f4",
+      "outcome": {
+        "kind": "worktree",
+        "worktree": {
+          "workspaceId": "project-a",
+          "identity": {
+            "wsId": "project-a",
+            "slug": "feature"
+          },
+          "path": "/home/test/app/feature",
+          "head": "abc",
+          "branch": "orca/project-a/feature",
+          "bare": false,
+          "detached": false,
+          "locked": null,
+          "prunable": null,
+          "managed": true
+        }
+      }
+    }
+  },
+  {
+    "kind": "operation",
+    "value": {
+      "state": "completed",
+      "requestId": "3941b9de-b16d-4d9a-ae0a-118f90fd91f4",
+      "outcome": {
+        "kind": "session",
+        "session": {
+          "target": {
+            "machineId": "machine-a",
+            "daemonEpoch": "9007199254740993",
+            "sessionId": "pty-1"
+          },
+          "workspaceId": "project-a",
+          "worktree": null,
+          "cwd": "/home/test/app",
+          "cols": 120,
+          "rows": 36,
+          "running": true,
+          "providerSession": null,
+          "startSequence": "0",
+          "endSequence": "18446744073709551615"
+        }
+      }
+    }
+  },
+  {
+    "kind": "operation",
+    "value": {
+      "state": "completed",
+      "requestId": "3941b9de-b16d-4d9a-ae0a-118f90fd91f4",
+      "outcome": {
+        "kind": "error",
+        "error": {
+          "code": "HOST_UNAVAILABLE",
+          "message": "Unavailable",
+          "retryable": true,
+          "requestId": "3941b9de-b16d-4d9a-ae0a-118f90fd91f4",
+          "details": {}
+        }
+      }
+    }
+  },
+  {
+    "kind": "target",
+    "value": {
+      "kind": "pairedDaemon",
+      "hostId": "relay/machine-a"
+    }
+  },
+  {
+    "kind": "target",
+    "value": {
+      "kind": "ssh",
+      "hostId": "ssh-a"
+    }
+  },
+  {
+    "kind": "target",
+    "value": {
+      "kind": "local"
+    }
+  },
+  {
+    "kind": "pairedProject",
+    "value": {
+      "workspaceId": "daemon:f3fa4269ab5d5b3189945b790e708994534625e0166dc326e02aeca25537ac17",
+      "remoteWorkspaceId": "project-a",
+      "repoRoot": "/app",
+      "target": {
+        "kind": "pairedDaemon",
+        "hostId": "relay/machine-a"
+      }
+    }
+  }
+]

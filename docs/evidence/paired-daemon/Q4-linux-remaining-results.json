@@ -1,0 +1,24 @@
+{
+  "command": [
+    "cargo",
+    "test",
+    "--locked",
+    "--manifest-path",
+    "src-tauri/Cargo.toml",
+    "--no-default-features",
+    "--test",
+    "machine_worktrees",
+    "--test",
+    "worktree_safety",
+    "--test",
+    "machine_worktree_legacy_bounds",
+    "--test",
+    "machine_worktree_transports",
+    "--test",
+    "relay_pairing_generation_regression",
+    "--",
+    "--nocapture"
+  ],
+  "pid": 309352,
+  "exit": 0
+}

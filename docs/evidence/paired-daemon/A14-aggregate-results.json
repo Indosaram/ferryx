@@ -1,0 +1,22 @@
+{
+  "rust": {
+    "command": "cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib paired_host::",
+    "exit": 101
+  },
+  "ui-tests": {
+    "command": "bun run --cwd ui test src/lib/pairedDaemonProject.test.ts src/lib/pairedDaemonContracts.test.ts src/state/remoteHostStore.test.ts",
+    "exit": 1
+  },
+  "ui-build": {
+    "command": "bun run --cwd ui build",
+    "exit": 0
+  },
+  "headless": {
+    "command": "cargo check --locked --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli --bin ferryx-relay",
+    "exit": 0
+  },
+  "diff": {
+    "command": "git diff --check",
+    "exit": 0
+  }
+}

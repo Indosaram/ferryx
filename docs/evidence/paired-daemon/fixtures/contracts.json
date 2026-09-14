@@ -1,0 +1,13 @@
+[
+  {"kind":"capabilities","value":{"apiVersion":1,"machineId":"machine-a","daemonEpoch":"9007199254740993","platform":"linux","accessScope":"machine","permission":"control","capabilities":["machineWorkspaceV1","directoryBrowseV1","managedWorktreesV1","terminalCreateV1","terminalStreamV1","machineEventsV1"],"limits":{"directoryEntries":1000,"terminalSessions":64}}},
+  {"kind":"directories","value":{"path":"/home/test","parentPath":"/home","homePath":"/home/test","entries":[{"name":"app","path":"/home/test/app","hidden":false}],"truncated":false}},
+  {"kind":"project","value":{"workspaceId":"project-a","repoRoot":"/home/test/app","gitRoot":null,"gitCommonDir":null,"gitRemote":null,"gitBranch":null,"gitHead":null,"availability":"ready","revision":"7"}},
+  {"kind":"projects","value":{"revision":"7","completeness":"partial","projects":[],"unavailableWorkspaceIds":["project-a"]}},
+  {"kind":"worktree","value":{"workspaceId":"project-a","identity":{"wsId":"project-a","slug":"feature"},"path":"/home/test/app/feature","head":"abc","branch":"orca/project-a/feature","bare":false,"detached":false,"locked":null,"prunable":null,"managed":true}},
+  {"kind":"worktrees","value":{"revision":"8","worktrees":[]}},
+  {"kind":"session","value":{"target":{"machineId":"machine-a","daemonEpoch":"9007199254740993","sessionId":"pty-1"},"workspaceId":"project-a","worktree":null,"cwd":"/home/test/app","cols":120,"rows":36,"running":true,"providerSession":null,"startSequence":"0","endSequence":"18446744073709551615"}},
+  {"kind":"session","value":{"target":{"machineId":"machine-a","daemonEpoch":"9007199254740993","sessionId":"pty-metadata"},"workspaceId":"project-a","worktree":null,"cwd":"/home/test/app","cols":120,"rows":36,"running":true,"title":"agent terminal","agentType":"omo","providerSession":{"key":"session_id","id":"owner-provider"},"startSequence":"0","endSequence":"12"}},
+  {"kind":"sessions","value":{"revision":"8","completeness":"complete","sessions":[],"unavailableWorkspaceIds":[]}},
+  {"kind":"error","value":{"error":{"code":"HOST_UNAVAILABLE","message":"Unavailable","retryable":true,"requestId":"3941b9de-b16d-4d9a-ae0a-118f90fd91f4","details":{}}}},
+  {"kind":"attached","value":{"type":"attached","target":{"machineId":"machine-a","daemonEpoch":"9007199254740993","sessionId":"pty-1"},"generation":"9","cols":120,"rows":36,"startSequence":"0","endSequence":"12","replayGap":null}}
+]

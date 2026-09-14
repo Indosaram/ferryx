@@ -1,0 +1,13 @@
+{
+ "hostId":"relay/machine-a",
+ "remoteWorkspaceId":"project-a",
+ "workspaceId":"daemon:f3fa4269ab5d5b3189945b790e708994534625e0166dc326e02aeca25537ac17",
+ "localProxyId":"daemon-session:c92715a3edd4d610415fd36294ee13f4393f93d772921dec49c43e923cdee909",
+ "worktree":null,
+ "remoteTarget":{"machineId":"machine","daemonEpoch":"9007199254740993","sessionId":"pty-1"},
+ "remoteCursor":"9007199254740995",
+ "nativeAttachment":{"daemonEpoch":"17","lastOutputSequence":"23"},
+ "cols":120,"rows":36,
+ "requestId":"3941b9de-b16d-4d9a-ae0a-118f90fd91f4",
+ "processStatus":"running","transportStatus":"disconnected"
+}
