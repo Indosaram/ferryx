@@ -1272,15 +1272,16 @@ async fn ws_terminal_handler(
     // Callers may address a session by its raw ID or by a host-scoped ID of the form
     // "<host_id>::<session_id>" (see `worktree::parse_host_scoped_session_id`). The
     // session backend itself only knows about raw session IDs, so unwrap the scope
-    // (if present) before doing any lookups or routing.
+    // (if present) before doing any lookups or routing. The ticket, however, was minted
+    // for the caller's *requested* path — consume it against that, not the unwrapped id.
     let session_id = parse_host_scoped_session_id(&requested_session_id)
         .map(|(_host_id, session_id)| session_id.to_string())
-        .unwrap_or(requested_session_id);
+        .unwrap_or_else(|| requested_session_id.clone());
     let token = socket_credential(
         &state,
         &headers,
         &query,
-        &format!("/api/v1/terminal/{session_id}"),
+        &format!("/api/v1/terminal/{requested_session_id}"),
     )
     .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let device = state
@@ -1516,9 +1517,13 @@ async fn handle_terminal_socket(
                             ClientControlMessage::RemoteWrite { .. }
                             | ClientControlMessage::RemoteResize { .. } => {}
                             ClientControlMessage::Resize { cols, rows } => {
-                                if let Some((cols, rows)) = validated_grid_geometry(cols, rows) {
-                                    let _ =
-                                        session_backend.resize(&session_id_clone, cols, rows).await;
+                                if can_control {
+                                    if let Some((cols, rows)) = validated_grid_geometry(cols, rows)
+                                    {
+                                        let _ = session_backend
+                                            .resize(&session_id_clone, cols, rows)
+                                            .await;
+                                    }
                                 }
                             }
                             ClientControlMessage::Signal { signal } => {
@@ -1892,8 +1897,13 @@ async fn handle_terminal_grid_socket(
                             | ClientControlMessage::RemoteResize { .. } => {}
                             ClientControlMessage::Resize { cols, rows } => {
                                 if let Some((cols, rows)) = validated_grid_geometry(cols, rows) {
-                                    let _ =
-                                        session_backend.resize(&session_id_clone, cols, rows).await;
+                                    // View-only devices may reflow their own grid but must not
+                                    // resize the desktop PTY (same gate as Signal/write_input).
+                                    if can_control {
+                                        let _ = session_backend
+                                            .resize(&session_id_clone, cols, rows)
+                                            .await;
+                                    }
                                     if !enqueue_grid_operation(&recv_mirror, &recv_tx, |mirror| {
                                         mirror.resize(cols, rows)
                                     }) {

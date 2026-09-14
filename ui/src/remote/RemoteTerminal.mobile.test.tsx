@@ -146,4 +146,30 @@ describe("mobile terminal input lifecycle", () => {
     fireEvent.compositionEnd(sink(), { data: "하" });
     expect(Socket.latest.send).toHaveBeenCalledWith(new TextEncoder().encode("하"));
   });
+
+  it("requests terminal preferences from the remote host with the scoped device token", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes("/api/v1/terminal/preferences")) {
+        return new Response(JSON.stringify({
+          fontFamily: "CustomMono",
+          fontSize: 17,
+          macosOptionAsAlt: false,
+          cursorStyle: "block",
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response("{}", { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<RemoteTerminal sessionId="a" token="token-a" transportUrl="https://host.example" />);
+
+    await screen.findByTestId("remote-terminal-grid");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://host.example/api/v1/terminal/preferences",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer token-a" }),
+      }),
+    );
+  });
 });

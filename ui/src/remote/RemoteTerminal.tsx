@@ -182,8 +182,10 @@ function terminalSocketUrl(sessionId: string, token: string, geometry: GridGeome
     url.searchParams.set("rows", String(geometry.rows));
     return url.toString();
   };
-  // In unit test harnesses testing synchronous terminal grid behaviors with a dummy token:
-  if (token.startsWith("token-") && (base.hostname === "localhost" || base.hostname === "127.0.0.1" || base.hostname === "terminal.example.com" || base.hostname.startsWith("192.168.1."))) {
+  // In unit test harnesses testing synchronous terminal grid behaviors with a dummy token.
+  // This path must never ship to production: a token in the WebSocket query string leaks
+  // into history, access logs and Referer — every real dial must go through tickets.
+  if (import.meta.env.MODE === "test" && token.startsWith("token-") && (base.hostname === "localhost" || base.hostname === "127.0.0.1" || base.hostname === "terminal.example.com" || base.hostname.startsWith("192.168.1."))) {
     const url = new URL(`${transportUrl.replace(/\/$/, "")}${target}`);
     url.protocol = base.protocol === "https:" ? "wss:" : "ws:";
     url.searchParams.set("token", token);
@@ -310,7 +312,7 @@ export function RemoteTerminal({
   const [grid, setGrid] = useState<TerminalGridState | null>(null);
   const [cellMetrics, setCellMetrics] = useState<CellMetrics>({ width: 0, height: 0 });
   const [preedit, setPreedit] = useState<string | null>(null);
-  const { settings, refreshNativePreferences } = useTerminalSettings();
+  const { settings, refreshNativePreferences } = useTerminalSettings({ baseUrl: transportUrl, token });
 
   const [userFontSize, setUserFontSize] = useState<number | null>(null);
   const activeFontSize = clampTerminalFontSize(userFontSize ?? settings.fontSize);

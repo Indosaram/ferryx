@@ -801,6 +801,17 @@ impl RelayState {
         Err(StatusCode::NOT_FOUND)
     }
 
+    /// Roll a pairing claim back to `Ready` when the daemon exchange could not
+    /// complete. Without this, a transient tunnel failure permanently burns the
+    /// PIN (there is no Claimed -> Ready transition) until the lease sweeps it.
+    fn release_pairing_claim(&self, pin: &str, pairing_token: &str) {
+        if let Some(p) = self.inner.pairings.lock().get_mut(pin) {
+            if p.state == PairingState::Claimed && p.registration.pairing_token == pairing_token {
+                p.state = PairingState::Ready;
+            }
+        }
+    }
+
     /// Reserve the relay's HTTP half before notifying the daemon, so even an
     /// immediate data connection hands its socket directly to this request.
     async fn open_session_channel(
@@ -1230,7 +1241,14 @@ async fn exchange_http(
         headers,
         body,
     )
-    .await?;
+    .await;
+    let response = match response {
+        Ok(response) => response,
+        Err(status) => {
+            state.release_pairing_claim(&pin, &token);
+            return Err(status);
+        }
+    };
     if response.status().is_success() {
         #[derive(Deserialize)]
         struct IssuedDeviceToken {
@@ -1253,6 +1271,8 @@ async fn exchange_http(
         }
         return Ok(Response::from_parts(parts, Body::from(body)));
     }
+    // The daemon rejected the exchange — the user should be able to retry the PIN.
+    state.release_pairing_claim(&pin, &token);
     Ok(response)
 }
 
@@ -2780,6 +2800,65 @@ mod tests {
             .claim_pairing("127.0.0.3".parse().unwrap(), &request, None)
             .expect("live control identity must be able to complete the exchange");
         assert_eq!(claimed_machine, machine);
+    }
+
+    #[test]
+    fn test_relay_pairing_claim_release_allows_retry() {
+        // A claimed pairing whose daemon exchange fails (tunnel down, daemon error)
+        // must become claimable again — there is no Claimed -> Ready transition
+        // without release_pairing_claim, so a transient failure would burn the PIN.
+        let state = test_state(vec![]);
+        let machine = "exchange-machine";
+        let (tx, _rx) = mpsc::channel(1);
+        state
+            .inner
+            .control_channels
+            .lock()
+            .insert(machine.to_owned(), ControlChannel { generation: 7, tx });
+        state
+            .register_pairing(
+                machine,
+                7,
+                RegisterPairingPin {
+                    generation: Some(7),
+                    machine_id: machine.into(),
+                    pin: "667788".into(),
+                    pairing_token: "release-token".into(),
+                    expires_at: current_time_secs() + 120,
+                },
+            )
+            .unwrap();
+        let request = PublicPairExchangeRequest {
+            pin: Some("667788".into()),
+            code: None,
+            pairing_token: None,
+            device_name: "device".into(),
+            installation_id: None,
+        };
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        state.claim_pairing(ip, &request, None).unwrap();
+
+        // A second claim while Claimed must fail.
+        assert_eq!(
+            state
+                .claim_pairing("127.0.0.2".parse().unwrap(), &request, None)
+                .err(),
+            Some(StatusCode::NOT_FOUND)
+        );
+
+        state.release_pairing_claim("667788", "release-token");
+        state
+            .claim_pairing("127.0.0.3".parse().unwrap(), &request, None)
+            .expect("released claim must be claimable again");
+
+        // A release with a mismatched token must not free the claim.
+        state.release_pairing_claim("667788", "wrong-token");
+        assert_eq!(
+            state
+                .claim_pairing("127.0.0.4".parse().unwrap(), &request, None)
+                .err(),
+            Some(StatusCode::NOT_FOUND)
+        );
     }
 
     #[test]

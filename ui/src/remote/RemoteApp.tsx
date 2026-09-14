@@ -729,8 +729,8 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
     if (prevTab) {
       void selectContext({
         workspaceId: model.context.workspaceId,
-        worktreeSlug: model.context.worktreeSlug,
-        worktreeLabel: model.context.worktreeLabel,
+        worktreeSlug: prevTab.worktreeSlug ?? model.context.worktreeSlug,
+        worktreeLabel: prevTab.worktreeLabel ?? model.context.worktreeLabel,
         tabId: prevTab.id,
         sessionId: prevTab.sessionId,
       });
@@ -743,8 +743,8 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
     if (nextTab) {
       void selectContext({
         workspaceId: model.context.workspaceId,
-        worktreeSlug: model.context.worktreeSlug,
-        worktreeLabel: model.context.worktreeLabel,
+        worktreeSlug: nextTab.worktreeSlug ?? model.context.worktreeSlug,
+        worktreeLabel: nextTab.worktreeLabel ?? model.context.worktreeLabel,
         tabId: nextTab.id,
         sessionId: nextTab.sessionId,
       });

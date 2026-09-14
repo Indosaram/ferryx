@@ -11,9 +11,13 @@ vi.mock("./RemoteTerminal", () => ({
   RemoteTerminal: ({
     sessionId,
     onSocketLifecycle,
+    onSwipePreviousTab,
+    onSwipeNextTab,
   }: {
     sessionId: string;
     onSocketLifecycle?: (sessionId: string, state: "open" | "closed") => void;
+    onSwipePreviousTab?: () => void;
+    onSwipeNextTab?: () => void;
   }) => (
     <div
       data-testid="remote-terminal"
@@ -21,8 +25,12 @@ vi.mock("./RemoteTerminal", () => ({
       data-instance-id={useId()}
       onClick={() => onSocketLifecycle?.(sessionId, "closed")}
       onDoubleClick={() => onSocketLifecycle?.(sessionId, "open")}
+      data-swipe-previous={onSwipePreviousTab ? "available" : undefined}
+      data-swipe-next={onSwipeNextTab ? "available" : undefined}
     >
       Mirrored terminal {sessionId}
+      <button type="button" data-testid="swipe-previous" onClick={onSwipePreviousTab} />
+      <button type="button" data-testid="swipe-next" onClick={onSwipeNextTab} />
     </div>
   ),
 }));
@@ -1372,6 +1380,50 @@ describe("Remote UI Components", () => {
         expect.objectContaining({
           method: "POST",
           // The pane's own worktree travels with the request; the mirrored context is not assumed.
+          body: JSON.stringify({
+            workspaceId: "ferryx-ui",
+            worktreeSlug: "feature/remote-safe",
+            tabId: "tab-2::leaf-b",
+          }),
+        }),
+      ),
+    );
+  });
+
+  it("swipes to a pane from another worktree using that pane's own worktree", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const crossWorktreeState = {
+      ...focusedState,
+      activeContext: {
+        ...focusedState.activeContext,
+        tabId: "tab-1",
+        terminalTabs: [
+          { id: "tab-1", label: "Editor", worktreeSlug: "main", worktreeLabel: "main" },
+          {
+            id: "tab-2::leaf-b",
+            label: "Build (2)",
+            worktreeSlug: "feature/remote-safe",
+            worktreeLabel: "feature/remote-safe",
+          },
+        ],
+      },
+    };
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(crossWorktreeState));
+    vi.stubGlobal("fetch", ticketed(fetchMock));
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+
+    // A mirrored terminal is required for the swipe handlers to be reachable.
+    await screen.findByTestId("remote-terminal");
+    fireEvent.click(screen.getByTestId("swipe-next"));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/v1/workspace/select",
+        expect.objectContaining({
+          method: "POST",
+          // Same contract as the click path: the target pane's own worktree travels.
           body: JSON.stringify({
             workspaceId: "ferryx-ui",
             worktreeSlug: "feature/remote-safe",
