@@ -1,8 +1,12 @@
+pub mod disk;
 pub mod git;
 pub mod manager;
 pub mod model;
 pub mod registry;
 pub mod rescan;
+
+#[cfg(test)]
+mod disk_tests;
 
 pub use git::*;
 pub use manager::*;

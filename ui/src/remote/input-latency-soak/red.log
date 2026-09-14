@@ -1,0 +1,15 @@
+bun test v1.4.0 (34cbb9a40)
+
+ui/src/remote/input-latency-soak/soak.test.mjs:
+
+# Unhandled error between tests
+-------------------------------
+error: Cannot find module './soak.mjs' from '/Users/indo/code/project/orca-lite-wt/sa-tests/ui/src/remote/input-latency-soak/soak.test.mjs'
+-------------------------------
+
+
+ 0 pass
+ 1 fail
+ 1 error
+Ran 1 test across 1 file. [9.00ms]
+exit_code=1

@@ -1,130 +1,115 @@
 ---
-title: Ferryx Privacy Policy
-description: How Ferryx processes local workspace data, terminal sessions, browser data, and optional remote connections.
-lastUpdated: 2026-09-09
+title: Ferryx Privacy Declaration
+description: "Plain declaration of Ferryx data handling: local-first storage, remote gateway transmissions, pairing tokens, and scoped telemetry checks."
+lastUpdated: 2026-09-13
 prev: false
 next: false
 ---
 
-**Effective date: September 9, 2026**
+This declaration explains how Ferryx handles your data, based on the implementation in the desktop application, remote gateway, and project website.
 
-**Publisher: Project Maho**
+## Local-first operation
 
-Ferryx is a desktop terminal and workspace manager. This policy covers the
-Ferryx application, its remote web client, and the Ferryx website. Features
-available to you may differ by platform, version, and settings.
+Ferryx stores your data on your own machine. Local terminal sessions, workspaces, Git worktree configurations, and application preferences remain stored on disk. When you connect to remote SSH hosts, workspace files and command execution remain on the remote host (`src-tauri/src/terminal/remote.rs:183-200`).
 
-## Data used on your devices
+Local state lives in predictable paths:
 
-Ferryx processes the information needed to run and restore your workspace:
+- **Session and workspace layout:** The background daemon persists running sessions to disk:
+  - Linux checks `$XDG_DATA_HOME/rorca/session_state.json` first, falling back to `~/.local/share/rorca/session_state.json` (`src-tauri/src/daemon/server.rs:301-361`). If neither base resolves, it composes `~/.rorca/rorca/session_state.json` (`:334,359`) or writes to the runtime directory (`:329-335`). Development builds use `rorca-dev` or `session_state.dev.json` (`:325-326`).
+  - macOS defaults to `~/Library/Application Support/rorca/session_state.json` (`src-tauri/src/daemon/server.rs:341-344`).
+  - Windows defaults to `%APPDATA%\rorca\session_state.json` (`src-tauri/src/daemon/server.rs:346-349`).
+  - You can override the session directory using `FERRYX_SESSION_DIR` (`src-tauri/src/daemon/server.rs:44`).
+- **Interface preferences:** Saved sidebar visibility, active workspace selections, and terminal font settings stay in webview or browser `localStorage` (`ui/src/App.tsx:2826`, `ui/src/lib/terminalSettings.ts:90-107,313-320`).
+- **Browsing history:** Embedded browser tabs record visited URLs locally in application storage only when `rememberBrowsingHistory` is enabled (`ui/src/lib/browserHistory.ts:15-20,66-98`). You can toggle this setting off or clear the history list at any time (`ui/src/components/settings/BrowserSection.tsx:239-242`). Clearing this list doesn't erase webview cookies or external site profile data.
+- **SSH connections:** Configured SSH hosts live in the platform application data directory under `com.ferryx.app/ssh_hosts.json` (`src-tauri/src/ipc/ssh.rs:73-86`, `src-tauri/src/daemon/server.rs:861-873`), or under `FERRYX_DATA_DIR/ssh_hosts.json` if set. On Linux, this resolves to `$XDG_DATA_HOME/com.ferryx.app` or `~/.local/share/com.ferryx.app`.
+- **Runtime files:** On Unix, the runtime directory (`/tmp/rorca-<UID>`) resolves from the process real UID via POSIX `libc::getuid` (`src-tauri/src/daemon/server.rs:126-138,434-439`), created with 0700 permissions (`:502-533`). The canonical daemon socket (`daemon.sock`) is validated and secured with 0600 permissions (`:1482-1486`). Unix agent sockets (`agent-state.sock`) apply best-effort 0600 permissions without halting startup on error (`:1345-1380`). Windows builds bind a loopback TCP listener and record the port in `daemon.port` (`:140-163,1469-1480`). These permissions restrict access to your local user account against unprivileged local users, without preventing root or administrative access.
 
-- **Workspace settings:** project locations, Git worktree and branch information,
-  tab and pane layouts, terminal preferences, and session identifiers.
-- **Terminal sessions:** commands you enter, process information, working
-  directories, and terminal output. Output may contain personal information,
-  source code, or secrets printed by the programs you run.
-- **Agent sessions:** session identifiers and locally available conversation
-  records used to find, display, or resume supported coding-agent sessions.
-- **Browser data:** pages you visit in embedded browser tabs, cookies and website
-  storage, and, when enabled, browsing history such as URLs, titles, and visit
-  times.
-- **Files and clipboard content:** files you choose to open or attach, and text or
-  images you copy, paste, or drop into the application.
-- **Diagnostics:** local logs and error details used to troubleshoot application,
-  terminal, or connection problems.
+- **Diagnostic logs:** In headless daemon mode, agent activity release reasons (`manual_reset`, `foreground_agent_to_shell`) are recorded to a bounded local log file at `~/.ferryx/logs/daemon.log` or `$FERRYX_DATA_DIR/logs/daemon.log` (`src-tauri/src/daemon/logging.rs:33-80`). This log is created with 0600 permissions, bounded to a maximum of 1 MiB (truncating oldest records when exceeded), and fed through a non-blocking 256-record queue. It records only session identifiers, previous activity states, and release triggers without logging terminal output or command history.
 
-Settings and saved state are stored in application files or local browser
-storage. Recent terminal output is also buffered for reconnection. A background
-process can keep terminal sessions running after you close the application
-window. Closing the window is not the same as deleting a session or its data.
+Terminal output stays in an in-memory ring buffer with a default capacity of 512 KiB per session (`src-tauri/src/terminal/output_hub.rs:7,100-154`). Monotonic sequence numbers let reattaching clients catch up on retained chunks without writing raw terminal streams to persistent logs (`src-tauri/src/daemon/server.rs:2890-2953`). Chunks evicted past the buffer capacity can't be replayed, and this in-memory buffer doesn't prevent running tools or agents from keeping their own logs.
 
-## Remote connections and external tools
+## Zero telemetry
 
-Local terminal use does not require a Project Maho account. Network features
-process additional data when you use them:
+Inspecting `src-tauri` and `ui` source code confirms the absence of desktop analytics tooling:
 
-- **Remote web access:** a paired browser exchanges authentication information,
-  workspace and session metadata, terminal output, and input with the Ferryx host
-  you connect to. People with access to an authorized client may see the sessions
-  exposed to that client.
-- **SSH workspaces:** commands, terminal input and output, and files you transfer
-  are exchanged with the remote host you select. That host and its administrator
-  may retain their own files, shell history, and logs.
-- **Coding agents and AI services:** agents or provider tools you launch may send
-  prompts, selected files, conversation context, tool output, and attachments to
-  their configured services. Their account settings and privacy policies govern
-  that processing; running an agent inside Ferryx does not make it offline.
-- **Embedded websites:** visiting a website sends requests to that website. It
-  can receive your IP address and browser information and use cookies or other
-  website storage under its own policy.
+- Product dependency manifests contain no metrics SDKs such as Sentry, PostHog, or Google Analytics (`src-tauri/Cargo.toml:58-177`, `ui/package.json:13-55`).
+- The desktop shell Content Security Policy permits local dev endpoints, internal IPC, and hardcoded `checka.cc` relay domains (`src-tauri/tauri.conf.json:30`). It doesn't dynamically adapt to arbitrary custom relays, nor does it govern native Rust requests or external webviews.
+- Software update checks: In native desktop builds, Ferryx periodically queries GitHub release metadata on startup and on an hourly schedule (`ui/src/App.tsx:260-262`, `ui/src/lib/updater.ts:54-63,154-178`). When an update is downloaded, the updater verifies the artifact signature against the configured public key (`src-tauri/tauri.conf.json:34-40`, `ui/src/lib/updater.ts:108-134`). Builds running from `WindowsApps` paths skip these updater checks (`src-tauri/src/ipc/updater.rs:5-18`), leaving delivery to the Microsoft Store.
 
-These connections are used to provide the requested terminal, browsing, remote,
-or agent functionality. Do not send information to a host, website, or provider
-that you do not intend to receive it.
+On the project website, an analytics script renders only when both `PUBLIC_ANALYTICS_SRC` and `PUBLIC_ANALYTICS_DOMAIN` build environment variables are set (`site/src/components/SiteAnalytics.astro:4-11`).
 
-## Notifications
+## Remote gateway and network modes
 
-When enabled, notifications can display workspace or agent activity through your
-operating system or browser. Notification text may be visible on a lock screen
-or to other people using your device. You can control notification permissions
-in the operating system or browser.
+Remote access lets you monitor or control terminal sessions from another device. The gateway starts Off by default (`src-tauri/src/remote/state.rs:53-60`). You can enable it through network configuration, or by requesting a pairing code, which auto-configures and starts Relay mode if the gateway was Off (`src-tauri/src/daemon/server.rs:1948-1972`). Persisted non-Off configuration restores automatically when the daemon starts (`:1500-1505`).
 
-## Updates and this website
+Four network modes determine connection behavior:
 
-Non-Store builds can contact GitHub-hosted release endpoints to check for or
-download updates. Microsoft Store installations use Microsoft's update
-mechanism. These services receive ordinary network request information, such
-as your IP address, and process it under their own policies.
+- **Off:** The gateway shuts down its listener and aborts active relay tasks (`src-tauri/src/remote/server.rs:2266-2268`, `src-tauri/src/daemon/server.rs:2376-2389`). Turning off the gateway stops remote listening, but it doesn't block independent outbound client traffic such as SSH sessions, embedded browser tabs, or background updater queries.
+- **LocalNetwork:** Ferryx binds port 43821 on loopback and a selected network interface (`src-tauri/src/remote/server.rs:2260-2344`, `src-tauri/src/remote/state.rs:194-227`). Resolution prefers a usable route-probe address, which can be public even when another interface has a private address. Paired devices can access protected session endpoints, while health, UI assets, and pair exchange routes remain unauthenticated (`src-tauri/src/remote/server.rs:325-346,2139-2160`). Direct connections use plain HTTP and WebSockets over TCP (`:2203-2238`).
+- **Tailscale:** The daemon binds port 43821 to loopback and any interface address matching the CGNAT range `100.64.0.0/10` (`src-tauri/src/remote/state.rs:110-112,229-234`, `src-tauri/src/remote/server.rs:2310-2344`). Matching a CGNAT address doesn't verify Tailscale daemon health or authenticated tailnet membership; restricting access relies on network firewall rules and Tailscale ACLs. WireGuard transport encryption is handled by Tailscale, not Ferryx TLS.
+- **Relay:** The daemon opens an outbound WebSocket to a relay server, defaulting to `https://relay.checka.cc` (`src-tauri/src/remote/state.rs:20`, `src-tauri/src/remote/relay_client.rs:538-549`). Connections use TLS encryption when directed to secure `https://` or `wss://` endpoints, while custom endpoints configured with `http://` or `ws://` run unencrypted.
 
-The Ferryx website is hosted on GitHub Pages. GitHub may process technical
-request information when you visit it. The website uses local storage for
-preferences such as your selected theme; some pages load fonts from Google
-Fonts. Those font requests also disclose network request information to Google.
+The gateway listener never binds to the wildcard `0.0.0.0` address (`src-tauri/src/remote/server.rs:2260-2344`). Operators deploying a custom relay should set `relayUrl` in persisted `remote-config.json` for deterministic restoration across restarts, because `FERRYX_RELAY_URL` is only read during pairing auto-configuration or IPC fallback (`src-tauri/src/daemon/server.rs:1956-1962`, `src-tauri/src/remote/server.rs:2270-2293`, `src-tauri/src/ipc/remote.rs:304-312`).
 
-- [GitHub's privacy statement](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement)
-- [Microsoft's privacy statement](https://privacy.microsoft.com/privacystatement)
-- [Google's privacy policy](https://policies.google.com/privacy)
+## What leaves your machine during remote access
 
-## Retention and your choices
+Enabling remote access exposes specific workspace data to paired devices. Traffic through the default relay uses TLS (`src-tauri/src/remote/relay_client.rs:538-549`). For direct LAN connections without a reverse proxy, the internal server listens on plain HTTP and WebSockets (`src-tauri/src/remote/server.rs:2203-2238`). Operators on untrusted networks should place a TLS-terminating proxy in front of the port.
 
-Local settings, saved state, browser data, and logs can remain on your device
-until you remove or replace them. Terminal replay buffers are bounded rather
-than a permanent archive, but shells, agents, and remote hosts may keep separate
-histories. There is no single retention period covering all these tools.
+Authorized remote clients receive:
 
-You can:
+- **Workspace metadata:** Project names, worktree branch labels, session identifiers, and optional titles (`src-tauri/src/remote/protocol.rs:180-195,232-264`, `src-tauri/src/remote/server.rs:657-767`). Process names are not sent as dedicated metadata fields.
+- **Desktop context:** Identifiers for the active workspace, worktree, session, and tab, without a separate pane identifier (`src-tauri/src/remote/protocol.rs:180-195`).
+- **Terminal output:** Live text, ANSI escape codes, snapshots, and recent chunk buffers from running sessions (`src-tauri/src/remote/server.rs:1450-1473,1830-1845`).
 
-- Disable browsing-history recording and clear Ferryx's browsing-history list.
-- Turn off remote access when you do not want clients connecting to your host.
-- Revoke notification permissions in your operating system or browser.
-- Clear site data in the browser used for the Ferryx website or remote client.
-- Remove local application data you no longer need after ending the relevant
-  sessions and backing up anything you want to keep.
-- Use the deletion controls of the websites, AI providers, and remote hosts you
-  connect to for information stored by those services.
+Client permissions govern available actions:
 
-Clearing Ferryx's browsing-history list does not clear website cookies. Removing
-a workspace from the interface does not necessarily delete its repository,
-agent history, or files. Uninstalling the application may leave configuration,
-logs, or data created by other programs. Contact us if you need help identifying
-which local data to remove.
+- **Keystrokes and input:** Raw text chunks sent to active PTY processes require Control permission (`src-tauri/src/remote/server.rs:1477-1485,1850-1858`).
+- **Window geometry:** Terminal resize events can be sent by clients with either Control or View permission (`src-tauri/src/remote/server.rs:1511-1516,1885-1895`). The server does not gate resize commands on control permissions in text or grid handlers.
+- **Control signals:** Interrupt signals (VINTR byte 0x03) require Control permission (`src-tauri/src/remote/server.rs:1520-1528,1912-1920`, `src-tauri/src/terminal/session.rs:210-215`), directing SIGINT through the PTY line discipline to the foreground process group rather than guaranteeing child process termination.
+- **Worktree actions:** Creating or removing Git worktrees requires Control permission (`src-tauri/src/remote/server.rs:963-969,1090-1096`).
 
-## Support and privacy requests
+Clients paired with View permission have input keystrokes discarded (`src-tauri/src/remote/server.rs:1477-1485,1850-1858`), but can still trigger terminal resizes and revoke their own tokens (`:1191-1197,1511-1516,1885-1895`). The gateway HTTP router exposes routes for session streaming and metadata without endpoints for repository tree browsing (`:2132-2162`), though Control sessions can execute arbitrary shell commands inside terminals.
 
-Project Maho receives information you choose to share when you contact us,
-including your message and any diagnostic material you attach. We use that
-information to respond to your request and investigate the reported issue.
+Remote gateway endpoints accept and store web push subscription payloads in memory (`src-tauri/src/remote/server.rs:2102-2129`, `src-tauri/src/remote/push.rs:16-63`). The codebase currently includes no dispatching caller to send push notifications to external notification services.
 
-For privacy questions or help accessing, correcting, or deleting information,
-contact the Ferryx maintainers through the
-[Ferryx support page on GitHub](https://github.com/Indosaram/ferryx/issues).
-GitHub issues are public: do not include credentials, private source code, or
-other sensitive personal information. If your request needs private details,
-ask for a private contact method before sharing them.
+## Pairing codes, tokens, and credentials
 
-Requests concerning data held by an external service should also be directed
-to that service. Its own retention rules and privacy policy apply.
+Pairing authorizes access to protected session endpoints (`src-tauri/src/remote/server.rs:332-378,2148-2162`). Public endpoints like health, static assets, and pair exchange do not require tokens (`:325-346,2139-2160`), and pairing alone doesn't encrypt plain LAN transport.
 
-## Changes to this policy
+Defensive layers protect pairing credentials:
 
-We will publish changes on this page and update the effective date above.
+- **Machine identity:** The host generates a unique machine UUID and an Ed25519 keypair lazily on the first pair exchange, identity lookup, or Relay startup (`src-tauri/src/remote/auth.rs:75-104`, `src-tauri/src/daemon/server.rs:1918-1923`, `src-tauri/src/remote/server.rs:332-346,2287-2293`). These reside in `identity.json`. Hostname discovery queries `PATH` with fallback to "Ferryx machine" (`src-tauri/src/remote/auth.rs:86-94`). Unix writes set 0700 parent and 0600 file permissions (`:868-910`), without retroactively updating permissions on read (`:75-84`). Windows relies on inherited filesystem ACLs.
+- **Pairing PINs:** Local pairing generates a 6-digit PIN between 100000 and 999999 (`src-tauri/src/remote/auth.rs:374-393`), while relay pairing generates zero-padded codes from 000000 to 999999 (`src-tauri/src/remote/relay_client.rs:131-155`). Each PIN expires 60 seconds after creation (`src-tauri/src/remote/auth.rs:196`). Active PINs and relay pairing capabilities are included in best-effort saves to `remote-auth.json` (`src-tauri/src/remote/auth.rs:395-423,768-779`). Expiry rejects use; it does not guarantee immediate disk erasure, and failed saves can leave older records.
+- **Rate limiting:** Failed pairing attempts are counted in an in-memory window (`src-tauri/src/remote/auth.rs:269-286,446-467`). After 5 failures, subsequent attempts return HTTP 429 until the window resets or the daemon restarts. This failure budget is not persisted across restarts.
+- **Device tokens:** Successful pairing mints a 64-character alphanumeric bearer token (`src-tauri/src/remote/auth.rs:208-227,545-573`). Approved devices and tokens are stored in `remote-auth.json` (`:289-298,735-779`). Clients store the token in browser or webview `localStorage` (`ui/src/lib/remoteClient.ts:6-30`).
+- **Socket tickets:** Connecting to WebSockets can use a short-lived single-use ticket minted by an authenticated client (`src-tauri/src/remote/server.rs:254-323`, `src-tauri/src/remote/state.rs:298`), avoiding long-lived tokens in query strings.
+- **Expiration and revocation:** Inactive devices expire after 30 days of inactivity (`src-tauri/src/remote/auth.rs:199,648-675`). Re-pairing an existing installation replaces and revokes its previous bearer tokens (`:482-501,536-563`). Revoking a device removes its tokens and signals its active WebSocket streams to terminate (`:693-713,797-805`, `src-tauri/src/remote/server.rs:1211-1243`).
+
+Credential storage on Linux and macOS resolves under `~/.ferryx/remote/` (`src-tauri/src/cli.rs:207`, `src-tauri/src/remote/auth.rs:55`). Windows installations place credentials in `%LOCALAPPDATA%\Ferryx\remote\` or `%USERPROFILE%\.ferryx\remote\` (`src-tauri/src/cli.rs:198`, `src-tauri/src/remote/auth.rs:49`). Operators can override this directory using `FERRYX_DATA_DIR` (`src-tauri/src/cli.rs:191`, `src-tauri/src/remote/auth.rs:41`). Missing directories are created automatically on write (`:868-875`). Pairing state remains memory-only only when no per-user base directory can be resolved from the environment (`:37-73`), in which case the CLI returns an error if run without `FERRYX_DATA_DIR` (`src-tauri/src/cli.rs:211-212`).
+
+## External services and tools
+
+Ferryx connects to external servers in several operational contexts:
+
+- **Remote SSH sessions:** Outbound SSH connections connect to configured remote hosts (`src-tauri/src/terminal/remote.rs:188-200`).
+- **Relay connections:** In Relay mode, the daemon establishes an outbound connection to the relay server (`src-tauri/src/remote/relay_client.rs:538-549`).
+- **Software updates:** Direct native desktop builds query GitHub release metadata on an hourly schedule (`src-tauri/tauri.conf.json:34-40`, `ui/src/App.tsx:260-262`, `ui/src/lib/updater.ts:54-63,154-178`). Executables running from `WindowsApps` paths skip updater checks (`src-tauri/src/ipc/updater.rs:5-18`), leaving updates to the Microsoft Store.
+- **Coding agents:** CLI tools like Claude Code, Codex, or custom agents execute as terminal child processes or report status via local sockets (`src-tauri/src/daemon/server.rs:1320-1380`). Their network traffic, credential use, and API communications depend on their own tooling and provider configurations.
+- **Embedded web views:** Navigating to an external URL inside a browser tab loads assets from that site (`src-tauri/src/ipc/browser.rs:925-934`). Remote sites receive standard HTTP request details and set cookies under their own policies.
+
+Setting the gateway mode to Off does not block SSH connections, external web views, or updater queries.
+
+## Your choices and data deletion
+
+You retain control over the data Ferryx stores:
+
+- You can stop remote access by switching the gateway mode to Off (`src-tauri/src/remote/server.rs:2266-2268`, `src-tauri/src/daemon/server.rs:2376-2389`). This stops the listener and aborts relay tasks, using graceful shutdown that doesn't forcibly sever active local WebSocket streams immediately.
+- Paired devices can be revoked through the desktop settings interface (`ui/src/components/settings/RemoteAccessSection.tsx:252-263`) or HTTP API (`src-tauri/src/ipc/remote.rs:354`, `src-tauri/src/remote/server.rs:1175-1208`). The CLI tool lets you list, generate, and approve pairings (`src-tauri/src/cli.rs:152-170,221-289`), but doesn't include a revoke command.
+- Clearing browsing history removes the application history list (`ui/src/lib/browserHistory.ts:90-98`, `ui/src/components/settings/BrowserSection.tsx:239-242`), but doesn't erase webview cookies or site storage.
+- To remove persistent state, stop any running Ferryx processes first, then delete local paths according to your platform:
+  - Linux: `~/.local/share/rorca` (or `$XDG_DATA_HOME/rorca`), `com.ferryx.app` app data (containing SSH hosts), `~/.ferryx` (containing remote auth, machine identity, and remote config), `/tmp/rorca-<UID>` (runtime socket and locks), and legacy `~/.rorca` if present (`src-tauri/src/daemon/server.rs:135,321,867`, `src-tauri/src/remote/auth.rs:55`).
+  - macOS: `~/Library/Application Support/rorca`, `~/Library/Application Support/com.ferryx.app` (SSH hosts), `~/.ferryx`, and `/tmp/rorca-<UID>` (`src-tauri/src/daemon/server.rs:341,867`, `src-tauri/src/remote/auth.rs:55`).
+  - Windows: `%LOCALAPPDATA%\Ferryx` (remote auth), `%APPDATA%\rorca` (sessions), `%APPDATA%\Ferryx` (persistent lock), `%APPDATA%\com.ferryx.app` (SSH hosts), `%USERPROFILE%\.ferryx`, and `%LOCALAPPDATA%\Ferryx\runtime` (`src-tauri/src/daemon/server.rs:284,348,867`, `src-tauri/src/remote/auth.rs:49`).
+  - Custom overrides: Check any directories configured by `FERRYX_DATA_DIR` (`src-tauri/src/cli.rs:191`, `src-tauri/src/daemon/server.rs:863`), `FERRYX_SESSION_DIR` (`src-tauri/src/daemon/server.rs:44`), or `FERRYX_RUNTIME_DIR` (`src-tauri/src/daemon/server.rs:128`).
+  - Web storage: Clear webview or browser `localStorage` (`ui/src/App.tsx:2826`, `ui/src/lib/remoteClient.ts:17`) to purge interface preferences and cached client tokens.
+  - This cleanup list is non-exhaustive. External assets like Git worktrees created inside project directories (`.orca-worktrees`), shell command logs, and browser profile cookies remain subject to their own storage locations.

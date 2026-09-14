@@ -221,6 +221,27 @@ describe("TabBar", () => {
     expect(onSplitRight).toHaveBeenCalledWith("tab-a");
   });
 
+  it("includes reset-agent-state in context menu and calls onResetAgentState for terminal tab", () => {
+    const onResetAgentState = vi.fn();
+    render(
+      <TabBar
+        tabs={[terminalTab("tab-a", "main")]}
+        activeTabId="tab-a"
+        onActivate={vi.fn()}
+        onClose={vi.fn()}
+        onResetAgentState={onResetAgentState}
+        onAdd={vi.fn()}
+      />,
+    );
+
+    fireEvent.contextMenu(getTab("main"));
+    const reset = menuItem("reset-agent-state");
+    expect(reset.label).toBe("Reset Agent State");
+
+    clickMenuItem("reset-agent-state");
+    expect(onResetAgentState).toHaveBeenCalledWith("tab-a");
+  });
+
   it("keeps pin state controlled by the workspace model and blocks pinned-tab close", () => {
     const onTogglePin = vi.fn();
     const onClose = vi.fn();

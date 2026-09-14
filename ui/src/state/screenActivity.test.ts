@@ -427,5 +427,15 @@ describe("screen-rule agent detection contract (ui/src/state/screenActivity.test
         }),
       ).toBe(seenState);
     });
+
+    it("RESET_AGENT_STATE clears stuck working activity and unread attention", () => {
+      let state = stateWithSession("tab-b");
+      state = workspaceReducer(state, screenAction("working", "spinner_working", "omo"));
+      expect(state.activityBySessionId?.["session-a"]?.state).toBe("working");
+
+      state = workspaceReducer(state, { type: "RESET_AGENT_STATE", sessionId: "session-a" });
+      expect(state.activityBySessionId?.["session-a"]).toBeUndefined();
+      expect(state.unreadTabIds["tab-a"]).toBeUndefined();
+    });
   });
 });

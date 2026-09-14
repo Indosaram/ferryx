@@ -794,6 +794,30 @@ fn emit_native_terminal_event<R: Runtime>(
 }
 
 impl NativeTerminalSurfaceHostState {
+    pub fn reset_agent_state<R: Runtime>(&self, session_id: &str, app: Option<&tauri::AppHandle<R>>) {
+        let changed = {
+            let mut sessions = self.sessions.lock();
+            if let Some(sess) = sessions.get_mut(session_id) {
+                sess.agent_reports_own_state = false;
+                sess.last_agent_activity = Some(crate::agent_detect::AgentActivity::Idle);
+                true
+            } else {
+                false
+            }
+        };
+        if changed {
+            let payload = NativeTerminalAgentStatePayload {
+                session_id: session_id.to_string(),
+                state: "idle".to_string(),
+                rule_id: "manual-reset".to_string(),
+                manifest_id: "".to_string(),
+                provider_session: None,
+                is_snapshot: false,
+            };
+            emit_native_terminal_event(app, &self.event_sink, NativeTerminalEvent::AgentState(payload));
+        }
+    }
+
     pub fn has_focused_session(&self) -> bool {
         self.sessions.lock().values().any(|session| session.focused)
     }
@@ -1713,7 +1737,7 @@ impl NativeTerminalSurfaceHostState {
                                 let mut sessions_guard = sessions.lock();
                                 match sessions_guard.get_mut(&session_id_owned) {
                                     Some(sess) => {
-                                        sess.agent_reports_own_state = true;
+                                        sess.agent_reports_own_state = reported != crate::agent_detect::AgentActivity::Idle;
                                         // `/new` gives the pane a new conversation while the
                                         // activity state stays put, so a rotated provider session
                                         // is a change in its own right.

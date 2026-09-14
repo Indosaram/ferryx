@@ -1378,6 +1378,56 @@ impl DaemonServer {
         });
     }
 
+    fn spawn_foreground_observer(self: &Arc<Self>) {
+        let server = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let mut transitions =
+                HashMap::<String, crate::terminal::foreground::ProcessTransition>::new();
+            // Inspect even without output. This cadence only collects positive process
+            // evidence; neither elapsed time nor silence can release activity.
+            let mut sample = tokio::time::interval(std::time::Duration::from_millis(250));
+            sample.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                sample.tick().await;
+                let Some(server) = server.upgrade() else { break };
+                let sessions: Vec<_> = server
+                    .terminal_service
+                    .list_sessions()
+                    .into_iter()
+                    .filter_map(|id| {
+                        server.terminal_service.get_session(&id).map(|session| (id, session))
+                    })
+                    .collect();
+                transitions.retain(|id, _| sessions.iter().any(|(live, _)| live == id));
+                let observations = crate::ipc::run_blocking(move || {
+                    Ok(sessions
+                        .into_iter()
+                        .map(|(id, session)| {
+                            let observation = crate::terminal::foreground::inspect(&session);
+                            (id, observation)
+                        })
+                        .collect::<Vec<_>>())
+                })
+                .await;
+                match observations {
+                    Ok(observations) => for (id, observation) in observations {
+                        match observation {
+                            Ok(observation) => {
+                                if transitions.entry(id.clone()).or_default().observe(observation)
+                                    && server.terminal_service.get_session(&id).is_some()
+                                {
+                                    server.agent_states.release_foreground(&id);
+                                }
+                            }
+                            Err(error) => tracing::debug!(session_id = id, %error, "foreground inspection unavailable; holding state"),
+                        }
+                    },
+                    Err(error) => tracing::warn!(%error, "foreground observer failed; holding state"),
+                }
+            }
+        });
+    }
+
     pub async fn run_server(self: Arc<Self>) -> Result<(), String> {
         self.run_server_with_handover_and_readiness(None, None)
             .await
@@ -1492,6 +1542,7 @@ impl DaemonServer {
 
         #[cfg(unix)]
         self.spawn_agent_state_listener();
+        self.spawn_foreground_observer();
         crate::daemon::agent_extension::install_agent_state_extension();
 
         let persisted_remote_config = self.remote_state.config.read().clone();
@@ -1711,6 +1762,33 @@ impl DaemonServer {
                         DaemonResponse::Error {
                             message: format!("Session '{session_id}' not found"),
                         }
+                    }
+                }
+                Ok(DaemonRequest::ResetAgentState { session_id }) => {
+                    if self.session_router.is_local_session(&session_id) || self.agent_states.current(&session_id).is_some() {
+                        self.agent_states.release_manual(&session_id);
+                        DaemonResponse::ResetAgentStateOk
+                    } else if let Some(peer) = self.session_router.find_legacy_peer_for_session(&session_id) {
+                        let peer_call = tokio::time::timeout(
+                            std::time::Duration::from_secs(2),
+                            peer.reset_agent_state(&session_id),
+                        )
+                        .await;
+                        match peer_call {
+                            Ok(Ok(())) => {
+                                self.agent_states.release_manual(&session_id);
+                                DaemonResponse::ResetAgentStateOk
+                            }
+                            Ok(Err(message)) => DaemonResponse::Error { message },
+                            Err(_) => {
+                                tracing::warn!(session_id, "peer reset_agent_state timed out; releasing locally");
+                                self.agent_states.release_manual(&session_id);
+                                DaemonResponse::ResetAgentStateOk
+                            }
+                        }
+                    } else {
+                        self.agent_states.release_manual(&session_id);
+                        DaemonResponse::ResetAgentStateOk
                     }
                 }
                 Ok(DaemonRequest::Write { session_id, data }) => {
@@ -4691,6 +4769,59 @@ mod tests {
         assert_eq!(attachment.snapshot.history_start_sequence, Some(2));
         assert_eq!(attachment.snapshot.history_end_sequence, Some(2));
     }
+    #[tokio::test]
+    async fn test_server_reset_agent_state_request() {
+        let server = Arc::new(DaemonServer::new());
+        let session_id = "test-reset-session".to_string();
+        server.agent_states.publish_canonical(AgentState {
+            session_id: session_id.clone(),
+            state: "working".to_string(),
+            agent: Some("omo".to_string()),
+            provider_session: None,
+        });
+        assert_eq!(server.agent_states.current(&session_id).unwrap().state, "working");
+
+        // Subscribe to exact state change BEFORE triggering reset
+        let mut sub = server.agent_states.subscribe(&session_id);
+
+        let (client_stream, server_stream) = tokio::io::duplex(4096);
+        let server_clone = Arc::clone(&server);
+        let server_task = tokio::spawn(async move {
+            server_clone.handle_client(server_stream).await;
+        });
+
+        let (read_half, mut write_half) = tokio::io::split(client_stream);
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+
+        let req = DaemonRequest::ResetAgentState {
+            session_id: session_id.clone(),
+        };
+        let mut req_json = serde_json::to_string(&req).unwrap();
+        req_json.push('\n');
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            write_half.write_all(req_json.as_bytes()).await.unwrap();
+            write_half.flush().await.unwrap();
+            reader.read_line(&mut line).await.unwrap();
+        })
+        .await
+        .expect("reset request/response within timeout");
+
+        let resp: DaemonResponse = serde_json::from_str(line.trim()).unwrap();
+        assert!(matches!(resp, DaemonResponse::ResetAgentStateOk));
+
+        // Await the exact broadcast update with bounded timeout
+        let update = tokio::time::timeout(std::time::Duration::from_secs(2), sub.receiver.recv())
+            .await
+            .expect("update signal within timeout")
+            .expect("valid update");
+        assert_eq!(update.state.state, "idle");
+        assert_eq!(server.agent_states.current(&session_id).unwrap().state, "idle");
+
+        server_task.abort();
+    }
+
     #[tokio::test]
     async fn agent_state_report_reaches_only_its_own_session_stream() {
         let server = Arc::new(DaemonServer::new());

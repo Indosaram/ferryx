@@ -4,7 +4,7 @@ use crate::worktree::{
     WorktreeIdentity,
 };
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Runtime, State};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 
 pub const WORKTREE_CHANGED_EVENT: &str = "worktree_changed";
 
@@ -158,17 +158,25 @@ async fn delete_worktree<R: Runtime>(
 
     let pruned = run_blocking(move || {
         let (manager, worktree) = registry
-            .resolve_worktree(&workspace_id, &identity)
+            .resolve_deletion_worktree(&workspace_id, &identity)
             .map_err(IpcError::from)?;
-        manager
+        let result = manager
             .delete_worktree_and_branch_with_prune_status(
                 &worktree.path,
                 delete_branch,
                 destructive,
             )
-            .map_err(IpcError::from)
+            .map_err(IpcError::from)?;
+        Ok((result, worktree.path))
     })
     .await?;
+
+    if let Some(snapshot) = app
+        .state::<crate::ipc::worktree_disk::WorktreeDiskScans>()
+        .remove_deleted(&event_workspace_id, &pruned.1)
+    {
+        let _ = app.emit(crate::ipc::worktree_disk::WORKTREE_DISK_SCAN_PROGRESS_EVENT, snapshot);
+    }
 
     emit_worktree_changed(
         &app,
@@ -180,7 +188,7 @@ async fn delete_worktree<R: Runtime>(
             WorktreeChangeKind::Deleted
         },
     )?;
-    if pruned {
+    if pruned.0 {
         emit_worktree_changed(
             &app,
             event_workspace_id,
@@ -217,7 +225,7 @@ pub async fn cmd_worktree_delete_preview(
     let registry = (*registry).clone();
     run_blocking(move || {
         let (manager, worktree) = registry
-            .resolve_worktree(&request.workspace_id, &request.worktree)
+            .resolve_deletion_worktree(&request.workspace_id, &request.worktree)
             .map_err(IpcError::from)?;
         manager
             .branch_deletion_preview(&worktree.path)
@@ -257,4 +265,217 @@ pub async fn cmd_worktree_status<R: Runtime>(
         )?;
     }
     Ok(status)
+}
+
+#[cfg(test)]
+mod deletion_repair_tests {
+    use super::*;
+    use crate::ipc::worktree_disk::WorktreeDiskScans;
+    use crate::worktree::{run_git, CreateWorktreeOptions};
+    use tauri::{Listener, Manager};
+
+    // Copy existing objects; never create commits or mutate the source repository.
+    fn fixture() -> (
+        tempfile::TempDir,
+        WorkspaceRegistry,
+        WorktreeIdentity,
+        Worktree,
+    ) {
+        let target_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
+        let dir = std::env::var("TMPDIR")
+            .ok()
+            .and_then(|t| tempfile::tempdir_in(t).ok())
+            .or_else(|| tempfile::tempdir_in(&target_dir).ok())
+            .unwrap_or_else(|| tempfile::tempdir().unwrap());
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap();
+        run_git(
+            dir.path(),
+            &[
+                "clone",
+                "--no-hardlinks",
+                "--no-checkout",
+                source.to_str().unwrap(),
+                "repo",
+            ],
+        )
+        .unwrap();
+        let repo = dir.path().join("repo");
+        let tip = run_git(&repo, &["rev-parse", "HEAD"]).unwrap();
+        run_git(&repo, &["checkout", "--detach", "HEAD~1"]).unwrap();
+        let registry = WorkspaceRegistry::new();
+        registry.register("repair", &repo).unwrap();
+        let manager = registry.manager("repair").unwrap();
+        let identity = WorktreeIdentity {
+            ws_id: "repair".into(),
+            slug: "target".into(),
+        };
+        let path = manager
+            .worktree_path_for(&identity.ws_id, &identity.slug)
+            .unwrap();
+        let wt = manager
+            .create_worktree(
+                CreateWorktreeOptions::new("repair", "target", path).with_base_ref(tip.trim()),
+            )
+            .unwrap();
+        (dir, registry, identity, wt)
+    }
+
+    #[tokio::test]
+    async fn deletion_repair_preview_reports_current_dirty_and_unmerged_loss() {
+        let (_dir, registry, identity, wt) = fixture();
+        let app = tauri::test::mock_builder()
+            .manage(registry)
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let request = WorktreeStatusRequest {
+            workspace_id: "repair".into(),
+            worktree: identity,
+        };
+        let clean = cmd_worktree_delete_preview(app.state(), request.clone())
+            .await
+            .unwrap();
+        assert!(!clean.merged);
+        let clean = serde_json::to_value(clean).unwrap();
+        assert_eq!(
+            clean["dirtyState"]["isDirty"], false,
+            "preview must include current dirty state"
+        );
+        assert_eq!(clean["missing"], false);
+        std::fs::write(wt.path.join("repair-untracked.txt"), b"current loss").unwrap();
+        let dirty = serde_json::to_value(
+            cmd_worktree_delete_preview(app.state(), request)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(dirty["merged"], false);
+        assert_eq!(dirty["dirtyState"]["isDirty"], true);
+        assert_eq!(
+            dirty["dirtyState"]["files"],
+            serde_json::json!([{ "statusCode": "??", "path": "repair-untracked.txt" }])
+        );
+    }
+
+    #[tokio::test]
+    async fn deletion_repair_missing_record_preview_and_targeted_cleanup() {
+        let (_dir, registry, identity, wt) = fixture();
+        let manager = registry.manager("repair").unwrap();
+        let other = manager.worktree_path_for("repair", "other").unwrap();
+        manager
+            .create_worktree(CreateWorktreeOptions::new("repair", "other", &other))
+            .unwrap();
+        let outside = manager.repo_root().parent().unwrap().join("outside");
+        run_git(
+            manager.repo_root(),
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                outside.to_str().unwrap(),
+                "HEAD",
+            ],
+        )
+        .unwrap();
+        for path in [&wt.path, &other, &outside] {
+            std::fs::remove_dir_all(path).unwrap();
+        }
+        let app = tauri::test::mock_builder()
+            .manage(registry)
+            .manage(WorktreeDiskScans::default())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let preview = cmd_worktree_delete_preview(
+            app.state(),
+            WorktreeStatusRequest {
+                workspace_id: "repair".into(),
+                worktree: identity.clone(),
+            },
+        )
+        .await;
+        assert!(
+            preview.is_ok(),
+            "missing managed Git record must resolve for preview: {preview:?}"
+        );
+        assert_eq!(
+            serde_json::to_value(preview.unwrap()).unwrap()["missing"],
+            true
+        );
+        cmd_worktree_delete_destructive(
+            app.handle().clone(),
+            app.state(),
+            DeleteWorktreeRequest {
+                workspace_id: "repair".into(),
+                worktree: identity,
+                delete_branch: Some(true),
+            },
+        )
+        .await
+        .unwrap();
+        let records = crate::worktree::git_worktree_list(manager.repo_root()).unwrap();
+        assert!(!records.iter().any(|r| r.path == wt.path));
+        assert!(records.iter().any(|r| r.path == other));
+        assert!(records.iter().any(|r| r.path == outside));
+        assert!(manager.canonical_allowed_path(&outside).is_err());
+        assert!(manager
+            .find_worktree_by_slug("repair", "other")
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn deletion_repair_success_removes_cached_row_and_blocks_stale_worker() {
+        let (_dir, registry, identity, wt) = fixture();
+        let scans = WorktreeDiskScans::default();
+        let row = crate::worktree::disk::WorktreeDiskRow {
+            worktree: wt.clone(),
+            size_bytes: Some(1),
+            last_commit_at: None,
+            is_dirty: Some(false),
+            dirty_files: vec![],
+            error: None,
+        };
+        let (initial, _) = scans.begin("repair", false);
+        scans.finish("repair", &initial.scan_id, Ok(vec![row.clone()]));
+        let (worker, _) = scans.begin("repair", true);
+        let app = tauri::test::mock_builder()
+            .manage(registry)
+            .manage(scans.clone())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let (scan_event_tx, mut scan_event_rx) = tokio::sync::mpsc::unbounded_channel();
+        app.listen(crate::ipc::worktree_disk::WORKTREE_DISK_SCAN_PROGRESS_EVENT, move |event: tauri::Event| {
+            let snapshot: crate::ipc::worktree_disk::DiskScanSnapshot =
+                serde_json::from_str(event.payload()).unwrap();
+            scan_event_tx.send(snapshot).unwrap();
+        });
+        cmd_worktree_delete_destructive(
+            app.handle().clone(),
+            app.state(),
+            DeleteWorktreeRequest {
+                workspace_id: "repair".into(),
+                worktree: identity,
+                delete_branch: Some(true),
+            },
+        )
+        .await
+        .unwrap();
+        let cancelled_event = tokio::time::timeout(std::time::Duration::from_secs(5), scan_event_rx.recv())
+            .await
+            .expect("delete must emit scan cancellation event")
+            .expect("event received");
+        assert_eq!(cancelled_event.status, crate::ipc::worktree_disk::DiskScanStatus::Cancelled);
+        assert_eq!(cancelled_event.scan_id, worker.scan_id);
+        assert!(!wt.path.exists());
+        assert!(
+            scans
+                .finish("repair", &worker.scan_id, Ok(vec![row]))
+                .is_none(),
+            "pre-delete worker must not resurrect deleted row"
+        );
+        assert!(scans.result("repair").unwrap().rows.is_empty());
+        let (cached, _) = scans.begin("repair", false);
+        assert!(cached.rows.is_empty(), "reopen must not return deleted row");
+    }
 }

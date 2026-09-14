@@ -210,6 +210,7 @@ type TerminalSplitViewProps = {
   onReconnectAgentSession?: (sessionId: string) => void;
   onReconnectSshSession?: (sessionId: string) => Promise<void> | void;
   onOpenNewShell?: (sessionId: string) => void;
+  onResetAgentState?: (tabId: string) => void;
   onBackendSessionUnavailable?: (
     sessionId: string,
     backendSessionId: string,
@@ -263,6 +264,7 @@ export function TerminalSplitView({
   onReconnectAgentSession,
   onReconnectSshSession,
   onOpenNewShell,
+  onResetAgentState,
   onBackendSessionUnavailable,
 }: TerminalSplitViewProps) {
   const normalizedLayout = normalizeLayout(layout);
@@ -494,6 +496,7 @@ export function TerminalSplitView({
     onReconnectAgentSession,
     onReconnectSshSession,
     onOpenNewShell,
+    onResetAgentState,
     onBackendSessionUnavailable,
     splitTerminalTab,
     browserPanesVisible: activeDrag === null,
@@ -682,6 +685,7 @@ type TabGroupViewProps = {
     bindingKey?: string | null,
   ) => void;
   splitTerminalTab: (tabId: string, direction: PaneDirection) => void;
+  onResetAgentState?: (tabId: string) => void;
   browserPanesVisible: boolean;
   dropFeedbackLeafId: string | null;
 };
@@ -699,6 +703,7 @@ function TabGroupView({
   onCloseTabsToLeft,
   onRenameTab,
   onToggleTabPin,
+  onResetAgentState,
   onAddTab,
   onAddBrowserTab,
   onAddMarkdown,
@@ -767,6 +772,7 @@ function TabGroupView({
         onCloseToLeft={onCloseTabsToLeft}
         onRenameTab={onRenameTab}
         onTogglePin={onToggleTabPin}
+        onResetAgentState={onResetAgentState}
         onSplitRight={(tabId) => splitTerminalTab(tabId, "horizontal")}
         onSplitDown={(tabId) => splitTerminalTab(tabId, "vertical")}
         onMoveTabToSplit={moveTabToSplitEdge}

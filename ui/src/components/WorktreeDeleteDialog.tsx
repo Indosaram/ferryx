@@ -8,7 +8,18 @@ import {
   previewWorktreeDelete,
   toIpcError,
 } from "../lib/tauri";
-import { worktreeIdentity, type BranchDeletionPreview, type StructuredIpcError, type Worktree } from "../lib/types";
+import {
+  worktreeIdentity,
+  type BranchDeletionPreview,
+  type DirtyFile,
+  type StructuredIpcError,
+  type Worktree,
+} from "../lib/types";
+
+// Destructive deletion is irreversible, so the confirmation has to name what is being
+// discarded rather than describing it in the abstract. Long lists are truncated with a
+// remainder count so the dialog cannot be pushed off-screen by a large dirty worktree.
+const DIRTY_FILES_SHOWN = 8;
 
 export type WorktreeDeleteServices = {
   previewDelete: (worktree: Worktree) => Promise<BranchDeletionPreview>;
@@ -22,6 +33,8 @@ type WorktreeDeleteDialogProps = {
   onClose: () => void;
   onDeleted: () => void;
   services?: WorktreeDeleteServices;
+  initialDirty?: boolean;
+  dirtyFiles?: DirtyFile[];
 };
 
 function createDefaultServices(workspaceId: string): WorktreeDeleteServices {
@@ -47,23 +60,49 @@ export function WorktreeDeleteDialog({
   onClose,
   onDeleted,
   services,
+  initialDirty = false,
 }: WorktreeDeleteDialogProps) {
   const resolvedServices = useMemo(() => services ?? createDefaultServices(workspaceId), [services, workspaceId]);
   const [preview, setPreview] = useState<BranchDeletionPreview | null>(null);
-  const [error, setError] = useState<StructuredIpcError | null>(null);
-  const [destructiveRequired, setDestructiveRequired] = useState(false);
+  const [error, setError] = useState<StructuredIpcError | null>(
+    initialDirty
+      ? {
+          code: "DIRTY_WORKTREE",
+          message:
+            "Safe deletion refused because the worktree has uncommitted or untracked changes. Destructive deletion will discard all changes permanently.",
+          details: {},
+        }
+      : null,
+  );
+  const [destructiveRequired, setDestructiveRequired] = useState(initialDirty);
   const [busy, setBusy] = useState(false);
+  const dirtyFiles = preview?.dirtyState.files ?? [];
+  const hasDirtyLoss = preview?.dirtyState.isDirty || error?.code === "DIRTY_WORKTREE";
 
   useEffect(() => {
     let cancelled = false;
     setPreview(null);
-    setError(null);
-    setDestructiveRequired(false);
+    if (initialDirty) {
+      setError({
+        code: "DIRTY_WORKTREE",
+        message:
+          "Safe deletion refused because the worktree has uncommitted or untracked changes. Destructive deletion will discard all changes permanently.",
+        details: {},
+      });
+      setDestructiveRequired(true);
+    } else {
+      setError(null);
+      setDestructiveRequired(false);
+    }
     setBusy(true);
     void resolvedServices
       .previewDelete(worktree)
       .then((result) => {
-        if (!cancelled) setPreview(result);
+        if (!cancelled) {
+          setPreview(result);
+          setDestructiveRequired(result.dirtyState.isDirty);
+          setError(null);
+        }
       })
       .catch((cause) => {
         if (!cancelled) setError(toIpcError(cause));
@@ -74,7 +113,7 @@ export function WorktreeDeleteDialog({
     return () => {
       cancelled = true;
     };
-  }, [resolvedServices, worktree]);
+  }, [resolvedServices, worktree, initialDirty]);
 
   const finishDelete = () => {
     onDeleted();
@@ -90,13 +129,23 @@ export function WorktreeDeleteDialog({
     } catch (cause) {
       const ipcError = toIpcError(cause);
       setError(ipcError);
-      setDestructiveRequired(ipcError.code === "UNMERGED_BRANCH" || ipcError.code === "DIRTY_WORKTREE");
+      const requiresDestructive = ipcError.code === "UNMERGED_BRANCH" || ipcError.code === "DIRTY_WORKTREE";
+      setDestructiveRequired(requiresDestructive);
+      if (requiresDestructive) {
+        setPreview(null);
+        try {
+          setPreview(await resolvedServices.previewDelete(worktree));
+        } catch (previewError) {
+          setError(toIpcError(previewError));
+        }
+      }
     } finally {
       setBusy(false);
     }
   };
 
   const handleDestructiveDelete = async () => {
+    if (busy || !preview) return;
     setBusy(true);
     setError(null);
     try {
@@ -156,29 +205,49 @@ export function WorktreeDeleteDialog({
                 <AlertTriangle className="mt-0.5 size-4 shrink-0" />
                 <div>
                   <div className="font-semibold">
-                    {error?.code === "DIRTY_WORKTREE" ? "Uncommitted changes" : "Unmerged branch"}
+                    {hasDirtyLoss ? "Uncommitted changes" : "Unmerged branch"}
                   </div>
                   <p className="mt-1 text-[11px] leading-relaxed text-destructive/85">
-                    {error?.code === "DIRTY_WORKTREE"
+                    {hasDirtyLoss
                       ? "Safe deletion refused because the worktree has uncommitted or untracked changes. Destructive deletion will discard all changes permanently."
                       : "Safe deletion refused to discard unmerged commits. Destructive deletion is a separate explicit action."}
                   </p>
+                  {dirtyFiles.length > 0 ? (
+                    <div className="mt-2" data-testid="dirty-file-preview">
+                      <div className="text-[11px] font-semibold text-destructive">
+                        {dirtyFiles.length} file{dirtyFiles.length === 1 ? "" : "s"} will be discarded
+                      </div>
+                      <ul className="mt-1 space-y-0.5 font-mono text-[10px] leading-relaxed text-destructive/80">
+                        {dirtyFiles.slice(0, DIRTY_FILES_SHOWN).map((file) => (
+                          <li key={file.path} className="flex gap-1.5">
+                            <span className="shrink-0 opacity-70">{file.statusCode.trim() || "?"}</span>
+                            <span className="truncate">{file.path}</span>
+                          </li>
+                        ))}
+                      </ul>
+                      {dirtyFiles.length > DIRTY_FILES_SHOWN ? (
+                        <div className="mt-1 text-[10px] text-destructive/70">
+                          and {dirtyFiles.length - DIRTY_FILES_SHOWN} more
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
               </div>
               <button
                 type="button"
-                disabled={busy}
+                disabled={busy || !preview}
                 onClick={() => void handleDestructiveDelete()}
                 className="w-full rounded-md bg-destructive px-3 py-2 font-semibold text-destructive-foreground disabled:opacity-50"
               >
-                {error?.code === "DIRTY_WORKTREE"
+                {hasDirtyLoss
                   ? "Delete worktree and discard changes permanently"
                   : "Delete unmerged branch permanently"}
               </button>
             </div>
           ) : null}
 
-          {error && !destructiveRequired ? (
+          {error && (!destructiveRequired || !preview) ? (
             <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-destructive">
               <div className="font-semibold">{error.code}</div>
               <div className="mt-0.5 text-[11px]">{error.message}</div>

@@ -233,6 +233,7 @@ export type WorkspaceAction =
       isSnapshot?: boolean;
       observed?: boolean;
     }
+  | { type: "RESET_AGENT_STATE"; sessionId: string }
   | { type: "MARK_TAB_UNREAD"; tabId: string; observed?: boolean }
   | { type: "CLEAR_TAB_UNREAD"; tabId: string }
   | { type: "MARK_WORKTREE_UNREAD"; worktreePath: string }
@@ -1363,6 +1364,28 @@ export function useWorkspaceStore({
     swapPanes,
     syncWorktrees,
     restoreWorkspace,
+    resetAgentState: async (sessionId: string) => {
+      const session = stateRef.current.sessions[sessionId];
+      const backendId = session?.backendSessionId || sessionId;
+      await tauriIpc.resetAgentState(backendId);
+      dispatch({ type: "RESET_AGENT_STATE", sessionId });
+    },
+    resetWorktreeAgentState: async (worktreePath: string) => {
+      const sessions = Object.values(stateRef.current.sessions).filter(
+        (s) => sessionWorktreePath(s) === worktreePath,
+      );
+      const results = await Promise.allSettled(sessions.map(async (session) => {
+        const backendId = session.backendSessionId || session.id;
+        await tauriIpc.resetAgentState(backendId);
+        dispatch({ type: "RESET_AGENT_STATE", sessionId: session.id });
+      }));
+      const failures = results.filter((result) => result.status === "rejected");
+      if (failures.length > 0) {
+        throw Object.assign(new Error(`Agent state reset failed for ${failures.length} of ${sessions.length} sessions`), {
+          results: results.map((result, index) => ({ sessionId: sessions[index].id, ...result })),
+        });
+      }
+    },
     markBackendSessionUnavailable: (
       sessionId: string,
       backendSessionId: string,
@@ -2401,6 +2424,28 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         },
       };
     }
+    case "RESET_AGENT_STATE": {
+      let nextState = state;
+      if (state.activityBySessionId?.[action.sessionId]) {
+        const activityBySessionId = { ...(nextState.activityBySessionId ?? {}) };
+        delete activityBySessionId[action.sessionId];
+        nextState = { ...nextState, activityBySessionId };
+      }
+      const tabId = findTabIdForSession(nextState, action.sessionId);
+      if (tabId && nextState.unreadTabIds[tabId]) {
+        const tabSessionIds = getTabSessionIds(nextState, tabId);
+        const hasOtherUnseenSessionInTab = [...tabSessionIds].some(
+          (sId) => sId !== action.sessionId && nextState.activityBySessionId?.[sId]?.seen !== true,
+        );
+        const hasBellUnread = Boolean(nextState.bellUnreadTabIds?.[tabId]);
+        if (!hasOtherUnseenSessionInTab && !hasBellUnread) {
+          const unreadTabIds = { ...nextState.unreadTabIds };
+          delete unreadTabIds[tabId];
+          nextState = clearWorktreeUnreadWhenRead({ ...nextState, unreadTabIds }, tabId);
+        }
+      }
+      return nextState;
+    }
     case "SESSION_TITLE_ACTIVITY": {
       const previous = state.activityBySessionId?.[action.sessionId];
       const prevActivity = previous as WorkspaceTerminalActivity | undefined;
@@ -2647,7 +2692,7 @@ function getTabSessionIdsForLayout(layout: LayoutState, tabId: string): Set<stri
   return sessionIds;
 }
 
-function getTabSessionIds(state: WorkspaceState, tabId: string): Set<string> {
+export function getTabSessionIds(state: WorkspaceState, tabId: string): Set<string> {
   const inActive = getTabSessionIdsForLayout(state.layout, tabId);
   if (inActive.size > 0 || state.layout.tabs.some((t) => t.id === tabId)) return inActive;
   for (const layout of Object.values(state.worktreeLayouts ?? {})) {

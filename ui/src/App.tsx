@@ -14,6 +14,7 @@ import { TerminalSplitView } from "./components/TerminalSplitView";
 import { RemoteHostConnection } from "./remote/RemoteApp";
 import { remoteHostStore, selectActiveHost } from "./state/remoteHostStore";
 import { WorktreeDeleteDialog } from "./components/WorktreeDeleteDialog";
+import { WorktreeDiskDialog } from "./components/WorktreeDiskDialog";
 import { ConfirmCloseTabDialog } from "./components/ConfirmCloseTabDialog";
 import { TerminalLinkActions } from "./components/TerminalLinkActions";
 import { Toaster, toast } from "./components/ui/sonner";
@@ -128,7 +129,7 @@ import { clearHmrWorkspaceState, getHmrWorkspaceState } from "./state/hmrWorkspa
 import { clearWorkspaceSnapshot, getWorkspaceSnapshot, listWorkspaceSnapshots } from "./state/workspaceSnapshotCache";
 import { emptySidebarWorkspaceIds } from "./state/sidebarWorkspaceState";
 import { useWorkspaceRuntime } from "./state/workspaceRuntime";
-import { hasNavigableSession, selectGlobalUnreadBadgeCount, selectNotificationWorkspaceLabel, selectWorktreeActivitySummaries, useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
+import { getTabSessionIds, hasNavigableSession, selectGlobalUnreadBadgeCount, selectNotificationWorkspaceLabel, selectWorktreeActivitySummaries, useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
 
 export { ACTIVE_PROJECT_STORAGE_KEY, PROJECTS_STORAGE_KEY, SIDEBAR_OPEN_STORAGE_KEY };
 type InboxNavigationTarget = NotificationTarget & { revision?: number };
@@ -629,6 +630,8 @@ function WorkspaceApp({
     swapPanes,
     syncWorktrees,
     restoreWorkspace,
+    resetAgentState,
+    resetWorktreeAgentState,
     ensureSessionBackends,
     dispatchWorkspaceAction,
     markBackendSessionUnavailable,
@@ -661,6 +664,34 @@ function WorkspaceApp({
   const isNotificationObserved = useCallback((target: RecordingTarget) => isNotificationTargetObserved(
     stateRef.current, target, getNativeWindowFocused() ?? isWindowForegroundFocused(),
   ), []);
+
+  const handleResetTabAgentState = useCallback(
+    async (tabId: string) => {
+      const tab = state.layout.tabs.find((t) => t.id === tabId);
+      if (!tab || tab.kind === "browser") return;
+      const sessionIds = getTabSessionIds(state, tab.id);
+      const results = await Promise.allSettled([...sessionIds].map(resetAgentState));
+      const failures = results.filter((result) => result.status === "rejected");
+      if (failures.length > 0) {
+        toast.error(`Agent state reset failed for ${failures.length} of ${sessionIds.size} sessions`);
+      } else {
+        toast.success("Agent state reset");
+      }
+    },
+    [state, resetAgentState],
+  );
+
+  const handleResetWorktreeAgentState = useCallback(
+    async (worktree: Worktree) => {
+      try {
+        await resetWorktreeAgentState(worktree.path);
+        toast.success("Agent state reset");
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Failed to reset agent state");
+      }
+    },
+    [resetWorktreeAgentState],
+  );
 
   useEffect(() => wireActivityRecording({
     events: (record) => subscribeActivityNotification((event) => {
@@ -1301,6 +1332,7 @@ function WorkspaceApp({
   const [searchLeafId, setSearchLeafId] = useState<string | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(loadSidebarOpen);
   const [deleteTarget, setDeleteTarget] = useState<Worktree | null>(null);
+  const [diskManageProject, setDiskManageProject] = useState<RegisteredProject | null>(null);
   const [pendingTabClose, setPendingTabClose] = useState<{
     kind: "pane" | "tab";
     tabId: string;
@@ -2503,6 +2535,8 @@ function WorkspaceApp({
           onSelectWorktree={handleSelectWorktree}
           onCreateWorktree={handleOpenCreateWorktree}
           onDeleteWorktree={setDeleteTarget}
+          onResetAgentState={handleResetWorktreeAgentState}
+          onManageDisk={setDiskManageProject}
           onOpenSettings={handleOpenSettings}
           onNavigateToSession={handleNotificationTarget}
           isSessionNavigable={(workspaceId, sessionId) => {
@@ -2592,6 +2626,7 @@ function WorkspaceApp({
             onDetachPaneToTab={detachPaneToTab}
             onRenameTab={renameTab}
             onToggleTabPin={setTabPinned}
+            onResetAgentState={handleResetTabAgentState}
             onAddTab={handleAddTerminalTab}
             onAddBrowserTab={handleAddBrowserTab}
             onOpenSettings={handleOpenSettings}
@@ -2741,6 +2776,13 @@ function WorkspaceApp({
           activeAgentCount={pendingTabClose.activeAgentCount}
           onCancel={handleCancelTabClose}
           onConfirm={handleConfirmTabClose}
+        />
+      ) : null}
+      {diskManageProject ? (
+        <WorktreeDiskDialog
+          workspaceId={diskManageProject.workspaceId}
+          projectName={diskManageProject.workspaceId}
+          onClose={() => setDiskManageProject(null)}
         />
       ) : null}
     </div>
