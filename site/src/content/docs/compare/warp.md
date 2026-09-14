@@ -3,13 +3,13 @@ title: "Ferryx vs Warp: Open Source vs Commercial Platform"
 description: Ferryx and Warp both target agentic coding, but differ in licensing, architecture, and how agents run. A factual comparison for engineers who check details.
 ---
 
-Ferryx and Warp are both built for engineers who run coding agents in a terminal, and that's roughly where the overlap ends. Warp is a closed source commercial platform marketed to enterprises; it ships three products: the Warp Terminal, the Warp Agent CLI, and Warp Factories, cloud infrastructure for fleets of coding agents. Ferryx is an open source, MIT licensed desktop application, currently at v0.1.0-alpha, that runs locally on macOS, Windows, and Linux.
+Ferryx and Warp are both built for engineers who run coding agents in a terminal, and that's roughly where the overlap ends. Warp is a closed source commercial platform marketed to enterprises; it ships three products: the Warp Terminal, the Warp Agent CLI, and Warp Factories, cloud infrastructure for fleets of coding agents. Ferryx is a source-available desktop application under the Sustainable Use License (SUL-1.0), currently at v0.1.0-alpha, that runs locally on macOS, Windows, and Linux.
 
 This page compares the two on what can be verified: source availability, licensing, architecture, and process handling. No benchmarks; the site's editorial rules bar publishing unmeasured performance claims. Verified September 2026, and details in this space change quickly, so confirm anything that matters on each vendor's site.
 
 ## Architecture and licensing
 
-Ferryx is built with Rust and Tauri v2, parses terminal output with libghostty-vt, and renders through WGPU on a native child surface, with no Electron. Its source is public on GitHub under the MIT license. The decision with the most practical weight is that a headless Rust PTY daemon owns the pseudoterminals and the GUI is just a client of it; close, reload, or crash the window, and running agent processes keep going. Output is buffered in a ring buffer with monotonic sequence numbers, so a reconnect replays exactly what was missed.
+Ferryx is built with Rust and Tauri v2, parses terminal output with libghostty-vt, and renders through WGPU on a native child surface, with no Electron. Its source is public on GitHub under the Sustainable Use License (SUL-1.0), which permits non-commercial use and internal business use. The decision with the most practical weight is that a headless Rust PTY daemon owns the pseudoterminals and the GUI is just a client of it; close, reload, or crash the window, and running agent processes keep going. Output is buffered in a ring buffer with monotonic sequence numbers, so a reconnect replays exactly what was missed.
 
 Warp is closed source. You can read its documentation, but not its implementation, so statements about how it works internally rest on what Warp publishes rather than on code you can audit; its rendering stack is undisclosed here for that reason. Where the work happens also differs: Ferryx runs everything on your machine, while Warp pairs its terminal and CLI with cloud infrastructure aimed at fleets of agents.
 
@@ -21,9 +21,9 @@ Ferryx approaches the same problem locally. The daemon owns the pseudoterminals 
 
 ## A plain-language rundown
 
-- **Source and license.** Ferryx is MIT licensed with public source on GitHub. Warp is closed source.
+- **Source and license.** Ferryx is source-available under SUL-1.0 with public source on GitHub. Warp is closed source.
 - **Products.** Ferryx is one desktop application. Warp sells a terminal, an agent CLI, and cloud infrastructure for agent fleets.
-- **Pricing.** Warp has a public pricing page with paid tiers. Ferryx is free software under MIT.
+- **Pricing.** Warp has a public pricing page with paid tiers. Ferryx is free for personal and non-commercial use under SUL-1.0.
 - **Where work runs.** Ferryx runs entirely locally. Warp Factories runs fleets of coding agents in cloud infrastructure across the software development lifecycle.
 - **Process survival.** Closing or reloading the Ferryx GUI doesn't kill running agent processes, and reconnecting replays missed output from a ring buffer with monotonic sequence numbers.
 - **Rendering.** Ferryx parses with libghostty-vt and renders with WGPU on a native child surface, no Electron. How Warp's terminal renders is undisclosed, since its source isn't public.
@@ -35,7 +35,7 @@ Ferryx approaches the same problem locally. The daemon owns the pseudoterminals 
 
 Here's the other side stated plainly. Warp is a mature commercial product with enterprise support, a dedicated agent CLI, and infrastructure for running agent fleets in the cloud; Ferryx is a v0.1.0-alpha desktop app with none of that. If you need a vendor relationship, paid tiers, and documented industry solutions, particularly in financial services, insurance, or telecommunications, Warp covers that today. Its documented use cases describe team-level workflows that an alpha desktop app can't yet serve. Choose Warp when you want a supported commercial product rather than a project whose source you can read.
 
-What Ferryx offers instead is public source under MIT, agents that survive a GUI restart, replay on reconnect, and per-worktree git isolation. If those are the properties you care about, the trade makes sense; if they aren't, Warp's maturity wins.
+What Ferryx offers instead is public source under SUL-1.0, agents that survive a GUI restart, replay on reconnect, and per-worktree git isolation. If those are the properties you care about, the trade makes sense; if they aren't, Warp's maturity wins.
 
 ## Where to get Ferryx
 

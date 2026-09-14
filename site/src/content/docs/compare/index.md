@@ -3,7 +3,7 @@ title: "Ferryx Alternatives: AI Terminals Compared"
 description: Compare Ferryx with Warp, Wave Terminal, Conductor, Crystal, tmux plus git worktree, and Ghostty. What each tool is, who it suits, and where to read next.
 ---
 
-Ferryx is an open source desktop terminal built for engineers who run AI coding agents. It's MIT licensed, written in Rust on Tauri v2, and currently at v0.1.0-alpha. If you're weighing it against the alternatives, each link below goes to a standalone comparison page. Every page states its facts plainly, marks when they were verified, and includes an honest section on what the other tool does better.
+Ferryx is a source-available desktop terminal built for engineers who run AI coding agents. It's licensed under the Sustainable Use License (SUL-1.0), free for personal and non-commercial use, written in Rust on Tauri v2, and currently at v0.1.0-alpha. If you're weighing it against the alternatives, each link below goes to a standalone comparison page. Every page states its facts plainly, marks when they were verified, and includes an honest section on what the other tool does better.
 
 ## What Ferryx is
 

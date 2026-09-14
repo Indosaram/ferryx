@@ -9,7 +9,7 @@ This page sticks to verifiable facts: license, language, documented features, an
 
 ## The basics
 
-- License: Wave Terminal is Apache-2.0. Ferryx is MIT. Both are permissive open source licenses.
+- License: Wave Terminal is Apache-2.0. Ferryx is SUL-1.0, a source-available license; its source is public and free for personal and non-commercial use.
 - Implementation: Wave is written in Go. Ferryx is built with Rust and Tauri v2, contains no Electron, and renders through WGPU on a native child surface.
 - Platforms: Wave runs on macOS, Linux, and Windows. Ferryx ships a macOS universal DMG, a Windows build through the Microsoft Store, and Linux AppImage and .deb packages.
 - Maturity: Wave is an established project with a large user base. Ferryx is at v0.1.0-alpha.

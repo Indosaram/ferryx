@@ -3,7 +3,7 @@ title: "Ferryx vs Crystal (Nimbalyst): Parallel Agent Worktrees"
 description: Ferryx and Nimbalyst, formerly Crystal, both run coding agents in parallel git worktrees. Compare the desktop architectures before choosing one.
 ---
 
-[Nimbalyst](https://github.com/stravu/crystal), formerly called Crystal, is the closest peer to Ferryx in concept: a desktop app that runs multiple coding agents in parallel git worktrees. Its repository describes the project as "Run multiple Codex and Claude Code AI sessions in parallel git worktrees. Test, compare approaches & manage AI-assisted development workflows in one desktop app." [Ferryx](https://github.com/Indosaram/ferryx) sits in the same space: an MIT-licensed desktop terminal that also keeps parallel agent work in git worktrees. The overlap is real, and the differences are architectural. Those differences decide which tool fits your setup.
+[Nimbalyst](https://github.com/stravu/crystal), formerly called Crystal, is the closest peer to Ferryx in concept: a desktop app that runs multiple coding agents in parallel git worktrees. Its repository describes the project as "Run multiple Codex and Claude Code AI sessions in parallel git worktrees. Test, compare approaches & manage AI-assisted development workflows in one desktop app." [Ferryx](https://github.com/Indosaram/ferryx) sits in the same space: a source-available (SUL-1.0) desktop terminal that also keeps parallel agent work in git worktrees. The overlap is real, and the differences are architectural. Those differences decide which tool fits your setup.
 
 One naming note before the details: the project was renamed from Crystal to Nimbalyst. Both names point to the same repository, so this page uses both.
 

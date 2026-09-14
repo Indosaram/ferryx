@@ -39,6 +39,6 @@ A caveat belongs here: Ferryx is at v0.1.0-alpha, with a narrow scope. It doesn'
 
 ## Credit
 
-Ferryx's terminal parsing rests on the Ghostty project's work through libghostty-vt. That's a real debt, worth stating plainly: thank you to the Ghostty maintainers and contributors for building it and releasing it under the MIT license. Both projects ship under MIT. If this page sends you to Ghostty instead of Ferryx, that's a good outcome, not a failure of the page.
+Ferryx's terminal parsing rests on the Ghostty project's work through libghostty-vt. That's a real debt, worth stating plainly: thank you to the Ghostty maintainers and contributors for building it and releasing it under the MIT license. Ghostty ships under MIT; Ferryx ships under the source-available Sustainable Use License (SUL-1.0). If this page sends you to Ghostty instead of Ferryx, that's a good outcome, not a failure of the page.
 
 Project links: [ghostty.org](https://ghostty.org/), [github.com/ghostty-org/ghostty](https://github.com/ghostty-org/ghostty), and Ferryx at [github.com/Indosaram/ferryx](https://github.com/Indosaram/ferryx).

@@ -208,7 +208,7 @@ Questions and ideas are welcome in [Discord](https://discord.gg/Z2hBkQEHUG).
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the [Sustainable Use License (SUL-1.0)](LICENSE): free to use, modify, and share for personal and non-commercial purposes.
 
 ## Code Signing Policy
 

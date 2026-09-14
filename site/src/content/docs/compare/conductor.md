@@ -3,7 +3,7 @@ title: "Ferryx vs Conductor: Local Agents vs Cloud Agents"
 description: Ferryx and Conductor both orchestrate coding agents. Compare a local-first workflow with Conductor Cloud's microVMs, multiplayer, and enterprise support.
 ---
 
-Comparing [Conductor](https://conductor.build/) and [Ferryx](https://github.com/Indosaram/ferryx) is mostly a question of where the agents run. Conductor's positioning is "Run a team of coding agents in the cloud": Conductor Cloud executes agents on isolated microVMs, and multiplayer features let a team share a workspace link, see who's active, follow the work, and prompt agents together in real time. Ferryx is an MIT-licensed desktop terminal built with Rust and Tauri v2 that keeps every agent on your own machine, with no Ferryx cloud service at all.
+Comparing [Conductor](https://conductor.build/) and [Ferryx](https://github.com/Indosaram/ferryx) is mostly a question of where the agents run. Conductor's positioning is "Run a team of coding agents in the cloud": Conductor Cloud executes agents on isolated microVMs, and multiplayer features let a team share a workspace link, see who's active, follow the work, and prompt agents together in real time. Ferryx is a source-available (SUL-1.0) desktop terminal built with Rust and Tauri v2 that keeps every agent on your own machine, with no Ferryx cloud service at all.
 
 This page is for engineers choosing between them. It covers the architectural difference, how each tool separates parallel work, and where each one is the better fit. Both products change quickly, so verify details on the linked sites.
 
@@ -25,7 +25,7 @@ Conductor's fence is the microVM. Agents on Conductor Cloud run on isolated micr
 
 ## Capabilities at a glance
 
-- As of September 2026, Ferryx is at v0.1.0-alpha and ships as a macOS universal DMG, a Windows build through the Microsoft Store, and Linux AppImage and .deb packages. It's MIT licensed.
+- As of September 2026, Ferryx is at v0.1.0-alpha and ships as a macOS universal DMG, a Windows build through the Microsoft Store, and Linux AppImage and .deb packages. It's SUL-1.0 licensed (free for personal and non-commercial use).
 - A headless PTY daemon keeps agent processes alive across GUI closes and reloads, and replays buffered output on reconnect.
 - Git worktree isolation puts each agent's work in `.orca-worktrees/wt-<slug>` on an `orca/<workspace-id>/<slug>` branch.
 - Embedded browser tabs run on native WebViews and can split beside terminal panes.

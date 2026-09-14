@@ -37,7 +37,7 @@ None of this is hard. It's repeated small decisions, which is exactly the kind o
 
 ## How Ferryx handles it
 
-Ferryx is a desktop terminal workspace (MIT licensed, Rust and Tauri v2) that manages git worktrees for you. When you ask it for an isolated workspace, it creates a managed worktree at a fixed path inside the repository, `.orca-worktrees/wt-<slug>`, on a branch named `orca/<workspace-id>/<slug>`. You don't choose paths or branch names, so the convention can't drift. Ferryx creates the worktree, names it, and removes it when you're done, which covers the cleanup step most often forgotten in the manual flow.
+Ferryx is a desktop terminal workspace (source-available SUL-1.0, Rust and Tauri v2) that manages git worktrees for you. When you ask it for an isolated workspace, it creates a managed worktree at a fixed path inside the repository, `.orca-worktrees/wt-<slug>`, on a branch named `orca/<workspace-id>/<slug>`. You don't choose paths or branch names, so the convention can't drift. Ferryx creates the worktree, names it, and removes it when you're done, which covers the cleanup step most often forgotten in the manual flow.
 
 What that means inside the workspace:
 

@@ -17,7 +17,7 @@ This baseline is genuinely good. Many engineers should keep using it. Nothing in
 
 ## What Ferryx actually changes
 
-Ferryx is an MIT licensed desktop app built with Rust and Tauri v2. It parses terminal output with libghostty-vt and renders panes with WGPU on a native surface, with no Electron. The honest framing is ergonomics and bookkeeping, not capability. Every item in this list is something a determined engineer could assemble manually with tmux plus scripts:
+Ferryx is a source-available desktop app (SUL-1.0) built with Rust and Tauri v2. It parses terminal output with libghostty-vt and renders panes with WGPU on a native surface, with no Electron. The honest framing is ergonomics and bookkeeping, not capability. Every item in this list is something a determined engineer could assemble manually with tmux plus scripts:
 
 - Worktree bookkeeping. Each managed worktree lives in `.orca-worktrees/wt-<slug>` on a branch named `orca/<workspace-id>/<slug>`, and worktree paths are jailed to the repository root. You don't invent directory names or branch names by hand; the app does it the same way every time.
 - Visible state. Each agent gets its own pane in a split layout, and panes and tabs can be rearranged with drag-and-drop, so who is doing what is visible at a glance.

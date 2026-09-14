@@ -3,7 +3,7 @@ title: Introduction
 description: Introduction to Ferryx, a native Rust terminal workspace for running parallel AI coding agents with Git worktree isolation and mobile remote access.
 ---
 
-Ferryx is a native desktop terminal workspace for running several AI coding agents at the same time. It's written in Rust on Tauri v2, parses terminal output with libghostty-vt, and renders panes with WGPU on a native child surface, so there's no Electron in the stack. The project is MIT licensed and ships for macOS, Windows, and Linux.
+Ferryx is a native desktop terminal workspace for running several AI coding agents at the same time. It's written in Rust on Tauri v2, parses terminal output with libghostty-vt, and renders panes with WGPU on a native child surface, so there's no Electron in the stack. The project is SUL-1.0 licensed (source-available, free for personal and non-commercial use) and ships for macOS, Windows, and Linux.
 
 ## The problem it addresses
 
