@@ -15,6 +15,24 @@ import {
   type TerminalGridState,
 } from "./terminalGridProtocol";
 
+interface RemoteStatusMessage {
+  readonly state: string;
+  readonly generation: string;
+}
+
+// Recovery status is only emitted for SSH sessions; generation fencing exists
+// because an SSH reconnect swaps the backend channel under the same socket.
+function parseRemoteStatus(data: string): RemoteStatusMessage | null {
+  try {
+    const parsed = JSON.parse(data) as { type?: unknown; state?: unknown; generation?: unknown };
+    if (parsed?.type !== "remoteStatus") return null;
+    if (typeof parsed.state !== "string" || typeof parsed.generation !== "string") return null;
+    return { state: parsed.state, generation: parsed.generation };
+  } catch {
+    return null;
+  }
+}
+
 type RemoteTerminalProps = {
   readonly sessionId: string;
   readonly token: string;
@@ -305,6 +323,7 @@ export function RemoteTerminal({
   const pendingCompositionInputRef = useRef<string | null>(null);
   const requestResizeRef = useRef<() => void>(() => {});
   const lastSentGeometryRef = useRef<GridGeometry | null>(null);
+  const sshGenerationRef = useRef<string | null>(null);
   const scheduledSocketRequestRef = useRef<SocketRequest | null>(null);
   const activeSocketRequestRef = useRef<SocketRequest | null>(null);
   const [socketRequest, setSocketRequest] = useState<SocketRequest | null>(null);
@@ -382,7 +401,12 @@ export function RemoteTerminal({
         !socketRequestMatches(activeSocketRequestRef.current, sessionId, token) ||
         geometriesEqual(lastSentGeometryRef.current, geometry)
       ) return;
-      socket.send(JSON.stringify({ type: "resize", cols: geometry.cols, rows: geometry.rows }));
+      const sshGeneration = sshGenerationRef.current;
+      if (sshGeneration !== null) {
+        socket.send(JSON.stringify({ type: "remoteResize", generation: sshGeneration, cols: geometry.cols, rows: geometry.rows }));
+      } else {
+        socket.send(JSON.stringify({ type: "resize", cols: geometry.cols, rows: geometry.rows }));
+      }
       lastSentGeometryRef.current = geometry;
     };
 
@@ -421,6 +445,16 @@ export function RemoteTerminal({
       }
     };
 
+    const scheduleReconnect = () => {
+      if (disposed || reconnectTimer !== null) return;
+      const delay = Math.min(10000, 1000 * Math.pow(2, backoffAttempt));
+      backoffAttempt += 1;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        void dial();
+      }, delay);
+    };
+
     const dial = async () => {
       clearReconnectTimer();
       if (disposed) return;
@@ -433,7 +467,12 @@ export function RemoteTerminal({
       } catch (error) {
         if (disposed) return;
         if (onTransportFailure) onTransportFailure();
-        else console.warn("Terminal socket connection failed", error);
+        else {
+          console.warn("Terminal socket connection failed", error);
+          // A failed ticket fetch has no socket to emit onclose, so schedule the
+          // retry here or a transient outage strands the terminal on "Connecting".
+          scheduleReconnect();
+        }
         return;
       }
       socket.onerror = () => {
@@ -442,6 +481,13 @@ export function RemoteTerminal({
       socket.binaryType = "arraybuffer";
       socketRef.current = socket;
       activeSocketRequestRef.current = socketRequest;
+      // Generations are per-connection: a fresh socket must re-learn it from the
+      // next remoteStatus frame before any SSH write is allowed through.
+      sshGenerationRef.current = null;
+      // Each socket starts from the handshake geometry the server applied, not
+      // from whatever a previous socket last sent — the cache must track this
+      // socket so a rotation or keyboard change is still announced.
+      lastSentGeometryRef.current = socketRequest.geometry;
       socket.onopen = () => {
         if (disposed || socketRef.current !== socket) return;
         backoffAttempt = 0;
@@ -457,18 +503,21 @@ export function RemoteTerminal({
           return;
         }
         onSocketLifecycle?.(socketRequest.sessionId, "closed");
-
-        const delay = Math.min(10000, 1000 * Math.pow(2, backoffAttempt));
-        backoffAttempt += 1;
-        clearReconnectTimer();
-        reconnectTimer = setTimeout(() => {
-          reconnectTimer = null;
-          void dial();
-        }, delay);
+        scheduleReconnect();
       };
       socket.onmessage = (event) => {
         if (disposed || socketRef.current !== socket) return;
         if (typeof event.data !== "string") return;
+        // SSH sessions drive input through generation-fenced messages; the status
+        // frame carries that generation and marks this socket as an SSH channel.
+        const status = parseRemoteStatus(event.data);
+        if (status) {
+          sshGenerationRef.current = status.generation;
+          // The mirror already holds the handshake geometry; announce it through
+          // the generation-fenced channel so the backend stays in sync.
+          requestResizeRef.current();
+          return;
+        }
         const frame = parseGridFrame(event.data);
         if (!frame) return;
         setGrid((current) => applyGridFrame(current, frame));
@@ -624,6 +673,13 @@ export function RemoteTerminal({
   const sendText = (text: string) => {
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN || text.length === 0) return;
+    const sshGeneration = sshGenerationRef.current;
+    if (sshGeneration !== null) {
+      // SSH channels only accept generation-fenced text frames; binary writes
+      // are rejected server-side.
+      socket.send(JSON.stringify({ type: "remoteWrite", generation: sshGeneration, data: text }));
+      return;
+    }
     socket.send(new TextEncoder().encode(text));
   };
 
@@ -649,6 +705,17 @@ export function RemoteTerminal({
     sink.value = "";
     const committed = pendingCompositionInputRef.current;
     pendingCompositionInputRef.current = null;
+    // Android IMEs may report deletion only through the input event's inputType
+    // (keycode-229 keydown is intentionally ignored above); an empty sink plus a
+    // delete* inputType is a remote deletion, not an empty insertion.
+    if (text.length === 0 && input.inputType === "deleteContentBackward") {
+      sendText("\u007f");
+      return;
+    }
+    if (text.length === 0 && input.inputType === "deleteContentForward") {
+      sendText("\u001b[3~");
+      return;
+    }
     // WebKit/Chromium can deliver the final insertion after compositionend.
     // Consume only that matching insertion, not the next unrelated edit.
     if (committed !== null && text === committed &&
@@ -660,6 +727,29 @@ export function RemoteTerminal({
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
 
+    const sshGeneration = sshGenerationRef.current;
+    if (sshGeneration !== null) {
+      // SSH sessions accept only generation-fenced text frames; every dock key
+      // — control bytes, meta chords, named sequences — travels as remoteWrite.
+      const modifiedDock = modifiedDockNavigationSequence(key);
+      let data: string | null = null;
+      if (modifiedDock) data = modifiedDock;
+      else if (key === "ctrl-c") data = "\u0003"; // legacy signal is dropped for SSH
+      else if (key.startsWith("alt-")) {
+        const altKey = key.slice(4);
+        const altSequence = KEY_SEQUENCES[BROWSER_KEY_NAMES[altKey] ?? (altKey as keyof typeof KEY_SEQUENCES)];
+        data = `\u001b${altSequence ?? altKey}`;
+      } else if (key.startsWith("ctrl-")) {
+        const byte = controlByteForChar(key.slice(5));
+        if (byte !== null) data = String.fromCharCode(byte);
+      } else {
+        const sequenceKey = BROWSER_KEY_NAMES[key] ?? key;
+        data = KEY_SEQUENCES[sequenceKey as keyof typeof KEY_SEQUENCES] ?? sequenceKey;
+      }
+      if (data !== null) socket.send(JSON.stringify({ type: "remoteWrite", generation: sshGeneration, data }));
+      return;
+    }
+
     if (key === "ctrl-c") {
       socket.send(JSON.stringify({ type: "signal", signal: "interrupt" }));
       return;
@@ -670,7 +760,11 @@ export function RemoteTerminal({
       return;
     }
     if (key.startsWith("alt-")) {
-      socket.send(new TextEncoder().encode(`\u001b${key.slice(4)}`));
+      const altKey = key.slice(4);
+      const altSequence = KEY_SEQUENCES[BROWSER_KEY_NAMES[altKey] ?? (altKey as keyof typeof KEY_SEQUENCES)];
+      // Named keys must resolve to their sequence before the literal fallback:
+      // ESC+"tab" would otherwise type the word "tab" into the remote shell.
+      socket.send(new TextEncoder().encode(`\u001b${altSequence ?? altKey}`));
       return;
     }
     if (key.startsWith("ctrl-")) {

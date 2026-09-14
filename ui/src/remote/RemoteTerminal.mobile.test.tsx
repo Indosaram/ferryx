@@ -10,6 +10,8 @@ class Socket {
   send = vi.fn();
   close = vi.fn();
   onopen?: () => void;
+  onclose?: () => void;
+  onerror?: () => void;
   onmessage?: (event: MessageEvent) => void;
   constructor() { Socket.latest = this; }
 }
@@ -145,6 +147,85 @@ describe("mobile terminal input lifecycle", () => {
     expect(Socket.latest.send).not.toHaveBeenCalled();
     fireEvent.compositionEnd(sink(), { data: "하" });
     expect(Socket.latest.send).toHaveBeenCalledWith(new TextEncoder().encode("하"));
+  });
+
+  it("retries a failed terminal ticket request instead of stalling on Connecting", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi.fn<typeof fetch>(async (input) => {
+        const url = String(input instanceof Request ? input.url : input);
+        if (url.includes("/api/v1/socket-ticket")) throw new Error("offline");
+        return new Response("{}", { status: 200 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      render(<RemoteTerminal sessionId="a" token="a-real-device-token" transportUrl="https://host.example" />);
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(2_500); });
+      const ticketCalls = fetchMock.mock.calls.filter(([input]) =>
+        String(input instanceof Request ? input.url : input).includes("/api/v1/socket-ticket"));
+      expect(ticketCalls.length).toBeGreaterThanOrEqual(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("sends the current geometry after a reconnect that reused the original handshake", () => {
+    vi.useFakeTimers();
+    try {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      act(() => Socket.latest.onopen?.());
+      height = 200;
+      act(() => resize([], {} as ResizeObserver));
+      expect(Socket.latest.send).toHaveBeenCalledWith(JSON.stringify({ type: "resize", cols: 80, rows: 10 }));
+
+      act(() => Socket.latest.onclose?.());
+      act(() => { vi.advanceTimersByTime(1_500); });
+      const reopened = Socket.latest;
+      act(() => reopened.onopen?.());
+      // The server re-applied the handshake's original 80x20; the client must
+      // correct it to the current 80x10 instead of trusting the stale cache.
+      expect(reopened.send).toHaveBeenCalledWith(JSON.stringify({ type: "resize", cols: 80, rows: 10 }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("deletes remote text on mobile input events that only fire as deleteContentBackward", () => {
+    render(<RemoteTerminal sessionId="a" token="token-a" />);
+    act(() => Socket.latest.onopen?.());
+    fireEvent.input(sink(), { target: { value: "x" }, inputType: "insertText" });
+    fireEvent.input(sink(), { target: { value: "" }, inputType: "deleteContentBackward" });
+    expect(Socket.latest.send).toHaveBeenLastCalledWith(new TextEncoder().encode("\u007f"));
+  });
+
+  it("maps dock alt-modified special keys to real escape sequences instead of literal names", () => {
+    render(<RemoteTerminal sessionId="a" token="token-a" />);
+    act(() => Socket.latest.onopen?.());
+    fireEvent.keyDown(grid(), { key: "Alt" });
+    const dock = screen.getByRole("button", { name: "Tab" });
+    const alt = screen.getByRole("button", { name: "Alt" });
+    fireEvent.click(alt);
+    fireEvent.click(dock);
+    expect(Socket.latest.send).toHaveBeenLastCalledWith(new TextEncoder().encode("\u001b\t"));
+  });
+
+  it("drives SSH sessions with generation-bearing remoteWrite/remoteResize after remoteStatus", () => {
+    render(<RemoteTerminal sessionId="ssh-1" token="token-a" />);
+    act(() => Socket.latest.onopen?.());
+    act(() => Socket.latest.onmessage?.({ data: JSON.stringify({ type: "remoteStatus", state: "connected", generation: "7" }) } as MessageEvent));
+
+    fireEvent.input(sink(), { target: { value: "pwd" }, inputType: "insertText" });
+    expect(Socket.latest.send).toHaveBeenLastCalledWith(JSON.stringify({ type: "remoteWrite", generation: "7", data: "pwd" }));
+
+    height = 200;
+    act(() => resize([], {} as ResizeObserver));
+    expect(Socket.latest.send).toHaveBeenLastCalledWith(JSON.stringify({ type: "remoteResize", generation: "7", cols: 80, rows: 10 }));
+
+    // Ctrl-C must reach SSH sessions too: the legacy signal message is dropped by the server.
+    const ctrlC = screen.getByRole("button", { name: "Ctrl-C" });
+    fireEvent.click(ctrlC);
+    expect(Socket.latest.send).toHaveBeenLastCalledWith(JSON.stringify({ type: "remoteWrite", generation: "7", data: "\u0003" }));
   });
 
   it("requests terminal preferences from the remote host with the scoped device token", async () => {
