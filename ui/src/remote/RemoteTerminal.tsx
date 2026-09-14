@@ -3,6 +3,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 
 import { MobileKeyDock } from "../components/MobileKeyDock";
 import { useTerminalSettings } from "../lib/terminalSettings";
+import { isTauriRuntime } from "../lib/tauri";
 import { remoteSocketUrl } from "./remoteClient";
 import {
   applyGridFrame,
@@ -296,6 +297,7 @@ export function RemoteTerminal({
   onSocketLifecycle,
 }: RemoteTerminalProps) {
   const socketRef = useRef<WebSocket | null>(null);
+  const wheelRemainderRowsRef = useRef(0);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const cellMeasureRef = useRef<HTMLSpanElement>(null);
   const inputSinkRef = useRef<HTMLTextAreaElement>(null);
@@ -310,7 +312,9 @@ export function RemoteTerminal({
   const [grid, setGrid] = useState<TerminalGridState | null>(null);
   const [cellMetrics, setCellMetrics] = useState<CellMetrics>({ width: 0, height: 0 });
   const [preedit, setPreedit] = useState<string | null>(null);
-  const { settings, refreshNativePreferences } = useTerminalSettings();
+  const { settings, refreshNativePreferences } = useTerminalSettings(
+    isTauriRuntime() ? undefined : { baseUrl: transportUrl, token },
+  );
 
   const [userFontSize, setUserFontSize] = useState<number | null>(null);
   const activeFontSize = clampTerminalFontSize(userFontSize ?? settings.fontSize);
@@ -326,6 +330,12 @@ export function RemoteTerminal({
   useEffect(() => {
     void refreshNativePreferences();
   }, [refreshNativePreferences]);
+
+  useEffect(() => {
+    const resetWheel = () => { wheelRemainderRowsRef.current = 0; };
+    document.addEventListener("visibilitychange", resetWheel);
+    return () => document.removeEventListener("visibilitychange", resetWheel);
+  }, []);
 
   const focusInput = useCallback(() => {
     inputSinkRef.current?.focus({ preventScroll: true });
@@ -443,12 +453,14 @@ export function RemoteTerminal({
       socket.onopen = () => {
         if (disposed || socketRef.current !== socket) return;
         backoffAttempt = 0;
+        wheelRemainderRowsRef.current = 0;
         setConnected(true);
         onSocketLifecycle?.(socketRequest.sessionId, "open");
         requestResizeRef.current();
       };
       socket.onclose = () => {
         if (disposed || socketRef.current !== socket || reconnectTimer !== null) return;
+        wheelRemainderRowsRef.current = 0;
         setConnected(false);
         if (onTransportFailure) {
           onTransportFailure();
@@ -477,6 +489,7 @@ export function RemoteTerminal({
 
     return () => {
       disposed = true;
+      wheelRemainderRowsRef.current = 0;
       abort.abort();
       clearReconnectTimer();
       const currentSocket = socketRef.current;
@@ -490,9 +503,18 @@ export function RemoteTerminal({
 
   const handleWheel = (event: React.WheelEvent<HTMLDivElement>) => {
     const socket = socketRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    if (!socket || socket.readyState !== WebSocket.OPEN || document.visibilityState === "hidden") {
+      wheelRemainderRowsRef.current = 0;
+      return;
+    }
     if (event.deltaY === 0) return;
-    const rawRows = Math.trunc(event.deltaY / 20) || (event.deltaY > 0 ? 1 : -1);
+    const rowsPerUnit = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 3
+      : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? (grid?.rows ?? lastSentGeometryRef.current?.rows ?? 1)
+      : 1 / 20;
+    const accumulatedRows = wheelRemainderRowsRef.current + event.deltaY * rowsPerUnit;
+    const rawRows = Math.trunc(accumulatedRows);
+    // Retain only the fraction, never replay whole rows dropped by the clamp.
+    wheelRemainderRowsRef.current = accumulatedRows - rawRows;
     const rows = Math.min(10, Math.max(-10, rawRows));
     if (rows !== 0) {
       socket.send(JSON.stringify({ type: "scroll", rows }));

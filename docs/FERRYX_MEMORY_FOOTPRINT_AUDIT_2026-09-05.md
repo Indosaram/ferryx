@@ -1,5 +1,12 @@
 # Ferryx Memory Footprint Audit & Root Cause Analysis
 
+> **STATUS (2026-09-12): 이 문서의 Metal 스왑체인 누수 분석은 wgpu v24 시점 기록이며 이미 해결되었다.**
+> 커밋 `29ea50be`(2026-09-07)가 wgpu를 30.0.1로 올리면서 `WgpuObserverLayer` 경로가 사라졌고
+> (wgpu-hal 30에는 `layer_observer.rs`가 없고 `raw-window-metal 1.1.0`이 KVO를 `Drop`에서 해제한다),
+> 로컬 `vendor/wgpu-hal` 패치도 제거되었다. 결론은
+> `docs/FERRYX_METAL_OWNERSHIP_INVESTIGATION_2026-09-05.md` §4 참조.
+> 아래 §4 "Root Cause: Metal Swapchain Leak on Pane Re-Attach"를 현재 상태로 인용하지 말 것.
+
 **Date:** 2026-09-05  
 **Target:** Ferryx Desktop App (`/Applications/Ferryx.app`, PID 63564) & Daemon on macOS Sonoma/Sequoia  
 **Issue:** Activity Monitor reports Ferryx consuming > 2.3 GiB of memory total, with the main `Ferryx` process alone taking 1.66 GB.

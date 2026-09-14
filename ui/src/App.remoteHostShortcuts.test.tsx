@@ -1,6 +1,7 @@
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { remoteHostStore } from "./state/remoteHostStore";
+import type { WorkspaceState } from "./state/workspaceStore";
 
 const native = vi.hoisted(() => ({
   registerProject: vi.fn(),
@@ -130,12 +131,14 @@ const workspace = {
     workspaceId: "local",
     activeWorktreePath: "/local",
     layout: {
-      tabs: [{ id: "tab-1", kind: "terminal", label: "Terminal 1", title: "Terminal 1", sessionId: "session-1" }],
+      tabs: [{ id: "tab-1", kind: "terminal", label: "Terminal 1", sessionId: "session-1" }],
       activeTabId: "tab-1",
       layoutsByTabId: {
         "tab-1": {
           root: { type: "leaf", leafId: "leaf-1" },
           activeLeafId: "leaf-1",
+          expandedLeafId: null,
+          sessionIdsByLeafId: { "leaf-1": "session-1" },
         },
       },
     },
@@ -145,13 +148,15 @@ const workspace = {
         backendSessionId: "backend-1",
         cwd: "/local",
         worktreePath: "/local",
-        lifecycle: "alive",
+        workspaceId: "local",
+        worktree: null,
+        lifecycle: "running",
       },
     },
-    worktrees: [{ path: "/local", branch: "main" }],
+    worktrees: [{ path: "/local", branch: "main", head: "", bare: false, detached: false, locked: null, prunable: null }],
     unreadTabIds: {},
     unreadWorktreePaths: {},
-  },
+  } satisfies WorkspaceState,
 };
 
 const workspaceStoreModule = await import("./state/workspaceStore");
@@ -274,6 +279,7 @@ describe("Blocker H3: local workspace shortcut suppression when remote host is a
     // None of these menu actions should mutate the local workspace
     expect(workspace.openTab).not.toHaveBeenCalled();
     expect(workspace.closeTab).not.toHaveBeenCalled();
+    expect(workspace.closePane).not.toHaveBeenCalled();
     expect(workspace.splitPane).not.toHaveBeenCalled();
     expect(workspace.ensureTabForWorktree).not.toHaveBeenCalled();
     expect(screen.queryByRole("dialog", { name: "Command palette" })).toBeNull();
@@ -291,6 +297,7 @@ describe("Blocker H3: local workspace shortcut suppression when remote host is a
     // Still no local workspace mutations
     expect(workspace.openTab).not.toHaveBeenCalled();
     expect(workspace.closeTab).not.toHaveBeenCalled();
+    expect(workspace.closePane).not.toHaveBeenCalled();
     expect(workspace.splitPane).not.toHaveBeenCalled();
 
     // 3. Switch back to local machine
@@ -304,21 +311,17 @@ describe("Blocker H3: local workspace shortcut suppression when remote host is a
     });
 
     // Now menu actions and shortcuts work again for the local workspace!
-    act(() => {
+    await act(async () => {
       native.newTerminalMenuHandler?.();
     });
-
-    await waitFor(() => {
-      expect(workspace.openTab).toHaveBeenCalledOnce();
-    });
+    expect(workspace.openTab).toHaveBeenCalledOnce();
 
     act(() => {
       native.closeMenuHandler?.();
     });
 
-    await waitFor(() => {
-      expect(workspace.closeTab).toHaveBeenCalledWith("tab-1");
-    });
+    expect(workspace.closePane).toHaveBeenCalledExactlyOnceWith("tab-1", "leaf-1");
+    expect(workspace.closeTab).not.toHaveBeenCalled();
   });
 
   it("suppresses createWorktree modal and creation when activeRemoteHost is active", async () => {

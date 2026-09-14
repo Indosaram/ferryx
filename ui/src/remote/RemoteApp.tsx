@@ -64,7 +64,8 @@ function collectWaitingTargets(model: RemoteWorkspaceModel): WaitingTabTarget[] 
   if (currentWorkspaceId && model.context.terminalTabs) {
     for (const tab of model.context.terminalTabs) {
       if (tab.activityState === "waiting" && tab.id !== activeTabId) {
-        const key = `${currentWorkspaceId}\u0000${currentWorktreeSlug ?? ""}\u0000${tab.id}`;
+        const worktreeSlug = tab.worktreeSlug ?? currentWorktreeSlug;
+        const key = `${currentWorkspaceId}\u0000${worktreeSlug ?? ""}\u0000${tab.id}`;
         if (!seen.has(key)) {
           seen.add(key);
           targets.push({
@@ -72,8 +73,8 @@ function collectWaitingTargets(model: RemoteWorkspaceModel): WaitingTabTarget[] 
             sessionId: tab.sessionId,
             label: tab.label,
             workspaceId: currentWorkspaceId,
-            worktreeSlug: currentWorktreeSlug,
-            worktreeLabel: currentWorktreeLabel,
+            worktreeSlug,
+            worktreeLabel: tab.worktreeLabel ?? currentWorktreeLabel,
           });
         }
       }
@@ -388,6 +389,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
 
   useEffect(() => () => {
     workspaceRefreshVersionRef.current += 1;
+    pendingSelectionRef.current = null;
     if (confirmationTimeoutRef.current !== null) clearTimeout(confirmationTimeoutRef.current);
   }, []);
 
@@ -674,8 +676,10 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
     }, CONFIRMATION_TIMEOUT_MS);
   }, [clearPendingSelection]);
 
-  const selectContext = useCallback(async (option: RemoteContextOption, createTerminal = false) => {
+  const selectContext = useCallback(async (requestedOption: RemoteContextOption, createTerminal = false) => {
     if (!token || pendingSelectionRef.current) return;
+    // A picker can reuse an option object; each attempt needs its own identity.
+    const option = { ...requestedOption };
     setCreationError(null);
     creationSessionsRef.current = createTerminal ? new Set([
       ...(model.context.terminalTabs?.flatMap((tab) => tab.sessionId ? [tab.sessionId] : []) ?? []),
@@ -690,6 +694,8 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
       optimisticSocketSessionIdRef.current = option.sessionId;
       setOptimisticSessionId(option.sessionId);
     }
+    // Bound the whole request, including a server that never sends headers.
+    armConfirmationTimeout(option);
 
     try {
       const response = await fetch(
@@ -706,12 +712,13 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
           }),
         },
       );
+      if (pendingSelectionRef.current !== option) return;
       if (!response.ok) throw new Error(`Selection failed (${response.status})`);
 
       selectionRequestAcceptedRef.current = true;
-      armConfirmationTimeout(option);
       if (selectionEventReceivedRef.current) void confirmSelection(option);
     } catch (error) {
+      if (pendingSelectionRef.current !== option) return;
       if (createTerminal) setCreationError(error instanceof Error ? error.message : "Terminal creation request failed");
       clearPendingSelection();
     }
@@ -729,8 +736,8 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
     if (prevTab) {
       void selectContext({
         workspaceId: model.context.workspaceId,
-        worktreeSlug: model.context.worktreeSlug,
-        worktreeLabel: model.context.worktreeLabel,
+        worktreeSlug: prevTab.worktreeSlug ?? model.context.worktreeSlug,
+        worktreeLabel: prevTab.worktreeLabel ?? model.context.worktreeLabel,
         tabId: prevTab.id,
         sessionId: prevTab.sessionId,
       });
@@ -743,8 +750,8 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
     if (nextTab) {
       void selectContext({
         workspaceId: model.context.workspaceId,
-        worktreeSlug: model.context.worktreeSlug,
-        worktreeLabel: model.context.worktreeLabel,
+        worktreeSlug: nextTab.worktreeSlug ?? model.context.worktreeSlug,
+        worktreeLabel: nextTab.worktreeLabel ?? model.context.worktreeLabel,
         tabId: nextTab.id,
         sessionId: nextTab.sessionId,
       });

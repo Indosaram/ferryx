@@ -126,6 +126,133 @@ afterEach(() => {
 });
 
 describe("RemoteAttention Affordance", () => {
+  it.each(
+    (["previous", "next", "waiting"] as const).flatMap((action) =>
+      (["published", "omitted"] as const).map((target) => ({ action, target })),
+    ),
+  )("uses the published target worktree for swipe and waiting selection ($action, $target)", async ({ action, target }) => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const currentSlug = "currentA";
+    const targetSlug = target === "published" ? "targetB" : currentSlug;
+    const targetTab = {
+      id: "target-tab",
+      label: "Target terminal",
+      sessionId: "target-session",
+      activityState: "waiting",
+      ...(target === "published" ? { worktreeSlug: targetSlug, worktreeLabel: "Target branch" } : {}),
+    };
+    const currentTab = {
+      id: "current-tab",
+      label: "Current terminal",
+      sessionId: "current-session",
+      worktreeSlug: currentSlug,
+    };
+    const initialState = {
+      activeContext: {
+        workspaceId: "ferryx-ui",
+        worktreeSlug: currentSlug,
+        worktreeLabel: "Current branch",
+        tabId: currentTab.id,
+        sessionId: currentTab.sessionId,
+        terminalTabs: action === "previous" ? [targetTab, currentTab] : [currentTab, targetTab],
+      },
+    };
+    const confirmedState = {
+      activeContext: {
+        ...initialState.activeContext,
+        worktreeSlug: targetSlug,
+        worktreeLabel: target === "published" ? "Target branch" : "Current branch",
+        tabId: targetTab.id,
+        sessionId: targetTab.sessionId,
+      },
+    };
+    const expectedRequest = { workspaceId: "ferryx-ui", worktreeSlug: targetSlug, tabId: targetTab.id };
+    function deferred<T>() {
+      let resolve!: (value: T | PromiseLike<T>) => void;
+      let reject!: (reason: unknown) => void;
+      const promise = new Promise<T>((accept, fail) => {
+        resolve = accept;
+        reject = fail;
+      });
+      return { promise, resolve, reject };
+    }
+    const initialRead = deferred<void>();
+    const socketReady = deferred<EventWebSocket>();
+    const requestReceived = deferred<unknown>();
+    const responseGate = deferred<void>();
+    const confirmationRead = deferred<void>();
+    const deadline = deferred<never>();
+    const timer = setTimeout(() => deadline.reject(new Error("Selection boundary signal missing")), 2000);
+    const signal = <T,>(promise: Promise<T>) => Promise.race([promise, deadline.promise]);
+    let selected = false;
+    const posts: unknown[] = [];
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.endsWith("/api/v1/workspace/select")) {
+        const body = JSON.parse(String(init?.body));
+        posts.push(body);
+        requestReceived.resolve(body);
+        await responseGate.promise;
+        // Match the gateway's published tab/worktree validation, not an unconditional ACK.
+        selected = init?.method === "POST"
+          && body.workspaceId === expectedRequest.workspaceId
+          && body.worktreeSlug === (targetTab.worktreeSlug ?? currentSlug)
+          && body.tabId === targetTab.id;
+        return new Response(JSON.stringify({ accepted: selected }), { status: selected ? 200 : 400 });
+      }
+      if (url.endsWith("/api/v1/workspace/state")) {
+        if (selected) confirmationRead.resolve();
+        else initialRead.resolve();
+        return jsonResponse(selected ? confirmedState : initialState);
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", ticketed(fetchMock));
+    vi.stubGlobal("WebSocket", class extends EventWebSocket {
+      constructor(url: string) {
+        super(url);
+        socketReady.resolve(this);
+      }
+    });
+
+    try {
+      render(<RemoteApp />);
+      await act(async () => {
+        await signal(Promise.all([initialRead.promise, socketReady.promise]));
+      });
+      expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", currentTab.sessionId);
+      await act(async () => {
+        if (action === "waiting") fireEvent.click(screen.getByTestId("remote-attention-badge"));
+        else swipe(screen.getByTestId("remote-terminal"), action === "previous" ? 60 : -60);
+        await signal(requestReceived.promise);
+      });
+      expect(posts).toEqual([expectedRequest]);
+      expect(screen.getByTestId("remote-attention-badge")).toBeDisabled();
+      await act(async () => {
+        responseGate.resolve();
+        await signal(responseGate.promise);
+      });
+      expect(selected).toBe(true);
+      await act(async () => {
+        eventSocket().onmessage?.(new MessageEvent("message", {
+          data: JSON.stringify({ event: "remote_active_selection_changed", payload: expectedRequest }),
+        }));
+        await signal(confirmationRead.promise);
+      });
+      expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", targetTab.sessionId);
+      expect(screen.getByRole("tab", { name: /Target terminal/i })).toHaveAttribute("aria-selected", "true");
+      expect(screen.getByRole("tab", { name: /Current terminal/i })).toBeEnabled();
+      expect(posts).toEqual([expectedRequest]);
+    } finally {
+      clearTimeout(timer);
+      await act(async () => {
+        cleanup();
+        responseGate.resolve();
+        await responseGate.promise;
+      });
+    }
+  });
+
   it("renders attention affordance with accessible name when a background tab enters waiting state", async () => {
     localStorage.setItem("ferryx_remote_token", "test-token");
     const stateWithWaiting = {

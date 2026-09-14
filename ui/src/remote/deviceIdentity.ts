@@ -29,14 +29,14 @@ export function suggestDeviceName(
     browser = "Chrome";
   } else if (/FxiOS\//i.test(ua)) {
     browser = "Firefox";
+  } else if (/OPR\/|Opera/i.test(ua)) {
+    browser = "Opera";
   } else if (/Chrome\//i.test(ua)) {
     browser = "Chrome";
   } else if (/Firefox\//i.test(ua)) {
     browser = "Firefox";
   } else if (/Safari\//i.test(ua)) {
     browser = "Safari";
-  } else if (/OPR\/|Opera/i.test(ua)) {
-    browser = "Opera";
   }
 
   if (os && browser) {

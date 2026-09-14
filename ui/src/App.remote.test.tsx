@@ -7,6 +7,7 @@ const native = vi.hoisted(() => ({
   registerProject: vi.fn(), registerRemoteProject: vi.fn(), listWorktrees: vi.fn(),
   spawnTerminalDetailed: vi.fn(), spawnTerminal: vi.fn(), watchDagProject: vi.fn(),
   loadSession: vi.fn(), saveSession: vi.fn(), isTauriRuntime: vi.fn(),
+  getTerminalRemoteStatus: vi.fn<typeof import("./lib/tauri").getTerminalRemoteStatus>(),
   remoteSelection: null as null | ((payload: import("./lib/tauri").RemoteSelectionRequestedPayload) => void),
   closeGuard: null as null | (() => Promise<void>),
 }));
@@ -354,8 +355,10 @@ describe("App SSH project lifecycle", () => {
     } finally { error.mockRestore(); }
   });
 
-  it("restores remote sessions after native startup and preserves their target in the next save", async () => {
+  it("reattaches remote sessions after native startup without replacement and preserves their target and identity in the next save", async () => {
     native.isTauriRuntime.mockReturnValue(true);
+    const status = deferred<import("./lib/types").RemoteSessionStatusResponse>();
+    native.getTerminalRemoteStatus.mockReturnValue(status.promise);
     const saved: import("./lib/types").PersistedWorkspaceSession = {
       version: 2, timestamp: 1, activeWorkspaceId: remote.workspaceId,
       workspaces: { [remote.workspaceId]: {
@@ -372,7 +375,25 @@ describe("App SSH project lifecycle", () => {
     await mount();
     expect(native.spawnTerminal).not.toHaveBeenCalled();
     await act(async () => { registration.resolve(registered); await registration.promise; });
-    expect(native.spawnTerminal).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: remote.workspaceId, cwd: remote.repoRoot }));
+    expect(native.getTerminalRemoteStatus).toHaveBeenCalledWith("old-backend");
+    await act(async () => {
+      status.resolve({
+        type: "remoteSessionDetailsOk", legacyDirectSsh: false,
+        details: {
+          state: "connected", generation: 2, failure: null, replayGap: null,
+          attempts: 0, pid: 1234,
+          descriptor: {
+            backendSessionId: "old-backend",
+            target: { hostId: "build", ownerId: "owner", backendSessionId: "remote-process", epoch: "1" },
+            config: {}, clientRequestId: "original-request", remoteCursor: "0", cols: 80, rows: 24,
+          },
+        },
+      });
+      await status.promise;
+    });
+    expect(native.spawnTerminal).not.toHaveBeenCalled();
+    expect(native.spawnTerminalDetailed).not.toHaveBeenCalled();
+    expect(screen.getByTestId("active-tab")).toHaveTextContent("saved-tab");
     expect(native.registerProject).not.toHaveBeenCalled();
     expect(JSON.parse(localStorage.getItem(PROJECTS_STORAGE_KEY)!).find((project: RegisteredProject) => project.workspaceId === remote.workspaceId).target).toEqual(remote.target);
     expect(native.closeGuard).not.toBeNull();
@@ -380,5 +401,8 @@ describe("App SSH project lifecycle", () => {
     expect(native.saveSession).toHaveBeenCalled();
     const latest = native.saveSession.mock.calls.at(-1)![0];
     expect(latest.workspaces[remote.workspaceId].target).toEqual(remote.target);
+    expect(latest.workspaces[remote.workspaceId].terminalSessions["saved-session"]).toMatchObject({
+      localSessionId: "saved-session", backendSessionId: "old-backend", cwd: remote.repoRoot,
+    });
   });
 });

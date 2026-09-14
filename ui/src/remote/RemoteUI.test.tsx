@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveAgentLogo } from "../lib/agentIcon";
 import { MobileKeyDock } from "../components/MobileKeyDock";
 import { PairingPage } from "./PairingPage";
-import { RemoteApp } from "./RemoteApp";
+import { RemoteApp, RemoteHostConnection } from "./RemoteApp";
 import { normalizeRemoteWorkspaceState } from "./RemoteSessionList";
 
 vi.mock("./RemoteTerminal", () => ({
@@ -221,6 +221,178 @@ afterEach(() => {
   localStorage.clear();
   EventWebSocket.latest = null;
   vi.unstubAllGlobals();
+});
+
+describe("selection request lifetime", () => {
+  const snapshot = (tabId: string) => ({
+    ...focusedState,
+    activeContext: {
+      ...focusedState.activeContext,
+      tabId,
+      activeTerminal: { sessionId: `session-${tabId}`, running: true },
+      terminalTabs: ["editor", "dev", "tests"].map((id) => ({
+        id, label: id, sessionId: `session-${id}`,
+      })),
+    },
+  });
+
+  // Every request and socket subscription is installed before its triggering
+  // action. Vitest's test timeout bounds these signal awaits, not polling.
+  async function mountSelectionHost() {
+    const initialRead = deferred<void>();
+    const socketCreated = deferred<EventWebSocket>();
+    const postA = deferred<void>();
+    const postB = deferred<void>();
+    const responseA = deferred<Response>();
+    const responseB = deferred<Response>();
+    const refresh = deferred<void>();
+    const confirmationRead = deferred<void>();
+    let state = snapshot("editor");
+    let posts = 0;
+    let reads = 0;
+    let rejectA = false;
+    const request = vi.fn<typeof fetch>(async (_input, init) => {
+      if (init?.method === "POST") {
+        posts += 1;
+        if (posts === 1) {
+          postA.resolve();
+          const response = await responseA.promise;
+          if (rejectA) throw new TypeError("selection connection lost");
+          return response;
+        }
+        postB.resolve();
+        return responseB.promise;
+      }
+      reads += 1;
+      if (reads === 1) initialRead.resolve();
+      else if (reads === 2) refresh.resolve();
+      else confirmationRead.resolve();
+      return jsonResponse(state);
+    });
+    class SelectionEventSocket extends EventWebSocket {
+      constructor(url: string) {
+        super(url);
+        socketCreated.resolve(this);
+      }
+    }
+    localStorage.setItem("ferryx_remote_token_selection-lifetime", "test-token");
+    vi.stubGlobal("WebSocket", SelectionEventSocket);
+    vi.stubGlobal("fetch", ticketed(request));
+    const { unmount } = render(<RemoteHostConnection hostId="selection-lifetime" relayUrl={window.location.origin} readUrlHints={false} />);
+    await act(async () => {
+      await initialRead.promise;
+      await socketCreated.promise;
+    });
+    const socket = await socketCreated.promise;
+    const publish = (tabId: string) => {
+      const onMessage = socket.onmessage;
+      if (!onMessage) throw new Error("Selection event subscription missing");
+      onMessage(new MessageEvent("message", {
+        data: JSON.stringify({ event: "remote_active_selection_changed", payload: snapshot(tabId).activeContext }),
+      }));
+    };
+    return {
+      postA, postB, responseA, responseB, refresh, confirmationRead, publish, unmount,
+      setState: (tabId: string) => { state = snapshot(tabId); },
+      rejectA: () => { rejectA = true; },
+      readCount: () => reads,
+    };
+  }
+
+  it("releases selection when the request never settles", async () => {
+    vi.useFakeTimers();
+    try {
+      const host = await mountSelectionHost();
+      const target = screen.getByRole("tab", { name: "dev" });
+      await act(async () => {
+        fireEvent.click(target);
+        await host.postA.promise;
+      });
+      expect(target).toBeDisabled();
+      expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-dev");
+      await act(async () => { await vi.advanceTimersByTimeAsync(5999); });
+      expect(target).toBeDisabled();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(target).toBeEnabled();
+      expect(screen.getByRole("button", { name: "Next terminal tab" })).toBeEnabled();
+      expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-editor");
+      expect(screen.getByRole("tab", { name: "editor" })).toHaveAttribute("aria-selected", "true");
+      expect(host.readCount()).toBe(1);
+      host.unmount();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      cleanup();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    { outcome: "success", acceptedB: true },
+    { outcome: "http-failure", acceptedB: true },
+    { outcome: "network-failure", acceptedB: true },
+    { outcome: "success", acceptedB: false },
+    { outcome: "http-failure", acceptedB: false },
+    { outcome: "network-failure", acceptedB: false },
+  ])("ignores an obsolete selection response while a newer selection is pending", async ({ outcome, acceptedB }) => {
+    vi.useFakeTimers();
+    try {
+      const host = await mountSelectionHost();
+      await act(async () => {
+        fireEvent.click(screen.getByRole("tab", { name: "dev" }));
+        await host.postA.promise;
+      });
+      // Desktop replaces A with tests, releasing the picker before A settles.
+      host.setState("tests");
+      await act(async () => {
+        host.publish("tests");
+        await host.refresh.promise;
+      });
+      const targetB = screen.getByRole("tab", { name: "editor" });
+      expect(targetB).toBeEnabled();
+      expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-tests");
+      await act(async () => {
+        fireEvent.click(targetB);
+        await host.postB.promise;
+        if (acceptedB) {
+          host.responseB.resolve(jsonResponse({ accepted: true }));
+          await host.responseB.promise;
+        }
+      });
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+      await act(async () => {
+        if (outcome === "network-failure") host.rejectA();
+        host.responseA.resolve(jsonResponse({}, outcome !== "http-failure"));
+        await host.responseA.promise;
+      });
+      expect(targetB).toBeDisabled();
+      expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-editor");
+      expect(screen.getByRole("tab", { name: "tests" })).toHaveAttribute("aria-selected", "true");
+      if (!acceptedB) {
+        // A's success must not accept B. Only B's own headers may start the
+        // event-triggered refresh; a stale snapshot still cannot confirm B.
+        await act(async () => { host.publish("editor"); });
+        expect(host.readCount()).toBe(2);
+        await act(async () => {
+          host.responseB.resolve(jsonResponse({ accepted: true }));
+          await host.responseB.promise;
+          await host.confirmationRead.promise;
+        });
+        expect(host.readCount()).toBe(3);
+        expect(targetB).toBeDisabled();
+      }
+      // B expires at its original start + 6000, not at either response + 6000.
+      await act(async () => { await vi.advanceTimersByTimeAsync(3999); });
+      expect(targetB).toBeDisabled();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(targetB).toBeEnabled();
+      expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "session-tests");
+      host.unmount();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      cleanup();
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("Remote UI Components", () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, vi } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, fireEvent } from "@testing-library/react";
 import { suggestDeviceName } from "./deviceIdentity";
 import {
   getOrCreateInstallationId,
@@ -74,52 +74,60 @@ describe("deviceIdentity", () => {
 
     it("renders device name pre-filled, allows editing, and submits installationId with deviceName", async () => {
       const onPaired = vi.fn();
-      let capturedBody: any = null;
+      let finishResponse: (response: Response) => void = () => {
+        throw new Error("Response completion not initialized");
+      };
+      const response = new Promise<Response>((resolve) => { finishResponse = resolve; });
+      const fetchMock = vi.fn((_url: string, _init?: RequestInit) => response);
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      const completed = new Promise<void>((resolve, reject) => {
+        onPaired.mockImplementation(() => resolve());
+        deadline = setTimeout(() => reject(new Error("Pairing callback not received")), 1000);
+      });
 
-      vi.stubGlobal(
-        "fetch",
-        vi.fn(async (_url: string, init?: RequestInit) => {
-          capturedBody = JSON.parse(init?.body as string);
-          return new Response(
-            JSON.stringify({
-              token: "mock-token-xyz",
-              machineId: "m-123",
-              displayName: "Host",
-            }),
-            { status: 200, headers: { "Content-Type": "application/json" } },
-          );
-        }),
-      );
+      vi.stubGlobal("fetch", fetchMock);
+      try {
+        render(<PairingPage onPaired={onPaired} />);
 
-      render(<PairingPage onPaired={onPaired} />);
+        const nameInput = screen.getByPlaceholderText(/Device name/i);
+        expect(nameInput).toHaveValue(suggestDeviceName());
+        fireEvent.change(nameInput, { target: { value: "My Custom Laptop" } });
+        fireEvent.change(screen.getByPlaceholderText(/6-digit PIN/i), { target: { value: "654321" } });
 
-      const nameInput = screen.getByPlaceholderText(/Device name/i);
-      expect(nameInput).toBeInTheDocument();
-      expect((nameInput as HTMLInputElement).value).toBe(suggestDeviceName());
+        fireEvent.click(screen.getByRole("button", { name: /Connect/i }));
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(onPaired).not.toHaveBeenCalled();
+        const [url, init] = fetchMock.mock.calls[0];
+        expect(url).toBe("/api/v1/pair/exchange");
+        expect(init?.method).toBe("POST");
+        const body = init?.body;
+        if (typeof body !== "string") throw new Error("Expected JSON request body");
+        const capturedBody: unknown = JSON.parse(body);
+        const installationId = localStorage.getItem(REMOTE_INSTALLATION_ID_STORAGE_KEY);
+        expect(installationId).toEqual(expect.any(String));
+        expect(installationId).not.toBe("");
+        expect(capturedBody).toEqual({
+          code: "654321",
+          deviceName: "My Custom Laptop",
+          installationId,
+        });
 
-      fireEvent.change(nameInput, { target: { value: "My Custom Laptop" } });
-
-      const pinInput = screen.getByPlaceholderText(/6-digit PIN/i);
-      fireEvent.change(pinInput, { target: { value: "654321" } });
-
-      const submitButton = screen.getByRole("button", { name: /Connect/i });
-      fireEvent.click(submitButton);
-
-      await waitFor(() => {
-        expect(onPaired).toHaveBeenCalledWith("mock-token-xyz", {
+        await act(async () => {
+          finishResponse(new Response(JSON.stringify({
+            token: "mock-token-xyz", machineId: "m-123", displayName: "Host",
+          }), { status: 200, headers: { "Content-Type": "application/json" } }));
+          await completed;
+        });
+        expect(onPaired).toHaveBeenCalledExactlyOnceWith("mock-token-xyz", {
           machineId: "m-123",
           displayName: "Host",
         });
-      });
-
-      expect(capturedBody).toMatchObject({
-        code: "654321",
-        deviceName: "My Custom Laptop",
-        installationId: expect.any(String),
-      });
-      expect(capturedBody.installationId).toBe(
-        localStorage.getItem(REMOTE_INSTALLATION_ID_STORAGE_KEY),
-      );
+      } finally {
+        clearTimeout(deadline);
+        cleanup();
+        vi.unstubAllGlobals();
+        localStorage.clear();
+      }
     });
   });
 });

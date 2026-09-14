@@ -694,7 +694,9 @@ describe("remote terminal grid contract", () => {
     fireEvent.wheel(surface(), { deltaY: 60 });
     expect(socket().send).toHaveBeenLastCalledWith(JSON.stringify({ type: "scroll", rows: 3 }));
 
-    // Small negative deltaY (< 20) falls back to sign-only (-1)
+    // Two negative half-row pixel events produce one older-content row.
+    fireEvent.wheel(surface(), { deltaY: -10 });
+    expect(socket().send).toHaveBeenCalledTimes(1);
     fireEvent.wheel(surface(), { deltaY: -10 });
     expect(socket().send).toHaveBeenLastCalledWith(JSON.stringify({ type: "scroll", rows: -1 }));
 
@@ -710,6 +712,101 @@ describe("remote terminal grid contract", () => {
     socket().send.mockClear();
     fireEvent.wheel(surface(), { deltaY: 0 });
     expect(socket().send).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [1, 1, 7, 3],
+    [1, -1, 7, -3],
+    [1, 100, 7, 10],
+    [1, -100, 7, -10],
+    [2, 1, 7, 7],
+    [2, -1, 7, -7],
+    [2, 1, 24, 10],
+    [2, -1, 24, -10],
+  ])("normalizes wheel mode %i delta %i using frame rows %i to %i wire rows", (deltaMode, deltaY, frameRows, rows) => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    const onSocketLifecycle = vi.fn();
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" onSocketLifecycle={onSocketLifecycle} />);
+    const current = socket();
+    if (!current.onopen || !current.onmessage) throw new Error("Expected socket event subscriptions");
+    act(() => {
+      current.onopen?.();
+      current.onmessage?.(new MessageEvent("message", { data: JSON.stringify({
+        type: "grid", cols: 80, rows: frameRows, cursor: hiddenCursor, lines: [],
+      }) }));
+    });
+    expect(onSocketLifecycle).toHaveBeenCalledWith("session-123", "open");
+    expect(surface().querySelectorAll("[data-grid-line]")).toHaveLength(frameRows);
+
+    fireEvent.wheel(surface(), { deltaMode, deltaY });
+
+    expect(current.send.mock.calls).toEqual([[JSON.stringify({ type: "scroll", rows })]]);
+  });
+
+  it.each([1, -1])("accumulates fractional pixels in direction %i without zero or horizontal input consuming them", (sign) => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+    act(() => socket().onopen?.());
+
+    fireEvent.wheel(surface(), { deltaY: sign * 9.5 });
+    fireEvent.wheel(surface(), { deltaY: 0, deltaMode: 2 });
+    fireEvent.wheel(surface(), { deltaX: 100, deltaY: 0, deltaMode: 1 });
+    fireEvent.wheel(surface(), { deltaY: sign * 10 });
+    expect(socket().send).not.toHaveBeenCalled();
+    fireEvent.wheel(surface(), { deltaY: sign * 0.5 });
+    expect(socket().send.mock.calls).toEqual([[JSON.stringify({ type: "scroll", rows: sign })]]);
+    socket().send.mockClear();
+    fireEvent.wheel(surface(), { deltaY: sign * 500 });
+    expect(socket().send.mock.calls).toEqual([[JSON.stringify({ type: "scroll", rows: sign * 10 })]]);
+    socket().send.mockClear();
+    fireEvent.wheel(surface(), { deltaY: sign * 1 });
+    expect(socket().send).not.toHaveBeenCalled();
+  });
+
+  it.each(["session", "socket", "visibility"])("discards fractional wheel remainder across a %s transition", (transition) => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    const view = render(<RemoteTerminal sessionId="session-a" token="token-abc" />);
+    act(() => socket().onopen?.());
+    fireEvent.wheel(surface(), { deltaY: 10 });
+    socket().send.mockClear();
+
+    if (transition === "session") {
+      view.rerender(<RemoteTerminal sessionId="session-b" token="token-abc" />);
+      act(() => socket().onopen?.());
+    } else if (transition === "socket") {
+      view.rerender(<RemoteTerminal sessionId="session-a" token="token-abc" transportUrl="http://127.0.0.1" />);
+      act(() => socket().onopen?.());
+    } else {
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+      fireEvent(document, new Event("visibilitychange"));
+      fireEvent.wheel(surface(), { deltaY: 10 });
+      expect(socket().send).not.toHaveBeenCalled();
+      visibility.mockReturnValue("visible");
+      fireEvent(document, new Event("visibilitychange"));
+    }
+
+    fireEvent.wheel(surface(), { deltaY: 10 });
+    expect(socket().send).not.toHaveBeenCalled();
+    fireEvent.wheel(surface(), { deltaY: 10 });
+    expect(socket().send.mock.calls).toEqual([[JSON.stringify({ type: "scroll", rows: 1 })]]);
+  });
+
+  it.each([0, 2, 3])("does not accumulate or send wheel input with socket readyState %i", (readyState) => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+    act(() => socket().onopen?.());
+    fireEvent.wheel(surface(), { deltaY: 10 });
+    socket().send.mockClear();
+    socket().readyState = readyState;
+    fireEvent.wheel(surface(), { deltaY: 10 });
+    fireEvent.wheel(surface(), { deltaY: 1, deltaMode: 1 });
+    expect(socket().send).not.toHaveBeenCalled();
+    socket().readyState = MockWebSocket.OPEN;
+    act(() => socket().onopen?.());
+    fireEvent.wheel(surface(), { deltaY: 10 });
+    expect(socket().send).not.toHaveBeenCalled();
+    fireEvent.wheel(surface(), { deltaY: 10 });
+    expect(socket().send.mock.calls).toEqual([[JSON.stringify({ type: "scroll", rows: 1 })]]);
   });
 
   it("auto-focuses its input sink on mount and when activeTabId changes", () => {
