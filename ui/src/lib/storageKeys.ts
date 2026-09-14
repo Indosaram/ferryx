@@ -33,7 +33,11 @@ export const LEGACY_STORAGE_KEY_MAP: Record<string, string[]> = {
 
 export function getMigratedItem(
   key: string,
-  storage: Pick<Storage, "getItem" | "setItem"> | null = typeof window !== "undefined" && window.localStorage ? window.localStorage : null,
+  // `removeItem` is optional: callers legitimately pass narrower storage shims
+  // (see notificationCenterPersistence.ts and terminalSettings.ts). Migration
+  // consumes the legacy key when the shim supports it and otherwise degrades to
+  // the old copy-forward behaviour rather than forcing every caller to widen.
+  storage: (Pick<Storage, "getItem" | "setItem"> & Partial<Pick<Storage, "removeItem">>) | null = typeof window !== "undefined" && window.localStorage ? window.localStorage : null,
 ): string | null {
   if (!storage) return null;
   const value = storage.getItem(key);
@@ -45,6 +49,12 @@ export function getMigratedItem(
     if (legacyVal !== null) {
       try {
         storage.setItem(key, legacyVal);
+        // Migration is ONE-SHOT: consume the legacy entry once it has been copied
+        // forward. Leaving it behind makes every reset*() helper ineffective --
+        // they delete only the canonical key, so the next load re-reads the legacy
+        // blob and resurrects the user's pre-upgrade settings. "Reset to defaults"
+        // could never complete for anyone upgrading from an orca/rorca build.
+        storage.removeItem?.(legacyKey);
       } catch {
         // ignore quota or disabled storage error
       }
@@ -55,7 +65,7 @@ export function getMigratedItem(
 }
 
 export function getOrCreateInstallationId(
-  storage: Pick<Storage, "getItem" | "setItem"> | null = typeof window !== "undefined" && window.localStorage ? window.localStorage : null,
+  storage: (Pick<Storage, "getItem" | "setItem"> & Partial<Pick<Storage, "removeItem">>) | null = typeof window !== "undefined" && window.localStorage ? window.localStorage : null,
 ): string {
   const existing = getMigratedItem(REMOTE_INSTALLATION_ID_STORAGE_KEY, storage);
   if (existing && existing.trim().length > 0) {

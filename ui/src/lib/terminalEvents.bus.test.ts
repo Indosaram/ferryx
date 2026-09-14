@@ -308,4 +308,20 @@ describe("terminalEventBus backlog buffer", () => {
     unsubscribe();
     terminalEventBus.clearSession(sessionId);
   });
+
+  it("releases the replay backlog when the last output listener unsubscribes", async () => {
+    await terminalEventBus.ensureStarted();
+    const sessionId = "backend-backlog-release";
+
+    const unsubscribe = terminalEventBus.subscribeOutput(sessionId, () => undefined, false);
+    callbacks.output?.({ sessionId, data: encodeOutput("y".repeat(4096)) });
+    expect(getBacklogMetricsForTest(sessionId).chars).toBe(4096);
+
+    // The backlog exists only to replay into an attached listener. Once the last
+    // one detaches, holding those bytes is a pure leak: nothing can consume them,
+    // and up to MAX_BACKLOG_BYTES per session stays resident for the app's life.
+    unsubscribe();
+
+    expect(getBacklogMetricsForTest(sessionId)).toEqual({ sessions: 0, chunks: 0, chars: 0 });
+  });
 });

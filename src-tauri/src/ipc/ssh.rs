@@ -3,7 +3,26 @@ use crate::ssh::config::parse_ssh_config;
 use crate::ssh::SshHost;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use tauri::{AppHandle, Manager, Runtime};
+
+/// Serializes every read-modify-write of the SSH host store.
+///
+/// Each mutating command runs its load/modify/save on its own `run_blocking`
+/// thread, so two concurrent commands would otherwise both read the same
+/// snapshot and the second `save_store` would silently discard the first
+/// command's change. The store is a single process-wide file, so one global
+/// lock is the whole fix.
+static SSH_STORE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Acquires the store lock, recovering from a poisoned mutex.
+///
+/// A panic in one command must not permanently disable SSH host editing: the
+/// guarded data lives on disk, not in the mutex, so the poison flag carries no
+/// corrupted in-memory state to protect.
+fn lock_ssh_store() -> std::sync::MutexGuard<'static, ()> {
+    SSH_STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -203,9 +222,24 @@ fn save_store(path: &PathBuf, store: &SshHostStore) -> Result<(), IpcError> {
     }
     let serialized = serde_json::to_string_pretty(store)
         .map_err(|e| IpcError::internal(format!("Failed to serialize ssh store: {}", e)))?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serialized.as_bytes())
-        .and_then(|()| std::fs::rename(&tmp, path))
+    // A per-write unique temp name: two concurrent writers sharing one fixed
+    // `.json.tmp` would interleave their bytes and rename a corrupt blend into
+    // place. The lock above already serializes in-process callers; this keeps a
+    // second process (CLI, a stale instance) from colliding too.
+    let tmp = path.with_extension(format!(
+        "json.tmp.{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let write_result = std::fs::write(&tmp, serialized.as_bytes())
+        .and_then(|()| std::fs::rename(&tmp, path));
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    write_result
         .map_err(|e| {
             IpcError::new(
                 IpcErrorCode::IoError,
@@ -237,6 +271,7 @@ pub async fn cmd_ssh_import_config<R: Runtime>(
 }
 
 fn import_config_into_store(path: &PathBuf, config_text: &str) -> Result<Vec<SshHost>, IpcError> {
+    let _guard = lock_ssh_store();
     let mut store = load_store(path)?;
     let parsed = parse_ssh_config(config_text);
     let already_stored: Vec<String> = store.hosts.iter().map(|host| host.key()).collect();
@@ -261,6 +296,7 @@ pub async fn cmd_ssh_update_host<R: Runtime>(
 ) -> Result<Vec<SshHost>, IpcError> {
     let path = get_ssh_store_path(&app)?;
     run_blocking(move || {
+        let _guard = lock_ssh_store();
         let mut store = load_store(&path)?;
         if let Some(slot) = store
             .hosts
@@ -284,6 +320,7 @@ pub async fn cmd_ssh_delete_host<R: Runtime>(
 ) -> Result<Vec<SshHost>, IpcError> {
     let path = get_ssh_store_path(&app)?;
     run_blocking(move || {
+        let _guard = lock_ssh_store();
         let mut store = load_store(&path)?;
         if let Some(position) = store.hosts.iter().position(|host| host.id == id) {
             let removed = store.hosts.remove(position);

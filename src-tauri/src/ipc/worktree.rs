@@ -171,11 +171,17 @@ async fn delete_worktree<R: Runtime>(
     })
     .await?;
 
-    if let Some(snapshot) = app
-        .state::<crate::ipc::worktree_disk::WorktreeDiskScans>()
-        .remove_deleted(&event_workspace_id, &pruned.1)
-    {
-        let _ = app.emit(crate::ipc::worktree_disk::WORKTREE_DISK_SCAN_PROGRESS_EVENT, snapshot);
+    // The disk-scan cache is optional app state: a host that never managed it
+    // (a test harness, or a future embedder) must still be able to delete a
+    // worktree. `state()` panics when unmanaged, so ask for it fallibly the way
+    // every other optional-state call site in this crate does.
+    if let Some(scans) = app.try_state::<crate::ipc::worktree_disk::WorktreeDiskScans>() {
+        if let Some(snapshot) = scans.remove_deleted(&event_workspace_id, &pruned.1) {
+            let _ = app.emit(
+                crate::ipc::worktree_disk::WORKTREE_DISK_SCAN_PROGRESS_EVENT,
+                snapshot,
+            );
+        }
     }
 
     emit_worktree_changed(

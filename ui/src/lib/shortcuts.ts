@@ -461,6 +461,22 @@ export function isMacShortcutPlatform() {
   return detectMacPlatform();
 }
 
+export /**
+ * True when `event.key` carries no latin character the matcher could compare against,
+ * so the physical `event.code` is the only usable signal.
+ *
+ * This is the Hangul/IME case: a Korean 2-set layout reports `key: "ㅍ"` for physical V,
+ * and without the `code` fallback every shortcut would die while the user is in Hangul mode.
+ *
+ * It deliberately does NOT hold for a latin remap such as Dvorak, where `key` is already
+ * the character the user typed. Falling back to `code` there matches the wrong binding:
+ * Dvorak's `,` sits on physical QWERTY-W, so Cmd+, would match `tab.close` (key "w",
+ * declared before `settings.toggle`) and close the user's tab instead of opening Settings.
+ */
+function isLayoutTransparent(eventKey: string): boolean {
+  return eventKey.length !== 1 || !/^[a-zA-Z0-9,.\-=[\]<>_+{}]$/.test(eventKey);
+}
+
 export function matchesBinding(event: KeyboardEvent, rawBinding: ShortcutBinding, isMac: boolean): boolean {
   // Keydowns owned by an active IME composition must never match an app chord:
   // the physical `code` still reflects the shortcut key, but the keystroke belongs
@@ -514,13 +530,16 @@ export function matchesBinding(event: KeyboardEvent, rawBinding: ShortcutBinding
     return ecode === "Minus" || ecode === "NumpadSubtract" || ekey === "-" || ekey === "_";
   }
   if (key === ",") {
-    return ecode === "Comma" || ekey === "," || ekey === "<";
+    return ekey === "," || ekey === "<" || (isLayoutTransparent(ekey) && ecode === "Comma");
   }
   if (/^[0-9]$/.test(key)) {
     return ecode === `Digit${key}` || ecode === `Numpad${key}` || ekey === key;
   }
   if (key.length === 1 && /^[a-zA-Z]$/.test(key)) {
-    return ecode === `Key${key.toUpperCase()}` || ekey.toLowerCase() === key.toLowerCase();
+    return (
+      ekey.toLowerCase() === key.toLowerCase() ||
+      (isLayoutTransparent(ekey) && ecode === `Key${key.toUpperCase()}`)
+    );
   }
 
   return normalizeKey(ekey) === normalizeKey(key);

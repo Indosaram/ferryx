@@ -150,7 +150,16 @@ class TerminalEventBus {
     return () => {
       const current = this.outputListeners.get(sessionId);
       current?.delete(listener);
-      if (current?.size === 0) this.outputListeners.delete(sessionId);
+      if (current?.size === 0) {
+        this.outputListeners.delete(sessionId);
+        // The backlog exists solely to replay into an attached listener (see the
+        // retention guard in handleOutput). With the last one gone nothing can ever
+        // consume those bytes, so keeping them is a pure leak of up to
+        // MAX_BACKLOG_BYTES per session for the lifetime of the app -- and closing a
+        // pane or switching tabs hits this path constantly, while clearSession()
+        // only runs on actual session teardown.
+        this.backlog.delete(sessionId);
+      }
     };
   }
 

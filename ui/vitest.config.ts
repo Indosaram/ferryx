@@ -15,6 +15,15 @@ export default defineConfig({
     clearMocks: true,
     restoreMocks: true,
     fileParallelism: false,
+    // The input-latency soak harness is an opt-in Bun measurement, run with
+    // `bun test ./ui/src/remote/input-latency-soak/soak.test.mjs`. It imports
+    // `bun:test`, which Vite externalizes for the jsdom/browser environment,
+    // so sweeping it into this suite fails the file on every run.
+    exclude: [
+      "**/node_modules/**",
+      "**/dist/**",
+      "src/remote/input-latency-soak/**",
+    ],
     coverage: {
       provider: "v8",
       reporter: ["text", "json-summary"],

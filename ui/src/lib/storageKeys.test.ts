@@ -91,4 +91,22 @@ describe("storageKeys unification and migration", () => {
     expect(getMigratedItem(GENERAL_SETTINGS_STORAGE_KEY, localStorage)).toBe(JSON.stringify({ confirmCloseTab: true }));
     expect(localStorage.getItem(GENERAL_SETTINGS_STORAGE_KEY)).toBe(JSON.stringify({ confirmCloseTab: true }));
   });
+
+  it("consumes the legacy key so a later reset cannot be resurrected", () => {
+    // Reset deletes only the canonical key. If migration leaves the legacy entry
+    // behind, the next load re-reads it and re-materialises the user's stale
+    // pre-upgrade settings -- making "Reset to defaults" impossible to complete
+    // for anyone who upgraded from an orca/rorca build.
+    localStorage.setItem("rorca:settings:notifications:v1", JSON.stringify({ enabled: false }));
+
+    expect(getMigratedItem(NOTIFICATION_SETTINGS_STORAGE_KEY, localStorage)).toBe(
+      JSON.stringify({ enabled: false }),
+    );
+    expect(localStorage.getItem("rorca:settings:notifications:v1")).toBeNull();
+
+    // Simulate Settings -> "Reset to defaults".
+    localStorage.removeItem(NOTIFICATION_SETTINGS_STORAGE_KEY);
+
+    expect(getMigratedItem(NOTIFICATION_SETTINGS_STORAGE_KEY, localStorage)).toBeNull();
+  });
 });

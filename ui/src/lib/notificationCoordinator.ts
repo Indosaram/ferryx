@@ -189,6 +189,17 @@ export class NotificationCoordinator {
 
     const decision = { accepted: true };
     const now = Date.now();
+    // Suppression must be SYMMETRIC. The bell handler already ignores a bell that
+    // lands just after a completion, but most TUI agents ring the bell AS they
+    // finish, so the bell arrives a few hundred ms BEFORE the store's transition to
+    // waiting/done. That ordering was unguarded: the user got two OS banners and two
+    // sounds for one completion, and the tab was marked unread twice. Keep the
+    // completion timestamp either way so later bells stay suppressed.
+    const lastBell = this.lastBellTimestamp.get(key) ?? 0;
+    if (now - lastBell < this.bellAgentSuppressionMs) {
+      this.lastAgentCompletionTimestamp.set(key, now);
+      return { accepted: false, suppressed: true };
+    }
     this.lastAgentCompletionTimestamp.set(key, now);
 
     const isFocused = this.isFocused();

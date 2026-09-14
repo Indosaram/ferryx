@@ -35,7 +35,13 @@ fn main() {
     }
     match parse_launch_mode(&args) {
         LaunchMode::Daemon => {
-            let handover_from = parse_handover_from(&args);
+            let handover_from = match parse_handover_from(&args) {
+                Ok(value) => value,
+                Err(e) => {
+                    eprintln!("Ferryx daemon error: {e}");
+                    std::process::exit(1);
+                }
+            };
             if let Err(e) = run_daemon_headless(handover_from) {
                 eprintln!("Ferryx daemon error: {e}");
                 std::process::exit(1);

@@ -458,14 +458,26 @@ where
     LaunchMode::Gui
 }
 
-pub fn parse_handover_from<I, T>(args: I) -> Option<std::path::PathBuf>
+/// Parses `--handover-from <path>`.
+///
+/// Returns `Ok(None)` when the flag is absent (a legitimate cold start) and an
+/// error when the flag is present but its value is missing or is itself an
+/// option. Treating a malformed flag as "no handover" would silently cold-start
+/// the daemon and abandon every live PTY session the handover existed to carry
+/// across, while still looking like a successful start to the caller.
+pub fn parse_handover_from<I, T>(args: I) -> Result<Option<std::path::PathBuf>, String>
 where
     I: IntoIterator<Item = T>,
     T: AsRef<str>,
 {
     let args: Vec<String> = args.into_iter().map(|s| s.as_ref().to_string()).collect();
-    let pos = args.iter().position(|a| a == "--handover-from")?;
-    args.get(pos + 1).map(std::path::PathBuf::from)
+    let Some(pos) = args.iter().position(|a| a == "--handover-from") else {
+        return Ok(None);
+    };
+    match args.get(pos + 1) {
+        Some(value) if !value.starts_with("--") => Ok(Some(std::path::PathBuf::from(value))),
+        _ => Err("missing value for --handover-from".to_string()),
+    }
 }
 
 pub fn run_daemon_headless(
@@ -771,6 +783,35 @@ mod tests {
                 generation: 3,
                 key: "Meta+ArrowLeft".into(),
             }
+        );
+    }
+
+    #[test]
+    fn handover_from_rejects_a_missing_or_option_like_value() {
+        // `--handover-from` with no value must be an ERROR, not a silent cold start.
+        // A handover exists to transplant live PTY sessions from a retiring daemon;
+        // starting fresh instead abandons every session the caller meant to preserve,
+        // and the caller sees a daemon that looks healthy.
+        assert!(parse_handover_from(&["--daemon".to_string(), "--handover-from".to_string()]).is_err());
+        // A following flag is not a path.
+        assert!(parse_handover_from(&[
+            "--handover-from".to_string(),
+            "--daemon".to_string()
+        ])
+        .is_err());
+        // Absent entirely is a legitimate cold start.
+        assert_eq!(
+            parse_handover_from(&["--daemon".to_string()]).expect("absent is ok"),
+            None
+        );
+        // A real value still parses.
+        assert_eq!(
+            parse_handover_from(&[
+                "--handover-from".to_string(),
+                "/tmp/ferryx-handover.json".to_string()
+            ])
+            .expect("value parses"),
+            Some(std::path::PathBuf::from("/tmp/ferryx-handover.json"))
         );
     }
 }

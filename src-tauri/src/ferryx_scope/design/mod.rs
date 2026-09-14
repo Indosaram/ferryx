@@ -55,10 +55,28 @@ pub fn crop_png(bytes: &[u8], selection: Rect, viewport: Viewport) -> Result<Vec
     if (sx - expected).abs() > 1. / viewport.width || (sy - expected).abs() > 1. / viewport.height { return Err(DesignError::Geometry); }
     let left = (x.max(0.) * sx).floor().min(f64::from(info.width)) as u32;
     let top = (y.max(0.) * sy).floor().min(f64::from(info.height)) as u32;
-    let right = ((x + width).min(viewport.width) * sx).ceil().max(0.) as u32;
-    let bottom = ((y + height).min(viewport.height) * sy).ceil().max(0.) as u32;
+    // The far edges MUST clamp to the image exactly as the near edges do. sx is
+    // info.width / viewport.width, so a full-width selection recomputes
+    // viewport.width * (info.width / viewport.width), which in binary floating point
+    // lands a hair ABOVE info.width often enough to matter; ceil() then yields
+    // info.width + 1 and the row slice below indexes past the decoded buffer. The
+    // geometry gate above cannot catch it: it only compares sx against dpr*zoom, and
+    // an adapter reporting the true effective scale passes that check exactly.
+    let right = ((x + width).min(viewport.width) * sx)
+        .ceil()
+        .min(f64::from(info.width))
+        .max(0.) as u32;
+    let bottom = ((y + height).min(viewport.height) * sy)
+        .ceil()
+        .min(f64::from(info.height))
+        .max(0.) as u32;
     if right <= left || bottom <= top { return Err(DesignError::Geometry); }
-    let mut decoded = vec![0; reader.output_buffer_size()];
+    let mut decoded = vec![
+        0;
+        reader
+            .output_buffer_size()
+            .ok_or_else(|| DesignError::Png("decoded png exceeds addressable size".into()))?
+    ];
     let frame = reader.next_frame(&mut decoded).map_err(|e| DesignError::Png(e.to_string()))?;
     let channels = match frame.color_type { png::ColorType::Rgba => 4, png::ColorType::Rgb => 3, png::ColorType::GrayscaleAlpha => 2, png::ColorType::Grayscale => 1, _ => return Err(DesignError::Png("unsupported pixel format".into())) };
     let mut cropped = Vec::with_capacity(((right-left)*(bottom-top)) as usize * channels);

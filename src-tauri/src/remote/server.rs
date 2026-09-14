@@ -1275,12 +1275,17 @@ async fn ws_terminal_handler(
     // (if present) before doing any lookups or routing.
     let session_id = parse_host_scoped_session_id(&requested_session_id)
         .map(|(_host_id, session_id)| session_id.to_string())
-        .unwrap_or(requested_session_id);
+        .unwrap_or_else(|| requested_session_id.clone());
     let token = socket_credential(
         &state,
         &headers,
         &query,
-        &format!("/api/v1/terminal/{session_id}"),
+        // The ticket audience MUST be the path the client actually requested and
+        // minted against. A host-scoped id (`<host_id>::<session_id>`) survives
+        // `valid_socket_target` and is what the shipped client sends, so rebuilding
+        // the audience from the unwrapped id here would never match the issued
+        // target and every scoped connect would 401 with its ticket already spent.
+        &format!("/api/v1/terminal/{requested_session_id}"),
     )
     .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let device = state
@@ -1547,7 +1552,13 @@ async fn handle_terminal_socket(
             std::future::pending::<()>().await;
             return;
         }
-        if active_session_rx.borrow().as_deref() != Some(target_session_id.as_str()) {
+        // A selection with no focused session id is NOT "focus moved away". The upgrade
+        // gate admits that case, so treating it as a mismatch here closed the socket
+        // immediately after a successful HTTP upgrade -- the client saw a connected
+        // terminal that never received a frame and reconnect-looped. Exit only once the
+        // watch value names a DIFFERENT session.
+        if matches!(active_session_rx.borrow().as_deref(), Some(current) if current != target_session_id.as_str())
+        {
             return;
         }
         while active_session_rx.changed().await.is_ok() {
@@ -1938,7 +1949,13 @@ async fn handle_terminal_grid_socket(
             std::future::pending::<()>().await;
             return;
         }
-        if active_session_rx.borrow().as_deref() != Some(target_session_id.as_str()) {
+        // A selection with no focused session id is NOT "focus moved away". The upgrade
+        // gate admits that case, so treating it as a mismatch here closed the socket
+        // immediately after a successful HTTP upgrade -- the client saw a connected
+        // terminal that never received a frame and reconnect-looped. Exit only once the
+        // watch value names a DIFFERENT session.
+        if matches!(active_session_rx.borrow().as_deref(), Some(current) if current != target_session_id.as_str())
+        {
             return;
         }
         while active_session_rx.changed().await.is_ok() {

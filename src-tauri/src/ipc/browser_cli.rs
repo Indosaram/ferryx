@@ -20,6 +20,105 @@ pub enum BrowserCliRequest {
     Act { request: BrowserAutomationRequest },
 }
 
+/// An authenticated request line: the capability token plus the command itself.
+///
+/// The control socket drives the user's logged-in browser, so possession of the
+/// endpoint address alone must never be sufficient. On Windows the endpoint is a
+/// loopback TCP port that every local process can reach, and on unix the socket
+/// mode only narrows callers to the same uid. The token is what actually proves
+/// the caller was allowed to read the capability file this process wrote.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserCliEnvelope {
+    pub token: String,
+    #[serde(flatten)]
+    pub request: BrowserCliRequest,
+}
+
+pub const BROWSER_CLI_UNAUTHORIZED: &str = "BROWSER_CLI_UNAUTHORIZED";
+
+/// Length of the hex-encoded capability token (32 bytes of entropy).
+const BROWSER_CLI_TOKEN_BYTES: usize = 32;
+
+/// Capability file that carries the token for the current server instance. It
+/// sits beside the socket/port file inside the 0700 runtime directory.
+pub fn browser_cli_token_path() -> PathBuf {
+    crate::daemon::server::get_runtime_dir().join("browser.token")
+}
+
+fn token_path_for(endpoint_path: &Path) -> PathBuf {
+    endpoint_path.with_file_name(match endpoint_path.file_name().and_then(|n| n.to_str()) {
+        Some(name) => format!("{name}.token"),
+        None => "browser.token".to_string(),
+    })
+}
+
+fn generate_browser_cli_token() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; BROWSER_CLI_TOKEN_BYTES];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Compares two tokens without leaking their matching prefix length through
+/// timing. Length is public information here, so an early length check is safe.
+fn tokens_match(expected: &str, provided: &str) -> bool {
+    let expected = expected.as_bytes();
+    let provided = provided.as_bytes();
+    if expected.len() != provided.len() {
+        return false;
+    }
+    let mut difference = 0u8;
+    for (left, right) in expected.iter().zip(provided.iter()) {
+        difference |= left ^ right;
+    }
+    difference == 0
+}
+
+fn write_token_file(path: &Path, token: &str) -> Result<(), BrowserError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => fs::remove_file(path).map_err(|error| {
+            BrowserError::Internal(format!(
+                "Failed to replace browser CLI token file {}: {error}",
+                path.display()
+            ))
+        })?,
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(BrowserError::Internal(format!(
+                "Failed to inspect browser CLI token file {}: {error}",
+                path.display()
+            )))
+        }
+    }
+    fs::write(path, token).map_err(|error| {
+        BrowserError::Internal(format!("Failed to write browser CLI token file: {error}"))
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|error| {
+            BrowserError::Internal(format!(
+                "Failed to restrict browser CLI token file permissions: {error}"
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+fn read_token_file(path: &Path) -> Result<String, BrowserError> {
+    let token = fs::read_to_string(path).map_err(|error| {
+        BrowserError::CliUnavailable(format!("Ferryx desktop app is not running: {error}"))
+    })?;
+    let token = token.trim().to_string();
+    if token.is_empty() {
+        return Err(BrowserError::CliUnavailable(format!(
+            "Invalid browser CLI token in {}: token is empty",
+            path.display()
+        )));
+    }
+    Ok(token)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum BrowserCliResponse {
@@ -160,6 +259,8 @@ fn start_browser_cli_server_at_path<R: tauri::Runtime>(
         .map_err(|error| BrowserError::Internal(error.to_string()))?;
     fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600))
         .map_err(|error| BrowserError::Internal(error.to_string()))?;
+    let token = Arc::new(generate_browser_cli_token());
+    write_token_file(&token_path_for(socket_path), token.as_str())?;
 
     tauri::async_runtime::spawn(async move {
         let listener = match tokio::net::UnixListener::from_std(listener) {
@@ -175,8 +276,9 @@ fn start_browser_cli_server_at_path<R: tauri::Runtime>(
             };
             let app = app.clone();
             let manager = Arc::clone(&manager);
+            let token = Arc::clone(&token);
             tauri::async_runtime::spawn(async move {
-                let _ = handle_connection(stream, app, manager).await;
+                let _ = handle_connection(stream, app, manager, token).await;
             });
         }
     });
@@ -216,6 +318,8 @@ fn start_browser_cli_server_at_path<R: tauri::Runtime>(
         .map_err(|error| BrowserError::Internal(error.to_string()))?;
 
     write_port_file(port_path, port)?;
+    let token = Arc::new(generate_browser_cli_token());
+    write_token_file(&token_path_for(port_path), token.as_str())?;
 
     tauri::async_runtime::spawn(async move {
         let listener = match tokio::net::TcpListener::from_std(listener) {
@@ -231,8 +335,9 @@ fn start_browser_cli_server_at_path<R: tauri::Runtime>(
             };
             let app = app.clone();
             let manager = Arc::clone(&manager);
+            let token = Arc::clone(&token);
             tauri::async_runtime::spawn(async move {
-                let _ = handle_connection(stream, app, manager).await;
+                let _ = handle_connection(stream, app, manager, token).await;
             });
         }
     });
@@ -300,11 +405,17 @@ async fn handle_connection<S, R: tauri::Runtime>(
     stream: S,
     app: AppHandle<R>,
     manager: Arc<BrowserManager>,
+    expected_token: Arc<String>,
 ) -> Result<(), BrowserError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     use tokio::io::AsyncWriteExt;
+
+    let unauthorized = || BrowserCliResponse::Error {
+        code: BROWSER_CLI_UNAUTHORIZED.into(),
+        message: "browser CLI requires the capability token of the running Ferryx app".into(),
+    };
 
     let (reader, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader);
@@ -317,12 +428,24 @@ where
             ),
         },
         Ok(RequestLine::Line(line)) => {
-            match serde_json::from_str::<BrowserCliRequest>(line.trim()) {
-                Ok(request) => execute_request(&app, &manager, request).await,
-                Err(error) => BrowserCliResponse::Error {
-                    code: "BROWSER_CLI_REQUEST_INVALID".into(),
-                    message: error.to_string(),
-                },
+            // Authorization is decided before the command is interpreted, so an
+            // unauthorized peer learns nothing about which commands exist or
+            // whether its arguments named a real browser session.
+            match serde_json::from_str::<BrowserCliEnvelope>(line.trim()) {
+                Ok(envelope) if tokens_match(expected_token.as_str(), &envelope.token) => {
+                    execute_request(&app, &manager, envelope.request).await
+                }
+                Ok(_) => unauthorized(),
+                Err(error) => {
+                    if serde_json::from_str::<BrowserCliRequest>(line.trim()).is_ok() {
+                        unauthorized()
+                    } else {
+                        BrowserCliResponse::Error {
+                            code: "BROWSER_CLI_REQUEST_INVALID".into(),
+                            message: error.to_string(),
+                        }
+                    }
+                }
             }
         }
         Err(error) => return Err(BrowserError::Internal(error.to_string())),
@@ -373,6 +496,7 @@ async fn execute_request<R: tauri::Runtime>(
 async fn send_over_stream<S>(
     stream: S,
     request: BrowserCliRequest,
+    token: String,
 ) -> Result<BrowserCliResponse, BrowserError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -380,7 +504,7 @@ where
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let (reader, mut writer) = tokio::io::split(stream);
-    let mut request_json = serde_json::to_string(&request)
+    let mut request_json = serde_json::to_string(&BrowserCliEnvelope { token, request })
         .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
     request_json.push('\n');
     writer
@@ -414,10 +538,11 @@ async fn send_browser_cli_request_at_path(
 ) -> Result<BrowserCliResponse, BrowserError> {
     use tokio::net::UnixStream;
 
+    let token = read_token_file(&token_path_for(socket_path))?;
     let stream = UnixStream::connect(socket_path).await.map_err(|error| {
         BrowserError::CliUnavailable(format!("Ferryx desktop app is not running: {error}"))
     })?;
-    send_over_stream(stream, request).await
+    send_over_stream(stream, request, token).await
 }
 
 #[cfg(not(unix))]
@@ -435,12 +560,13 @@ async fn send_browser_cli_request_at_path(
     use tokio::net::TcpStream;
 
     let port = read_port_from_file(port_path)?;
+    let token = read_token_file(&token_path_for(port_path))?;
     let stream = TcpStream::connect(format!("127.0.0.1:{port}"))
         .await
         .map_err(|error| {
             BrowserError::CliUnavailable(format!("Ferryx desktop app is not running: {error}"))
         })?;
-    send_over_stream(stream, request).await
+    send_over_stream(stream, request, token).await
 }
 
 #[cfg(test)]
@@ -478,6 +604,7 @@ mod tests {
     // This fixture uses the production connection handler over an actual owned
     // TCP socket on every platform. No desktop, daemon or global runtime path.
     async fn p12_raw_tcp_request(request: serde_json::Value) -> BrowserCliResponse {
+
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
         let app = tauri::test::mock_builder()
@@ -502,9 +629,14 @@ mod tests {
         let address = listener.local_addr().expect("listener address");
         let server = async {
             let (stream, _) = listener.accept().await.expect("accept independent peer");
-            handle_connection(stream, app.handle().clone(), manager)
-                .await
-                .expect("handle actual TCP connection");
+            handle_connection(
+                stream,
+                app.handle().clone(),
+                manager,
+                Arc::new("p12-owned-capability-token".to_string()),
+            )
+            .await
+            .expect("handle actual TCP connection");
         };
         let client = async {
             let mut stream = tokio::net::TcpStream::connect(address)
@@ -564,6 +696,34 @@ mod tests {
                 if code == "BROWSER_CLI_UNAUTHORIZED"),
             "forged credential reached dispatch: {response:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn p12_tcp_accepts_the_capability_token() {
+        // Given the capability token this server instance minted, when a peer
+        // presents it, then the command is dispatched normally. This is what
+        // proves the rejection tests above fail on authorization, not on the
+        // envelope shape.
+        let response = p12_raw_tcp_request(serde_json::json!({
+            "command": "list", "token": "p12-owned-capability-token"
+        }))
+        .await;
+        let BrowserCliResponse::List { sessions } = response else {
+            panic!("authorized list must dispatch: {response:?}");
+        };
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].browser_id, "p12-owned-browser");
+    }
+
+    #[test]
+    fn browser_cli_tokens_match_only_on_exact_equality() {
+        let token = generate_browser_cli_token();
+        assert_eq!(token.len(), BROWSER_CLI_TOKEN_BYTES * 2);
+        assert!(tokens_match(&token, &token.clone()));
+        assert!(!tokens_match(&token, &token[..token.len() - 1]));
+        assert!(!tokens_match(&token, ""));
+        // Two separately minted tokens must not collide.
+        assert_ne!(token, generate_browser_cli_token());
     }
 
     #[test]
@@ -651,12 +811,22 @@ mod tests {
         let app_handle = app.handle().clone();
         let manager_clone = Arc::clone(&manager);
         let server_task = tokio::spawn(async move {
-            handle_connection(server_stream, app_handle, manager_clone).await
+            handle_connection(
+                server_stream,
+                app_handle,
+                manager_clone,
+                Arc::new("duplex-capability-token".to_string()),
+            )
+            .await
         });
 
-        let response = send_over_stream(client_stream, BrowserCliRequest::List)
-            .await
-            .expect("send request over stream");
+        let response = send_over_stream(
+            client_stream,
+            BrowserCliRequest::List,
+            "duplex-capability-token".to_string(),
+        )
+        .await
+        .expect("send request over stream");
 
         let server_result = server_task.await.expect("server task completed");
         assert!(server_result.is_ok());
@@ -707,10 +877,15 @@ mod tests {
 
         let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
         let app_handle = app.handle().clone();
-        let server_task =
-            tokio::spawn(
-                async move { handle_connection(server_stream, app_handle, manager).await },
-            );
+        let server_task = tokio::spawn(async move {
+            handle_connection(
+                server_stream,
+                app_handle,
+                manager,
+                Arc::new("oversize-capability-token".to_string()),
+            )
+            .await
+        });
 
         let (client_reader, mut client_writer) = tokio::io::split(client_stream);
         let mut oversized_line = vec![b'a'; MAX_REQUEST_BYTES + 16];
@@ -802,11 +977,17 @@ mod tests {
         let app_handle = app.handle().clone();
         let manager_clone = Arc::clone(&manager);
         let handler_task = tokio::spawn(async move {
-            handle_connection(server_stream, app_handle, manager_clone).await
+            handle_connection(
+                server_stream,
+                app_handle,
+                manager_clone,
+                Arc::new("unix-pair-capability-token".to_string()),
+            )
+            .await
         });
 
         client_stream
-            .write_all(b"{\"command\":\"list\"}\n")
+            .write_all(b"{\"command\":\"list\",\"token\":\"unix-pair-capability-token\"}\n")
             .await
             .expect("write request line");
         client_stream.flush().await.expect("flush request");
@@ -876,8 +1057,20 @@ mod tests {
         client
             .set_read_timeout(Some(Duration::from_secs(2)))
             .expect("set response timeout");
+        // The server minted this token at startup; reading it back is exactly what
+        // an authorized caller does, and the file must be owner-only.
+        let token_path = token_path_for(&socket_path);
+        assert_eq!(
+            fs::metadata(&token_path)
+                .expect("token metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+        );
+        let token = read_token_file(&token_path).expect("read capability token");
         client
-            .write_all(b"{\"command\":\"list\"}\n")
+            .write_all(format!("{{\"command\":\"list\",\"token\":\"{token}\"}}\n").as_bytes())
             .expect("write list request");
         let mut response = String::new();
         BufReader::new(client)
@@ -922,8 +1115,9 @@ mod tests {
         client
             .set_read_timeout(Some(Duration::from_secs(2)))
             .expect("set response timeout");
+        let token = read_token_file(&token_path_for(&port_path)).expect("read capability token");
         client
-            .write_all(b"{\"command\":\"list\"}\n")
+            .write_all(format!("{{\"command\":\"list\",\"token\":\"{token}\"}}\n").as_bytes())
             .expect("write list request");
         let mut response = String::new();
         BufReader::new(client)

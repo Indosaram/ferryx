@@ -537,6 +537,13 @@ export function NativeTerminalPane({
   const bindingKey = targetSessionId
     ? `${targetSessionId}:${session?.daemonEpoch ?? ""}:${session?.remoteGeneration ?? 0}:${session?.remoteConnectionState ?? ""}`
     : null;
+  // Hoisted to render scope so the input/paste/mouse callbacks can list the two
+  // values they actually read. Both change on an SSH reconnect while
+  // `targetSessionId` and `visible` stay put, so omitting them froze the
+  // callbacks on the pre-reconnect generation and every keystroke was rejected
+  // by the host as stale -- a permanently dead keyboard in a live pane.
+  const remoteGeneration = session?.remoteGeneration ?? null;
+  const remoteConnectionState = session?.remoteConnectionState ?? null;
   const wheelPixelRemainderRef = useRef(0);
   useLayoutEffect(() => {
     wheelPixelRemainderRef.current = 0;
@@ -941,7 +948,7 @@ export function NativeTerminalPane({
     };
 
     void executeInput(false);
-  }, [performAttach, targetSessionId, visible]);
+  }, [performAttach, remoteConnectionState, remoteGeneration, targetSessionId, visible]);
 
   const sendCtrlC = useCallback(() => {
     sendInput({
@@ -1010,7 +1017,7 @@ export function NativeTerminalPane({
           reportNativeTerminalIpcFailure("cmd_native_terminal_paste", error);
         });
     },
-    [targetSessionId, visible],
+    [remoteConnectionState, remoteGeneration, targetSessionId, visible],
   );
 
   const sendImagePasteShortcut = useCallback(() => {
@@ -1137,7 +1144,7 @@ export function NativeTerminalPane({
       .catch((error: unknown) => {
         reportNativeTerminalIpcFailure("cmd_native_terminal_mouse", error);
       });
-  }, [targetSessionId, visible]);
+  }, [remoteConnectionState, remoteGeneration, targetSessionId, visible]);
 
   const scrollToTrackPosition = useCallback((clientY: number, grabOffsetPx: number) => {
     const track = scrollbarTrackRef.current;

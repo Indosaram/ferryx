@@ -43,10 +43,10 @@ async fn remote_registration_preserves_git_identity_and_execution_path() {
     )
     .await
     .unwrap();
-    assert_eq!(registered.repo_root, probed.0);
-    assert_eq!(registered.git_root, probed.1);
-    assert_eq!(registered.git_remote, probed.2);
-    assert_eq!(registered.git_common_dir, probed.3);
+    assert_eq!(registered.repo_root, probed.repo_root);
+    assert_eq!(registered.git_root, probed.git_root);
+    assert_eq!(registered.git_remote, probed.git_remote);
+    assert_eq!(registered.git_common_dir, probed.git_common_dir);
     assert_eq!(registered.host_id, host.id);
     assert_eq!(
         registered.workspace_id,

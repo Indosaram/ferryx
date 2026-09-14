@@ -27,7 +27,7 @@ fn stale_native_callback_rejected_and_completion_consumed_once() {
 fn crop_uses_selected_native_pixel_bounds() {
     let cropped = crop_png(&fixture(), Rect { x: 1., y: 0.5, width: 2., height: 1.5 }, viewport()).unwrap();
     let mut reader = png::Decoder::new(std::io::Cursor::new(cropped)).read_info().unwrap();
-    let mut pixels = vec![0; reader.output_buffer_size()]; let info = reader.next_frame(&mut pixels).unwrap();
+    let mut pixels = vec![0; reader.output_buffer_size().expect("decoded png size")]; let info = reader.next_frame(&mut pixels).unwrap();
     assert_eq!((info.width, info.height), (4, 3));
     assert_eq!(&pixels[..4], &[2, 1, 120, 255]);
     assert_eq!(&pixels[44..48], &[5, 3, 120, 255]);
@@ -54,7 +54,7 @@ fn real_webkit_viewport_crop() {
     let scale = f64::from(original.info().width) / 320.;
     let cropped = crop_png(&bytes, Rect { x:20., y:30., width:120., height:64. }, Viewport {width:320.,height:240.,dpr:scale,zoom:1.}).unwrap();
     let mut reader = png::Decoder::new(std::io::Cursor::new(cropped)).read_info().unwrap();
-    let mut pixels = vec![0;reader.output_buffer_size()]; let info = reader.next_frame(&mut pixels).unwrap();
+    let mut pixels = vec![0;reader.output_buffer_size().expect("decoded png size")]; let info = reader.next_frame(&mut pixels).unwrap();
     assert_eq!((info.width,info.height),((120.*scale) as u32,(64.*scale) as u32));
     // Interior, away from text/antialiasing: actual CSS blue, not overlay Highlight.
     let channels = if info.color_type == png::ColorType::Rgba {4} else {3};

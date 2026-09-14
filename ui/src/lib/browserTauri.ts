@@ -115,14 +115,13 @@ function enqueueBrowserLifecycle(browserId: string, operation: () => Promise<voi
 }
 
 function isBrowserNotFoundError(err: unknown): boolean {
+  // The backend serializes IpcErrorCode as SCREAMING_SNAKE_CASE
+  // (src-tauri/src/ipc/error.rs:7), so the structured code is authoritative.
+  // Matching on message prose would silently stop working the moment the
+  // wording changes, which this project's IPC contract forbids.
   if (!err) return false;
   if (typeof err === "object") {
-    const obj = err as Record<string, unknown>;
-    if (obj.code === "BROWSER_NOT_FOUND") return true;
-    if (typeof obj.message === "string" && obj.message.includes("Browser not found")) return true;
-  }
-  if (typeof err === "string" && (err.includes("BROWSER_NOT_FOUND") || err.includes("Browser not found"))) {
-    return true;
+    return (err as Record<string, unknown>).code === "BROWSER_NOT_FOUND";
   }
   return false;
 }
@@ -162,14 +161,10 @@ export async function reloadBrowser(browserId: string): Promise<void> {
 }
 
 function isWebviewNotFoundError(err: unknown): boolean {
+  // Structured code only, for the same reason as isBrowserNotFoundError.
   if (!err) return false;
   if (typeof err === "object") {
-    const obj = err as Record<string, unknown>;
-    if (obj.code === "WEBVIEW_NOT_FOUND") return true;
-    if (typeof obj.message === "string" && obj.message.includes("Webview not found")) return true;
-  }
-  if (typeof err === "string" && (err.includes("WEBVIEW_NOT_FOUND") || err.includes("Webview not found"))) {
-    return true;
+    return (err as Record<string, unknown>).code === "WEBVIEW_NOT_FOUND";
   }
   return false;
 }

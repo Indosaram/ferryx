@@ -1,4 +1,4 @@
-import { type RefObject, useRef, useState } from "react";
+import { type RefObject, useCallback, useRef, useState } from "react";
 import { Bell } from "lucide-react";
 
 import { cn } from "../../lib/cn";
@@ -26,6 +26,14 @@ export function NotificationCenterButton({
   anchorRef: externalAnchorRef,
 }: NotificationCenterButtonProps) {
   const [open, setOpen] = useState(false);
+  // Stable identity. This component subscribes to the notification store, so every
+  // arriving notification (and every Sidebar re-render) produced a fresh inline
+  // `onClose`, which tore down and re-ran the popover's focus-trap effect: focus was
+  // yanked to the trigger and then back to the first focusable element. A keyboard
+  // user who had tabbed to "Mark all read" or a specific row was thrown to the top of
+  // the popover on every incoming notification, with the screen-reader announcement
+  // repeating each time. It also re-registered the keydown/resize listeners each cycle.
+  const handleClose = useCallback(() => setOpen(false), []);
   const internalAnchorRef = useRef<HTMLDivElement>(null);
   const anchorRef = externalAnchorRef ?? internalAnchorRef;
   const { unreadCount } = useNotificationCenter(store);
@@ -58,7 +66,7 @@ export function NotificationCenterButton({
       {open ? (
         <NotificationCenterPopover
           anchorRef={anchorRef}
-          onClose={() => setOpen(false)}
+          onClose={handleClose}
           onNavigateToSession={onNavigateToSession}
           isSessionNavigable={isSessionNavigable}
           store={store}

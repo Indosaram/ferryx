@@ -90,6 +90,7 @@ pub async fn dag_watch_project<R: tauri::Runtime>(
     if is_new_root {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, DagRunSnapshot)>(100);
         crate::dag::watcher::spawn_dag_watcher(PathBuf::from(&canonical), tx);
+        let watched_key = canonical.clone();
         tauri::async_runtime::spawn(async move {
             while let Some((tagged, snapshot)) = rx.recv().await {
                 let payload = DagRunUpdatedPayload {
@@ -100,6 +101,16 @@ pub async fn dag_watch_project<R: tauri::Runtime>(
                     tracing::debug!("Failed to emit dag-run-updated event: {error}");
                 }
             }
+            // The loop ends only when the watcher dropped its sender, i.e. the watcher
+            // task itself returned (failed initial hydrate, sink failure, closed notify
+            // channel). Registration must reflect LIVENESS, not "was ever registered":
+            // leaving the key in the set makes every later dag_watch_project take the
+            // is_new_root == false branch and never re-arm, so the DAG panel hydrates
+            // once and then goes permanently stale with no error, until an app restart.
+            dag_watched_roots()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&watched_key);
         });
     }
     let snapshot_project = canonical.clone();

@@ -46,6 +46,7 @@ export function clearPendingAutoResumes(): void {
 export function collectAutoResumeCandidates(
   state: WorkspaceState,
   allSessions?: Readonly<Record<string, TerminalSession>>,
+  limit: number = MAX_AUTO_RESUME_CANDIDATES,
 ): string[] {
   const sessions = allSessions ?? state.sessions;
   const rawCandidates = Object.values(sessions).filter((session) => {
@@ -130,7 +131,7 @@ export function collectAutoResumeCandidates(
     }
   }
 
-  return orderedIds.slice(0, MAX_AUTO_RESUME_CANDIDATES);
+  return orderedIds.slice(0, limit);
 }
 
 export type ScheduleAgentAutoResumeOptions = {
@@ -160,7 +161,11 @@ export function scheduleAgentAutoResume({
   }
   markRestoreTokenExecuted(token);
 
-  const candidates = collectAutoResumeCandidates(state).slice(0, maxCandidates);
+  // Pass the caller's limit DOWN instead of double-slicing. collectAutoResumeCandidates
+  // already truncated to MAX_AUTO_RESUME_CANDIDATES (8), so the caller-side slice could
+  // only ever narrow: `maxCandidates: 20` silently yielded 8 and panes 9+ were left dead
+  // with no reconnect attempt and no error -- a broken contract on a documented option.
+  const candidates = collectAutoResumeCandidates(state, undefined, maxCandidates);
   if (candidates.length === 0) {
     return () => {};
   }

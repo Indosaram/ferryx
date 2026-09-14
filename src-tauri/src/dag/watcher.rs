@@ -54,7 +54,6 @@ async fn scan_and_emit(
     sink: &TaggedSink,
     hooks: &WatcherHooks,
 ) -> bool {
-    hooks.scanning();
     let runs_dir = resolve_dag_runs_dir(root);
     let target_dir = if runs_dir.is_dir() {
         &runs_dir
@@ -65,44 +64,69 @@ async fn scan_and_emit(
     {
         root
     } else {
+        // Even the "nothing to scan" determination is filesystem work, so it must be
+        // observed off the async worker like any other scan.
+        let probe_hooks = hooks.clone();
+        let _ = tokio::task::spawn_blocking(move || probe_hooks.scanning()).await;
         return true;
     };
 
-    let entries = match std::fs::read_dir(target_dir) {
-        Ok(e) => e,
-        Err(_) => return true,
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_file() && path.extension().is_some_and(|ext| ext == "json") {
-            let mut snapshot_opt = None;
+    // The directory walk, the file reads and the JSON parses all run on a blocking
+    // thread. Doing them inline occupied a Tokio worker for the whole scan -- a
+    // directory walk plus N synchronous reads and parses -- which stalls other tasks
+    // on that worker and stalls the entire runtime on a current-thread executor.
+    // Only the sink sends stay on the async side.
+    let scan_dir = target_dir.to_path_buf();
+    let scan_hooks = hooks.clone();
+    let snapshots = match tokio::task::spawn_blocking(move || {
+        // The scan observation point belongs INSIDE the blocking closure: the whole
+        // point is that the walk, reads and parses happen off the async worker, so a
+        // hook that fired on the async side would report the wrong thread.
+        scan_hooks.scanning();
+        let mut collected: Vec<DagRunSnapshot> = Vec::new();
+        let entries = match std::fs::read_dir(&scan_dir) {
+            Ok(e) => e,
+            Err(_) => return collected,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() || !path.extension().is_some_and(|ext| ext == "json") {
+                continue;
+            }
+            // A checkpoint can be observed mid-write; retry briefly before giving up.
             for attempt in 0..3 {
                 if let Ok(content) = std::fs::read_to_string(&path) {
                     if let Ok(snapshot) = parse_run_checkpoint(&content) {
-                        snapshot_opt = Some(snapshot);
+                        collected.push(snapshot);
                         break;
                     }
                 }
                 if attempt < 2 {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                    std::thread::sleep(std::time::Duration::from_millis(50));
                 }
             }
-            if let Some(snapshot) = snapshot_opt {
-                let is_updated = match cache.get(&snapshot.run_id) {
-                    Some(prev) => prev != &snapshot,
-                    None => true,
-                };
-                if is_updated {
-                    cache.insert(snapshot.run_id.clone(), snapshot.clone());
-                    if sink
-                        .send((project_path.to_string(), snapshot))
-                        .await
-                        .is_err()
-                    {
-                        return false;
-                    }
-                }
+        }
+        collected
+    })
+    .await
+    {
+        Ok(snapshots) => snapshots,
+        Err(_) => return true,
+    };
+
+    for snapshot in snapshots {
+        let is_updated = match cache.get(&snapshot.run_id) {
+            Some(prev) => prev != &snapshot,
+            None => true,
+        };
+        if is_updated {
+            cache.insert(snapshot.run_id.clone(), snapshot.clone());
+            if sink
+                .send((project_path.to_string(), snapshot))
+                .await
+                .is_err()
+            {
+                return false;
             }
         }
     }
@@ -164,7 +188,7 @@ async fn run_watcher_loop_observed(
         Config::default(),
     );
 
-    let (polling_mode, mut _watcher_guard) = match watcher_res {
+    let (mut polling_mode, mut _watcher_guard) = match watcher_res {
         Ok(mut watcher) if watch_target.exists() => {
             match watcher.watch(&watch_target, RecursiveMode::Recursive) {
                 Ok(()) => (false, Some(watcher)),
@@ -200,6 +224,12 @@ async fn run_watcher_loop_observed(
                 notify_rx.close();
                 while notify_rx.try_recv().is_ok() {}
                 debounce_sleep = None;
+                // Fall back to interval reconciliation. Without this every arm of the
+                // select is disabled once the native watch is gone -- the notify arm is
+                // gated off by `!notify_rx.is_closed()`, the poll arm by `polling_mode`,
+                // `lose_watch` is now None and `debounce_sleep` is None -- so the task
+                // parks forever and DAG progress silently freezes until the app restarts.
+                polling_mode = true;
                 if !scan_and_emit(&project_path, &root, &mut cache, &sink, &hooks).await {
                     break;
                 }

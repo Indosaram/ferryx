@@ -1310,12 +1310,12 @@ pub async fn cmd_browser_import_cookies<R: tauri::Runtime>(
         .filter_map(|label| app.get_webview(&label))
         .collect::<Vec<_>>();
 
-    if targets.is_empty() && matches!(profile_id, BrowserProfileId::Default) {
-        if let Some(main_webview) = app.get_webview("main") {
-            targets.push(main_webview);
-        }
-    }
-
+    // No fallback to the app's own "main" webview. The user asked to import into a
+    // BROWSER profile; with no matching tab open (the common case, since import
+    // lives in Settings) falling back would inject every cookie from an arbitrary
+    // third-party export file -- unrestricted by domain -- into Ferryx's own
+    // privileged webview context, while still reporting success. The empty-target
+    // error below is the correct outcome for every profile, Default included.
     if targets.is_empty() {
         return Err(BrowserError::CookieImport(format!(
             "open a browser tab using the {} profile before importing cookies",

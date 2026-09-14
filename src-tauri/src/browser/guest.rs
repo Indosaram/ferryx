@@ -62,6 +62,22 @@ const BRIDGE_SCRIPT_TEMPLATE: &str = r#"
   const enc = encodeURIComponent;
   const closestOf = Element.prototype.closest;
   const addDocumentListener = document.addEventListener.bind(document);
+  // Captured at document start, before page script runs, so a hostile page cannot
+  // shadow `isTrusted` with an own-property that always reports true.
+  const isTrustedOf = Object.getOwnPropertyDescriptor(Event.prototype, 'isTrusted').get;
+  // Only real user input may reach the bridge. Without this, ordinary page script
+  // can `document.dispatchEvent(new KeyboardEvent('keydown', {key:'t', metaKey:true}))`
+  // and drive privileged app chrome -- spawning terminal tabs, closing the active
+  // surface and its running session, opening the palette -- with no user interaction,
+  // including from a hidden background tab. The bridge nonce cannot help: the bridge
+  // itself supplies the nonce on behalf of the forged event.
+  const isUserEvent = (event) => {
+    try {
+      return isTrustedOf.call(event) === true;
+    } catch (_) {
+      return false;
+    }
+  };
 
   const resolveHttpUrl = (raw) => {
     if (!raw) return null;
@@ -89,6 +105,7 @@ const BRIDGE_SCRIPT_TEMPLATE: &str = r#"
   };
 
   addDocumentListener('click', (event) => {
+    if (!isUserEvent(event)) return;
     const target = event.target;
     if (!(target instanceof Element)) return;
     const anchor = closestOf.call(target, 'a[href]');
@@ -112,6 +129,7 @@ const BRIDGE_SCRIPT_TEMPLATE: &str = r#"
   );
 
   addDocumentListener('keydown', (event) => {
+    if (!isUserEvent(event)) return;
     let action = null;
     const composing = event.isComposing || event.keyCode === 229;
     if (composing) return;
@@ -190,6 +208,7 @@ const BRIDGE_SCRIPT_TEMPLATE: &str = r#"
   }, true);
 
   addDocumentListener('drop', (event) => {
+    if (!isUserEvent(event)) return;
     const uri = event.dataTransfer?.getData('text/uri-list') || event.dataTransfer?.getData('text/plain') || '';
     const target = resolveHttpUrl(uri.split(/\r?\n/).find((line) => line && !line.startsWith('#')) || uri);
     if (!target) return;
