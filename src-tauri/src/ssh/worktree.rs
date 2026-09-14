@@ -280,21 +280,29 @@ pub fn worktree_create_script(
     }
 }
 
-pub fn worktree_remove_script(platform: RemotePlatform, repo_root: &str, path: &str) -> String {
+pub fn worktree_remove_script(
+    platform: RemotePlatform,
+    repo_root: &str,
+    path: &str,
+    force: bool,
+) -> String {
+    let force_arg = if force { " --force" } else { "" };
     match platform {
         RemotePlatform::Posix => {
             let quoted_root = direct::quote_posix(repo_root);
             let quoted_path = direct::quote_posix(path);
             format!(
-                "out=$(git -C {quoted_root} worktree remove {quoted_path} 2>&1) || {{ rc=$?; [ \"$rc\" -ne 0 ] || rc=1; printf '%s\\n' \"$out\" >&2; exit $rc; }}"
+                "out=$(git -C {quoted_root} worktree remove{force_arg} {quoted_path} 2>&1) || {{ rc=$?; [ \"$rc\" -ne 0 ] || rc=1; printf '%s\\n' \"$out\" >&2; exit $rc; }}"
             )
         }
         RemotePlatform::Windows => {
             let p = powershell_data(repo_root);
             let wt = powershell_data(path);
+            let force_code = if force { " $args += '--force';" } else { "" };
             format!(
                 "{POWERSHELL_GIT}\n$p={p}; $wt={wt}; \
-                 $g=Invoke-FerryxGit @('-C',$p,'worktree','remove',$wt); \
+                 $args = @('-C',$p,'worktree','remove');{force_code} $args += $wt; \
+                 $g=Invoke-FerryxGit $args; \
                  if ($g.Code -ne 0) {{ $err = if ($g.Error) {{ $g.Error }} elseif ($g.Output) {{ $g.Output }} else {{ 'git worktree remove failed' }}; throw $err }}"
             )
         }
@@ -361,15 +369,29 @@ pub async fn remove_remote(
     environment: &RemoteEnvironment,
     repo_root: &str,
     path: &str,
+    force: bool,
 ) -> Result<(), IpcError> {
     environment.platform.validate_path(repo_root)?;
     environment.platform.validate_path(path)?;
-    let script = worktree_remove_script(environment.platform, repo_root, path);
+    let script = worktree_remove_script(environment.platform, repo_root, path, force);
     let plan = direct::ssh_plan(host, environment.executor.command(&script), false)?;
-    direct::bounded_output(&plan, Duration::from_secs(30))
-        .await
-        .map_err(|err| tag_error(err, "worktree-remove"))?;
-    Ok(())
+    let result = direct::bounded_output(&plan, Duration::from_secs(30)).await;
+    match result {
+        Ok(_) => Ok(()),
+        Err(mut err) => {
+            let is_dirty = err
+                .details
+                .as_ref()
+                .and_then(|d| d.get("stderr"))
+                .and_then(|s| s.as_str())
+                .map(|msg| msg.contains("modified or untracked files") || msg.contains("--force"))
+                .unwrap_or(false);
+            if is_dirty {
+                err.code = IpcErrorCode::DirtyWorktree;
+            }
+            Err(tag_error(err, "worktree-remove"))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -408,6 +430,42 @@ mod tests {
         assert!(windows.contains("Invoke-FerryxGit"));
         assert!(windows.contains("'worktree','list','--porcelain'"));
         assert!(windows.contains("MARKER_WIN"));
+    }
+
+    #[test]
+    fn red_worktree_remove_script_supports_force_both_platforms() {
+        let posix_safe = worktree_remove_script(
+            RemotePlatform::Posix,
+            "/srv/repo",
+            "/srv/repo/.orca-worktrees/wt-1",
+            false,
+        );
+        assert!(posix_safe.contains("git -C '/srv/repo' worktree remove '/srv/repo/.orca-worktrees/wt-1'"));
+        assert!(!posix_safe.contains("--force"));
+
+        let posix_force = worktree_remove_script(
+            RemotePlatform::Posix,
+            "/srv/repo",
+            "/srv/repo/.orca-worktrees/wt-1",
+            true,
+        );
+        assert!(posix_force.contains("git -C '/srv/repo' worktree remove --force '/srv/repo/.orca-worktrees/wt-1'"));
+
+        let win_safe = worktree_remove_script(
+            RemotePlatform::Windows,
+            r"C:\repo",
+            r"C:\repo\.orca-worktrees\wt-1",
+            false,
+        );
+        assert!(!win_safe.contains("'--force'"));
+
+        let win_force = worktree_remove_script(
+            RemotePlatform::Windows,
+            r"C:\repo",
+            r"C:\repo\.orca-worktrees\wt-1",
+            true,
+        );
+        assert!(win_force.contains("$args += '--force';"));
     }
 
     #[test]

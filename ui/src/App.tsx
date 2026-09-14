@@ -2114,6 +2114,18 @@ function WorkspaceApp({
   }, []);
   const handleCloseSearch = useCallback(() => setSearchLeafId(null), []);
   const handleCloseDeleteTarget = useCallback(() => setDeleteTarget(null), []);
+  const handleDeleteWorktree = useCallback((worktree: Worktree) => {
+    const isRemote = Boolean(worktree.workspaceId?.startsWith("ssh:"));
+    const isPrimary = worktreeIdentity(worktree) === null;
+    if (isRemote && isPrimary) {
+      const project = projectsRef.current.find((p) => p.workspaceId === worktree.workspaceId);
+      if (project) {
+        setPendingProjectRemove(project);
+        return;
+      }
+    }
+    setDeleteTarget(worktree);
+  }, []);
   const handleCancelTabClose = useCallback(() => setPendingTabClose(null), []);
 
   const handleAddBrowserTab = useCallback(
@@ -2534,7 +2546,7 @@ function WorkspaceApp({
           onRemoveProject={setPendingProjectRemove}
           onSelectWorktree={handleSelectWorktree}
           onCreateWorktree={handleOpenCreateWorktree}
-          onDeleteWorktree={setDeleteTarget}
+          onDeleteWorktree={handleDeleteWorktree}
           onResetAgentState={handleResetWorktreeAgentState}
           onManageDisk={setDiskManageProject}
           onOpenSettings={handleOpenSettings}

@@ -11,6 +11,7 @@ const native = {
   previewWorktreeDelete: vi.fn(),
   deleteWorktree: vi.fn(),
   deleteWorktreeDestructive: vi.fn(),
+  deleteRemoteWorktree: vi.fn(),
 };
 
 const worktree: Worktree = {
@@ -44,15 +45,21 @@ function createServices(overrides: Partial<WorktreeDeleteServices> = {}): Worktr
 }
 
 beforeEach(() => {
+  (window as any).isTauri = true;
   native.previewWorktreeDelete.mockReset();
   native.deleteWorktree.mockReset();
   native.deleteWorktreeDestructive.mockReset();
+  native.deleteRemoteWorktree.mockReset();
   native.previewWorktreeDelete.mockResolvedValue(preview);
   native.deleteWorktree.mockResolvedValue(undefined);
   native.deleteWorktreeDestructive.mockResolvedValue(undefined);
+  native.deleteRemoteWorktree.mockResolvedValue(undefined);
   // Intercept only IPC: default services and native request routing stay real,
   // with no module mocks that could leak into the disk/lifecycle suites in Bun.
   mockIPC((command, args) => {
+    if (command === "cmd_ssh_delete_remote_worktree") {
+      return native.deleteRemoteWorktree(args);
+    }
     if (!args || !("request" in args)) throw new Error(`Missing IPC request: ${command}`);
     switch (command) {
       case "cmd_worktree_delete_preview": return native.previewWorktreeDelete(args?.request);
@@ -63,6 +70,7 @@ beforeEach(() => {
   });
 });
 afterEach(() => {
+  delete (window as any).isTauri;
   cleanup();
   clearMocks();
 });
@@ -275,5 +283,101 @@ describe("WorktreeDeleteDialog", () => {
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Delete worktree and branch" })); });
     screen.getByText("GIT_ERROR");
     expect(screen.queryByRole("button", { name: "Delete unmerged branch permanently" })).not.toBeInTheDocument();
+  });
+
+  it("deletes a remote SSH worktree using cmd_ssh_delete_remote_worktree", async () => {
+    const remoteWorktree: Worktree = {
+      path: "/srv/repo/.orca-worktrees/wt-feat-remote",
+      head: "abc1234",
+      branch: "refs/heads/orca/ssh-123456/feat-remote",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+      workspaceId: "ssh:host-1",
+    };
+    const onDeleted = vi.fn();
+    const onClose = vi.fn();
+
+    await act(async () => {
+      render(
+        <WorktreeDeleteDialog
+          workspaceId="ssh:host-1"
+          worktree={remoteWorktree}
+          onClose={onClose}
+          onDeleted={onDeleted}
+        />,
+      );
+    });
+
+    expect(screen.getByText("orca/ssh-123456/feat-remote")).toBeInTheDocument();
+    const deleteBtn = screen.getByRole("button", { name: "Delete remote worktree" });
+    expect(deleteBtn).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(deleteBtn);
+    });
+
+    expect(native.deleteRemoteWorktree).toHaveBeenCalledWith({
+      workspaceId: "ssh:host-1",
+      path: "/srv/repo/.orca-worktrees/wt-feat-remote",
+      force: false,
+    });
+    expect(onDeleted).toHaveBeenCalledOnce();
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("offers destructive deletion for remote SSH worktree with force: true", async () => {
+    native.deleteRemoteWorktree
+      .mockRejectedValueOnce({
+        code: "DIRTY_WORKTREE",
+        message: "Worktree contains modified or untracked files",
+        details: {},
+      })
+      .mockResolvedValueOnce(undefined);
+
+    const remoteWorktree: Worktree = {
+      path: "/srv/repo/.orca-worktrees/wt-feat-remote",
+      head: "abc1234",
+      branch: "refs/heads/orca/ssh-123456/feat-remote",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+      workspaceId: "ssh:host-1",
+    };
+    const onDeleted = vi.fn();
+    const onClose = vi.fn();
+
+    await act(async () => {
+      render(
+        <WorktreeDeleteDialog
+          workspaceId="ssh:host-1"
+          worktree={remoteWorktree}
+          onClose={onClose}
+          onDeleted={onDeleted}
+        />,
+      );
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Delete remote worktree" }));
+    });
+
+    const destructiveBtn = screen.getByRole("button", {
+      name: "Delete worktree and discard changes permanently",
+    });
+    expect(destructiveBtn).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(destructiveBtn);
+    });
+
+    expect(native.deleteRemoteWorktree).toHaveBeenLastCalledWith({
+      workspaceId: "ssh:host-1",
+      path: "/srv/repo/.orca-worktrees/wt-feat-remote",
+      force: true,
+    });
+    expect(onDeleted).toHaveBeenCalledOnce();
   });
 });

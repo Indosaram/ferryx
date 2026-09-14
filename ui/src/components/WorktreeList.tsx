@@ -76,8 +76,12 @@ export const WorktreeRow = memo(function WorktreeRow({
   }, []);
 
   const isRemote = Boolean(worktree.workspaceId?.startsWith("ssh:"));
-  const primary = !isRemote && isPrimaryWorktree(worktree);
-  const canDelete = !primary && !isRemote;
+  const isPrimary = isPrimaryWorktree(worktree);
+  const primary = !isRemote && isPrimary;
+  const isRemotePrimary = isRemote && isPrimary;
+  const canDelete = !primary;
+  const deleteActionLabel = isRemotePrimary ? "Remove Project" : "Delete Worktree";
+  const deleteButtonLabel = isRemotePrimary ? "Remove project" : "Delete worktree";
   const managedSlug = worktreeIdentity(worktree)?.slug;
   const displayName = managedSlug ?? workspaceName(worktree);
   const displaySummary = activitySummary
@@ -103,7 +107,7 @@ export const WorktreeRow = memo(function WorktreeRow({
       items.push({ kind: "item", id: "reset-agent-state", label: "Reset Agent State", icon: "refresh" });
     }
     items.push({ kind: "separator" });
-    items.push({ kind: "item", id: "delete", label: "Delete Worktree", enabled: canDelete, icon: "trash" });
+    items.push({ kind: "item", id: "delete", label: deleteActionLabel, enabled: canDelete, icon: "trash" });
     menuUnlistenRef.current?.();
     const controller = new AbortController();
     menuUnlistenRef.current = () => controller.abort();
@@ -228,7 +232,7 @@ export const WorktreeRow = memo(function WorktreeRow({
           ) : null}
           {canDelete ? (
             <IconButton
-              label="Delete worktree"
+              label={deleteButtonLabel}
               size="sm"
               className="size-5 hover:text-destructive"
               onClick={() => onDelete(worktree)}

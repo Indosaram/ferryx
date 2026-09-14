@@ -453,6 +453,7 @@ pub async fn cmd_ssh_delete_remote_worktree<R: Runtime>(
     app: AppHandle<R>,
     workspace_id: String,
     path: String,
+    force: Option<bool>,
 ) -> Result<(), IpcError> {
     let store = get_ssh_store_path(&app)?;
     let id = workspace_id.clone();
@@ -464,7 +465,14 @@ pub async fn cmd_ssh_delete_remote_worktree<R: Runtime>(
         &project.repo_root,
         &path,
     )?;
-    crate::ssh::worktree::remove_remote(&host, &environment, &project.repo_root, &path).await?;
+    crate::ssh::worktree::remove_remote(
+        &host,
+        &environment,
+        &project.repo_root,
+        &path,
+        force.unwrap_or(false),
+    )
+    .await?;
     let slug = path
         .split(['/', '\\'])
         .filter(|s| !s.is_empty())

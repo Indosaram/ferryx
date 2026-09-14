@@ -431,6 +431,7 @@ describe("WorktreeList actions", () => {
 
   it("displays managed slug for remote worktree with orca identity and renders + button", () => {
     const onCreateWorktree = vi.fn();
+    const onDelete = vi.fn();
     const remoteWorktree: Worktree = {
       workspaceId: "ssh:opaque-hash",
       path: "/srv/repo/.orca-worktrees/wt-my-slug",
@@ -450,7 +451,7 @@ describe("WorktreeList actions", () => {
         agents={[]}
         statuses={{}}
         onSelect={vi.fn()}
-        onDelete={vi.fn()}
+        onDelete={onDelete}
         onCreateWorktree={onCreateWorktree}
       />,
     );
@@ -465,8 +466,90 @@ describe("WorktreeList actions", () => {
     fireEvent.click(addBtn);
     expect(onCreateWorktree).toHaveBeenCalledWith(remoteWorktree);
 
-    // Delete button should NOT be rendered for remote worktree
-    expect(screen.queryByRole("button", { name: "Delete worktree" })).not.toBeInTheDocument();
+    // Delete button should be rendered for remote child worktree
+    const deleteBtn = screen.getByRole("button", { name: "Delete worktree" });
+    expect(deleteBtn).toBeInTheDocument();
+    fireEvent.click(deleteBtn);
+    expect(onDelete).toHaveBeenCalledWith(remoteWorktree);
+  });
+
+  it("enables Delete Worktree in native context menu for remote child worktree", () => {
+    const onDelete = vi.fn();
+    nativeMenu.openNativePopupMenu.mockResolvedValue(() => undefined);
+    const remoteWorktree: Worktree = {
+      workspaceId: "ssh:opaque-hash",
+      path: "/srv/repo/.orca-worktrees/wt-my-slug",
+      head: "def456",
+      branch: "refs/heads/orca/ssh-123456/my-slug",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+      hostLabel: "Build machine",
+    };
+
+    render(
+      <WorktreeList
+        worktrees={[remoteWorktree]}
+        activePath=""
+        agents={[]}
+        statuses={{}}
+        onSelect={vi.fn()}
+        onDelete={onDelete}
+      />,
+    );
+
+    const row = screen.getByText("my-slug").closest(".group\\/worktree-row")!;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 100 });
+
+    const { items, onAction } = lastMenuCall();
+    const deleteItem = items.find((item) => item.id === "delete");
+    expect(deleteItem?.label).toBe("Delete Worktree");
+    expect(deleteItem?.enabled).toBe(true);
+
+    onAction("delete");
+    expect(onDelete).toHaveBeenCalledWith(remoteWorktree);
+  });
+
+  it("offers Remove Project in native context menu for remote primary repo root", () => {
+    const onDelete = vi.fn();
+    nativeMenu.openNativePopupMenu.mockResolvedValue(() => undefined);
+    const remoteRootWorktree: Worktree = {
+      workspaceId: "ssh:opaque-hash",
+      path: "/srv/repo",
+      head: "abc123",
+      branch: "refs/heads/main",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+      hostLabel: "Build machine",
+    };
+
+    render(
+      <WorktreeList
+        worktrees={[remoteRootWorktree]}
+        activePath=""
+        agents={[]}
+        statuses={{}}
+        onSelect={vi.fn()}
+        onDelete={onDelete}
+      />,
+    );
+
+    const row = screen.getByText("main").closest(".group\\/worktree-row")!;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 100 });
+
+    const { items, onAction } = lastMenuCall();
+    const deleteItem = items.find((item) => item.id === "delete");
+    expect(deleteItem?.label).toBe("Remove Project");
+    expect(deleteItem?.enabled).toBe(true);
+
+    onAction("delete");
+    expect(onDelete).toHaveBeenCalledWith(remoteRootWorktree);
+
+    // Hover button should have "Remove project" label
+    expect(screen.getByRole("button", { name: "Remove project" })).toBeInTheDocument();
   });
 
   it("renders branch on the left and hostLabel as machine badge on the right for remote worktree", () => {

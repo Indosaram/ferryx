@@ -8,6 +8,7 @@ import {
   previewWorktreeDelete,
   toIpcError,
 } from "../lib/tauri";
+import { createRemoteWorktreeDeleteServices } from "../lib/remoteProject";
 import {
   worktreeIdentity,
   type BranchDeletionPreview,
@@ -62,7 +63,17 @@ export function WorktreeDeleteDialog({
   services,
   initialDirty = false,
 }: WorktreeDeleteDialogProps) {
-  const resolvedServices = useMemo(() => services ?? createDefaultServices(workspaceId), [services, workspaceId]);
+  const isRemoteWorkspace = Boolean(
+    workspaceId?.startsWith("ssh:") || worktree.workspaceId?.startsWith("ssh:"),
+  );
+  const resolvedServices = useMemo(
+    () =>
+      services ??
+      (isRemoteWorkspace
+        ? createRemoteWorktreeDeleteServices(worktree.workspaceId ?? workspaceId)
+        : createDefaultServices(workspaceId)),
+    [services, isRemoteWorkspace, worktree.workspaceId, workspaceId],
+  );
   const [preview, setPreview] = useState<BranchDeletionPreview | null>(null);
   const [error, setError] = useState<StructuredIpcError | null>(
     initialDirty
@@ -265,7 +276,7 @@ export function WorktreeDeleteDialog({
                 onClick={() => void handleSafeDelete()}
                 className="rounded-md bg-destructive px-3 py-2 font-semibold text-destructive-foreground disabled:opacity-50"
               >
-                Delete worktree and branch
+                {isRemoteWorkspace ? "Delete remote worktree" : "Delete worktree and branch"}
               </button>
             ) : null}
           </div>

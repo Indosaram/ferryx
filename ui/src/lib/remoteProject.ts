@@ -1,5 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { RegisteredProject } from "./tauri";
+import type { BranchDeletionPreview, Worktree } from "./types";
 
 export interface RegisterRemoteProjectRequest {
   workspaceId: string;
@@ -103,6 +104,7 @@ export async function createRemoteWorktree(options: {
 export async function deleteRemoteWorktree(options: {
   workspaceId: string;
   path: string;
+  force?: boolean;
 }): Promise<void> {
   if (!isTauri()) {
     throw new Error("Remote worktree deletion is available only in the Ferryx desktop runtime");
@@ -110,6 +112,45 @@ export async function deleteRemoteWorktree(options: {
   return invoke<void>("cmd_ssh_delete_remote_worktree", {
     workspaceId: options.workspaceId,
     path: options.path,
+    force: options.force ?? false,
   });
+}
+
+export type WorktreeDeleteServices = {
+  previewDelete: (worktree: Worktree) => Promise<BranchDeletionPreview>;
+  deleteSafe: (worktree: Worktree) => Promise<void>;
+  deleteDestructive: (worktree: Worktree) => Promise<void>;
+};
+
+export function createRemoteWorktreeDeleteServices(workspaceId: string): WorktreeDeleteServices {
+  return {
+    previewDelete: async (worktree) => {
+      const branchName = (worktree.branch ?? "").replace(/^refs\/heads\//, "");
+      return {
+        dirtyState: { isDirty: false, files: [] },
+        missing: false,
+        branch: branchName || (worktree.path.split(/[/\\]/).pop() ?? "worktree"),
+        head: worktree.head ?? "",
+        upstream: null,
+        merged: true,
+        ahead: null,
+        behind: null,
+      };
+    },
+    deleteSafe: async (worktree) => {
+      await deleteRemoteWorktree({
+        workspaceId,
+        path: worktree.path,
+        force: false,
+      });
+    },
+    deleteDestructive: async (worktree) => {
+      await deleteRemoteWorktree({
+        workspaceId,
+        path: worktree.path,
+        force: true,
+      });
+    },
+  };
 }
 
