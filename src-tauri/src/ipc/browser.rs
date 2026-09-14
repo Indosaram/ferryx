@@ -1614,6 +1614,27 @@ pub async fn cmd_browser_open_external(url: String) -> Result<(), IpcError> {
 }
 
 #[tauri::command]
+fn resolve_file_link(
+    trimmed: &str,
+    cwd: Option<&str>,
+    home: Option<std::path::PathBuf>,
+) -> std::path::PathBuf {
+    if trimmed.starts_with("~/") || trimmed == "~" {
+        home.map(|h| match trimmed.strip_prefix("~/") {
+            Some(suffix) => h.join(suffix),
+            None => h,
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from(trimmed))
+    } else if std::path::Path::new(trimmed).is_absolute() {
+        std::path::PathBuf::from(trimmed)
+    } else if let Some(cwd_dir) = cwd {
+        std::path::Path::new(cwd_dir).join(trimmed)
+    } else {
+        std::path::PathBuf::from(trimmed)
+    }
+}
+
+#[tauri::command]
 pub async fn cmd_open_file_path(
     path: String,
     cwd: Option<String>,
@@ -1628,18 +1649,11 @@ pub async fn cmd_open_file_path(
             return Ok(false);
         }
 
-        let candidate = if trimmed.starts_with("~/") || trimmed == "~" {
-            std::env::var_os("HOME")
-                .map(std::path::PathBuf::from)
-                .map(|h| h.join(trimmed.trim_start_matches("~/")))
-                .unwrap_or_else(|| std::path::PathBuf::from(trimmed))
-        } else if std::path::Path::new(trimmed).is_absolute() {
-            std::path::PathBuf::from(trimmed)
-        } else if let Some(ref cwd_dir) = cwd {
-            std::path::Path::new(cwd_dir).join(trimmed)
-        } else {
-            std::path::PathBuf::from(trimmed)
-        };
+        let candidate = resolve_file_link(
+            trimmed,
+            cwd.as_deref(),
+            std::env::var_os("HOME").map(std::path::PathBuf::from),
+        );
 
         if !candidate.exists() {
             return Ok(false);
@@ -1672,7 +1686,7 @@ pub async fn cmd_open_file_path(
 
 #[cfg(test)]
 mod tests {
-    use super::cmd_open_file_path;
+    use super::{cmd_open_file_path, resolve_file_link};
 
     #[test]
     fn keep_or_discard_fresh_webview_covers_both_branches() {
@@ -1701,26 +1715,12 @@ mod tests {
         assert_eq!(res, false);
     }
 
-    #[tokio::test]
-    async fn test_cmd_open_file_path_resolves_relative_with_cwd() {
-        // The Linux opener is xdg-open, which cannot succeed in a headless
-        // session (CI, SSH without a desktop): it exits "no method available"
-        // and cmd_open_file_path correctly reports false. The resolution logic
-        // under test does not depend on a display, so skip there instead of
-        // failing the frozen-backend rehearsal benches.
-        #[cfg(target_os = "linux")]
-        if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
-            return;
-        }
+    #[test]
+    fn test_cmd_open_file_path_resolves_relative_with_cwd() {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let res = cmd_open_file_path(
-            "Cargo.toml".to_string(),
-            Some(manifest_dir.to_string()),
-            None,
-            None,
-        )
-        .await
-        .expect("ipc result");
-        assert_eq!(res, true);
+        // Test the production resolver, not the user's default application.
+        let resolved = resolve_file_link("Cargo.toml", Some(manifest_dir), None);
+        assert_eq!(resolved, std::path::Path::new(manifest_dir).join("Cargo.toml"));
+        assert!(resolved.is_file());
     }
 }

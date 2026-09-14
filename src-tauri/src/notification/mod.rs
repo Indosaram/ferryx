@@ -29,9 +29,25 @@ pub use service::*;
 /// Deliberately narrow: the target is fixed per platform and never accepted
 /// from the frontend, so this cannot become a general URI-open primitive.
 pub fn open_system_notification_settings() -> OpenSystemSettingsResult {
+    open_system_notification_settings_with_launcher(|program, args| {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            run_opener(program, args)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (program, args);
+            false
+        }
+    })
+}
+
+pub fn open_system_notification_settings_with_launcher(
+    launch: impl FnOnce(&str, &[&str]) -> bool,
+) -> OpenSystemSettingsResult {
     #[cfg(target_os = "macos")]
     {
-        if run_opener(
+        if launch(
             "open",
             &["x-apple.systempreferences:com.apple.preference.notifications"],
         ) {
@@ -48,7 +64,7 @@ pub fn open_system_notification_settings() -> OpenSystemSettingsResult {
 
     #[cfg(target_os = "windows")]
     {
-        if run_opener("cmd", &["/C", "start", "", "ms-settings:notifications"]) {
+        if launch("cmd", &["/C", "start", "", "ms-settings:notifications"]) {
             return OpenSystemSettingsResult {
                 opened: true,
                 reason: None,
@@ -63,6 +79,7 @@ pub fn open_system_notification_settings() -> OpenSystemSettingsResult {
     // Linux desktop environments have no single notification settings target.
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
+        let _ = launch;
         OpenSystemSettingsResult {
             opened: false,
             reason: Some("unsupported".into()),
@@ -72,7 +89,7 @@ pub fn open_system_notification_settings() -> OpenSystemSettingsResult {
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 #[allow(dead_code)]
-fn run_opener(program: &str, args: &[&str]) -> bool {
+pub fn run_opener(program: &str, args: &[&str]) -> bool {
     crate::util::no_window_command(program)
         .args(args)
         .status()
