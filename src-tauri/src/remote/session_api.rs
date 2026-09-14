@@ -176,13 +176,20 @@ async fn mutation(state: Arc<RemoteGatewayState>, headers: HeaderMap, request: a
     }
 }
 
-pub(super) async fn list(State(state): State<Arc<RemoteGatewayState>>, headers: HeaderMap) -> Result<Response, Response> {
-    read(state, headers, None).await
+pub(super) async fn list(State(state): State<Arc<RemoteGatewayState>>, headers: HeaderMap, uri: axum::http::Uri) -> Result<Response, Response> {
+    // `workspaceId` scopes the listing; an absent query lists every workspace.
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Scope { workspace_id: Option<String> }
+    let scope: Scope = axum::extract::Query::try_from_uri(&uri)
+        .map(|axum::extract::Query(scope)| scope)
+        .map_err(|_| failure("INVALID_REQUEST", &uuid::Uuid::new_v4().to_string()))?;
+    read(state, headers, None, scope.workspace_id).await
 }
 pub(super) async fn detail(State(state): State<Arc<RemoteGatewayState>>, path: Result<Path<String>, axum::extract::rejection::PathRejection>, headers: HeaderMap) -> Result<Response, Response> {
-    read(state, headers, Some(path.map(|p| p.0))).await
+    read(state, headers, Some(path.map(|p| p.0)), None).await
 }
-async fn read(state: Arc<RemoteGatewayState>, headers: HeaderMap, path: Option<Result<String, axum::extract::rejection::PathRejection>>) -> Result<Response, Response> {
+async fn read(state: Arc<RemoteGatewayState>, headers: HeaderMap, path: Option<Result<String, axum::extract::rejection::PathRejection>>, workspace: Option<String>) -> Result<Response, Response> {
     let id = uuid::Uuid::new_v4().to_string();
     let admission = workspace_api::admit(state.clone(), headers, false, &id).await?;
     let path = path.transpose().map_err(|_| failure("INVALID_REQUEST", &id))?;
@@ -201,7 +208,13 @@ async fn read(state: Arc<RemoteGatewayState>, headers: HeaderMap, path: Option<R
         check()?;
         let response = match path {
             Some(path) => json(200, sessions.machine_detail_routed(&path, epoch).await?),
-            None => json(200, sessions.machine_sessions_routed(epoch).await?),
+            None => {
+                let mut rows = sessions.machine_sessions_routed(epoch).await?;
+                if let Some(workspace) = &workspace {
+                    rows.sessions.retain(|row| &row.workspace_id == workspace);
+                }
+                json(200, rows)
+            }
         };
         check()?;
         Ok::<_, String>(response)

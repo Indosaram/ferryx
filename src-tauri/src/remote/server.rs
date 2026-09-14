@@ -2278,6 +2278,7 @@ pub(super) async fn load_gateway_identity(state: Arc<RemoteGatewayState>) -> Res
 async fn list_sessions(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
+    uri: axum::http::Uri,
 ) -> Result<Response, Response> {
     let auth_state = state.clone();
     let auth_headers = headers.clone();
@@ -2290,7 +2291,7 @@ async fn list_sessions(
             .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token").into_response())
     })())).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Session authorization unavailable").into_response())??;
     if device.access_scope == DeviceAccessScope::Machine {
-        super::session_api::list(State(state), headers).await
+        super::session_api::list(State(state), headers, uri).await
     } else {
         list_legacy_sessions(State(state), headers).await.map(IntoResponse::into_response).map_err(IntoResponse::into_response)
     }
