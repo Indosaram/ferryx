@@ -134,7 +134,7 @@ export type MobileHostDrawerProps = {
 
 /**
  * Mobile-friendly full-width drawer for switching the active host. Mirrors the desktop
- * `RemoteHostSwitcher` behavior (switching only ever updates `activeHostId`) but uses a
+ * sidebar switcher behavior (switching only ever updates `activeHostId`) but uses a
  * bottom-sheet layout sized for touch targets instead of a compact popover.
  */
 export function MobileHostDrawer({ open, onOpenChange }: MobileHostDrawerProps) {

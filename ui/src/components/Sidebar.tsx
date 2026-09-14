@@ -46,7 +46,6 @@ import { type ActiveAgent, type DirtyState, type Worktree } from "../lib/types";
 import { SidebarDragRow } from "./sidebar-dnd/SidebarDragRow";
 import { projectSortableId, SortableProjectSection } from "./sidebar-dnd/SortableProjectSection";
 import { openNativePopupMenu, type NativeMenuEntry } from "../lib/nativeMenu";
-import { RemoteHostSwitcher } from "./RemoteHostSwitcher";
 import { IconButton } from "./ui/IconButton";
 import { StatusDot } from "./ui/StatusDot";
 import { NotificationCenterButton } from "./notification/NotificationCenterButton";
@@ -375,7 +374,6 @@ export function Sidebar({
           className="drag-region flex h-titlebar shrink-0 items-center px-2 gap-0.5"
         >
           {isMac ? <div data-testid="titlebar-traffic-light-pad" className="w-[72px] shrink-0" aria-hidden="true" /> : null}
-          <RemoteHostSwitcher className="no-drag min-w-0 flex-1" />
           <IconButton label="Add project" className="no-drag" size="sm" onClick={onAddProject}>
             <Plus className="size-3.5" />
           </IconButton>
