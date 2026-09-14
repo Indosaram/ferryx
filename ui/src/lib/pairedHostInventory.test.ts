@@ -93,12 +93,12 @@ it("conflicting host-scoped credential copies are retained for explicit retry", 
   expect(localStorage.getItem(tokenKey)).toBe("different-fixture-token");
   expect(store.getState().migrationStatus).toBe("pending");
 });
-it("inventory capability alone does not enable unfinished proxy features", async () => {
+it("inventory readiness enables machine features regardless of the legacy proxy flag", async () => {
   const { inventory, commands, store } = fixture();
   vi.mocked(commands.capabilities).mockResolvedValue({ pairedHostInventoryV1: true, pairedDaemonProxyV1: false });
   await inventory.refresh();
   expect(store.getState().nativeStatus).toBe("ready");
-  expect(store.getState().machineFeaturesEnabled).toBe(false);
+  expect(store.getState().machineFeaturesEnabled).toBe(true);
   expect(store.getState().hosts[hostId].authStatus).toBe("paired");
 });
 it("refresh failure retains offline rows and unknown local capabilities disable machine features", async () => {

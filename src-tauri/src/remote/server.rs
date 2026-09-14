@@ -2253,7 +2253,7 @@ async fn get_capabilities(
         "accessScope": device.access_scope,
         "permission": device.permission,
         "capabilities": if state.machine_services.is_some() && device.access_scope == DeviceAccessScope::Machine && device.permission == DevicePermission::Control {
-            let mut capabilities = vec!["directoryBrowseV1"];
+            let mut capabilities = vec!["directoryBrowseV1", "machineWorkspaceV1", "managedWorktreesV1"];
             if state.machine_services.as_ref().is_some_and(|services| services.workspaces.catalog().is_ok() && services.workspaces.journal.session_revision().is_ok()) {
                 capabilities.push("terminalCreateV1");
             }
@@ -2570,7 +2570,7 @@ pub async fn start_remote_server_with_resolver(
     let relay_token = std::env::var("FERRYX_MACHINE_TOKEN")
         .ok()
         .filter(|token| !token.trim().is_empty());
-    let relay_identity = if config.mode == RemoteNetworkMode::Relay && relay_token.is_none() {
+    let relay_identity = if config.mode == RemoteNetworkMode::Relay {
         Some(load_gateway_identity(Arc::clone(&state)).await
             .map_err(|_| "Machine identity unavailable".to_string())?)
     } else {
@@ -2628,7 +2628,7 @@ pub async fn start_remote_server_with_resolver(
     let relay_task = relay_url
         .filter(|_| config.mode == RemoteNetworkMode::Relay)
         .map(|url| {
-            let client = match relay_token {
+            let mut client = match relay_token {
                 Some(token) => crate::remote::relay_client::RelayClient::with_gateway(
                     url,
                     token,
@@ -2636,11 +2636,14 @@ pub async fn start_remote_server_with_resolver(
                 ),
                 None => crate::remote::relay_client::RelayClient::with_identity(
                     url,
-                    relay_identity.expect("relay identity loaded before binding"),
+                    relay_identity.clone().expect("relay identity loaded before binding"),
                     primary_local_addr.to_string(),
                 ),
+            };
+            if let Some(identity) = &relay_identity {
+                client = client.with_machine_id(&identity.machine_id);
             }
-            .with_auth_manager((*state.auth_manager).clone());
+            let client = client.with_auth_manager((*state.auth_manager).clone());
             // Publish the one relay pairing authority so daemon/GUI pairing registers
             // its PIN with the relay instead of minting a local-only code.
             let epoch = crate::remote::state::RELAY_PAIRING_EPOCH

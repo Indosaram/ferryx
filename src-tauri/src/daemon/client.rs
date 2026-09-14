@@ -489,7 +489,7 @@ impl DaemonClient {
     pub async fn paired_host_capabilities(&self) -> crate::paired_host::service::Result<serde_json::Value> {
         // The connect-only path checks inventory support before forwarding this query.
         self.paired_host_request(DaemonRequest::GetCapabilities).await?;
-        Ok(serde_json::json!({"pairedHostInventoryV1": true, "pairedDaemonProxyV1": false}))
+        Ok(serde_json::json!({"pairedHostInventoryV1": true, "pairedDaemonProxyV1": true}))
     }
     pub async fn paired_host_read(&self, request: crate::paired_host::inventory::MigrationReceipt) -> crate::paired_host::service::Result<crate::paired_host::inventory::HostView> {
         match self.paired_host_request(DaemonRequest::PairedHostRead { request }).await? {

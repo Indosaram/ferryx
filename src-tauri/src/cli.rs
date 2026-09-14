@@ -281,6 +281,7 @@ pub fn run_pair_cli(command: PairCliCommand) -> Result<(), String> {
                     eprintln!(
                         "Pairing registered by the running daemon; it holds the relay control connection."
                     );
+                    eprintln!("Enter this PIN in the desktop's Paired machines settings. Mirror PINs stay valid for one minute; machine PINs for ten minutes.");
                     std::io::stdout().flush().map_err(|error| error.to_string())?;
                     Ok(())
                 }

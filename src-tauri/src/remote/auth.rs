@@ -194,6 +194,18 @@ fn verify_message(public_key_b64: &str, message: &str, signature_b64: &str) -> b
 }
 
 const PAIRING_EXPIRY: Duration = Duration::from_secs(60);
+
+fn pairing_code_default_lifetime() -> Duration {
+    PAIRING_EXPIRY
+}
+
+fn pairing_code_lifetime(access_scope: DeviceAccessScope) -> Duration {
+    if matches!(access_scope, DeviceAccessScope::Machine) {
+        Duration::from_secs(600)
+    } else {
+        PAIRING_EXPIRY
+    }
+}
 const PAIRING_FAILURE_BUDGET: u8 = 5;
 const LAST_SEEN_PERSIST_INTERVAL: Duration = Duration::from_secs(60);
 pub const DEVICE_IDLE_EXPIRY_SECS: u64 = 30 * 24 * 60 * 60;
@@ -241,6 +253,8 @@ struct PairingCode {
     default_permission: DevicePermission,
     #[serde(default)]
     access_scope: DeviceAccessScope,
+    #[serde(default = "pairing_code_default_lifetime")]
+    lifetime: Duration,
     #[serde(default)]
     approved_token: Option<String>,
 }
@@ -287,7 +301,7 @@ impl PairingWindow {
             .is_none_or(|start| now.duration_since(start) >= PAIRING_EXPIRY)
         {
             self.codes
-                .retain(|_, pairing| now.duration_since(pairing.created_at) < PAIRING_EXPIRY);
+                .retain(|_, pairing| now.duration_since(pairing.created_at) < pairing.lifetime);
             self.started_at = Some(now);
             self.failures = 0;
         }
@@ -411,6 +425,7 @@ impl AuthManager {
                 created_at: Instant::now(),
                 default_permission,
                 access_scope,
+                lifetime: pairing_code_lifetime(access_scope),
                 approved_token: None,
             },
         );
@@ -461,6 +476,7 @@ impl AuthManager {
                 created_at: Instant::now(),
                 default_permission: permission,
                 access_scope,
+                lifetime: pairing_code_lifetime(access_scope),
                 approved_token: None,
             },
         );
@@ -501,7 +517,7 @@ impl AuthManager {
                 window.failures += 1;
                 return Err(AuthError::InvalidPairingCode);
             };
-            if pairing.created_at.elapsed() >= PAIRING_EXPIRY {
+            if pairing.created_at.elapsed() >= pairing.lifetime {
                 window.failures += 1;
                 return Err(AuthError::ExpiredPairingCode);
             }
@@ -633,7 +649,7 @@ impl AuthManager {
                 window.failures += 1;
                 return Err(AuthError::InvalidPairingCode);
             };
-            if pairing.created_at.elapsed() >= PAIRING_EXPIRY {
+            if pairing.created_at.elapsed() >= pairing.lifetime {
                 window.failures += 1;
                 return Err(AuthError::ExpiredPairingCode);
             }

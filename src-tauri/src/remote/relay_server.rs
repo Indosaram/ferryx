@@ -94,6 +94,7 @@ struct WaitingHalf {
     active: bool,
 }
 
+#[derive(Clone)]
 struct ControlChannel {
     generation: u64,
     tx: mpsc::Sender<IncomingSessionNotice>,
@@ -512,13 +513,15 @@ impl RelayState {
         (generation, rx)
     }
 
-    fn unregister_control_channel(&self, machine_token: &str, generation: u64) {
+    fn unregister_control_channel(&self, _machine_token: &str, generation: u64) {
         let mut channels = self.inner.control_channels.lock();
-        if channels
-            .get(machine_token)
-            .is_some_and(|channel| channel.generation == generation)
-        {
-            channels.remove(machine_token);
+        channels.retain(|_, channel| channel.generation != generation);
+    }
+
+    pub fn bind_control_alias(&self, machine_token: &str, alias: String) {
+        let mut channels = self.inner.control_channels.lock();
+        if let Some(channel) = channels.get(machine_token).cloned() {
+            channels.insert(alias, channel);
         }
     }
 
@@ -1283,10 +1286,13 @@ fn validate_http_query(path: &str, query: Option<&str>) -> Result<(), StatusCode
             return Err(StatusCode::BAD_REQUEST);
         }
     }
-    let allowed: &[&str] = match path {
-        "fs/directories" => &["path", "includeHidden"],
-        "workspace/worktrees" => &["workspaceId"],
-        "workspace/worktrees/status" => &["workspaceId", "wsId", "slug"],
+    let allowed: &[&str] = match path.split('/').collect::<Vec<_>>().as_slice() {
+        ["fs", "directories"] => &["path", "includeHidden"],
+        ["workspace", "worktrees"] => &["workspaceId"],
+        ["workspace", "worktrees", "status"] => &["workspaceId", "wsId", "slug"],
+        // Session listing is workspace-scoped; a single session is epoch-fenced.
+        ["sessions"] => &["workspaceId", "daemonEpoch"],
+        ["sessions", _] => &["daemonEpoch"],
         _ => &[],
     };
     let mut seen = std::collections::HashSet::new();
@@ -1631,6 +1637,11 @@ async fn control_handler(
         ));
     }
     let token = extract_bearer_token(&headers, query.token.as_deref());
+    let machine_id = headers
+        .get("x-ferryx-machine-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     if let Some(token) = &token {
         // Legacy identities remain token-keyed. Never allow a bearer to replace
         // a previously bound Ed25519 identity, even if their strings coincide.
@@ -1645,7 +1656,7 @@ async fn control_handler(
     Ok(ws
         .max_message_size(MAX_MESSAGE_SIZE)
         .max_frame_size(MAX_MESSAGE_SIZE)
-        .on_upgrade(move |socket| authenticate_control_socket(socket, state, token, ip)))
+        .on_upgrade(move |socket| authenticate_control_socket(socket, state, token, machine_id, ip)))
 }
 
 // Do not trust forwarding headers. Servers must supply ConnectInfo from the
@@ -1659,11 +1670,12 @@ async fn authenticate_control_socket(
     mut socket: WebSocket,
     state: RelayState,
     token: Option<String>,
+    machine_id: Option<String>,
     ip: IpAddr,
 ) {
     if let Some(token) = token {
         state.record_auth(ip, true);
-        handle_control_socket(socket, state, token).await;
+        handle_control_socket(socket, state, token, machine_id).await;
         return;
     }
     let challenge = ControlChallenge {
@@ -1731,7 +1743,7 @@ async fn authenticate_control_socket(
         return;
     }
     match result {
-        Ok(machine_id) => handle_control_socket(socket, state, machine_id).await,
+        Ok(machine_id) => handle_control_socket(socket, state, machine_id, None).await,
         Err(_) => {
             if !matches!(
                 timeout(CONTROL_AUTH_TIMEOUT, socket.close()).await,
@@ -1743,8 +1755,18 @@ async fn authenticate_control_socket(
     }
 }
 
-async fn handle_control_socket(mut socket: WebSocket, state: RelayState, machine_token: String) {
+async fn handle_control_socket(
+    mut socket: WebSocket,
+    state: RelayState,
+    machine_token: String,
+    machine_id: Option<String>,
+) {
     let (generation, mut notices) = state.register_control_channel(machine_token.clone());
+    if let Some(ref id) = machine_id {
+        if id != &machine_token {
+            state.bind_control_alias(&machine_token, id.clone());
+        }
+    }
     loop {
         tokio::select! {
             notice = notices.recv() => {
@@ -1770,11 +1792,19 @@ async fn handle_control_socket(mut socket: WebSocket, state: RelayState, machine
                                 }
                             }
                             Ok(ControlRequest::RegisterPairingPin(registration)) => {
+                                if !registration.machine_id.is_empty() && registration.machine_id != machine_token {
+                                    state.bind_control_alias(&machine_token, registration.machine_id.clone());
+                                }
+                                let target_machine = if !registration.machine_id.is_empty() {
+                                    registration.machine_id.clone()
+                                } else {
+                                    machine_token.clone()
+                                };
                                 let ack = RegisterPairingPinAck {
                                     generation: registration.generation,
                                     pin: registration.pin.clone(),
-                                    machine_id: machine_token.clone(),
-                                    status: match state.register_pairing(&machine_token, generation, registration) {
+                                    machine_id: target_machine.clone(),
+                                    status: match state.register_pairing(&target_machine, generation, registration) {
                                         Ok(()) => "ready",
                                         Err(error) => error,
                                     }.into(),
@@ -1785,6 +1815,15 @@ async fn handle_control_socket(mut socket: WebSocket, state: RelayState, machine
                                 }
                             }
                             Err(error) => tracing::warn!(%error, "invalid relay control request"),
+                        }
+                    }
+                    Some(Ok(Message::Ping(payload))) => {
+                        if !matches!(
+                            timeout(TRANSFER_TIMEOUT, socket.send(Message::Pong(payload))).await,
+                            Ok(Ok(()))
+                        ) {
+                            tracing::warn!("relay control pong failed or timed out");
+                            break;
                         }
                     }
                     Some(Ok(_)) => {}

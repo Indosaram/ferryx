@@ -4,7 +4,7 @@ Machine access is not phone mirroring. A machine control grant permits browsing 
 
 ## Current availability
 
-Settings > Remote Access > Paired machines (native desktop only) provides pairing, inventory refresh, capability checking, re-pairing, and confirmed credential forgetting. The `pairedDaemonProjectsV1` opt-in defaults off. Its effective value drives `remoteHostStore.machineFeaturesEnabled` only when native inventory and `pairedDaemonProxyV1` are advertised. Turning it off preserves credentials, host selection, projects, and layout references. Restart retains the preference; refreshing capabilities cannot turn a disabled preference back on.
+Settings > Remote Access > Paired machines (native desktop only) provides pairing, inventory refresh, capability checking, re-pairing, and confirmed credential forgetting. There is no separate opt-in rollout gate: `remoteHostStore.machineFeaturesEnabled` follows native inventory readiness alone. When the local daemon cannot answer, the adapter fails closed, marks retained rows offline, and preserves credentials, host selection, projects, and layout references.
 
 The terminal proxy currently advertises false. Enabling the preference cannot provide live remote terminals. Inventory or successful pairing alone is not evidence of terminal support. The settings Add Project button remains disabled without its workspace navigation callback; use the workspace Add Project dialog. This packet does not wire that dialog or claim the full workflow is complete.
 
@@ -26,9 +26,9 @@ export FERRYX_RELAY_URL=https://your-relay.example
 ferryx-cli pair generate --access machine
 ```
 
-The running daemon owns the relay identity and issues the PIN. Do not launch a second standalone pairing server. An old daemon that refuses machine pairing must be upgraded in the fixture; do not substitute a mirror PIN. The PIN is short-lived; do not store it in evidence or logs. Permanent bearer credentials must never appear in URLs or renderer logs.
+The running daemon owns the relay identity and issues the PIN. Do not launch a second standalone pairing server. An old daemon that refuses machine pairing must be upgraded in the fixture; do not substitute a mirror PIN. The PIN is short-lived; machine PINs stay valid for ten minutes (single-use), mirror PINs for one minute. Do not store it in evidence or logs. Permanent bearer credentials must never appear in URLs or renderer logs.
 
-In the macOS native desktop, open Settings > Remote Access > Paired machines. Enter the relay origin, a machine label, and the owner-issued PIN; choose Pair machine. The separate QR-code section is for phone mirrors, not machine authorization. Refresh machines and Check capabilities. Resolve the displayed version/scope error rather than selecting a Local/SSH fallback.
+In the macOS native desktop, open Settings > Remote Access > Paired machines. The pairing form asks for the PIN only: the built-in relay (`https://relay.checka.cc`) and a default machine label are applied automatically; enter a custom relay origin or label only through the collapsed Advanced controls. Choose Pair machine. The separate QR-code section is for phone mirrors, not machine authorization. Refresh machines and Check capabilities. Resolve the displayed version/scope error rather than selecting a Local/SSH fallback.
 
 Once compatible proxy and project capabilities are shipped, enable Paired daemon projects, open workspace Add Project > Paired Daemon, select this host and a permitted folder, and verify the returned canonical remote identity. Verify remote `pwd`, split panes, and original session reattachment after reconnection. These are required human acceptance checks, not capabilities proven by this settings packet.
 

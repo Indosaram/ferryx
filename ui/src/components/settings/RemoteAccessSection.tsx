@@ -14,6 +14,7 @@ import {
 } from "../../lib/tauri";
 
 import { SettingRow, SettingsHeading } from "./primitives";
+import { DEFAULT_RELAY_ORIGIN } from "../../lib/pairedHostInventory";
 import { PairedMachinesSection } from "./PairedMachinesSection";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Badge } from "../ui/badge";
@@ -23,7 +24,7 @@ import { Input } from "../ui/input";
 import { Switch } from "../ui/switch";
 
 const DEFAULT_PORT = 43821;
-const DEFAULT_RELAY_PLACEHOLDER = "https://relay.checka.cc";
+const DEFAULT_RELAY_PLACEHOLDER = DEFAULT_RELAY_ORIGIN;
 const PAIRING_LIFETIME_SECONDS = 60;
 
 type PairingGatewayStatus = RemoteGatewayStatus & {

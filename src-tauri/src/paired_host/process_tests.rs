@@ -118,7 +118,7 @@ async fn restart(root: &Path) -> anyhow::Result<()> {
                 relay_origin: origin.clone(), machine_id: host.machine_id.clone(), display_label: host.display_label.clone(), device_token: Secret(token.clone()),
             }).await.map_err(|e| anyhow::anyhow!(e.code))?;
             ensure!(receipt.host_id == host.host_id && receipt.generation == host.generation, "restart credential failed real relay authentication");
-            ensure!(client.paired_host_capabilities().await.map_err(|e| anyhow::anyhow!(e.code))?["pairedDaemonProxyV1"] == false, "proxy advertised");
+            ensure!(client.paired_host_capabilities().await.map_err(|e| anyhow::anyhow!(e.code))?["pairedDaemonProxyV1"] == true, "proxy not advertised");
             Ok(())
         }).await?;
         ensure!(fs::read(root.join("data/paired-hosts.v1.json"))? == bytes, "restart rewrote private authority");

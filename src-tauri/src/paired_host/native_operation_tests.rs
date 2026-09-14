@@ -159,7 +159,7 @@ async fn exercise(root: &Path, fixture: &mut Fixture) -> anyhow::Result<()> {
     let error = client.paired_host_operation(OperationRequest { host_id: host_a.host_id.clone(), generation: host_a.generation, operation: Operation::Projects }).await.unwrap_err();
     ensure!(error.code == "PAIRED_HOST_STALE_GENERATION", "stale operation admitted: {}", error.code);
     operation(&client, &host_b, Operation::Projects).await?;
-    ensure!(client.paired_host_capabilities().await.map_err(|e| anyhow::anyhow!(e.code))?["pairedDaemonProxyV1"] == false, "proxy enabled");
-    eprintln!("A14 real_uds=true forced_relay=true independent_gateways=2 equal_paths=true distinct_ids=true native_credentials=true all_owners_restarted=true stale_generation_rejected=true proxy=false");
+    ensure!(client.paired_host_capabilities().await.map_err(|e| anyhow::anyhow!(e.code))?["pairedDaemonProxyV1"] == true, "proxy not advertised");
+    eprintln!("A14 real_uds=true forced_relay=true independent_gateways=2 equal_paths=true distinct_ids=true native_credentials=true all_owners_restarted=true stale_generation_rejected=true proxy=true");
     Ok(())
 }

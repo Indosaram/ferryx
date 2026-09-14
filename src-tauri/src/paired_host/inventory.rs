@@ -326,7 +326,7 @@ impl Inventory {
                 } else {
                     row.auth_status
                 },
-                online: !self.fenced && self.online.get(id).copied().unwrap_or(false),
+                online: !self.fenced && self.online.get(id).copied().unwrap_or(true),
             })
             .collect()
     }

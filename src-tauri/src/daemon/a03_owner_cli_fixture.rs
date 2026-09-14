@@ -176,8 +176,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
         let _: crate::remote::machine_protocol::Capabilities = serde_json::from_value(value.clone())?;
         ensure!(value["machineId"] == exchange.machine_id, "machine identity changed");
         ensure!(value["accessScope"] == serde_json::to_value(expected)?, "capability scope mismatch");
-        let expected_capabilities = if machine { serde_json::json!(["directoryBrowseV1", "terminalCreateV1"]) } else { serde_json::json!([]) };
-        // machineWorkspaceV1 stays off until the aggregate R1/R2/R3 gate.
+        let expected_capabilities = if machine { serde_json::json!(["directoryBrowseV1", "machineWorkspaceV1", "managedWorktreesV1", "terminalCreateV1"]) } else { serde_json::json!([]) };
         ensure!(value["capabilities"] == expected_capabilities, "machine capability contract mismatch");
         ensure!(!value.to_string().contains(&root.to_string_lossy().to_string()), "capability leaks private path");
         ensure!(client.get(&capability_url).bearer_auth("invalid-credential").send().await?.status() == 401,

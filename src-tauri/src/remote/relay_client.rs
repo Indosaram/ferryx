@@ -142,8 +142,18 @@ impl PairingCoordinator {
         if scope == crate::remote::auth::DeviceAccessScope::Machine && permission != DevicePermission::Control {
             return Err("Machine access requires Control permission".into());
         }
-        // Gateway pairing credentials have a maximum lifetime of sixty seconds.
-        let timeout = timeout.min(Duration::from_secs(60));
+        // Gateway (phone mirror) pairing codes are typed into the paired browser
+        // within seconds of being shown, so they stay at sixty seconds.
+        // Machine-scope pairing codes are redeemed from another machine's settings
+        // UI after an operator shells in and runs the CLI, which routinely takes
+        // longer than a minute; they get the full relay lease (ten minutes) and
+        // remain single-use and revoked on redemption.
+        let max_lifetime = if scope == crate::remote::auth::DeviceAccessScope::Machine {
+            Duration::from_secs(600)
+        } else {
+            Duration::from_secs(60)
+        };
+        let timeout = timeout.min(max_lifetime);
         let expires_at = SystemTime::now()
             .checked_add(timeout)
             .ok_or("Invalid pairing lifetime")?
@@ -327,6 +337,11 @@ impl RelayClient {
         }
     }
 
+    pub fn with_machine_id(mut self, machine_id: impl Into<String>) -> Self {
+        self.pairing.machine_id = machine_id.into();
+        self
+    }
+
     pub fn with_identity(
         relay_url: impl Into<String>,
         identity: MachineIdentity,
@@ -361,6 +376,16 @@ impl RelayClient {
                 AUTHORIZATION,
                 format!("Bearer {}", self.machine_token).parse()?,
             );
+        }
+        let machine_id = self
+            .identity
+            .as_ref()
+            .map(|i| i.machine_id.as_str())
+            .unwrap_or(&self.pairing.machine_id);
+        if !machine_id.is_empty() {
+            if let Ok(val) = machine_id.parse() {
+                request.headers_mut().insert("x-ferryx-machine-id", val);
+            }
         }
         let (mut socket, _) = tokio_tungstenite::connect_async(request).await?;
         if let Some(identity) = &self.identity {
@@ -452,9 +477,18 @@ impl RelayClient {
         let (mut write, mut read) = socket.split();
         // Dropping the control future also aborts its data channels.
         let mut sessions = tokio::task::JoinSet::new();
+        let mut ping_interval = tokio::time::interval(Duration::from_secs(15));
+        ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             let message = tokio::select! {
+                _ = ping_interval.tick() => {
+                    if let Err(err) = write.send(Message::Ping(Vec::new().into())).await {
+                        tracing::warn!("relay control ping failed: {err}");
+                        break;
+                    }
+                    continue;
+                }
                 registration = registrations.recv(), if pending.is_none() => {
                     if let Some(registration) = registration {
                         if registration.ack.is_closed() { continue; }

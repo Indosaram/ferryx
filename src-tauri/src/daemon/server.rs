@@ -1985,13 +1985,12 @@ impl DaemonServer {
                         .map(|published| published.coordinator.clone());
                     match coordinator {
                         Some(coordinator) => {
-                            match coordinator
-                                .generate_scoped_pairing(
-                                    std::time::Duration::from_secs(60),
-                                    perm,
-                                    scope,
-                                )
-                                .await
+                            let lifetime = if scope == crate::remote::auth::DeviceAccessScope::Machine {
+                                std::time::Duration::from_secs(600)
+                            } else {
+                                std::time::Duration::from_secs(60)
+                            };
+                            match coordinator.generate_scoped_pairing(lifetime, perm, scope).await
                             {
                                 Ok(info) => DaemonResponse::RemotePairingCodeOk {
                                     code: info.pin,

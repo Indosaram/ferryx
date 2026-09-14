@@ -5,8 +5,7 @@ import type { RegisteredProject } from "../lib/tauri";
 import { remoteHostStore, type HostEndpoint } from "../state/remoteHostStore";
 import { RemoteDirectoryPicker } from "./RemoteDirectoryPicker";
 
-function unavailable(host: HostEndpoint | undefined, nativeReady: boolean, enabled: boolean): string | null {
-  if (!enabled) return "Paired daemon projects are disabled. Enable machine access in Settings.";
+function unavailable(host: HostEndpoint | undefined, nativeReady: boolean): string | null {
   if (!nativeReady) return "Native machine access is unavailable. Upgrade the desktop and local daemon.";
   if (!host) return "Pair a daemon in Settings > Remote Access, then select a machine.";
   if (host.authStatus !== "paired" || host.grantScope !== "machine") return "Pair this daemon with a machine-access PIN in Settings > Remote Access.";
@@ -22,7 +21,7 @@ export function PairedDaemonProjectForm({ onBack, onClose, onRegistered }: {
   const hosts = Object.values(state.hosts);
   const [hostId, setHostId] = useState(() => hosts[0]?.hostId ?? "");
   const host = state.hosts[hostId];
-  const issue = unavailable(host, state.nativeStatus === "ready", state.machineFeaturesEnabled !== false);
+  const issue = unavailable(host, state.nativeStatus === "ready");
   const key = JSON.stringify([hostId, host?.generation, issue]);
   // Remounting discards selected paths, cached listings, negotiated capabilities and pending UI adoption.
   return <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6" role="presentation">

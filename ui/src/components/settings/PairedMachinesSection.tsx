@@ -1,22 +1,19 @@
 import { useState, useSyncExternalStore } from "react";
-import { pairedHostInventory } from "../../lib/pairedHostInventory";
+import { pairedHostInventory, DEFAULT_RELAY_ORIGIN, DEFAULT_MACHINE_LABEL } from "../../lib/pairedHostInventory";
 import { createPairedDaemonProjectAdapter, type PairedHostContext } from "../../lib/pairedDaemonProject";
 import { remoteHostStore, selectHostList, type RemoteHostStore } from "../../state/remoteHostStore";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
-import { Switch } from "../ui/switch";
-import { SettingRow } from "./primitives";
 
 const explanations: Record<string, string> = {
   NATIVE_CONTEXT_REQUIRED: "Native host inventory is unavailable. Use the desktop app with a compatible local daemon; browser mirror access cannot manage machines.",
   MACHINE_GRANT_REQUIRED: "A machine control grant is required. A mirror PIN cannot authorize projects. Re-pair with an owner-issued machine PIN; revoked credentials cannot reconnect.",
-  UNSUPPORTED_CAPABILITY: "This relay, remote daemon, or local daemon does not advertise the required machine capabilities. Upgrade compatible components; remote terminals are not available in this build without pairedDaemonProxyV1.",
+  UNSUPPORTED_CAPABILITY: "This relay, remote daemon, or local daemon does not advertise the required machine capabilities. Upgrade compatible components.",
   STALE_HOST_GENERATION: "Credentials changed during this request. Refresh the inventory and check capabilities again.",
   PAIRED_HOST_UNAVAILABLE: "The native host operation failed. Check the relay and daemon versions, connectivity, and PIN scope, then retry. Saved projects have not been removed.",
-  FEATURE_DISABLED: "Paired daemon projects are disabled. Saved projects and layouts remain intact; no mirror, Local, or SSH fallback is used.",
   OFFLINE: "Machine is offline. Saved projects remain available in the workspace; reconnect to the owning daemon.",
-  UNCHECKED: "Check the remote machine capabilities before adding a project. Inventory support alone does not provide remote terminals.",
-  READY: "Machine project capabilities verified. Sessions require an advertised native terminal proxy.",
+  UNCHECKED: "Check the remote machine capabilities before adding a project.",
+  READY: "Machine project capabilities verified.",
 };
 
 async function negotiate(context: PairedHostContext) {
@@ -35,9 +32,10 @@ export function PairedMachinesSection({
   onOpenProject?: (hostId: string) => void;
 }) {
   const state = useSyncExternalStore(store.subscribe, store.getState);
-  const [relayOrigin, setRelayOrigin] = useState("");
-  const [displayLabel, setDisplayLabel] = useState("");
+  const [relayOrigin, setRelayOrigin] = useState(DEFAULT_RELAY_ORIGIN);
+  const [displayLabel, setDisplayLabel] = useState(DEFAULT_MACHINE_LABEL);
   const [pin, setPin] = useState("");
+  const [advanced, setAdvanced] = useState(false);
   const [confirm, setConfirm] = useState<PairedHostContext | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -45,7 +43,11 @@ export function PairedMachinesSection({
 
   async function pair() {
     setBusy(true); setError(null);
-    const request = { relayOrigin, displayLabel, pin };
+    const request = {
+      relayOrigin: relayOrigin.trim() || DEFAULT_RELAY_ORIGIN,
+      displayLabel: displayLabel.trim() || DEFAULT_MACHINE_LABEL,
+      pin,
+    };
     setPin("");
     try { if (!await inventory.pair(request)) setError("PAIRED_HOST_UNAVAILABLE"); }
     finally { setBusy(false); }
@@ -74,28 +76,25 @@ export function PairedMachinesSection({
 
   return <section aria-label="Paired machines" className="mt-8 space-y-3">
     <h3 className="text-[12px] font-semibold">Paired machines</h3>
-    <p className="text-[12px] text-muted-foreground">Manage project-owning daemons, not phone mirrors. On the remote machine, the daemon owner starts <code>ferryx-cli --daemon</code> and issues <code>ferryx-cli pair generate --access machine</code>. Machine traffic stays on the paired relay; no SSH credentials or remote GUI are needed.</p>
-    <SettingRow label="Paired daemon projects" description="Opt-in rollout gate (pairedDaemonProjectsV1). Turning this off preserves projects, layouts, and credentials. It does not enable an unsupported terminal proxy.">
-      <Switch aria-label="Paired daemon projects" checked={inventory.getProjectsEnabled()} onCheckedChange={enabled => {
-        try { inventory.setProjectsEnabled(enabled); setError(null); }
-        catch { setError("Unable to save the feature gate. The previous setting is unchanged."); }
-      }} />
-    </SettingRow>
+    <p className="text-[12px] text-muted-foreground">Manage project-owning daemons, not phone mirrors. On the remote machine, the daemon owner starts <code>ferryx-cli --daemon</code> and issues <code>ferryx-cli pair generate --access machine</code>. Enter only the PIN here: the built-in relay is used unless Advanced overrides it. Machine traffic stays on the paired relay; no SSH credentials or remote GUI are needed.</p>
     {error ? <p role="alert" className="text-[12px] text-destructive">{explanations[error] ?? error}</p> : null}
     <form className="space-y-2" onSubmit={event => { event.preventDefault(); void pair(); }}>
-      <Input aria-label="Machine relay origin" type="url" required placeholder="https://relay.example" value={relayOrigin} onChange={event => setRelayOrigin(event.target.value)} />
-      <Input aria-label="Machine label" required value={displayLabel} onChange={event => setDisplayLabel(event.target.value)} />
-      <Input aria-label="Machine PIN" type="password" autoComplete="off" required value={pin} onChange={event => setPin(event.target.value)} />
-      <Button type="submit" disabled={busy || state.nativeStatus !== "ready"}>Pair machine</Button>
-      <Button type="button" variant="outline" disabled={busy} onClick={() => void inventory.refresh()}>Refresh machines</Button>
+      <Input aria-label="Machine PIN" type="password" autoComplete="off" required value={pin} placeholder="6-digit PIN from the remote machine" onChange={event => setPin(event.target.value)} />
+      <div className="flex flex-wrap gap-2">
+        <Button type="submit" disabled={busy || state.nativeStatus !== "ready"}>Pair machine</Button>
+        <Button type="button" variant="outline" disabled={busy} onClick={() => void inventory.refresh()}>Refresh machines</Button>
+        <Button type="button" variant="ghost" aria-expanded={advanced} onClick={() => setAdvanced(value => !value)}>Advanced</Button>
+      </div>
+      {advanced ? <div className="space-y-2 rounded-md border border-border p-2">
+        <Input aria-label="Machine relay origin" type="url" placeholder={DEFAULT_RELAY_ORIGIN} value={relayOrigin} onChange={event => setRelayOrigin(event.target.value)} />
+        <Input aria-label="Machine label" value={displayLabel} placeholder={DEFAULT_MACHINE_LABEL} onChange={event => setDisplayLabel(event.target.value)} />
+      </div> : null}
     </form>
     {state.nativeStatus !== "ready" ? <p className="text-[12px] text-status-warning">{explanations.NATIVE_CONTEXT_REQUIRED}</p> : null}
     {selectHostList(state).map(host => {
       const result = checks[host.hostId];
       const code = state.nativeStatus !== "ready" ? "NATIVE_CONTEXT_REQUIRED"
         : host.authStatus !== "paired" || host.grantScope !== "machine" ? "MACHINE_GRANT_REQUIRED"
-        : !inventory.hasProxyCapability() ? "UNSUPPORTED_CAPABILITY"
-        : !state.machineFeaturesEnabled ? "FEATURE_DISABLED"
         : !host.online ? "OFFLINE"
         : result?.generation === host.generation ? result.code : "UNCHECKED";
       return <div key={host.hostId} className="space-y-2 rounded-md border border-border p-3">
@@ -105,7 +104,7 @@ export function PairedMachinesSection({
         <div className="flex flex-wrap gap-2">
           <Button type="button" variant="outline" aria-label={`Check capabilities for ${host.name}`} disabled={busy || !host.generation || state.nativeStatus !== "ready"} onClick={() => void checkHost({ hostId: host.hostId, generation: host.generation! })}>Check capabilities</Button>
           <Button type="button" aria-label={`Add Project on ${host.name}`} disabled={busy || code !== "READY" || !onOpenProject} onClick={() => onOpenProject?.(host.hostId)}>Add Project</Button>
-          <Button type="button" variant="outline" aria-label={`Re-pair ${host.name}`} disabled={busy} onClick={() => { setRelayOrigin(host.relayOrigin ?? ""); setDisplayLabel(host.name); setPin(""); }}>Re-pair</Button>
+          <Button type="button" variant="outline" aria-label={`Re-pair ${host.name}`} disabled={busy} onClick={() => { setAdvanced(true); setRelayOrigin(host.relayOrigin ?? ""); setDisplayLabel(host.name); setPin(""); }}>Re-pair</Button>
           <Button type="button" variant="outline" aria-label={`Forget ${host.name}`} disabled={busy || !host.generation} onClick={() => setConfirm({ hostId: host.hostId, generation: host.generation! })}>Forget credentials</Button>
         </div>
         {!onOpenProject ? <p className="text-[11px] text-muted-foreground">Use the workspace Add Project dialog and select Paired Daemon. Direct navigation from settings is not connected in this build.</p> : null}

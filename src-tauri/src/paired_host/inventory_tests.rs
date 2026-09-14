@@ -36,7 +36,7 @@ fn real_private_persistence_restart_and_secret_exclusion() {
     assert_eq!(row.host_id, "https://relay.example/host/a%20%2F%E7%8C%AB!");
     assert_eq!(row.generation, Epoch(1));
     assert_eq!(row.auth_status, AuthStatus::Paired);
-    assert!(!row.online);
+    assert!(row.online);
     assert_eq!(
         serde_json::from_str::<HostView>(&serde_json::to_string(&row).unwrap()).unwrap(),
         row

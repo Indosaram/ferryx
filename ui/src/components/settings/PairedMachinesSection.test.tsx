@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createRemoteHostStore, remoteHostKey } from "../../state/remoteHostStore";
-import { createPairedHostInventory, type HostView, type PairedHostCommands } from "../../lib/pairedHostInventory";
+import { createPairedHostInventory, DEFAULT_RELAY_ORIGIN, type HostView, type PairedHostCommands } from "../../lib/pairedHostInventory";
 import { PairedMachinesSection } from "./PairedMachinesSection";
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true, invoke: vi.fn() }));
 const hostId = remoteHostKey("https://relay.example", "fixture");
@@ -19,18 +19,17 @@ function fixture(overrides: Partial<HostView> = {}, proxy = true) {
 }
 beforeEach(() => { localStorage.clear(); vi.clearAllMocks(); });
 afterEach(cleanup);
-it("rollback disables the existing flag and preserves host selection and saved layout bytes across refresh", async () => {
+it("refresh preserves host selection, generation, and saved layout bytes", async () => {
   const { store, inventory } = fixture();
   await inventory.refresh();
-  inventory.setProjectsEnabled(true);
   store.setActiveHost(hostId);
   localStorage.setItem("ferryx_workspace_layout", '{"target":{"kind":"daemon","hostId":"fixture"},"session":"original"}');
   const saved = localStorage.getItem("ferryx_workspace_layout");
   render(<PairedMachinesSection store={store} inventory={inventory} />);
   expect(store.getState().machineFeaturesEnabled).toBe(true);
-  fireEvent.click(screen.getByRole("switch", { name: "Paired daemon projects" }));
+  expect(screen.queryByRole("switch", { name: "Paired daemon projects" })).toBeNull();
   await act(() => inventory.refresh());
-  expect(store.getState().machineFeaturesEnabled).toBe(false);
+  expect(store.getState().machineFeaturesEnabled).toBe(true);
   expect(store.getState().activeHostId).toBe(hostId);
   expect(store.getState().hosts[hostId].generation).toBe("9");
   expect(localStorage.getItem("ferryx_workspace_layout")).toBe(saved);
@@ -50,9 +49,8 @@ it("requires explicit confirmation before native credential forget, and cancel p
 it.each([
   [{ grantScope: "mirror" }, true, "MACHINE_GRANT_REQUIRED"],
   [{ authStatus: "revoked" }, true, "MACHINE_GRANT_REQUIRED"],
-  [{}, false, "UNSUPPORTED_CAPABILITY"],
 ] as const)("does not classify incompatible hosts as merely offline: %j", async (overrides, proxy, code) => {
-  const { store, inventory } = fixture(overrides, proxy); await inventory.refresh(); inventory.setProjectsEnabled(true);
+  const { store, inventory } = fixture(overrides, proxy); await inventory.refresh();
   render(<PairedMachinesSection store={store} inventory={inventory} />);
   expect(screen.getByTestId("machine-status").getAttribute("data-code")).toBe(code);
   expect(screen.getByRole("button", { name: "Add Project on Fixture" })).toBeDisabled();
@@ -69,8 +67,15 @@ it("pairs and re-pairs only through native inventory and never selects a mirror 
   expect(store.getState().hosts[hostId].generation).toBe("10");
   expect(screen.getByLabelText("Machine PIN")).toHaveValue("");
 });
+it("pairs with the PIN alone using the built-in relay and default label", async () => {
+  const { store, inventory, commands } = fixture(); await inventory.refresh();
+  render(<PairedMachinesSection store={store} inventory={inventory} />);
+  fireEvent.change(screen.getByLabelText("Machine PIN"), { target: { value: "654321" } });
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Pair machine" })); });
+  expect(commands.pair).toHaveBeenCalledExactlyOnceWith({ relayOrigin: DEFAULT_RELAY_ORIGIN, displayLabel: "Machine", pin: "654321" });
+});
 it("fails closed without native inventory and exposes stale generation errors from capability negotiation", async () => {
-  const { store, inventory } = fixture(); await inventory.refresh(); inventory.setProjectsEnabled(true);
+  const { store, inventory } = fixture(); await inventory.refresh();
   const negotiate = vi.fn().mockRejectedValue(new Error("STALE_HOST_GENERATION"));
   render(<PairedMachinesSection store={store} inventory={inventory} negotiate={negotiate} />);
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Check capabilities for Fixture" })); });

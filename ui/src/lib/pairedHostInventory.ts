@@ -1,6 +1,12 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { remoteHostKey, remoteHostStore, REMOTE_HOST_STORAGE_KEY, type HostEndpoint, type RemoteHostStore } from "../state/remoteHostStore";
 
+// The built-in relay is the product default: pairing must work with the PIN
+// alone. One source of truth, shared by every settings surface that asks for
+// a relay; the advanced pairing controls may override it per machine.
+export const DEFAULT_RELAY_ORIGIN = "https://relay.checka.cc";
+export const DEFAULT_MACHINE_LABEL = "Machine";
+
 export interface HostView {
   hostId: string;
   relayOrigin: string;
@@ -57,16 +63,13 @@ function endpoint(view: HostView): HostEndpoint {
 export function createPairedHostInventory(store: RemoteHostStore, commands = nativePairedHostCommands, storage?: Storage) {
   let revision = 0;
   let refreshRequest = 0;
-  // Rollout is opt-in and separate from advertised support; the effective flag
-  // remains the store's existing machineFeaturesEnabled, never a second gate.
-  let projectsEnabled = false;
-  try { projectsEnabled = storage?.getItem("pairedDaemonProjectsV1") === "true"; }
-  catch { projectsEnabled = false; }
-  let proxyAvailable = false;
+  // Machine features follow native inventory readiness alone; there is no
+  // user-facing rollout gate. A local inventory failure fails closed below.
+  let projectsEnabled = true;
+  let proxyAvailable = true;
   function setProjectsEnabled(enabled: boolean) {
-    storage?.setItem("pairedDaemonProjectsV1", String(enabled));
     projectsEnabled = enabled;
-    store.setState(s => ({ ...s, machineFeaturesEnabled: enabled && proxyAvailable && s.nativeStatus === "ready" }));
+    store.setState(s => ({ ...s, machineFeaturesEnabled: enabled && s.nativeStatus === "ready" }));
   }
   function getProjectsEnabled() { return projectsEnabled; }
   function hasProxyCapability() { return proxyAvailable; }
@@ -90,7 +93,7 @@ export function createPairedHostInventory(store: RemoteHostStore, commands = nat
       if (request !== refreshRequest || started !== revision) return;
       proxyAvailable = capability.pairedDaemonProxyV1 === true;
       store.setHosts(hosts);
-      store.setState(s => ({ ...s, nativeStatus: "ready", machineFeaturesEnabled: projectsEnabled && proxyAvailable }));
+      store.setState(s => ({ ...s, nativeStatus: "ready", machineFeaturesEnabled: true }));
     } catch { if (request === refreshRequest && started === revision) unavailable(); }
   }
   async function pair(request: PairHostRequest): Promise<boolean> {
