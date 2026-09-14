@@ -9,12 +9,13 @@ use crate::ipc::{run_blocking, IpcError};
 #[cfg(target_os = "macos")]
 use crate::notification::format_badge_label;
 use crate::notification::{
-    open_system_notification_settings, picked_audio_file, DispatchNotificationRequest,
-    DispatchNotificationResult, NativeNotificationBackend, NotificationActivations,
-    NotificationAudioPlayer, NotificationContent, NotificationPermissionRequestDto,
-    NotificationPermissionStatusDto, NotificationProbeResult, NotificationService,
-    NotificationSound, NotificationTarget, OpenSystemSettingsResult, PickedAudioFile,
-    PlaySoundResult, SetBadgeCountResult, SUPPORTED_AUDIO_EXTENSIONS,
+    open_system_notification_settings, open_system_notification_settings_with_launcher,
+    picked_audio_file, DispatchNotificationRequest, DispatchNotificationResult,
+    NativeNotificationBackend, NotificationActivations, NotificationAudioPlayer,
+    NotificationContent, NotificationPermissionRequestDto, NotificationPermissionStatusDto,
+    NotificationProbeResult, NotificationService, NotificationSound, NotificationTarget,
+    OpenSystemSettingsResult, PickedAudioFile, PlaySoundResult, SetBadgeCountResult,
+    SUPPORTED_AUDIO_EXTENSIONS,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -148,6 +149,12 @@ pub async fn cmd_notification_probe_delivery<R: Runtime>(
 #[tauri::command]
 pub async fn cmd_notification_open_system_settings() -> Result<OpenSystemSettingsResult, IpcError> {
     run_blocking(|| Ok(open_system_notification_settings())).await
+}
+
+pub async fn cmd_notification_open_system_settings_with_launcher(
+    launch: impl FnOnce(&str, &[&str]) -> bool + Send + 'static,
+) -> Result<OpenSystemSettingsResult, IpcError> {
+    run_blocking(|| Ok(open_system_notification_settings_with_launcher(launch))).await
 }
 
 /// Play a custom notification sound.
@@ -359,7 +366,7 @@ mod tests {
 
     #[tokio::test]
     async fn open_system_settings_command_returns_a_structured_result() {
-        let result = cmd_notification_open_system_settings()
+        let result = cmd_notification_open_system_settings_with_launcher(|_program, _args| true)
             .await
             .expect("command resolves");
 
@@ -370,9 +377,23 @@ mod tests {
         }
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
-            // Opening can legitimately fail in a headless session; only the
-            // structured shape is guaranteed.
-            assert!(result.opened || result.reason.is_some());
+            assert!(result.opened);
+            assert!(result.reason.is_none());
+        }
+
+        let failed = cmd_notification_open_system_settings_with_launcher(|_program, _args| false)
+            .await
+            .expect("command resolves");
+
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            assert!(!failed.opened);
+            assert_eq!(failed.reason.as_deref(), Some("unsupported"));
+        }
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            assert!(!failed.opened);
+            assert!(failed.reason.is_some());
         }
     }
 
