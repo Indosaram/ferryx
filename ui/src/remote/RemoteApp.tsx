@@ -64,7 +64,12 @@ function collectWaitingTargets(model: RemoteWorkspaceModel): WaitingTabTarget[] 
   if (currentWorkspaceId && model.context.terminalTabs) {
     for (const tab of model.context.terminalTabs) {
       if (tab.activityState === "waiting" && tab.id !== activeTabId) {
-        const key = `${currentWorkspaceId}\u0000${currentWorktreeSlug ?? ""}\u0000${tab.id}`;
+        // Panes from every worktree are published with their own identity; the
+        // waiting badge must route through that tab's worktree, not the current
+        // one — the gateway rejects a mismatched worktreeSlug with 400.
+        const tabWorktreeSlug = tab.worktreeSlug ?? currentWorktreeSlug;
+        const tabWorktreeLabel = tab.worktreeLabel ?? currentWorktreeLabel;
+        const key = `${currentWorkspaceId}\u0000${tabWorktreeSlug ?? ""}\u0000${tab.id}`;
         if (!seen.has(key)) {
           seen.add(key);
           targets.push({
@@ -72,8 +77,8 @@ function collectWaitingTargets(model: RemoteWorkspaceModel): WaitingTabTarget[] 
             sessionId: tab.sessionId,
             label: tab.label,
             workspaceId: currentWorkspaceId,
-            worktreeSlug: currentWorktreeSlug,
-            worktreeLabel: currentWorktreeLabel,
+            worktreeSlug: tabWorktreeSlug,
+            worktreeLabel: tabWorktreeLabel,
           });
         }
       }
@@ -338,6 +343,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
   const selectionRequestAcceptedRef = useRef(false);
   const selectionEventReceivedRef = useRef(false);
   const confirmationInFlightRef = useRef(false);
+  const confirmationDirtyRef = useRef(false);
   const workspaceRefreshVersionRef = useRef(0);
   const confirmationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -371,6 +377,10 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
         directHints,
       });
       remoteHostStore.setActiveHost(remoteHostKey(relayUrl, machineId));
+      // Re-pairing the host that is already active is a no-op in the store, so
+      // the keyed connection never remounts — adopt the new token here or the
+      // UI stays on the pairing page until reload.
+      if (remoteHostKey(relayUrl, machineId) === hostId) setToken(newToken);
       clearRemoteAuthToken(hostId);
       return;
     }
@@ -552,16 +562,28 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
   }, []);
 
   const confirmSelection = useCallback(async (option: RemoteContextOption) => {
-    if (confirmationInFlightRef.current) return;
+    if (confirmationInFlightRef.current) {
+      // Another matching selection event arrived while a confirmation read is
+      // in flight: that response will be discarded as stale, so queue one
+      // replacement run instead of dropping the selection on the floor.
+      confirmationDirtyRef.current = true;
+      return;
+    }
     confirmationInFlightRef.current = true;
-    const confirmed = await refreshWorkspace();
-    confirmationInFlightRef.current = false;
-    if (pendingSelectionRef.current !== option) return;
-    const creating = creationSessionsRef.current;
-    const newSession = confirmed?.context.activeTerminal?.sessionId;
-    if (confirmed && modelConfirmsSelection(option, confirmed)
-      && (!creating || (newSession && !creating.has(newSession)))) {
-      clearPendingSelection(true);
+    try {
+      do {
+        confirmationDirtyRef.current = false;
+        const confirmed = await refreshWorkspace();
+        if (pendingSelectionRef.current !== option) break;
+        const creating = creationSessionsRef.current;
+        const newSession = confirmed?.context.activeTerminal?.sessionId;
+        if (confirmed && modelConfirmsSelection(option, confirmed)
+          && (!creating || (newSession && !creating.has(newSession)))) {
+          clearPendingSelection(true);
+        }
+      } while (confirmationDirtyRef.current && pendingSelectionRef.current === option);
+    } finally {
+      confirmationInFlightRef.current = false;
     }
   }, [clearPendingSelection, refreshWorkspace]);
 
@@ -729,8 +751,8 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
     if (prevTab) {
       void selectContext({
         workspaceId: model.context.workspaceId,
-        worktreeSlug: model.context.worktreeSlug,
-        worktreeLabel: model.context.worktreeLabel,
+        worktreeSlug: prevTab.worktreeSlug ?? model.context.worktreeSlug,
+        worktreeLabel: prevTab.worktreeLabel ?? model.context.worktreeLabel,
         tabId: prevTab.id,
         sessionId: prevTab.sessionId,
       });
@@ -743,15 +765,48 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
     if (nextTab) {
       void selectContext({
         workspaceId: model.context.workspaceId,
-        worktreeSlug: model.context.worktreeSlug,
-        worktreeLabel: model.context.worktreeLabel,
+        worktreeSlug: nextTab.worktreeSlug ?? model.context.worktreeSlug,
+        worktreeLabel: nextTab.worktreeLabel ?? model.context.worktreeLabel,
         tabId: nextTab.id,
         sessionId: nextTab.sessionId,
       });
     }
   }, [currentIndex, model.context.workspaceId, model.context.worktreeLabel, model.context.worktreeSlug, selectContext, tabs]);
 
-  if (!token) return <PairingPage onPaired={handlePaired} transportUrl={pairingBaseUrl} />;
+  if (!token) {
+    return (
+      <div className="flex h-[100dvh] min-h-0 min-w-0 flex-col overflow-hidden bg-background text-foreground">
+        {/* The unpaired shell still needs host switching: choosing "Local
+            Machine" lands here and the saved hosts must stay reachable. */}
+        <header className="flex h-7 shrink-0 items-center justify-end border-b border-border bg-card px-2.5">
+          <button
+            type="button"
+            aria-label="Switch host"
+            aria-haspopup="dialog"
+            aria-expanded={hostDrawerOpen}
+            data-testid="mobile-host-drawer-trigger"
+            onClick={() => setHostDrawerOpen(true)}
+            className="flex h-5 items-center gap-1 rounded px-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            {activeHost ? (
+              <span
+                data-testid="active-host-online-indicator"
+                className={`size-1.5 shrink-0 rounded-full ${activeHost.online ? "bg-status-success" : "bg-status-idle"}`}
+                aria-hidden="true"
+              />
+            ) : (
+              <Laptop className="size-3 shrink-0" aria-hidden="true" />
+            )}
+            <span data-testid="active-host-name" className="max-w-20 truncate sm:max-w-32">
+              {activeHost ? activeHost.name : "Local"}
+            </span>
+          </button>
+        </header>
+        <PairingPage onPaired={handlePaired} transportUrl={pairingBaseUrl} />
+        <MobileHostDrawer open={hostDrawerOpen} onOpenChange={setHostDrawerOpen} />
+      </div>
+    );
+  }
 
   const activeTerminal = model.context.activeTerminal;
   const effectiveSessionId = optimisticSessionId ?? activeTerminal?.sessionId ?? null;

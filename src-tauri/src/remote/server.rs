@@ -1241,23 +1241,50 @@ async fn while_device_authorized<T>(
 }
 
 async fn handle_events_socket(
-    mut socket: WebSocket,
+    socket: WebSocket,
     mut rx: broadcast::Receiver<String>,
     active_selection: Option<RemoteActiveDesktopSelection>,
 ) {
+    let (mut sender, mut receiver) = socket.split();
     if let Some(selection) = active_selection {
         let snapshot = serde_json::to_string(&RemoteEventMessage {
             event: REMOTE_ACTIVE_SELECTION_CHANGED_EVENT.to_string(),
             payload: serde_json::to_value(selection).unwrap_or(serde_json::Value::Null),
         })
         .unwrap_or_default();
-        if socket.send(Message::Text(snapshot.into())).await.is_err() {
+        if sender.send(Message::Text(snapshot.into())).await.is_err() {
             return;
         }
     }
-    while let Ok(msg) = rx.recv().await {
-        if socket.send(Message::Text(msg.into())).await.is_err() {
-            break;
+    loop {
+        tokio::select! {
+            biased;
+            // The client half is polled too: a send-only loop cannot observe a
+            // closed socket while no events are flowing, which would leak the
+            // task, receiver, and authorization watcher until the next event.
+            incoming = receiver.next() => {
+                match incoming {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Ping(payload))) => {
+                        if sender.send(Message::Pong(payload)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) => break,
+                }
+            }
+            msg = rx.recv() => {
+                match msg {
+                    Ok(msg) => {
+                        if sender.send(Message::Text(msg.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
         }
     }
 }
@@ -1272,15 +1299,16 @@ async fn ws_terminal_handler(
     // Callers may address a session by its raw ID or by a host-scoped ID of the form
     // "<host_id>::<session_id>" (see `worktree::parse_host_scoped_session_id`). The
     // session backend itself only knows about raw session IDs, so unwrap the scope
-    // (if present) before doing any lookups or routing.
+    // (if present) before doing any lookups or routing. The ticket, however, was minted
+    // for the caller's *requested* path — consume it against that, not the unwrapped id.
     let session_id = parse_host_scoped_session_id(&requested_session_id)
         .map(|(_host_id, session_id)| session_id.to_string())
-        .unwrap_or(requested_session_id);
+        .unwrap_or_else(|| requested_session_id.clone());
     let token = socket_credential(
         &state,
         &headers,
         &query,
-        &format!("/api/v1/terminal/{session_id}"),
+        &format!("/api/v1/terminal/{requested_session_id}"),
     )
     .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let device = state
@@ -1516,9 +1544,13 @@ async fn handle_terminal_socket(
                             ClientControlMessage::RemoteWrite { .. }
                             | ClientControlMessage::RemoteResize { .. } => {}
                             ClientControlMessage::Resize { cols, rows } => {
-                                if let Some((cols, rows)) = validated_grid_geometry(cols, rows) {
-                                    let _ =
-                                        session_backend.resize(&session_id_clone, cols, rows).await;
+                                if can_control {
+                                    if let Some((cols, rows)) = validated_grid_geometry(cols, rows)
+                                    {
+                                        let _ = session_backend
+                                            .resize(&session_id_clone, cols, rows)
+                                            .await;
+                                    }
                                 }
                             }
                             ClientControlMessage::Signal { signal } => {
@@ -1892,8 +1924,13 @@ async fn handle_terminal_grid_socket(
                             | ClientControlMessage::RemoteResize { .. } => {}
                             ClientControlMessage::Resize { cols, rows } => {
                                 if let Some((cols, rows)) = validated_grid_geometry(cols, rows) {
-                                    let _ =
-                                        session_backend.resize(&session_id_clone, cols, rows).await;
+                                    // View-only devices may reflow their own grid but must not
+                                    // resize the desktop PTY (same gate as Signal/write_input).
+                                    if can_control {
+                                        let _ = session_backend
+                                            .resize(&session_id_clone, cols, rows)
+                                            .await;
+                                    }
                                     if !enqueue_grid_operation(&recv_mirror, &recv_tx, |mirror| {
                                         mirror.resize(cols, rows)
                                     }) {
@@ -2115,7 +2152,9 @@ async fn push_subscribe(
         .auth_manager
         .validate_token(&token)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
-    global_push_store().subscribe(payload);
+    global_push_store()
+        .subscribe(payload)
+        .map_err(|message| (StatusCode::PAYLOAD_TOO_LARGE, message))?;
     Ok(StatusCode::NO_CONTENT)
 }
 

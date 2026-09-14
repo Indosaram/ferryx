@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveAgentLogo } from "../lib/agentIcon";
 import { MobileKeyDock } from "../components/MobileKeyDock";
 import { PairingPage } from "./PairingPage";
+import { remoteHostKey, remoteHostStore } from "../state/remoteHostStore";
 import { RemoteApp } from "./RemoteApp";
 import { normalizeRemoteWorkspaceState } from "./RemoteSessionList";
 
@@ -11,9 +12,13 @@ vi.mock("./RemoteTerminal", () => ({
   RemoteTerminal: ({
     sessionId,
     onSocketLifecycle,
+    onSwipePreviousTab,
+    onSwipeNextTab,
   }: {
     sessionId: string;
     onSocketLifecycle?: (sessionId: string, state: "open" | "closed") => void;
+    onSwipePreviousTab?: () => void;
+    onSwipeNextTab?: () => void;
   }) => (
     <div
       data-testid="remote-terminal"
@@ -21,8 +26,12 @@ vi.mock("./RemoteTerminal", () => ({
       data-instance-id={useId()}
       onClick={() => onSocketLifecycle?.(sessionId, "closed")}
       onDoubleClick={() => onSocketLifecycle?.(sessionId, "open")}
+      data-swipe-previous={onSwipePreviousTab ? "available" : undefined}
+      data-swipe-next={onSwipeNextTab ? "available" : undefined}
     >
       Mirrored terminal {sessionId}
+      <button type="button" data-testid="swipe-previous" onClick={onSwipePreviousTab} />
+      <button type="button" data-testid="swipe-next" onClick={onSwipeNextTab} />
     </div>
   ),
 }));
@@ -220,6 +229,7 @@ afterEach(() => {
   cleanup();
   localStorage.clear();
   EventWebSocket.latest = null;
+  remoteHostStore.reset();
   vi.unstubAllGlobals();
 });
 
@@ -1382,6 +1392,50 @@ describe("Remote UI Components", () => {
     );
   });
 
+  it("swipes to a pane from another worktree using that pane's own worktree", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const crossWorktreeState = {
+      ...focusedState,
+      activeContext: {
+        ...focusedState.activeContext,
+        tabId: "tab-1",
+        terminalTabs: [
+          { id: "tab-1", label: "Editor", worktreeSlug: "main", worktreeLabel: "main" },
+          {
+            id: "tab-2::leaf-b",
+            label: "Build (2)",
+            worktreeSlug: "feature/remote-safe",
+            worktreeLabel: "feature/remote-safe",
+          },
+        ],
+      },
+    };
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(crossWorktreeState));
+    vi.stubGlobal("fetch", ticketed(fetchMock));
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+
+    // A mirrored terminal is required for the swipe handlers to be reachable.
+    await screen.findByTestId("remote-terminal");
+    fireEvent.click(screen.getByTestId("swipe-next"));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/v1/workspace/select",
+        expect.objectContaining({
+          method: "POST",
+          // Same contract as the click path: the target pane's own worktree travels.
+          body: JSON.stringify({
+            workspaceId: "ferryx-ui",
+            worktreeSlug: "feature/remote-safe",
+            tabId: "tab-2::leaf-b",
+          }),
+        }),
+      ),
+    );
+  });
+
   it("tab strip renders brand logo image for supported agentType and fallback terminal icon for unknown/missing agentType", async () => {
     localStorage.setItem("ferryx_remote_token", "test-token");
     const stateWithAgents = {
@@ -2126,6 +2180,169 @@ describe("Remote UI Components", () => {
         "data-session-id",
         "session-tests",
       );
+    });
+  });
+
+  it("routes a waiting badge tap through the waiting tab's own worktree", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const crossWorktreeWaiting = {
+      ...focusedState,
+      activeContext: {
+        workspaceId: "ferryx-ui",
+        worktreeSlug: "wt-main",
+        worktreeLabel: "main",
+        activeTerminal: focusedState.activeContext.activeTerminal,
+        activeTabId: "tab-1",
+        terminalTabs: [
+          { id: "tab-1", label: "Editor", activityState: "working", worktreeSlug: "wt-main", worktreeLabel: "main" },
+          { id: "tab-2", label: "Feature Agent", activityState: "waiting", worktreeSlug: "wt-feature", worktreeLabel: "feature", sessionId: "session-feature" },
+        ],
+      },
+      worktrees: [
+        { worktreeSlug: "wt-main", worktreeLabel: "main" },
+        { worktreeSlug: "wt-feature", worktreeLabel: "feature" },
+      ],
+    };
+    let selectBody: Record<string, unknown> | null = null;
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.endsWith("/api/v1/workspace/select") && init?.method === "POST") {
+        selectBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return jsonResponse({ accepted: true });
+      }
+      return jsonResponse(crossWorktreeWaiting);
+    });
+    vi.stubGlobal("fetch", ticketed(fetchMock));
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+    const badge = await screen.findByTestId("remote-attention-badge");
+    fireEvent.click(badge);
+
+    await waitFor(() => expect(selectBody).not.toBeNull());
+    expect(selectBody).toMatchObject({
+      workspaceId: "ferryx-ui",
+      worktreeSlug: "wt-feature",
+      tabId: "tab-2",
+    });
+  });
+
+  it("activates the new token when re-pairing the already-active host", async () => {
+    remoteHostStore.reset();
+    remoteHostStore.upsertHost({
+      machineId: "m1",
+      displayName: "Desk",
+      relayOrigin: "https://relay.example",
+      deviceToken: null,
+      lastSeenAt: Date.now(),
+      directHints: [],
+    });
+    remoteHostStore.setActiveHost(remoteHostKey("https://relay.example", "m1"));
+
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.endsWith("/api/v1/pair/exchange") && init?.method === "POST") {
+        return jsonResponse({ token: "new-device-token", machineId: "m1", displayName: "Desk" });
+      }
+      if (url.endsWith("/api/v1/workspace/state")) {
+        return jsonResponse(focusedState);
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", ticketed(fetchMock));
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+    const input = await screen.findByPlaceholderText("6-digit PIN");
+    fireEvent.change(input, { target: { value: "123456" } });
+    fireEvent.click(screen.getByRole("button", { name: /^connect$/i }));
+
+    // Same host: the new token must take effect without a remount.
+    expect(await screen.findByTestId("remote-terminal")).toBeInTheDocument();
+  });
+
+  it("keeps host switching reachable while the local machine is unpaired", async () => {
+    remoteHostStore.reset();
+    remoteHostStore.upsertHost({
+      machineId: "m1",
+      displayName: "Desk",
+      relayOrigin: "https://relay.example",
+      deviceToken: "tok-a",
+      lastSeenAt: Date.now(),
+      directHints: [],
+    });
+    remoteHostStore.setActiveHost(remoteHostKey("https://relay.example", "m1"));
+
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.endsWith("/api/v1/workspace/state")) {
+        return jsonResponse(focusedState);
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", ticketed(fetchMock));
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+    const switcher = await screen.findByTestId("mobile-host-drawer-trigger");
+    fireEvent.click(switcher);
+    fireEvent.click(await screen.findByTestId("mobile-host-option-local"));
+
+    // Local machine has no token: PairingPage shows, but the host switcher must
+    // stay reachable or the user is trapped with no way back to saved hosts.
+    expect(await screen.findByPlaceholderText("6-digit PIN")).toBeInTheDocument();
+    expect(screen.getByTestId("mobile-host-drawer-trigger")).toBeInTheDocument();
+  });
+
+  it("re-confirms a pending selection when another selection event arrives mid-confirmation", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    let workspaceStateCalls = 0;
+    let resolveConfirm: ((res: Response) => void) | null = null;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.endsWith("/api/v1/workspace/select") && init?.method === "POST") {
+        return Promise.resolve(jsonResponse({ accepted: true }));
+      }
+      if (url.endsWith("/api/v1/workspace/state")) {
+        workspaceStateCalls += 1;
+        if (workspaceStateCalls === 1) return Promise.resolve(jsonResponse(focusedState));
+        // First confirmation fetch: held open so a second event can interleave.
+        if (workspaceStateCalls === 2) {
+          return new Promise<Response>((resolve) => { resolveConfirm = resolve; });
+        }
+        return Promise.resolve(jsonResponse(secondFocusedState));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+    vi.stubGlobal("fetch", ticketed(fetchMock));
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+    await screen.findByTestId("remote-terminal");
+
+    fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i }));
+    const selector = screen.getByRole("dialog", { name: /Workspace context/i });
+    fireEvent.click(within(selector).getByRole("button", { name: /api-service.*feature\/remote-safe/i }));
+
+    const eventPayload = JSON.stringify({
+      event: "remote_active_selection_changed",
+      payload: { workspaceId: "api-service", worktreeSlug: "feature/remote-safe" },
+    });
+    act(() => { eventSocket().onmessage?.(new MessageEvent("message", { data: eventPayload })); });
+    await waitFor(() => expect(workspaceStateCalls).toBe(2));
+
+    // A second matching event while the confirmation is still in flight must be
+    // coalesced, not dropped: the first response is stale by the time it lands.
+    act(() => { eventSocket().onmessage?.(new MessageEvent("message", { data: eventPayload })); });
+    await act(async () => {
+      resolveConfirm?.(jsonResponse(focusedState));
+      await Promise.resolve();
+    });
+
+    // A replacement confirmation read must run and apply the authoritative state.
+    await waitFor(() => expect(workspaceStateCalls).toBeGreaterThanOrEqual(3));
+    await waitFor(() => {
+      expect(screen.getByLabelText("Current desktop context")).toHaveTextContent("api-service / feature/remote-safe");
     });
   });
 });

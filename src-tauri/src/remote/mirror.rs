@@ -462,14 +462,28 @@ pub mod headless {
 
             for line in &mut self.primary_grid {
                 line.resize(cols as usize, HeadlessCell::default());
+                // Truncating a row can clip a wide glyph's spacer tail; the
+                // orphaned head would make the emitted run claim more cells
+                // than the grid's declared width.
+                if let Some(last) = line.last_mut() {
+                    if last.width == 2 {
+                        *last = HeadlessCell::default();
+                    }
+                }
             }
             for line in &mut self.scrollback {
                 line.resize(cols as usize, HeadlessCell::default());
+                if let Some(last) = line.last_mut() {
+                    if last.width == 2 {
+                        *last = HeadlessCell::default();
+                    }
+                }
             }
             if self.primary_grid.len() < rows as usize {
                 let diff = rows as usize - self.primary_grid.len();
                 for _ in 0..diff {
-                    self.primary_grid.push(vec![HeadlessCell::default(); cols as usize]);
+                    self.primary_grid
+                        .push(vec![HeadlessCell::default(); cols as usize]);
                 }
             } else if self.primary_grid.len() > rows as usize {
                 let diff = self.primary_grid.len() - rows as usize;
@@ -477,6 +491,9 @@ pub mod headless {
                     let old_line = self.primary_grid.remove(0);
                     self.scrollback.push(old_line);
                 }
+                // Shrinking appends to scrollback too; keep the bound here or a
+                // viewer resizing repeatedly can grow the history without limit.
+                self.trim_scrollback();
             }
 
             for line in &mut self.alt_grid {
@@ -485,7 +502,8 @@ pub mod headless {
             if self.alt_grid.len() < rows as usize {
                 let diff = rows as usize - self.alt_grid.len();
                 for _ in 0..diff {
-                    self.alt_grid.push(vec![HeadlessCell::default(); cols as usize]);
+                    self.alt_grid
+                        .push(vec![HeadlessCell::default(); cols as usize]);
                 }
             } else if self.alt_grid.len() > rows as usize {
                 let diff = self.alt_grid.len() - rows as usize;
@@ -744,6 +762,21 @@ pub mod headless {
             self.scroll_top > 0 || self.scroll_bottom < self.rows.saturating_sub(1)
         }
 
+        /// Scrollback is bounded by [`Self::MAX_SCROLLBACK`]; every insertion path
+        /// — `scroll_up` and `resize` alike — must trim, not just the first.
+        pub(crate) const MAX_SCROLLBACK: usize = 10_000;
+
+        /// Wide graphemes need a stable two-cell anchor; combining sequences are
+        /// attacker-controlled and unbounded, so cap them per cell.
+        pub(crate) const MAX_COMBINING: usize = 8;
+
+        fn trim_scrollback(&mut self) {
+            let excess = self.scrollback.len().saturating_sub(Self::MAX_SCROLLBACK);
+            if excess > 0 {
+                self.scrollback.drain(..excess);
+            }
+        }
+
         fn scroll_up(&mut self) {
             let cols = self.cols as usize;
             if self.is_scrolling_region_active() {
@@ -763,9 +796,7 @@ pub mod headless {
                 if !self.primary_grid.is_empty() {
                     let old_line = self.primary_grid.remove(0);
                     self.scrollback.push(old_line);
-                    if self.scrollback.len() > 10_000 {
-                        self.scrollback.remove(0);
-                    }
+                    self.trim_scrollback();
                     self.primary_grid.push(vec![HeadlessCell::default(); cols]);
                 }
             }
@@ -803,7 +834,10 @@ pub mod headless {
                         } else {
                             target_x
                         };
-                        grid[cy][actual_x].combining.push(ch);
+                        // A lone cell could otherwise accumulate marks forever.
+                        if grid[cy][actual_x].combining.len() < Self::MAX_COMBINING {
+                            grid[cy][actual_x].combining.push(ch);
+                        }
                     }
                 }
                 return;
@@ -1022,13 +1056,19 @@ pub mod headless {
                     self.sync_active_cursor();
                 }
                 b'B' => {
-                    let count = params.first().copied().unwrap_or(1).max(1) as u16;
-                    self.cursor_y = (self.cursor_y + count).min(self.rows.saturating_sub(1));
+                    let count = params.first().copied().unwrap_or(1).max(1);
+                    self.cursor_y = self
+                        .cursor_y
+                        .saturating_add(count.min(u16::MAX as u32) as u16)
+                        .min(self.rows.saturating_sub(1));
                     self.sync_active_cursor();
                 }
                 b'C' => {
-                    let count = params.first().copied().unwrap_or(1).max(1) as u16;
-                    self.cursor_x = (self.cursor_x + count).min(self.cols.saturating_sub(1));
+                    let count = params.first().copied().unwrap_or(1).max(1);
+                    self.cursor_x = self
+                        .cursor_x
+                        .saturating_add(count.min(u16::MAX as u32) as u16)
+                        .min(self.cols.saturating_sub(1));
                     self.sync_active_cursor();
                 }
                 b'D' => {
@@ -1037,9 +1077,12 @@ pub mod headless {
                     self.sync_active_cursor();
                 }
                 b'E' => {
-                    let count = params.first().copied().unwrap_or(1).max(1) as u16;
+                    let count = params.first().copied().unwrap_or(1).max(1);
                     self.cursor_x = 0;
-                    self.cursor_y = (self.cursor_y + count).min(self.rows.saturating_sub(1));
+                    self.cursor_y = self
+                        .cursor_y
+                        .saturating_add(count.min(u16::MAX as u32) as u16)
+                        .min(self.rows.saturating_sub(1));
                     self.sync_active_cursor();
                 }
                 b'F' => {
@@ -1049,13 +1092,17 @@ pub mod headless {
                     self.sync_active_cursor();
                 }
                 b'G' => {
-                    let col = params.first().copied().unwrap_or(1).max(1) as u16;
-                    self.cursor_x = (col - 1).min(self.cols.saturating_sub(1));
+                    let col = params.first().copied().unwrap_or(1).max(1);
+                    self.cursor_x =
+                        col.saturating_sub(1)
+                            .min(self.cols.saturating_sub(1) as u32) as u16;
                     self.sync_active_cursor();
                 }
                 b'd' => {
-                    let row = params.first().copied().unwrap_or(1).max(1) as u16;
-                    self.cursor_y = (row - 1).min(self.rows.saturating_sub(1));
+                    let row = params.first().copied().unwrap_or(1).max(1);
+                    self.cursor_y =
+                        row.saturating_sub(1)
+                            .min(self.rows.saturating_sub(1) as u32) as u16;
                     self.sync_active_cursor();
                 }
                 b'@' => {
@@ -1787,5 +1834,65 @@ mod headless_tests {
         assert_eq!(text2, "e\u{0301}b");
         let total_cells: u16 = line0_2.runs.iter().map(|r| r.cells).sum();
         assert_eq!(total_cells, 2);
+    }
+
+    #[test]
+    fn resize_shrink_keeps_scrollback_bounded() {
+        let mut mirror = RemoteTerminalMirror::new(4, 2).expect("mirror");
+        for _ in 0..200 {
+            mirror.feed(b"line\r\n").expect("feed");
+            mirror.resize(4, 1).expect("shrink");
+            mirror.resize(4, 2).expect("grow");
+        }
+        assert!(mirror.scrollback.len() <= headless::RemoteTerminalMirror::MAX_SCROLLBACK);
+    }
+
+    #[test]
+    fn combining_marks_are_bounded_per_cell() {
+        let mut mirror = RemoteTerminalMirror::new(4, 2).expect("mirror");
+        mirror.feed(b"e").expect("base char");
+        for _ in 0..(headless::RemoteTerminalMirror::MAX_COMBINING * 4) {
+            mirror.feed("\u{0301}".as_bytes()).expect("combining mark");
+        }
+        assert!(
+            mirror.primary_grid[0][0].combining.len()
+                <= headless::RemoteTerminalMirror::MAX_COMBINING
+        );
+    }
+
+    #[test]
+    fn large_csi_counts_do_not_panic() {
+        let mut mirror = RemoteTerminalMirror::new(4, 2).expect("mirror");
+        mirror.feed(b"\x1b[65535B").expect("cursor down overflow");
+        mirror.feed(b"\x1b[65536G").expect("col overflow");
+        mirror.feed(b"\x1b[65535C").expect("cursor right overflow");
+        mirror
+            .feed(b"\x1b[65535E")
+            .expect("cursor next line overflow");
+        let _ = mirror.full_frame().expect("frame after extremes");
+    }
+
+    #[test]
+    fn shrink_repairs_wide_glyph_at_boundary() {
+        // 'ab가' in a 4-col row: '가' occupies cells 2-3. Shrinking to 3 clips
+        // the spacer tail; the orphaned head must be cleared or the emitted run
+        // claims more cells than the declared width.
+        let mut mirror = RemoteTerminalMirror::new(4, 2).expect("mirror");
+        mirror.feed("ab가".as_bytes()).expect("feed");
+        let frame = mirror.resize(3, 2).expect("resize");
+        match frame {
+            RemoteGridFrame::Grid { cols, lines, .. } => {
+                assert_eq!(cols, 3);
+                for line in lines {
+                    let cells: u16 = line.runs.iter().map(|run| run.cells).sum();
+                    assert!(
+                        cells <= cols,
+                        "line {} claims {cells} cells in a {cols}-col grid",
+                        line.index
+                    );
+                }
+            }
+            other => panic!("expected full grid, got {other:?}"),
+        }
     }
 }
