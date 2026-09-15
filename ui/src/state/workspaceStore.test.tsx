@@ -701,12 +701,27 @@ describe("useWorkspaceStore terminal ownership", () => {
       expect.objectContaining({
         id: "backend-1",
         sessionId: "backend-1",
-        state: "working",
+        // A freshly spawned PTY is alive, not an agent doing work: nothing has observed any
+        // agent activity in it yet, so it must not claim "working".
+        state: "starting",
         worktree: { wsId: "ws-main", slug: "main" },
         worktreePath: worktree.path,
         task: "orca/ws-main/main",
       }),
     ]);
+
+    const [tab] = result.current.state.layout.tabs;
+    if (tab.kind === "browser") throw new Error("expected a terminal tab");
+    act(() => result.current.dispatchWorkspaceAction({
+      type: "SESSION_SCREEN_ACTIVITY",
+      tabId: tab.id,
+      sessionId: tab.sessionId,
+      state: "working",
+      ruleId: "extension",
+      manifestId: "omo",
+    }));
+
+    expect(result.current.agents[0]?.state).toBe("working");
   });
 
   it("removes deleted-worktree tabs, sessions, and agents during synchronization", async () => {

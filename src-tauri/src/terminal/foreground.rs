@@ -8,18 +8,42 @@ pub(crate) enum Foreground {
     Other,
 }
 
+/// The positive process evidence an observation carries about agent ownership of a PTY.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AgentProcessEdge {
+    /// An agent process was observed where none was before: screen inference is meaningful again.
+    Observed,
+    /// The shell owns the foreground again after an agent ran: the agent's work is over.
+    Released,
+}
+
 #[derive(Default)]
 pub(crate) struct ProcessTransition {
-    previous: Option<Foreground>,
+    /// Set while an agent has been observed and no shell prompt has been seen since.
+    agent_observed: bool,
 }
 
 impl ProcessTransition {
-    pub(crate) fn observe(&mut self, current: Option<Foreground>) -> bool {
-        let Some(current) = current else { return false };
-        let release =
-            matches!(self.previous, Some(Foreground::Agent(_))) && current == Foreground::Shell;
-        self.previous = Some(current);
-        release
+    pub(crate) fn observe(&mut self, current: Option<Foreground>) -> Option<AgentProcessEdge> {
+        // Unknown ownership is not evidence in either direction.
+        let current = current?;
+        match current {
+            Foreground::Agent(_) if !self.agent_observed => {
+                self.agent_observed = true;
+                Some(AgentProcessEdge::Observed)
+            }
+            Foreground::Agent(_) => None,
+            // An agent rarely hands the terminal straight back to the prompt: it exits, the shell
+            // runs whatever came next in the command line, and only then prompts. Releasing only
+            // on an immediate agent -> shell edge therefore misses real exits and pins the pane
+            // to its last activity forever. The shell owning the foreground is the evidence.
+            Foreground::Shell if self.agent_observed => {
+                self.agent_observed = false;
+                Some(AgentProcessEdge::Released)
+            }
+            // A non-agent, non-shell foreground says nothing about whether the agent came back.
+            Foreground::Shell | Foreground::Other => None,
+        }
     }
 }
 
@@ -267,6 +291,7 @@ mod tests {
             state: "working".into(),
             agent: Some("omo".into()),
             provider_session: None,
+            origin: crate::daemon::protocol::AgentStateOrigin::Agent,
         });
         let mut states = hub.subscribe(&id);
         let mut transition = ProcessTransition::default();
@@ -279,7 +304,7 @@ mod tests {
                 matches!(observed, Some(Foreground::Agent(_))),
                 "{observed:?}"
             );
-            assert!(!transition.observe(observed));
+            assert_ne!(transition.observe(observed), Some(AgentProcessEdge::Released));
         }
         assert!(matches!(
             states.receiver.try_recv(),
@@ -292,7 +317,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(observed, Some(Foreground::Shell));
-        assert!(transition.observe(observed));
+        assert_eq!(transition.observe(observed), Some(AgentProcessEdge::Released));
         hub.release_foreground(&id);
         let released = tokio::time::timeout(Duration::from_secs(1), states.receiver.recv())
             .await
@@ -341,10 +366,63 @@ mod tests {
     #[test]
     fn unknown_and_unrelated_processes_do_not_release() {
         let mut observer = ProcessTransition::default();
-        assert!(!observer.observe(Some(Foreground::Shell)));
-        assert!(!observer.observe(Some(Foreground::Agent(42))));
-        assert!(!observer.observe(None));
-        assert!(!observer.observe(Some(Foreground::Other)));
-        assert!(!observer.observe(Some(Foreground::Shell)));
+        assert_eq!(observer.observe(Some(Foreground::Shell)), None);
+        assert_eq!(
+            observer.observe(Some(Foreground::Agent(42))),
+            Some(AgentProcessEdge::Observed)
+        );
+        assert_eq!(observer.observe(None), None);
+        assert_eq!(observer.observe(Some(Foreground::Other)), None);
+        assert_eq!(
+            observer.observe(Some(Foreground::Shell)),
+            Some(AgentProcessEdge::Released),
+            "an unknown or unrelated foreground must not consume the pending agent exit"
+        );
+    }
+
+    #[test]
+    fn agent_exit_through_an_unrelated_command_still_releases() {
+        // `omo && ls` and `omo; git status` are ordinary usage: the agent exits, the shell runs
+        // the next command, and only then prompts. Requiring an immediate agent -> shell edge
+        // silently drops the exit and the pane stays "working" with no agent alive.
+        let mut observer = ProcessTransition::default();
+        assert_eq!(
+            observer.observe(Some(Foreground::Agent(42))),
+            Some(AgentProcessEdge::Observed)
+        );
+        assert_eq!(observer.observe(Some(Foreground::Other)), None);
+        assert_eq!(
+            observer.observe(Some(Foreground::Shell)),
+            Some(AgentProcessEdge::Released)
+        );
+        assert_eq!(
+            observer.observe(Some(Foreground::Shell)),
+            None,
+            "one release per exit"
+        );
+    }
+
+    #[test]
+    fn a_new_agent_after_a_release_is_reported_as_fresh_evidence() {
+        // Screen inference is disarmed while the daemon owns the release; the next agent launch
+        // is what re-arms it, so the edge has to be observable.
+        let mut observer = ProcessTransition::default();
+        assert_eq!(
+            observer.observe(Some(Foreground::Agent(7))),
+            Some(AgentProcessEdge::Observed)
+        );
+        assert_eq!(
+            observer.observe(Some(Foreground::Agent(7))),
+            None,
+            "a still-running agent is not a new edge"
+        );
+        assert_eq!(
+            observer.observe(Some(Foreground::Shell)),
+            Some(AgentProcessEdge::Released)
+        );
+        assert_eq!(
+            observer.observe(Some(Foreground::Agent(9))),
+            Some(AgentProcessEdge::Observed)
+        );
     }
 }

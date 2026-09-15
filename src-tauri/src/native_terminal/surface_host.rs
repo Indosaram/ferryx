@@ -309,8 +309,10 @@ pub struct NativeTerminalSession {
     pub last_scrollbar: Option<NativeTerminalScrollbarPayload>,
     pub scrollbar_overlay: ScrollbarOverlayState,
     pub attention_frame: bool,
-    /// Set once the agent reports its own state through the Ferryx extension, which permanently
-    /// disables screen inference for this session.
+    /// Set while screen inference is suppressed for this session because a more authoritative
+    /// producer owns its state: the agent's own extension reports or a daemon process release
+    /// whose leftover screen would otherwise resurrect the activity that just ended. A new
+    /// agent process or an explicit manual reset re-enables screen inference.
     pub agent_reports_own_state: bool,
     /// Whether bracketed paste mode (DEC mode 2004) has ever been enabled on this session,
     /// preserved across terminal resets and history re-feeds.
@@ -1724,6 +1726,7 @@ impl NativeTerminalSurfaceHostState {
                         agent,
                         provider_session,
                         is_snapshot,
+                        origin,
                         ..
                     } => {
                         let reported = match state.as_ref() {
@@ -1737,7 +1740,24 @@ impl NativeTerminalSurfaceHostState {
                                 let mut sessions_guard = sessions.lock();
                                 match sessions_guard.get_mut(&session_id_owned) {
                                     Some(sess) => {
-                                        sess.agent_reports_own_state = reported != crate::agent_detect::AgentActivity::Idle;
+                                        // Screen inference is the FALLBACK, not a tiebreaker, and
+                                        // this flag suppresses it. Two producers claim the
+                                        // session, each for its own reason:
+                                        //  - the agent itself, for as long as its process lives,
+                                        //    including the `idle` it reports between turns (its
+                                        //    last frame is still on screen);
+                                        //  - a process release, because the screen the exited
+                                        //    agent left behind still shows its spinner and would
+                                        //    otherwise resurrect the activity that just ended.
+                                        // A later process sighting is what lifts the suppression:
+                                        // a new agent is running, so its screen is live evidence
+                                        // again until it reports for itself.
+                                        sess.agent_reports_own_state = match origin {
+                                            crate::daemon::protocol::AgentStateOrigin::Agent
+                                            | crate::daemon::protocol::AgentStateOrigin::ProcessReleased => true,
+                                            crate::daemon::protocol::AgentStateOrigin::ProcessObserved
+                                            | crate::daemon::protocol::AgentStateOrigin::ManualReset => false,
+                                        };
                                         // `/new` gives the pane a new conversation while the
                                         // activity state stays put, so a rotated provider session
                                         // is a change in its own right.
@@ -1746,15 +1766,12 @@ impl NativeTerminalSurfaceHostState {
                                         if provider_rotated {
                                             sess.last_provider_session = provider_session.clone();
                                         }
-                                        if !is_snapshot
-                                            && sess.last_agent_activity == Some(reported)
-                                            && !provider_rotated
-                                        {
-                                            false
-                                        } else {
-                                            sess.last_agent_activity = Some(reported);
-                                            true
-                                        }
+                                        let repeats = sess.last_agent_activity == Some(reported);
+                                        // The reported state is the new inference baseline either
+                                        // way: a released session that keeps its old activity here
+                                        // would replay it from the exited agent's leftover screen.
+                                        sess.last_agent_activity = Some(reported);
+                                        !(!is_snapshot && repeats && !provider_rotated)
                                     }
                                     None => false,
                                 }
@@ -4267,6 +4284,7 @@ mod tests {
             agent: Some("omo".into()),
             provider_session: None,
             is_snapshot: false,
+            origin: crate::daemon::protocol::AgentStateOrigin::Agent,
         })
         .await
         .expect("send agent state report");
@@ -4300,6 +4318,243 @@ mod tests {
             observed.lock().len(),
             1,
             "screen inference must stay disabled once the agent reports its own state"
+        );
+
+        state.teardown();
+    }
+
+    #[tokio::test]
+    async fn an_agents_own_idle_keeps_screen_inference_disabled() {
+        // An agent that finishes a turn reports `idle` and keeps running. Its final frame is
+        // still on screen, spinner and "esc to interrupt" footer included, so handing the
+        // session back to screen inference here re-promotes the pane to "working" with no work
+        // in flight — exactly the phantom-running state users see.
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "self-reported-idle-session";
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_for_sink = Arc::clone(&observed);
+        let (reported, mut reports) = tokio::sync::mpsc::unbounded_channel();
+        state.set_event_sink(Arc::new(move |event| {
+            if let NativeTerminalEvent::AgentState(payload) = event {
+                observed_for_sink.lock().push(payload.state);
+                reported.send(()).expect("report receiver alive");
+            }
+        }));
+
+        let (tx, messages) = tokio::sync::mpsc::channel(4);
+        state
+            .attach_daemon_attachment::<tauri::Wry>(
+                session_id,
+                DaemonAttachment {
+                    session_id: session_id.to_string(),
+                    epoch: 1,
+                    start_sequence: Some(1),
+                    end_sequence: Some(1),
+                    gap: None,
+                    history: Vec::new(),
+                    history_segments: Vec::new(),
+                    pty_cols: None,
+                    pty_rows: None,
+                    remote_generation: None,
+                    messages,
+                    stream_task: tokio::spawn(std::future::pending()),
+                },
+                None,
+            )
+            .expect("attach");
+
+        for reported_state in ["working", "idle"] {
+            tx.send(DaemonStreamMessage::AgentState {
+                session_id: session_id.into(),
+                state: reported_state.into(),
+                agent: Some("omo".into()),
+                provider_session: None,
+                is_snapshot: false,
+                origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+            })
+            .await
+            .expect("send agent state report");
+            tokio::time::timeout(std::time::Duration::from_secs(5), reports.recv())
+                .await
+                .expect("extension report delivered")
+                .expect("event sink alive");
+        }
+        assert_eq!(
+            observed.lock().clone(),
+            vec!["working".to_string(), "idle".to_string()]
+        );
+
+        // The agent's own leftover frame arrives after its idle report. The barrier is the
+        // detection pass itself: `agent_detect_pending` clears only once this screen has been
+        // through a detection attempt, whether inline or on the pump's trailing edge.
+        let mut updates = state.sessions.lock()[session_id].update_sender.subscribe();
+        tx.send(DaemonStreamMessage::Output {
+            session_id: session_id.into(),
+            sequence: 2,
+            data: b"  Working (esc to interrupt)\r\n".to_vec().into(),
+            metrics_read_unix_micros: None,
+        })
+        .await
+        .expect("send stale screen output");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                updates.changed().await.expect("native pump alive");
+                let sessions = state.sessions.lock();
+                let session = &sessions[session_id];
+                if session.last_sequence == Some(2) && !session.agent_detect_pending {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("stale screen went through a detection pass");
+
+        assert_eq!(
+            observed.lock().clone(),
+            vec!["working".to_string(), "idle".to_string()],
+            "a running agent still owns its state after reporting idle; its stale screen must not re-promote the pane"
+        );
+
+        state.teardown();
+    }
+
+    #[tokio::test]
+    async fn process_release_hands_the_session_back_to_screen_inference() {
+        // The opposite case: the daemon saw the agent process leave the PTY, so the extension no
+        // longer owns this session. Inference must be armed again for whatever runs next, and it
+        // must not replay the released activity from the agent's leftover screen.
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "process-released-session";
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_for_sink = Arc::clone(&observed);
+        let (reported, mut reports) = tokio::sync::mpsc::unbounded_channel();
+        state.set_event_sink(Arc::new(move |event| {
+            if let NativeTerminalEvent::AgentState(payload) = event {
+                observed_for_sink.lock().push(payload.state);
+                reported.send(()).expect("report receiver alive");
+            }
+        }));
+
+        let (tx, messages) = tokio::sync::mpsc::channel(4);
+        state
+            .attach_daemon_attachment::<tauri::Wry>(
+                session_id,
+                DaemonAttachment {
+                    session_id: session_id.to_string(),
+                    epoch: 1,
+                    start_sequence: Some(1),
+                    end_sequence: Some(1),
+                    gap: None,
+                    history: Vec::new(),
+                    history_segments: Vec::new(),
+                    pty_cols: None,
+                    pty_rows: None,
+                    remote_generation: None,
+                    messages,
+                    stream_task: tokio::spawn(std::future::pending()),
+                },
+                None,
+            )
+            .expect("attach");
+
+        for (reported_state, origin) in [
+            (
+                "working",
+                crate::daemon::protocol::AgentStateOrigin::Agent,
+            ),
+            (
+                "idle",
+                crate::daemon::protocol::AgentStateOrigin::ProcessReleased,
+            ),
+        ] {
+            tx.send(DaemonStreamMessage::AgentState {
+                session_id: session_id.into(),
+                state: reported_state.into(),
+                agent: Some("omo".into()),
+                provider_session: None,
+                is_snapshot: false,
+                origin,
+            })
+            .await
+            .expect("send agent state report");
+            tokio::time::timeout(std::time::Duration::from_secs(5), reports.recv())
+                .await
+                .expect("agent state delivered")
+                .expect("event sink alive");
+        }
+        assert_eq!(
+            observed.lock().clone(),
+            vec!["working".to_string(), "idle".to_string()]
+        );
+
+        // THE stale frame that causes the reported bug: the exited agent's own spinner footer is
+        // still the visible screen after the release. Inference is armed again here, so this is
+        // exactly the content that would re-promote the pane to "working" with no agent alive.
+        // The detection pass over this screen is the barrier, not elapsed time.
+        let mut updates = state.sessions.lock()[session_id].update_sender.subscribe();
+        tx.send(DaemonStreamMessage::Output {
+            session_id: session_id.into(),
+            sequence: 2,
+            data: b"  Working (esc to interrupt)\r\n".to_vec().into(),
+            metrics_read_unix_micros: None,
+        })
+        .await
+        .expect("send stale agent screen");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                updates.changed().await.expect("native pump alive");
+                let sessions = state.sessions.lock();
+                let session = &sessions[session_id];
+                if session.last_sequence == Some(2) && !session.agent_detect_pending {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("stale agent screen went through a detection pass");
+        assert_eq!(
+            observed.lock().clone(),
+            vec!["working".to_string(), "idle".to_string()],
+            "the exited agent's leftover spinner must not resurrect the released activity"
+        );
+
+        // A new agent is started in the same pane. The daemon sees its process first and says so;
+        // that sighting carries no activity, so it must not emit a state of its own.
+        tx.send(DaemonStreamMessage::AgentState {
+            session_id: session_id.into(),
+            state: "idle".into(),
+            agent: Some("omo".into()),
+            provider_session: None,
+            is_snapshot: false,
+            origin: crate::daemon::protocol::AgentStateOrigin::ProcessObserved,
+        })
+        .await
+        .expect("send process sighting");
+
+        // The new agent then paints its own working screen. Screen inference must still be armed
+        // for it, which is what proves the release did not disable detection permanently.
+        tx.send(DaemonStreamMessage::Output {
+            session_id: session_id.into(),
+            sequence: 3,
+            data: b"\x1b[2J\x1b[HThinking through the next step...\r\nesc to interrupt\r\n"
+                .to_vec()
+                .into(),
+            metrics_read_unix_micros: None,
+        })
+        .await
+        .expect("send new agent screen");
+        tokio::time::timeout(std::time::Duration::from_secs(5), reports.recv())
+            .await
+            .expect("screen inference re-armed after release")
+            .expect("event sink alive");
+        assert_eq!(
+            observed.lock().clone(),
+            vec![
+                "working".to_string(),
+                "idle".to_string(),
+                "working".to_string()
+            ],
+            "a new agent in a released pane must be detected again"
         );
 
         state.teardown();
@@ -4349,6 +4604,7 @@ mod tests {
                 transcript_path: None,
             }),
             is_snapshot: false,
+            origin: crate::daemon::protocol::AgentStateOrigin::Agent,
         };
 
         // The agent stays "working" across `/new`, so an activity-only change test swallows the

@@ -360,14 +360,6 @@ export function useWorkspaceStore({
   }, [renderedState, workspaceId]);
 
   useEffect(() => {
-    const unsubscribeLifecycle = terminalEventBus.subscribeLifecycle((payload) => {
-      dispatch({
-        type: "SESSION_LIFECYCLE",
-        backendSessionId: payload.sessionId,
-        lifecycle: mapBackendLifecycle(payload),
-      });
-    });
-
     // Native title and bell events carry the BACKEND session id and are emitted by the daemon
     // stream pump, so they arrive for every attached session -- including background tabs whose
     // panes `TerminalSplitView` has unmounted. That is the whole point: the notification exists
@@ -402,18 +394,37 @@ export function useWorkspaceStore({
         const resolved = locateSession(snapshot, backendSessionId);
         if (!resolved) continue;
         const action = build(resolved);
-        const nextState = workspaceReducer(snapshot,
-          action.type === "SESSION_TITLE_ACTIVITY" || action.type === "SESSION_SCREEN_ACTIVITY"
-            ? { ...action, observed: false } : action);
+        const isActivityAction = action.type === "SESSION_TITLE_ACTIVITY" || action.type === "SESSION_SCREEN_ACTIVITY";
+        const nextState = workspaceReducer(snapshot, isActivityAction ? { ...action, observed: false } : action);
         if (nextState === snapshot) return true;
         setWorkspaceSnapshot(snapshotWorkspaceId, nextState);
         setHmrWorkspaceState(snapshotWorkspaceId, nextState);
         bumpParkedActivity();
-        emitActivityChanges(snapshot, nextState);
+        // Lifecycle-driven settling is bookkeeping about a dead PTY, not an agent reporting a
+        // result, so it must stay as silent in a parked project as it is in the mounted one.
+        if (isActivityAction) emitActivityChanges(snapshot, nextState);
         return true;
       }
       return false;
     };
+
+    /**
+     * A PTY exit is emitted for every attached session, including sessions owned by a project the
+     * user switched away from. Without routing it into that project's snapshot its agent would
+     * keep claiming live work forever, because only the mounted workspace has a live reducer.
+     */
+    const unsubscribeLifecycle = terminalEventBus.subscribeLifecycle((payload) => {
+      const action: WorkspaceAction = {
+        type: "SESSION_LIFECYCLE",
+        backendSessionId: payload.sessionId,
+        lifecycle: mapBackendLifecycle(payload),
+      };
+      const mountedOwnsSession = Object.values(stateRef.current.sessions).some(
+        (candidate) => candidate.backendSessionId === payload.sessionId,
+      );
+      if (!mountedOwnsSession && dispatchToParkedWorkspace(payload.sessionId, () => action)) return;
+      dispatch(action);
+    });
 
     let unlistenTitle: (() => void) | undefined;
     let unlistenBell: (() => void) | undefined;
@@ -1431,8 +1442,11 @@ export function selectAgents(state: WorkspaceState): ActiveAgent[] {
           : worktree?.branch?.replace(/^refs\/heads\//, "") ?? worktreePath,
         state: activity
           ? activityStateToAgentState(activity.state)
+          // No activity entry means nothing has ever observed this pane doing agent work: a live
+          // PTY alone is a shell prompt as often as it is a running agent, and claiming "working"
+          // here spins the worktree row forever. Report the pane as merely alive instead.
           : session.lifecycle === "running" || session.lifecycle === "working"
-            ? "working"
+            ? "starting"
             : session.lifecycle,
         worktree: session.worktree,
         worktreePath,
@@ -2145,9 +2159,14 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
     }
     case "SESSION_REMOTE_STATUS": {
       const sessions = { ...state.sessions };
+      const lostSessionIds: string[] = [];
       for (const [id, session] of Object.entries(sessions)) {
         if (session.backendSessionId !== action.status.sessionId || !isRemoteWorkspaceId(session.workspaceId)) continue;
+        // `missing`/`expired`/`legacyLost` is the daemon reporting the remote session itself is
+        // gone, which kills the process running in it. `disconnected`/`reconnecting` is only the
+        // control channel dropping: the remote agent keeps working, so its activity must survive.
         const lost = ["missing", "expired", "legacyLost"].includes(action.status.state);
+        if (lost) lostSessionIds.push(id);
         const epochChanged = action.daemonEpoch != null && action.daemonEpoch !== session.daemonEpoch;
         sessions[id] = {
           ...session,
@@ -2160,7 +2179,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
           ...(epochChanged ? { lastOutputSequence: null } : {}),
         };
       }
-      return { ...state, sessions };
+      return settleActivityForDeadSessions({ ...state, sessions }, lostSessionIds);
     }
     case "SESSION_LIFECYCLE": {
       const matchedSessionIds: string[] = [];
@@ -2183,14 +2202,10 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         }),
       ) as Record<string, TerminalSession>;
       let nextState: WorkspaceState = { ...state, sessions };
-      if (action.lifecycle === "exited") {
-        for (const sessionId of matchedSessionIds) {
-          const current = nextState.activityBySessionId?.[sessionId];
-          if (!current || current.state === "done") continue;
-          const tabId = findTabIdForSession(nextState, sessionId);
-          if (!tabId) continue;
-          nextState = applySessionActivity(nextState, tabId, sessionId, { ...current, state: "done" });
-        }
+      // `failed` is as terminal as `exited`: the PTY is gone either way, so an in-flight work
+      // claim can never be retired by a later event and must settle here.
+      if (action.lifecycle === "exited" || action.lifecycle === "failed") {
+        nextState = settleActivityForDeadSessions(nextState, matchedSessionIds);
       }
       return nextState;
     }
@@ -2207,23 +2222,28 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         if (action.bindingKey !== currentBindingKey) return state;
       }
       if (isRemoteWorkspaceId(session.workspaceId)) {
-        return {
-          ...state,
-          sessions: {
-            ...state.sessions,
-            [action.sessionId]: {
-              ...session,
-              remoteConnectionState: "disconnected",
-              remoteGeneration: null,
-              remoteFailure: {
-                kind: "network",
-                message: action.reason ?? "Failed to spawn terminal",
+        // A confirmed-missing daemon session is proof the remote PTY is gone, so the in-flight
+        // work claim has to settle here exactly as it does for a local session below.
+        return settleActivityForDeadSessions(
+          {
+            ...state,
+            sessions: {
+              ...state.sessions,
+              [action.sessionId]: {
+                ...session,
+                remoteConnectionState: "disconnected",
+                remoteGeneration: null,
+                remoteFailure: {
+                  kind: "network",
+                  message: action.reason ?? "Failed to spawn terminal",
+                },
+                lifecycle: "exited",
+                reconnectLifecycle: "idle",
               },
-              lifecycle: "exited",
-              reconnectLifecycle: "idle",
             },
           },
-        };
+          [action.sessionId],
+        );
       }
       const updatedSession: TerminalSession = {
         ...session,
@@ -2238,13 +2258,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
           [action.sessionId]: updatedSession,
         },
       };
-      const current = nextState.activityBySessionId?.[action.sessionId];
-      if (current && current.state !== "done") {
-        const tabId = findTabIdForSession(nextState, action.sessionId);
-        if (tabId) {
-          nextState = applySessionActivity(nextState, tabId, action.sessionId, { ...current, state: "done" });
-        }
-      }
+      nextState = settleActivityForDeadSessions(nextState, [action.sessionId]);
       return nextState;
     }
     case "SET_RECONNECT_LIFECYCLE": {
@@ -2331,8 +2345,10 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       const previous = state.activityBySessionId?.[action.sessionId];
       let mappedState: TerminalActivityState;
       if (action.state === "working") {
+        if (isSessionBackendDead(state, action.sessionId)) return state;
         mappedState = "working";
       } else if (action.state === "blocked") {
+        if (isSessionBackendDead(state, action.sessionId)) return state;
         mappedState = "waiting";
       } else if (action.state === "idle") {
         if (!action.isSnapshot && (!previous || (previous.state !== "working" && previous.state !== "waiting"))) {
@@ -2521,7 +2537,15 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         source: isScreenSource ? "screen" : (previous?.source ?? "title"),
         agentSource,
       };
-      return applySessionActivity(state, action.tabId, action.sessionId, activity, action.observed);
+      // A title is decoded from terminal output, which can still arrive after the PTY is gone.
+      // Such a late frame must never raise a dead pane back to working/waiting; the label still
+      // applies, so only the in-flight claim is downgraded to the settled state.
+      const claimsInFlight = activity.state === "working" || activity.state === "waiting";
+      const guarded: WorkspaceTerminalActivity =
+        claimsInFlight && isSessionBackendDead(state, action.sessionId)
+          ? { ...activity, state: "done" }
+          : activity;
+      return applySessionActivity(state, action.tabId, action.sessionId, guarded, action.observed);
     }
   }
 }
@@ -2580,6 +2604,38 @@ function isSessionActivelyObserved(state: WorkspaceState, tabId: string, session
     return Boolean(leafId && leafId === tabLayout.activeLeafId);
   }
   return true;
+}
+
+/**
+ * Settles any in-flight work claim of sessions whose backend process is known to be gone.
+ *
+ * A `working`/`waiting` entry is a claim that something is running right now. Once the PTY that
+ * produced it is dead, no further screen or title event can ever arrive to retire it, so leaving
+ * the claim in place makes tabs, worktree rows and the sidebar spin forever.
+ */
+function settleActivityForDeadSessions(state: WorkspaceState, sessionIds: Iterable<string>): WorkspaceState {
+  let nextState = state;
+  for (const sessionId of sessionIds) {
+    const current = nextState.activityBySessionId?.[sessionId];
+    if (!current || current.state === "done") continue;
+    const tabId = findTabIdForSession(nextState, sessionId);
+    if (!tabId) continue;
+    nextState = applySessionActivity(nextState, tabId, sessionId, { ...current, state: "done" });
+  }
+  return nextState;
+}
+
+/**
+ * A session whose backend is gone cannot be producing live agent output.
+ *
+ * Screen-state reports are decoded from terminal output, which the daemon stream pump can deliver
+ * slightly after the exit event. Accepting such a late `working`/`blocked` would light a spinner
+ * for a dead PTY that nothing will ever turn off.
+ */
+function isSessionBackendDead(state: WorkspaceState, sessionId: string): boolean {
+  const session = state.sessions[sessionId];
+  if (!session) return false;
+  return session.backendSessionId === null || session.lifecycle === "exited" || session.lifecycle === "failed";
 }
 
 function applySessionActivity(

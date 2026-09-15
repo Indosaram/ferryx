@@ -1290,6 +1290,7 @@ impl DaemonServer {
                                 state: report.1,
                                 agent: report.2,
                                 provider_session: report.3,
+                                origin: crate::daemon::protocol::AgentStateOrigin::Agent,
                             });
                         }
                         line.clear();
@@ -1334,10 +1335,17 @@ impl DaemonServer {
                     Ok(observations) => for (id, observation) in observations {
                         match observation {
                             Ok(observation) => {
-                                if transitions.entry(id.clone()).or_default().observe(observation)
-                                    && server.terminal_service.get_session(&id).is_some()
-                                {
-                                    server.agent_states.release_foreground(&id);
+                                let edge = transitions.entry(id.clone()).or_default().observe(observation);
+                                if server.terminal_service.get_session(&id).is_some() {
+                                    match edge {
+                                        Some(crate::terminal::foreground::AgentProcessEdge::Released) => {
+                                            server.agent_states.release_foreground(&id);
+                                        }
+                                        Some(crate::terminal::foreground::AgentProcessEdge::Observed) => {
+                                            server.agent_states.observe_foreground_agent(&id);
+                                        }
+                                        None => {}
+                                    }
                                 }
                             }
                             Err(error) => tracing::debug!(session_id = id, %error, "foreground inspection unavailable; holding state"),
@@ -2555,6 +2563,7 @@ impl DaemonServer {
                 agent: snapshot.agent.as_deref().map(Cow::Borrowed),
                 provider_session: snapshot.provider_session.clone(),
                 is_snapshot: true,
+                origin: snapshot.origin,
             };
             let Ok(frame) = crate::daemon::protocol::encode_daemon_stream_frame(&msg) else {
                 return;
@@ -2588,6 +2597,7 @@ impl DaemonServer {
                                         agent: report.state.agent.as_deref().map(Cow::Borrowed),
                                         provider_session: report.state.provider_session,
                                         is_snapshot: report.is_snapshot,
+                                        origin: report.state.origin,
                                     };
                                     frame_buf.clear();
                                     if serde_json::to_writer(&mut frame_buf, &msg).is_err() {
@@ -2610,6 +2620,7 @@ impl DaemonServer {
                                             agent: current.agent.as_deref().map(Cow::Borrowed),
                                             provider_session: current.provider_session,
                                             is_snapshot: true,
+                                            origin: current.origin,
                                         };
                                         frame_buf.clear();
                                         if serde_json::to_writer(&mut frame_buf, &msg).is_err() { break; }
@@ -4340,6 +4351,7 @@ mod tests {
             state: "working".to_string(),
             agent: Some("omo".to_string()),
             provider_session: None,
+            origin: crate::daemon::protocol::AgentStateOrigin::Agent,
         });
         assert_eq!(server.agent_states.current(&session_id).unwrap().state, "working");
 
@@ -4412,12 +4424,14 @@ mod tests {
             state: "working".to_string(),
             agent: Some("codex".to_string()),
             provider_session: None,
+            origin: crate::daemon::protocol::AgentStateOrigin::Agent,
         });
         server.agent_states.publish_canonical(AgentState {
             session_id: session_id.clone(),
             state: "blocked".to_string(),
             agent: Some("omo".to_string()),
             provider_session: None,
+            origin: crate::daemon::protocol::AgentStateOrigin::Agent,
         });
 
         let mut reader = BufReader::new(&mut server_side);
@@ -4474,6 +4488,7 @@ mod tests {
                 state: "working".to_string(),
                 agent: Some("omo".to_string()),
                 provider_session: None,
+                origin: crate::daemon::protocol::AgentStateOrigin::Agent,
             });
 
             let (client_stream, server_stream) = UnixStream::pair().map_err(|e| e.to_string())?;

@@ -66,6 +66,7 @@ async fn reset_scenario(succeeds: bool) {
         agent: Some("omo".into()),
         provider_session: None,
         is_snapshot,
+        origin: crate::daemon::protocol::AgentStateOrigin::Agent,
     };
     messages_tx
         .send(report("working", false))

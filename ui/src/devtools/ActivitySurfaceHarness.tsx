@@ -141,6 +141,12 @@ export function ActivitySurfaceHarness() {
       isSnapshot,
     } as WorkspaceAction);
 
+  const lifecycle = (backendSessionId: string, state: "exited" | "failed") =>
+    dispatch({ type: "SESSION_LIFECYCLE", backendSessionId, lifecycle: state } as WorkspaceAction);
+
+  const rebind = (sessionId: string, backendSessionId: string) =>
+    dispatch({ type: "REBIND_SESSION_BACKEND", sessionId, backendSessionId } as WorkspaceAction);
+
   const tabActivity = useMemo(() => selectTabActivitySummaries(state), [state]);
   const worktreeActivity = useMemo(() => selectWorktreeActivitySummaries(state), [state]);
 
@@ -213,6 +219,50 @@ export function ActivitySurfaceHarness() {
       label: "screen rule: background idle after working (attention)",
       run: () => screen("session-bg", "tab-bg", "idle", "prompt_idle"),
     },
+    {
+      id: "qa-lifecycle-exit-while-working",
+      label: "lifecycle: PTY exits while agent working",
+      run: () => {
+        screen("session-bg", "tab-bg", "working", "extension", "omo");
+        lifecycle("backend-bg", "exited");
+      },
+    },
+    {
+      id: "qa-stale-working-after-exit",
+      label: "lifecycle: stale working event after exit",
+      run: () => {
+        screen("session-bg", "tab-bg", "working", "extension", "omo");
+        lifecycle("backend-bg", "exited");
+        screen("session-bg", "tab-bg", "working", "extension", "omo");
+      },
+    },
+    {
+      id: "qa-backend-replacement",
+      label: "lifecycle: new backend after exit accepts work again",
+      run: () => {
+        screen("session-bg", "tab-bg", "working", "extension", "omo");
+        lifecycle("backend-bg", "exited");
+        rebind("session-bg", "backend-bg-2");
+        screen("session-bg", "tab-bg", "working", "extension", "omo");
+      },
+    },
+    {
+      id: "qa-lifecycle-failed-while-working",
+      label: "lifecycle: PTY fails while agent working",
+      run: () => {
+        screen("session-bg", "tab-bg", "working", "extension", "omo");
+        lifecycle("backend-bg", "failed");
+      },
+    },
+    {
+      id: "qa-stale-title-working-after-exit",
+      label: "lifecycle: stale working TITLE after exit",
+      run: () => {
+        screen("session-bg", "tab-bg", "working", "extension", "omo");
+        lifecycle("backend-bg", "exited");
+        title("session-bg", "tab-bg", "\u280b omo: building");
+      },
+    },
     { id: "qa-reset", label: "reset", run: () => {
       stateRef.current = initialState();
       setState(stateRef.current);
@@ -282,6 +332,12 @@ export function ActivitySurfaceHarness() {
           {
             badgeCount: selectGlobalUnreadBadgeCount(state),
             activityBySessionId: state.activityBySessionId,
+            sessionLifecycles: Object.fromEntries(
+              Object.entries(state.sessions).map(([id, session]) => [
+                id,
+                { lifecycle: session.lifecycle, backendSessionId: session.backendSessionId },
+              ]),
+            ),
             unreadTabIds: state.unreadTabIds,
             unreadWorktreePaths: state.unreadWorktreePaths,
           },

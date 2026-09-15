@@ -482,6 +482,8 @@ pub enum DaemonStreamMessage<'a> {
         provider_session: Option<AgentProviderSession>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         is_snapshot: bool,
+        #[serde(default, skip_serializing_if = "AgentStateOrigin::is_self_reported")]
+        origin: AgentStateOrigin,
     },
     #[serde(rename_all = "camelCase")]
     RemoteStatus {
@@ -496,6 +498,43 @@ pub enum DaemonStreamMessage<'a> {
         session_id: Cow<'a, str>,
         exit_code: Option<i32>,
     },
+}
+
+/// Who produced an agent-state frame.
+///
+/// The frame's `state` alone cannot answer "is this session still owned by an agent?": a running
+/// agent reporting `idle` between turns and a daemon releasing a session whose agent process has
+/// exited both look like `idle` on the wire. Consumers that choose between authoritative reports
+/// and screen inference need that distinction, so it travels with the frame.
+///
+/// ROLLING-UPGRADE LIMITATION: this field is new, and the daemon that predates it emitted plain
+/// `idle` frames for BOTH kinds of event — a self-report and a `release_foreground` /
+/// `release_manual` release. A frame arriving without `origin` is therefore genuinely ambiguous,
+/// not provably self-reported. It decodes to [`AgentStateOrigin::Agent`] because that is the
+/// conservative choice for the consumer (it keeps extension ownership rather than handing a live
+/// agent back to screen inference), NOT because the producer is known. While a predecessor daemon
+/// still serves a session, its releases consequently do not re-arm screen inference on this side;
+/// that session recovers when its next origin-carrying frame arrives.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentStateOrigin {
+    /// The agent reported its own state through the Ferryx extension. Authoritative.
+    #[default]
+    Agent,
+    /// The daemon observed the agent process leave this PTY; the reported state is a release.
+    ProcessReleased,
+    /// The daemon observed an agent process running in this PTY again. Carries no new activity.
+    ProcessObserved,
+    /// The user reset this session's activity by hand.
+    ManualReset,
+}
+
+impl AgentStateOrigin {
+    /// A frame from the agent itself is the wire default, so it is omitted when serializing and
+    /// absence decodes back to it. See the type docs for why absence is ambiguous in practice.
+    pub fn is_self_reported(&self) -> bool {
+        matches!(self, AgentStateOrigin::Agent)
+    }
 }
 
 /// One state report from the Ferryx agent extension running inside a PTY session.
@@ -600,6 +639,7 @@ mod tests {
                 transcript_path: None,
             }),
             is_snapshot: false,
+            origin: AgentStateOrigin::Agent,
         };
 
         // When: serialized through the production framing contract.
@@ -630,6 +670,7 @@ mod tests {
             agent: None,
             provider_session: None,
             is_snapshot: false,
+            origin: AgentStateOrigin::Agent,
         };
         assert_eq!(
             encode_daemon_stream_frame(&live).expect("encode live frame"),
@@ -645,6 +686,56 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(encoded.trim()).expect("snapshot json");
 
         assert_eq!(value["isSnapshot"], true);
+    }
+
+    #[test]
+    fn agent_state_origin_defaults_to_self_reported_and_survives_the_wire() {
+        // A peer predating the origin field sends no origin. That frame is ambiguous (the old
+        // daemon emitted plain `idle` for releases too), and decodes to the conservative default.
+        let legacy = r#"{"type":"agentState","sessionId":"pty-1","state":"idle"}"#;
+        assert!(matches!(
+            decode_daemon_stream_frame(legacy).expect("decode legacy frame"),
+            DaemonStreamMessage::AgentState {
+                origin: AgentStateOrigin::Agent,
+                ..
+            }
+        ));
+        // A self-reported frame stays byte-identical so old peers keep parsing it.
+        assert_eq!(
+            encode_daemon_stream_frame(&DaemonStreamMessage::AgentState {
+                session_id: Cow::Borrowed("pty-1"),
+                state: Cow::Borrowed("idle"),
+                agent: None,
+                provider_session: None,
+                is_snapshot: false,
+                origin: AgentStateOrigin::Agent,
+            })
+            .expect("encode self-reported frame"),
+            "{\"type\":\"agentState\",\"sessionId\":\"pty-1\",\"state\":\"idle\"}\n"
+        );
+
+        // A process-evidence release must be distinguishable from an agent's own idle report,
+        // otherwise a consumer cannot tell "agent left" from "agent is between turns".
+        let release = encode_daemon_stream_frame(&DaemonStreamMessage::AgentState {
+            session_id: Cow::Borrowed("pty-1"),
+            state: Cow::Borrowed("idle"),
+            agent: None,
+            provider_session: None,
+            is_snapshot: false,
+            origin: AgentStateOrigin::ProcessReleased,
+        })
+        .expect("encode release frame");
+        assert!(
+            release.contains("\"origin\":\"processReleased\""),
+            "release frames must carry their origin: {release}"
+        );
+        assert!(matches!(
+            decode_daemon_stream_frame(&release).expect("decode release frame"),
+            DaemonStreamMessage::AgentState {
+                origin: AgentStateOrigin::ProcessReleased,
+                ..
+            }
+        ));
     }
 
     #[test]

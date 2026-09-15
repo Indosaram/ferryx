@@ -1,4 +1,4 @@
-use crate::daemon::protocol::AgentProviderSession;
+use crate::daemon::protocol::{AgentProviderSession, AgentStateOrigin};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -10,6 +10,9 @@ pub(crate) struct AgentState {
     pub state: String,
     pub agent: Option<String>,
     pub provider_session: Option<AgentProviderSession>,
+    /// Who produced this state. `idle` from a running agent and `idle` from a daemon release are
+    /// the same word with opposite meanings for screen inference, so the producer travels along.
+    pub origin: AgentStateOrigin,
 }
 
 #[derive(Clone, Debug)]
@@ -60,6 +63,7 @@ impl AgentStateHub {
             state: "idle".to_string(),
             agent: previous.as_ref().and_then(|s| s.agent.clone()),
             provider_session: previous.as_ref().and_then(|s| s.provider_session.clone()),
+            origin: AgentStateOrigin::ManualReset,
         };
         tracing::info!(session_id, reason = "manual_reset",
             previous_state = ?previous.as_ref().map(|s| &s.state),
@@ -76,12 +80,43 @@ impl AgentStateHub {
             state: "idle".to_string(),
             agent: previous.as_ref().and_then(|s| s.agent.clone()),
             provider_session: previous.as_ref().and_then(|s| s.provider_session.clone()),
+            origin: AgentStateOrigin::ProcessReleased,
         };
         tracing::info!(session_id, reason = "foreground_agent_to_shell",
             previous_state = ?previous.as_ref().map(|s| &s.state),
             "agent activity released");
         retained.insert(session_id.to_string(), state.clone());
         let _ = self.tx.send(AgentStateUpdate { state, is_snapshot: false });
+    }
+
+    /// Publishes the positive evidence that an agent process owns this PTY again.
+    ///
+    /// This carries no activity of its own — only a released session needs it, to undo the
+    /// inference lockout the release installed. Sessions whose agent reports its own state are
+    /// left alone: their retained state is authoritative and must not be overwritten by a
+    /// process sighting.
+    pub(crate) fn observe_foreground_agent(&self, session_id: &str) {
+        let mut retained = self.retained.lock();
+        let Some(previous) = retained.get(session_id).cloned() else {
+            return;
+        };
+        if previous.origin != AgentStateOrigin::ProcessReleased {
+            return;
+        }
+        let state = AgentState {
+            origin: AgentStateOrigin::ProcessObserved,
+            ..previous
+        };
+        tracing::info!(
+            session_id,
+            reason = "foreground_shell_to_agent",
+            "agent process observed; screen inference re-armed"
+        );
+        retained.insert(session_id.to_string(), state.clone());
+        let _ = self.tx.send(AgentStateUpdate {
+            state,
+            is_snapshot: false,
+        });
     }
 
     /// The successor owns the report socket. Predecessor frames are only a quiet
@@ -140,6 +175,7 @@ mod tests {
             state: value.to_string(),
             agent: Some("omo".to_string()),
             provider_session: None,
+            origin: AgentStateOrigin::Agent,
         }
     }
 
@@ -169,13 +205,16 @@ mod tests {
 
     #[tokio::test]
     async fn agent_to_shell_transition_releases_state() {
-        use crate::terminal::foreground::{Foreground, ProcessTransition};
+        use crate::terminal::foreground::{AgentProcessEdge, Foreground, ProcessTransition};
         let hub = Arc::new(AgentStateHub::new(8));
         hub.publish_canonical(state("s1", "working"));
         let mut subscription = hub.subscribe("s1");
         let mut transition = ProcessTransition::default();
-        assert!(!transition.observe(Some(Foreground::Agent(42))));
-        if transition.observe(Some(Foreground::Shell)) {
+        assert_eq!(
+            transition.observe(Some(Foreground::Agent(42))),
+            Some(AgentProcessEdge::Observed)
+        );
+        if transition.observe(Some(Foreground::Shell)) == Some(AgentProcessEdge::Released) {
             hub.release_foreground("s1");
         }
         let update = tokio::time::timeout(
@@ -184,18 +223,80 @@ mod tests {
         assert_eq!(update.state.state, "idle");
         assert!(!update.is_snapshot);
         assert_eq!(hub.current("s1").unwrap().state, "idle");
-        assert!(!transition.observe(Some(Foreground::Shell)), "one release per edge");
+        assert_eq!(
+            transition.observe(Some(Foreground::Shell)),
+            None,
+            "one release per edge"
+        );
+    }
+
+    #[test]
+    fn released_state_is_distinguishable_from_an_agents_own_idle_report() {
+        // Screen inference must stay disarmed after a process release: the exited agent's last
+        // frame (spinner, "esc to interrupt" footer) is still on screen and would otherwise
+        // re-promote the pane to working with no agent alive. An agent reporting idle between
+        // turns is the opposite case and must keep its own ownership.
+        let hub = Arc::new(AgentStateHub::new(8));
+        hub.publish_canonical(state("s1", "working"));
+        hub.release_foreground("s1");
+        let released = hub.current("s1").expect("released state retained");
+        assert_eq!(released.state, "idle");
+        assert_eq!(released.origin, AgentStateOrigin::ProcessReleased);
+
+        hub.publish_canonical(state("s2", "idle"));
+        assert_eq!(hub.current("s2").unwrap().origin, AgentStateOrigin::Agent);
+
+        hub.publish_canonical(state("s3", "working"));
+        hub.release_manual("s3");
+        assert_eq!(
+            hub.current("s3").unwrap().origin,
+            AgentStateOrigin::ManualReset
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_agent_process_re_arms_a_released_session() {
+        // A release disarms screen inference; without a re-arm edge the next agent started in
+        // that same pane would never show activity again.
+        let hub = Arc::new(AgentStateHub::new(8));
+        hub.publish_canonical(state("s1", "working"));
+        hub.release_foreground("s1");
+        let mut subscription = hub.subscribe("s1");
+
+        hub.observe_foreground_agent("s1");
+        let update = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            subscription.receiver.recv(),
+        )
+        .await
+        .expect("re-arm event")
+        .expect("state stream");
+        assert_eq!(update.state.origin, AgentStateOrigin::ProcessObserved);
+        assert_eq!(
+            update.state.state, "idle",
+            "a process sighting carries no activity of its own"
+        );
+
+        // A session the agent itself owns must not be disturbed by a process sighting.
+        hub.publish_canonical(state("s2", "working"));
+        let mut owned = hub.subscribe("s2");
+        hub.observe_foreground_agent("s2");
+        assert_eq!(hub.current("s2"), Some(state("s2", "working")));
+        assert!(matches!(
+            owned.receiver.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
     }
 
     #[test]
     fn quiet_agent_with_no_output_and_live_process_is_not_released() {
-        use crate::terminal::foreground::{Foreground, ProcessTransition};
+        use crate::terminal::foreground::{AgentProcessEdge, Foreground, ProcessTransition};
         let hub = Arc::new(AgentStateHub::new(8));
         hub.publish_canonical(state("s1", "working"));
         let mut subscription = hub.subscribe("s1");
         let mut transition = ProcessTransition::default();
         for observation in [Some(Foreground::Agent(42)), None, Some(Foreground::Agent(42))] {
-            if transition.observe(observation) {
+            if transition.observe(observation) == Some(AgentProcessEdge::Released) {
                 hub.release_foreground("s1");
             }
         }
