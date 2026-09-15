@@ -736,20 +736,14 @@ describe("App project workspace flow", () => {
         expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
       });
 
-      it.each(["working", "waiting"] as const)("keeps untagged focused %s agent confirmation and cancellation", async (state) => {
+      it.each(["working", "waiting"] as const)("closes focused %s agent pane in a split without confirmation", async (state) => {
         seedCloseLayout(false, false, true);
         workspace.storeState.activityBySessionId["sess-2"] = { state, title: "agent", isAgent: true };
         const close = await mountCloseAction(route);
         close();
-        expect(workspace.closePane).not.toHaveBeenCalled();
-        expect(workspace.closeTab).not.toHaveBeenCalled();
-        fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: /cancel/i }));
-        expect(workspace.closePane).not.toHaveBeenCalled();
-        expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-        close();
-        fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: /close pane/i }));
         expect(workspace.closePane).toHaveBeenCalledExactlyOnceWith("tab-1", "leaf-2");
         expect(workspace.closeTab).not.toHaveBeenCalled();
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
       });
 
       it("does not ask for confirmation for an untagged pane's busy sibling", async () => {
@@ -838,7 +832,7 @@ describe("App project workspace flow", () => {
     expect(workspace.closeTab).not.toHaveBeenCalled();
   });
 
-  it.each(["working", "waiting"] as const)("confirms pane close for a %s agent, with cancel leaving it open", async (state) => {
+  it.each(["working", "waiting"] as const)("confirms closing a single-pane tab with a %s agent as a tab close", async (state) => {
     workspace.storeState.activityBySessionId["sess-1"] = { state, title: "agent", isAgent: true };
     await act(async () => { render(<App />); });
     fireEvent.click(screen.getByRole("button", { name: "Close fixture pane" }));
@@ -850,9 +844,29 @@ describe("App project workspace flow", () => {
     expect(workspace.closePane).not.toHaveBeenCalled();
     expect(workspace.closeTab).not.toHaveBeenCalled();
     act(() => { native.closeMenuHandler?.(); });
-    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: /close pane/i }));
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: /close tab/i }));
     expect(workspace.closePane).toHaveBeenCalledExactlyOnceWith("tab-1", "leaf-1");
     expect(workspace.closeTab).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it.each(["working", "waiting"] as const)("closes a single pane in a split view with a %s agent without confirmation", async (state) => {
+    workspace.storeState.layout.layoutsByTabId["tab-1"] = {
+      root: {
+        type: "split",
+        direction: "horizontal",
+        first: { type: "leaf", leafId: "leaf-1" },
+        second: { type: "leaf", leafId: "leaf-2" },
+        ratio: 0.5,
+      },
+      activeLeafId: "leaf-1",
+      expandedLeafId: null,
+      sessionIdsByLeafId: { "leaf-1": "sess-1", "leaf-2": "sess-2" },
+    };
+    workspace.storeState.activityBySessionId["sess-1"] = { state, title: "agent", isAgent: true };
+    await act(async () => { render(<App />); });
+    fireEvent.click(screen.getByRole("button", { name: "Close fixture pane" }));
+    expect(workspace.closePane).toHaveBeenCalledWith("tab-1", "leaf-1");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 

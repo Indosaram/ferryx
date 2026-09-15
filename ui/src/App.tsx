@@ -1839,16 +1839,24 @@ function WorkspaceApp({
     (tabId: string, leafId: string) => {
       if (activeRemoteHostRef.current) return;
       const currentState = stateRef.current;
-      const sessionId = currentState.layout.layoutsByTabId?.[tabId]?.sessionIdsByLeafId[leafId];
-      const activity = sessionId ? currentState.activityBySessionId?.[sessionId] : undefined;
-      if (activity?.state === "working" || activity?.state === "waiting") {
+      const tabLayout = currentState.layout.layoutsByTabId?.[tabId];
+      if (tabLayout?.root.type === "leaf") {
         const tab = currentState.layout.tabs.find((candidate) => candidate.id === tabId);
-        setPendingTabClose({ kind: "pane", tabId, leafId, label: tab?.label ?? "", activeAgentCount: 1 });
-        return;
+        const sessionIds = tab?.kind === "terminal"
+          ? Object.values(tabLayout.sessionIdsByLeafId ?? {}).filter(Boolean)
+          : [];
+        const activeAgentCount = sessionIds.filter((sessionId) => {
+          const activity = currentState.activityBySessionId?.[sessionId];
+          return activity?.state === "working" || activity?.state === "waiting";
+        }).length;
+        if (activeAgentCount > 0 || (generalSettings.confirmCloseTab && !tab?.pinned)) {
+          setPendingTabClose({ kind: "tab", tabId, leafId, label: tab?.label ?? "", activeAgentCount });
+          return;
+        }
       }
       void closePane(tabId, leafId).catch(reportRuntimeError);
     },
-    [closePane, reportRuntimeError],
+    [closePane, generalSettings.confirmCloseTab, reportRuntimeError],
   );
 
   const handleCloseActiveSurface = useCallback(() => {
@@ -1872,9 +1880,9 @@ function WorkspaceApp({
 
   const handleConfirmTabClose = useCallback(() => {
     if (!pendingTabClose) return;
-    const { kind, tabId, leafId } = pendingTabClose;
+    const { tabId, leafId } = pendingTabClose;
     setPendingTabClose(null);
-    if (kind === "pane" && leafId) {
+    if (leafId) {
       void closePane(tabId, leafId).catch(reportRuntimeError);
     } else {
       void closeTab(tabId).catch(reportRuntimeError);
