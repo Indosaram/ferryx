@@ -703,8 +703,20 @@ export function NativeTerminalPane({
               toast.error("Remote files cannot be opened on this machine.");
               return;
             }
+            const container = containerRef.current;
+            const leafId =
+              container?.closest("[data-leaf-id]")?.getAttribute("data-leaf-id") ??
+              session?.id ??
+              targetSessionId;
             const opened = await openTerminalToken(token, {
               shiftKey,
+              preview: !shiftKey,
+              source: {
+                leafId,
+                sessionId: session?.id ?? targetSessionId,
+                backendSessionId: targetSessionId,
+                workspaceId: session?.workspaceId ?? null,
+              },
               cwd: session?.cwd || session?.worktreePath,
               sessionId: targetSessionId,
               editor: loadFileLinkEditor(),
