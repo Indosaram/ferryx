@@ -2,6 +2,12 @@ import { useEffect, useSyncExternalStore } from "react";
 
 import { deserializeWorkspaceState, serializeWorkspaceState } from "../lib/sessionPersistence";
 import { resetAgentAutoResumeGuard } from "../lib/agentAutoResume";
+import { loadGeneralSettings } from "../lib/generalSettings";
+import { isPairedWorkspaceId, isRemoteWorkspaceId } from "../lib/remoteProject";
+import {
+  registerSessionSnapshot,
+  setSessionSleeping,
+} from "../lib/sessionLifecycle";
 import { isTauriRuntime, listTerminalSessions, loadSession } from "../lib/tauri";
 import { defaultTauriTransport } from "../lib/terminalTransport/tauriTransport";
 import type { PersistedWorkspaceSession } from "../lib/types";
@@ -90,16 +96,50 @@ export async function defaultListLiveBackendSessionIds(): Promise<Array<{ sessio
   }));
 }
 
+function activeRestoreSessionIds(state: WorkspaceState): Set<string> {
+  const sessionIds = new Set<string>();
+  const activeTabIds = new Set<string>();
+  if (state.layout.tabGroups) {
+    for (const group of Object.values(state.layout.tabGroups)) {
+      if (group.activeTabId) activeTabIds.add(group.activeTabId);
+    }
+  }
+  if (activeTabIds.size === 0 && state.layout.activeTabId) activeTabIds.add(state.layout.activeTabId);
+  for (const tabId of activeTabIds) {
+    const tab = state.layout.tabs.find((candidate) => candidate.id === tabId);
+    if (!tab || tab.kind === "browser") continue;
+    sessionIds.add(tab.sessionId);
+    const paneLayout = state.layout.layoutsByTabId?.[tabId];
+    for (const sessionId of Object.values(paneLayout?.sessionIdsByLeafId ?? {})) {
+      if (sessionId) sessionIds.add(sessionId);
+    }
+  }
+  return sessionIds;
+}
+
 function prepareDiskRestoredState(workspaceId: string, state: WorkspaceState): WorkspaceState {
+  const policy = loadGeneralSettings().sessionRestorePolicy;
+  const activeSessionIds = activeRestoreSessionIds(state);
+  const sessions = Object.fromEntries(
+    Object.entries(state.sessions).map(([id, session]) => {
+      const isLocal = !isRemoteWorkspaceId(session.workspaceId) && !isPairedWorkspaceId(session.workspaceId);
+      const isMissing = session.backendSessionId === null;
+      const shouldSleep = isLocal && isMissing && (
+        policy === "lazy" || (policy === "activeOnly" && !activeSessionIds.has(id))
+      );
+      const nextSession = {
+        ...session,
+        lastOutputSequence: null,
+      };
+      setSessionSleeping(id, shouldSleep);
+      registerSessionSnapshot(nextSession, state.activityBySessionId?.[id]?.state);
+      return [id, nextSession];
+    }),
+  );
   return {
     ...state,
     workspaceId,
-    sessions: Object.fromEntries(
-      Object.entries(state.sessions).map(([id, session]) => [
-        id,
-        { ...session, lastOutputSequence: null },
-      ]),
-    ),
+    sessions,
   };
 }
 

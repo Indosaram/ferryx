@@ -13,14 +13,16 @@ import { workspaceName } from "../lib/branchFilter";
 import { closeBrowser, createBrowser, navigateBrowser, reloadBrowser } from "../lib/browserTauri";
 import { closeTerminal, DEFAULT_WORKSPACE_ID, discoverAgentProviderSession, getTerminalCwd, onNativeTerminalAgentState, onNativeTerminalBell, onNativeTerminalFocus, onNativeTerminalTitle, spawnTerminal, toIpcError, waitForTerminalExit } from "../lib/tauri";
 import * as tauriIpc from "../lib/tauri";
+import type { SpawnTerminalRequest } from "../lib/tauri";
 import { ensureTerminalEvents, terminalEventBus } from "../lib/terminalEvents";
 import { switchDebug } from "../lib/switchDebug";
-import { isRemoteWorkspaceId } from "../lib/remoteProject";
+import { isPairedWorkspaceId, isRemoteWorkspaceId } from "../lib/remoteProject";
 import { findGroupForWorkspace, groupProjects } from "../lib/projectGrouping";
 import { hasValidProjectTarget } from "../lib/projectIdentity";
 import { getCachedSshHosts } from "../lib/sshHosts";
 import { getMigratedItem, PROJECTS_STORAGE_KEY } from "../lib/storageKeys";
 import { startSshRecovery } from "../lib/sshRecovery";
+import { getAgentReconnectAffordance } from "../lib/agentResumeAffordance";
 import { getNativeWindowFocused } from "../lib/nativeWindowFocus";
 import { isWindowForegroundFocused } from "../lib/notificationCoordinator";
 import { createBrowserPaneContent, worktreeIdentity } from "../lib/types";
@@ -220,7 +222,7 @@ export type WorkspaceAction =
       requestId?: string | null;
     }
   | { type: "APPLY_PROVIDER_SESSION"; sessionId: string; providerSession: AgentProviderSession; agentType?: string }
-  | { type: "REBIND_SESSION_BACKEND"; sessionId: string; backendSessionId: string; cwd?: string; daemonEpoch?: string | null }
+  | { type: "REBIND_SESSION_BACKEND"; sessionId: string; backendSessionId: string; cwd?: string; daemonEpoch?: string | null; clearAgent?: boolean }
   | { type: "SESSION_TITLE_ACTIVITY"; tabId: string; sessionId: string; title: string; observed?: boolean }
   | {
       type: "SESSION_SCREEN_ACTIVITY";
@@ -579,7 +581,7 @@ export function useWorkspaceStore({
         worktree: worktreeIdentity(worktree),
         backendSessionId,
         lifecycle: "working",
-        ...(isRemoteWorkspaceId(workspaceId)
+        ...(isRemoteWorkspaceId(workspaceId) || isPairedWorkspaceId(workspaceId)
           ? {
               remoteConnectionState: "connected",
               remoteGeneration: 1,
@@ -655,12 +657,15 @@ export function useWorkspaceStore({
   }, [sshRecoveryKey, dispatch]);
 
   const ensureSessionBackends = useCallback(
-    async (sessionIds: string[]) => {
+    async (sessionIds: string[], options?: { fallbackToShell?: boolean }) => {
       const targets = sessionIds.filter((sessionId) => {
         const session = stateRef.current.sessions[sessionId];
         if (!session || session.backendSessionId != null) return false;
         if (isRemoteWorkspaceId(session.workspaceId)) return false;
-        if (session.lifecycle === "exited" && (session.agentType || session.providerSession || session.agentSessionId)) {
+        const isAgent = Boolean(session.agentType || session.providerSession || session.agentSessionId);
+        const isReconnecting = session.reconnectLifecycle === "validating" || session.reconnectLifecycle === "spawning" || session.reconnectLifecycle === "binding";
+        const canReconnect = isAgent && getAgentReconnectAffordance(session, stateRef.current.sessions).canReconnect;
+        if (!options?.fallbackToShell && session.lifecycle === "exited" && (canReconnect || isReconnecting)) {
           return false;
         }
         if (spawningSessionIdsRef.current.has(sessionId)) return false;
@@ -702,10 +707,12 @@ export function useWorkspaceStore({
               await closeBackendSession({ ...session, backendSessionId: entry.sessionId }, services);
               continue;
             }
+            const isAgent = Boolean(session.agentType || session.providerSession || session.agentSessionId);
             dispatch({
               type: "REBIND_SESSION_BACKEND",
               sessionId,
               backendSessionId: entry.sessionId,
+              clearAgent: options?.fallbackToShell || isAgent,
             });
           }
           return;
@@ -729,10 +736,12 @@ export function useWorkspaceStore({
               await closeBackendSession({ ...session, backendSessionId }, services);
               return;
             }
+            const isAgent = Boolean(session.agentType || session.providerSession || session.agentSessionId);
             dispatch({
               type: "REBIND_SESSION_BACKEND",
               sessionId,
               backendSessionId,
+              clearAgent: options?.fallbackToShell || isAgent,
             });
           } finally {
             // Let the caller surface registration/host failures, while allowing retry.
@@ -2309,11 +2318,12 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       // identity and activity. An unchanged id is a same-process reattach (the daemon
       // restarted around the same PTY); the pane keeps its agent and generation.
       const isSshBackendReplaced = isRemoteWorkspaceId(session.workspaceId) && session.backendSessionId !== action.backendSessionId;
+      const shouldClearAgent = isSshBackendReplaced || action.clearAgent === true;
       const activityBySessionId = { ...state.activityBySessionId };
-      if (isSshBackendReplaced) delete activityBySessionId[action.sessionId];
+      if (shouldClearAgent) delete activityBySessionId[action.sessionId];
       return {
         ...state,
-        ...(isSshBackendReplaced ? { activityBySessionId } : {}),
+        ...(shouldClearAgent ? { activityBySessionId } : {}),
         sessions: {
           ...state.sessions,
           [action.sessionId]: {
@@ -2326,11 +2336,15 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
             reconnectLifecycle: "idle",
             reconnectError: null,
             reconnectRequestId: null,
-            ...(isSshBackendReplaced
+            ...(shouldClearAgent
               ? {
                   agentType: null,
                   agentSessionId: null,
                   providerSession: null,
+                }
+              : {}),
+            ...(isSshBackendReplaced
+              ? {
                   remoteConnectionState: "connected",
                   remoteGeneration: 1,
                   remoteFailure: null,
@@ -2900,12 +2914,32 @@ function clearWorktreeUnreadWhenRead(
   return { ...state, unreadWorktreePaths };
 }
 
+function resolvePairedStartup(workspaceId: string): SpawnTerminalRequest["startup"] {
+  if (workspaceId.startsWith("daemon:")) {
+    try {
+      const stored: unknown = JSON.parse(getMigratedItem(PROJECTS_STORAGE_KEY) ?? "[]");
+      if (Array.isArray(stored)) {
+        const found = stored.find((p: RegisteredProject) => p?.workspaceId === workspaceId);
+        if (found?.target?.kind === "pairedDaemon" && found.remoteWorkspaceId) {
+          return {
+            kind: "pairedDaemon",
+            hostId: found.target.hostId,
+            remoteWorkspaceId: found.remoteWorkspaceId,
+          };
+        }
+      }
+    } catch {}
+  }
+  return null;
+}
+
 async function spawnTerminalForLogicalAction(
   services: WorkspaceServices,
   request: { workspaceId: string; worktree: WorktreeIdentity | null; cwd?: string | null; shell?: string | null; inheritFromSessionId?: string | null },
 ): Promise<string> {
   const clientRequestId = createClientRequestId();
-  const stableRequest = { ...request, clientRequestId };
+  const startup = resolvePairedStartup(request.workspaceId);
+  const stableRequest = { ...request, clientRequestId, ...(startup ? { startup } : {}) };
   try {
     return await services.spawnTerminal(stableRequest);
   } catch (error) {
@@ -2919,7 +2953,8 @@ async function spawnDetailedForLogicalAction(
   request: { workspaceId: string; worktree: WorktreeIdentity | null; cwd?: string | null; shell?: string | null; inheritFromSessionId?: string | null },
 ): Promise<Awaited<ReturnType<NonNullable<WorkspaceServices["spawnTerminalDetailed"]>>>> {
   const clientRequestId = createClientRequestId();
-  const stableRequest = { ...request, clientRequestId };
+  const startup = resolvePairedStartup(request.workspaceId);
+  const stableRequest = { ...request, clientRequestId, ...(startup ? { startup } : {}) };
   const spawnDetailed = services.spawnTerminalDetailed!;
   try {
     return await spawnDetailed(stableRequest);

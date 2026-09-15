@@ -1,4 +1,5 @@
 import { getAgentReconnectAffordance } from "./agentResumeAffordance";
+import { loadGeneralSettings } from "./generalSettings";
 import type { TerminalSession, TerminalTab } from "./types";
 import type { WorkspaceState } from "../state/workspaceStore";
 
@@ -27,9 +28,7 @@ export function markRestoreTokenExecuted(token: string): void {
 export function resetAgentAutoResumeGuard(workspaceId?: string): void {
   if (workspaceId) {
     for (const token of executedRestoreTokens) {
-      if (token.startsWith(`${workspaceId}:`)) {
-        executedRestoreTokens.delete(token);
-      }
+      if (token.startsWith(`${workspaceId}:`)) executedRestoreTokens.delete(token);
     }
   } else {
     executedRestoreTokens.clear();
@@ -37,49 +36,62 @@ export function resetAgentAutoResumeGuard(workspaceId?: string): void {
 }
 
 export function clearPendingAutoResumes(): void {
-  for (const timeoutId of pendingTimeouts) {
-    clearTimeout(timeoutId);
-  }
+  for (const timeoutId of pendingTimeouts) clearTimeout(timeoutId);
   pendingTimeouts.clear();
+}
+
+function activeTabSessionIds(state: WorkspaceState): Set<string> {
+  const result = new Set<string>();
+  const activeTabIds = new Set<string>();
+  if (state.layout.tabGroups) {
+    for (const group of Object.values(state.layout.tabGroups)) {
+      if (group.activeTabId) activeTabIds.add(group.activeTabId);
+    }
+  }
+  if (activeTabIds.size === 0 && state.layout.activeTabId) activeTabIds.add(state.layout.activeTabId);
+  for (const tabId of activeTabIds) {
+    const tab = state.layout.tabs.find((candidate) => candidate.id === tabId);
+    if (!tab || tab.kind === "browser") continue;
+    result.add(tab.sessionId);
+    const tabLayout = state.layout.layoutsByTabId?.[tabId];
+    for (const sessionId of Object.values(tabLayout?.sessionIdsByLeafId ?? {})) {
+      if (sessionId) result.add(sessionId);
+    }
+  }
+  return result;
 }
 
 export function collectAutoResumeCandidates(
   state: WorkspaceState,
   allSessions?: Readonly<Record<string, TerminalSession>>,
-  limit: number = MAX_AUTO_RESUME_CANDIDATES,
+  limit?: number,
+  allowedSessionIds?: ReadonlySet<string>,
 ): string[] {
   const sessions = allSessions ?? state.sessions;
-  const rawCandidates = Object.values(sessions).filter((session) => {
-    return (
-      session.backendSessionId === null &&
-      typeof session.agentType === "string" &&
-      session.agentType.trim().length > 0
-    );
-  });
+  const rawCandidates = Object.values(sessions).filter((session) =>
+    (allowedSessionIds === undefined || allowedSessionIds.has(session.id)) &&
+    session.backendSessionId === null &&
+    typeof session.agentType === "string" &&
+    session.agentType.trim().length > 0,
+  );
 
   const validCandidates: TerminalSession[] = [];
   for (const session of rawCandidates) {
     const affordance = getAgentReconnectAffordance(session, sessions);
-    if (affordance.canReconnect) {
-      validCandidates.push(session);
-    }
+    if (affordance.canReconnect) validCandidates.push(session);
   }
-
   if (validCandidates.length === 0) return [];
 
   const candidateIdSet = new Set(validCandidates.map((s) => s.id));
   const orderedIds: string[] = [];
   const seen = new Set<string>();
-
   const activeTabId = state.layout.focusedGroupId
     ? state.layout.tabGroups?.[state.layout.focusedGroupId]?.activeTabId ?? state.layout.activeTabId
     : state.layout.activeTabId ?? state.layout.tabs[0]?.id;
-
   const activeTab = activeTabId
     ? (state.layout.tabs.find((t) => t.id === activeTabId && t.kind !== "browser") as TerminalTab | undefined)
     : null;
 
-  // 1. Active tab session(s) first
   if (activeTab) {
     const tabLayout = state.layout.layoutsByTabId?.[activeTab.id];
     const activeLeafId = tabLayout?.activeLeafId;
@@ -91,10 +103,10 @@ export function collectAutoResumeCandidates(
       }
     }
     if (tabLayout?.sessionIdsByLeafId) {
-      for (const sessId of Object.values(tabLayout.sessionIdsByLeafId)) {
-        if (candidateIdSet.has(sessId) && !seen.has(sessId)) {
-          orderedIds.push(sessId);
-          seen.add(sessId);
+      for (const sessionId of Object.values(tabLayout.sessionIdsByLeafId)) {
+        if (candidateIdSet.has(sessionId) && !seen.has(sessionId)) {
+          orderedIds.push(sessionId);
+          seen.add(sessionId);
         }
       }
     }
@@ -104,34 +116,31 @@ export function collectAutoResumeCandidates(
     }
   }
 
-  // 2. Open tabs in layout order
   for (const tab of state.layout.tabs) {
     if (tab.kind === "browser") continue;
-    const termTab = tab as TerminalTab;
-    const tabLayout = state.layout.layoutsByTabId?.[termTab.id];
+    const terminalTab = tab as TerminalTab;
+    const tabLayout = state.layout.layoutsByTabId?.[terminalTab.id];
     if (tabLayout?.sessionIdsByLeafId) {
-      for (const sessId of Object.values(tabLayout.sessionIdsByLeafId)) {
-        if (candidateIdSet.has(sessId) && !seen.has(sessId)) {
-          orderedIds.push(sessId);
-          seen.add(sessId);
+      for (const sessionId of Object.values(tabLayout.sessionIdsByLeafId)) {
+        if (candidateIdSet.has(sessionId) && !seen.has(sessionId)) {
+          orderedIds.push(sessionId);
+          seen.add(sessionId);
         }
       }
     }
-    if (termTab.sessionId && candidateIdSet.has(termTab.sessionId) && !seen.has(termTab.sessionId)) {
-      orderedIds.push(termTab.sessionId);
-      seen.add(termTab.sessionId);
+    if (terminalTab.sessionId && candidateIdSet.has(terminalTab.sessionId) && !seen.has(terminalTab.sessionId)) {
+      orderedIds.push(terminalTab.sessionId);
+      seen.add(terminalTab.sessionId);
     }
   }
 
-  // 3. Any remaining valid candidates
   for (const session of validCandidates) {
     if (!seen.has(session.id)) {
       orderedIds.push(session.id);
       seen.add(session.id);
     }
   }
-
-  return orderedIds.slice(0, limit);
+  return typeof limit === "number" ? orderedIds.slice(0, limit) : orderedIds;
 }
 
 export type ScheduleAgentAutoResumeOptions = {
@@ -141,6 +150,8 @@ export type ScheduleAgentAutoResumeOptions = {
   reconnect: (sessionId: string) => Promise<unknown>;
   staggerIntervalMs?: number;
   maxCandidates?: number;
+  allowedSessionIds?: ReadonlySet<string>;
+  ignorePolicy?: boolean;
 };
 
 export function scheduleAgentAutoResume({
@@ -149,29 +160,31 @@ export function scheduleAgentAutoResume({
   recoveredFromHmr,
   reconnect,
   staggerIntervalMs = AUTO_RESUME_STAGGER_INTERVAL_MS,
-  maxCandidates = MAX_AUTO_RESUME_CANDIDATES,
+  maxCandidates,
+  allowedSessionIds,
+  ignorePolicy = false,
 }: ScheduleAgentAutoResumeOptions): () => void {
-  if (recoveredFromHmr) {
-    return () => {};
+  if (recoveredFromHmr) return () => {};
+
+  const policy = loadGeneralSettings().sessionRestorePolicy;
+  if (!ignorePolicy && policy === "lazy") return () => {};
+
+  let effectiveAllowed = allowedSessionIds;
+  if (!ignorePolicy && policy === "activeOnly") {
+    const activeIds = activeTabSessionIds(state);
+    effectiveAllowed = allowedSessionIds
+      ? new Set([...activeIds].filter((sessionId) => allowedSessionIds.has(sessionId)))
+      : activeIds;
   }
 
   const token = computeRestoreToken(workspaceId, state);
-  if (hasExecutedRestoreToken(token)) {
-    return () => {};
-  }
+  if (hasExecutedRestoreToken(token)) return () => {};
   markRestoreTokenExecuted(token);
 
-  // Pass the caller's limit DOWN instead of double-slicing. collectAutoResumeCandidates
-  // already truncated to MAX_AUTO_RESUME_CANDIDATES (8), so the caller-side slice could
-  // only ever narrow: `maxCandidates: 20` silently yielded 8 and panes 9+ were left dead
-  // with no reconnect attempt and no error -- a broken contract on a documented option.
-  const candidates = collectAutoResumeCandidates(state, undefined, maxCandidates);
-  if (candidates.length === 0) {
-    return () => {};
-  }
+  const candidates = collectAutoResumeCandidates(state, undefined, maxCandidates, effectiveAllowed);
+  if (candidates.length === 0) return () => {};
 
   const localTimeouts: ReturnType<typeof setTimeout>[] = [];
-
   for (let index = 0; index < candidates.length; index++) {
     const sessionId = candidates[index];
     const delay = index * staggerIntervalMs;
@@ -179,7 +192,6 @@ export function scheduleAgentAutoResume({
       pendingTimeouts.delete(timeoutId);
       void reconnect(sessionId).catch(() => undefined);
     }, delay);
-
     pendingTimeouts.add(timeoutId);
     localTimeouts.push(timeoutId);
   }

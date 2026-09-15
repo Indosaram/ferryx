@@ -64,6 +64,7 @@ import {
   getSystemPermissionsStatus,
   isTauriRuntime,
   loadSession,
+  onWorktreeChanged,
   onCloseTabMenu,
   onSelectWorktreeMenu,
   onSelectTabMenu,
@@ -97,10 +98,11 @@ import {
 import { safeRandomUUID } from "./lib/uuid";
 import { getCachedSshHosts } from "./lib/sshHosts";
 import { reconnectAgentSession } from "./lib/agentReconnect";
-import { registerRemoteProject, toRegisteredProject } from "./lib/remoteProject";
+import { isRemoteWorkspaceId, registerRemoteProject, toRegisteredProject } from "./lib/remoteProject";
 import { hasValidProjectTarget, projectRootWorktree } from "./lib/projectIdentity";
 import { groupProjects } from "./lib/projectGrouping";
 import { scheduleAgentAutoResume } from "./lib/agentAutoResume";
+import { getAgentReconnectAffordance } from "./lib/agentResumeAffordance";
 import { createAppReconnectDependencies } from "./lib/appReconnectDependencies";
 import { replaceExitedShellSession } from "./lib/shellReplacement";
 import { enqueueStrictPersistence } from "./lib/persistenceQueue";
@@ -129,6 +131,7 @@ import { clearHmrWorkspaceState, getHmrWorkspaceState } from "./state/hmrWorkspa
 import { clearWorkspaceSnapshot, getWorkspaceSnapshot, listWorkspaceSnapshots } from "./state/workspaceSnapshotCache";
 import { emptySidebarWorkspaceIds } from "./state/sidebarWorkspaceState";
 import { useWorkspaceRuntime } from "./state/workspaceRuntime";
+import { listPairedProjectWorktrees } from "./state/pairedProjectWorktrees";
 import { getTabSessionIds, hasNavigableSession, selectGlobalUnreadBadgeCount, selectNotificationWorkspaceLabel, selectWorktreeActivitySummaries, useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
 
 export { ACTIVE_PROJECT_STORAGE_KEY, PROJECTS_STORAGE_KEY, SIDEBAR_OPEN_STORAGE_KEY };
@@ -829,11 +832,13 @@ function WorkspaceApp({
     () => {
       if (projects.length === 0) return null;
       const target = activeProject.target;
-      if (activeProject.gitRoot === null || target?.kind === "ssh") {
+      if (activeProject.gitRoot === null || target?.kind === "ssh" || target?.kind === "pairedDaemon") {
         const hostLabel = target?.kind === "ssh"
           ? (typeof getCachedSshHosts === "function"
               ? getCachedSshHosts()?.find((h) => h.id === target.hostId)?.label ?? target.hostId
               : target.hostId)
+          : target?.kind === "pairedDaemon"
+          ? (remoteHostStore.getState().hosts[target.hostId]?.displayName ?? "Remote")
           : undefined;
         return projectRootWorktree(activeProject, hostLabel);
       }
@@ -852,6 +857,17 @@ function WorkspaceApp({
     plainRootWorktree,
     rootOnly: activeProject.target?.kind === "ssh" && activeProject.gitRoot === null,
     registeredWorkspaceId: registeredProjectId,
+    services: activeProject.target?.kind === "pairedDaemon"
+      ? {
+          ensureTerminalEvents,
+          listWorktrees: async () => {
+            const listed = await listPairedProjectWorktrees(activeProject);
+            return listed ?? [];
+          },
+          onWorktreeChanged,
+          isTauriRuntime,
+        }
+      : undefined,
   });
   reportRuntimeErrorRef.current = reportRuntimeError;
 
@@ -1143,12 +1159,27 @@ function WorkspaceApp({
     (restoredState: WorkspaceState) => {
       lastRestoredSessionsRef.current = restoredState.sessions;
       restoreWorkspace(restoredState);
+
+      const deadSessions = Object.values(restoredState.sessions).filter(
+        (session) => session.backendSessionId === null && !isRemoteWorkspaceId(session.workspaceId),
+      );
+
+      const shellRecoverySessionIds: string[] = [];
+      for (const session of deadSessions) {
+        const isAgent = Boolean(session.agentType || session.providerSession || session.agentSessionId);
+        if (!isAgent) {
+          shellRecoverySessionIds.push(session.id);
+        } else {
+          const affordance = getAgentReconnectAffordance(session, restoredState.sessions);
+          if (!affordance.canReconnect) {
+            shellRecoverySessionIds.push(session.id);
+          }
+        }
+      }
+
       setPendingBackendRecovery({
         workspaceId: activeProjectRef.current.workspaceId,
-        sessionIds: Object.values(restoredState.sessions)
-          .filter((session) => session.backendSessionId === null)
-          .filter((session) => !(session.lifecycle === "exited" && (session.agentType || session.providerSession || session.agentSessionId)))
-          .map((session) => session.id),
+        sessionIds: shellRecoverySessionIds,
       });
       setPendingAgentAutoResume({
         workspaceId: activeProjectRef.current.workspaceId,
@@ -1173,7 +1204,7 @@ function WorkspaceApp({
     // switch those IDs belong to another workspace and must not be respawned.
     if (pendingBackendRecovery.workspaceId !== activeProject.workspaceId) return;
     if (pendingBackendRecovery.sessionIds.length === 0) return;
-    void ensureSessionBackends(pendingBackendRecovery.sessionIds).catch(reportRuntimeError);
+    void ensureSessionBackends?.(pendingBackendRecovery.sessionIds)?.catch(reportRuntimeError);
   }, [activeProject.workspaceId, ensureSessionBackends, pendingBackendRecovery, registeredProjectId, reportRuntimeError]);
 
   const saveChainRef = useRef<Promise<void>>(Promise.resolve());
@@ -1328,14 +1359,23 @@ function WorkspaceApp({
       workspaceId: activeProject.workspaceId,
       state: pending.state,
       recoveredFromHmr,
-      reconnect: (sessionId) => {
+      ignorePolicy: true,
+      reconnect: async (sessionId) => {
         // The app, not the user, initiated this resume; the working→idle blip it
         // produces when the agent lands back at its prompt is not user attention.
         dispatchWorkspaceAction({ type: "SUPPRESS_NEXT_ATTENTION", sessionId });
-        return handleReconnectAgentSession(sessionId, { silent: true });
+        try {
+          await handleReconnectAgentSession(sessionId, { silent: true });
+        } catch {
+          // If auto-resume fails in background, fallback to fresh shell in that worktree
+          // so user never lands on a dead "Session disconnected / Reconnect" screen.
+          await ensureSessionBackends?.([sessionId], { fallbackToShell: true })?.catch((fallbackError) => {
+            reportRuntimeError(fallbackError);
+          });
+        }
       },
     });
-  }, [activeProject.workspaceId, dispatchWorkspaceAction, handleReconnectAgentSession, pendingAgentAutoResume, recoveredFromHmr, registeredProjectId]);
+  }, [activeProject.workspaceId, dispatchWorkspaceAction, ensureSessionBackends, handleReconnectAgentSession, pendingAgentAutoResume, recoveredFromHmr, registeredProjectId, reportRuntimeError]);
 
   useEffect(() => {
     const unregister = registerWindowCloseGuard(async () => {
@@ -2968,7 +3008,7 @@ export function loadProjects(): RegisteredProject[] {
           typeof project.workspaceId === "string" &&
           typeof project.repoRoot === "string" &&
           hasValidProjectTarget(project) &&
-          (project.repoRoot !== "/" || project.target?.kind === "ssh") &&
+          (project.repoRoot !== "/" || project.target?.kind === "ssh" || project.target?.kind === "pairedDaemon") &&
           project.repoRoot !== "\\",
       )
       .map((project): RegisteredProject => {
@@ -2994,8 +3034,7 @@ export function loadProjects(): RegisteredProject[] {
               : project.repoRoot,
         };
         if (project.target?.kind === "pairedDaemon") {
-          if (typeof project.remoteWorkspaceId !== "string") throw new Error("INVALID_PAIRED_PROJECT_METADATA");
-          return { ...metadata, target: project.target, remoteWorkspaceId: project.remoteWorkspaceId };
+          return { ...metadata, target: project.target, remoteWorkspaceId: project.remoteWorkspaceId as string };
         }
         return { ...metadata, target: project.target };
       });
