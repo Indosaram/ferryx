@@ -964,6 +964,10 @@ mod macos_proc {
     }
 }
 
+#[cfg(target_os = "windows")]
+#[path = "windows_process_cwd.rs"]
+mod windows_process_cwd;
+
 pub fn process_cwd(pid: u32) -> Option<PathBuf> {
     #[cfg(target_os = "linux")]
     {
@@ -990,7 +994,12 @@ pub fn process_cwd(pid: u32) -> Option<PathBuf> {
             .map(PathBuf::from);
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(target_os = "windows")]
+    {
+        windows_process_cwd::process_cwd(pid)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         let _ = pid;
         None

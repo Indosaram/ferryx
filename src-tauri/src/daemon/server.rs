@@ -1700,7 +1700,16 @@ impl DaemonServer {
                 }
                 Ok(DaemonRequest::DescribeSession { session_id }) => {
                     if self.session_router.is_local_session(&session_id) {
-                        self.handle_describe_session(&session_id)
+                        let mut response = self.handle_describe_session(&session_id);
+                        if let Some(pid) = self.terminal_service.get_session(&session_id).and_then(|session| session.pid()) {
+                            let cwd = crate::ipc::run_blocking::<Option<PathBuf>, _>(move || {
+                                Ok(crate::ipc::terminal::process_cwd(pid))
+                            }).await;
+                            if let DaemonResponse::DescribeSessionOk { session } = &mut response {
+                                session.cwd = cwd.ok().flatten().map(|path| path.to_string_lossy().into_owned());
+                            }
+                        }
+                        response
                     } else if let Some(peer) = self.session_router.find_legacy_peer_for_session(&session_id) {
                         match peer.describe_session(&session_id).await {
                             Ok(session) => DaemonResponse::DescribeSessionOk { session },

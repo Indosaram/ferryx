@@ -3522,10 +3522,32 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       expect(openCalls[0]?.[1]).toEqual({
         path: "src/components/App.tsx",
         cwd: "/Users/indo/code/project",
+        sessionId: "daemon-file-click",
+        editor: "system",
         line: 42,
         col: 10,
       });
     });
+  });
+
+  it("shows a link underline only while hovering a token with the modifier", async () => {
+    const session = createSession("hover-file", "hover-backend");
+    tauriCoreMocks.invoke.mockImplementation(async (command) => {
+      if (command === "cmd_native_terminal_line_at") return { text: "src/a.ts plain", col: 2, row: 0 };
+      return undefined;
+    });
+    const view = render(<NativeTerminalPane session={session} />);
+    const pane = view.getByTestId("native-terminal-pane");
+    vi.spyOn(view.getByTestId("native-terminal-viewport"), "getBoundingClientRect")
+      .mockReturnValue(new DOMRect(0, 0, 800, 480));
+    await act(async () => {
+      fireEvent.pointerMove(pane, { pointerId: 1, clientX: 16, clientY: 5, metaKey: true, buttons: 0 });
+    });
+    expect(view.getByTestId("terminal-link-underline")).toBeTruthy();
+    expect(pane.classList.contains("cursor-pointer")).toBe(true);
+    act(() => { fireEvent.pointerLeave(pane); });
+    expect(view.queryByTestId("terminal-link-underline")).toBeNull();
+    expect(pane.classList.contains("cursor-pointer")).toBe(false);
   });
 
   it("handles Cmd+click on indented lines without coordinate drift", async () => {
@@ -3600,6 +3622,8 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       expect(openCalls[0]?.[1]).toEqual({
         path: "alpha/one.ts",
         cwd: "/Users/indo/code/project",
+        sessionId: "daemon-indented-click",
+        editor: "system",
         line: 1,
         col: 1,
       });

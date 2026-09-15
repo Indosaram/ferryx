@@ -16,6 +16,7 @@ import {
 import { switchDebug } from "../lib/switchDebug";
 import { isMacShortcutPlatform } from "../lib/shortcuts";
 import { openTerminalToken, resolveTokenAtCol } from "../lib/linkRouting";
+import { loadFileLinkEditor } from "../lib/fileLinkSettings";
 import {
   isStructuredIpcError,
   onNativeTerminalCopyOrInterrupt,
@@ -512,6 +513,9 @@ export function NativeTerminalPane({
   const [scrollbar, setScrollbar] = useState<ScrollbarMetrics | null>(null);
   const [isScrollbarRevealed, setIsScrollbarRevealed] = useState(false);
   const [isCmdHeld, setIsCmdHeld] = useState(false);
+  const [linkHover, setLinkHover] = useState<{ left: number; top: number; width: number } | null>(null);
+  const linkHoverRevision = useRef(0);
+  const [linkPointer, setLinkPointer] = useState<{ x: number; y: number } | null>(null);
   const cmdClickDownRef = useRef<{ clientX: number; clientY: number; shiftKey: boolean } | null>(null);
   const scrollbarHideTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isScrollbarHoveredRef = useRef(false);
@@ -695,18 +699,56 @@ export function NativeTerminalPane({
         if (receipt && receipt.text) {
           const token = resolveTokenAtCol(receipt.text, receipt.col);
           if (token) {
-            await openTerminalToken(token, {
+            if (token.type === "file" && session?.workspaceId && isRemoteWorkspaceId(session.workspaceId)) {
+              toast.error("Remote files cannot be opened on this machine.");
+              return;
+            }
+            const opened = await openTerminalToken(token, {
               shiftKey,
               cwd: session?.cwd || session?.worktreePath,
+              sessionId: targetSessionId,
+              editor: loadFileLinkEditor(),
             });
+            if (!opened) toast.error("This file could not be opened in the current client.");
           }
         }
       } catch (error) {
-        console.error("Failed to resolve terminal line on Cmd+click:", error);
+        toast.error(extractIpcErrorMessage(error, "Could not open terminal link."));
       }
     },
-    [session?.cwd, session?.worktreePath, targetSessionId, visible],
+    [session?.cwd, session?.worktreePath, session?.workspaceId, targetSessionId, visible],
   );
+
+  useEffect(() => {
+    const revision = ++linkHoverRevision.current;
+    setLinkHover(null);
+    const point = linkPointer;
+    const viewport = viewportRef.current;
+    if (!isCmdHeld || !visible || !targetSessionId || !point || !viewport) return;
+    const rect = viewport.getBoundingClientRect();
+    const scale = scaleFactorRef.current || 1;
+    const width = (cellSizeRef.current?.width ?? 8 * scale) / scale;
+    const height = (cellSizeRef.current?.height ?? 16 * scale) / scale;
+    const col = Math.floor((point.x - rect.left) / width);
+    const row = Math.floor((point.y - rect.top) / height);
+    if (col < 0 || row < 0 || point.x >= rect.right || point.y >= rect.bottom) return;
+    void invoke<{ text: string; col: number; row: number }>("cmd_native_terminal_line_at", {
+      sessionId: targetSessionId, col, row,
+    }).then((receipt) => {
+      if (revision !== linkHoverRevision.current) return;
+      const token = resolveTokenAtCol(receipt.text, receipt.col);
+      if (!token) return;
+      const key = JSON.stringify(token);
+      let start = receipt.col;
+      let end = start + 1;
+      while (start > 0 && JSON.stringify(resolveTokenAtCol(receipt.text, start - 1)) === key) start--;
+      while (end < receipt.text.length * 2 && JSON.stringify(resolveTokenAtCol(receipt.text, end)) === key) end++;
+      const host = containerRef.current?.getBoundingClientRect();
+      if (host) setLinkHover({ left: rect.left - host.left + start * width,
+        top: rect.top - host.top + (row + 1) * height - 1, width: (end - start) * width });
+    }).catch(() => { if (revision === linkHoverRevision.current) setLinkHover(null); });
+    return () => { linkHoverRevision.current++; };
+  }, [isCmdHeld, visible, targetSessionId, linkPointer]);
 
   const sendFocus = useCallback((focused: boolean) => {
     if (!visible || !isTauri() || !targetSessionId) {
@@ -1215,7 +1257,7 @@ export function NativeTerminalPane({
   useEffect(() => {
     const move = (event: PointerEvent) => {
       const drag = scrollbarDragRef.current;
-      if (drag?.pointerId === event.pointerId) {
+      if (drag && drag.pointerId === event.pointerId) {
         scrollToTrackPosition(event.clientY, drag.grabOffsetPx);
         return;
       }
@@ -2190,17 +2232,24 @@ export function NativeTerminalPane({
       data-native-terminal-visible={surfaceVisible ? "true" : "false"}
       data-native-terminal-presented={surfaceVisible && retainedPresentation !== null ? "true" : "false"}
       data-native-terminal-input-enabled={visible ? "true" : "false"}
-      className={cn("terminal-host relative h-full w-full min-h-0 min-w-0 bg-transparent", isCmdHeld && "cursor-pointer", className)}
+      className={cn("terminal-host relative h-full w-full min-h-0 min-w-0 bg-transparent", isCmdHeld && linkHover && "cursor-pointer", className)}
       style={style}
       onPointerEnter={() => {
         if (!visible) return;
         triggerScrollbarReveal();
       }}
-      onPointerMove={() => {
+      onPointerMove={(event) => {
         if (!visible) return;
+        setLinkPointer(event.buttons === 0 ? { x: event.clientX, y: event.clientY } : null);
+        setIsCmdHeld(isMacShortcutPlatform() ? event.metaKey : event.ctrlKey);
+        setLinkHover(null);
+        linkHoverRevision.current++;
         triggerScrollbarReveal();
       }}
       onPointerLeave={() => {
+        setLinkPointer(null);
+        linkHoverRevision.current++;
+        setLinkHover(null);
         if (!visible) return;
         if (scrollbarDragRef.current === null && !isScrollbarHoveredRef.current) {
           scheduleScrollbarHide();
@@ -2208,6 +2257,8 @@ export function NativeTerminalPane({
       }}
       onPointerDown={(event) => {
         if (!visible) return;
+        linkHoverRevision.current++;
+        setLinkHover(null);
         if (error) {
           retryAttach();
         }
@@ -2285,6 +2336,8 @@ export function NativeTerminalPane({
           });
       }}
     >
+      {isCmdHeld && linkHover && <div aria-hidden="true" data-testid="terminal-link-underline"
+        className="pointer-events-none absolute z-10 h-px bg-foreground" style={linkHover} />}
       <div
         ref={viewportRef}
         data-testid="native-terminal-viewport"
