@@ -108,6 +108,14 @@ export const PLATFORMS: Record<'macos' | 'windows' | 'linux', PlatformConfig> = 
         url: `${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_amd64.deb`,
         notes: 'For Debian, Ubuntu, Linux Mint, and derivatives',
       },
+      {
+        id: 'linux-cli',
+        name: 'Headless Daemon & CLI (ferryx-cli)',
+        architecture: 'x86_64 / amd64',
+        fileType: 'binary',
+        url: `${GITHUB_RELEASE_DOWNLOAD_BASE}/ferryx-cli`,
+        notes: 'Headless PTY daemon for remote Linux servers, VPS, and cloud machines (no GUI/SSH required)',
+      },
     ],
   },
 };

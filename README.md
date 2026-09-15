@@ -32,6 +32,7 @@ No Electron anywhere.
 | **Windows** | Microsoft Store (x64, auto-updates) | [Store](https://apps.microsoft.com/search?query=Ferryx) |
 | **Linux** | Portable AppImage (x64) | [`.AppImage`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.AppImage) |
 | **Linux** | Debian / Ubuntu package (x64) | [`.deb`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.deb) |
+| **Linux (Headless)** | Server / VPS PTY Daemon & CLI (x64) | [`ferryx-cli`](https://github.com/Indosaram/ferryx/releases/latest/download/ferryx-cli) |
 
 Every link resolves against the latest release. Verify downloads with the `SHA256SUMS.txt`
 published alongside the binaries:
@@ -79,6 +80,30 @@ DOM terminal grid and steer agents from anywhere.
 - 6-digit PIN pairing
 - Streamed terminal grid
 - Steer agents from a phone
+
+### Remote Linux machine pairing (No SSH required)
+
+Pair headless Linux servers, VPSs, and cloud instances as project-owning machines.
+Ferryx uses an outbound-only relay tunnel, so machines behind NAT, firewalls, or without
+public IPs / open SSH ports connect seamlessly.
+
+- Single standalone binary (`ferryx-cli`) with zero GUI/WebKit dependencies
+- Outbound encrypted relay tunnel: no inbound SSH, open ports, or public IP needed
+- Native terminal split-panes and remote Git worktrees run directly on the machine
+
+```bash
+# 1. Download ferryx-cli on the remote Linux machine (x64)
+sudo curl -fsSL https://github.com/Indosaram/ferryx/releases/latest/download/ferryx-cli -o /usr/local/bin/ferryx-cli
+sudo chmod +x /usr/local/bin/ferryx-cli
+
+# 2. Start the headless PTY daemon in background
+nohup ferryx-cli --daemon > /tmp/ferryx.log 2>&1 &
+
+# 3. Generate a 10-minute machine pairing PIN
+ferryx-cli pair generate --access machine
+
+# 4. In Ferryx Desktop, open Settings (Cmd+,) > Remote > [Pair with PIN] and enter the 6-digit PIN
+```
 
 ### Zero Electron overhead
 
