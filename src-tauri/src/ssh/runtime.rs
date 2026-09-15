@@ -153,6 +153,7 @@ pub fn parse_fields<'a>(
 }
 
 pub async fn detect(host: &SshHost) -> Result<RemoteEnvironment, IpcError> {
+    let credential_generation = super::password::generation(host)?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
     let nonce = uuid::Uuid::new_v4().simple().to_string();
     let marker = format!("FERRYX_ENV_V1_{nonce}");
@@ -247,8 +248,14 @@ pub async fn detect(host: &SshHost) -> Result<RemoteEnvironment, IpcError> {
                 // host key verification failure, authentication failure). In that case, subsequent
                 // executor probes will also fail identically, so fail immediately.
                 if exit_code == Some(255) {
+                    let authentication_failed = host.auth_method == super::SshAuthMethod::Password
+                        && err.details.as_ref().and_then(|v| v.get("stderr")).and_then(|v| v.as_str())
+                            .is_some_and(|text| text.contains("Permission denied"));
+                    if authentication_failed {
+                        if let Some(generation) = credential_generation.as_deref() { super::password::clear_generation(host, generation)?; }
+                    }
                     if let Some(details) = err.details.as_mut() {
-                        details["stage"] = "environment".into();
+                        details["stage"] = if authentication_failed { "authentication" } else { "environment" }.into();
                         details["executor"] = executor.program().into();
                     }
                     return Err(err);

@@ -1544,6 +1544,16 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::Ping) => DaemonResponse::Pong,
+                Ok(DaemonRequest::SshPassword { host, password }) => {
+                    let result = crate::ipc::run_blocking(move || match password {
+                        Some(password) => crate::ssh::password::set(&host, password),
+                        None => crate::ssh::password::clear(&host),
+                    }).await;
+                    match result {
+                        Ok(()) => DaemonResponse::Pong,
+                        Err(error) => DaemonResponse::WorktreeError { error },
+                    }
+                }
                 Ok(DaemonRequest::RemoteSessionDetails { session_id }) => {
                     let details = self.terminal_service.remote().details(&session_id);
                     let legacy_direct_ssh = details.is_none() && self.session_metadata.read().get(&session_id).is_some_and(|m| crate::ssh::projects::is_remote(&m.workspace_id));
@@ -2048,7 +2058,7 @@ impl DaemonServer {
                     Err(error) => DaemonResponse::PairedHostError { error },
                 },
                 Ok(DaemonRequest::GetCapabilities) => {
-                    let mut capabilities = vec!["machinePairingV1".into()];
+                    let mut capabilities = vec!["machinePairingV1".into(), "sshPasswordV1".into()];
                     if self.paired_hosts.available().await { capabilities.push("pairedHostInventoryV1".into()); }
                     DaemonResponse::CapabilitiesOk { capabilities }
                 },

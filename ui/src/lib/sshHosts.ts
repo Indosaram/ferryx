@@ -4,7 +4,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { SSH_CONFIG_PATH_STORAGE_KEY } from "./storageKeys";
 
 export type SshHostSource = "config" | "manual";
-export type SshAuthMethod = "agent" | "key";
+export type SshAuthMethod = "agent" | "key" | "password";
 
 export interface SshHost {
   id: string;
@@ -235,6 +235,14 @@ export async function deleteSshHost(id: string): Promise<SshHost[]> {
   }
   const hosts = await invoke<SshHost[]>("cmd_ssh_delete_host", { id });
   return notifyListeners(hosts);
+}
+
+export async function setSshPassword(host: SshHost, password: string): Promise<void> {
+  return invoke<void>("cmd_ssh_set_password", { host: cleanHostForIpc(host), password });
+}
+
+export async function clearSshPassword(host: SshHost): Promise<void> {
+  return invoke<void>("cmd_ssh_clear_password", { host: cleanHostForIpc(host) });
 }
 
 export async function testSshConnection(host: SshHost): Promise<SshTargetSummary> {

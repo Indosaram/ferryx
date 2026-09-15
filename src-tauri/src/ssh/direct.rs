@@ -59,6 +59,7 @@ pub fn ssh_plan(
     interactive: bool,
 ) -> Result<ShellCommandPlan, IpcError> {
     validate_host(host)?;
+    super::password::require(host)?;
     let mut args = super::exec::interactive_argv(host);
     args.remove(0);
     if !interactive {
@@ -66,7 +67,7 @@ pub fn ssh_plan(
     }
     // These precede user config and prevent prompts, forwarding, or connection reuse.
     let mut options = vec![
-        "BatchMode=yes",
+        if host.auth_method == SshAuthMethod::Password { "BatchMode=no" } else { "BatchMode=yes" },
         "StrictHostKeyChecking=yes",
         "UpdateHostKeys=no",
         "ConnectTimeout=5",
@@ -80,6 +81,9 @@ pub fn ssh_plan(
     ];
     if !interactive {
         options.push("ClearAllForwardings=yes");
+    }
+    if host.auth_method == SshAuthMethod::Password {
+        options.extend(["PreferredAuthentications=password", "PasswordAuthentication=yes", "PubkeyAuthentication=no", "KbdInteractiveAuthentication=no", "NumberOfPasswordPrompts=1"]);
     }
     for option in options {
         args.splice(0..0, ["-o".to_string(), option.to_string()]);
@@ -281,6 +285,7 @@ pub(crate) fn spawn_child(
 ) -> Result<tokio::process::Child, IpcError> {
     tokio::process::Command::new(&plan.program)
         .args(&plan.args)
+        .envs(super::password::environment(&plan.args)?)
         .stdin(stdin)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

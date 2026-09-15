@@ -150,6 +150,7 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
 
 fn request_type_name(req: &DaemonRequest) -> &'static str {
     match req {
+        DaemonRequest::SshPassword { .. } => "sshPassword",
         DaemonRequest::Handshake { .. } => "handshake",
         DaemonRequest::Ping => "ping",
         DaemonRequest::MachineSessionDetail { .. } => "machineSessionDetail",

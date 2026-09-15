@@ -123,6 +123,8 @@ pub struct DaemonRemoteStatus {
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum DaemonRequest {
     #[serde(rename_all = "camelCase")]
+    SshPassword { host: crate::ssh::SshHost, password: Option<crate::ssh::password::Password> },
+    #[serde(rename_all = "camelCase")]
     Handshake {
         version: u32,
     },

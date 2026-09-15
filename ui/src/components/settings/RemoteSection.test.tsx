@@ -1,35 +1,24 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { act, cleanup, createEvent, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RemoteSection } from "./RemoteSection";
-import { pairedHostInventory } from "../../lib/pairedHostInventory";
-import { resetSshHostsCache } from "../../lib/sshHosts";
+import { createRemoteHostStore, remoteHostKey } from "../../state/remoteHostStore";
+import { createPairedHostInventory, DEFAULT_RELAY_ORIGIN, type HostView, type PairedHostCommands } from "../../lib/pairedHostInventory";
+import { resetSshHostsCache, type SshHost } from "../../lib/sshHosts";
 
-vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true, invoke: vi.fn() }));
-vi.mock("../../lib/pairedHostInventory", () => ({
-  DEFAULT_RELAY_ORIGIN: "https://relay.checka.cc",
-  pairedHostInventory: {
-    refresh: vi.fn().mockResolvedValue(undefined),
-  },
+const { isTauriMock, invokeMock } = vi.hoisted(() => ({
+  isTauriMock: vi.fn(() => true),
+  invokeMock: vi.fn(),
 }));
-vi.mock("../../lib/sshHosts", () => ({
-  resetSshHostsCache: vi.fn(),
+
+vi.mock("@tauri-apps/api/core", () => ({
+  isTauri: () => isTauriMock(),
+  invoke: (...args: unknown[]) => invokeMock(...args),
 }));
-vi.mock("./SshSection", () => ({
-  SshSection: ({ onOpenProject, searchQuery }: { onOpenProject?: (hostId: string) => void; searchQuery?: string }) => (
-    <div data-testid="ssh-section" data-query={searchQuery ?? ""}>
-      <button type="button" onClick={() => onOpenProject?.("host-1")}>Open SSH Project</button>
-    </div>
-  ),
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: vi.fn(),
 }));
-vi.mock("./PairedMachinesSection", () => ({
-  PairedMachinesSection: ({ onOpenProject, searchQuery }: { onOpenProject?: (target: unknown) => void; searchQuery?: string }) => (
-    <div data-testid="paired-machines-section" data-query={searchQuery ?? ""}>
-      <button type="button" onClick={() => onOpenProject?.({ kind: "pairedDaemon", hostId: "pair-1", generation: "1" })}>
-        Open Paired Project
-      </button>
-    </div>
-  ),
-}));
+
 vi.mock("./RemoteAccessSection", () => ({
   RemoteAccessSection: ({ detailsOnly }: { detailsOnly?: boolean }) => (
     <div data-testid={detailsOnly ? "remote-access-details" : "remote-access-section"}>
@@ -38,105 +27,552 @@ vi.mock("./RemoteAccessSection", () => ({
   ),
 }));
 
-beforeEach(() => {
-  localStorage.clear();
-  vi.clearAllMocks();
-});
-afterEach(cleanup);
+const pairedHostId = remoteHostKey(DEFAULT_RELAY_ORIGIN, "paired-box");
+const mockPairedHostView: HostView = {
+  hostId: pairedHostId,
+  machineId: "paired-box",
+  relayOrigin: DEFAULT_RELAY_ORIGIN,
+  displayLabel: "Linux Build Box",
+  grantScope: "machine",
+  generation: "1",
+  authStatus: "paired",
+  online: true,
+};
 
-it("renders subnavigation with Machines, Access to This Machine, and Connection Details", () => {
-  render(<RemoteSection />);
-  expect(screen.getByRole("button", { name: "Machines" })).toHaveAttribute("aria-current", "page");
-  expect(screen.getByRole("button", { name: "Access to This Machine" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Connection Details" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "All" })).toHaveAttribute("aria-pressed", "true");
-  expect(screen.getByTestId("paired-machines-section")).toBeInTheDocument();
-  expect(screen.getByTestId("ssh-section")).toBeInTheDocument();
-});
+const mockSshHost: SshHost = {
+  id: "ssh-box-1",
+  label: "Dev Server",
+  hostname: "192.168.1.50",
+  username: "ubuntu",
+  port: 22,
+  source: "manual",
+  authMethod: "agent",
+  disabled: false,
+};
 
-it("switches to Access to This Machine subpage", () => {
-  render(<RemoteSection />);
-  fireEvent.click(screen.getByRole("button", { name: "Access to This Machine" }));
-  expect(screen.getByTestId("remote-access-section")).toBeInTheDocument();
-  expect(screen.queryByTestId("paired-machines-section")).toBeNull();
-  expect(screen.queryByTestId("ssh-section")).toBeNull();
-});
+function createTestInventory(initialHosts: HostView[] = [mockPairedHostView]) {
+  const store = createRemoteHostStore();
+  const commands: PairedHostCommands = {
+    list: vi.fn().mockResolvedValue(initialHosts),
+    capabilities: vi.fn().mockResolvedValue({ pairedHostInventoryV1: true, pairedDaemonProxyV1: true }),
+    pair: vi.fn().mockImplementation(async (req: { pin: string }) => {
+      if (req.pin === "bad-pin") {
+        throw new Error("PAIR_FAILED");
+      }
+      return {
+        hostId: remoteHostKey(DEFAULT_RELAY_ORIGIN, "new-paired-box"),
+        machineId: "new-paired-box",
+        relayOrigin: DEFAULT_RELAY_ORIGIN,
+        displayLabel: "New Paired Machine",
+        grantScope: "machine",
+        generation: "1",
+        authStatus: "paired",
+        online: true,
+      };
+    }),
+    forget: vi.fn().mockResolvedValue(undefined),
+    migrate: vi.fn(),
+    read: vi.fn(),
+  };
+  const inventory = createPairedHostInventory(store, commands);
+  return { store, inventory, commands };
+}
 
-it("switches to Connection Details subpage", () => {
-  render(<RemoteSection />);
-  fireEvent.click(screen.getByRole("button", { name: "Connection Details" }));
-  expect(screen.getByTestId("remote-access-details")).toBeInTheDocument();
-  expect(screen.getByText("Native inventory")).toBeInTheDocument();
-});
+describe("RemoteSection UX Unification & Review Blockers", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetSshHostsCache();
+    localStorage.clear();
+    isTauriMock.mockReturnValue(true);
 
-it("filters by All, Paired, and SSH on the Machines subpage", () => {
-  render(<RemoteSection />);
-  expect(screen.getByRole("button", { name: "All" })).toHaveAttribute("aria-pressed", "true");
-  expect(screen.getByTestId("paired-machines-section")).toBeInTheDocument();
-  expect(screen.getByTestId("ssh-section")).toBeInTheDocument();
+    invokeMock.mockImplementation(async (command: string, args?: any) => {
+      if (command === "cmd_ssh_list_hosts") return [mockSshHost];
+      if (command === "cmd_ssh_read_system_config") {
+        return {
+          path: "/Users/test/.ssh/config",
+          exists: true,
+          hosts: [{ ...mockSshHost, id: "sys-1", label: "sys-box" }],
+          rawText: "Host sys-box\n  HostName 10.0.0.2",
+        };
+      }
+      if (command === "cmd_ssh_test_connection") {
+        if (args?.host?.hostname === "unreachable.corp") {
+          return { host: args.host, reachable: false, lastError: "Host unreachable" };
+        }
+        return {
+          host: args?.host ?? mockSshHost,
+          reachable: true,
+          checkedAt: 1,
+          environment: { platform: "linux", executor: "bash", version: "5.0", home: "/home/ubuntu", temp: "/tmp", git: true },
+        };
+      }
+      if (command === "cmd_ssh_update_host") {
+        return [args?.host ?? mockSshHost];
+      }
+      if (command === "cmd_ssh_import_config") {
+        if (args?.configText?.includes("invalid")) {
+          throw new Error("Invalid SSH config syntax");
+        }
+        return [{ ...mockSshHost, id: "imported-1", label: "imported-host" }];
+      }
+      return undefined;
+    });
+  });
 
-  fireEvent.click(screen.getByRole("button", { name: "Paired" }));
-  expect(screen.getByRole("button", { name: "Paired" })).toHaveAttribute("aria-pressed", "true");
-  expect(screen.getByTestId("paired-machines-section")).toBeInTheDocument();
-  expect(screen.queryByTestId("ssh-section")).toBeNull();
+  afterEach(cleanup);
 
-  fireEvent.click(screen.getByRole("button", { name: "SSH" }));
-  expect(screen.getByRole("button", { name: "SSH" })).toHaveAttribute("aria-pressed", "true");
-  expect(screen.getByTestId("ssh-section")).toBeInTheDocument();
-  expect(screen.queryByTestId("paired-machines-section")).toBeNull();
-});
+  it("authenticates SSH with a separate password before probing and never saves it in the host", async () => {
+    const { store, inventory } = createTestInventory();
+    await inventory.refresh();
+    await act(async () => { render(<RemoteSection store={store} inventory={inventory} />); });
+    fireEvent.click(screen.getByRole("button", { name: "Add Machine" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Connect with SSH" }));
+    fireEvent.change(screen.getByLabelText("Authentication method"), { target: { value: "password" } });
+    fireEvent.change(screen.getByLabelText("Label"), { target: { value: "Password server" } });
+    fireEvent.change(screen.getByLabelText("Hostname"), { target: { value: "password.example" } });
+    fireEvent.change(screen.getByLabelText("SSH password"), { target: { value: "fixture-secret" } });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Connect SSH Machine" })); });
+    const calls = invokeMock.mock.calls;
+    const authIndex = calls.findIndex(([command]) => command === "cmd_ssh_set_password");
+    const probeIndex = calls.findIndex(([command]) => command === "cmd_ssh_test_connection");
+    expect(authIndex).toBeGreaterThanOrEqual(0);
+    expect(probeIndex).toBeGreaterThan(authIndex);
+    expect(calls[authIndex][1]).toMatchObject({ password: "fixture-secret", host: { authMethod: "password" } });
+    const saved = calls.find(([command]) => command === "cmd_ssh_update_host");
+    expect(saved?.[1].host).not.toHaveProperty("password");
+    expect(screen.queryByLabelText("SSH password")).toBeNull();
+  });
 
-it("passes search query to both machine sections", () => {
-  render(<RemoteSection />);
-  const searchInput = screen.getByLabelText("Search machines");
-  fireEvent.change(searchInput, { target: { value: "omaki" } });
+  it("shows machines without top-level destination navigation", async () => {
+    const { store, inventory } = createTestInventory();
+    await inventory.refresh();
+    await act(async () => {
+      render(<RemoteSection store={store} inventory={inventory} />);
+    });
+    expect(screen.queryByRole("navigation", { name: "Remote destinations" })).toBeNull();
+    expect(screen.getByRole("list", { name: "Remote machines" })).toBeTruthy();
+  });
 
-  expect(screen.getByTestId("paired-machines-section")).toHaveAttribute("data-query", "omaki");
-  expect(screen.getByTestId("ssh-section")).toHaveAttribute("data-query", "omaki");
-});
+  it("renders ONE mixed machine list without All/Paired/SSH tabs or separate headings", async () => {
+    const { store, inventory } = createTestInventory();
+    await inventory.refresh();
 
-it("toggles the Add Machine options chooser", () => {
-  render(<RemoteSection />);
-  expect(screen.queryByRole("group", { name: "Add Machine options" })).toBeNull();
+    await act(async () => {
+      render(<RemoteSection store={store} inventory={inventory} />);
+    });
 
-  fireEvent.click(screen.getByRole("button", { name: "Add Machine" }));
-  expect(screen.getByRole("group", { name: "Add Machine options" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Pair with PIN" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Connect with SSH" })).toBeInTheDocument();
+    expect(screen.getByRole("list", { name: "Remote machines" })).toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "Remote destinations" })).toBeNull();
 
-  fireEvent.click(screen.getByRole("button", { name: "Pair with PIN" }));
-  expect(screen.getByRole("button", { name: "Paired" })).toHaveAttribute("aria-pressed", "true");
-  expect(screen.queryByRole("group", { name: "Add Machine options" })).toBeNull();
-});
+    // MUST NOT have All / Paired / SSH tabs
+    expect(screen.queryByRole("button", { name: "All" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Paired" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "SSH" })).toBeNull();
 
-it("refreshes paired and SSH inventory on clicking Refresh", () => {
-  render(<RemoteSection />);
-  fireEvent.click(screen.getByRole("button", { name: "Refresh machines" }));
-  expect(pairedHostInventory.refresh).toHaveBeenCalled();
-  expect(resetSshHostsCache).toHaveBeenCalled();
-});
+    // MUST NOT have separate section headings
+    expect(screen.queryByRole("heading", { name: "Paired machines" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "SSH Machines" })).toBeNull();
 
-it("normalizes legacy ssh section by opening Remote with SSH filter active", () => {
-  render(<RemoteSection legacySsh={true} />);
-  expect(screen.getByRole("button", { name: "SSH" })).toHaveAttribute("aria-pressed", "true");
-  expect(screen.getByTestId("ssh-section")).toBeInTheDocument();
-  expect(screen.queryByTestId("paired-machines-section")).toBeNull();
-});
+    // Mixed in ONE list
+    expect(screen.getByText("Linux Build Box")).toBeInTheDocument();
+    expect(screen.getByText("Dev Server")).toBeInTheDocument();
+  });
 
-it("dispatches typed project targets to onOpenProject", () => {
-  const onOpenProject = vi.fn();
-  render(<RemoteSection onOpenProject={onOpenProject} />);
+  it("renders EXACTLY ONE Add Machine button even when the inventory is empty", async () => {
+    const { store, inventory } = createTestInventory([]);
+    await inventory.refresh();
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "cmd_ssh_list_hosts") return [];
+      return undefined;
+    });
 
-  fireEvent.click(screen.getByRole("button", { name: "Open Paired Project" }));
-  expect(onOpenProject).toHaveBeenCalledWith(
-    { kind: "pairedDaemon", hostId: "pair-1", generation: "1" },
-    expect.objectContaining({ page: "machines" }),
-  );
+    await act(async () => {
+      render(<RemoteSection store={store} inventory={inventory} />);
+    });
 
-  fireEvent.click(screen.getByRole("button", { name: "SSH" }));
-  fireEvent.click(screen.getByRole("button", { name: "Open SSH Project" }));
-  expect(onOpenProject).toHaveBeenCalledWith(
-    { kind: "ssh", hostId: "host-1" },
-    expect.objectContaining({ page: "machines", filter: "ssh" }),
-  );
+    // Exactly one Add Machine button in the toolbar; none duplicated in empty state
+    const addButtons = screen.getAllByRole("button", { name: "Add Machine" });
+    expect(addButtons).toHaveLength(1);
+  });
+
+  it("renders NO permanent add or PIN forms on the page body", async () => {
+    const { store, inventory } = createTestInventory();
+    await inventory.refresh();
+
+    await act(async () => {
+      render(<RemoteSection store={store} inventory={inventory} />);
+    });
+
+    expect(screen.queryByLabelText("Machine PIN")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Pair machine" })).toBeNull();
+  });
+
+  it("common rows display concise status, Add Project, and Details toggle with technical metadata hidden", async () => {
+    const { store, inventory } = createTestInventory();
+    await inventory.refresh();
+
+    await act(async () => {
+      render(<RemoteSection store={store} inventory={inventory} />);
+    });
+
+    // Paired row
+    expect(screen.getByText("Linux Build Box")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add Project on Linux Build Box" })).toBeInTheDocument();
+    const pairedDetailsBtn = screen.getByRole("button", { name: "Details for Linux Build Box" });
+    expect(pairedDetailsBtn).toBeInTheDocument();
+
+    // Status is concise, not paragraph
+    expect(screen.getByText("Unchecked")).toBeInTheDocument();
+    expect(screen.getByText("Not checked")).toBeInTheDocument();
+
+    // Technical metadata hidden initially
+    expect(screen.queryByText(/relayOrigin/i)).toBeNull();
+    expect(screen.queryByText("192.168.1.50")).toBeNull();
+    expect(screen.queryByText("paired-box")).toBeNull();
+
+    // Expanding Details reveals technical metadata
+    fireEvent.click(pairedDetailsBtn);
+    expect(screen.getByText(DEFAULT_RELAY_ORIGIN)).toBeInTheDocument();
+    expect(screen.getByText("paired-box")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Check capabilities for Linux Build Box" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Forget Linux Build Box" })).toBeInTheDocument();
+  });
+
+  it("propagates verified generation-bound state to row status and offers project upon PIN pairing success", async () => {
+    const { store, inventory } = createTestInventory();
+    await inventory.refresh();
+    const negotiate = vi.fn().mockResolvedValue(undefined);
+    const onOpenProject = vi.fn();
+
+    await act(async () => {
+      render(<RemoteSection store={store} inventory={inventory} negotiate={negotiate} onOpenProject={onOpenProject} />);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Add Machine" }));
+    fireEvent.change(screen.getByLabelText("Machine PIN"), { target: { value: "valid-pin" } });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Pair Machine" }));
+    });
+
+    // Verification succeeded; modal offers project
+    expect(screen.getByText(/connected and verified/i)).toBeInTheDocument();
+    const offerProjectBtn = screen.getByRole("button", { name: "Add Project" });
+    expect(offerProjectBtn).toBeInTheDocument();
+
+    fireEvent.click(offerProjectBtn);
+    expect(onOpenProject).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "pairedDaemon", hostId: remoteHostKey(DEFAULT_RELAY_ORIGIN, "new-paired-box") }),
+      expect.anything(),
+    );
+
+    // After modal closes, the newly added row shows Ready status (propagated verified state)
+    const newRowStatus = screen.getByText("Ready");
+    expect(newRowStatus).toBeInTheDocument();
+  });
+
+  it("rechecks live paired generation/auth after await negotiate; fails if credentials revoked or changed", async () => {
+    const { store, inventory } = createTestInventory();
+    await inventory.refresh();
+
+    // Negotiate hook alters the store state mid-request (simulating stale generation)
+    const negotiate = vi.fn().mockImplementation(async () => {
+      store.setState(s => ({
+        ...s,
+        hosts: {
+          ...s.hosts,
+          [remoteHostKey(DEFAULT_RELAY_ORIGIN, "new-paired-box")]: {
+            ...s.hosts[remoteHostKey(DEFAULT_RELAY_ORIGIN, "new-paired-box")],
+            generation: "99", // Generation changed mid-request!
+          },
+        },
+      }));
+    });
+
+    await act(async () => {
+      render(<RemoteSection store={store} inventory={inventory} negotiate={negotiate} />);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Add Machine" }));
+    fireEvent.change(screen.getByLabelText("Machine PIN"), { target: { value: "valid-pin" } });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Pair Machine" }));
+    });
+
+    // Must catch stale generation, display alert, and retain PIN
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(screen.getByText(/Credentials changed during this request/i)).toBeInTheDocument();
+    expect(screen.getByLabelText("Machine PIN")).toHaveValue("valid-pin");
+    // No project offer
+    expect(screen.queryByText(/connected and verified/i)).toBeNull();
+  });
+
+  it("config import separates imported-not-verified result with NO ready/project offer", async () => {
+    const { store, inventory } = createTestInventory();
+    await inventory.refresh();
+
+    await act(async () => {
+      render(<RemoteSection store={store} inventory={inventory} />);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Add Machine" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Import SSH Config" }));
+
+    // Switch to paste configuration
+    fireEvent.click(screen.getByRole("button", { name: "Paste Configuration" }));
+
+    const configArea = screen.getByLabelText("SSH Configuration");
+    fireEvent.change(configArea, { target: { value: "Host valid-box\n  HostName 10.0.0.1" } });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Import Configuration" }));
+    });
+
+    // Shows imported result clearly separated with NO ready / project offer
+    expect(screen.getByText(/Imported 1 machine into inventory/i)).toBeInTheDocument();
+    expect(screen.getByText(/Imported machines are recorded as unchecked/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add Project" })).toBeNull();
+
+    // Click Done closes modal and selects row
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    expect(screen.queryByRole("dialog", { name: "Add Machine" })).toBeNull();
+  });
+
+  it("restores system SSH config discovery, card, and import options inside Add Machine modal", async () => {
+    const { store, inventory } = createTestInventory();
+    await inventory.refresh();
+
+    await act(async () => {
+      render(<RemoteSection store={store} inventory={inventory} />);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Add Machine" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Import SSH Config" }));
+
+    // System config detected and card displayed
+    expect(await screen.findByText("System SSH Config")).toBeInTheDocument();
+    expect(await screen.findByText("1 hosts found")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Import all system hosts" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Choose custom SSH config file" })).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Import all system hosts" }));
+    });
+
+    expect(invokeMock).toHaveBeenCalledWith("cmd_ssh_import_config", {
+      configText: "Host sys-box\n  HostName 10.0.0.2",
+    });
+  });
+
+  it("restores all SSH edit fields including port validation, authMethod, identityFile, and jumpHost", async () => {
+    const { store, inventory } = createTestInventory();
+    await inventory.refresh();
+
+    await act(async () => {
+      render(<RemoteSection store={store} inventory={inventory} />);
+    });
+
+    // Expand SSH details and start Edit
+    fireEvent.click(screen.getByRole("button", { name: "Details for Dev Server" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit Dev Server" }));
+
+    // Invalid port validation
+    const portInput = screen.getByLabelText("Port");
+    fireEvent.change(portInput, { target: { value: "99999" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Save Changes" }));
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent(/Port must be an integer between 1 and 65535/i);
+
+    // Expand advanced options in edit
+    fireEvent.click(screen.getByRole("button", { name: /Show Advanced Options/i }));
+    expect(screen.getByLabelText("Identity File")).toBeInTheDocument();
+    expect(screen.getByLabelText("Jump Host")).toBeInTheDocument();
+    expect(screen.getByLabelText("Auth Method")).toBeInTheDocument();
+
+    // Valid update
+    fireEvent.change(portInput, { target: { value: "2222" } });
+    fireEvent.change(screen.getByLabelText("Identity File"), { target: { value: "~/.ssh/custom_key" } });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Save Changes" }));
+    });
+
+    expect(invokeMock).toHaveBeenCalledWith(
+      "cmd_ssh_update_host",
+      expect.objectContaining({
+        host: expect.objectContaining({
+          port: 2222,
+          identityFile: "~/.ssh/custom_key",
+        }),
+      }),
+    );
+  });
+
+  it("restores sameConnection invalidation: clears stale test results when host config changes", async () => {
+    const { store, inventory } = createTestInventory();
+    await inventory.refresh();
+
+    await act(async () => {
+      render(<RemoteSection store={store} inventory={inventory} />);
+    });
+
+    // Test connection
+    fireEvent.click(screen.getByRole("button", { name: "Details for Dev Server" }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Test connection to Dev Server" }));
+    });
+    expect(screen.getByTestId("ssh-runtime-ssh-box-1")).toBeInTheDocument();
+
+    // Edit host to change hostname
+    fireEvent.click(screen.getByRole("button", { name: "Edit Dev Server" }));
+    fireEvent.change(screen.getByLabelText("Hostname"), { target: { value: "192.168.1.99" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Save Changes" }));
+    });
+
+    // Updating host must clear previous test result
+    expect(screen.queryByTestId("ssh-runtime-ssh-box-1")).toBeNull();
+  });
+
+  it("disables Paired Add Project without onOpenProject even if onOpenSshProject is provided", async () => {
+    const { store, inventory } = createTestInventory();
+    await inventory.refresh();
+
+    const negotiate = vi.fn().mockResolvedValue(undefined);
+    const onOpenSshProject = vi.fn();
+
+    await act(async () => {
+      render(
+        <RemoteSection
+          store={store}
+          inventory={inventory}
+          negotiate={negotiate}
+          onOpenSshProject={onOpenSshProject}
+        />,
+      );
+    });
+
+    // Mark paired host ready
+    fireEvent.click(screen.getByRole("button", { name: "Details for Linux Build Box" }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Check capabilities for Linux Build Box" }));
+    });
+
+    // Paired Add Project MUST BE DISABLED because onOpenProject is undefined!
+    const pairedAddBtn = screen.getByRole("button", { name: "Add Project on Linux Build Box" });
+    expect(pairedAddBtn).toBeDisabled();
+
+    // SSH Add Project IS ENABLED because onOpenSshProject is provided
+    const sshAddBtn = screen.getByRole("button", { name: "Add Project on Dev Server" });
+    expect(sshAddBtn).not.toBeDisabled();
+    fireEvent.click(sshAddBtn);
+    expect(onOpenSshProject).toHaveBeenCalledWith("ssh-box-1");
+  });
+
+  it("namespaces machine row IDs and prevents ID collision between Paired and SSH machines", async () => {
+    // Both paired host and ssh host have ID matching collidingPairedId
+    const collidingId = remoteHostKey(DEFAULT_RELAY_ORIGIN, "colliding-box");
+    const collidingPairedView: HostView = {
+      ...mockPairedHostView,
+      hostId: collidingId,
+      machineId: "colliding-box",
+      displayLabel: "Colliding Paired",
+    };
+    const collidingSshHost: SshHost = {
+      ...mockSshHost,
+      id: collidingId,
+      label: "Colliding SSH",
+    };
+
+    const { store, inventory } = createTestInventory([collidingPairedView]);
+    await inventory.refresh();
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "cmd_ssh_list_hosts") return [collidingSshHost];
+      return undefined;
+    });
+
+    await act(async () => {
+      render(<RemoteSection store={store} inventory={inventory} />);
+    });
+
+    const pairedEl = screen.getByText("Colliding Paired").closest("[data-machine-id]");
+    const sshEl = screen.getByText("Colliding SSH").closest("[data-machine-id]");
+
+    expect(pairedEl).toHaveAttribute("data-machine-id", `paired:${collidingId}`);
+    expect(sshEl).toHaveAttribute("data-machine-id", `ssh:${collidingId}`);
+  });
+
+  it("handles Escape in Add Machine modal without propagating to parent SettingsDialog", async () => {
+    const { store, inventory } = createTestInventory();
+    await inventory.refresh();
+
+    await act(async () => {
+      render(<RemoteSection store={store} inventory={inventory} />);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Add Machine" }));
+    const dialog = screen.getByRole("dialog", { name: "Add Machine" });
+    expect(dialog).toBeInTheDocument();
+
+    const event = createEvent.keyDown(dialog, { key: "Escape" });
+    const stopPropagationSpy = vi.spyOn(event, "stopPropagation");
+    fireEvent(dialog, event);
+
+    expect(stopPropagationSpy).toHaveBeenCalled();
+    expect(screen.queryByRole("dialog", { name: "Add Machine" })).toBeNull();
+  });
+
+  it("restores focus to trigger element when Add Machine modal closes", async () => {
+    const { store, inventory } = createTestInventory();
+    await inventory.refresh();
+
+    await act(async () => {
+      render(<RemoteSection store={store} inventory={inventory} />);
+    });
+
+    const addBtn = screen.getByRole("button", { name: "Add Machine" });
+    addBtn.focus();
+    expect(document.activeElement).toBe(addBtn);
+
+    fireEvent.click(addBtn);
+    expect(screen.getByRole("dialog", { name: "Add Machine" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog", { name: "Add Machine" })).toBeNull();
+
+    // Focus restored to the Add Machine trigger button
+    expect(document.activeElement).toBe(addBtn);
+  });
+
+  it("resets dismissed state on reopen: open-close-reopen pairing succeeds and is not discarded", async () => {
+    const { store, inventory } = createTestInventory();
+    await inventory.refresh();
+    const negotiate = vi.fn().mockResolvedValue(undefined);
+
+    await act(async () => {
+      render(<RemoteSection store={store} inventory={inventory} negotiate={negotiate} />);
+    });
+
+    // 1. Open modal and close it via Cancel (sets dismissed)
+    fireEvent.click(screen.getByRole("button", { name: "Add Machine" }));
+    expect(screen.getByRole("dialog", { name: "Add Machine" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog", { name: "Add Machine" })).toBeNull();
+
+    // 2. Reopen modal
+    fireEvent.click(screen.getByRole("button", { name: "Add Machine" }));
+    expect(screen.getByRole("dialog", { name: "Add Machine" })).toBeInTheDocument();
+
+    // 3. Enter PIN and submit
+    fireEvent.change(screen.getByLabelText("Machine PIN"), { target: { value: "valid-pin" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Pair Machine" }));
+    });
+
+    // 4. Must successfully verify and offer project (not discarded!)
+    expect(screen.getByText(/connected and verified/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add Project" })).toBeInTheDocument();
+  });
 });

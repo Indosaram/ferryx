@@ -102,29 +102,29 @@ describe("SettingsDialog SSH Navigation (seam verification)", () => {
     browserNative.listBrowsers.mockResolvedValue([]);
   });
 
-  it("renders an 'SSH Machines' nav item and switches to SSH Machines section", () => {
+  it("renders a unified 'Remote' nav item and switches to Remote section", () => {
     render(<SettingsDialog open={true} onClose={vi.fn()} />);
 
-    // Should find the "SSH Machines" button in settings-nav
-    const sshNavButton = screen.getByRole("button", { name: "SSH Machines" });
-    expect(sshNavButton).toBeInTheDocument();
+    // Should find the "Remote" button in settings-nav
+    const remoteNavButton = screen.getByRole("button", { name: "Remote" });
+    expect(remoteNavButton).toBeInTheDocument();
 
-    // Clicking switches to SSH section
-    fireEvent.click(sshNavButton);
+    // Clicking switches to Remote section
+    fireEvent.click(remoteNavButton);
 
-    // Should display the SSH Machines header/section within main
+    // Should display the unified Remote section within main
     const main = screen.getByRole("main");
-    expect(within(main).getByText("SSH Machines")).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "SSH Machines" })).toBeInTheDocument();
+    expect(within(main).getByText("Connect to another machine.")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Remote" })).toBeInTheDocument();
   });
 
-  it("mounts directly to 'ssh' section when initialSection is 'ssh'", () => {
+  it("normalizes legacy 'ssh' initialSection by mounting to 'remote' with Remote nav active", () => {
     render(<SettingsDialog open={true} onClose={vi.fn()} initialSection="ssh" />);
 
-    const sshNavButton = screen.getByRole("button", { name: "SSH Machines" });
-    expect(sshNavButton).toHaveAttribute("aria-current", "page");
+    const remoteNavButton = screen.getByRole("button", { name: "Remote" });
+    expect(remoteNavButton).toHaveAttribute("aria-current", "page");
     const main = screen.getByRole("main");
-    expect(within(main).getByText("SSH Machines")).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "SSH Machines" })).toBeInTheDocument();
+    expect(within(main).getByText("Connect to another machine.")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Remote" })).toBeInTheDocument();
   });
 });

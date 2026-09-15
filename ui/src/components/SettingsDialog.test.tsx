@@ -463,7 +463,8 @@ describe("SettingsDialog", () => {
 
   it("navigates to Remote Access section, renders paired devices, and revokes device on confirmation", async () => {
     render(<SettingsDialog open onClose={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "Remote Access" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remote" }));
+    fireEvent.click(screen.getByText("Access to This Machine", { selector: "summary" }));
 
     await waitFor(() => expect(native.listRemoteDevices).toHaveBeenCalled());
 
@@ -587,7 +588,8 @@ describe("SettingsDialog", () => {
     });
 
     render(<SettingsDialog open onClose={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "Remote Access" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remote" }));
+    fireEvent.click(screen.getByText("Access to This Machine", { selector: "summary" }));
     await waitFor(() => expect(native.getRemoteStatus).toHaveBeenCalled());
 
     const remoteToggle = screen.getByRole("switch", { name: "Remote Access" });
@@ -608,7 +610,8 @@ describe("SettingsDialog", () => {
 
   it("states that authorized browser profiles reconnect while Remote remains enabled and only require re-pairing when storage cleared, revoked, or profile changed", () => {
     render(<SettingsDialog open onClose={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "Remote Access" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remote" }));
+    fireEvent.click(screen.getByText("Access to This Machine", { selector: "summary" }));
 
     const remote = screen.getByRole("region", { name: "Remote Access" });
     expect(remote).toHaveTextContent(/authorized browsers reconnect automatically while this stays on/i);
@@ -639,7 +642,8 @@ describe("SettingsDialog", () => {
     });
 
     render(<SettingsDialog open onClose={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "Remote Access" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remote" }));
+    fireEvent.click(screen.getByText("Access to This Machine", { selector: "summary" }));
 
     await waitFor(() => expect(native.getRemoteStatus).toHaveBeenCalled());
     const generateBtn = await screen.findByRole("button", { name: "Generate QR Code" });
@@ -676,7 +680,8 @@ describe("SettingsDialog", () => {
     native.createPairingCode.mockRejectedValueOnce(new Error("Pairing creation failed on daemon"));
 
     render(<SettingsDialog open onClose={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "Remote Access" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remote" }));
+    fireEvent.click(screen.getByText("Access to This Machine", { selector: "summary" }));
 
     await waitFor(() => expect(native.getRemoteStatus).toHaveBeenCalled());
     const generateBtn = await screen.findByRole("button", { name: "Generate QR Code" });

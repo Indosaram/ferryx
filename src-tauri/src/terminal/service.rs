@@ -148,6 +148,10 @@ impl TerminalService {
         .map_err(|e| PtyError::Other(e.to_string()))?;
         let mut cmd = CommandBuilder::new(&plan.program);
         cmd.args(&plan.args);
+        for (key, value) in crate::ssh::password::environment(&plan.args)
+            .map_err(|e| PtyError::Other(e.to_string()))? {
+            cmd.env(key, value);
+        }
         // No remote path is ever used as the local SSH process working directory.
         let pty_rx = self
             .pty_manager

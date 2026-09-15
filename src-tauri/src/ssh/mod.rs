@@ -8,6 +8,7 @@ pub mod helper_runtime;
 pub mod helper_setup;
 pub mod helper_assets;
 pub mod operations;
+pub mod password;
 pub mod projects;
 pub mod runtime;
 pub mod state_bridge;
@@ -177,6 +178,7 @@ pub enum SshAuthMethod {
     Agent,
     #[serde(alias = "KEY", alias = "Key")]
     Key,
+    Password,
 }
 
 impl SshHost {

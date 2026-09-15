@@ -81,6 +81,7 @@ try {{
         ), false)?;
         let mut child = tokio::process::Command::new(&plan.program)
             .args(&plan.args)
+            .envs(super::password::environment(&plan.args)?)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

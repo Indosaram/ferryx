@@ -4,6 +4,9 @@
 pub use ferryx_lib::cli::*;
 
 fn main() {
+    if let Some(code) = ferryx_lib::ssh::password::run_askpass() {
+        std::process::exit(code);
+    }
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).is_some_and(|arg| arg == "browser") {
         match parse_browser_cli(&args).and_then(run_browser_cli) {

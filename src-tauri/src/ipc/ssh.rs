@@ -14,6 +14,10 @@ use tauri::{AppHandle, Manager, Runtime};
 /// command's change. The store is a single process-wide file, so one global
 /// lock is the whole fix.
 static SSH_STORE_LOCK: Mutex<()> = Mutex::new(());
+// Credential mutations and probes must not race a replacement password in the
+// other process. This lock spans the GUI/daemon transaction, not network I/O on
+// the credential store's synchronous mutex.
+static SSH_CREDENTIAL_TRANSACTION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Acquires the store lock, recovering from a poisoned mutex.
 ///
@@ -338,8 +342,15 @@ pub async fn cmd_ssh_delete_host<R: Runtime>(
 }
 
 #[tauri::command]
-pub async fn cmd_ssh_test_connection(host: SshHost) -> Result<SshTargetSummary, IpcError> {
+pub async fn cmd_ssh_test_connection(
+    daemon_client: tauri::State<'_, std::sync::Arc<crate::daemon::client::DaemonClient>>,
+    host: SshHost,
+) -> Result<SshTargetSummary, IpcError> {
+    let _transaction = SSH_CREDENTIAL_TRANSACTION.lock().await;
     let result = crate::ssh::runtime::detect(&host).await;
+    if result.as_ref().err().and_then(|e| e.details.as_ref()).and_then(|v| v.get("stage")).and_then(|v|v.as_str()) == Some("authentication") {
+        clear_password_in_daemon(&daemon_client, host.clone()).await?;
+    }
     let reachable = result.is_ok();
     let (environment, diagnostic) = match result {
         Ok(environment) => (Some(environment), None),
@@ -353,6 +364,48 @@ pub async fn cmd_ssh_test_connection(host: SshHost) -> Result<SshTargetSummary, 
         diagnostic,
         checked_at: now_millis(),
     })
+}
+
+#[tauri::command]
+pub async fn cmd_ssh_set_password(
+    daemon_client: tauri::State<'_, std::sync::Arc<crate::daemon::client::DaemonClient>>,
+    host: SshHost,
+    password: crate::ssh::password::Password,
+) -> Result<(), IpcError> {
+    let _transaction = SSH_CREDENTIAL_TRANSACTION.lock().await;
+    let credential_host = host.clone();
+    let credential = password.clone();
+    run_blocking(move || crate::ssh::password::set(&credential_host, credential)).await?;
+    match daemon_client.send_request(crate::daemon::protocol::DaemonRequest::SshPassword {
+        host: host.clone(), password: Some(password),
+    }).await {
+        Ok(crate::daemon::protocol::DaemonResponse::Pong) => Ok(()),
+        result => {
+            crate::ssh::password::clear(&host)?;
+            match result {
+                Err(error) | Ok(crate::daemon::protocol::DaemonResponse::WorktreeError { error }) => Err(error),
+                _ => Err(IpcError::internal("Daemon does not support SSH password credentials")),
+            }
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn cmd_ssh_clear_password(
+    daemon_client: tauri::State<'_, std::sync::Arc<crate::daemon::client::DaemonClient>>,
+    host: SshHost,
+) -> Result<(), IpcError> {
+    let _transaction = SSH_CREDENTIAL_TRANSACTION.lock().await;
+    clear_password_in_daemon(&daemon_client, host).await
+}
+
+async fn clear_password_in_daemon(daemon_client: &crate::daemon::client::DaemonClient, host: SshHost) -> Result<(), IpcError> {
+    crate::ssh::password::clear(&host)?;
+    match daemon_client.send_request(crate::daemon::protocol::DaemonRequest::SshPassword { host, password: None }).await? {
+        crate::daemon::protocol::DaemonResponse::Pong => Ok(()),
+        crate::daemon::protocol::DaemonResponse::WorktreeError { error } => Err(error),
+        _ => Err(IpcError::internal("Daemon does not support SSH password credentials")),
+    }
 }
 
 /// Explicit user-selected artifact installation; no build or download is performed.
