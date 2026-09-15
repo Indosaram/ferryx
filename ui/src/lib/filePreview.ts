@@ -215,6 +215,7 @@ export function createFilePreviewController(deps: Partial<FilePreviewDeps> = {})
    * and any in-flight reply from it becomes ignorable.
    */
   function beginGeneration(): number {
+    cachedCapability = null;
     generation += 1;
     const stale = [...(mainHandle ? [mainHandle] : []), ...childHandles];
     mainHandle = null;
@@ -261,14 +262,34 @@ export function createFilePreviewController(deps: Partial<FilePreviewDeps> = {})
     }
   }
 
+  let cachedCapability: {
+    generation: number;
+    parentHandle: string;
+    capability: FilePreviewMarkdownCapability;
+  } | null = null;
+
   function markdownCapability(): FilePreviewMarkdownCapability | null {
     const snapshot = state;
-    if (snapshot.status !== "ready" || snapshot.payload.kind !== "markdown") return null;
+    if (snapshot.status !== "ready" || snapshot.payload.kind !== "markdown") {
+      cachedCapability = null;
+      return null;
+    }
     const parentHandle = snapshot.payload.handle;
     const capabilityGeneration = snapshot.generation;
 
-    return {
-      remainingChildHandles: snapshot.remainingChildHandles,
+    if (
+      cachedCapability &&
+      cachedCapability.generation === capabilityGeneration &&
+      cachedCapability.parentHandle === parentHandle
+    ) {
+      return cachedCapability.capability;
+    }
+
+    const capability: FilePreviewMarkdownCapability = {
+      get remainingChildHandles(): number {
+        const live = state;
+        return live.status === "ready" ? live.remainingChildHandles : 0;
+      },
       requestImage: async (relativePath: string): Promise<FilePreviewChildAsset> => {
         if (capabilityGeneration !== generation) {
           throw new FilePreviewCapabilityError({
@@ -321,6 +342,13 @@ export function createFilePreviewController(deps: Partial<FilePreviewDeps> = {})
         });
       },
     };
+
+    cachedCapability = {
+      generation: capabilityGeneration,
+      parentHandle,
+      capability,
+    };
+    return capability;
   }
 
   return {

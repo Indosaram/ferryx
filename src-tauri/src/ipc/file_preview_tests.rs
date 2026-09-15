@@ -138,6 +138,7 @@ fn range_header_parses_the_three_supported_single_forms() {
 
 #[test]
 fn range_header_rejects_multi_malformed_and_unsatisfiable_forms() {
+    // R11: RFC 9110 §14.2: multi-range, unknown units, and malformed grammar are Ignored
     for raw in [
         "bytes=0-1,4-5",
         "bytes=abc",
@@ -145,15 +146,16 @@ fn range_header_rejects_multi_malformed_and_unsatisfiable_forms() {
         "bytes=",
         "bytes=-",
         "bytes=5-2",
-        "bytes=-0",
         "bytes=99999999999999999999-",
     ] {
         assert_eq!(
             parse_range_header(raw, 10),
-            RangeOutcome::Unsatisfiable,
-            "range {raw} must be refused"
+            RangeOutcome::Ignored,
+            "range {raw} must be ignored per RFC 9110"
         );
     }
+    // Zero suffix-length is unsatisfiable
+    assert_eq!(parse_range_header("bytes=-0", 10), RangeOutcome::Unsatisfiable);
     // start at or past EOF is unsatisfiable, including on an empty file
     assert_eq!(parse_range_header("bytes=10-", 10), RangeOutcome::Unsatisfiable);
     assert_eq!(parse_range_header("bytes=0-", 0), RangeOutcome::Unsatisfiable);
@@ -618,9 +620,10 @@ async fn single_ranges_return_206_with_exact_bytes() {
     assert_eq!(response.headers().get("content-range").unwrap(), "bytes 60-63/64");
     assert_eq!(response.bytes().await.expect("body").as_ref(), &bytes[60..64]);
 
+    // R11: HEAD ignores Range per RFC 9110 §14.2; returns 200 with full content-length
     let response = client.head(&url).header("Range", "bytes=2-5").send().await.expect("range head");
-    assert_eq!(response.status(), reqwest::StatusCode::PARTIAL_CONTENT);
-    assert_eq!(response.headers().get("content-range").unwrap(), "bytes 2-5/64");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(response.headers().get("content-length").unwrap(), "64");
     assert!(response.bytes().await.expect("body").is_empty());
 }
 
@@ -637,7 +640,8 @@ async fn unsatisfiable_and_multi_ranges_return_416_with_the_length() {
         .media_url
         .unwrap();
 
-    for raw in ["bytes=64-70", "bytes=0-1,4-5", "bytes=xyz", "bytes=5-2"] {
+    // R11: Unsatisfiable single ranges return 416
+    for raw in ["bytes=64-70", "bytes=-0", "bytes=100-"] {
         let response = client.get(&url).header("Range", raw).send().await.expect("range");
         assert_eq!(
             response.status(),
@@ -646,6 +650,17 @@ async fn unsatisfiable_and_multi_ranges_return_416_with_the_length() {
         );
         assert_eq!(response.headers().get("content-range").unwrap(), "bytes */64");
         assert!(response.bytes().await.expect("body").is_empty());
+    }
+
+    // R11: Unsupported multi-range and malformed units are ignored per RFC 9110 (200 with full body)
+    for raw in ["bytes=0-1,4-5", "items=0-1", "bytes=xyz", "bytes=5-2"] {
+        let response = client.get(&url).header("Range", raw).send().await.expect("range");
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::OK,
+            "range {raw} must be ignored with 200"
+        );
+        assert_eq!(response.bytes().await.expect("body").len(), 64);
     }
 }
 
@@ -961,4 +976,84 @@ async fn a_refused_session_resolution_maps_to_remote_unsupported() {
     );
     let mapped = map_session_error(missing);
     assert_eq!(mapped.code, crate::ipc::error::IpcErrorCode::SessionNotFound);
+}
+
+#[tokio::test]
+async fn concurrent_disjoint_ranges_on_same_document_stream_exact_bytes() {
+    let dir = TempDir::new().expect("tempdir");
+    let bytes = mp4_bytes(1024);
+    write_file(dir.path(), "stream.mp4", &bytes);
+    let service = service().await;
+    let client = http();
+    let payload = service.open(request(dir.path(), "stream.mp4")).await.expect("payload");
+    let url = payload.media_url.clone().unwrap();
+
+    // R2: fire multiple concurrent disjoint range requests on the same capability
+    let req1 = client.get(&url).header("Range", "bytes=100-199").send();
+    let req2 = client.get(&url).header("Range", "bytes=300-399").send();
+    let req3 = client.get(&url).header("Range", "bytes=500-599").send();
+
+    let (res1, res2, res3) = tokio::join!(req1, req2, req3);
+    let (b1, b2, b3) = tokio::join!(
+        res1.unwrap().bytes(),
+        res2.unwrap().bytes(),
+        res3.unwrap().bytes()
+    );
+
+    assert_eq!(b1.unwrap().as_ref(), &bytes[100..=199]);
+    assert_eq!(b2.unwrap().as_ref(), &bytes[300..=399]);
+    assert_eq!(b3.unwrap().as_ref(), &bytes[500..=599]);
+}
+
+#[tokio::test]
+async fn late_open_completion_does_not_revoke_newer_preview() {
+    let dir = TempDir::new().expect("tempdir");
+    write_file(dir.path(), "first.txt", b"first doc");
+    write_file(dir.path(), "second.txt", b"second doc");
+    let service = service().await;
+
+    // R3: simulate out-of-order open completion by taking epoch 1, then
+    // opening and registering doc 2 (epoch 2), then attempting to register doc 1
+    // with stale epoch 1.
+    let epoch1 = service.begin_main_open(ROOT_WINDOW_LABEL);
+    assert_eq!(epoch1, 1);
+
+    // Document 2 opens and finishes at epoch 2
+    let doc2 = service
+        .open(request(dir.path(), "second.txt"))
+        .await
+        .expect("doc 2 opens");
+    assert_eq!(doc2.display_name, "second.txt");
+
+    // Attempt to register doc 1 with stale epoch 1
+    let opened1 = open_blocking_path(&dir.path().join("first.txt"), None, None).unwrap();
+    let err = service.register_main(ROOT_WINDOW_LABEL, opened1, epoch1).unwrap_err();
+    assert_eq!(err.code, IpcErrorCode::InvalidArgument);
+
+    // Doc 2's handle is STILL valid and not revoked by stale doc 1
+    let reg = service.registry.lock();
+    assert_eq!(reg.windows.get(ROOT_WINDOW_LABEL).unwrap().main.as_deref(), Some(doc2.handle.as_str()));
+    assert!(reg.handles.contains_key(&doc2.handle));
+}
+
+#[tokio::test]
+async fn image_exceeding_per_axis_bound_is_rejected() {
+    let dir = TempDir::new().expect("tempdir");
+    // Craft a valid PNG IHDR with width = 20,000 (> 16,384) but height = 100 (total pixels 2M < 40M)
+    let mut png = vec![
+        0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, // signature
+        0x00, 0x00, 0x00, 0x0D, // IHDR length
+        b'I', b'H', b'D', b'R', // IHDR
+        0x00, 0x00, 0x4E, 0x20, // width: 20,000 (> 16384)
+        0x00, 0x00, 0x00, 0x64, // height: 100
+        0x08, 0x06, 0x00, 0x00, 0x00, // 8-bit RGBA
+        0x00, 0x00, 0x00, 0x00, // CRC placeholder
+    ];
+    png.resize(128, 0);
+    write_file(dir.path(), "wide.png", &png);
+
+    let service = service().await;
+    let err = service.open(request(dir.path(), "wide.png")).await.unwrap_err();
+    assert_eq!(err.code, IpcErrorCode::Unsupported);
+    assert_eq!(err.details.unwrap()["reason"], "TooLarge");
 }

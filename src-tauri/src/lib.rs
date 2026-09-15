@@ -946,6 +946,16 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
 
     let builder = builder
         .on_window_event(|window, event| {
+            // R6: a destroyed window must never leave preview capabilities
+            // (retained descriptors, capability URLs) behind.
+            if let tauri::WindowEvent::Destroyed = event {
+                if let Some(service) = window
+                    .app_handle()
+                    .try_state::<Arc<crate::ipc::file_preview::FilePreviewService>>()
+                {
+                    service.close_window(window.label());
+                }
+            }
             #[cfg(target_os = "macos")]
             if let tauri::WindowEvent::DragDrop(drag_event) = event {
                 if crate::ipc::debug::switch_debug_sink_enabled(
@@ -996,7 +1006,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                 }
             }
             #[cfg(not(target_os = "macos"))]
-            let _ = (window, event);
+            let _ = event;
         })
         .setup(move |app| {
             #[cfg(target_os = "macos")]

@@ -86,9 +86,17 @@ function restoreFocus(
     previous.focus();
     return;
   }
-  const candidate = focusableWithin(leaf)[0];
-  if (candidate) {
-    candidate.focus();
+  // R14: prefer the originating pane's exact native terminal focus sink
+  const sink = leaf.querySelector<HTMLElement>('[data-testid="native-terminal-focus-sink"]');
+  if (sink && sink.isConnected) {
+    sink.focus();
+    return;
+  }
+  // Fall back to the first visible focusable within the leaf
+  const candidates = focusableWithin(leaf);
+  const visible = candidates.find((el) => el.offsetParent !== null) ?? candidates[0];
+  if (visible) {
+    visible.focus();
     return;
   }
   if (!leaf.hasAttribute("tabindex")) leaf.tabIndex = -1;
@@ -178,6 +186,16 @@ export function FilePreviewDialog({
   useEffect(() => {
     setSourceMode(false);
   }, [generation]);
+
+  // R6: unmounting the dialog disposes the preview controller if it is still open,
+  // releasing any backend capability handles.
+  useEffect(() => {
+    return () => {
+      if (controller.getState().status !== "closed") {
+        void controller.close();
+      }
+    };
+  }, [controller]);
 
   useEffect(() => {
     if (!isOpen) return;

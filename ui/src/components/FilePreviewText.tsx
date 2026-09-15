@@ -109,7 +109,7 @@ export function FilePreviewText({
     }
   }, [onFailure, payload.displayName, text]);
 
-  const matchesByLine = useMemo(() => groupMatchesByLine(matches), [matches]);
+  const { byLine: matchesByLine, firstIndexByLine } = useMemo(() => indexMatches(matches), [matches]);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-card text-foreground" data-testid="file-preview-text">
@@ -233,7 +233,7 @@ export function FilePreviewText({
               caret={caret && caret.line === index + 1 ? caret : null}
               matches={matchesByLine.get(index) ?? []}
               activeMatch={activeMatch}
-              matchOffset={matchIndexOffset(matches, index)}
+              matchOffset={firstIndexByLine.get(index) ?? -1}
             />
           ))}
         </div>
@@ -264,19 +264,28 @@ function errorMessage(error: unknown): string {
   return "unknown error";
 }
 
-function groupMatchesByLine(matches: readonly PreviewMatch[]): Map<number, PreviewMatch[]> {
-  const grouped = new Map<number, PreviewMatch[]>();
-  for (const match of matches) {
-    const bucket = grouped.get(match.line);
-    if (bucket) bucket.push(match);
-    else grouped.set(match.line, [match]);
+/**
+ * R8: Linear document match indexing. Precomputes line buckets and the flat
+ * index of the first match per line in a single O(matches) pass, eliminating
+ * quadratic findIndex calls during line rendering.
+ */
+function indexMatches(matches: readonly PreviewMatch[]): {
+  byLine: Map<number, PreviewMatch[]>;
+  firstIndexByLine: Map<number, number>;
+} {
+  const byLine = new Map<number, PreviewMatch[]>();
+  const firstIndexByLine = new Map<number, number>();
+  for (let i = 0; i < matches.length; i++) {
+    const match = matches[i]!;
+    const bucket = byLine.get(match.line);
+    if (bucket) {
+      bucket.push(match);
+    } else {
+      byLine.set(match.line, [match]);
+      firstIndexByLine.set(match.line, i);
+    }
   }
-  return grouped;
-}
-
-/** Index of the first match on `line` within the flat, document-ordered list. */
-function matchIndexOffset(matches: readonly PreviewMatch[], line: number): number {
-  return matches.findIndex((match) => match.line === line);
+  return { byLine, firstIndexByLine };
 }
 
 type ToolbarButtonProps = {
@@ -629,9 +638,17 @@ function PreviewImageNode({ src, alt, capability, generation }: PreviewImageNode
   const classified = useMemo(() => classifyPreviewImage(src), [src]);
   const budgetExhausted = classified.kind === "local" && (capability?.remainingChildHandles ?? 0) <= 0;
   const [state, setState] = useState<ImageState>({ status: "idle" });
+  // R1: acquire each image at most once per generation, avoiding re-acquisition loops
+  const requestedRef = useRef(false);
+
+  useEffect(() => {
+    requestedRef.current = false;
+  }, [generation]);
 
   useEffect(() => {
     if (classified.kind !== "local" || !capability || budgetExhausted) return;
+    if (requestedRef.current) return;
+    requestedRef.current = true;
     let cancelled = false;
     setState({ status: "loading" });
     capability.requestImage(classified.relativePath).then(

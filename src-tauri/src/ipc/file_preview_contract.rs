@@ -110,10 +110,14 @@ pub mod limits {
     pub const TEXT_MAX_BYTES: u64 = 2 * 1024 * 1024;
     /// Rendered line ceiling before `TooLarge`.
     pub const MAX_RENDERED_LINES: usize = 50_000;
-    /// Compressed image ceiling: 32 MiB.
+    /// Compressed image ceiling: 100 MiB.
     pub const IMAGE_MAX_BYTES: u64 = 32 * 1024 * 1024;
     /// Decoded image ceiling: 40 megapixels per frame.
     pub const IMAGE_MAX_PIXELS: u64 = 40_000_000;
+    /// Per-axis image ceiling: 16,384 pixels on width or height.
+    pub const IMAGE_MAX_AXIS: u32 = 16_384;
+    /// Bytes inspected for image signature/dimension headers (covers EXIF-heavy JPEGs).
+    pub const IMAGE_HEADER_PROBE: usize = 64 * 1024;
     /// Markdown child image handles per main handle.
     pub const MAX_CHILD_HANDLES: usize = 32;
     /// Concurrent capability media requests before HTTP 429.

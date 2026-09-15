@@ -359,4 +359,14 @@ describe("openTerminalToken", () => {
     expect(openSpy).not.toHaveBeenCalled();
     openSpy.mockRestore();
   });
+  it("recognizes single media and markdown file tokens (R13)", () => {
+    for (const name of ["clip.mp4", "anim.webm", "photo.webp", "movie.mov", "DOC.MARKDOWN"]) {
+      const token = resolveTokenAtCol(name, 2);
+      expect(token).not.toBeNull();
+      expect(token?.type).toBe("file");
+      if (token?.type === "file") {
+        expect(token.path).toBe(name);
+      }
+    }
+  });
 });

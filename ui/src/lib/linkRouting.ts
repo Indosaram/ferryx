@@ -83,9 +83,9 @@ export async function requestTerminalLinkOpen(url: string, shiftKey = false): Pr
 
 const KNOWN_EXTENSIONS = new Set([
   "ts", "tsx", "js", "jsx", "mjs", "cjs", "rs", "py", "go", "json", "json5",
-  "toml", "yaml", "yml", "md", "mdx", "css", "scss", "html", "sh", "bash",
+  "toml", "yaml", "yml", "md", "markdown", "mdx", "css", "scss", "html", "sh", "bash",
   "zsh", "lock", "txt", "c", "cpp", "cc", "h", "hpp", "svg", "png", "jpg",
-  "jpeg", "gif", "env", "conf", "config", "log", "sql", "diff", "patch",
+  "jpeg", "gif", "webp", "mp4", "m4v", "mov", "webm", "ogv", "env", "conf", "config", "log", "sql", "diff", "patch",
 ]);
 
 function isEastAsianWide(code: number): boolean {
