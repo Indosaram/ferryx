@@ -6,11 +6,12 @@ import {
 
 export function useNotificationCenter(store: NotificationCenterStore = notificationCenterStore) {
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot);
-  const unreadCount = state.entries.filter((entry) => "unread" in entry.read).length;
+  const unreadEntries = state.entries.filter((entry) => "unread" in entry.read);
+  const unreadCount = unreadEntries.length;
 
   return {
     state,
-    entries: state.entries,
+    entries: unreadEntries,
     unreadCount,
     markEntriesRead: store.markEntriesRead,
     markAllRead: store.markAllRead,

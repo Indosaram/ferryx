@@ -50,11 +50,13 @@ export function createNotificationCenterStore(options: NotificationCenterOptions
   };
 
   const markEntriesRead = (acknowledgements: ReadAcknowledgement[], seenAt = Date.now()) => {
-    const revisions = new Map(acknowledgements.map((ack) => [ack.id, ack.expectedRevision]));
+    const ackMap = new Map(acknowledgements.map((ack) => [ack.id, ack.expectedRevision]));
     let changed = false;
     const entries = state.entries.map((entry): NotificationEntry => {
-      const expectedRevision = revisions.get(entry.id);
-      if (expectedRevision === undefined || expectedRevision !== entry.revision || "seen" in entry.read) return entry;
+      if (!ackMap.has(entry.id)) return entry;
+      const expectedRevision = ackMap.get(entry.id);
+      if (expectedRevision !== undefined && expectedRevision !== entry.revision) return entry;
+      if ("seen" in entry.read) return entry;
       changed = true;
       return { ...entry, read: { seen: true, seenAt } };
     });
@@ -78,6 +80,11 @@ export function createNotificationCenterStore(options: NotificationCenterOptions
     markEntriesRead,
     markAllRead: (seenAt = Date.now()) => {
       markEntriesRead(state.entries.map((entry) => ({ id: entry.id, expectedRevision: entry.revision })), seenAt);
+    },
+    dismissSession: (workspaceId: string, sessionId: string) => {
+      const id = notificationEntryId(workspaceId, sessionId);
+      const entries = state.entries.filter((entry) => entry.id !== id);
+      if (entries.length !== state.entries.length) publish({ ...state, entries });
     },
     dismissEntry: (id: string) => {
       const entries = state.entries.filter((entry) => entry.id !== id);

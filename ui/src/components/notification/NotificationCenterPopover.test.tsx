@@ -294,7 +294,7 @@ describe("NotificationCenterPopover", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it("provides keyboard-accessible hover clear button that removes the row", () => {
+  it("does not render a separate clear button on the row", () => {
     store.recordActivity({
       workspaceId: "ws-1",
       sessionId: "s-1",
@@ -306,74 +306,14 @@ describe("NotificationCenterPopover", () => {
       state: "done",
     });
 
-    const onNavigate = vi.fn();
     render(
       <NotificationCenterPopover
         onClose={vi.fn()}
-        onNavigateToSession={onNavigate}
         store={store}
       />,
     );
 
-    const clearButton = screen.getByRole("button", { name: "Clear notification" });
-    expect(clearButton).toBeInTheDocument();
-
-    // Clicking clear dismisses entry without navigating
-    fireEvent.click(clearButton);
-    expect(onNavigate).not.toHaveBeenCalled();
-    expect(screen.queryByText("Term to clear")).toBeNull();
-    expect(store.getSnapshot().entries).toHaveLength(0);
-  });
-
-  it("B1: pressing Enter or Space on clear button dismisses entry without navigating or closing popover", () => {
-    store.recordActivity({
-      workspaceId: "ws-1",
-      sessionId: "s-enter",
-      labels: { terminalTitle: "Term Enter" },
-      subject: "terminal",
-      occurredAt: 1000,
-      observed: false,
-      previousState: "working",
-      state: "done",
-    });
-    store.recordActivity({
-      workspaceId: "ws-1",
-      sessionId: "s-space",
-      labels: { terminalTitle: "Term Space" },
-      subject: "terminal",
-      occurredAt: 2000,
-      observed: false,
-      previousState: "working",
-      state: "done",
-    });
-
-    const onNavigateToSession = vi.fn();
-    const onClose = vi.fn();
-
-    render(
-      <NotificationCenterPopover
-        onClose={onClose}
-        onNavigateToSession={onNavigateToSession}
-        store={store}
-      />,
-    );
-
-    const clearButtons = screen.getAllByRole("button", { name: "Clear notification" });
-    expect(clearButtons).toHaveLength(2);
-
-    // Press Enter on first clear button
-    fireEvent.keyDown(clearButtons[0], { key: "Enter" });
-    expect(onNavigateToSession).not.toHaveBeenCalled();
-    expect(onClose).not.toHaveBeenCalled();
-    expect(screen.queryByText("Term Space")).toBeNull();
-    expect(store.getSnapshot().entries).toHaveLength(1);
-
-    // Press Space on second clear button
-    fireEvent.keyDown(clearButtons[1], { key: " " });
-    expect(onNavigateToSession).not.toHaveBeenCalled();
-    expect(onClose).not.toHaveBeenCalled();
-    expect(screen.queryByText("Term Enter")).toBeNull();
-    expect(store.getSnapshot().entries).toHaveLength(0);
+    expect(screen.queryByRole("button", { name: "Clear notification" })).toBeNull();
   });
 
   it("B1: row keyboard activation still navigates and closes when Enter or Space is pressed directly on the row", () => {
@@ -500,7 +440,7 @@ describe("NotificationCenterPopover", () => {
     expect(popover.style.left).toBe("50px");
   });
 
-  it("header: 'Mark all read' and 'Clear all' buttons function correctly", () => {
+  it("header: 'Mark all read' marks all read and clears the popover, with no separate Clear all button", () => {
     store.recordActivity({
       workspaceId: "ws-1",
       sessionId: "s-1",
@@ -525,16 +465,13 @@ describe("NotificationCenterPopover", () => {
     render(<NotificationCenterPopover onClose={vi.fn()} store={store} />);
 
     expect(screen.getByText("2 unread")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Clear all" })).toBeNull();
 
-    // Mark all read
+    // Mark all read removes all notifications from the view immediately
     fireEvent.click(screen.getByRole("button", { name: "Mark all read" }));
+    expect(screen.getByText("No new notifications")).toBeInTheDocument();
     expect(screen.queryByText("2 unread")).toBeNull();
     expect(store.getSnapshot().entries.every((e) => "seen" in e.read)).toBe(true);
-
-    // Clear all
-    fireEvent.click(screen.getByRole("button", { name: "Clear all" }));
-    expect(screen.getByText("No new notifications")).toBeInTheDocument();
-    expect(store.getSnapshot().entries).toHaveLength(0);
   });
 
   it("reflects 201st row eviction in render", () => {

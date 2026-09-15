@@ -50,7 +50,7 @@ export interface ActivityOccurrence extends BellOccurrence {
 
 export interface ReadAcknowledgement {
   id: string;
-  expectedRevision: number;
+  expectedRevision?: number;
 }
 
 export const MAX_NOTIFICATION_ENTRIES = 200;

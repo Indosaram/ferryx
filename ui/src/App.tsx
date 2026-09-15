@@ -29,7 +29,7 @@ import { useGeneralSettings } from "./lib/generalSettings";
 import { NotificationCoordinator, isWindowForegroundFocused } from "./lib/notificationCoordinator";
 import { isNotificationTargetObserved, wireActivityRecording, wireBellRecording, type RecordingListener, type RecordingTarget } from "./lib/notificationCenter/activityRecording";
 import { notificationCenterStore } from "./lib/notificationCenter/notificationCenterStore";
-import { notificationEntryId } from "./lib/notificationCenter/types";
+import { notificationEntryId, type ReadAcknowledgement } from "./lib/notificationCenter/types";
 import { getNativeWindowFocused, startNativeWindowFocusTracking } from "./lib/nativeWindowFocus";
 import { serializeWorkspaceState, sessionPersistenceKey } from "./lib/sessionPersistence";
 import { isMacShortcutPlatform, SHORTCUTS, useShortcuts } from "./lib/shortcuts";
@@ -134,9 +134,16 @@ import { getTabSessionIds, hasNavigableSession, selectGlobalUnreadBadgeCount, se
 export { ACTIVE_PROJECT_STORAGE_KEY, PROJECTS_STORAGE_KEY, SIDEBAR_OPEN_STORAGE_KEY };
 type InboxNavigationTarget = NotificationTarget & { revision?: number };
 
+function findTabIdForSession(state: WorkspaceState, sessionId: string): string | null {
+  const tabs = [...state.layout.tabs, ...Object.values(state.worktreeLayouts ?? {}).flatMap((l) => l.tabs)];
+  for (const tab of tabs) {
+    if (tab.kind === "browser") continue;
+    if (getTabSessionIds(state, tab.id).has(sessionId)) return tab.id;
+  }
+  return null;
+}
+
 function acknowledgeNotificationTarget(target: InboxNavigationTarget): void {
-  // Native activations carry no inbox revision and retain their existing navigation-only behavior.
-  if (target.revision === undefined) return;
   notificationCenterStore.markEntriesRead([{
     id: notificationEntryId(target.workspaceId, target.sessionId), expectedRevision: target.revision,
   }]);
@@ -751,6 +758,51 @@ function WorkspaceApp({
     events: (record) => subscribeTerminalBell((sessionId, tabId, target) => handleTerminalBell(sessionId, tabId, target, record)),
     isObserved: isNotificationObserved,
   }), [handleTerminalBell, subscribeTerminalBell, isNotificationObserved]);
+
+  // Synchronize workspace attention/seen state with the notification center inbox:
+  // When an agent's completion is seen (user viewed the tab / focused the pane),
+  // mark the matching inbox entry as read so it immediately disappears.
+  useEffect(() => {
+    const syncInbox = () => {
+      if (!state.workspaceId) return;
+      const workspaceId = state.workspaceId;
+      const entries = notificationCenterStore.getSnapshot().entries;
+      const toMarkRead: ReadAcknowledgement[] = [];
+
+      for (const entry of entries) {
+        if (entry.workspaceId !== workspaceId) continue;
+        if ("seen" in entry.read) continue;
+
+        if (entry.subject === "agent") {
+          const activity = state.activityBySessionId?.[entry.sessionId];
+          if (activity?.seen === true) {
+            toMarkRead.push({ id: entry.id, expectedRevision: entry.revision });
+            continue;
+          }
+        } else if (entry.reason === "bell") {
+          const tabId = findTabIdForSession(state, entry.sessionId);
+          if (tabId && state.layout.activeTabId === tabId && !state.unreadTabIds?.[tabId] && !state.bellUnreadTabIds?.[tabId]) {
+            toMarkRead.push({ id: entry.id, expectedRevision: entry.revision });
+            continue;
+          }
+        }
+      }
+
+      if (toMarkRead.length > 0) {
+        notificationCenterStore.markEntriesRead(toMarkRead);
+      }
+    };
+
+    syncInbox();
+    return notificationCenterStore.subscribe(syncInbox);
+  }, [
+    state.workspaceId,
+    state.sessions,
+    state.activityBySessionId,
+    state.unreadTabIds,
+    state.bellUnreadTabIds,
+    state.layout,
+  ]);
   useEffect(() => {
     switchDebug("workspace.render", {
       activeProjectId: activeProject.workspaceId,

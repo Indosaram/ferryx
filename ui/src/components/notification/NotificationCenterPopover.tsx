@@ -81,7 +81,7 @@ export function NotificationCenterPopover({
   isSessionNavigable,
   store = notificationCenterStore,
 }: NotificationCenterPopoverProps): ReactNode {
-  const { entries, unreadCount, markAllRead, dismissEntry, clearAll } = useNotificationCenter(store);
+  const { entries, unreadCount, markAllRead } = useNotificationCenter(store);
   const modalRef = useRef<HTMLDivElement>(null);
   const previousActiveElementRef = useRef<HTMLElement | null>(null);
 
@@ -206,14 +206,6 @@ export function NotificationCenterPopover({
             </button>
             <button
               type="button"
-              onClick={() => clearAll()}
-              disabled={entries.length === 0}
-              className="rounded px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40 transition-colors"
-            >
-              Clear all
-            </button>
-            <button
-              type="button"
               aria-label="Close notifications"
               onClick={onClose}
               className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground transition-colors ml-0.5"
@@ -328,7 +320,7 @@ export function NotificationCenterPopover({
                     ) : null}
                   </div>
 
-                  {/* Right: Unread indicator / bell indicator + Clear button */}
+                  {/* Right: Unread indicator / bell indicator */}
                   <div className="flex shrink-0 items-center gap-1.5 self-center ml-1">
                     {isUnread ? (
                       <span
@@ -344,18 +336,6 @@ export function NotificationCenterPopover({
                         aria-label="Bell alert"
                       />
                     ) : null}
-                    <button
-                      type="button"
-                      aria-label="Clear notification"
-                      data-testid="notification-clear-button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        dismissEntry(entry.id);
-                      }}
-                      className="rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus:opacity-100 group-hover:opacity-100"
-                    >
-                      <X className="size-3.5" />
-                    </button>
                   </div>
                 </div>
               );

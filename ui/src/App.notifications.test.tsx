@@ -969,6 +969,28 @@ describe("App notification coordinator wiring", () => {
       await act(async () => { render(<App />); });
       expect(inbox.getSnapshot().entries).toEqual([expect.objectContaining({ sessionId: "sess-1", revision: 1, read: { unread: true } })]);
     });
+
+    it("automatically marks inbox entry read when agent completion is marked seen in workspaceStore", async () => {
+      seedUnread("default", "sess-1");
+      expect(inbox.getSnapshot().entries[0].read).toEqual({ unread: true });
+
+      const original = storeSpy.getMockImplementation();
+      storeSpy.mockImplementation((options: { workspaceId: string }) => {
+        const base = original(options);
+        return {
+          ...base,
+          state: {
+            ...base.state,
+            activityBySessionId: {
+              "sess-1": { state: "done", seen: true, isAgent: true },
+            },
+          },
+        };
+      });
+
+      await act(async () => { render(<App />); });
+      expect(inbox.getSnapshot().entries[0].read).toMatchObject({ seen: true });
+    });
   });
 
   describe("activation navigation", () => {
