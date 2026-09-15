@@ -923,6 +923,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
     let notification_activations = Arc::new(NotificationActivations::new());
     let browser_manager = Arc::new(browser::BrowserManager::new());
     let browser_cli_manager = Arc::clone(&browser_manager);
+    let file_preview_service = tauri::async_runtime::block_on(crate::ipc::file_preview::FilePreviewService::start())
+        .expect("file preview service failed to start");
     #[cfg(feature = "native-terminal")]
     let native_terminal_surface_host = NativeTerminalSurfaceHostState::default();
     let setup_activations = Arc::clone(&notification_activations);
@@ -1061,7 +1063,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         .manage(ipc::worktree_disk::WorktreeDiskScans::default())
         .manage(notification_audio)
         .manage(notification_activations)
-        .manage(browser_manager);
+        .manage(browser_manager)
+        .manage(file_preview_service);
 
     #[cfg(desktop)]
     let builder = if crate::ipc::updater::updater_managed_externally() {
@@ -1081,6 +1084,10 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         crate::ipc::paired_host::paired_host_pair,
         crate::ipc::paired_host::paired_host_migrate_legacy,
         crate::ipc::paired_host::paired_host_forget,
+        crate::ipc::file_preview::cmd_file_preview_open,
+        crate::ipc::file_preview::cmd_file_preview_open_child,
+        crate::ipc::file_preview::cmd_file_preview_open_child_document,
+        crate::ipc::file_preview::cmd_file_preview_close,
         crate::ipc::updater::cmd_updater_managed_externally,
         crate::ipc::updater::cmd_distribution_channel,
         cmd_switch_debug_log,

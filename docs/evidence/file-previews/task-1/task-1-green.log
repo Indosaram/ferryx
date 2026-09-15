@@ -1,0 +1,195 @@
+   Compiling ferryx v2026.915.1 (/Users/indo/code/project/orca-lite-wt/preview/src-tauri)
+warning: variable does not need to be mutable
+    --> src/ipc/browser.rs:1307:9
+     |
+1307 |     let mut targets = manager
+     |         ----^^^^^^^
+     |         |
+     |         help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:79:28
+   |
+79 |             let location = unsafe { info.draggingLocation() };
+   |                            ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/macos_file_drop.rs:80:25
+   |
+80 |             let point = unsafe { self.convertPoint_fromView(location, None) };
+   |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:102:46
+    |
+102 |     let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    |                                              ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:105:25
+    |
+105 |     if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:122:25
+    |
+122 |     if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
+    |                         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:123:28
+    |
+123 |         if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
+    |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:124:33
+    |
+124 |             if let Some(path) = unsafe { url.path() } {
+    |                                 ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> src/macos_file_drop.rs:169:5
+    |
+169 |     unsafe { view.registerForDraggedTypes(&types) };
+    |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `super_key`
+   --> src/native_terminal/input.rs:366:13
+    |
+366 |         let super_key = KeyModifiers {
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_super_key`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/native_terminal/renderer/font_manager.rs:155:13
+    |
+155 |         let mut buffer = vec![0u8; total_pixels];
+    |             ----^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: unused variable: `token`
+    --> src/remote/auth.rs:1415:14
+     |
+1415 |         let (token, device) = auth
+     |              ^^^^^ help: if this is intentional, prefix it with an underscore: `_token`
+
+warning: method `machine_sessions` is never used
+   --> src/daemon/session_service.rs:366:19
+    |
+227 | impl DaemonSessionService {
+    | ------------------------- method in this implementation
+...
+366 |     pub(crate) fn machine_sessions(&self, epoch: crate::scoped_contracts::Epoch) -> Result<crate::remote::machine_protocol::Sessions, Str...
+    |                   ^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `kind` is never read
+   --> src/ipc/file_preview.rs:409:5
+    |
+404 | struct HandleRecord {
+    |        ------------ field in this struct
+...
+409 |     kind: FilePreviewKind,
+    |     ^^^^
+
+warning: field `app` is never read
+  --> src/ipc/notifications.rs:29:5
+   |
+28 | pub struct TauriNotificationBackend<R: Runtime> {
+   |            ------------------------ field in this struct
+29 |     app: AppHandle<R>,
+   |     ^^^
+
+warning: function `no_auth_query` is never used
+    --> src/remote/server.rs:3346:12
+     |
+3346 |         fn no_auth_query() -> AuthQuery {
+     |            ^^^^^^^^^^^^^
+
+warning: struct `WriterLeaseGuard` is never constructed
+  --> src/worktree/manager.rs:86:19
+   |
+86 | pub(crate) struct WriterLeaseGuard {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `canonical_path`, and `owner_id` are never used
+   --> src/worktree/manager.rs:93:8
+    |
+ 92 | impl WriterLeaseGuard {
+    | --------------------- associated items in this implementation
+ 93 |     fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
+    |        ^^^
+...
+101 |     pub(crate) fn canonical_path(&self) -> &Path {
+    |                   ^^^^^^^^^^^^^^
+...
+105 |     pub(crate) fn owner_id(&self) -> &str {
+    |                   ^^^^^^^^
+
+warning: associated items `acquire_writer_lease` and `validate_ref_component` are never used
+   --> src/worktree/manager.rs:338:19
+    |
+134 | impl WorktreeManager {
+    | -------------------- associated items in this implementation
+...
+338 |     pub(crate) fn acquire_writer_lease(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+...
+398 |     fn validate_ref_component(component: &str, label: &str) -> Result<(), WorktreeError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib test) generated 19 warnings (run `cargo fix --lib -p ferryx --tests` to apply 4 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 18.64s
+     Running unittests src/lib.rs (src-tauri/target/debug/deps/ferryx_lib-a908d3ab2e7c7e9a)
+
+running 37 tests
+test ipc::file_preview::file_preview_tests::allowed_origins_never_include_a_wildcard ... ok
+test ipc::file_preview::file_preview_tests::caret_target_is_one_based_and_clamped_to_unicode_scalars ... ok
+test ipc::file_preview::file_preview_tests::line_counting_ignores_a_single_trailing_newline ... ok
+test ipc::file_preview::file_preview_tests::a_refused_session_resolution_maps_to_remote_unsupported ... ok
+test ipc::file_preview::file_preview_tests::image_dimensions_come_from_real_signatures_not_extensions ... ok
+test ipc::file_preview::file_preview_tests::expired_handles_report_the_machine_reason ... ok
+test ipc::file_preview::file_preview_tests::a_child_symlink_escaping_the_document_directory_is_refused ... ok
+test ipc::file_preview::file_preview_tests::only_the_desktop_root_window_may_hold_capabilities ... ok
+test ipc::file_preview::file_preview_tests::open_decodes_bounded_text_without_a_media_capability ... ok
+test ipc::file_preview::file_preview_tests::markdown_document_links_navigate_only_inside_the_parent_boundary ... ok
+test ipc::file_preview::file_preview_tests::head_has_no_body_but_advertises_the_full_length ... ok
+test ipc::file_preview::file_preview_tests::open_offloads_file_io_off_the_async_reactor ... ok
+test ipc::file_preview::file_preview_tests::full_get_returns_the_exact_body_and_frozen_headers ... ok
+test ipc::file_preview::file_preview_tests::preview_kind_and_media_type_follow_the_frozen_extension_allowlist ... ok
+test ipc::file_preview::file_preview_tests::range_header_parses_the_three_supported_single_forms ... ok
+test ipc::file_preview::file_preview_tests::concurrent_media_requests_are_capped_with_429 ... ok
+test ipc::file_preview::file_preview_tests::a_zero_length_file_serves_an_empty_200_and_refuses_ranges ... ok
+test ipc::file_preview::file_preview_tests::range_header_rejects_multi_malformed_and_unsatisfiable_forms ... ok
+test ipc::file_preview::file_preview_tests::a_replaced_path_never_redirects_the_retained_handle ... ok
+test ipc::file_preview::file_preview_tests::text_decoder_is_strict_and_bom_aware ... ok
+test ipc::file_preview::file_preview_tests::open_refuses_remote_specs_urls_and_nul_bytes ... ok
+test ipc::file_preview::file_preview_tests::close_is_idempotent_and_scoped_to_the_owning_window ... ok
+test ipc::file_preview::file_preview_tests::destroying_a_window_revokes_every_capability_it_owns ... ok
+test ipc::file_preview::file_preview_tests::closing_mid_stream_stops_delivery_at_the_next_chunk ... ok
+test ipc::file_preview::file_preview_tests::host_and_origin_are_checked_and_cors_is_never_wildcarded ... ok
+test ipc::file_preview::file_preview_tests::only_get_and_head_are_routed_and_unknown_handles_404 ... ok
+test ipc::file_preview::file_preview_tests::open_refuses_non_regular_and_missing_paths ... ok
+test ipc::file_preview::file_preview_tests::undecodable_text_reports_unsupported_encoding ... ok
+test ipc::file_preview::file_preview_tests::video_open_exposes_a_streaming_capability_not_a_body ... ok
+test ipc::file_preview::file_preview_tests::opening_b_revokes_a_for_the_same_window ... ok
+test ipc::file_preview::file_preview_tests::markdown_children_resolve_only_under_the_document_directory ... ok
+test ipc::file_preview::file_preview_tests::truncating_the_open_inode_requires_an_explicit_reload ... ok
+test ipc::file_preview::file_preview_tests::single_ranges_return_206_with_exact_bytes ... ok
+test ipc::file_preview::file_preview_tests::unsatisfiable_and_multi_ranges_return_416_with_the_length ... ok
+test ipc::file_preview::file_preview_tests::child_handles_are_capped_per_document ... ok
+test ipc::file_preview::file_preview_tests::text_bounds_report_too_large_without_truncating ... ok
+test ipc::file_preview::file_preview_tests::image_open_checks_signature_and_pixel_bounds_before_the_client_decodes ... ok
+
+test result: ok. 37 passed; 0 failed; 0 ignored; 0 measured; 1327 filtered out; finished in 4.55s
+
+exit=0

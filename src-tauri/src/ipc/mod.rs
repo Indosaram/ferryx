@@ -7,6 +7,7 @@ pub mod debug;
 pub mod diagnostics;
 pub mod error;
 pub mod file_link;
+pub mod file_preview;
 pub mod file_preview_contract;
 pub mod native_menu;
 #[cfg(feature = "native-terminal")]
