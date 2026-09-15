@@ -1,0 +1,1116 @@
+$ vitest run --maxWorkers=1 src/lib/previewMarkdown.test.ts src/components/FilePreviewText.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/preview/ui
+
+ ❯ src/components/FilePreviewText.test.tsx (19 tests | 15 failed) 2083ms
+   × FilePreviewText source view > renders every line with a 1-based number and escapes markup literally 13ms
+     → Unable to find an element by: [data-testid="/^file-preview-line-\d+$/"]
+
+Ignored nodes: comments, script, style
+[36m<div[39m
+  [33mdata-testid[39m=[32m"file-preview-source"[39m
+[36m>[39m
+  [36m<pre>[39m
+    [0m&lt;script&gt;window.__pwned = 1&lt;/script&gt;
+안녕하세요 world
+[0m
+  [36m</pre>[39m
+[36m</div>[39m
+   × FilePreviewText source view > never mounts an editing surface 4ms
+     → [2mexpect([22m[31melement[39m[2m).toHaveAttribute([22m[32m[32m"aria-readonly"[32m[39m[2m, [22m[32m[32m"true"[32m[39m[2m) // element.getAttribute("aria-readonly") === "true"[22m
+
+Expected the element to have attribute:
+[32m  aria-readonly="true"[39m
+Received:
+[31m  null[39m
+   × FilePreviewText source view > places the caret at a Unicode scalar column and reports clamping 2ms
+     → Unable to find an element by: [data-testid="file-preview-caret"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mdata-testid[39m=[32m"file-preview-source"[39m
+    [36m>[39m
+      [36m<pre>[39m
+        [0m👩x
+second
+[0m
+      [36m</pre>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+   × FilePreviewText source view > highlights and selects search matches without altering the document text 1ms
+     → Unable to find an element by: [data-testid="file-preview-search-input"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mdata-testid[39m=[32m"file-preview-source"[39m
+    [36m>[39m
+      [36m<pre>[39m
+        [0mHello hello
+안녕 Hello
+[0m
+      [36m</pre>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+   × FilePreviewText source view > copies the exact document text and reports clipboard failure through onFailure 2ms
+     → Unable to find an element by: [data-testid="file-preview-copy"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mdata-testid[39m=[32m"file-preview-source"[39m
+    [36m>[39m
+      [36m<pre>[39m
+        [0m안녕
+world
+[0m
+      [36m</pre>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+   ✓ FilePreviewText source view > offers no Markdown toggle for plain text 1ms
+   ✓ FilePreviewText Markdown rendering > renders GFM structure as real elements 31ms
+   ✓ FilePreviewText Markdown rendering > keeps raw HTML inert and literal 2ms
+   × FilePreviewText Markdown rendering > opens http(s) anchors only through the capability, never as navigable hrefs 4ms
+     → Unable to find an element by: [data-testid="file-preview-external-link"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mdata-testid[39m=[32m"file-preview-markdown"[39m
+    [36m>[39m
+      [36m<p>[39m
+        [36m<a[39m
+          [33mhref[39m=[32m"https://example.com/docs"[39m
+        [36m>[39m
+          [0msite[0m
+        [36m</a>[39m
+      [36m</p>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+   × FilePreviewText Markdown rendering > refuses unsafe anchor schemes without any action 2ms
+     → Unable to find an element by: [data-testid="file-preview-rejected-link"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mdata-testid[39m=[32m"file-preview-markdown"[39m
+    [36m>[39m
+      [36m<p>[39m
+        [36m<a[39m
+          [33mhref[39m=[32m""[39m
+        [36m>[39m
+          [0mboom[0m
+        [36m</a>[39m
+        [0m and [0m
+        [36m<a[39m
+          [33mhref[39m=[32m""[39m
+        [36m>[39m
+          [0mdrive[0m
+        [36m</a>[39m
+      [36m</p>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+   × FilePreviewText Markdown rendering > escalates relative document links to a new preview request 1ms
+     → Unable to find an element by: [data-testid="file-preview-document-link"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mdata-testid[39m=[32m"file-preview-markdown"[39m
+    [36m>[39m
+      [36m<p>[39m
+        [36m<a[39m
+          [33mhref[39m=[32m"./notes.md"[39m
+        [36m>[39m
+          [0mnotes[0m
+        [36m</a>[39m
+      [36m</p>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+   × FilePreviewText Markdown rendering > scrolls in-document fragments to the matching heading anchor 2ms
+     → [2mexpect([22m[31melement[39m[2m).toHaveAttribute([22m[32m[32m"id"[32m[39m[2m, [22m[32m[32m"safe-section"[32m[39m[2m) // element.getAttribute("id") === "safe-section"[22m
+
+Expected the element to have attribute:
+[32m  id="safe-section"[39m
+Received:
+[31m  null[39m
+   × FilePreviewText Markdown rendering > resolves relative images through the parent capability 1005ms
+     → expected "spy" to be called with arguments: [ './img/logo.png' ][90m
+
+Number of calls: [1m0[22m
+[39m
+
+Ignored nodes: comments, script, style
+[36m<html>[39m
+  [36m<head />[39m
+  [36m<body>[39m
+    [36m<div>[39m
+      [36m<div[39m
+        [33mdata-testid[39m=[32m"file-preview-markdown"[39m
+      [36m>[39m
+        [36m<p>[39m
+          [36m<img[39m
+            [33malt[39m=[32m"logo"[39m
+            [33msrc[39m=[32m"./img/logo.png"[39m
+          [36m/>[39m
+        [36m</p>[39m
+      [36m</div>[39m
+    [36m</div>[39m
+  [36m</body>[39m
+[36m</html>[39m
+   × FilePreviewText Markdown rendering > never requests remote, data or traversal images 4ms
+     → expected <img …(2)></img>
+<img …(2)></img>
+…(1) to have a length of +0 but got 3
+   × FilePreviewText Markdown rendering > stops requesting images once the child-handle budget is exhausted 2ms
+     → Unable to find an element by: [data-testid="file-preview-rejected-image"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mdata-testid[39m=[32m"file-preview-markdown"[39m
+    [36m>[39m
+      [36m<p>[39m
+        [36m<img[39m
+          [33malt[39m=[32m"logo"[39m
+          [33msrc[39m=[32m"./img/logo.png"[39m
+        [36m/>[39m
+      [36m</p>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+   × FilePreviewText Markdown rendering > reports a failed image request inline without mounting a source 1002ms
+     → Unable to find an element by: [data-testid="file-preview-image-error"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mdata-testid[39m=[32m"file-preview-markdown"[39m
+    [36m>[39m
+      [36m<p>[39m
+        [36m<img[39m
+          [33malt[39m=[32m"logo"[39m
+          [33msrc[39m=[32m"./img/logo.png"[39m
+        [36m/>[39m
+      [36m</p>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mdata-testid[39m=[32m"file-preview-markdown"[39m
+    [36m>[39m
+      [36m<p>[39m
+        [36m<img[39m
+          [33malt[39m=[32m"logo"[39m
+          [33msrc[39m=[32m"./img/logo.png"[39m
+        [36m/>[39m
+      [36m</p>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+   ✓ FilePreviewText Markdown rendering > ignores a late image resolution from a superseded generation 2ms
+   × FilePreviewText Markdown source toggle > switches between rendered document and read-only source 2ms
+     → Unable to find an element by: [data-testid="file-preview-source-toggle"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mdata-testid[39m=[32m"file-preview-markdown"[39m
+    [36m>[39m
+      [36m<h1>[39m
+        [0mTitle[0m
+      [36m</h1>[39m
+      [0m
+[0m
+      [36m<table>[39m
+        [36m<thead>[39m
+          [36m<tr>[39m
+            [36m<th>[39m
+              [0ma[0m
+            [36m</th>[39m
+          [36m</tr>[39m
+        [36m</thead>[39m
+        [36m<tbody>[39m
+          [36m<tr>[39m
+            [36m<td>[39m
+              [0m1[0m
+            [36m</td>[39m
+          [36m</tr>[39m
+        [36m</tbody>[39m
+      [36m</table>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+   × FilePreviewText Markdown source toggle > routes a Markdown line target into the source view instead of an editable caret 1ms
+     → Unable to find an element by: [data-testid="file-preview-target-source"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mdata-testid[39m=[32m"file-preview-markdown"[39m
+    [36m>[39m
+      [36m<h1>[39m
+        [0mTitle[0m
+      [36m</h1>[39m
+      [0m
+[0m
+      [36m<p>[39m
+        [0mbody[0m
+      [36m</p>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ src/lib/previewMarkdown.test.ts (16 tests | 13 failed) 10ms
+   × classifyPreviewLink > accepts http(s) anchors regardless of scheme case 5ms
+     → expected { kind: 'document', …(1) } to deeply equal { kind: 'external', …(1) }
+   × classifyPreviewLink > rejects javascript, data, file and custom schemes 1ms
+     → javascript:alert(1): expected { kind: 'document', …(1) } to deeply equal { kind: 'rejected', …(2) }
+   × classifyPreviewLink > rejects protocol-relative and absolute filesystem targets 0ms
+     → expected { kind: 'document', …(1) } to deeply equal { kind: 'rejected', …(2) }
+   × classifyPreviewLink > rejects traversal even when percent-encoded 0ms
+     → expected { kind: 'document', …(1) } to deeply equal { kind: 'rejected', …(2) }
+   × classifyPreviewLink > rejects empty targets 0ms
+     → expected { kind: 'document', …(1) } to deeply equal { kind: 'rejected', …(2) }
+   × classifyPreviewLink > routes fragments and relative documents 0ms
+     → expected { kind: 'fragment', id: 'Hello World' } to deeply equal { kind: 'fragment', id: 'hello-world' }
+   ✓ classifyPreviewImage > accepts only relative local paths 0ms
+   × classifyPreviewImage > rejects remote images, data URLs and escapes 0ms
+     → expected { kind: 'local', …(1) } to deeply equal { kind: 'rejected', …(2) }
+   × splitPreviewLines > splits LF, CRLF and lone CR without dropping empty trailing lines 0ms
+     → expected [ 'a\r', 'b\rc', 'd' ] to deeply equal [ 'a', 'b', 'c', 'd' ]
+   × clampPreviewTarget > counts columns in Unicode scalars, not UTF-16 code units 1ms
+     → expected { line: 2, column: 2, offset: 1, …(1) } to deeply equal { line: 2, column: 2, offset: 2, …(1) }
+   × clampPreviewTarget > clamps out-of-range lines and columns and reports the clamp 0ms
+     → expected { line: 999, column: 999, …(2) } to deeply equal { line: 3, column: 5, offset: 4, …(1) }
+   × findPreviewMatches > matches case-insensitively and reports UTF-16 ranges per line 0ms
+     → expected [ { line: +0, start: 6, end: 11 } ] to deeply equal [ …(3) ]
+   ✓ findPreviewMatches > treats the query literally, never as a regular expression 0ms
+   ✓ findPreviewMatches > returns nothing for an empty query 0ms
+   × literalizeHtmlNodes > turns raw HTML nodes into literal text so nothing is ever mounted 0ms
+     → expected { type: 'html', …(1) } to deeply equal { type: 'paragraph', …(1) }
+   × previewAnchorId > slugifies heading text while preserving non-latin scripts 0ms
+     → expected 'hello-world!' to be 'hello-world' // Object.is equality
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 28 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/FilePreviewText.test.tsx > FilePreviewText source view > renders every line with a 1-based number and escapes markup literally
+TestingLibraryElementError: Unable to find an element by: [data-testid="/^file-preview-line-\d+$/"]
+
+Ignored nodes: comments, script, style
+[36m<div[39m
+  [33mdata-testid[39m=[32m"file-preview-source"[39m
+[36m>[39m
+  [36m<pre>[39m
+    [0m&lt;script&gt;window.__pwned = 1&lt;/script&gt;
+안녕하세요 world
+[0m
+  [36m</pre>[39m
+[36m</div>[39m
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:109:15
+ ❯ src/components/FilePreviewText.test.tsx:95:27
+     93| 
+     94|     const source = screen.getByTestId("file-preview-source");
+     95|     expect(within(source).getAllByTestId(/^file-preview-line-\d+$/)).t…
+       |                           ^
+     96|     expect(within(source).getByText("<script>window.__pwned = 1</scrip…
+     97|     expect(within(source).getByText("안녕하세요 world")).toBeInTheDocument(…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/28]⎯
+
+ FAIL  src/components/FilePreviewText.test.tsx > FilePreviewText source view > never mounts an editing surface
+Error: [2mexpect([22m[31melement[39m[2m).toHaveAttribute([22m[32m[32m"aria-readonly"[32m[39m[2m, [22m[32m[32m"true"[32m[39m[2m) // element.getAttribute("aria-readonly") === "true"[22m
+
+Expected the element to have attribute:
+[32m  aria-readonly="true"[39m
+Received:
+[31m  null[39m
+ ❯ src/components/FilePreviewText.test.tsx:109:55
+    107|     expect(container.querySelectorAll("textarea")).toHaveLength(0);
+    108|     expect(container.querySelectorAll("[contenteditable]")).toHaveLeng…
+    109|     expect(screen.getByTestId("file-preview-source")).toHaveAttribute(…
+       |                                                       ^
+    110|   });
+    111| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/28]⎯
+
+ FAIL  src/components/FilePreviewText.test.tsx > FilePreviewText source view > places the caret at a Unicode scalar column and reports clamping
+TestingLibraryElementError: Unable to find an element by: [data-testid="file-preview-caret"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mdata-testid[39m=[32m"file-preview-source"[39m
+    [36m>[39m
+      [36m<pre>[39m
+        [0m👩x
+second
+[0m
+      [36m</pre>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/components/FilePreviewText.test.tsx:118:19
+    116|     );
+    117| 
+    118|     expect(screen.getByTestId("file-preview-caret")).toHaveAttribute("…
+       |                   ^
+    119|     expect(screen.getByTestId("file-preview-location")).toHaveTextCont…
+    120|     expect(screen.queryByTestId("file-preview-target-clamped")).toBeNu…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/28]⎯
+
+ FAIL  src/components/FilePreviewText.test.tsx > FilePreviewText source view > highlights and selects search matches without altering the document text
+TestingLibraryElementError: Unable to find an element by: [data-testid="file-preview-search-input"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mdata-testid[39m=[32m"file-preview-source"[39m
+    [36m>[39m
+      [36m<pre>[39m
+        [0mHello hello
+안녕 Hello
+[0m
+      [36m</pre>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/components/FilePreviewText.test.tsx:135:29
+    133|     const before = screen.getByTestId("file-preview-source").textConte…
+    134| 
+    135|     fireEvent.change(screen.getByTestId("file-preview-search-input"), …
+       |                             ^
+    136| 
+    137|     expect(screen.getByTestId("file-preview-search-status")).toHaveTex…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/28]⎯
+
+ FAIL  src/components/FilePreviewText.test.tsx > FilePreviewText source view > copies the exact document text and reports clipboard failure through onFailure
+TestingLibraryElementError: Unable to find an element by: [data-testid="file-preview-copy"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mdata-testid[39m=[32m"file-preview-source"[39m
+    [36m>[39m
+      [36m<pre>[39m
+        [0m안녕
+world
+[0m
+      [36m</pre>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/components/FilePreviewText.test.tsx:156:28
+    154|     const { rerender } = render(<FilePreviewText {...props} />);
+    155| 
+    156|     fireEvent.click(screen.getByTestId("file-preview-copy"));
+       |                            ^
+    157|     await waitFor(() => expect(writeText).toHaveBeenCalledWith("안녕\nwo…
+    158| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/28]⎯
+
+ FAIL  src/components/FilePreviewText.test.tsx > FilePreviewText Markdown rendering > opens http(s) anchors only through the capability, never as navigable hrefs
+TestingLibraryElementError: Unable to find an element by: [data-testid="file-preview-external-link"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mdata-testid[39m=[32m"file-preview-markdown"[39m
+    [36m>[39m
+      [36m<p>[39m
+        [36m<a[39m
+          [33mhref[39m=[32m"https://example.com/docs"[39m
+        [36m>[39m
+          [0msite[0m
+        [36m</a>[39m
+      [36m</p>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/components/FilePreviewText.test.tsx:217:25
+    215|     const { container } = render(<FilePreviewText {...props} />);
+    216| 
+    217|     const link = screen.getByTestId("file-preview-external-link");
+       |                         ^
+    218|     expect(container.querySelector("a[href]")).toBeNull();
+    219|     fireEvent.click(link);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/28]⎯
+
+ FAIL  src/components/FilePreviewText.test.tsx > FilePreviewText Markdown rendering > refuses unsafe anchor schemes without any action
+TestingLibraryElementError: Unable to find an element by: [data-testid="file-preview-rejected-link"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mdata-testid[39m=[32m"file-preview-markdown"[39m
+    [36m>[39m
+      [36m<p>[39m
+        [36m<a[39m
+          [33mhref[39m=[32m""[39m
+        [36m>[39m
+          [0mboom[0m
+        [36m</a>[39m
+        [0m and [0m
+        [36m<a[39m
+          [33mhref[39m=[32m""[39m
+        [36m>[39m
+          [0mdrive[0m
+        [36m</a>[39m
+      [36m</p>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:109:15
+ ❯ src/components/FilePreviewText.test.tsx:227:29
+    225|     render(<FilePreviewText {...props} />);
+    226| 
+    227|     const rejected = screen.getAllByTestId("file-preview-rejected-link…
+       |                             ^
+    228|     expect(rejected).toHaveLength(2);
+    229|     fireEvent.click(rejected[0]);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/28]⎯
+
+ FAIL  src/components/FilePreviewText.test.tsx > FilePreviewText Markdown rendering > escalates relative document links to a new preview request
+TestingLibraryElementError: Unable to find an element by: [data-testid="file-preview-document-link"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mdata-testid[39m=[32m"file-preview-markdown"[39m
+    [36m>[39m
+      [36m<p>[39m
+        [36m<a[39m
+          [33mhref[39m=[32m"./notes.md"[39m
+        [36m>[39m
+          [0mnotes[0m
+        [36m</a>[39m
+      [36m</p>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/components/FilePreviewText.test.tsx:239:28
+    237|     render(<FilePreviewText {...props} />);
+    238| 
+    239|     fireEvent.click(screen.getByTestId("file-preview-document-link"));
+       |                            ^
+    240|     expect(props.markdown?.requestDocument).toHaveBeenCalledWith("./no…
+    241|     expect(props.markdown?.openExternalUrl).not.toHaveBeenCalled();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[8/28]⎯
+
+ FAIL  src/components/FilePreviewText.test.tsx > FilePreviewText Markdown rendering > scrolls in-document fragments to the matching heading anchor
+Error: [2mexpect([22m[31melement[39m[2m).toHaveAttribute([22m[32m[32m"id"[32m[39m[2m, [22m[32m[32m"safe-section"[32m[39m[2m) // element.getAttribute("id") === "safe-section"[22m
+
+Expected the element to have attribute:
+[32m  id="safe-section"[39m
+Received:
+[31m  null[39m
+ ❯ src/components/FilePreviewText.test.tsx:249:21
+    247| 
+    248|     const heading = screen.getByRole("heading", { level: 1, name: "Saf…
+    249|     expect(heading).toHaveAttribute("id", "safe-section");
+       |                     ^
+    250|     const scrollIntoView = vi.spyOn(heading, "scrollIntoView").mockImp…
+    251| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[9/28]⎯
+
+ FAIL  src/components/FilePreviewText.test.tsx > FilePreviewText Markdown rendering > resolves relative images through the parent capability
+AssertionError: expected "spy" to be called with arguments: [ './img/logo.png' ][90m
+
+Number of calls: [1m0[22m
+[39m
+
+Ignored nodes: comments, script, style
+[36m<html>[39m
+  [36m<head />[39m
+  [36m<body>[39m
+    [36m<div>[39m
+      [36m<div[39m
+        [33mdata-testid[39m=[32m"file-preview-markdown"[39m
+      [36m>[39m
+        [36m<p>[39m
+          [36m<img[39m
+            [33malt[39m=[32m"logo"[39m
+            [33msrc[39m=[32m"./img/logo.png"[39m
+          [36m/>[39m
+        [36m</p>[39m
+      [36m</div>[39m
+    [36m</div>[39m
+  [36m</body>[39m
+[36m</html>[39m
+ ❯ src/components/FilePreviewText.test.tsx:265:46
+    263|     render(<FilePreviewText {...props} />);
+    264| 
+    265|     await waitFor(() => expect(requestImage).toHaveBeenCalledWith("./i…
+       |                                              ^
+    266|     const image = await screen.findByAltText("logo");
+    267|     expect(image).toHaveAttribute("src", "http://127.0.0.1:53211/asset…
+ ❯ runWithExpensiveErrorDiagnosticsDisabled node_modules/@testing-library/dom/dist/config.js:47:12
+ ❯ checkCallback node_modules/@testing-library/dom/dist/wait-for.js:124:77
+ ❯ Timeout.checkRealTimersCallback node_modules/@testing-library/dom/dist/wait-for.js:118:16
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[10/28]⎯
+
+ FAIL  src/components/FilePreviewText.test.tsx > FilePreviewText Markdown rendering > never requests remote, data or traversal images
+AssertionError: expected <img …(2)></img>
+<img …(2)></img>
+…(1) to have a length of +0 but got 3
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- 0[39m
+[31m+ 3[39m
+
+ ❯ src/components/FilePreviewText.test.tsx:280:47
+    278| 
+    279|     expect(requestImage).not.toHaveBeenCalled();
+    280|     expect(container.querySelectorAll("img")).toHaveLength(0);
+       |                                               ^
+    281|     expect(screen.getAllByTestId("file-preview-rejected-image")).toHav…
+    282|     expect(container.innerHTML).not.toContain("tracker.example");
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[11/28]⎯
+
+ FAIL  src/components/FilePreviewText.test.tsx > FilePreviewText Markdown rendering > stops requesting images once the child-handle budget is exhausted
+TestingLibraryElementError: Unable to find an element by: [data-testid="file-preview-rejected-image"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mdata-testid[39m=[32m"file-preview-markdown"[39m
+    [36m>[39m
+      [36m<p>[39m
+        [36m<img[39m
+          [33malt[39m=[32m"logo"[39m
+          [33msrc[39m=[32m"./img/logo.png"[39m
+        [36m/>[39m
+      [36m</p>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/components/FilePreviewText.test.tsx:293:19
+    291| 
+    292|     expect(requestImage).not.toHaveBeenCalled();
+    293|     expect(screen.getByTestId("file-preview-rejected-image")).toHaveTe…
+       |                   ^
+    294|   });
+    295| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[12/28]⎯
+
+ FAIL  src/components/FilePreviewText.test.tsx > FilePreviewText Markdown rendering > reports a failed image request inline without mounting a source
+TestingLibraryElementError: Unable to find an element by: [data-testid="file-preview-image-error"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mdata-testid[39m=[32m"file-preview-markdown"[39m
+    [36m>[39m
+      [36m<p>[39m
+        [36m<img[39m
+          [33malt[39m=[32m"logo"[39m
+          [33msrc[39m=[32m"./img/logo.png"[39m
+        [36m/>[39m
+      [36m</p>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mdata-testid[39m=[32m"file-preview-markdown"[39m
+    [36m>[39m
+      [36m<p>[39m
+        [36m<img[39m
+          [33malt[39m=[32m"logo"[39m
+          [33msrc[39m=[32m"./img/logo.png"[39m
+        [36m/>[39m
+      [36m</p>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ waitForWrapper node_modules/@testing-library/dom/dist/wait-for.js:163:27
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:86:33
+ ❯ src/components/FilePreviewText.test.tsx:305:34
+    303|     const { container } = render(<FilePreviewText {...props} />);
+    304| 
+    305|     const failure = await screen.findByTestId("file-preview-image-erro…
+       |                                  ^
+    306|     expect(failure).toHaveTextContent("MissingFile");
+    307|     expect(container.querySelectorAll("img")).toHaveLength(0);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[13/28]⎯
+
+ FAIL  src/components/FilePreviewText.test.tsx > FilePreviewText Markdown source toggle > switches between rendered document and read-only source
+TestingLibraryElementError: Unable to find an element by: [data-testid="file-preview-source-toggle"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mdata-testid[39m=[32m"file-preview-markdown"[39m
+    [36m>[39m
+      [36m<h1>[39m
+        [0mTitle[0m
+      [36m</h1>[39m
+      [0m
+[0m
+      [36m<table>[39m
+        [36m<thead>[39m
+          [36m<tr>[39m
+            [36m<th>[39m
+              [0ma[0m
+            [36m</th>[39m
+          [36m</tr>[39m
+        [36m</thead>[39m
+        [36m<tbody>[39m
+          [36m<tr>[39m
+            [36m<td>[39m
+              [0m1[0m
+            [36m</td>[39m
+          [36m</tr>[39m
+        [36m</tbody>[39m
+      [36m</table>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/components/FilePreviewText.test.tsx:333:28
+    331| 
+    332|     expect(screen.getByTestId("file-preview-markdown")).toBeInTheDocum…
+    333|     fireEvent.click(screen.getByTestId("file-preview-source-toggle"));
+       |                            ^
+    334|     expect(props.onSourceModeChange).toHaveBeenCalledWith(true);
+    335| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[14/28]⎯
+
+ FAIL  src/components/FilePreviewText.test.tsx > FilePreviewText Markdown source toggle > routes a Markdown line target into the source view instead of an editable caret
+TestingLibraryElementError: Unable to find an element by: [data-testid="file-preview-target-source"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mdata-testid[39m=[32m"file-preview-markdown"[39m
+    [36m>[39m
+      [36m<h1>[39m
+        [0mTitle[0m
+      [36m</h1>[39m
+      [0m
+[0m
+      [36m<p>[39m
+        [0mbody[0m
+      [36m</p>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/components/FilePreviewText.test.tsx:347:28
+    345|     const { rerender } = render(<FilePreviewText {...props} />);
+    346| 
+    347|     fireEvent.click(screen.getByTestId("file-preview-target-source"));
+       |                            ^
+    348|     expect(props.onSourceModeChange).toHaveBeenCalledWith(true);
+    349| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[15/28]⎯
+
+ FAIL  src/lib/previewMarkdown.test.ts > classifyPreviewLink > accepts http(s) anchors regardless of scheme case
+AssertionError: expected { kind: 'document', …(1) } to deeply equal { kind: 'external', …(1) }
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  {[22m
+[32m-   "kind": "external",[39m
+[32m-   "url": "HTTP://Example.com/a",[39m
+[31m+   "kind": "document",[39m
+[31m+   "relativePath": "HTTP://Example.com/a",[39m
+[2m  }[22m
+
+ ❯ src/lib/previewMarkdown.test.ts:19:57
+     17|       url: "https://example.com/docs",
+     18|     });
+     19|     expect(classifyPreviewLink("HTTP://Example.com/a")).toEqual({
+       |                                                         ^
+     20|       kind: "external",
+     21|       url: "HTTP://Example.com/a",
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[16/28]⎯
+
+ FAIL  src/lib/previewMarkdown.test.ts > classifyPreviewLink > rejects javascript, data, file and custom schemes
+AssertionError: javascript:alert(1): expected { kind: 'document', …(1) } to deeply equal { kind: 'rejected', …(2) }
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  {[22m
+[32m-   "kind": "rejected",[39m
+[32m-   "raw": "javascript:alert(1)",[39m
+[32m-   "reason": "unsafe-scheme",[39m
+[31m+   "kind": "document",[39m
+[31m+   "relativePath": "javascript:alert(1)",[39m
+[2m  }[22m
+
+ ❯ src/lib/previewMarkdown.test.ts:37:47
+     35|       "mailto:someone@example.com",
+     36|     ]) {
+     37|       expect(classifyPreviewLink(href), href).toEqual({
+       |                                               ^
+     38|         kind: "rejected",
+     39|         reason: "unsafe-scheme",
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[17/28]⎯
+
+ FAIL  src/lib/previewMarkdown.test.ts > classifyPreviewLink > rejects protocol-relative and absolute filesystem targets
+AssertionError: expected { kind: 'document', …(1) } to deeply equal { kind: 'rejected', …(2) }
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  {[22m
+[32m-   "kind": "rejected",[39m
+[32m-   "raw": "//evil.example/x",[39m
+[32m-   "reason": "remote",[39m
+[31m+   "kind": "document",[39m
+[31m+   "relativePath": "//evil.example/x",[39m
+[2m  }[22m
+
+ ❯ src/lib/previewMarkdown.test.ts:46:53
+     44| 
+     45|   it("rejects protocol-relative and absolute filesystem targets", () =…
+     46|     expect(classifyPreviewLink("//evil.example/x")).toEqual({
+       |                                                     ^
+     47|       kind: "rejected",
+     48|       reason: "remote",
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[18/28]⎯
+
+ FAIL  src/lib/previewMarkdown.test.ts > classifyPreviewLink > rejects traversal even when percent-encoded
+AssertionError: expected { kind: 'document', …(1) } to deeply equal { kind: 'rejected', …(2) }
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  {[22m
+[32m-   "kind": "rejected",[39m
+[32m-   "raw": "../secret.md",[39m
+[32m-   "reason": "traversal",[39m
+[31m+   "kind": "document",[39m
+[31m+   "relativePath": "../secret.md",[39m
+[2m  }[22m
+
+ ❯ src/lib/previewMarkdown.test.ts:64:49
+     62| 
+     63|   it("rejects traversal even when percent-encoded", () => {
+     64|     expect(classifyPreviewLink("../secret.md")).toEqual({
+       |                                                 ^
+     65|       kind: "rejected",
+     66|       reason: "traversal",
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[19/28]⎯
+
+ FAIL  src/lib/previewMarkdown.test.ts > classifyPreviewLink > rejects empty targets
+AssertionError: expected { kind: 'document', …(1) } to deeply equal { kind: 'rejected', …(2) }
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  {[22m
+[32m-   "kind": "rejected",[39m
+[32m-   "raw": "   ",[39m
+[32m-   "reason": "empty",[39m
+[31m+   "kind": "document",[39m
+[31m+   "relativePath": "   ",[39m
+[2m  }[22m
+
+ ❯ src/lib/previewMarkdown.test.ts:77:40
+     75| 
+     76|   it("rejects empty targets", () => {
+     77|     expect(classifyPreviewLink("   ")).toEqual({ kind: "rejected", rea…
+       |                                        ^
+     78|   });
+     79| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[20/28]⎯
+
+ FAIL  src/lib/previewMarkdown.test.ts > classifyPreviewLink > routes fragments and relative documents
+AssertionError: expected { kind: 'fragment', id: 'Hello World' } to deeply equal { kind: 'fragment', id: 'hello-world' }
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  {[22m
+[32m-   "id": "hello-world",[39m
+[31m+   "id": "Hello World",[39m
+[2m    "kind": "fragment",[22m
+[2m  }[22m
+
+ ❯ src/lib/previewMarkdown.test.ts:81:49
+     79| 
+     80|   it("routes fragments and relative documents", () => {
+     81|     expect(classifyPreviewLink("#Hello World")).toEqual({ kind: "fragm…
+       |                                                 ^
+     82|     expect(classifyPreviewLink("./notes.md")).toEqual({ kind: "documen…
+     83|     expect(classifyPreviewLink("docs/notes.md")).toEqual({
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[21/28]⎯
+
+ FAIL  src/lib/previewMarkdown.test.ts > classifyPreviewImage > rejects remote images, data URLs and escapes
+AssertionError: expected { kind: 'local', …(1) } to deeply equal { kind: 'rejected', …(2) }
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  {[22m
+[32m-   "kind": "rejected",[39m
+[32m-   "raw": "//tracker.example/p.png",[39m
+[32m-   "reason": "remote",[39m
+[31m+   "kind": "local",[39m
+[31m+   "relativePath": "//tracker.example/p.png",[39m
+[2m  }[22m
+
+ ❯ src/lib/previewMarkdown.test.ts:108:61
+    106|       raw: "https://tracker.example/p.png",
+    107|     });
+    108|     expect(classifyPreviewImage("//tracker.example/p.png")).toEqual({
+       |                                                             ^
+    109|       kind: "rejected",
+    110|       reason: "remote",
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[22/28]⎯
+
+ FAIL  src/lib/previewMarkdown.test.ts > splitPreviewLines > splits LF, CRLF and lone CR without dropping empty trailing lines
+AssertionError: expected [ 'a\r', 'b\rc', 'd' ] to deeply equal [ 'a', 'b', 'c', 'd' ]
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  [[22m
+[32m-   "a",[39m
+[32m-   "b",[39m
+[32m-   "c",[39m
+[31m+   "a",[39m
+[31m+   "bc",[39m
+[2m    "d",[22m
+[2m  ][22m
+
+ ❯ src/lib/previewMarkdown.test.ts:133:47
+    131| describe("splitPreviewLines", () => {
+    132|   it("splits LF, CRLF and lone CR without dropping empty trailing line…
+    133|     expect(splitPreviewLines("a\r\nb\rc\nd")).toEqual(["a", "b", "c", …
+       |                                               ^
+    134|     expect(splitPreviewLines("a\n")).toEqual(["a", ""]);
+    135|     expect(splitPreviewLines("")).toEqual([""]);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[23/28]⎯
+
+ FAIL  src/lib/previewMarkdown.test.ts > clampPreviewTarget > counts columns in Unicode scalars, not UTF-16 code units
+AssertionError: expected { line: 2, column: 2, offset: 1, …(1) } to deeply equal { line: 2, column: 2, offset: 2, …(1) }
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  {[22m
+[2m    "clamped": false,[22m
+[2m    "column": 2,[22m
+[2m    "line": 2,[22m
+[32m-   "offset": 2,[39m
+[31m+   "offset": 1,[39m
+[2m  }[22m
+
+ ❯ src/lib/previewMarkdown.test.ts:143:60
+    141| 
+    142|   it("counts columns in Unicode scalars, not UTF-16 code units", () =>…
+    143|     expect(clampPreviewTarget({ line: 2, col: 2 }, lines)).toEqual({
+       |                                                            ^
+    144|       line: 2,
+    145|       column: 2,
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[24/28]⎯
+
+ FAIL  src/lib/previewMarkdown.test.ts > clampPreviewTarget > clamps out-of-range lines and columns and reports the clamp
+AssertionError: expected { line: 999, column: 999, …(2) } to deeply equal { line: 3, column: 5, offset: 4, …(1) }
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  {[22m
+[32m-   "clamped": true,[39m
+[32m-   "column": 5,[39m
+[32m-   "line": 3,[39m
+[32m-   "offset": 4,[39m
+[31m+   "clamped": false,[39m
+[31m+   "column": 999,[39m
+[31m+   "line": 999,[39m
+[31m+   "offset": 998,[39m
+[2m  }[22m
+
+ ❯ src/lib/previewMarkdown.test.ts:158:64
+    156| 
+    157|   it("clamps out-of-range lines and columns and reports the clamp", ()…
+    158|     expect(clampPreviewTarget({ line: 999, col: 999 }, lines)).toEqual…
+       |                                                                ^
+    159|       line: 3,
+    160|       column: 5,
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[25/28]⎯
+
+ FAIL  src/lib/previewMarkdown.test.ts > findPreviewMatches > matches case-insensitively and reports UTF-16 ranges per line
+AssertionError: expected [ { line: +0, start: 6, end: 11 } ] to deeply equal [ …(3) ]
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  [[22m
+[2m    {[22m
+[32m-     "end": 5,[39m
+[32m-     "line": 0,[39m
+[32m-     "start": 0,[39m
+[32m-   },[39m
+[32m-   {[39m
+[2m      "end": 11,[22m
+[2m      "line": 0,[22m
+[2m      "start": 6,[22m
+[32m-   },[39m
+[32m-   {[39m
+[32m-     "end": 8,[39m
+[32m-     "line": 1,[39m
+[32m-     "start": 3,[39m
+[2m    },[22m
+[2m  ][22m
+
+ ❯ src/lib/previewMarkdown.test.ts:183:48
+    181| 
+    182|   it("matches case-insensitively and reports UTF-16 ranges per line", …
+    183|     expect(findPreviewMatches(lines, "hello")).toEqual([
+       |                                                ^
+    184|       { line: 0, start: 0, end: 5 },
+    185|       { line: 0, start: 6, end: 11 },
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[26/28]⎯
+
+ FAIL  src/lib/previewMarkdown.test.ts > literalizeHtmlNodes > turns raw HTML nodes into literal text so nothing is ever mounted
+AssertionError: expected { type: 'html', …(1) } to deeply equal { type: 'paragraph', …(1) }
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  {[22m
+[32m-   "children": [[39m
+[32m-     {[39m
+[32m-       "type": "text",[39m
+[31m+   "type": "html",[39m
+[2m    "value": "<script>window.__pwned = 1</script>",[22m
+[32m-     },[39m
+[32m-   ],[39m
+[32m-   "type": "paragraph",[39m
+[2m  }[22m
+
+ ❯ src/lib/previewMarkdown.test.ts:220:30
+    218|     literalizeHtmlNodes(tree);
+    219| 
+    220|     expect(tree.children[0]).toEqual({
+       |                              ^
+    221|       type: "paragraph",
+    222|       children: [{ type: "text", value: "<script>window.__pwned = 1</s…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[27/28]⎯
+
+ FAIL  src/lib/previewMarkdown.test.ts > previewAnchorId > slugifies heading text while preserving non-latin scripts
+AssertionError: expected 'hello-world!' to be 'hello-world' // Object.is equality
+
+Expected: [32m"hello-world"[39m
+Received: [31m"hello-world[7m![27m"[39m
+
+ ❯ src/lib/previewMarkdown.test.ts:238:45
+    236| describe("previewAnchorId", () => {
+    237|   it("slugifies heading text while preserving non-latin scripts", () =…
+    238|     expect(previewAnchorId("Hello World!")).toBe("hello-world");
+       |                                             ^
+    239|     expect(previewAnchorId("  안녕 하세요  ")).toBe("안녕-하세요");
+    240|     expect(previewAnchorId("a/b c")).toBe("ab-c");
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[28/28]⎯
+
+
+ Test Files  2 failed (2)
+      Tests  28 failed | 7 passed (35)
+   Start at  16:21:09
+   Duration  2.97s (transform 45ms, setup 132ms, collect 131ms, tests 2.09s, environment 318ms, prepare 49ms)
+
+error: script "test" exited with code 1
+exit=1

@@ -1,0 +1,22 @@
+[
+  {
+    "at": 1124,
+    "event": "onFailure",
+    "detail": {
+      "reason": "UnsupportedFormat",
+      "message": "broken.webm cannot be played here: this container or codec is not supported by the preview.",
+      "details": {
+        "reason": "UnsupportedFormat",
+        "displayName": "broken.webm"
+      }
+    }
+  },
+  {
+    "at": 1201,
+    "event": "onReload"
+  },
+  {
+    "at": 1231,
+    "event": "onExternalOpen"
+  }
+]

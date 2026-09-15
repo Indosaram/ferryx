@@ -1,0 +1,13 @@
+$ vitest run --maxWorkers=1 src/lib/previewMarkdown.test.ts src/components/FilePreviewText.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/preview/ui
+
+ ✓ src/components/FilePreviewText.test.tsx (19 tests) 181ms
+ ✓ src/lib/previewMarkdown.test.ts (16 tests) 4ms
+
+ Test Files  2 passed (2)
+      Tests  35 passed (35)
+   Start at  16:21:18
+   Duration  1.44s (transform 56ms, setup 134ms, collect 507ms, tests 185ms, environment 318ms, prepare 49ms)
+
+exit=0
