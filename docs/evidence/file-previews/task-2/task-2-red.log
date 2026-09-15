@@ -1,0 +1,681 @@
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/preview/ui
+
+ ❯ src/components/FilePreviewDialog.test.tsx (13 tests | 12 failed) 54ms
+   ✓ FilePreviewDialog > renders nothing while the controller is closed 8ms
+   × FilePreviewDialog > presents a modal dialog while loading and moves focus into it 22ms
+     → Unable to find an accessible element with the role "dialog"
+
+There are no accessible roles. But there might be some inaccessible roles. If you wish to access them, then set the `hidden` option to `true`. Learn more about this here: https://testing-library.com/docs/dom-testing-library/api-queries#byrole
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div />[39m
+[36m</body>[39m
+   × FilePreviewDialog > closes on Escape and returns focus to the originating pane leaf 7ms
+     → Unable to find an accessible element with the role "dialog"
+
+Here are the accessible roles:
+
+  textbox:
+
+  Name "pane input":
+  [36m<input[39m
+    [33maria-label[39m=[32m"pane input"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div[39m
+    [33mdata-leaf-id[39m=[32m"leaf-1"[39m
+  [36m>[39m
+    [36m<input[39m
+      [33maria-label[39m=[32m"pane input"[39m
+    [36m/>[39m
+  [36m</div>[39m
+  [36m<div />[39m
+[36m</body>[39m
+   × FilePreviewDialog > falls back to workspace chrome when the originating leaf is gone, never another pane 6ms
+     → Unable to find an accessible element with the role "dialog"
+
+Here are the accessible roles:
+
+  textbox:
+
+  Name "other pane input":
+  [36m<input[39m
+    [33maria-label[39m=[32m"other pane input"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div[39m
+    [33mdata-leaf-id[39m=[32m"leaf-2"[39m
+  [36m>[39m
+    [36m<input[39m
+      [33maria-label[39m=[32m"other pane input"[39m
+    [36m/>[39m
+  [36m</div>[39m
+  [36m<div[39m
+    [33mdata-workspace-chrome[39m=[32m"true"[39m
+    [33mtabindex[39m=[32m"-1"[39m
+  [36m/>[39m
+  [36m<div />[39m
+[36m</body>[39m
+   × FilePreviewDialog > keeps modal keystrokes out of the terminal sink 2ms
+     → Unable to find an accessible element with the role "dialog"
+
+There are no accessible roles. But there might be some inaccessible roles. If you wish to access them, then set the `hidden` option to `true`. Learn more about this here: https://testing-library.com/docs/dom-testing-library/api-queries#byrole
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div />[39m
+[36m</body>[39m
+   × FilePreviewDialog > traps Tab focus inside the dialog in both directions 1ms
+     → Unable to find an accessible element with the role "dialog"
+
+There are no accessible roles. But there might be some inaccessible roles. If you wish to access them, then set the `hidden` option to `true`. Learn more about this here: https://testing-library.com/docs/dom-testing-library/api-queries#byrole
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div />[39m
+[36m</body>[39m
+   × FilePreviewDialog > delegates a ready payload to the injected render slot with the live generation 1ms
+     → Unable to find an element by: [data-testid="stub-text-body"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div />[39m
+[36m</body>[39m
+   × FilePreviewDialog > passes a Markdown capability to the text slot only for markdown payloads 1ms
+     → Unable to find an element by: [data-testid="stub-markdown"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div />[39m
+[36m</body>[39m
+   × FilePreviewDialog > states plainly that no renderer is registered for a kind instead of faking one 1ms
+     → Unable to find an element by: [data-testid="file-preview-no-renderer"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div />[39m
+[36m</body>[39m
+   × FilePreviewDialog > opens the external editor from the dialog action using the original request 1ms
+     → Unable to find an element by: [data-testid="file-preview-external"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div />[39m
+[36m</body>[39m
+   × FilePreviewDialog > shows the machine failure reason and reloads the original file on demand 2ms
+     → Unable to find an element by: [data-testid="file-preview-failure"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div />[39m
+[36m</body>[39m
+   × FilePreviewDialog > surfaces a renderer-reported failure for the live generation 1ms
+     → Unable to find an accessible element with the role "button" and name "fail"
+
+There are no accessible roles. But there might be some inaccessible roles. If you wish to access them, then set the `hidden` option to `true`. Learn more about this here: https://testing-library.com/docs/dom-testing-library/api-queries#byrole
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div />[39m
+[36m</body>[39m
+   × FilePreviewDialog > reports the unavailable child-document command as a notice inside the dialog 1ms
+     → Cannot read properties of null (reading 'requestDocument')
+ ❯ src/lib/filePreview.test.ts (15 tests | 15 failed) 10ms
+   × filePreview controller > starts closed and reports a ready payload after open resolves 4ms
+     → expected 'closed' to be 'loading' // Object.is equality
+   × filePreview controller > keeps the newer request when an older open resolves late and revokes the stale handle 0ms
+     → expected ready
+   × filePreview controller > closes a handle that resolves after the modal was closed and stays closed 1ms
+     → expected [] to deeply equal [ 'handle-late' ]
+   × filePreview controller > closes each acquired handle exactly once across repeated close calls 1ms
+     → expected [] to deeply equal [ 'handle-once' ]
+   × filePreview controller > reload releases the previous handle once and reacquires the original request 0ms
+     → expected ready
+   × filePreview controller > surfaces the machine failure reason without parsing prose 0ms
+     → expected failed
+   × filePreview controller > opens the external editor with the original path, session and caret, never the preview handle 1ms
+     → expected "spy" to be called with arguments: [ { path: '/tmp/notes.txt', …(3) } ][90m
+
+Number of calls: [1m0[22m
+[39m
+   × filePreview controller > offers a Markdown capability only for markdown payloads 0ms
+     → expected null not to be null
+   × filePreview controller > refuses child image requests past the per-parent handle budget without calling the backend 0ms
+     → Cannot read properties of null (reading 'requestImage')
+   × filePreview controller > releases every child handle when the preview closes 0ms
+     → Cannot read properties of null (reading 'requestImage')
+   × filePreview controller > revokes a child capability that resolves after the preview was replaced 0ms
+     → Cannot read properties of null (reading 'requestImage')
+   × filePreview controller > reports the missing child-document command instead of opening an unbounded path 0ms
+     → Cannot read properties of null (reading 'requestDocument')
+   × filePreview controller > only forwards http(s) anchors to the external browser 0ms
+     → Cannot read properties of null (reading 'openExternalUrl')
+   × filePreview controller > ignores renderer failures reported from a superseded generation 0ms
+     → expected 'closed' to be 'ready' // Object.is equality
+   × filePreview controller > notifies subscribers on each state transition and stops after unsubscribe 0ms
+     → expected 0 to be greater than or equal to 2
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 27 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/FilePreviewDialog.test.tsx > FilePreviewDialog > presents a modal dialog while loading and moves focus into it
+TestingLibraryElementError: Unable to find an accessible element with the role "dialog"
+
+There are no accessible roles. But there might be some inaccessible roles. If you wish to access them, then set the `hidden` option to `true`. Learn more about this here: https://testing-library.com/docs/dom-testing-library/api-queries#byrole
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div />[39m
+[36m</body>[39m
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/components/FilePreviewDialog.test.tsx:153:27
+    151|     });
+    152| 
+    153|     const dialog = screen.getByRole("dialog");
+       |                           ^
+    154|     expect(dialog).toHaveAttribute("aria-modal", "true");
+    155|     expect(screen.getByTestId("file-preview-loading")).toBeInTheDocume…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/27]⎯
+
+ FAIL  src/components/FilePreviewDialog.test.tsx > FilePreviewDialog > closes on Escape and returns focus to the originating pane leaf
+TestingLibraryElementError: Unable to find an accessible element with the role "dialog"
+
+Here are the accessible roles:
+
+  textbox:
+
+  Name "pane input":
+  [36m<input[39m
+    [33maria-label[39m=[32m"pane input"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div[39m
+    [33mdata-leaf-id[39m=[32m"leaf-1"[39m
+  [36m>[39m
+    [36m<input[39m
+      [33maria-label[39m=[32m"pane input"[39m
+    [36m/>[39m
+  [36m</div>[39m
+  [36m<div />[39m
+[36m</body>[39m
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/components/FilePreviewDialog.test.tsx:172:30
+    170|     await openPreview(controller, SOURCE, REQUEST);
+    171| 
+    172|     fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+       |                              ^
+    173| 
+    174|     expect(controller.getState().status).toBe("closed");
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/27]⎯
+
+ FAIL  src/components/FilePreviewDialog.test.tsx > FilePreviewDialog > falls back to workspace chrome when the originating leaf is gone, never another pane
+TestingLibraryElementError: Unable to find an accessible element with the role "dialog"
+
+Here are the accessible roles:
+
+  textbox:
+
+  Name "other pane input":
+  [36m<input[39m
+    [33maria-label[39m=[32m"other pane input"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div[39m
+    [33mdata-leaf-id[39m=[32m"leaf-2"[39m
+  [36m>[39m
+    [36m<input[39m
+      [33maria-label[39m=[32m"other pane input"[39m
+    [36m/>[39m
+  [36m</div>[39m
+  [36m<div[39m
+    [33mdata-workspace-chrome[39m=[32m"true"[39m
+    [33mtabindex[39m=[32m"-1"[39m
+  [36m/>[39m
+  [36m<div />[39m
+[36m</body>[39m
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/components/FilePreviewDialog.test.tsx:188:30
+    186| 
+    187|     sink.closest("[data-leaf-id]")!.remove();
+    188|     fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+       |                              ^
+    189| 
+    190|     expect(document.activeElement).toBe(chrome);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/27]⎯
+
+ FAIL  src/components/FilePreviewDialog.test.tsx > FilePreviewDialog > keeps modal keystrokes out of the terminal sink
+TestingLibraryElementError: Unable to find an accessible element with the role "dialog"
+
+There are no accessible roles. But there might be some inaccessible roles. If you wish to access them, then set the `hidden` option to `true`. Learn more about this here: https://testing-library.com/docs/dom-testing-library/api-queries#byrole
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div />[39m
+[36m</body>[39m
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/components/FilePreviewDialog.test.tsx:202:29
+    200| 
+    201|     try {
+    202|       const dialog = screen.getByRole("dialog");
+       |                             ^
+    203|       fireEvent.keyDown(dialog, { key: "a" });
+    204|       fireEvent.keyDown(dialog, { key: "가" });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/27]⎯
+
+ FAIL  src/components/FilePreviewDialog.test.tsx > FilePreviewDialog > traps Tab focus inside the dialog in both directions
+TestingLibraryElementError: Unable to find an accessible element with the role "dialog"
+
+There are no accessible roles. But there might be some inaccessible roles. If you wish to access them, then set the `hidden` option to `true`. Learn more about this here: https://testing-library.com/docs/dom-testing-library/api-queries#byrole
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div />[39m
+[36m</body>[39m
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/components/FilePreviewDialog.test.tsx:217:27
+    215|     await openPreview(controller, SOURCE, REQUEST);
+    216| 
+    217|     const dialog = screen.getByRole("dialog");
+       |                           ^
+    218|     const focusables = Array.from(
+    219|       dialog.querySelectorAll<HTMLElement>('button, [href], input, sel…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/27]⎯
+
+ FAIL  src/components/FilePreviewDialog.test.tsx > FilePreviewDialog > delegates a ready payload to the injected render slot with the live generation
+TestingLibraryElementError: Unable to find an element by: [data-testid="stub-text-body"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div />[39m
+[36m</body>[39m
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/components/FilePreviewDialog.test.tsx:239:19
+    237|     await openPreview(controller, SOURCE, REQUEST);
+    238| 
+    239|     expect(screen.getByTestId("stub-text-body").textContent).toBe("첫 줄…
+       |                   ^
+    240|     const state = controller.getState();
+    241|     if (state.status !== "ready") throw new Error("expected ready");
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/27]⎯
+
+ FAIL  src/components/FilePreviewDialog.test.tsx > FilePreviewDialog > passes a Markdown capability to the text slot only for markdown payloads
+TestingLibraryElementError: Unable to find an element by: [data-testid="stub-markdown"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div />[39m
+[36m</body>[39m
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/components/FilePreviewDialog.test.tsx:251:19
+    249|     await openPreview(controller, SOURCE, { ...REQUEST, path: "/tmp/re…
+    250| 
+    251|     expect(screen.getByTestId("stub-markdown").textContent).toBe("capa…
+       |                   ^
+    252|   });
+    253| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/27]⎯
+
+ FAIL  src/components/FilePreviewDialog.test.tsx > FilePreviewDialog > states plainly that no renderer is registered for a kind instead of faking one
+TestingLibraryElementError: Unable to find an element by: [data-testid="file-preview-no-renderer"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div />[39m
+[36m</body>[39m
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/components/FilePreviewDialog.test.tsx:259:19
+    257|     await openPreview(controller, SOURCE, { ...REQUEST, path: "/tmp/cl…
+    258| 
+    259|     expect(screen.getByTestId("file-preview-no-renderer")).toBeInTheDo…
+       |                   ^
+    260|     expect(screen.queryByTestId("stub-text")).toBeNull();
+    261|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[8/27]⎯
+
+ FAIL  src/components/FilePreviewDialog.test.tsx > FilePreviewDialog > opens the external editor from the dialog action using the original request
+TestingLibraryElementError: Unable to find an element by: [data-testid="file-preview-external"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div />[39m
+[36m</body>[39m
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/components/FilePreviewDialog.test.tsx:269:28
+    267|     await openPreview(controller, SOURCE, REQUEST);
+    268| 
+    269|     fireEvent.click(screen.getByTestId("file-preview-external"));
+       |                            ^
+    270| 
+    271|     expect(openExternalFile).toHaveBeenCalledWith({
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[9/27]⎯
+
+ FAIL  src/components/FilePreviewDialog.test.tsx > FilePreviewDialog > shows the machine failure reason and reloads the original file on demand
+TestingLibraryElementError: Unable to find an element by: [data-testid="file-preview-failure"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div />[39m
+[36m</body>[39m
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/components/FilePreviewDialog.test.tsx:293:19
+    291|     await openPreview(controller, SOURCE, REQUEST);
+    292| 
+    293|     expect(screen.getByTestId("file-preview-failure")).toHaveAttribute…
+       |                   ^
+    294|     fireEvent.click(screen.getByTestId("file-preview-reload"));
+    295|     await vi.waitFor(() => expect(screen.getByTestId("stub-text")).toB…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[10/27]⎯
+
+ FAIL  src/components/FilePreviewDialog.test.tsx > FilePreviewDialog > surfaces a renderer-reported failure for the live generation
+TestingLibraryElementError: Unable to find an accessible element with the role "button" and name "fail"
+
+There are no accessible roles. But there might be some inaccessible roles. If you wish to access them, then set the `hidden` option to `true`. Learn more about this here: https://testing-library.com/docs/dom-testing-library/api-queries#byrole
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div />[39m
+[36m</body>[39m
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/components/FilePreviewDialog.test.tsx:304:28
+    302|     await openPreview(controller, SOURCE, REQUEST);
+    303| 
+    304|     fireEvent.click(screen.getByRole("button", { name: "fail" }));
+       |                            ^
+    305| 
+    306|     expect(screen.getByTestId("file-preview-failure")).toHaveAttribute…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[11/27]⎯
+
+ FAIL  src/components/FilePreviewDialog.test.tsx > FilePreviewDialog > reports the unavailable child-document command as a notice inside the dialog
+TypeError: Cannot read properties of null (reading 'requestDocument')
+ ❯ src/components/FilePreviewDialog.test.tsx:315:37
+    313| 
+    314|     act(() => {
+    315|       controller.markdownCapability()!.requestDocument("./nested/guide…
+       |                                     ^
+    316|     });
+    317| 
+ ❯ node_modules/@testing-library/react/dist/act-compat.js:47:24
+ ❯ act node_modules/react/cjs/react.development.js:2512:16
+ ❯ node_modules/@testing-library/react/dist/act-compat.js:46:25
+ ❯ src/components/FilePreviewDialog.test.tsx:314:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[12/27]⎯
+
+ FAIL  src/lib/filePreview.test.ts > filePreview controller > starts closed and reports a ready payload after open resolves
+AssertionError: expected 'closed' to be 'loading' // Object.is equality
+
+Expected: [32m"lo[7mading[27m"[39m
+Received: [31m"[7mc[27mlo[7msed[27m"[39m
+
+ ❯ src/lib/filePreview.test.ts:127:44
+    125|     expect(h.controller.getState().status).toBe("closed");
+    126|     const pending = h.controller.open(SOURCE, REQUEST);
+    127|     expect(h.controller.getState().status).toBe("loading");
+       |                                            ^
+    128| 
+    129|     open.resolve(textPayload("handle-a"));
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[13/27]⎯
+
+ FAIL  src/lib/filePreview.test.ts > filePreview controller > keeps the newer request when an older open resolves late and revokes the stale handle
+Error: expected ready
+ ❯ src/lib/filePreview.test.ts:166:41
+    164| 
+    165|     const state = h.controller.getState();
+    166|     if (state.status !== "ready") throw new Error("expected ready");
+       |                                         ^
+    167|     expect(state.payload.handle).toBe("handle-b");
+    168|     expect(state.request.path).toBe("/tmp/second.txt");
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[14/27]⎯
+
+ FAIL  src/lib/filePreview.test.ts > filePreview controller > closes a handle that resolves after the modal was closed and stays closed
+AssertionError: expected [] to deeply equal [ 'handle-late' ]
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- [[39m
+[32m-   "handle-late",[39m
+[32m- ][39m
+[31m+ [][39m
+
+ ❯ src/lib/filePreview.test.ts:188:31
+    186| 
+    187|     expect(h.controller.getState().status).toBe("closed");
+    188|     expect(h.closedHandles()).toEqual(["handle-late"]);
+       |                               ^
+    189|   });
+    190| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[15/27]⎯
+
+ FAIL  src/lib/filePreview.test.ts > filePreview controller > closes each acquired handle exactly once across repeated close calls
+AssertionError: expected [] to deeply equal [ 'handle-once' ]
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- [[39m
+[32m-   "handle-once",[39m
+[32m- ][39m
+[31m+ [][39m
+
+ ❯ src/lib/filePreview.test.ts:202:31
+    200|     await h.controller.close();
+    201| 
+    202|     expect(h.closedHandles()).toEqual(["handle-once"]);
+       |                               ^
+    203|   });
+    204| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[16/27]⎯
+
+ FAIL  src/lib/filePreview.test.ts > filePreview controller > reload releases the previous handle once and reacquires the original request
+Error: expected ready
+ ❯ src/lib/filePreview.test.ts:219:41
+    217| 
+    218|     const state = h.controller.getState();
+    219|     if (state.status !== "ready") throw new Error("expected ready");
+       |                                         ^
+    220|     expect(state.payload.handle).toBe("handle-2");
+    221|     expect(state.request).toEqual(REQUEST);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[17/27]⎯
+
+ FAIL  src/lib/filePreview.test.ts > filePreview controller > surfaces the machine failure reason without parsing prose
+Error: expected failed
+ ❯ src/lib/filePreview.test.ts:242:42
+    240| 
+    241|     const state = h.controller.getState();
+    242|     if (state.status !== "failed") throw new Error("expected failed");
+       |                                          ^
+    243|     expect(state.failure.reason).toBe("TooLarge");
+    244|     expect(state.failure.details?.limit).toBe(FILE_PREVIEW_LIMITS.text…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[18/27]⎯
+
+ FAIL  src/lib/filePreview.test.ts > filePreview controller > opens the external editor with the original path, session and caret, never the preview handle
+AssertionError: expected "spy" to be called with arguments: [ { path: '/tmp/notes.txt', …(3) } ][90m
+
+Number of calls: [1m0[22m
+[39m
+ ❯ src/lib/filePreview.test.ts:261:32
+    259|     await h.controller.openExternal();
+    260| 
+    261|     expect(h.openExternalFile).toHaveBeenCalledWith({
+       |                                ^
+    262|       path: REQUEST.path,
+    263|       backendSessionId: SOURCE.backendSessionId,
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[19/27]⎯
+
+ FAIL  src/lib/filePreview.test.ts > filePreview controller > offers a Markdown capability only for markdown payloads
+AssertionError: expected null not to be null
+ ❯ src/lib/filePreview.test.ts:288:28
+    286|     await md.controller.open(SOURCE, { ...REQUEST, path: "/tmp/readme.…
+    287|     const capability = md.controller.markdownCapability();
+    288|     expect(capability).not.toBeNull();
+       |                            ^
+    289|     expect(capability?.remainingChildHandles).toBe(FILE_PREVIEW_LIMITS…
+    290|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[20/27]⎯
+
+ FAIL  src/lib/filePreview.test.ts > filePreview controller > refuses child image requests past the per-parent handle budget without calling the backend
+TypeError: Cannot read properties of null (reading 'requestImage')
+ ❯ src/lib/filePreview.test.ts:303:45
+    301| 
+    302|     for (let i = 0; i < FILE_PREVIEW_LIMITS.maxChildHandles; i++) {
+    303|       await h.controller.markdownCapability()!.requestImage(`img-${i}.…
+       |                                             ^
+    304|     }
+    305|     expect(h.controller.markdownCapability()!.remainingChildHandles).t…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[21/27]⎯
+
+ FAIL  src/lib/filePreview.test.ts > filePreview controller > releases every child handle when the preview closes
+TypeError: Cannot read properties of null (reading 'requestImage')
+ ❯ src/lib/filePreview.test.ts:325:43
+    323|     });
+    324|     await h.controller.open(SOURCE, { ...REQUEST, path: "/tmp/readme.m…
+    325|     await h.controller.markdownCapability()!.requestImage("a.png");
+       |                                           ^
+    326|     await h.controller.close();
+    327| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[22/27]⎯
+
+ FAIL  src/lib/filePreview.test.ts > filePreview controller > revokes a child capability that resolves after the preview was replaced
+TypeError: Cannot read properties of null (reading 'requestImage')
+ ❯ src/lib/filePreview.test.ts:341:58
+    339|     await h.controller.open(SOURCE, { ...REQUEST, path: "/tmp/readme.m…
+    340| 
+    341|     const pendingChild = h.controller.markdownCapability()!.requestIma…
+       |                                                          ^
+    342|     await h.controller.close();
+    343|     child.resolve(childAsset("child-late"));
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[23/27]⎯
+
+ FAIL  src/lib/filePreview.test.ts > filePreview controller > reports the missing child-document command instead of opening an unbounded path
+TypeError: Cannot read properties of null (reading 'requestDocument')
+ ❯ src/lib/filePreview.test.ts:358:37
+    356|     const openCallsBefore = h.invoke.mock.calls.filter((call) => call[…
+    357| 
+    358|     h.controller.markdownCapability()!.requestDocument("./nested/guide…
+       |                                     ^
+    359| 
+    360|     const state = h.controller.getState();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[24/27]⎯
+
+ FAIL  src/lib/filePreview.test.ts > filePreview controller > only forwards http(s) anchors to the external browser
+TypeError: Cannot read properties of null (reading 'openExternalUrl')
+ ❯ src/lib/filePreview.test.ts:375:37
+    373|     await h.controller.open(SOURCE, { ...REQUEST, path: "/tmp/readme.m…
+    374| 
+    375|     h.controller.markdownCapability()!.openExternalUrl("https://exampl…
+       |                                     ^
+    376|     expect(h.openExternalUrl).toHaveBeenCalledWith("https://example.co…
+    377| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[25/27]⎯
+
+ FAIL  src/lib/filePreview.test.ts > filePreview controller > ignores renderer failures reported from a superseded generation
+AssertionError: expected 'closed' to be 'ready' // Object.is equality
+
+Expected: [32m"ready"[39m
+Received: [31m"closed"[39m
+
+ ❯ src/lib/filePreview.test.ts:401:44
+    399| 
+    400|     h.controller.reportFailure(staleGeneration, { reason: "Unsupported…
+    401|     expect(h.controller.getState().status).toBe("ready");
+       |                                            ^
+    402| 
+    403|     const current = h.controller.getState();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[26/27]⎯
+
+ FAIL  src/lib/filePreview.test.ts > filePreview controller > notifies subscribers on each state transition and stops after unsubscribe
+AssertionError: expected 0 to be greater than or equal to 2
+ ❯ src/lib/filePreview.test.ts:421:40
+    419| 
+    420|     await h.controller.open(SOURCE, REQUEST);
+    421|     expect(listener.mock.calls.length).toBeGreaterThanOrEqual(2);
+       |                                        ^
+    422| 
+    423|     unsubscribe();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[27/27]⎯
+
+
+ Test Files  2 failed (2)
+      Tests  27 failed | 1 passed (28)
+   Start at  16:21:43
+   Duration  762ms (transform 48ms, setup 129ms, collect 48ms, tests 64ms, environment 315ms, prepare 49ms)
+
+error: "vitest" exited with code 1
+exit=1

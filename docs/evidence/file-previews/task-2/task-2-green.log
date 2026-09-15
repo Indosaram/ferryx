@@ -1,0 +1,12 @@
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/preview/ui
+
+ ✓ src/components/FilePreviewDialog.test.tsx (13 tests) 132ms
+ ✓ src/lib/filePreview.test.ts (15 tests) 6ms
+
+ Test Files  2 passed (2)
+      Tests  28 passed (28)
+   Start at  16:23:30
+   Duration  1.43s (transform 59ms, setup 184ms, collect 307ms, tests 139ms, environment 408ms, prepare 52ms)
+
+exit=0
