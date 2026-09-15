@@ -1003,6 +1003,148 @@ mod tests {
     }
 
     #[test]
+    fn native_terminal_double_click_selects_whole_url() {
+        let mut terminal = NativeTerminal::new(80, 24).expect("create native terminal");
+        terminal
+            .feed(b"open https://ferryx.dev/docs?tab=a#b now\r\n")
+            .expect("write terminal line containing a URL");
+        let size = MouseRendererSize {
+            screen_width: 800,
+            screen_height: 480,
+            cell_width: 10,
+            cell_height: 20,
+            padding_top: 0,
+            padding_bottom: 0,
+            padding_right: 0,
+            padding_left: 0,
+        };
+        let event = |action, x, time_ns| MouseEvent {
+            action,
+            button: (action == MouseAction::Press).then_some(MouseButton::Left),
+            position: MousePosition { x, y: 10.0 },
+            modifiers: Default::default(),
+            size: Some(size),
+            timestamp_ns: Some(time_ns),
+        };
+
+        // "open " occupies cols 0..4, so the URL starts at col 5 and ends at col 35.
+        // Double click anywhere inside the URL must select the entire URL.
+        for (label, col) in [("scheme", 6u16), ("host", 16), ("path", 27), ("query", 33)] {
+            let x = f32::from(col) * 10.0 + 5.0;
+            let base = 1_000_000_000 + u64::from(col) * 10_000_000_000;
+            terminal
+                .handle_mouse_gesture(&event(MouseAction::Press, x, base))
+                .expect("first press");
+            terminal
+                .handle_mouse_gesture(&event(MouseAction::Release, x, base + 50_000_000))
+                .expect("first release");
+            terminal
+                .handle_mouse_gesture(&event(MouseAction::Press, x, base + 200_000_000))
+                .expect("second press (double click)");
+            terminal
+                .handle_mouse_gesture(&event(MouseAction::Release, x, base + 250_000_000))
+                .expect("second release");
+
+            assert_eq!(
+                terminal.selection_text().expect("query URL selection"),
+                Some("https://ferryx.dev/docs?tab=a#b".to_string()),
+                "double click on the {label} segment must select the whole URL",
+            );
+        }
+    }
+
+    #[test]
+    fn native_terminal_double_click_outside_url_still_selects_word() {
+        let mut terminal = NativeTerminal::new(80, 24).expect("create native terminal");
+        terminal
+            .feed(b"open https://ferryx.dev/docs now\r\n")
+            .expect("write terminal line containing a URL");
+        let size = MouseRendererSize {
+            screen_width: 800,
+            screen_height: 480,
+            cell_width: 10,
+            cell_height: 20,
+            padding_top: 0,
+            padding_bottom: 0,
+            padding_right: 0,
+            padding_left: 0,
+        };
+        let event = |action, x, time_ns| MouseEvent {
+            action,
+            button: (action == MouseAction::Press).then_some(MouseButton::Left),
+            position: MousePosition { x, y: 10.0 },
+            modifiers: Default::default(),
+            size: Some(size),
+            timestamp_ns: Some(time_ns),
+        };
+
+        // Column 1 sits inside the leading word "open", outside the URL span.
+        terminal
+            .handle_mouse_gesture(&event(MouseAction::Press, 15.0, 1_000_000_000))
+            .expect("first press");
+        terminal
+            .handle_mouse_gesture(&event(MouseAction::Release, 15.0, 1_050_000_000))
+            .expect("first release");
+        terminal
+            .handle_mouse_gesture(&event(MouseAction::Press, 15.0, 1_200_000_000))
+            .expect("second press (double click)");
+        terminal
+            .handle_mouse_gesture(&event(MouseAction::Release, 15.0, 1_250_000_000))
+            .expect("second release");
+
+        assert_eq!(
+            terminal.selection_text().expect("query word selection"),
+            Some("open".to_string()),
+        );
+    }
+
+    #[test]
+    fn native_terminal_double_click_selects_url_across_a_soft_wrap() {
+        // 20 columns forces the URL to soft-wrap onto a second row.
+        let mut terminal = NativeTerminal::new(20, 24).expect("create native terminal");
+        terminal
+            .feed(b"go https://ferryx.dev/docs/deep end\r\n")
+            .expect("write soft-wrapped URL line");
+        let size = MouseRendererSize {
+            screen_width: 200,
+            screen_height: 480,
+            cell_width: 10,
+            cell_height: 20,
+            padding_top: 0,
+            padding_bottom: 0,
+            padding_right: 0,
+            padding_left: 0,
+        };
+        let event = |action, x, y, time_ns| MouseEvent {
+            action,
+            button: (action == MouseAction::Press).then_some(MouseButton::Left),
+            position: MousePosition { x, y },
+            modifiers: Default::default(),
+            size: Some(size),
+            timestamp_ns: Some(time_ns),
+        };
+
+        // Row 0 col 10 lands inside the URL host on the first visual row.
+        terminal
+            .handle_mouse_gesture(&event(MouseAction::Press, 105.0, 10.0, 1_000_000_000))
+            .expect("first press");
+        terminal
+            .handle_mouse_gesture(&event(MouseAction::Release, 105.0, 10.0, 1_050_000_000))
+            .expect("first release");
+        terminal
+            .handle_mouse_gesture(&event(MouseAction::Press, 105.0, 10.0, 1_200_000_000))
+            .expect("second press (double click)");
+        terminal
+            .handle_mouse_gesture(&event(MouseAction::Release, 105.0, 10.0, 1_250_000_000))
+            .expect("second release");
+
+        assert_eq!(
+            terminal.selection_text().expect("query URL selection"),
+            Some("https://ferryx.dev/docs/deep".to_string()),
+        );
+    }
+
+    #[test]
     fn test_selection_with_scrollback() {
         let mut terminal = NativeTerminal::new(80, 24).expect("create native terminal");
         for i in 0..50 {

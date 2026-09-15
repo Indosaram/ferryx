@@ -239,4 +239,10 @@ extern "C" {
         event: GhosttySelectionGestureEvent,
         out_selection: *mut GhosttySelection,
     ) -> c_int;
+    pub fn ghostty_selection_gesture_get(
+        gesture: GhosttySelectionGesture,
+        terminal: GhosttyTerminal,
+        data: c_int,
+        value: *mut c_void,
+    ) -> c_int;
 }

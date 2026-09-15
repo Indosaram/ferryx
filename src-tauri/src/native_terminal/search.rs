@@ -9,7 +9,9 @@ use super::sys::types::{
     GHOSTTY_POINT_TAG_SCREEN,
 };
 
-fn cell_text(
+/// Read the grapheme cluster rendered by a single screen-coordinate cell.
+/// Empty cells read as a single space so a row reads as contiguous text.
+pub fn screen_cell_text(
     handle: NonNull<GhosttyTerminalImpl>,
     col: u16,
     row: u32,
@@ -87,7 +89,7 @@ pub fn search_grid(
     for row in 0..row_count {
         let mut cells = Vec::with_capacity(cols as usize);
         for col in 0..cols {
-            cells.push(cell_text(handle, col, row as u32)?);
+            cells.push(screen_cell_text(handle, col, row as u32)?);
         }
 
         for start in 0..cols {

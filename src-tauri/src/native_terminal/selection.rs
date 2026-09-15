@@ -6,11 +6,12 @@ use std::ptr::NonNull;
 use super::error::NativeTerminalError;
 use super::guards::{SelectionGestureEventGuard, SelectionGestureGuard};
 use super::mouse::{MouseAction, MouseButton, MouseEvent};
+use super::search::screen_cell_text;
 use super::sys::ffi::{
     ghostty_free, ghostty_selection_gesture_event, ghostty_selection_gesture_event_new,
-    ghostty_selection_gesture_event_set, ghostty_selection_gesture_new,
-    ghostty_selection_gesture_reset, ghostty_terminal_get, ghostty_terminal_grid_ref,
-    ghostty_terminal_point_from_grid_ref, ghostty_terminal_select_all,
+    ghostty_selection_gesture_event_set, ghostty_selection_gesture_get,
+    ghostty_selection_gesture_new, ghostty_selection_gesture_reset, ghostty_terminal_get,
+    ghostty_terminal_grid_ref, ghostty_terminal_point_from_grid_ref, ghostty_terminal_select_all,
     ghostty_terminal_select_line, ghostty_terminal_select_word,
     ghostty_terminal_selection_format_alloc, ghostty_terminal_selection_ordered,
     ghostty_terminal_set,
@@ -21,7 +22,8 @@ use super::sys::types::{
     GhosttySurfacePosition, GhosttyTerminalImpl, GhosttyTerminalSelectLineOptions,
     GhosttyTerminalSelectWordOptions, GhosttyTerminalSelectionFormatOptions,
     GHOSTTY_FORMATTER_FORMAT_PLAIN, GHOSTTY_NO_VALUE, GHOSTTY_POINT_TAG_SCREEN,
-    GHOSTTY_POINT_TAG_VIEWPORT, GHOSTTY_SELECTION_GESTURE_EVENT_OPT_GEOMETRY,
+    GHOSTTY_POINT_TAG_VIEWPORT, GHOSTTY_SELECTION_GESTURE_DATA_CLICK_COUNT,
+    GHOSTTY_SELECTION_GESTURE_EVENT_OPT_GEOMETRY,
     GHOSTTY_SELECTION_GESTURE_EVENT_OPT_POSITION, GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REF,
     GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REPEAT_DISTANCE,
     GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REPEAT_INTERVAL_NS,
@@ -30,6 +32,7 @@ use super::sys::types::{
     GHOSTTY_SELECTION_ORDER_FORWARD, GHOSTTY_SUCCESS, GHOSTTY_TERMINAL_DATA_SELECTION,
     GHOSTTY_TERMINAL_OPT_SELECTION,
 };
+use super::url::url_span_at;
 
 fn viewport_ref(
     handle: NonNull<GhosttyTerminalImpl>,
@@ -51,6 +54,45 @@ fn viewport_ref(
     let result = unsafe { ghostty_terminal_grid_ref(handle.as_ptr(), point, &mut grid_ref) };
     NativeTerminalError::from_c_result(result, "ghostty_terminal_grid_ref(Viewport)")?;
     Ok(grid_ref)
+}
+
+fn screen_ref(
+    handle: NonNull<GhosttyTerminalImpl>,
+    col: u16,
+    row: u32,
+) -> Result<GhosttyGridRef, NativeTerminalError> {
+    let point = GhosttyPoint {
+        tag: GHOSTTY_POINT_TAG_SCREEN,
+        value: GhosttyPointValue {
+            coordinate: GhosttyPointCoordinate { x: col, y: row },
+        },
+    };
+    let mut grid_ref = GhosttyGridRef::default();
+    // SAFETY: Category: Foreign Grid Reference Extraction.
+    // Invariant: handle is live; point is initialized; out grid_ref is valid writable stack storage.
+    let result = unsafe { ghostty_terminal_grid_ref(handle.as_ptr(), point, &mut grid_ref) };
+    NativeTerminalError::from_c_result(result, "ghostty_terminal_grid_ref(Screen)")?;
+    Ok(grid_ref)
+}
+
+fn screen_point(
+    handle: NonNull<GhosttyTerminalImpl>,
+    grid_ref: &GhosttyGridRef,
+    context: &'static str,
+) -> Result<GhosttyPointCoordinate, NativeTerminalError> {
+    let mut point = GhosttyPointCoordinate::default();
+    // SAFETY: Category: Foreign Grid Coordinate Conversion.
+    // Invariant: grid_ref is a fresh snapshot from this terminal; output is writable stack storage.
+    let result = unsafe {
+        ghostty_terminal_point_from_grid_ref(
+            handle.as_ptr(),
+            grid_ref,
+            GHOSTTY_POINT_TAG_SCREEN,
+            &mut point,
+        )
+    };
+    NativeTerminalError::from_c_result(result, context)?;
+    Ok(point)
 }
 
 fn install_selection(
@@ -173,6 +215,152 @@ pub fn selection_text(
     handle: NonNull<GhosttyTerminalImpl>,
 ) -> Result<Option<String>, NativeTerminalError> {
     format_selection(handle, None, true)
+}
+
+/// Screen-coordinate text of the logical (soft-wrap aware) line containing `grid_ref`,
+/// paired with the screen cell each character came from.
+///
+/// Returns `None` when the pressed cell has no selectable line content.
+fn logical_line_cells(
+    handle: NonNull<GhosttyTerminalImpl>,
+    grid_ref: GhosttyGridRef,
+) -> Result<Option<(String, Vec<(u16, u32)>)>, NativeTerminalError> {
+    let options = GhosttyTerminalSelectLineOptions {
+        size: std::mem::size_of::<GhosttyTerminalSelectLineOptions>(),
+        grid_ref,
+        whitespace: std::ptr::null(),
+        whitespace_len: 0,
+        semantic_prompt_boundary: false,
+    };
+    let mut selection = GhosttySelection::default();
+    // SAFETY: Category: Foreign Selection Extraction.
+    // Invariant: options holds a fresh ref from this terminal; default whitespace is null with zero length.
+    let result = unsafe { ghostty_terminal_select_line(handle.as_ptr(), &options, &mut selection) };
+    if result == GHOSTTY_NO_VALUE {
+        return Ok(None);
+    }
+    NativeTerminalError::from_c_result(result, "ghostty_terminal_select_line(UrlSpan)")?;
+
+    let mut ordered = GhosttySelection::default();
+    // SAFETY: Category: Foreign Selection Ordering.
+    // Invariant: selection is a fresh snapshot from this terminal and no mutation has occurred.
+    let result = unsafe {
+        ghostty_terminal_selection_ordered(
+            handle.as_ptr(),
+            &selection,
+            GHOSTTY_SELECTION_ORDER_FORWARD,
+            &mut ordered,
+        )
+    };
+    NativeTerminalError::from_c_result(result, "ghostty_terminal_selection_ordered(UrlSpan)")?;
+
+    let start = screen_point(
+        handle,
+        &ordered.start,
+        "ghostty_terminal_point_from_grid_ref(UrlSpanStart)",
+    )?;
+    let end = screen_point(
+        handle,
+        &ordered.end,
+        "ghostty_terminal_point_from_grid_ref(UrlSpanEnd)",
+    )?;
+
+    let cols = super::queries::query_cols(handle)?;
+    // Bound the scan: a soft-wrapped logical line can span many rows, and this runs
+    // per double-click press. URLs never need more than a few rows of context.
+    const MAX_URL_SCAN_ROWS: u32 = 8;
+    let pressed = screen_point(
+        handle,
+        &grid_ref,
+        "ghostty_terminal_point_from_grid_ref(UrlSpanPressedRow)",
+    )?;
+    let first_row = start.y.max(pressed.y.saturating_sub(MAX_URL_SCAN_ROWS));
+    let last_row = end.y.min(pressed.y.saturating_add(MAX_URL_SCAN_ROWS));
+
+    let mut text = String::new();
+    let mut positions: Vec<(u16, u32)> = Vec::new();
+    for row in first_row..=last_row {
+        let first_col = if row == start.y { start.x } else { 0 };
+        let last_col = if row == end.y {
+            end.x
+        } else {
+            cols.saturating_sub(1)
+        };
+        for col in first_col..=last_col {
+            let cell = screen_cell_text(handle, col, row)?;
+            for ch in cell.chars() {
+                text.push(ch);
+                positions.push((col, row));
+            }
+        }
+    }
+
+    if positions.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some((text, positions)))
+}
+
+/// Derive a selection covering the whole URL under `grid_ref`.
+///
+/// Ghostty's word selection treats `:` as a word boundary and stops at the first
+/// one, so a double click inside `https://host/path` yields only a fragment. A
+/// terminal is expected to select the entire URL, so this widens the selection
+/// to the URL span when the pressed cell is inside one.
+fn url_selection_at(
+    handle: NonNull<GhosttyTerminalImpl>,
+    grid_ref: GhosttyGridRef,
+) -> Result<Option<GhosttySelection>, NativeTerminalError> {
+    let pressed = screen_point(
+        handle,
+        &grid_ref,
+        "ghostty_terminal_point_from_grid_ref(UrlSpanPressed)",
+    )?;
+    let Some((text, positions)) = logical_line_cells(handle, grid_ref)? else {
+        return Ok(None);
+    };
+    let Some(pressed_index) = positions
+        .iter()
+        .position(|&(col, row)| col == pressed.x && row == pressed.y)
+    else {
+        return Ok(None);
+    };
+
+    let Some((span_start, span_end)) = url_span_at(&text, pressed_index) else {
+        return Ok(None);
+    };
+    let (start_col, start_row) = positions[span_start];
+    let (end_col, end_row) = positions[span_end - 1];
+
+    Ok(Some(GhosttySelection {
+        size: std::mem::size_of::<GhosttySelection>(),
+        start: screen_ref(handle, start_col, start_row)?,
+        end: screen_ref(handle, end_col, end_row)?,
+        rectangle: false,
+    }))
+}
+
+/// Current click count of an active gesture (0 when inactive).
+fn gesture_click_count(
+    gesture: &SelectionGestureGuard,
+    terminal: NonNull<GhosttyTerminalImpl>,
+) -> Result<u8, NativeTerminalError> {
+    let mut count: u8 = 0;
+    // SAFETY: Category: Foreign Data Extraction.
+    // Invariant: both handles are live; out pointer is writable stack storage of the documented u8 type.
+    let result = unsafe {
+        ghostty_selection_gesture_get(
+            gesture.as_ptr(),
+            terminal.as_ptr(),
+            GHOSTTY_SELECTION_GESTURE_DATA_CLICK_COUNT,
+            &mut count as *mut u8 as *mut c_void,
+        )
+    };
+    if result == GHOSTTY_NO_VALUE {
+        return Ok(0);
+    }
+    NativeTerminalError::from_c_result(result, "ghostty_selection_gesture_get(ClickCount)")?;
+    Ok(count)
 }
 
 /// Read the unwrapped text of a line at (col, row) without altering the active selection.
@@ -508,7 +696,15 @@ pub fn apply_mouse_gesture(
                 )
             };
             if event_res == GHOSTTY_SUCCESS {
-                install_selection(terminal, &selection)?;
+                // The gesture owns single/double/triple-click behavior. Double click on a
+                // URL must select the whole URL rather than the word fragment Ghostty's
+                // word boundaries produce (`:` and `/` split `https://host/path`).
+                let widened = if gesture_click_count(gesture, terminal)? == 2 {
+                    url_selection_at(terminal, grid_ref)?
+                } else {
+                    None
+                };
+                install_selection(terminal, widened.as_ref().unwrap_or(&selection))?;
             } else if event_res == GHOSTTY_NO_VALUE {
                 clear_selection(terminal)?;
             } else {

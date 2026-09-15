@@ -371,6 +371,9 @@ pub struct GhosttySelectionGestureGeometry {
     pub screen_height: u32,
 }
 
+// GhosttySelectionGestureData constants matching `ghostty/vt/selection.h`.
+pub const GHOSTTY_SELECTION_GESTURE_DATA_CLICK_COUNT: c_int = 0;
+
 // GhosttySelectionGestureEventType constants matching `ghostty/vt/selection.h`.
 pub const GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_PRESS: c_int = 0;
 pub const GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_RELEASE: c_int = 1;

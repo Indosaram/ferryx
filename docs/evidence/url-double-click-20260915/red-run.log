@@ -1,0 +1,30 @@
+398 |     fn validate_ref_component(component: &str, label: &str) -> Result<(), WorktreeError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `ferryx` (lib test) generated 18 warnings (run `cargo fix --lib -p ferryx --tests` to apply 4 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 24.32s
+     Running unittests src/lib.rs (src-tauri/target/debug/deps/ferryx_lib-c4d5a091b5557805)
+
+running 4 tests
+test native_terminal::terminal::tests::native_terminal_double_click_drag_extends_selection_by_word ... ok
+test native_terminal::terminal::tests::native_terminal_double_click_outside_url_still_selects_word ... ok
+test native_terminal::terminal::tests::native_terminal_double_click_selects_word_and_triple_click_selects_line ... ok
+test native_terminal::terminal::tests::native_terminal_double_click_selects_whole_url ... FAILED
+
+failures:
+
+---- native_terminal::terminal::tests::native_terminal_double_click_selects_whole_url stdout ----
+
+thread 'native_terminal::terminal::tests::native_terminal_double_click_selects_whole_url' (1249229) panicked at src/native_terminal/terminal.rs:1048:13:
+assertion `left == right` failed: double click on the scheme segment must select the whole URL
+  left: Some("https")
+ right: Some("https://ferryx.dev/docs?tab=a#b")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    native_terminal::terminal::tests::native_terminal_double_click_selects_whole_url
+
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 1296 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `--lib`

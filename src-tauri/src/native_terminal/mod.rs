@@ -45,6 +45,7 @@ pub mod surface_host;
 mod surface_snapshot;
 mod sys;
 mod terminal;
+mod url;
 mod viewport;
 #[cfg(feature = "native-terminal")]
 pub mod wheel;

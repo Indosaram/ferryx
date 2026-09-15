@@ -789,6 +789,81 @@ async fn test_double_click_selection_via_surface_host_boundary() {
     assert_eq!(sel2, "world".to_string());
 }
 
+#[tokio::test]
+async fn test_double_click_on_url_selects_whole_url_via_surface_host_boundary() {
+    use ferryx_lib::ipc::native_terminal::{
+        copy_attached_native_selection, select_attached_native_terminal_with_mouse,
+    };
+    use ferryx_lib::native_terminal::{
+        MouseAction, MouseButton, MouseEvent, MousePosition, MouseRendererSize,
+    };
+
+    let state = NativeTerminalSurfaceHostState::default();
+    let session_id = "test-double-click-url-session";
+    let (_tx, attachment) = create_attachment(session_id);
+
+    state
+        .attach_daemon_attachment::<tauri::Wry>(session_id, attachment, None)
+        .expect("attach native daemon stream state");
+
+    state
+        .with_session_terminal(session_id, |term| {
+            term.feed(b"open https://ferryx.dev/docs?tab=a#b now\r\n")
+        })
+        .expect("feed text");
+
+    let size = MouseRendererSize {
+        screen_width: 800,
+        screen_height: 480,
+        cell_width: 10,
+        cell_height: 20,
+        padding_top: 0,
+        padding_bottom: 0,
+        padding_right: 0,
+        padding_left: 0,
+    };
+
+    // x = 165.0 is col 16, inside the URL host ("open " occupies cols 0..4).
+    let event = |action, time_ns| MouseEvent {
+        action,
+        button: (action == MouseAction::Press).then_some(MouseButton::Left),
+        position: MousePosition { x: 165.0, y: 10.0 },
+        modifiers: Default::default(),
+        size: Some(size),
+        timestamp_ns: Some(time_ns),
+    };
+
+    select_attached_native_terminal_with_mouse(
+        &state,
+        session_id,
+        &event(MouseAction::Press, 1_000_000_000),
+    )
+    .expect("press 1");
+    select_attached_native_terminal_with_mouse(
+        &state,
+        session_id,
+        &event(MouseAction::Release, 1_050_000_000),
+    )
+    .expect("release 1");
+    select_attached_native_terminal_with_mouse(
+        &state,
+        session_id,
+        &event(MouseAction::Press, 1_200_000_000),
+    )
+    .expect("press 2");
+    select_attached_native_terminal_with_mouse(
+        &state,
+        session_id,
+        &event(MouseAction::Release, 1_250_000_000),
+    )
+    .expect("release 2");
+
+    assert_eq!(
+        copy_attached_native_selection(&state, session_id).expect("copy url selection"),
+        "https://ferryx.dev/docs?tab=a#b".to_string(),
+    );
+}
+
 #[test]
 fn command_wheel_preserves_noncentral_cell_and_ctrl() {
     use ferryx_lib::ipc::native_terminal::{native_scroll_outcome, NativeTerminalWheelContext};
