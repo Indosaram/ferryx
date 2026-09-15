@@ -15,6 +15,7 @@ type SortableTabProps = {
   index: number;
   active: boolean;
   unread: boolean;
+  sleeping?: boolean;
   activity?: ActivitySummary;
   isRenaming: boolean;
   renameValue: string;
@@ -32,6 +33,7 @@ export const SortableTab = memo(function SortableTab({
   index,
   active,
   unread,
+  sleeping = false,
   activity,
   isRenaming,
   renameValue,
@@ -113,6 +115,16 @@ export const SortableTab = memo(function SortableTab({
           ) : (
             <TerminalSquare data-testid="tab-terminal-icon" className="size-4 shrink-0" />
           )}
+          {sleeping ? (
+            <span
+              data-testid="tab-hibernated-indicator"
+              aria-label="Hibernated session"
+              title="Hibernated"
+              className="shrink-0 text-[11px] leading-none"
+            >
+              💤
+            </span>
+          ) : null}
           {activityIndicator ? (
             <span
               data-testid={activityIndicator === "unread" ? "tab-unread-dot" : `tab-${activityIndicator}-indicator`}

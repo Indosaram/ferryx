@@ -1,5 +1,5 @@
 import { Loader2, RefreshCw, TerminalSquare } from "lucide-react";
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { TerminalActivity } from "../lib/activity";
 import { isMonochromeAgentLogo, resolveAgentLogo } from "../lib/agentIcon";
 import { getAgentReconnectAffordance } from "../lib/agentResumeAffordance";
@@ -7,6 +7,14 @@ import { agentDisplayNameForType } from "../lib/agentTitle";
 import { Button } from "./ui/button";
 import { cn } from "../lib/cn";
 import { isPairedWorkspaceId, isRemoteWorkspaceId } from "../lib/remoteProject";
+import {
+  isSessionAutoResumeHeld,
+  isSessionSleeping,
+  isStandbyBackendSessionId,
+  registerSessionSnapshot,
+  setSessionActive,
+  setSessionSleeping,
+} from "../lib/sessionLifecycle";
 import { toIpcError } from "../lib/tauri";
 import type { TerminalSession } from "../lib/types";
 import { NativeTerminalPane } from "./NativeTerminalPane";
@@ -87,6 +95,7 @@ export function TerminalPane({
   const [replacementError, setReplacementError] = useState<string | null>(null);
   const titleId = useId();
   const descId = useId();
+  const autoResumeKeyRef = useRef<string | null>(null);
 
   const isSshSession = isRemoteWorkspaceId(session.workspaceId);
   const isSpawning = session.reconnectLifecycle === "spawning" || session.reconnectLifecycle === "validating";
@@ -97,7 +106,7 @@ export function TerminalPane({
   const isSshExpired = isSshSession && !isSpawning && (remoteState === "expired" || remoteState === "missing");
   const isSshLegacyLost = isSshSession && !isSpawning && remoteState === "legacyLost";
   const showSshOverlay = isSshSession && (isSshReconnecting || isSshDisconnected || isSshExpired || isSshLegacyLost);
-  const isExited = isSshSession ? showSshOverlay : session.backendSessionId === null || session.lifecycle === "exited";
+  const isExited = isSshSession ? showSshOverlay : session.backendSessionId === null || isStandbyBackendSessionId(session.backendSessionId) || session.lifecycle === "exited";
   const affordance = getAgentReconnectAffordance(session, sessions);
   const isAgentSession = Boolean(
     (session.agentType && session.agentType.trim().length > 0) ||
@@ -154,9 +163,44 @@ export function TerminalPane({
     }
   };
 
-  // The native paired proxy is not available. Never mount local path/PTY tooling
-  // or offer SSH/agent respawn as a substitute for attaching the captured target.
-  if (isPairedWorkspaceId(session.workspaceId)) {
+  useEffect(() => {
+    registerSessionSnapshot(session, activity?.state);
+    setSessionActive(session.id, active);
+    if (!isExited && session.backendSessionId && !isStandbyBackendSessionId(session.backendSessionId) && autoResumeKeyRef.current !== null) {
+      setSessionSleeping(session.id, false);
+      autoResumeKeyRef.current = null;
+    }
+    return () => setSessionActive(session.id, false);
+  }, [active, activity?.state, isExited, session]);
+
+  useEffect(() => {
+    if (!active || !isExited || isPending || isSshSession || !isSessionSleeping(session.id) || isSessionAutoResumeHeld(session.id)) return;
+    const key = `${session.id}:${session.backendSessionId ?? "none"}:${session.reconnectLifecycle ?? "idle"}`;
+    if (autoResumeKeyRef.current === key) return;
+    if (isAgentSession) {
+      if (!affordance.canReconnect || !onReconnect) return;
+      autoResumeKeyRef.current = key;
+      setPendingLocal(true);
+      setReplacementError(null);
+      void Promise.resolve(onReconnect(session.id))
+        .then(() => setSessionSleeping(session.id, false))
+        .catch((error) => setReplacementError(toIpcError(error).message))
+        .finally(() => setPendingLocal(false));
+      return;
+    }
+    if (!onOpenNewShell) return;
+    autoResumeKeyRef.current = key;
+    setPendingLocal(true);
+    setReplacementError(null);
+    void Promise.resolve(onOpenNewShell(session.id))
+      .then(() => setSessionSleeping(session.id, false))
+      .catch((error) => setReplacementError(toIpcError(error).message))
+      .finally(() => setPendingLocal(false));
+  }, [active, affordance.canReconnect, isAgentSession, isExited, isPending, isSshSession, onOpenNewShell, onReconnect, session.backendSessionId, session.id, session.reconnectLifecycle]);
+
+  // If the native paired proxy session has not been established or expired,
+  // do not mount local path/PTY tooling or offer SSH/agent respawn.
+  if (isPairedWorkspaceId(session.workspaceId) && (!session.backendSessionId || session.remoteConnectionState === "expired")) {
     return <div data-testid="paired-terminal-unavailable" role="status" className="flex h-full items-center justify-center p-6 text-center text-sm text-muted-foreground">
       <div>
         <h2 className="font-medium text-foreground">Paired terminal unavailable</h2>

@@ -1,0 +1,440 @@
+{
+  "timestamp": "2026-09-15T05:59:24.057Z",
+  "harnessUrl": "http://127.0.0.1:53092/docs/evidence/remote-machines-20260915/index.html",
+  "port": 53092,
+  "engine": "Bun.WebView (Chrome backend, headless)",
+  "bunVersion": "1.4.0",
+  "viewports": {
+    "390": [
+      {
+        "name": "Single 'Add Machine' button in toolbar",
+        "pass": true,
+        "detail": {
+          "count": 1
+        }
+      },
+      {
+        "name": "No legacy filter tabs (All/Paired/SSH)",
+        "pass": true,
+        "detail": null
+      },
+      {
+        "name": "Narrow layout: no horizontal document overflow in empty state",
+        "pass": true,
+        "detail": null
+      },
+      {
+        "name": "Unified list renders all machines without section splits",
+        "pass": true,
+        "detail": {
+          "count": 4
+        }
+      },
+      {
+        "name": "Common row Type Badges ('Paired' and 'SSH')",
+        "pass": true,
+        "detail": [
+          "SSH",
+          "SSH",
+          "Paired",
+          "Paired"
+        ]
+      },
+      {
+        "name": "Common row concise Status indicators present",
+        "pass": true,
+        "detail": [
+          {
+            "text": "Not checked",
+            "code": "UNCHECKED"
+          },
+          {
+            "text": "Not checked",
+            "code": "UNCHECKED"
+          },
+          {
+            "text": "Unchecked",
+            "code": "UNCHECKED"
+          },
+          {
+            "text": "Needs Grant",
+            "code": "MACHINE_GRANT_REQUIRED"
+          }
+        ]
+      },
+      {
+        "name": "Narrow layout: no horizontal overflow in mixed list",
+        "pass": true,
+        "detail": null
+      },
+      {
+        "name": "Paired details conceal technical metadata",
+        "pass": true,
+        "detail": {
+          "hasMachineId": true,
+          "hasRelay": true,
+          "hasTransport": true,
+          "hasGeneration": true,
+          "hasGrant": true,
+          "hasAuthStatus": true
+        }
+      },
+      {
+        "name": "Paired actions available (Check capabilities, Re-pair, Forget)",
+        "pass": true,
+        "detail": {
+          "checkCaps": true,
+          "repair": true,
+          "forget": true
+        }
+      },
+      {
+        "name": "SSH details conceal technical metadata",
+        "pass": true,
+        "detail": {
+          "hasHostname": true,
+          "hasPort": true,
+          "hasUsername": true,
+          "hasAuthMethod": true
+        }
+      },
+      {
+        "name": "SSH actions available (Test, Prepare, Edit, Disable, Delete)",
+        "pass": true,
+        "detail": {
+          "testConn": true,
+          "prepIntegration": true,
+          "edit": true,
+          "toggleDisable": true,
+          "delete": true
+        }
+      },
+      {
+        "name": "Add Machine Modal opens on 'Pair with PIN' tab",
+        "pass": true,
+        "detail": {
+          "activeTab": "Pair with PIN"
+        }
+      },
+      {
+        "name": "PIN input field present and accessible",
+        "pass": true,
+        "detail": null
+      },
+      {
+        "name": "SSH basic fields (Label, Hostname, Username, Port) present",
+        "pass": true,
+        "detail": {
+          "label": true,
+          "hostname": true,
+          "username": true,
+          "port": true
+        }
+      },
+      {
+        "name": "SSH advanced collapsible fields (Auth Method, Key, Jump Host) revealed",
+        "pass": true,
+        "detail": {
+          "authMethod": true,
+          "identityFile": true,
+          "jumpHost": true
+        }
+      },
+      {
+        "name": "Narrow layout: modal SSH form controls fit within dialog",
+        "pass": true,
+        "detail": {
+          "clientWidth": 341,
+          "scrollWidth": 341
+        }
+      },
+      {
+        "name": "Import SSH Config options available (System & Paste)",
+        "pass": true,
+        "detail": {
+          "hasSystem": true,
+          "hasPaste": true
+        }
+      },
+      {
+        "name": "Failure error alert displayed on invalid PIN",
+        "pass": true,
+        "detail": {
+          "alertText": "Could not pair. Check connectivity and daemon compatibility, obtain a fresh machine-access PIN, and retry."
+        }
+      },
+      {
+        "name": "User input preserved on failure (not cleared)",
+        "pass": true,
+        "detail": {
+          "preservedPin": "000000"
+        }
+      },
+      {
+        "name": "Success view displays verified machine and offers 'Add Project'",
+        "pass": true,
+        "detail": null
+      },
+      {
+        "name": "Modal dismissed after success completion",
+        "pass": true,
+        "detail": null
+      },
+      {
+        "name": "Newly added machine auto-selected in list",
+        "pass": true,
+        "detail": null
+      },
+      {
+        "name": "Trigger button focused before modal open",
+        "pass": true,
+        "detail": null
+      },
+      {
+        "name": "Focus located inside modal before Escape",
+        "pass": true,
+        "detail": null
+      },
+      {
+        "name": "Escape closes the Add Machine modal",
+        "pass": true,
+        "detail": null
+      },
+      {
+        "name": "Escape parent isolation (parent dialog escape count is 0)",
+        "pass": true,
+        "detail": {
+          "parentEscCount": 0,
+          "windowEscCount": 0
+        }
+      },
+      {
+        "name": "Trigger focus restored to 'Add Machine' button after Escape",
+        "pass": true,
+        "detail": {
+          "activeElementTag": "BUTTON",
+          "activeElementLabel": "Add Machine"
+        }
+      }
+    ],
+    "1280": [
+      {
+        "name": "Single 'Add Machine' button in toolbar",
+        "pass": true,
+        "detail": {
+          "count": 1
+        }
+      },
+      {
+        "name": "No legacy filter tabs (All/Paired/SSH)",
+        "pass": true,
+        "detail": null
+      },
+      {
+        "name": "Narrow layout: no horizontal document overflow in empty state",
+        "pass": true,
+        "detail": null
+      },
+      {
+        "name": "Unified list renders all machines without section splits",
+        "pass": true,
+        "detail": {
+          "count": 4
+        }
+      },
+      {
+        "name": "Common row Type Badges ('Paired' and 'SSH')",
+        "pass": true,
+        "detail": [
+          "SSH",
+          "SSH",
+          "Paired",
+          "Paired"
+        ]
+      },
+      {
+        "name": "Common row concise Status indicators present",
+        "pass": true,
+        "detail": [
+          {
+            "text": "Not checked",
+            "code": "UNCHECKED"
+          },
+          {
+            "text": "Not checked",
+            "code": "UNCHECKED"
+          },
+          {
+            "text": "Unchecked",
+            "code": "UNCHECKED"
+          },
+          {
+            "text": "Needs Grant",
+            "code": "MACHINE_GRANT_REQUIRED"
+          }
+        ]
+      },
+      {
+        "name": "Narrow layout: no horizontal overflow in mixed list",
+        "pass": true,
+        "detail": null
+      },
+      {
+        "name": "Paired details conceal technical metadata",
+        "pass": true,
+        "detail": {
+          "hasMachineId": true,
+          "hasRelay": true,
+          "hasTransport": true,
+          "hasGeneration": true,
+          "hasGrant": true,
+          "hasAuthStatus": true
+        }
+      },
+      {
+        "name": "Paired actions available (Check capabilities, Re-pair, Forget)",
+        "pass": true,
+        "detail": {
+          "checkCaps": true,
+          "repair": true,
+          "forget": true
+        }
+      },
+      {
+        "name": "SSH details conceal technical metadata",
+        "pass": true,
+        "detail": {
+          "hasHostname": true,
+          "hasPort": true,
+          "hasUsername": true,
+          "hasAuthMethod": true
+        }
+      },
+      {
+        "name": "SSH actions available (Test, Prepare, Edit, Disable, Delete)",
+        "pass": true,
+        "detail": {
+          "testConn": true,
+          "prepIntegration": true,
+          "edit": true,
+          "toggleDisable": true,
+          "delete": true
+        }
+      },
+      {
+        "name": "Add Machine Modal opens on 'Pair with PIN' tab",
+        "pass": true,
+        "detail": {
+          "activeTab": "Pair with PIN"
+        }
+      },
+      {
+        "name": "PIN input field present and accessible",
+        "pass": true,
+        "detail": null
+      },
+      {
+        "name": "SSH basic fields (Label, Hostname, Username, Port) present",
+        "pass": true,
+        "detail": {
+          "label": true,
+          "hostname": true,
+          "username": true,
+          "port": true
+        }
+      },
+      {
+        "name": "SSH advanced collapsible fields (Auth Method, Key, Jump Host) revealed",
+        "pass": true,
+        "detail": {
+          "authMethod": true,
+          "identityFile": true,
+          "jumpHost": true
+        }
+      },
+      {
+        "name": "Narrow layout: modal SSH form controls fit within dialog",
+        "pass": true,
+        "detail": {
+          "clientWidth": 510,
+          "scrollWidth": 510
+        }
+      },
+      {
+        "name": "Import SSH Config options available (System & Paste)",
+        "pass": true,
+        "detail": {
+          "hasSystem": true,
+          "hasPaste": true
+        }
+      },
+      {
+        "name": "Failure error alert displayed on invalid PIN",
+        "pass": true,
+        "detail": {
+          "alertText": "Could not pair. Check connectivity and daemon compatibility, obtain a fresh machine-access PIN, and retry."
+        }
+      },
+      {
+        "name": "User input preserved on failure (not cleared)",
+        "pass": true,
+        "detail": {
+          "preservedPin": "000000"
+        }
+      },
+      {
+        "name": "Success view displays verified machine and offers 'Add Project'",
+        "pass": true,
+        "detail": null
+      },
+      {
+        "name": "Modal dismissed after success completion",
+        "pass": true,
+        "detail": null
+      },
+      {
+        "name": "Newly added machine auto-selected in list",
+        "pass": true,
+        "detail": null
+      },
+      {
+        "name": "Trigger button focused before modal open",
+        "pass": true,
+        "detail": null
+      },
+      {
+        "name": "Focus located inside modal before Escape",
+        "pass": true,
+        "detail": null
+      },
+      {
+        "name": "Escape closes the Add Machine modal",
+        "pass": true,
+        "detail": null
+      },
+      {
+        "name": "Escape parent isolation (parent dialog escape count is 0)",
+        "pass": true,
+        "detail": {
+          "parentEscCount": 0,
+          "windowEscCount": 0
+        }
+      },
+      {
+        "name": "Trigger focus restored to 'Add Machine' button after Escape",
+        "pass": true,
+        "detail": {
+          "activeElementTag": "BUTTON",
+          "activeElementLabel": "Add Machine"
+        }
+      }
+    ]
+  },
+  "summary": {
+    "totalChecks": 54,
+    "passedChecks": 54,
+    "failedChecks": 0
+  },
+  "defects": [],
+  "limitations": []
+}

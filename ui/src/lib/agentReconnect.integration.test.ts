@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { reconnectAgentSession, clearAgentReconnectInflightForTests } from "./agentReconnect";
 import { scheduleAgentAutoResume, resetAgentAutoResumeGuard } from "./agentAutoResume";
+import { saveGeneralSettings, resetGeneralSettings } from "./generalSettings";
 import { workspaceReducer } from "../state/workspaceStore";
 import { deserializeWorkspaceState, serializeWorkspaceState } from "./sessionPersistence";
 import type { TerminalSession } from "./types";
@@ -152,8 +153,9 @@ describe("agent reconnect cross-layer contracts", () => {
     expect(state.sessions[session.id]).toMatchObject({ backendSessionId: null, lifecycle: "exited", providerSession: session.providerSession, reconnectLifecycle: "failed" });
   });
 
-  it("auto-resumes deserialized exited agent sessions through scheduleAgentAutoResume", async () => {
+  it("auto-resumes deserialized exited agent sessions through scheduleAgentAutoResume in Eager mode", async () => {
     vi.useFakeTimers();
+    saveGeneralSettings({ sessionRestorePolicy: "eager" });
     resetAgentAutoResumeGuard();
     clearAgentReconnectInflightForTests();
 
@@ -168,10 +170,7 @@ describe("agent reconnect cross-layer contracts", () => {
           worktrees: [{ path: "/repo", branch: "main", head: "123", isMain: true, isLocked: false }],
           activeWorktreePath: "/repo",
           layout: {
-            splitMode: "none",
-            primaryTabId: "tab-1",
-            secondaryTabId: null,
-            activeTabId: "tab-1",
+            splitMode: "none", primaryTabId: "tab-1", secondaryTabId: null, activeTabId: "tab-1",
             tabs: [
               { id: "tab-1", kind: "terminal", label: "Agent 1", terminal: { primarySessionId: "agent-1", paneTree: { type: "leaf", leafId: "leaf-1" }, sessionIdsByLeafId: { "leaf-1": "agent-1" }, activeLeafId: "leaf-1", expandedLeafId: null } },
               { id: "tab-2", kind: "terminal", label: "Agent 2", terminal: { primarySessionId: "agent-2", paneTree: { type: "leaf", leafId: "leaf-2" }, sessionIdsByLeafId: { "leaf-2": "agent-2" }, activeLeafId: "leaf-2", expandedLeafId: null } },
@@ -214,24 +213,19 @@ describe("agent reconnect cross-layer contracts", () => {
       }),
     });
 
-    // t = 0ms: agent-1 is spawned
     await vi.advanceTimersByTimeAsync(0);
     expect(spawn).toHaveBeenCalledTimes(1);
     expect(spawn).toHaveBeenCalledWith(expect.objectContaining({ startup: expect.objectContaining({ providerSession: { key: "session_id", id: "uuid-1" } }) }));
-
-    // t = 400ms: agent-2 is spawned
     await vi.advanceTimersByTimeAsync(400);
     expect(spawn).toHaveBeenCalledTimes(2);
     expect(spawn).toHaveBeenLastCalledWith(expect.objectContaining({ startup: expect.objectContaining({ providerSession: { key: "session_id", id: "uuid-2" } }) }));
-
-    // Advance further: shell session is not spawned
     await vi.advanceTimersByTimeAsync(2000);
     expect(spawn).toHaveBeenCalledTimes(2);
-
     expect(state.sessions["agent-1"].backendSessionId).toBe("backend-uuid-1");
     expect(state.sessions["agent-2"].backendSessionId).toBe("backend-uuid-2");
     expect(state.sessions["shell-1"].backendSessionId).toBeNull();
 
+    resetGeneralSettings();
     vi.useRealTimers();
   });
 });

@@ -587,6 +587,8 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
     let cols = request.cols.unwrap_or(80);
     let rows = request.rows.unwrap_or(24);
     let is_remote_workspace = crate::ssh::projects::is_remote(&request.workspace_id);
+    let is_paired_workspace = request.workspace_id.starts_with("daemon:")
+        || matches!(request.startup, Some(TerminalStartup::PairedDaemon { .. }));
     let spawn_result = if is_remote_workspace {
         if request.startup.is_some() {
             return Err(crate::ssh::projects::unsupported());
@@ -611,6 +613,185 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                 Some(TerminalStartup::RemoteSsh { host_store_path }),
             )
             .await?
+    } else if is_paired_workspace {
+        if matches!(request.startup, Some(TerminalStartup::RemoteSsh { .. })) {
+            return Err(crate::ssh::projects::unsupported());
+        }
+
+        let data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| IpcError::internal(e.to_string()))?;
+
+        let (host_id, remote_workspace_id): (String, String) = match &request.startup {
+            Some(TerminalStartup::PairedDaemon { host_id, remote_workspace_id }) => {
+                (host_id.clone(), remote_workspace_id.clone())
+            }
+            _ => {
+                let dir = data_dir.clone();
+                let ws_id = request.workspace_id.clone();
+                let resolved = run_blocking(move || {
+                    Ok::<_, IpcError>(crate::paired_host::projects::resolve_stored_project(&dir, &ws_id))
+                })
+                .await?;
+                match resolved {
+                    Some(stored) => match stored.target {
+                        crate::scoped_contracts::RunTarget::PairedDaemon { host_id } => {
+                            (host_id, stored.remote_workspace_id)
+                        }
+                        _ => (stored.remote_workspace_id.clone(), stored.remote_workspace_id),
+                    },
+                    None => {
+                        return Err(IpcError::new(
+                            crate::ipc::error::IpcErrorCode::WorkspaceNotFound,
+                            "Paired daemon project not found. Re-select or re-pair this project.",
+                        ));
+                    }
+                }
+            }
+        };
+
+        let hosts = daemon_client.paired_host_list().await.map_err(|e| {
+            IpcError::internal(e.message)
+        })?;
+        let host = hosts.into_iter().find(|h| h.host_id == host_id).ok_or_else(|| {
+            IpcError::internal(format!("Paired machine '{host_id}' not found in inventory"))
+        })?;
+        if host.auth_status != crate::paired_host::inventory::AuthStatus::Paired {
+            return Err(IpcError::internal("Machine authorization required for paired host"));
+        }
+
+        let client_request_id = request
+            .client_request_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+        let cwd_relative = match &request.cwd {
+            Some(p) => {
+                let path = std::path::Path::new(p);
+                if path.is_relative()
+                    && !p.to_string_lossy().is_empty()
+                    && path.components().all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir))
+                {
+                    Some(p.to_string_lossy().to_string())
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
+
+        let create_worktree = request.worktree.as_ref().map(|w| {
+            crate::remote::machine_protocol::WorktreeIdentity {
+                ws_id: remote_workspace_id.clone(),
+                slug: w.slug.clone(),
+            }
+        });
+
+        let create_request = crate::remote::machine_protocol::CreateSessionRequest {
+            request_id: client_request_id.clone(),
+            workspace_id: remote_workspace_id.clone(),
+            worktree: create_worktree,
+            cols,
+            rows,
+            inherit_from_session_id: request.inherit_from_session_id.clone(),
+            cwd_relative,
+            startup: crate::remote::machine_protocol::Startup::Shell,
+        };
+
+        let op_resp = daemon_client
+            .paired_host_operation(crate::paired_host::client::OperationRequest {
+                host_id: host_id.clone(),
+                generation: host.generation,
+                operation: crate::paired_host::client::Operation::CreateSession {
+                    request: create_request,
+                },
+            })
+            .await
+            .map_err(|e| IpcError::internal(e.code))?;
+
+        let remote_session = match op_resp.result {
+            crate::paired_host::client::OperationResult::CreateSession(session) => session,
+            other => {
+                return Err(IpcError::internal(format!("Unexpected operation result: {other:?}")));
+            }
+        };
+
+        let descriptor = crate::terminal::paired_daemon::Descriptor {
+            host_id: host_id.clone(),
+            generation: host.generation,
+            target: remote_session.target.clone(),
+            after_sequence: None,
+        };
+
+        let (proxy_session_id, _gen) = match daemon_client
+            .paired_terminal_reattach(descriptor)
+            .await
+        {
+            Ok(result) => result,
+            Err(reattach_error) => {
+                // The remote PTY was already created above; a failed reattach must
+                // not leak an idle shell on the paired machine.
+                let _ = daemon_client
+                    .paired_host_operation(crate::paired_host::client::OperationRequest {
+                        host_id: host_id.clone(),
+                        generation: host.generation,
+                        operation:
+                            crate::paired_host::client::Operation::CloseSession {
+                                session_id: remote_session.target.session_id.clone(),
+                                request:
+                                    crate::remote::machine_protocol::CloseSessionRequest {
+                                        request_id: uuid::Uuid::new_v4().to_string(),
+                                        daemon_epoch: remote_session.target.daemon_epoch.clone(),
+                                    },
+                            },
+                    })
+                    .await;
+                return Err(IpcError::internal(reattach_error.code));
+            }
+        };
+
+        // Durably store project info for future sessions
+        {
+            let dir = data_dir.clone();
+            let p = crate::paired_host::projects::Project {
+                metadata: crate::remote::machine_protocol::Project {
+                    workspace_id: request.workspace_id.clone(),
+                    repo_root: remote_session.cwd.clone(),
+                    git_root: None,
+                    git_common_dir: None,
+                    git_remote: None,
+                    git_branch: None,
+                    git_head: None,
+                    availability: crate::remote::machine_protocol::Availability::Ready,
+                    revision: crate::scoped_contracts::Epoch(1),
+                },
+                remote_workspace_id: remote_workspace_id.clone(),
+                target: crate::scoped_contracts::RunTarget::PairedDaemon {
+                    host_id: host_id.clone(),
+                },
+            };
+            let _ = run_blocking(move || {
+                let _ = crate::paired_host::projects::save_stored_project(&dir, p);
+                Ok::<_, IpcError>(())
+            }).await;
+        }
+
+        crate::daemon::client::DaemonSpawnResult {
+            session_id: proxy_session_id.clone(),
+            epoch: host.generation.0,
+            session: crate::daemon::protocol::DaemonSessionDetails {
+                session_id: proxy_session_id,
+                workspace_id: Some(request.workspace_id.clone()),
+                worktree: request.worktree.clone(),
+                cwd: request.cwd.map(|p| p.to_string_lossy().to_string()).or(Some(remote_session.cwd)),
+                cols,
+                rows,
+                running: true,
+                start_sequence: Some(remote_session.start_sequence.0),
+                end_sequence: Some(remote_session.end_sequence.0),
+            },
+        }
     } else {
         if matches!(request.startup, Some(TerminalStartup::RemoteSsh { .. })) {
             return Err(crate::ssh::projects::unsupported());
@@ -856,6 +1037,17 @@ pub async fn cmd_terminal_attach<R: Runtime>(
 }
 
 #[tauri::command]
+pub async fn cmd_terminal_history_snapshot(
+    daemon_client: State<'_, Arc<DaemonClient>>,
+    session_id: String,
+) -> Result<String, IpcError> {
+    let attachment = daemon_client.attach(&session_id, None).await?;
+    let history = String::from_utf8_lossy(&attachment.history).into_owned();
+    attachment.stream_task.abort();
+    Ok(history)
+}
+
+#[tauri::command]
 pub async fn cmd_terminal_get_cwd(
     daemon_client: State<'_, Arc<DaemonClient>>,
     session_id: String,
@@ -964,6 +1156,10 @@ mod macos_proc {
     }
 }
 
+#[cfg(target_os = "windows")]
+#[path = "windows_process_cwd.rs"]
+mod windows_process_cwd;
+
 pub fn process_cwd(pid: u32) -> Option<PathBuf> {
     #[cfg(target_os = "linux")]
     {
@@ -990,7 +1186,12 @@ pub fn process_cwd(pid: u32) -> Option<PathBuf> {
             .map(PathBuf::from);
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(target_os = "windows")]
+    {
+        windows_process_cwd::process_cwd(pid)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         let _ = pid;
         None
@@ -1072,6 +1273,15 @@ pub async fn cmd_terminal_close(
 ) -> Result<(), IpcError> {
     invalidate_cached_cwd(&session_id);
     daemon_client.close_terminal(&session_id).await
+}
+
+#[tauri::command]
+pub async fn cmd_terminal_hibernate(
+    daemon_client: State<'_, Arc<DaemonClient>>,
+    session_id: String,
+) -> Result<(), IpcError> {
+    invalidate_cached_cwd(&session_id);
+    daemon_client.hibernate_terminal(&session_id).await
 }
 
 #[tauri::command]

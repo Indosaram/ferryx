@@ -136,6 +136,10 @@ export type SpawnTerminalRequest = {
     kind: "agentResume";
     agentType: string;
     providerSession: AgentProviderSession;
+  } | {
+    kind: "pairedDaemon";
+    hostId: string;
+    remoteWorkspaceId: string;
   } | null;
 };
 
@@ -381,7 +385,15 @@ function describeNonSerializablePaths(
 }
 
 function sanitizeSpawnStartup(startup: SpawnTerminalRequest["startup"]): SpawnTerminalRequest["startup"] {
-  if (!startup || startup.kind !== "agentResume") return null;
+  if (!startup) return null;
+  if (startup.kind === "pairedDaemon") {
+    return {
+      kind: "pairedDaemon",
+      hostId: String(startup.hostId ?? ""),
+      remoteWorkspaceId: String(startup.remoteWorkspaceId ?? ""),
+    };
+  }
+  if (startup.kind !== "agentResume") return null;
   const providerSession = startup.providerSession as
     | { key?: unknown; id?: unknown; transcriptPath?: unknown }
     | null
@@ -499,6 +511,11 @@ export async function attachTerminal(
   });
 }
 
+export async function getTerminalHistorySnapshot(sessionId: string): Promise<string> {
+  if (!isTauri()) return "";
+  return invokeCommand<string>("cmd_terminal_history_snapshot", { sessionId });
+}
+
 export async function getTerminalCwd(sessionId: string): Promise<string | null> {
   if (!isTauri()) return null;
   const response = await invokeCommand<{ cwd: string }>("cmd_terminal_get_cwd", { sessionId });
@@ -524,6 +541,12 @@ export async function closeTerminal(sessionId: string) {
   if (!isTauri()) return;
   await invokeCommand<void>("cmd_native_terminal_close", { sessionId }).catch(() => undefined);
   await invokeCommand<void>("cmd_terminal_close", { sessionId });
+}
+
+export async function hibernateTerminal(sessionId: string) {
+  if (!isTauri()) return;
+  await invokeCommand<void>("cmd_native_terminal_close", { sessionId }).catch(() => undefined);
+  await invokeCommand<void>("cmd_terminal_hibernate", { sessionId });
 }
 
 export async function waitForTerminalExit(_sessionId: string, _timeoutMs = 5000) {

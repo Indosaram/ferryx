@@ -8,6 +8,7 @@ pub mod manifest;
 pub mod protocol;
 pub mod proxy;
 pub mod server;
+pub mod session_lifecycle;
 pub mod session_service;
 pub mod workspace_service;
 
@@ -24,3 +25,4 @@ pub use manifest::*;
 pub use protocol::*;
 pub use proxy::*;
 pub use server::*;
+pub use session_lifecycle::*;

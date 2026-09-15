@@ -1,0 +1,55 @@
+[
+  {
+    "test": "Initial Terminal Tab & UI Presence",
+    "pass": true,
+    "details": {
+      "title": "Ferryx",
+      "hasRoot": true,
+      "tabs": [
+        "main"
+      ],
+      "tabCount": 1,
+      "hasTerminal": false
+    }
+  },
+  {
+    "test": "Terminal Keystroke Echo & Execution",
+    "pass": true,
+    "details": {
+      "command": "echo FERRYX_WIN64_VERIFIED_OK"
+    }
+  },
+  {
+    "test": "Terminal Wheel Scrollback (+/-120 delta normalization)",
+    "pass": true
+  },
+  {
+    "test": "New Browser Tab Creation",
+    "pass": true,
+    "details": {
+      "tabs": [
+        "main",
+        "Browser"
+      ],
+      "tabCount": 2,
+      "hasToolbar": true
+    }
+  },
+  {
+    "test": "Browser Toolbar & URL Navigation Bar",
+    "pass": true,
+    "details": {
+      "hasInput": true,
+      "value": "about:blank",
+      "placeholder": "Search or enter URL"
+    }
+  },
+  {
+    "test": "Tab Switching between Terminal and Browser",
+    "pass": true
+  },
+  {
+    "test": "Split Panes (Ctrl+D) & Focused Pane Close (Ctrl+W) with Sibling Survival",
+    "pass": true
+  }
+]

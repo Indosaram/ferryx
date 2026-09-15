@@ -1,0 +1,228 @@
+{
+  "fixtureOnly": true,
+  "checks": [
+    {
+      "vp": 1280,
+      "name": "Default mixed inventory / no old top navigation",
+      "pass": true
+    },
+    {
+      "vp": 1280,
+      "name": "Single Add Machine with plus icon",
+      "pass": true
+    },
+    {
+      "vp": 1280,
+      "name": "Access disclosure opens real access component",
+      "pass": true
+    },
+    {
+      "vp": 1280,
+      "name": "Opening places focus inside modal",
+      "pass": true
+    },
+    {
+      "vp": 1280,
+      "name": "Password selectable in basic form without Advanced",
+      "pass": true
+    },
+    {
+      "vp": 1280,
+      "name": "Password masked and labeled",
+      "pass": true
+    },
+    {
+      "vp": 1280,
+      "name": "Failure: setter before probe, no save",
+      "pass": true,
+      "detail": [
+        "cmd_ssh_set_password",
+        "cmd_ssh_test_connection"
+      ]
+    },
+    {
+      "vp": 1280,
+      "name": "Failure retains fields/password",
+      "pass": true
+    },
+    {
+      "vp": 1280,
+      "name": "Cancel/reopen clears password and form",
+      "pass": true
+    },
+    {
+      "vp": 1280,
+      "name": "Success: setter -> probe -> save",
+      "pass": true,
+      "detail": [
+        "cmd_ssh_set_password",
+        "cmd_ssh_test_connection",
+        "cmd_ssh_update_host"
+      ]
+    },
+    {
+      "vp": 1280,
+      "name": "Secret excluded from probe/save/persisted host",
+      "pass": true
+    },
+    {
+      "vp": 1280,
+      "name": "Success keeps keyboard focus within modal",
+      "pass": true,
+      "detail": {
+        "tag": "BUTTON",
+        "machine": null
+      }
+    },
+    {
+      "vp": 1280,
+      "name": "Existing password machine Edit offers empty reauth field",
+      "pass": true
+    },
+    {
+      "vp": 1280,
+      "name": "Edit reauth setter -> probe -> save, secret excluded",
+      "pass": true,
+      "detail": [
+        "cmd_ssh_set_password",
+        "cmd_ssh_test_connection",
+        "cmd_ssh_update_host"
+      ]
+    },
+    {
+      "vp": 1280,
+      "name": "Tab wraps to first modal control",
+      "pass": true
+    },
+    {
+      "vp": 1280,
+      "name": "Escape closes only child, restores trigger",
+      "pass": true
+    },
+    {
+      "vp": 1280,
+      "name": "No horizontal document overflow",
+      "pass": true
+    },
+    {
+      "vp": 390,
+      "name": "Default mixed inventory / no old top navigation",
+      "pass": true
+    },
+    {
+      "vp": 390,
+      "name": "Single Add Machine with plus icon",
+      "pass": true
+    },
+    {
+      "vp": 390,
+      "name": "Access disclosure opens real access component",
+      "pass": true
+    },
+    {
+      "vp": 390,
+      "name": "Opening places focus inside modal",
+      "pass": true
+    },
+    {
+      "vp": 390,
+      "name": "Password selectable in basic form without Advanced",
+      "pass": true
+    },
+    {
+      "vp": 390,
+      "name": "Password masked and labeled",
+      "pass": true
+    },
+    {
+      "vp": 390,
+      "name": "Failure: setter before probe, no save",
+      "pass": true,
+      "detail": [
+        "cmd_ssh_set_password",
+        "cmd_ssh_test_connection"
+      ]
+    },
+    {
+      "vp": 390,
+      "name": "Failure retains fields/password",
+      "pass": true
+    },
+    {
+      "vp": 390,
+      "name": "Cancel/reopen clears password and form",
+      "pass": true
+    },
+    {
+      "vp": 390,
+      "name": "Success: setter -> probe -> save",
+      "pass": true,
+      "detail": [
+        "cmd_ssh_set_password",
+        "cmd_ssh_test_connection",
+        "cmd_ssh_update_host"
+      ]
+    },
+    {
+      "vp": 390,
+      "name": "Secret excluded from probe/save/persisted host",
+      "pass": true
+    },
+    {
+      "vp": 390,
+      "name": "Success keeps keyboard focus within modal",
+      "pass": true,
+      "detail": {
+        "tag": "BUTTON",
+        "machine": null
+      }
+    },
+    {
+      "vp": 390,
+      "name": "Existing password machine Edit offers empty reauth field",
+      "pass": true
+    },
+    {
+      "vp": 390,
+      "name": "Edit reauth setter -> probe -> save, secret excluded",
+      "pass": true,
+      "detail": [
+        "cmd_ssh_set_password",
+        "cmd_ssh_test_connection",
+        "cmd_ssh_update_host"
+      ]
+    },
+    {
+      "vp": 390,
+      "name": "Tab wraps to first modal control",
+      "pass": true
+    },
+    {
+      "vp": 390,
+      "name": "Escape closes only child, restores trigger",
+      "pass": true
+    },
+    {
+      "vp": 390,
+      "name": "No horizontal document overflow",
+      "pass": true
+    }
+  ],
+  "screenshots": [
+    "/Users/indo/code/project/orca-lite/docs/evidence/remote-password-20260915/screenshots/1280-default.png",
+    "/Users/indo/code/project/orca-lite/docs/evidence/remote-password-20260915/screenshots/1280-access.png",
+    "/Users/indo/code/project/orca-lite/docs/evidence/remote-password-20260915/screenshots/1280-password-basic.png",
+    "/Users/indo/code/project/orca-lite/docs/evidence/remote-password-20260915/screenshots/1280-password-error.png",
+    "/Users/indo/code/project/orca-lite/docs/evidence/remote-password-20260915/screenshots/1280-success.png",
+    "/Users/indo/code/project/orca-lite/docs/evidence/remote-password-20260915/screenshots/1280-edit-reauth.png",
+    "/Users/indo/code/project/orca-lite/docs/evidence/remote-password-20260915/screenshots/1280-final.png",
+    "/Users/indo/code/project/orca-lite/docs/evidence/remote-password-20260915/screenshots/390-default.png",
+    "/Users/indo/code/project/orca-lite/docs/evidence/remote-password-20260915/screenshots/390-access.png",
+    "/Users/indo/code/project/orca-lite/docs/evidence/remote-password-20260915/screenshots/390-password-basic.png",
+    "/Users/indo/code/project/orca-lite/docs/evidence/remote-password-20260915/screenshots/390-password-error.png",
+    "/Users/indo/code/project/orca-lite/docs/evidence/remote-password-20260915/screenshots/390-success.png",
+    "/Users/indo/code/project/orca-lite/docs/evidence/remote-password-20260915/screenshots/390-edit-reauth.png",
+    "/Users/indo/code/project/orca-lite/docs/evidence/remote-password-20260915/screenshots/390-final.png"
+  ],
+  "errors": []
+}

@@ -46,7 +46,7 @@ mod paired_host_compatibility_tests {
             let mut reader = BufReader::new(reader);
             let mut line = String::new(); reader.read_line(&mut line).await.unwrap();
             assert!(matches!(serde_json::from_str::<DaemonRequest>(&line).unwrap(), DaemonRequest::Handshake { .. }));
-            writer.write_all(b"{\"type\":\"handshakeOk\",\"version\":3,\"pid\":1,\"epoch\":1,\"daemonVersion\":\"old\"}\n").await.unwrap();
+            writer.write_all(format!("{{\"type\":\"handshakeOk\",\"version\":{},\"pid\":1,\"epoch\":1,\"daemonVersion\":\"old\"}}\n", DAEMON_PROTOCOL_VERSION).as_bytes()).await.unwrap();
             line.clear(); reader.read_line(&mut line).await.unwrap();
             assert!(matches!(serde_json::from_str::<DaemonRequest>(&line).unwrap(), DaemonRequest::GetCapabilities));
             writer.write_all(b"{\"type\":\"error\",\"message\":\"unknown request\"}\n").await.unwrap();
@@ -138,6 +138,7 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
             | DaemonRequest::Ping
             | DaemonRequest::MachineSessionDetail { .. }
             | DaemonRequest::Spawn { .. }
+            | DaemonRequest::Hibernate { .. }
             | DaemonRequest::ListSessions
             | DaemonRequest::DescribeSession { .. }
             | DaemonRequest::DiscoverAgentSession { .. }
@@ -170,6 +171,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::Resize { .. } => "resize",
         DaemonRequest::Signal { .. } => "signal",
         DaemonRequest::Close { .. } => "close",
+        DaemonRequest::Hibernate { .. } => "hibernate",
         DaemonRequest::ListSessions => "listSessions",
         DaemonRequest::DescribeSession { .. } => "describeSession",
         DaemonRequest::DiscoverAgentSession { .. } => "discoverAgentSession",
@@ -1517,6 +1519,25 @@ impl DaemonClient {
 
         match resp {
             DaemonResponse::CloseOk => Ok(()),
+            DaemonResponse::Error { message } => {
+                Err(IpcError::new(IpcErrorCode::InternalError, message))
+            }
+            _ => Err(IpcError::new(
+                IpcErrorCode::InternalError,
+                "Unexpected daemon response",
+            )),
+        }
+    }
+
+    pub async fn hibernate_terminal(&self, session_id: &str) -> Result<(), IpcError> {
+        let resp = self
+            .send_request(DaemonRequest::Hibernate {
+                session_id: session_id.to_string(),
+            })
+            .await?;
+
+        match resp {
+            DaemonResponse::HibernateOk => Ok(()),
             DaemonResponse::Error { message } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }

@@ -2463,6 +2463,7 @@ async fn get_capabilities(
             let mut capabilities = vec!["directoryBrowseV1", "machineWorkspaceV1", "managedWorktreesV1"];
             if state.machine_services.as_ref().is_some_and(|services| services.workspaces.catalog().is_ok() && services.workspaces.journal.session_revision().is_ok()) {
                 capabilities.push("terminalCreateV1");
+                capabilities.push("terminalStreamV1");
             }
             capabilities
         } else { vec![] },

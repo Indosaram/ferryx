@@ -1,0 +1,1386 @@
+{
+  "phase": "post-fix",
+  "browser": "Bun.WebView headless Chrome (default WebKit lacks TouchEvent)",
+  "bun": "1.4.0",
+  "results": [
+    {
+      "name": "360: list horizontal containment",
+      "pass": true,
+      "detail": {
+        "viewport": 360,
+        "documentWidth": 360,
+        "dialogWidth": 342,
+        "dialogScroll": 342,
+        "listWidth": 342,
+        "listScrollWidth": 342,
+        "horizontalScroll": 0,
+        "verticalScroll": 150,
+        "listHeight": 384,
+        "listScrollHeight": 1380
+      }
+    },
+    {
+      "name": "360: list vertical scroll",
+      "pass": true,
+      "detail": {
+        "viewport": 360,
+        "documentWidth": 360,
+        "dialogWidth": 342,
+        "dialogScroll": 342,
+        "listWidth": 342,
+        "listScrollWidth": 342,
+        "horizontalScroll": 0,
+        "verticalScroll": 150,
+        "listHeight": 384,
+        "listScrollHeight": 1380
+      }
+    },
+    {
+      "name": "360: touch scroll does not focus sink",
+      "pass": true,
+      "detail": {
+        "focused": false,
+        "focusEvents": [],
+        "scroll": {
+          "target": "/api/v1/terminal/pty-original",
+          "type": "scroll",
+          "rows": 9
+        }
+      }
+    },
+    {
+      "name": "360: real pointer click focuses sink",
+      "pass": true,
+      "detail": "<textarea data-testid=\"remote-terminal-input-sink\" aria-label=\"Remote terminal input\" autocapitalize=\"none\" autocomplete=\"off\" autocorrect=\"off\" spellcheck=\"false\" class=\"pointer-e"
+    },
+    {
+      "name": "360: trusted touch tap focuses sink",
+      "pass": true,
+      "detail": "[true]"
+    },
+    {
+      "name": "360: focus survives grid update",
+      "pass": true,
+      "detail": {}
+    },
+    {
+      "name": "360: focus survives viewport resize",
+      "pass": true,
+      "detail": {}
+    },
+    {
+      "name": "360: Hangul trailing input commits once",
+      "pass": true,
+      "detail": [
+        "한",
+        "!"
+      ]
+    },
+    {
+      "name": "360: Hangul input-before-end",
+      "pass": true,
+      "detail": "한#"
+    },
+    {
+      "name": "360: Hangul cancel",
+      "pass": true,
+      "detail": "#"
+    },
+    {
+      "name": "360: Hangul blur",
+      "pass": true,
+      "detail": "#"
+    },
+    {
+      "name": "360: new terminal action exists",
+      "pass": true,
+      "detail": "New terminal tab"
+    },
+    {
+      "name": "360: new tab target and resulting terminal",
+      "pass": true,
+      "detail": {
+        "method": "POST",
+        "path": "/api/v1/workspace/select",
+        "body": {
+          "workspaceId": "qa-project-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-",
+          "worktreeSlug": "feature-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-",
+          "createTerminal": true
+        },
+        "authorization": "Bearer qa-isolated-device"
+      }
+    },
+    {
+      "name": "360: controls not cropped",
+      "pass": true,
+      "detail": [
+        {
+          "label": "Change workspace context",
+          "left": 6,
+          "right": 165.40625,
+          "top": 3.5,
+          "bottom": 23.5,
+          "width": 159.40625
+        },
+        {
+          "label": "Switch host",
+          "left": 218.125,
+          "right": 273.9375,
+          "top": 3.5,
+          "bottom": 23.5,
+          "width": 55.8125
+        },
+        {
+          "label": "Disconnect",
+          "left": 279.9375,
+          "right": 350,
+          "top": 3.5,
+          "bottom": 23.5,
+          "width": 70.0625
+        },
+        {
+          "label": "Previous terminal tab",
+          "left": 6,
+          "right": 34,
+          "top": 30,
+          "bottom": 58,
+          "width": 28
+        },
+        {
+          "label": "Next terminal tab",
+          "left": 79.125,
+          "right": 107.125,
+          "top": 30,
+          "bottom": 58,
+          "width": 28
+        },
+        {
+          "label": "New terminal tab",
+          "left": 326,
+          "right": 354,
+          "top": 30,
+          "bottom": 58,
+          "width": 28
+        }
+      ]
+    },
+    {
+      "name": "360: zero-terminal context creates selected terminal",
+      "pass": true,
+      "detail": {
+        "method": "POST",
+        "path": "/api/v1/workspace/select",
+        "body": {
+          "workspaceId": "qa-project-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-",
+          "worktreeSlug": "feature-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-",
+          "createTerminal": true
+        },
+        "authorization": "Bearer qa-isolated-device"
+      }
+    },
+    {
+      "name": "390: list horizontal containment",
+      "pass": true,
+      "detail": {
+        "viewport": 390,
+        "documentWidth": 390,
+        "dialogWidth": 372,
+        "dialogScroll": 372,
+        "listWidth": 372,
+        "listScrollWidth": 372,
+        "horizontalScroll": 0,
+        "verticalScroll": 150,
+        "listHeight": 384,
+        "listScrollHeight": 1380
+      }
+    },
+    {
+      "name": "390: list vertical scroll",
+      "pass": true,
+      "detail": {
+        "viewport": 390,
+        "documentWidth": 390,
+        "dialogWidth": 372,
+        "dialogScroll": 372,
+        "listWidth": 372,
+        "listScrollWidth": 372,
+        "horizontalScroll": 0,
+        "verticalScroll": 150,
+        "listHeight": 384,
+        "listScrollHeight": 1380
+      }
+    },
+    {
+      "name": "390: touch scroll does not focus sink",
+      "pass": true,
+      "detail": {
+        "focused": false,
+        "focusEvents": [],
+        "scroll": {
+          "target": "/api/v1/terminal/pty-original",
+          "type": "scroll",
+          "rows": 9
+        }
+      }
+    },
+    {
+      "name": "390: real pointer click focuses sink",
+      "pass": true,
+      "detail": "<textarea data-testid=\"remote-terminal-input-sink\" aria-label=\"Remote terminal input\" autocapitalize=\"none\" autocomplete=\"off\" autocorrect=\"off\" spellcheck=\"false\" class=\"pointer-e"
+    },
+    {
+      "name": "390: trusted touch tap focuses sink",
+      "pass": true,
+      "detail": "[true]"
+    },
+    {
+      "name": "390: focus survives grid update",
+      "pass": true,
+      "detail": {}
+    },
+    {
+      "name": "390: focus survives viewport resize",
+      "pass": true,
+      "detail": {}
+    },
+    {
+      "name": "390: Hangul trailing input commits once",
+      "pass": true,
+      "detail": [
+        "한",
+        "!"
+      ]
+    },
+    {
+      "name": "390: Hangul input-before-end",
+      "pass": true,
+      "detail": "한#"
+    },
+    {
+      "name": "390: Hangul cancel",
+      "pass": true,
+      "detail": "#"
+    },
+    {
+      "name": "390: Hangul blur",
+      "pass": true,
+      "detail": "#"
+    },
+    {
+      "name": "390: new terminal action exists",
+      "pass": true,
+      "detail": "New terminal tab"
+    },
+    {
+      "name": "390: new tab target and resulting terminal",
+      "pass": true,
+      "detail": {
+        "method": "POST",
+        "path": "/api/v1/workspace/select",
+        "body": {
+          "workspaceId": "qa-project-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-",
+          "worktreeSlug": "feature-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-",
+          "createTerminal": true
+        },
+        "authorization": "Bearer qa-isolated-device"
+      }
+    },
+    {
+      "name": "390: controls not cropped",
+      "pass": true,
+      "detail": [
+        {
+          "label": "Change workspace context",
+          "left": 6,
+          "right": 195.40625,
+          "top": 3.5,
+          "bottom": 23.5,
+          "width": 189.40625
+        },
+        {
+          "label": "Switch host",
+          "left": 248.125,
+          "right": 303.9375,
+          "top": 3.5,
+          "bottom": 23.5,
+          "width": 55.8125
+        },
+        {
+          "label": "Disconnect",
+          "left": 309.9375,
+          "right": 380,
+          "top": 3.5,
+          "bottom": 23.5,
+          "width": 70.0625
+        },
+        {
+          "label": "Previous terminal tab",
+          "left": 6,
+          "right": 34,
+          "top": 30,
+          "bottom": 58,
+          "width": 28
+        },
+        {
+          "label": "Next terminal tab",
+          "left": 79.125,
+          "right": 107.125,
+          "top": 30,
+          "bottom": 58,
+          "width": 28
+        },
+        {
+          "label": "New terminal tab",
+          "left": 356,
+          "right": 384,
+          "top": 30,
+          "bottom": 58,
+          "width": 28
+        }
+      ]
+    },
+    {
+      "name": "390: zero-terminal context creates selected terminal",
+      "pass": true,
+      "detail": {
+        "method": "POST",
+        "path": "/api/v1/workspace/select",
+        "body": {
+          "workspaceId": "qa-project-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-",
+          "worktreeSlug": "feature-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-",
+          "createTerminal": true
+        },
+        "authorization": "Bearer qa-isolated-device"
+      }
+    },
+    {
+      "name": "768: list horizontal containment",
+      "pass": true,
+      "detail": {
+        "viewport": 768,
+        "documentWidth": 768,
+        "dialogWidth": 750,
+        "dialogScroll": 750,
+        "listWidth": 739,
+        "listScrollWidth": 739,
+        "horizontalScroll": 0,
+        "verticalScroll": 150,
+        "listHeight": 384,
+        "listScrollHeight": 1380
+      }
+    },
+    {
+      "name": "768: list vertical scroll",
+      "pass": true,
+      "detail": {
+        "viewport": 768,
+        "documentWidth": 768,
+        "dialogWidth": 750,
+        "dialogScroll": 750,
+        "listWidth": 739,
+        "listScrollWidth": 739,
+        "horizontalScroll": 0,
+        "verticalScroll": 150,
+        "listHeight": 384,
+        "listScrollHeight": 1380
+      }
+    },
+    {
+      "name": "768: touch scroll does not focus sink",
+      "pass": true,
+      "detail": {
+        "focused": false,
+        "focusEvents": [],
+        "scroll": {
+          "target": "/api/v1/terminal/pty-original",
+          "type": "scroll",
+          "rows": 9
+        }
+      }
+    },
+    {
+      "name": "768: real pointer click focuses sink",
+      "pass": true,
+      "detail": "<textarea data-testid=\"remote-terminal-input-sink\" aria-label=\"Remote terminal input\" autocapitalize=\"none\" autocomplete=\"off\" autocorrect=\"off\" spellcheck=\"false\" class=\"pointer-e"
+    },
+    {
+      "name": "768: trusted touch tap focuses sink",
+      "pass": true,
+      "detail": "[true]"
+    },
+    {
+      "name": "768: focus survives grid update",
+      "pass": true,
+      "detail": {}
+    },
+    {
+      "name": "768: focus survives viewport resize",
+      "pass": true,
+      "detail": {}
+    },
+    {
+      "name": "768: Hangul trailing input commits once",
+      "pass": true,
+      "detail": [
+        "한",
+        "!"
+      ]
+    },
+    {
+      "name": "768: Hangul input-before-end",
+      "pass": true,
+      "detail": "한#"
+    },
+    {
+      "name": "768: Hangul cancel",
+      "pass": true,
+      "detail": "#"
+    },
+    {
+      "name": "768: Hangul blur",
+      "pass": true,
+      "detail": "#"
+    },
+    {
+      "name": "768: new terminal action exists",
+      "pass": true,
+      "detail": "New terminal tab"
+    },
+    {
+      "name": "768: new tab target and resulting terminal",
+      "pass": true,
+      "detail": {
+        "method": "POST",
+        "path": "/api/v1/workspace/select",
+        "body": {
+          "workspaceId": "qa-project-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-",
+          "worktreeSlug": "feature-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-",
+          "createTerminal": true
+        },
+        "authorization": "Bearer qa-isolated-device"
+      }
+    },
+    {
+      "name": "768: controls not cropped",
+      "pass": true,
+      "detail": [
+        {
+          "label": "Change workspace context",
+          "left": 6,
+          "right": 535.453125,
+          "top": 3.5,
+          "bottom": 23.5,
+          "width": 529.453125
+        },
+        {
+          "label": "Switch host",
+          "left": 626.125,
+          "right": 681.9375,
+          "top": 3.5,
+          "bottom": 23.5,
+          "width": 55.8125
+        },
+        {
+          "label": "Disconnect",
+          "left": 687.9375,
+          "right": 758,
+          "top": 3.5,
+          "bottom": 23.5,
+          "width": 70.0625
+        },
+        {
+          "label": "Previous terminal tab",
+          "left": 6,
+          "right": 34,
+          "top": 30,
+          "bottom": 58,
+          "width": 28
+        },
+        {
+          "label": "Next terminal tab",
+          "left": 79.125,
+          "right": 107.125,
+          "top": 30,
+          "bottom": 58,
+          "width": 28
+        },
+        {
+          "label": "New terminal tab",
+          "left": 734,
+          "right": 762,
+          "top": 30,
+          "bottom": 58,
+          "width": 28
+        }
+      ]
+    },
+    {
+      "name": "768: zero-terminal context creates selected terminal",
+      "pass": true,
+      "detail": {
+        "method": "POST",
+        "path": "/api/v1/workspace/select",
+        "body": {
+          "workspaceId": "qa-project-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-",
+          "worktreeSlug": "feature-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-",
+          "createTerminal": true
+        },
+        "authorization": "Bearer qa-isolated-device"
+      }
+    },
+    {
+      "name": "1280: list horizontal containment",
+      "pass": true,
+      "detail": {
+        "viewport": 1280,
+        "documentWidth": 1280,
+        "dialogWidth": 1262,
+        "dialogScroll": 1262,
+        "listWidth": 1251,
+        "listScrollWidth": 1251,
+        "horizontalScroll": 0,
+        "verticalScroll": 150,
+        "listHeight": 384,
+        "listScrollHeight": 1380
+      }
+    },
+    {
+      "name": "1280: list vertical scroll",
+      "pass": true,
+      "detail": {
+        "viewport": 1280,
+        "documentWidth": 1280,
+        "dialogWidth": 1262,
+        "dialogScroll": 1262,
+        "listWidth": 1251,
+        "listScrollWidth": 1251,
+        "horizontalScroll": 0,
+        "verticalScroll": 150,
+        "listHeight": 384,
+        "listScrollHeight": 1380
+      }
+    },
+    {
+      "name": "1280: touch scroll does not focus sink",
+      "pass": true,
+      "detail": {
+        "focused": false,
+        "focusEvents": [],
+        "scroll": {
+          "target": "/api/v1/terminal/pty-original",
+          "type": "scroll",
+          "rows": 9
+        }
+      }
+    },
+    {
+      "name": "1280: real pointer click focuses sink",
+      "pass": true,
+      "detail": "<textarea data-testid=\"remote-terminal-input-sink\" aria-label=\"Remote terminal input\" autocapitalize=\"none\" autocomplete=\"off\" autocorrect=\"off\" spellcheck=\"false\" class=\"pointer-e"
+    },
+    {
+      "name": "1280: trusted touch tap focuses sink",
+      "pass": true,
+      "detail": "[true]"
+    },
+    {
+      "name": "1280: focus survives grid update",
+      "pass": true,
+      "detail": {}
+    },
+    {
+      "name": "1280: focus survives viewport resize",
+      "pass": true,
+      "detail": {}
+    },
+    {
+      "name": "1280: Hangul trailing input commits once",
+      "pass": true,
+      "detail": [
+        "한",
+        "!"
+      ]
+    },
+    {
+      "name": "1280: Hangul input-before-end",
+      "pass": true,
+      "detail": "한#"
+    },
+    {
+      "name": "1280: Hangul cancel",
+      "pass": true,
+      "detail": "#"
+    },
+    {
+      "name": "1280: Hangul blur",
+      "pass": true,
+      "detail": "#"
+    },
+    {
+      "name": "1280: new terminal action exists",
+      "pass": true,
+      "detail": "New terminal tab"
+    },
+    {
+      "name": "1280: new tab target and resulting terminal",
+      "pass": true,
+      "detail": {
+        "method": "POST",
+        "path": "/api/v1/workspace/select",
+        "body": {
+          "workspaceId": "qa-project-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-",
+          "worktreeSlug": "feature-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-",
+          "createTerminal": true
+        },
+        "authorization": "Bearer qa-isolated-device"
+      }
+    },
+    {
+      "name": "1280: controls not cropped",
+      "pass": true,
+      "detail": [
+        {
+          "label": "Change workspace context",
+          "left": 6,
+          "right": 1047.453125,
+          "top": 3.5,
+          "bottom": 23.5,
+          "width": 1041.453125
+        },
+        {
+          "label": "Switch host",
+          "left": 1138.125,
+          "right": 1193.9375,
+          "top": 3.5,
+          "bottom": 23.5,
+          "width": 55.8125
+        },
+        {
+          "label": "Disconnect",
+          "left": 1199.9375,
+          "right": 1270,
+          "top": 3.5,
+          "bottom": 23.5,
+          "width": 70.0625
+        },
+        {
+          "label": "Previous terminal tab",
+          "left": 6,
+          "right": 34,
+          "top": 30,
+          "bottom": 58,
+          "width": 28
+        },
+        {
+          "label": "Next terminal tab",
+          "left": 79.125,
+          "right": 107.125,
+          "top": 30,
+          "bottom": 58,
+          "width": 28
+        },
+        {
+          "label": "New terminal tab",
+          "left": 1246,
+          "right": 1274,
+          "top": 30,
+          "bottom": 58,
+          "width": 28
+        }
+      ]
+    },
+    {
+      "name": "1280: zero-terminal context creates selected terminal",
+      "pass": true,
+      "detail": {
+        "method": "POST",
+        "path": "/api/v1/workspace/select",
+        "body": {
+          "workspaceId": "qa-project-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-",
+          "worktreeSlug": "feature-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-",
+          "createTerminal": true
+        },
+        "authorization": "Bearer qa-isolated-device"
+      }
+    }
+  ],
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/api/v1/workspace/state",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/socket-ticket",
+      "body": {
+        "target": "/api/v1/events"
+      },
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/socket-ticket",
+      "body": {
+        "target": "/api/v1/terminal/pty-original"
+      },
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspace/state",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/workspace/select",
+      "body": {
+        "workspaceId": "qa-project-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-",
+        "worktreeSlug": "feature-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-",
+        "createTerminal": true
+      },
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspace/state",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/socket-ticket",
+      "body": {
+        "target": "/api/v1/terminal/pty-created"
+      },
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspace/state",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/socket-ticket",
+      "body": {
+        "target": "/api/v1/events"
+      },
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspace/state",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/workspace/select",
+      "body": {
+        "workspaceId": "qa-project-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-",
+        "worktreeSlug": "feature-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-",
+        "createTerminal": true
+      },
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspace/state",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/terminal/preferences",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/terminal/preferences",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/socket-ticket",
+      "body": {
+        "target": "/api/v1/terminal/pty-created"
+      },
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspace/state",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/socket-ticket",
+      "body": {
+        "target": "/api/v1/events"
+      },
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/terminal/preferences",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/terminal/preferences",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/socket-ticket",
+      "body": {
+        "target": "/api/v1/terminal/pty-original"
+      },
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspace/state",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/workspace/select",
+      "body": {
+        "workspaceId": "qa-project-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-",
+        "worktreeSlug": "feature-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-",
+        "createTerminal": true
+      },
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspace/state",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/terminal/preferences",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/socket-ticket",
+      "body": {
+        "target": "/api/v1/terminal/pty-created"
+      },
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspace/state",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/socket-ticket",
+      "body": {
+        "target": "/api/v1/events"
+      },
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspace/state",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/workspace/select",
+      "body": {
+        "workspaceId": "qa-project-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-",
+        "worktreeSlug": "feature-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-",
+        "createTerminal": true
+      },
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspace/state",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/terminal/preferences",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/socket-ticket",
+      "body": {
+        "target": "/api/v1/terminal/pty-created"
+      },
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/terminal/preferences",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspace/state",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/socket-ticket",
+      "body": {
+        "target": "/api/v1/events"
+      },
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/terminal/preferences",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/terminal/preferences",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/socket-ticket",
+      "body": {
+        "target": "/api/v1/terminal/pty-original"
+      },
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspace/state",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/workspace/select",
+      "body": {
+        "workspaceId": "qa-project-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-",
+        "worktreeSlug": "feature-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-",
+        "createTerminal": true
+      },
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspace/state",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/terminal/preferences",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/socket-ticket",
+      "body": {
+        "target": "/api/v1/terminal/pty-created"
+      },
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspace/state",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/socket-ticket",
+      "body": {
+        "target": "/api/v1/events"
+      },
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspace/state",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/workspace/select",
+      "body": {
+        "workspaceId": "qa-project-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-",
+        "worktreeSlug": "feature-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-",
+        "createTerminal": true
+      },
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspace/state",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/terminal/preferences",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/terminal/preferences",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/socket-ticket",
+      "body": {
+        "target": "/api/v1/terminal/pty-created"
+      },
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspace/state",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/socket-ticket",
+      "body": {
+        "target": "/api/v1/events"
+      },
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/terminal/preferences",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/terminal/preferences",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/socket-ticket",
+      "body": {
+        "target": "/api/v1/terminal/pty-original"
+      },
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspace/state",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/workspace/select",
+      "body": {
+        "workspaceId": "qa-project-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-",
+        "worktreeSlug": "feature-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-",
+        "createTerminal": true
+      },
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspace/state",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/terminal/preferences",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/socket-ticket",
+      "body": {
+        "target": "/api/v1/terminal/pty-created"
+      },
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspace/state",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/socket-ticket",
+      "body": {
+        "target": "/api/v1/events"
+      },
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspace/state",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/workspace/select",
+      "body": {
+        "workspaceId": "qa-project-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-very-long-project-name-",
+        "worktreeSlug": "feature-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-long-unbroken-worktree-label-",
+        "createTerminal": true
+      },
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspace/state",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/terminal/preferences",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/terminal/preferences",
+      "body": null,
+      "authorization": "Bearer qa-isolated-device"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/socket-ticket",
+      "body": {
+        "target": "/api/v1/terminal/pty-created"
+      },
+      "authorization": "Bearer qa-isolated-device"
+    }
+  ],
+  "messages": [
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "scroll",
+      "rows": 9
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "resize",
+      "cols": 46,
+      "rows": 37
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "resize",
+      "cols": 46,
+      "rows": 50
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "input",
+      "text": "한"
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "input",
+      "text": "!"
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "input",
+      "text": "한"
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "input",
+      "text": "#"
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "input",
+      "text": "#"
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "input",
+      "text": "#"
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "scroll",
+      "rows": 9
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "resize",
+      "cols": 49,
+      "rows": 37
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "resize",
+      "cols": 49,
+      "rows": 50
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "input",
+      "text": "한"
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "input",
+      "text": "!"
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "input",
+      "text": "한"
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "input",
+      "text": "#"
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "input",
+      "text": "#"
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "input",
+      "text": "#"
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "scroll",
+      "rows": 9
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "resize",
+      "cols": 98,
+      "rows": 37
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "resize",
+      "cols": 98,
+      "rows": 50
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "input",
+      "text": "한"
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "input",
+      "text": "!"
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "input",
+      "text": "한"
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "input",
+      "text": "#"
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "input",
+      "text": "#"
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "input",
+      "text": "#"
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "scroll",
+      "rows": 9
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "resize",
+      "cols": 163,
+      "rows": 37
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "resize",
+      "cols": 163,
+      "rows": 50
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "input",
+      "text": "한"
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "input",
+      "text": "!"
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "input",
+      "text": "한"
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "input",
+      "text": "#"
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "input",
+      "text": "#"
+    },
+    {
+      "target": "/api/v1/terminal/pty-original",
+      "type": "input",
+      "text": "#"
+    }
+  ],
+  "limits": "Browser integration with real remote components and mocked HTTP/WebSocket boundary; synthetic touch/composition events are not native phone IME, keyboard or live PTY verification."
+}

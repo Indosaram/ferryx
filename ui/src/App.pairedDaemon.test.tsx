@@ -134,7 +134,7 @@ describe("App paired desktop shell", () => {
     // On the broken App call site this renders PAIRED_OWNER_REQUIRED instead.
     expect(deletion.createPairedWorktreeActions).toHaveBeenCalledWith(paired);
     expect(deletion.previewDelete).toHaveBeenCalledWith(pairedWorktree);
-    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Delete worktree and branch" })); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Delete remote worktree" })); });
     expect(deletion.deleteSafe).toHaveBeenCalledWith(pairedWorktree);
     expect(screen.queryByRole("dialog", { name: "Delete worktree" })).not.toBeInTheDocument();
     expect(deletion.previewWorktreeDelete).not.toHaveBeenCalled();

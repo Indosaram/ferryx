@@ -1,0 +1,22 @@
+157 |       }
+158 |       const controls = JSON.parse(await evaluate(view, `JSON.stringify(Array.from(document.querySelectorAll('header button,[aria-label="New terminal tab"],[aria-label="Previous terminal tab"],[aria-label="Next terminal tab"]')).map(el=>{const r=el.getBoundingClientRect(); return {label:el.getAttribute('aria-label')||el.textContent,left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width};}))`));
+159 |       check(`${width}: controls not cropped`, controls.every((r) => r.left >= 0 && r.right <= width && r.top >= 0 && r.bottom <= 780 && r.width > 0), controls);
+160 |       await Bun.write(`${out}/${width}-controls.png`, Buffer.from((await view.cdp("Page.captureScreenshot", { format: "png", clip: { x: 0, y: 0, width, height: 110, scale: 1 } })).data, "base64"));
+161 |     } finally {
+162 |       view.close();
+                 ^
+error: WebView closed
+      at /Users/indo/code/project/orca-lite/docs/evidence/mobile-remote-20260913/qa.mjs:162:12
+147 |       }
+148 |       const newButton = await evaluate(view, "Array.from(document.querySelectorAll('button')).find(b=>/new terminal|new tab|add terminal/i.test(b.getAttribute('aria-label')||b.textContent))?.getAttribute('aria-label')??null");
+149 |       check(`${width}: new terminal action exists`, !!newButton, newButton);
+150 |       if (phase === "post-fix" && newButton) {
+151 |         const createdRequest = signal("request", (item) => item.body?.createTerminal === !0), createdGrid = evaluate(view, `qaWait('[data-grid-line="0"]','pty-created')`);
+152 |         await evaluate(view, `document.querySelector('[aria-label="New terminal tab"]').click()`);
+                    ^
+error: Invalid state: an evaluate() is already pending
+ code: "ERR_INVALID_STATE"
+
+      at /Users/indo/code/project/orca-lite/docs/evidence/mobile-remote-20260913/qa.mjs:152:15
+
+Bun v1.4.0 (macOS arm64)

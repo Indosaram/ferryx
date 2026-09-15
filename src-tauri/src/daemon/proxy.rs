@@ -653,6 +653,7 @@ impl SessionRouter {
         .await
         .map_err(|error| error.to_string())?;
 
+        let mut unreachable_routes: Vec<PathBuf> = Vec::new();
         for route in manifest.routes {
             if self
                 .legacy_peers
@@ -666,8 +667,35 @@ impl SessionRouter {
                 route.legacy_socket_path.clone(),
                 route.sessions.clone(),
             ));
-            peer.list_sessions().await?;
-            self.legacy_peers.write().push(peer);
+            match peer.list_sessions().await {
+                Ok(_) => {
+                    self.legacy_peers.write().push(peer);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        legacy_socket = %route.legacy_socket_path.display(),
+                        "Dropping unreachable legacy daemon route during handover adoption: {error}"
+                    );
+                    unreachable_routes.push(route.legacy_socket_path);
+                }
+            }
+        }
+
+        if !unreachable_routes.is_empty() {
+            let manifest_path = get_manifest_path();
+            let _ = crate::ipc::run_blocking(move || {
+                HandoverManifest::update_at_path(&manifest_path, |manifest| {
+                    for path in &unreachable_routes {
+                        manifest.remove_route(path);
+                    }
+                })
+                .map_err(|error| {
+                    crate::ipc::IpcError::internal(format!(
+                        "Failed to prune stale handover routes: {error}"
+                    ))
+                })
+            })
+            .await;
         }
         Ok(())
     }

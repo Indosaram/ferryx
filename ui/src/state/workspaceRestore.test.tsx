@@ -725,7 +725,7 @@ describe("workspaceRestore coordinator", () => {
     const restored = restoreWorkspace.mock.calls[0][0] as WorkspaceState;
     expect(restored.sessions["sess-1"]).toMatchObject({
       id: "sess-1",
-      backendSessionId: null,
+      backendSessionId: "standby:sess-1",
       lifecycle: "exited",
       daemonEpoch: null,
       lastOutputSequence: null,

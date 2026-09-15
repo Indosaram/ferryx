@@ -106,6 +106,9 @@ pub async fn cmd_worktree_list<R: Runtime>(
             .collect();
         return Ok(worktrees);
     }
+    if workspace_id.starts_with("daemon:") {
+        return Ok(Vec::new());
+    }
 
     let registry = (*registry).clone();
     run_blocking(move || {

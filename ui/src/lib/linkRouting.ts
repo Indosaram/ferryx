@@ -187,7 +187,7 @@ export function resolveTokenAtCol(line: string, col: number): TerminalToken | nu
     }
     const start = urlMatch.index;
     const end = start + url.length;
-    if (targetCharIndex >= start && targetCharIndex <= end) {
+    if (targetCharIndex >= start && targetCharIndex < end) {
       return { type: "url", target: url };
     }
   }
@@ -200,7 +200,7 @@ export function resolveTokenAtCol(line: string, col: number): TerminalToken | nu
     const content = quotedMatch[1];
     const start = quotedMatch.index;
     const end = start + full.length;
-    if (targetCharIndex >= start && targetCharIndex <= end) {
+    if (targetCharIndex >= start && targetCharIndex < end) {
       const quoteChar = full[0];
       const lastQuote = full.lastIndexOf(quoteChar);
       const suffix = full.slice(lastQuote + 1);
@@ -216,7 +216,7 @@ export function resolveTokenAtCol(line: string, col: number): TerminalToken | nu
     const content = parenMatch[1].trim();
     const start = parenMatch.index + 1;
     const end = start + content.length;
-    if (targetCharIndex >= start && targetCharIndex <= end) {
+    if (targetCharIndex >= start && targetCharIndex < end) {
       const candidate = parseFilePathCandidate(content);
       if (candidate) return candidate;
     }
@@ -224,13 +224,13 @@ export function resolveTokenAtCol(line: string, col: number): TerminalToken | nu
 
   // 4. Check unquoted paths with slashes (supports apostrophes and escaped spaces)
   const PATH_PATTERN =
-    /(?:[a-zA-Z]:[\\/]|~[\\/]|\.\.?[\\/]|\/|[a-zA-Z0-9_-]+[\\/])(?:[\w.'-]|\\ |[\\/])+[\w.-]+(?::\d+(?::\d+)?)?/g;
+    /(?:[a-zA-Z]:[\\/]|\\\\|~[\\/]|\.\.?[\\/]|\/|[\p{L}\p{N}_-]+[\\/])(?:[\p{L}\p{N}\p{M}_.'-]|\\ |[\\/])+[\p{L}\p{N}\p{M}_.-]+(?::\d+(?::\d+)?)?/gu;
   let pathMatch: RegExpExecArray | null;
   while ((pathMatch = PATH_PATTERN.exec(line)) !== null) {
     const full = pathMatch[0];
     const start = pathMatch.index;
     const end = start + full.length;
-    if (targetCharIndex >= start && targetCharIndex <= end) {
+    if (targetCharIndex >= start && targetCharIndex < end) {
       const unescaped = full.replace(/\\ /g, " ");
       const candidate = parseFilePathCandidate(unescaped);
       if (candidate) return candidate;
@@ -238,13 +238,13 @@ export function resolveTokenAtCol(line: string, col: number): TerminalToken | nu
   }
 
   // 5. Fallback: single file names with known extensions (e.g. package.json:12)
-  const SINGLE_FILE_PATTERN = /\b[\w.'-]+\.[a-zA-Z0-9_-]+(?::\d+(?::\d+)?)?\b/g;
+  const SINGLE_FILE_PATTERN = /[\p{L}\p{N}\p{M}_.'-]+\.[a-zA-Z0-9_-]+(?::\d+(?::\d+)?)?/gu;
   let fileMatch: RegExpExecArray | null;
   while ((fileMatch = SINGLE_FILE_PATTERN.exec(line)) !== null) {
     const full = fileMatch[0];
     const start = fileMatch.index;
     const end = start + full.length;
-    if (targetCharIndex >= start && targetCharIndex <= end) {
+    if (targetCharIndex >= start && targetCharIndex < end) {
       const candidate = parseFilePathCandidate(full);
       if (candidate) return candidate;
     }
@@ -256,6 +256,8 @@ export function resolveTokenAtCol(line: string, col: number): TerminalToken | nu
 export type OpenTerminalTokenOptions = {
   shiftKey?: boolean;
   cwd?: string;
+  sessionId?: string;
+  editor?: "system" | "vscode" | "cursor" | "zed";
 };
 
 /**
@@ -276,17 +278,14 @@ export async function openTerminalToken(
     if (!isTauri()) {
       return false;
     }
-    try {
-      return await invoke<boolean>("cmd_open_file_path", {
+    return invoke<boolean>("cmd_open_file_path", {
         path: token.path,
         cwd: options.cwd,
+        sessionId: options.sessionId,
+        editor: options.editor,
         line: token.line,
         col: token.col,
       });
-    } catch (error) {
-      console.error("Failed to open file path from terminal:", error);
-      return false;
-    }
   }
 
   return false;

@@ -431,7 +431,7 @@ async fn directory_http_fixture(inject_send_failure: bool) {
             serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
         assert_eq!(
             capabilities["capabilities"],
-            serde_json::json!(["directoryBrowseV1", "machineWorkspaceV1", "managedWorktreesV1", "terminalCreateV1"])
+            serde_json::json!(["directoryBrowseV1", "machineWorkspaceV1", "managedWorktreesV1", "terminalCreateV1", "terminalStreamV1"])
         );
         // Subscribe before triggering work; revocation must win while enumeration is blocked.
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();

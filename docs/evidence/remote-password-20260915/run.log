@@ -1,0 +1,51 @@
+[33mThe CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprecated for more details.[39m
+[QA Harness] Ephemeral port allocated: 60444 (isolated, not 5173)
+[QA Harness] Vite server ready at: http://127.0.0.1:60444/docs/evidence/remote-password-20260915/index.html
+PASS 1280 Default mixed inventory / no old top navigation 
+PASS 1280 Single Add Machine with plus icon 
+PASS 1280 Access disclosure opens real access component 
+PASS 1280 Opening places focus inside modal 
+PASS 1280 Password selectable in basic form without Advanced 
+PASS 1280 Password masked and labeled 
+PASS 1280 Failure: setter before probe, no save [ "cmd_ssh_set_password", "cmd_ssh_test_connection" ]
+PASS 1280 Failure retains fields/password 
+PASS 1280 Cancel/reopen clears password and form 
+PASS 1280 Success: setter -> probe -> save [ "cmd_ssh_set_password", "cmd_ssh_test_connection",
+  "cmd_ssh_update_host"
+]
+PASS 1280 Secret excluded from probe/save/persisted host 
+PASS 1280 Success keeps keyboard focus within modal {
+  tag: "BUTTON",
+  machine: null,
+}
+PASS 1280 Existing password machine Edit offers empty reauth field 
+PASS 1280 Edit reauth setter -> probe -> save, secret excluded [ "cmd_ssh_set_password",
+  "cmd_ssh_test_connection", "cmd_ssh_update_host"
+]
+PASS 1280 Tab wraps to first modal control 
+PASS 1280 Escape closes only child, restores trigger 
+PASS 1280 No horizontal document overflow 
+PASS 390 Default mixed inventory / no old top navigation 
+PASS 390 Single Add Machine with plus icon 
+PASS 390 Access disclosure opens real access component 
+PASS 390 Opening places focus inside modal 
+PASS 390 Password selectable in basic form without Advanced 
+PASS 390 Password masked and labeled 
+PASS 390 Failure: setter before probe, no save [ "cmd_ssh_set_password", "cmd_ssh_test_connection" ]
+PASS 390 Failure retains fields/password 
+PASS 390 Cancel/reopen clears password and form 
+PASS 390 Success: setter -> probe -> save [ "cmd_ssh_set_password", "cmd_ssh_test_connection",
+  "cmd_ssh_update_host"
+]
+PASS 390 Secret excluded from probe/save/persisted host 
+PASS 390 Success keeps keyboard focus within modal {
+  tag: "BUTTON",
+  machine: null,
+}
+PASS 390 Existing password machine Edit offers empty reauth field 
+PASS 390 Edit reauth setter -> probe -> save, secret excluded [ "cmd_ssh_set_password",
+  "cmd_ssh_test_connection", "cmd_ssh_update_host"
+]
+PASS 390 Tab wraps to first modal control 
+PASS 390 Escape closes only child, restores trigger 
+PASS 390 No horizontal document overflow 

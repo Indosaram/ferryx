@@ -1,0 +1,314 @@
+[
+  {
+    "name": "360: list horizontal containment",
+    "pass": true,
+    "detail": {
+      "viewport": 360,
+      "documentWidth": 360,
+      "dialogWidth": 342,
+      "dialogScroll": 342,
+      "listWidth": 342,
+      "listScrollWidth": 342,
+      "horizontalScroll": 0,
+      "verticalScroll": 150,
+      "listHeight": 384,
+      "listScrollHeight": 1380
+    }
+  },
+  {
+    "name": "360: list vertical scroll",
+    "pass": true,
+    "detail": {
+      "viewport": 360,
+      "documentWidth": 360,
+      "dialogWidth": 342,
+      "dialogScroll": 342,
+      "listWidth": 342,
+      "listScrollWidth": 342,
+      "horizontalScroll": 0,
+      "verticalScroll": 150,
+      "listHeight": 384,
+      "listScrollHeight": 1380
+    }
+  },
+  {
+    "name": "360: touch scroll does not focus sink",
+    "pass": true,
+    "detail": {
+      "focused": false,
+      "focusEvents": [],
+      "scroll": {
+        "target": "/api/v1/terminal/pty-original",
+        "type": "scroll",
+        "rows": 9
+      }
+    }
+  },
+  {
+    "name": "360: real pointer click focuses sink",
+    "pass": true,
+    "detail": "<textarea data-testid=\"remote-terminal-input-sink\" aria-label=\"Remote terminal input\" autocapitalize=\"none\" autocomplete=\"off\" autocorrect=\"off\" spellcheck=\"false\" class=\"pointer-e"
+  },
+  {
+    "name": "360: trusted touch tap focuses sink",
+    "pass": true,
+    "detail": "[true]"
+  },
+  {
+    "name": "360: focus survives grid update",
+    "pass": true,
+    "detail": {}
+  },
+  {
+    "name": "360: focus survives viewport resize",
+    "pass": true,
+    "detail": {}
+  },
+  {
+    "name": "360: Hangul trailing input commits once",
+    "pass": true,
+    "detail": [
+      "한",
+      "!"
+    ]
+  },
+  {
+    "name": "360: new terminal action exists",
+    "pass": true,
+    "detail": "New terminal tab"
+  },
+  {
+    "name": "390: list horizontal containment",
+    "pass": true,
+    "detail": {
+      "viewport": 390,
+      "documentWidth": 390,
+      "dialogWidth": 372,
+      "dialogScroll": 372,
+      "listWidth": 372,
+      "listScrollWidth": 372,
+      "horizontalScroll": 0,
+      "verticalScroll": 150,
+      "listHeight": 384,
+      "listScrollHeight": 1380
+    }
+  },
+  {
+    "name": "390: list vertical scroll",
+    "pass": true,
+    "detail": {
+      "viewport": 390,
+      "documentWidth": 390,
+      "dialogWidth": 372,
+      "dialogScroll": 372,
+      "listWidth": 372,
+      "listScrollWidth": 372,
+      "horizontalScroll": 0,
+      "verticalScroll": 150,
+      "listHeight": 384,
+      "listScrollHeight": 1380
+    }
+  },
+  {
+    "name": "390: touch scroll does not focus sink",
+    "pass": true,
+    "detail": {
+      "focused": false,
+      "focusEvents": [],
+      "scroll": {
+        "target": "/api/v1/terminal/pty-original",
+        "type": "scroll",
+        "rows": 9
+      }
+    }
+  },
+  {
+    "name": "390: real pointer click focuses sink",
+    "pass": true,
+    "detail": "<textarea data-testid=\"remote-terminal-input-sink\" aria-label=\"Remote terminal input\" autocapitalize=\"none\" autocomplete=\"off\" autocorrect=\"off\" spellcheck=\"false\" class=\"pointer-e"
+  },
+  {
+    "name": "390: trusted touch tap focuses sink",
+    "pass": true,
+    "detail": "[true]"
+  },
+  {
+    "name": "390: focus survives grid update",
+    "pass": true,
+    "detail": {}
+  },
+  {
+    "name": "390: focus survives viewport resize",
+    "pass": true,
+    "detail": {}
+  },
+  {
+    "name": "390: Hangul trailing input commits once",
+    "pass": true,
+    "detail": [
+      "한",
+      "!"
+    ]
+  },
+  {
+    "name": "390: new terminal action exists",
+    "pass": true,
+    "detail": "New terminal tab"
+  },
+  {
+    "name": "768: list horizontal containment",
+    "pass": true,
+    "detail": {
+      "viewport": 768,
+      "documentWidth": 768,
+      "dialogWidth": 750,
+      "dialogScroll": 750,
+      "listWidth": 739,
+      "listScrollWidth": 739,
+      "horizontalScroll": 0,
+      "verticalScroll": 150,
+      "listHeight": 384,
+      "listScrollHeight": 1380
+    }
+  },
+  {
+    "name": "768: list vertical scroll",
+    "pass": true,
+    "detail": {
+      "viewport": 768,
+      "documentWidth": 768,
+      "dialogWidth": 750,
+      "dialogScroll": 750,
+      "listWidth": 739,
+      "listScrollWidth": 739,
+      "horizontalScroll": 0,
+      "verticalScroll": 150,
+      "listHeight": 384,
+      "listScrollHeight": 1380
+    }
+  },
+  {
+    "name": "768: touch scroll does not focus sink",
+    "pass": true,
+    "detail": {
+      "focused": false,
+      "focusEvents": [],
+      "scroll": {
+        "target": "/api/v1/terminal/pty-original",
+        "type": "scroll",
+        "rows": 9
+      }
+    }
+  },
+  {
+    "name": "768: real pointer click focuses sink",
+    "pass": true,
+    "detail": "<textarea data-testid=\"remote-terminal-input-sink\" aria-label=\"Remote terminal input\" autocapitalize=\"none\" autocomplete=\"off\" autocorrect=\"off\" spellcheck=\"false\" class=\"pointer-e"
+  },
+  {
+    "name": "768: trusted touch tap focuses sink",
+    "pass": true,
+    "detail": "[true]"
+  },
+  {
+    "name": "768: focus survives grid update",
+    "pass": true,
+    "detail": {}
+  },
+  {
+    "name": "768: focus survives viewport resize",
+    "pass": true,
+    "detail": {}
+  },
+  {
+    "name": "768: Hangul trailing input commits once",
+    "pass": true,
+    "detail": [
+      "한",
+      "!"
+    ]
+  },
+  {
+    "name": "768: new terminal action exists",
+    "pass": true,
+    "detail": "New terminal tab"
+  },
+  {
+    "name": "1280: list horizontal containment",
+    "pass": true,
+    "detail": {
+      "viewport": 1280,
+      "documentWidth": 1280,
+      "dialogWidth": 1262,
+      "dialogScroll": 1262,
+      "listWidth": 1251,
+      "listScrollWidth": 1251,
+      "horizontalScroll": 0,
+      "verticalScroll": 150,
+      "listHeight": 384,
+      "listScrollHeight": 1380
+    }
+  },
+  {
+    "name": "1280: list vertical scroll",
+    "pass": true,
+    "detail": {
+      "viewport": 1280,
+      "documentWidth": 1280,
+      "dialogWidth": 1262,
+      "dialogScroll": 1262,
+      "listWidth": 1251,
+      "listScrollWidth": 1251,
+      "horizontalScroll": 0,
+      "verticalScroll": 150,
+      "listHeight": 384,
+      "listScrollHeight": 1380
+    }
+  },
+  {
+    "name": "1280: touch scroll does not focus sink",
+    "pass": true,
+    "detail": {
+      "focused": false,
+      "focusEvents": [],
+      "scroll": {
+        "target": "/api/v1/terminal/pty-original",
+        "type": "scroll",
+        "rows": 9
+      }
+    }
+  },
+  {
+    "name": "1280: real pointer click focuses sink",
+    "pass": true,
+    "detail": "<textarea data-testid=\"remote-terminal-input-sink\" aria-label=\"Remote terminal input\" autocapitalize=\"none\" autocomplete=\"off\" autocorrect=\"off\" spellcheck=\"false\" class=\"pointer-e"
+  },
+  {
+    "name": "1280: trusted touch tap focuses sink",
+    "pass": true,
+    "detail": "[true]"
+  },
+  {
+    "name": "1280: focus survives grid update",
+    "pass": true,
+    "detail": {}
+  },
+  {
+    "name": "1280: focus survives viewport resize",
+    "pass": true,
+    "detail": {}
+  },
+  {
+    "name": "1280: Hangul trailing input commits once",
+    "pass": true,
+    "detail": [
+      "한",
+      "!"
+    ]
+  },
+  {
+    "name": "1280: new terminal action exists",
+    "pass": true,
+    "detail": "New terminal tab"
+  }
+]

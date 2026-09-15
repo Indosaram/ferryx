@@ -1284,6 +1284,16 @@ impl DaemonSessionService {
         Ok(())
     }
 
+    pub(super) async fn handle_hibernate(
+        &self,
+        session_id: &str,
+    ) -> Result<(), crate::terminal::PtyError> {
+        self.terminal_service.hibernate_session(session_id).await?;
+        self.release_session_ownership(session_id);
+        self.agent_states.remove(session_id);
+        Ok(())
+    }
+
     pub(super) fn session_is_live(&self, session_id: &str) -> bool {
         if self.terminal_service.remote().contains(session_id) {
             return true;
@@ -1422,6 +1432,28 @@ impl DaemonSessionService {
                     end_sequence,
                 },
             };
+        }
+        if super::super::terminal::paired_runtime::Runtime::owns(session_id) {
+            if self.terminal_service.paired().contains(session_id) {
+                let (start_sequence, end_sequence) = self
+                    .terminal_service
+                    .output_hub()
+                    .session_sequence_range(session_id)
+                    .unwrap_or((None, None));
+                return DaemonResponse::DescribeSessionOk {
+                    session: DaemonSessionDetails {
+                        session_id: session_id.into(),
+                        workspace_id: None,
+                        worktree: None,
+                        cwd: None,
+                        cols: 80,
+                        rows: 24,
+                        running: true,
+                        start_sequence,
+                        end_sequence,
+                    },
+                };
+            }
         }
         let Some(pty_session) = self.terminal_service.get_session(session_id) else {
             return DaemonResponse::Error {

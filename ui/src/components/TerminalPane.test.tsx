@@ -1,9 +1,10 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import dagRunSampleJson from "../state/__fixtures__/dagRunSample.json";
 import type { TerminalActivity } from "../lib/activity";
 import { parseDagRunSnapshot } from "../lib/dagTypes";
+import { resetSessionLifecycleForTests, setSessionSleeping } from "../lib/sessionLifecycle";
 import type { TerminalSession } from "../lib/types";
 import { dagStore } from "../state/dagStore";
 import { TerminalPane } from "./TerminalPane";
@@ -64,10 +65,12 @@ function createExitedSession(overrides: Partial<TerminalSession> = {}): Terminal
 describe("TerminalPane native routing contract", () => {
   beforeEach(() => {
     dagStore.reset();
+    resetSessionLifecycleForTests();
   });
 
   afterEach(() => {
     cleanup();
+    resetSessionLifecycleForTests();
     vi.restoreAllMocks();
   });
 
@@ -194,6 +197,21 @@ describe("TerminalPane native routing contract", () => {
     expect(document.querySelector('[role="dialog"]')).toBeNull();
   });
 
+  it("transparently resumes a sleeping standby shell when its pane receives focus", async () => {
+    const standby = createExitedSession({
+      id: "session-standby",
+      backendSessionId: "standby:session-standby",
+      agentType: null,
+      providerSession: null,
+      agentSessionId: null,
+    });
+    const onOpenNewShell = vi.fn().mockResolvedValue(undefined);
+    setSessionSleeping(standby.id, true);
+    render(<TerminalPane session={standby} active={true} onOpenNewShell={onOpenNewShell} />);
+
+    await waitFor(() => expect(onOpenNewShell).toHaveBeenCalledWith("session-standby"));
+    expect(onOpenNewShell).toHaveBeenCalledTimes(1);
+  });
   it("calls reconnect once with the local session id and disables repeat activation while pending", () => {
     // Given: an exited Omo session with an authoritative provider reference.
     const onReconnect = vi.fn(() => new Promise<void>(() => undefined));

@@ -81,7 +81,7 @@ async fn handshake(socket: &Path) -> anyhow::Result<()> {
     let mut line = String::new();
     tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line)).await??;
     let response: DaemonResponse = serde_json::from_str(&line)?;
-    ensure!(matches!(response, DaemonResponse::HandshakeOk { version: 3, pid, .. }
+    ensure!(matches!(response, DaemonResponse::HandshakeOk { version: DAEMON_PROTOCOL_VERSION, pid, .. }
         if pid == std::process::id()), "fixture PID handshake mismatch");
     write.write_all(b"{\"type\":\"getCapabilities\"}\n").await?;
     line.clear();

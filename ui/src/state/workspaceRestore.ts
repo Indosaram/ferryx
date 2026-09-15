@@ -5,6 +5,7 @@ import { resetAgentAutoResumeGuard } from "../lib/agentAutoResume";
 import { loadGeneralSettings } from "../lib/generalSettings";
 import { isPairedWorkspaceId, isRemoteWorkspaceId } from "../lib/remoteProject";
 import {
+  createStandbyBackendSessionId,
   registerSessionSnapshot,
   setSessionSleeping,
 } from "../lib/sessionLifecycle";
@@ -98,21 +99,17 @@ export async function defaultListLiveBackendSessionIds(): Promise<Array<{ sessio
 
 function activeRestoreSessionIds(state: WorkspaceState): Set<string> {
   const sessionIds = new Set<string>();
-  const activeTabIds = new Set<string>();
-  if (state.layout.tabGroups) {
-    for (const group of Object.values(state.layout.tabGroups)) {
-      if (group.activeTabId) activeTabIds.add(group.activeTabId);
-    }
-  }
-  if (activeTabIds.size === 0 && state.layout.activeTabId) activeTabIds.add(state.layout.activeTabId);
-  for (const tabId of activeTabIds) {
-    const tab = state.layout.tabs.find((candidate) => candidate.id === tabId);
-    if (!tab || tab.kind === "browser") continue;
-    sessionIds.add(tab.sessionId);
-    const paneLayout = state.layout.layoutsByTabId?.[tabId];
-    for (const sessionId of Object.values(paneLayout?.sessionIdsByLeafId ?? {})) {
-      if (sessionId) sessionIds.add(sessionId);
-    }
+  const focusedGroupId = state.layout.focusedGroupId;
+  const activeTabId = focusedGroupId
+    ? state.layout.tabGroups?.[focusedGroupId]?.activeTabId ?? state.layout.activeTabId
+    : state.layout.activeTabId;
+  if (!activeTabId) return sessionIds;
+  const tab = state.layout.tabs.find((candidate) => candidate.id === activeTabId);
+  if (!tab || tab.kind === "browser") return sessionIds;
+  sessionIds.add(tab.sessionId);
+  const paneLayout = state.layout.layoutsByTabId?.[activeTabId];
+  for (const sessionId of Object.values(paneLayout?.sessionIdsByLeafId ?? {})) {
+    if (sessionId) sessionIds.add(sessionId);
   }
   return sessionIds;
 }
@@ -127,9 +124,21 @@ function prepareDiskRestoredState(workspaceId: string, state: WorkspaceState): W
       const shouldSleep = isLocal && isMissing && (
         policy === "lazy" || (policy === "activeOnly" && !activeSessionIds.has(id))
       );
+      // Every sleeping local session gets a frontend-only standby identity. This prevents
+      // App's legacy eager-recovery pass from spawning either shells or fallback shells for
+      // agents. Agent reconnect logic treats this identity as process-absent and can resume
+      // the provider session transparently when the pane is focused.
       const nextSession = {
         ...session,
         lastOutputSequence: null,
+        ...(shouldSleep
+          ? {
+              backendSessionId: createStandbyBackendSessionId(id),
+              processState: session.processState === "hibernated" ? "hibernated" as const : "standby" as const,
+              lifecycle: "exited" as const,
+              reconnectLifecycle: "idle" as const,
+            }
+          : {}),
       };
       setSessionSleeping(id, shouldSleep);
       registerSessionSnapshot(nextSession, state.activityBySessionId?.[id]?.state);

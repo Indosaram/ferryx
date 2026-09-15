@@ -1,0 +1,15 @@
+2026-09-12T13:43:13.285Z CDP_TARGET http://127.0.0.1:5173/
+2026-09-12T13:43:13.289Z CDP_ATTACHED
+2026-09-12T13:43:13.305Z PROBE {"vw":1280,"vh":851,"at":[768,426],"chain":["DIV.absolute.inset-0","DIV.terminal-host.relative","DIV.relative.h-full","DIV.h-full.w-full","DIV.relative.flex","DIV.relative.min-h-0"]}
+2026-09-12T13:43:13.307Z VIEWPORT 1280x851.2000122070312
+2026-09-12T13:43:13.365Z CLICKED terminal area at 768,426
+2026-09-12T13:43:13.827Z KEYS_SENT "echo FERRYX_WIN_START_OK" +Enter
+2026-09-12T13:48:02.845Z CDP_TARGET http://127.0.0.1:5173/
+2026-09-12T13:48:02.849Z CDP_ATTACHED
+2026-09-12T13:48:02.864Z FOCUS_EMULATION_ON
+2026-09-12T13:48:02.865Z BROUGHT_TO_FRONT
+2026-09-12T13:48:02.867Z PROBE {"vw":1280,"vh":851,"at":[768,426],"chain":["DIV.absolute.inset-0","DIV.terminal-host.relative","DIV.relative.h-full","DIV.h-full.w-full","DIV.relative.flex","DIV.relative.min-h-0"]}
+2026-09-12T13:48:02.867Z VIEWPORT 1280x851.2000122070312
+2026-09-12T13:48:02.881Z CLICKED terminal area at 768,426
+2026-09-12T13:48:03.318Z KEYS_SENT "echo FERRYX_WIN_START_OK" +Enter
+2026-09-12T13:48:03.319Z PAGE_RECV {"hasFocus":true,"active":"TEXTAREA.pointer-events-none absolute left-0 top-","keys":"e:T:KeyE|c:T:KeyC|h:T:KeyH|o:T:KeyO| :T:Space|F:T:KeyF|E:T:KeyE|R:T:KeyR|R:T:KeyR|Y:T:KeyY|X:T:KeyX|_:T:Minus|W:T:KeyW|I:T:KeyI|N:T:KeyN|_:T:Minus|S:T:KeyS|T:T:KeyT|A:T:KeyA|R:T:KeyR|T:T:KeyT|_:T:Minus|O:T:KeyO|K:T:KeyK|Enter:T:Enter"}

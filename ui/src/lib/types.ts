@@ -79,11 +79,14 @@ export type DiskScanSnapshot = {
 
 export type TerminalSignal = "interrupt" | "terminate" | "kill";
 
+export type SessionProcessState = "standby" | "running" | "hibernated";
+
 export type TerminalSessionSummary = {
   sessionId: string;
   worktreePath: string | null;
   daemonEpoch?: string | null;
   running?: boolean;
+  processState?: SessionProcessState;
 };
 
 export type AgentProviderSessionKey = "session_id" | "conversation_id";
@@ -144,6 +147,8 @@ export type TerminalSession = {
   worktree: WorktreeIdentity | null;
   /** Native PTY identity. This is intentionally distinct from `id`. */
   backendSessionId: string | null;
+  /** Backing-process resource state, independent from agent activity. */
+  processState?: SessionProcessState;
   lifecycle: TerminalLifecycle;
   ownerId?: string | null;
   daemonEpoch?: string | null;
@@ -697,6 +702,8 @@ export interface PersistedTerminalSession {
   backendSessionId?: string | null;
   /** v1 compatibility field (v1 accidentally stored the local id here). */
   sessionId?: string;
+  /** Persisted backing-process resource state. */
+  processState?: SessionProcessState;
   worktreePath: string;
   cwd: string;
   lastCommand?: string;

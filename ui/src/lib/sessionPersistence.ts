@@ -5,6 +5,7 @@ import type { WorkspaceState } from "../state/workspaceStore";
 import type { TerminalActivity } from "./activity";
 import { loadBrowserSettings, resolveSupportedBrowserProfileId, supportedBrowserProfiles } from "./browserSettings";
 import { normalizeSessionId, providerSessionKeyForAgent } from "./agentResume";
+import { getSessionProcessState, getSessionRecentScrollback, restoreSessionRecentScrollback } from "./sessionLifecycle";
 import {
   createBrowserPaneContent,
   createDagPaneContent,
@@ -21,6 +22,7 @@ import {
   type PersistedWorkspaceSession,
   type PersistedWorktree,
   type TabGroup,
+  type SessionProcessState,
   type TerminalLifecycle,
   type TerminalSession,
   type TerminalTab,
@@ -40,7 +42,7 @@ export function sessionPersistenceKey(sessions: Record<string, TerminalSession>)
   return Object.entries(sessions)
     .map(
       ([id, session]) =>
-        `${id}:${session.backendSessionId ?? ""}:${session.lifecycle}:${session.agentType ?? ""}:${session.providerSession?.key ?? ""}:${session.providerSession?.id ?? ""}`,
+        `${id}:${session.backendSessionId ?? ""}:${getSessionProcessState(session)}:${session.lifecycle}:${session.agentType ?? ""}:${session.providerSession?.key ?? ""}:${session.providerSession?.id ?? ""}`,
     )
     .join(",");
 }
@@ -236,6 +238,7 @@ export function serializeWorkspaceState(
     persistedTerminalSessions[id] = {
       localSessionId: sess.id,
       backendSessionId: sess.backendSessionId,
+      processState: getSessionProcessState(sess),
       worktreePath: sess.worktreePath ?? sess.cwd,
       cwd: sess.cwd,
       daemonEpoch: sess.daemonEpoch != null ? String(sess.daemonEpoch) : null,
@@ -243,6 +246,7 @@ export function serializeWorkspaceState(
       agentType,
       agentSessionId: sess.agentSessionId ?? null,
       providerSession: sess.providerSession ?? null,
+      recentScrollback: getSessionRecentScrollback(id),
       createdAt,
     };
   }
@@ -397,6 +401,7 @@ export function deserializeWorkspaceState(
     let daemonEpoch: string | null = null;
     let lastOutputSequence: string | null = null;
     let lifecycle: TerminalLifecycle = "exited";
+    let processState: SessionProcessState = sess.processState === "hibernated" ? "hibernated" : "standby";
 
     const isSshSession = ws.target?.kind === "ssh" || workspaceId.startsWith("ssh:");
     const isPairedSession = ws.target?.kind === "pairedDaemon";
@@ -407,6 +412,7 @@ export function deserializeWorkspaceState(
       daemonEpoch = persistedEpoch;
       lastOutputSequence = null;
       lifecycle = persistedBackendSessionId ? "working" : "exited";
+      processState = persistedBackendSessionId ? "running" : processState;
     } else if (isSshSession && persistedBackendSessionId) {
       // SSH backend IDs identify persisted remote targets across daemon epochs.
       // List absence/running=false cannot establish remote process death; status can.
@@ -414,12 +420,14 @@ export function deserializeWorkspaceState(
       daemonEpoch = liveSessionMap.get(persistedBackendSessionId)?.daemonEpoch ?? persistedEpoch;
       lastOutputSequence = daemonEpoch === persistedEpoch ? persistedSequence : null;
       lifecycle = "working";
+      processState = "running";
     } else if (!hasLiveSessionQuery) {
       const isLive = Boolean(persistedBackendSessionId);
       backendSessionId = isLive ? persistedBackendSessionId : null;
       daemonEpoch = isLive ? persistedEpoch : null;
       lastOutputSequence = isLive ? persistedSequence : null;
       lifecycle = isLive ? "working" : "exited";
+      processState = isLive ? "running" : processState;
     } else {
       if (!persistedBackendSessionId || !liveSessionMap.has(persistedBackendSessionId)) {
         backendSessionId = null;
@@ -449,6 +457,7 @@ export function deserializeWorkspaceState(
           daemonEpoch = persistedEpoch ?? effectiveLiveEpoch ?? null;
           lastOutputSequence = persistedSequence;
           lifecycle = "working";
+          processState = "running";
         } else {
           backendSessionId = null;
           daemonEpoch = null;
@@ -471,6 +480,7 @@ export function deserializeWorkspaceState(
         ? { key: legacyProviderKey, id: normalizedLegacyId }
         : null
     );
+    restoreSessionRecentScrollback(localSessionId, sess.recentScrollback);
     sessions[localSessionId] = {
       id: localSessionId,
       cwd: sess.cwd || worktreePath,
@@ -478,6 +488,7 @@ export function deserializeWorkspaceState(
       workspaceId,
       worktree: matchingWorktree ? worktreeIdentity(matchingWorktree) : null,
       backendSessionId,
+      processState,
       lifecycle,
       daemonEpoch,
       lastOutputSequence,

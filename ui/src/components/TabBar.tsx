@@ -12,6 +12,10 @@ import {
   useBrowserSettings,
 } from "../lib/browserSettings";
 import { openNativePopupMenu, type NativeMenuEntry } from "../lib/nativeMenu";
+import {
+  requestSessionLifecycleAction,
+  useSleepingSessionIds,
+} from "../lib/sessionLifecycle";
 import { formatBindingLabel, isMacShortcutPlatform, shortcutLabel } from "../lib/shortcuts";
 import type { WorkspaceTab } from "../lib/types";
 import { SortableTab } from "./tab-dnd/SortableTab";
@@ -103,6 +107,7 @@ export function TabBar({
   const isMac = isMacShortcutPlatform();
   const isWindows = isWindowsPlatform();
   const { settings: browserSettings } = useBrowserSettings();
+  const sleepingSessionIds = useSleepingSessionIds();
 
   useEffect(() => {
     if (renamingTabId && !tabs.some((tab) => tab.id === renamingTabId)) setRenamingTabId(null);
@@ -304,6 +309,16 @@ export function TabBar({
       items.push({ kind: "item", id: "reset-agent-state", label: "Reset Agent State", icon: "refresh" });
       actions["reset-agent-state"] = () => onResetAgentState(tab.id);
     }
+    if (tab.kind !== "browser") {
+      items.push({ kind: "separator" });
+      items.push({ kind: "item", id: "hibernate-session", label: "Hibernate Session" });
+      items.push({ kind: "item", id: "restart-session", label: "Restart Session" });
+      actions["hibernate-session"] = () => requestSessionLifecycleAction("hibernate", tab.sessionId);
+      actions["restart-session"] = () => {
+        onActivate(tab.id);
+        requestSessionLifecycleAction("restart", tab.sessionId);
+      };
+    }
     items.push({ kind: "separator" });
     items.push({ kind: "item", id: "close", label: "Close tab", enabled: !tab.pinned });
     actions["close"] = () => {
@@ -322,7 +337,7 @@ export function TabBar({
       actions["close-left"] = () => onCloseToLeft(tab.id);
     }
     openMenu("cmd_native_tab_context_menu", items, { x: event.clientX, y: event.clientY }, actions);
-  }, [browserSettings, tabs, handleStartRename, onClose, onCloseOthers, onCloseToLeft, onCloseToRight, onDuplicateBrowser, onMoveTabToSplit, onResetAgentState, onSplitDown, onSplitRight, onTogglePin]);
+  }, [browserSettings, tabs, handleStartRename, onActivate, onClose, onCloseOthers, onCloseToLeft, onCloseToRight, onDuplicateBrowser, onMoveTabToSplit, onResetAgentState, onSplitDown, onSplitRight, onTogglePin]);
 
   const handleCommitRename = useCallback((tabId: string) => {
     const cancelled = renameCancelledRef.current;
@@ -379,6 +394,7 @@ export function TabBar({
         <div className="flex min-w-0 items-stretch overflow-x-auto scrollbar-none" role="tablist">
           {tabs.map((tab, index) => {
             const active = tab.id === activeTabId;
+            const sleeping = tab.kind !== "browser" && sleepingSessionIds.has(tab.sessionId);
             return (
               <SortableTab
                 key={tab.id}
@@ -387,6 +403,7 @@ export function TabBar({
                 index={index}
                 active={active}
                 unread={Boolean(unreadTabIds?.[tab.id] && !active)}
+                sleeping={sleeping}
                 activity={activityByTabId?.[tab.id]}
                 isRenaming={renamingTabId === tab.id}
                 renameValue={renameValue}

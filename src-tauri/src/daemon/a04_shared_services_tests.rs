@@ -141,7 +141,7 @@ async fn scenario(root: &Path, injection: Injection) -> anyhow::Result<()> {
             }
             let handshake = request(
                 &socket,
-                serde_json::json!({"type":"handshake", "version":3}),
+                serde_json::json!({"type":"handshake", "version": crate::daemon::protocol::DAEMON_PROTOCOL_VERSION}),
             )
             .await?;
             ensure!(

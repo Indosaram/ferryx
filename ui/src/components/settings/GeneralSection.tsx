@@ -11,6 +11,8 @@ import {
 
 import {
   loadSidebarOpenStartup,
+  MAX_SESSION_IDLE_TIMEOUT_MINUTES,
+  MIN_SESSION_IDLE_TIMEOUT_MINUTES,
   saveSidebarOpenStartup,
   useGeneralSettings,
 } from "../../lib/generalSettings";
@@ -34,7 +36,9 @@ import { Alert, AlertDescription } from "../ui/alert";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Card } from "../ui/card";
+import { Input } from "../ui/input";
 import { Progress } from "../ui/progress";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
 
 function updateStatusMessage(status: UpdateStatus): string {
@@ -290,6 +294,44 @@ export function GeneralSection() {
                 saveSidebarOpenStartup(checked);
               }}
             />
+          </SettingRow>
+          <SettingRow
+            label="Session Restore Policy"
+            description="Choose how terminal and agent processes are restored after Ferryx restarts. Lazy is recommended for lower memory use."
+          >
+            <Select
+              value={settings.sessionRestorePolicy}
+              onValueChange={(value) => updateSettings({ sessionRestorePolicy: value as typeof settings.sessionRestorePolicy })}
+            >
+              <SelectTrigger aria-label="Session Restore Policy" className="h-8 w-[180px] text-[12px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="lazy">Lazy (Recommended)</SelectItem>
+                <SelectItem value="activeOnly">Active Only</SelectItem>
+                <SelectItem value="eager">Eager (Legacy)</SelectItem>
+              </SelectContent>
+            </Select>
+          </SettingRow>
+          <SettingRow
+            label="Auto-hibernate idle sessions"
+            description="Background sessions that have completed work are hibernated after this many minutes of inactivity."
+          >
+            <div className="flex items-center gap-2">
+              <Input
+                aria-label="Session idle timeout minutes"
+                type="number"
+                min={MIN_SESSION_IDLE_TIMEOUT_MINUTES}
+                max={MAX_SESSION_IDLE_TIMEOUT_MINUTES}
+                value={settings.sessionIdleTimeoutMinutes}
+                onChange={(event) => {
+                  const next = Number(event.target.value);
+                  if (Number.isFinite(next)) updateSettings({ sessionIdleTimeoutMinutes: next });
+                }}
+                className="h-8 w-20 text-right text-[12px]"
+              />
+              <span className="text-[11px] text-muted-foreground">min</span>
+            </div>
           </SettingRow>
         </div>
         <CliLauncherCard />

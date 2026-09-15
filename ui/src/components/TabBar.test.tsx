@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ActivitySummary } from "../lib/activity";
 import { saveBrowserSettings } from "../lib/browserSettings";
+import { clearSleepingSessions } from "../lib/sessionLifecycle";
 import type { WorkspaceTab } from "../lib/types";
 import { TabBar } from "./TabBar";
 import { SortableTab } from "./tab-dnd/SortableTab";
@@ -85,6 +86,7 @@ afterEach(() => {
   nativeWindow.startDragging.mockClear();
   nativeMenu.lastCall = null;
   localStorage.clear();
+  clearSleepingSessions();
 });
 
 function activity(overrides: Partial<ActivitySummary> = {}): ActivitySummary {

@@ -1,0 +1,81 @@
+{
+  "mechanism": "Existing GUI automatic stale-binary handover completed before guarded explicit UpgradeBinary; worker sent no upgrade request",
+  "before": {
+    "pid": 10752,
+    "epoch": 1789456716346,
+    "protocol": 3,
+    "sessionIds": [
+      "22c7cfff-702d-4daa-893b-d895877f048b",
+      "4fab5077-f150-4deb-a0e5-7ee07ac53518"
+    ]
+  },
+  "after": {
+    "type": "handshakeOk",
+    "version": 3,
+    "pid": 36432,
+    "epoch": 1789459188090,
+    "binaryPath": "/Users/indo/code/project/orca-lite/src-tauri/target/debug/Ferryx.app/Contents/MacOS/ferryx",
+    "binaryMtimeMs": 1789459079905,
+    "daemonVersion": "2026.915.1"
+  },
+  "capabilities": {
+    "type": "capabilitiesOk",
+    "capabilities": [
+      "machinePairingV1",
+      "sshPasswordV1",
+      "pairedHostInventoryV1"
+    ]
+  },
+  "sessions": {
+    "type": "listSessionsOk",
+    "epoch": 1789459188090,
+    "sessions": [
+      "22c7cfff-702d-4daa-893b-d895877f048b",
+      "4fab5077-f150-4deb-a0e5-7ee07ac53518"
+    ]
+  },
+  "descriptions": [
+    {
+      "type": "describeSessionOk",
+      "session": {
+        "sessionId": "22c7cfff-702d-4daa-893b-d895877f048b",
+        "workspaceId": "maho-workspace",
+        "worktree": null,
+        "cwd": "/Users/indo/code/project/maho-workspace",
+        "cols": 130,
+        "rows": 51,
+        "running": true,
+        "startSequence": 1,
+        "endSequence": 3061
+      }
+    },
+    {
+      "type": "describeSessionOk",
+      "session": {
+        "sessionId": "4fab5077-f150-4deb-a0e5-7ee07ac53518",
+        "workspaceId": "maho-workspace",
+        "worktree": null,
+        "cwd": "/Users/indo/code/project/maho-workspace",
+        "cols": 80,
+        "rows": 24,
+        "running": true,
+        "startSequence": 1,
+        "endSequence": 7
+      }
+    }
+  ],
+  "predecessorAlive": true,
+  "routes": {
+    "routes": [
+      {
+        "legacySocketPath": "/tmp/rorca-501-dev/legacy-10752-1789459187885.sock",
+        "sessions": [
+          "22c7cfff-702d-4daa-893b-d895877f048b",
+          "4fab5077-f150-4deb-a0e5-7ee07ac53518"
+        ]
+      }
+    ]
+  },
+  "processes": "  PID  PPID COMMAND\n 6417  8197 /Users/indo/code/project/orca-lite/src-tauri/target/debug/Ferryx.app/Contents/MacOS/ferryx\n10752     1 /Users/indo/code/project/orca-lite/src-tauri/target/debug/Ferryx.app/Contents/MacOS/ferryx --daemon\n36432 10752 /Users/indo/code/project/orca-lite/src-tauri/target/debug/Ferryx.app/Contents/MacOS/ferryx --daemon --handover-from /tmp/rorca-501-dev/legacy-10752-1789459187885.sock\n",
+  "signature": "src-tauri/target/debug/Ferryx.app/Contents/MacOS/ferryx: valid on disk\nsrc-tauri/target/debug/Ferryx.app/Contents/MacOS/ferryx: satisfies its Designated Requirement\n"
+}

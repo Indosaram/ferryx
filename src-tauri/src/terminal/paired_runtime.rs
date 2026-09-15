@@ -74,8 +74,14 @@ impl Runtime {
             loop {
                 tokio::select! {
                     command = receiver.recv() => match command {
-                        Some(Command::Write(g, data, reply)) => { let _ = reply.send(proxy.write(Epoch(g), &data).await.map_err(|e| e.code)); }
-                        Some(Command::Resize(g, cols, rows, reply)) => { let _ = reply.send(proxy.resize(Epoch(g), cols, rows).await.map_err(|e| e.code)); }
+                        Some(Command::Write(g, data, reply)) => {
+                            let gen = if g == 0 { proxy.controller().unwrap_or(Epoch(0)) } else { Epoch(g) };
+                            let _ = reply.send(proxy.write(gen, &data).await.map_err(|e| e.code));
+                        }
+                        Some(Command::Resize(g, cols, rows, reply)) => {
+                            let gen = if g == 0 { proxy.controller().unwrap_or(Epoch(0)) } else { Epoch(g) };
+                            let _ = reply.send(proxy.resize(gen, cols, rows).await.map_err(|e| e.code));
+                        }
                         Some(Command::Interrupt(g, reply)) => { let _ = reply.send(proxy.interrupt(Epoch(g)).await.map_err(|e| e.code)); }
                         Some(Command::Detach(reply)) => {
                             let result = proxy.detach().await.map_err(|e| e.code);

@@ -176,6 +176,43 @@ describe("agentAutoResume", () => {
       expect(reconnect).toHaveBeenCalledWith("sess-1");
     });
 
+    it("Active Only resumes only the focused group's active tab", async () => {
+      saveGeneralSettings({ sessionRestorePolicy: "activeOnly" });
+      resetAgentAutoResumeGuard();
+      const state = createMockState({
+        layout: {
+          activeTabId: "tab-1",
+          focusedGroupId: "group-b",
+          tabs: [
+            { id: "tab-1", label: "one", sessionId: "sess-1" },
+            { id: "tab-2", label: "two", sessionId: "sess-2" },
+          ],
+          tabGroups: {
+            "group-a": { id: "group-a", tabIds: ["tab-1"], activeTabId: "tab-1" },
+            "group-b": { id: "group-b", tabIds: ["tab-2"], activeTabId: "tab-2" },
+          },
+          tabGroupLayout: {
+            type: "split",
+            direction: "horizontal",
+            ratio: 0.5,
+            first: { type: "group", groupId: "group-a" },
+            second: { type: "group", groupId: "group-b" },
+          },
+          layoutsByTabId: {
+            "tab-1": { root: { type: "leaf", leafId: "leaf-1" }, activeLeafId: "leaf-1", expandedLeafId: null, sessionIdsByLeafId: { "leaf-1": "sess-1" } },
+            "tab-2": { root: { type: "leaf", leafId: "leaf-2" }, activeLeafId: "leaf-2", expandedLeafId: null, sessionIdsByLeafId: { "leaf-2": "sess-2" } },
+          },
+        },
+        sessions: { "sess-1": agentSession("sess-1"), "sess-2": agentSession("sess-2") },
+      });
+      const reconnect = vi.fn().mockResolvedValue(undefined);
+
+      scheduleAgentAutoResume({ workspaceId: "test-workspace", state, recoveredFromHmr: false, reconnect });
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(reconnect).toHaveBeenCalledTimes(1);
+      expect(reconnect).toHaveBeenCalledWith("sess-2");
+    });
+
     it("keeps legacy Eager behavior and staggers multiple resumes", async () => {
       const state = createMockState({ sessions: { "sess-1": agentSession("sess-1"), "sess-2": agentSession("sess-2") } });
       const reconnect = vi.fn().mockResolvedValue(undefined);

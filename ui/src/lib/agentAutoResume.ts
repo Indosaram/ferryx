@@ -42,21 +42,17 @@ export function clearPendingAutoResumes(): void {
 
 function activeTabSessionIds(state: WorkspaceState): Set<string> {
   const result = new Set<string>();
-  const activeTabIds = new Set<string>();
-  if (state.layout.tabGroups) {
-    for (const group of Object.values(state.layout.tabGroups)) {
-      if (group.activeTabId) activeTabIds.add(group.activeTabId);
-    }
-  }
-  if (activeTabIds.size === 0 && state.layout.activeTabId) activeTabIds.add(state.layout.activeTabId);
-  for (const tabId of activeTabIds) {
-    const tab = state.layout.tabs.find((candidate) => candidate.id === tabId);
-    if (!tab || tab.kind === "browser") continue;
-    result.add(tab.sessionId);
-    const tabLayout = state.layout.layoutsByTabId?.[tabId];
-    for (const sessionId of Object.values(tabLayout?.sessionIdsByLeafId ?? {})) {
-      if (sessionId) result.add(sessionId);
-    }
+  const focusedGroupId = state.layout.focusedGroupId;
+  const activeTabId = focusedGroupId
+    ? state.layout.tabGroups?.[focusedGroupId]?.activeTabId ?? state.layout.activeTabId
+    : state.layout.activeTabId;
+  if (!activeTabId) return result;
+  const tab = state.layout.tabs.find((candidate) => candidate.id === activeTabId);
+  if (!tab || tab.kind === "browser") return result;
+  result.add(tab.sessionId);
+  const tabLayout = state.layout.layoutsByTabId?.[activeTabId];
+  for (const sessionId of Object.values(tabLayout?.sessionIdsByLeafId ?? {})) {
+    if (sessionId) result.add(sessionId);
   }
   return result;
 }

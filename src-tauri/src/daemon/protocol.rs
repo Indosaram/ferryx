@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::path::PathBuf;
 
-pub const DAEMON_PROTOCOL_VERSION: u32 = 3;
+pub const DAEMON_PROTOCOL_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -56,6 +56,11 @@ pub enum TerminalStartup {
     /// The daemon resolves the registered project and enabled host from disk.
     #[serde(rename_all = "camelCase")]
     RemoteSsh { host_store_path: std::path::PathBuf },
+    #[serde(rename_all = "camelCase")]
+    PairedDaemon {
+        host_id: String,
+        remote_workspace_id: String,
+    },
     #[serde(rename_all = "camelCase")]
     AgentResume {
         agent_type: String,
@@ -192,6 +197,10 @@ pub enum DaemonRequest {
     },
     #[serde(rename_all = "camelCase")]
     Close {
+        session_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Hibernate {
         session_id: String,
     },
     #[serde(rename_all = "camelCase")]
@@ -347,6 +356,7 @@ pub enum DaemonResponse {
     ResizeOk,
     SignalOk,
     CloseOk,
+    HibernateOk,
     #[serde(rename_all = "camelCase")]
     ListSessionsOk {
         epoch: u64,
@@ -1064,8 +1074,8 @@ mod tests {
     }
 
     #[test]
-    fn test_protocol_v3_handshake_and_list_sessions_epoch() {
-        assert_eq!(DAEMON_PROTOCOL_VERSION, 3);
+    fn test_protocol_v4_handshake_and_list_sessions_epoch() {
+        assert_eq!(DAEMON_PROTOCOL_VERSION, 4);
 
         let hs = DaemonResponse::HandshakeOk {
             version: DAEMON_PROTOCOL_VERSION,
@@ -1077,7 +1087,7 @@ mod tests {
         };
         let hs_json = serde_json::to_string(&hs).expect("serialize handshake");
         assert!(hs_json.contains(r#""epoch":777777"#));
-        assert!(hs_json.contains(r#""version":3"#));
+        assert!(hs_json.contains(r#""version":4"#));
         assert!(hs_json.contains(r#""binaryPath":"/bin/ferryx""#));
         assert!(hs_json.contains(r#""binaryMtimeMs":1700000000000"#));
         assert!(hs_json.contains(r#""daemonVersion":"2026.902.2""#));
@@ -1172,7 +1182,7 @@ mod tests {
             _ => panic!("Expected Spawn variant"),
         }
 
-        assert_eq!(DAEMON_PROTOCOL_VERSION, 3);
+        assert_eq!(DAEMON_PROTOCOL_VERSION, 4);
     }
 
     #[test]

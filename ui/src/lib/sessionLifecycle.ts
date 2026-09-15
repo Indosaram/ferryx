@@ -3,13 +3,14 @@ import { useSyncExternalStore } from "react";
 import type { TerminalActivityState } from "./activity";
 import { loadGeneralSettings } from "./generalSettings";
 import { isPairedWorkspaceId, isRemoteWorkspaceId } from "./remoteProject";
-import { closeTerminal, onNativeTerminalAgentState } from "./tauri";
-import type { TerminalSession } from "./types";
+import { getTerminalHistorySnapshot, hibernateTerminal, onNativeTerminalAgentState } from "./tauri";
+import type { SessionProcessState, TerminalSession } from "./types";
 
-export type SessionProcessState = "standby" | "running" | "hibernated";
+export type { SessionProcessState } from "./types";
 export type SessionLifecycleAction = "hibernate" | "restart";
 
 export const STANDBY_BACKEND_PREFIX = "standby:";
+const MAX_PERSISTED_SCROLLBACK_CHARS = 256_000;
 
 export function createStandbyBackendSessionId(sessionId: string): string {
   return `${STANDBY_BACKEND_PREFIX}${sessionId}`;
@@ -21,9 +22,12 @@ export function isStandbyBackendSessionId(sessionId: string | null | undefined):
 
 export function getSessionProcessState(session: TerminalSession | null | undefined): SessionProcessState {
   if (!session) return "standby";
-  if (isSessionSleeping(session.id)) return "hibernated";
-  if (!session.backendSessionId || isStandbyBackendSessionId(session.backendSessionId)) return "standby";
-  return "running";
+  if (session.backendSessionId && !isStandbyBackendSessionId(session.backendSessionId)) return "running";
+  if (isStandbyBackendSessionId(session.backendSessionId)) {
+    return session.processState === "hibernated" ? "hibernated" : "standby";
+  }
+  if (isSessionSleeping(session.id) || session.processState === "hibernated") return "hibernated";
+  return "standby";
 }
 
 type RegisteredSession = {
@@ -33,7 +37,9 @@ type RegisteredSession = {
 };
 
 const registeredSessions = new Map<string, RegisteredSession>();
+const recentScrollbackBySessionId = new Map<string, string>();
 const sleepingSessionIds = new Set<string>();
+const manualHibernateHoldIds = new Set<string>();
 const sleepingListeners = new Set<() => void>();
 const actionListeners = new Set<(action: SessionLifecycleAction, sessionId: string) => void>();
 let sleepingSnapshot = "";
@@ -55,6 +61,10 @@ export function setSessionSleeping(sessionId: string, sleeping: boolean): void {
 
 export function isSessionSleeping(sessionId: string): boolean {
   return sleepingSessionIds.has(sessionId);
+}
+
+export function isSessionAutoResumeHeld(sessionId: string): boolean {
+  return manualHibernateHoldIds.has(sessionId);
 }
 
 export function clearSleepingSessions(): void {
@@ -81,6 +91,20 @@ export function useSleepingSessionIds(): ReadonlySet<string> {
   return new Set(snapshot ? snapshot.split("\u0000") : []);
 }
 
+export function getSessionRecentScrollback(sessionId: string): string | undefined {
+  return recentScrollbackBySessionId.get(sessionId);
+}
+
+export function restoreSessionRecentScrollback(sessionId: string, value: string | null | undefined): void {
+  if (!value) return;
+  recentScrollbackBySessionId.set(
+    sessionId,
+    value.length > MAX_PERSISTED_SCROLLBACK_CHARS
+      ? value.slice(-MAX_PERSISTED_SCROLLBACK_CHARS)
+      : value,
+  );
+}
+
 function activityIsIdle(state: TerminalActivityState | "idle" | "blocked" | undefined): boolean {
   return state === "done" || state === "idle";
 }
@@ -101,16 +125,17 @@ export function registerSessionSnapshot(
     active: previous?.active ?? false,
     idleSince,
   });
-  if (session.backendSessionId && !isStandbyBackendSessionId(session.backendSessionId)) {
-    setSessionSleeping(session.id, false);
-  }
   ensureLifecycleMonitoring();
 }
 
 export function setSessionActive(sessionId: string, active: boolean): void {
   const entry = registeredSessions.get(sessionId);
   if (!entry) return;
+  const wasActive = entry.active;
   entry.active = active;
+  // Manual Hibernate on an already-active pane must stay asleep. A real focus
+  // transition away and back is what releases the hold and permits transparent wakeup.
+  if (active && !wasActive) manualHibernateHoldIds.delete(sessionId);
 }
 
 export function markSessionActivity(
@@ -129,6 +154,21 @@ function findRegisteredByBackend(backendSessionId: string): RegisteredSession | 
   return null;
 }
 
+async function captureRecentScrollback(sessionId: string, backendSessionId: string): Promise<void> {
+  try {
+    const history = await getTerminalHistorySnapshot(backendSessionId);
+    if (!history) return;
+    recentScrollbackBySessionId.set(
+      sessionId,
+      history.length > MAX_PERSISTED_SCROLLBACK_CHARS
+        ? history.slice(-MAX_PERSISTED_SCROLLBACK_CHARS)
+        : history,
+    );
+  } catch {
+    // History capture is best-effort; failure must never prevent memory reclamation.
+  }
+}
+
 export async function hibernateRegisteredSession(sessionId: string): Promise<void> {
   const entry = registeredSessions.get(sessionId);
   if (!entry) {
@@ -139,14 +179,21 @@ export async function hibernateRegisteredSession(sessionId: string): Promise<voi
   if (isRemoteWorkspaceId(session.workspaceId) || isPairedWorkspaceId(session.workspaceId)) return;
   const backendSessionId = session.backendSessionId;
   if (!backendSessionId || isStandbyBackendSessionId(backendSessionId)) {
-    entry.session = { ...session, backendSessionId: null, lifecycle: "exited" };
+    entry.session = { ...session, backendSessionId: null, processState: "hibernated", lifecycle: "exited" };
     setSessionSleeping(sessionId, true);
     return;
   }
-  await closeTerminal(backendSessionId);
-  entry.session = { ...session, backendSessionId: null, lifecycle: "exited" };
-  entry.idleSince = null;
+
+  await captureRecentScrollback(sessionId, backendSessionId);
   setSessionSleeping(sessionId, true);
+  try {
+    await hibernateTerminal(backendSessionId);
+  } catch (error) {
+    setSessionSleeping(sessionId, false);
+    throw error;
+  }
+  entry.session = { ...session, backendSessionId: null, processState: "hibernated", lifecycle: "exited" };
+  entry.idleSince = null;
 }
 
 async function sweepIdleSessions(): Promise<void> {
@@ -178,8 +225,11 @@ function ensureLifecycleMonitoring(): void {
 }
 
 export function requestSessionLifecycleAction(action: SessionLifecycleAction, sessionId: string): void {
+  if (action === "hibernate") manualHibernateHoldIds.add(sessionId);
+  else manualHibernateHoldIds.delete(sessionId);
   for (const listener of actionListeners) listener(action, sessionId);
   void hibernateRegisteredSession(sessionId).catch((error) => {
+    if (action === "hibernate") manualHibernateHoldIds.delete(sessionId);
     console.warn(`Failed to ${action} session`, error);
   });
 }
@@ -193,7 +243,9 @@ export function subscribeSessionLifecycleActions(
 
 export function resetSessionLifecycleForTests(): void {
   registeredSessions.clear();
+  recentScrollbackBySessionId.clear();
   sleepingSessionIds.clear();
+  manualHibernateHoldIds.clear();
   sleepingSnapshot = "";
   monitoringStarted = false;
   if (idleSweepTimer) clearInterval(idleSweepTimer);

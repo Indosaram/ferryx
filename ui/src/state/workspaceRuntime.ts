@@ -138,9 +138,6 @@ export function useWorkspaceRuntime({
 
   const refreshWorktrees = useCallback(
     (options?: { allowCreate?: boolean }) => {
-      // Paired metadata is refreshed by the owner-aware Sidebar cache. Until
-      // terminal proxy support ships, never feed it to local terminal sync.
-      if (workspaceId.startsWith("daemon:")) return Promise.resolve();
       // Dedupe only within one workspace: a refresh started for the previous
       // project must never be handed to its replacement, and its result must
       // never be synced into the workspace that replaced it.

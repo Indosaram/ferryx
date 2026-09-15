@@ -2171,7 +2171,7 @@ describe("App project workspace flow", () => {
     expect(screen.getByRole("button", { name: "Show sidebar" })).toBeInTheDocument();
   });
 
-  it("requests fresh backends for restored tabs whose daemon sessions are gone", async () => {
+  it("keeps restored missing sessions in standby under the default Lazy policy", async () => {
     localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "/repo/main" }]));
     localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
     native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
@@ -2211,20 +2211,20 @@ describe("App project workspace flow", () => {
     render(<App />);
 
     await waitFor(() => expect(workspace.restoreWorkspace).toHaveBeenCalled());
-    await waitFor(() => expect(workspace.ensureSessionBackends).toHaveBeenCalledWith(["dead-sess-1"]));
+    expect(workspace.ensureSessionBackends).not.toHaveBeenCalled();
     expect(native.spawnTerminal).not.toHaveBeenCalled();
 
     const restoredState = workspace.restoreWorkspace.mock.calls[0]?.[0];
     expect(restoredState).toBeDefined();
     expect(restoredState.sessions["dead-sess-1"]).toMatchObject({
       id: "dead-sess-1",
-      backendSessionId: null,
+      backendSessionId: "standby:dead-sess-1",
       lifecycle: "exited",
       cwd: "/repo/main",
     });
   });
 
-  it("waits until project registration and authoritative worktree refresh complete before restoring workspace and recovering stale session backends", async () => {
+  it("waits until registration and worktree refresh complete before restoring Lazy standby sessions", async () => {
     localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "/repo/main" }]));
     localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
     let resolveRegister!: (value: any) => void;
@@ -2294,13 +2294,13 @@ describe("App project workspace flow", () => {
     });
 
     await waitFor(() => expect(workspace.restoreWorkspace).toHaveBeenCalled());
-    await waitFor(() => expect(workspace.ensureSessionBackends).toHaveBeenCalledWith(["dead-sess-1"]));
+    expect(workspace.ensureSessionBackends).not.toHaveBeenCalled();
 
     const restoredState = workspace.restoreWorkspace.mock.calls[0]?.[0];
     expect(restoredState).toBeDefined();
     expect(restoredState.sessions["dead-sess-1"]).toMatchObject({
       id: "dead-sess-1",
-      backendSessionId: null,
+      backendSessionId: "standby:dead-sess-1",
       lifecycle: "exited",
     });
   });
@@ -2474,7 +2474,7 @@ describe("App project workspace flow", () => {
     });
     expect(restoredState.sessions["dead-sess-2"]).toMatchObject({
       id: "dead-sess-2",
-      backendSessionId: null,
+      backendSessionId: "standby:dead-sess-2",
       lifecycle: "exited",
     });
   });
@@ -2553,7 +2553,7 @@ describe("App project workspace flow", () => {
     // Mismatching epoch -> exited / lost
     expect(restoredState.sessions["sess-mismatch"]).toMatchObject({
       id: "sess-mismatch",
-      backendSessionId: null,
+      backendSessionId: "standby:sess-mismatch",
       lifecycle: "exited",
       daemonEpoch: null,
       lastOutputSequence: null,
@@ -2979,13 +2979,13 @@ describe("App project workspace flow", () => {
       "leaf-feature": "sess-feature-dead",
     });
 
-    // Verify both dead sessions were preserved with null backendSessionId and exited lifecycle without respawn
+    // Verify both dead sessions were preserved as Lazy standby metadata without respawn
     expect(finalRestoreCall.sessions["sess-main-dead"]).toMatchObject({
       id: "sess-main-dead",
       cwd: "/repo/main/backend",
       worktreePath: "/repo/main",
       worktree: null,
-      backendSessionId: null,
+      backendSessionId: "standby:sess-main-dead",
       lifecycle: "exited",
     });
     expect(finalRestoreCall.sessions["sess-feature-dead"]).toMatchObject({
@@ -2993,7 +2993,7 @@ describe("App project workspace flow", () => {
       cwd: "/repo/feature/packages/ui",
       worktreePath: "/repo/feature",
       worktree: { wsId: "default", slug: "feature-branch" },
-      backendSessionId: null,
+      backendSessionId: "standby:sess-feature-dead",
       lifecycle: "exited",
     });
   });
@@ -4147,6 +4147,7 @@ describe("App project workspace flow", () => {
 
   describe("Automatic agent session resume on workspace restore", () => {
     it("auto-resumes exited agent sessions in staggered order, while plain shell sessions and unsupported agents are not auto-resumed", async () => {
+      localStorage.setItem("ferryx.settings.general", JSON.stringify({ confirmCloseTab: false, sessionRestorePolicy: "eager", sessionIdleTimeoutMinutes: 30 }));
       localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "/repo/main" }]));
       localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
       native.getInitialProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
@@ -4253,6 +4254,7 @@ describe("App project workspace flow", () => {
     });
 
     it("does not crash and degrades silently when auto-resume spawn fails", async () => {
+      localStorage.setItem("ferryx.settings.general", JSON.stringify({ confirmCloseTab: false, sessionRestorePolicy: "eager", sessionIdleTimeoutMinutes: 30 }));
       localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "/repo/main" }]));
       localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
       native.getInitialProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });

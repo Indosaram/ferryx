@@ -6,24 +6,48 @@ import {
   getMigratedItem,
 } from "./storageKeys";
 
+export type SessionRestorePolicy = "lazy" | "activeOnly" | "eager";
+
 export type GeneralSettings = {
   confirmCloseTab: boolean;
+  sessionRestorePolicy: SessionRestorePolicy;
+  sessionIdleTimeoutMinutes: number;
 };
+
+export const MIN_SESSION_IDLE_TIMEOUT_MINUTES = 1;
+export const MAX_SESSION_IDLE_TIMEOUT_MINUTES = 24 * 60;
 
 export const DEFAULT_GENERAL_SETTINGS: GeneralSettings = {
   confirmCloseTab: false,
+  sessionRestorePolicy: "lazy",
+  sessionIdleTimeoutMinutes: 30,
 };
 
 export const GENERAL_SETTINGS_EVENT = "ferryx:general-settings";
 
 function normalizeGeneralSettings(value: unknown): GeneralSettings {
   const source = typeof value === "object" && value !== null
-    ? value as { confirmCloseTab?: unknown }
+    ? value as {
+        confirmCloseTab?: unknown;
+        sessionRestorePolicy?: unknown;
+        sessionIdleTimeoutMinutes?: unknown;
+      }
     : {};
+  const sessionRestorePolicy: SessionRestorePolicy = source.sessionRestorePolicy === "activeOnly" || source.sessionRestorePolicy === "eager"
+    ? source.sessionRestorePolicy
+    : "lazy";
+  const timeout = typeof source.sessionIdleTimeoutMinutes === "number" && Number.isFinite(source.sessionIdleTimeoutMinutes)
+    ? Math.round(source.sessionIdleTimeoutMinutes)
+    : DEFAULT_GENERAL_SETTINGS.sessionIdleTimeoutMinutes;
   return {
     confirmCloseTab: typeof source.confirmCloseTab === "boolean"
       ? source.confirmCloseTab
       : DEFAULT_GENERAL_SETTINGS.confirmCloseTab,
+    sessionRestorePolicy,
+    sessionIdleTimeoutMinutes: Math.min(
+      MAX_SESSION_IDLE_TIMEOUT_MINUTES,
+      Math.max(MIN_SESSION_IDLE_TIMEOUT_MINUTES, timeout),
+    ),
   };
 }
 

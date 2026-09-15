@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { getGroupForTab, layoutReducer, normalizeLayout } from "../state/layout";
 import type { WorkspaceState } from "../state/workspaceStore";
 import { saveBrowserSettings } from "./browserSettings";
+import { resetSessionLifecycleForTests, restoreSessionRecentScrollback } from "./sessionLifecycle";
 import {
   deserializeWorkspaceState,
   migrateLegacyAgentType,
@@ -94,6 +95,17 @@ function workspaceState(): WorkspaceState {
 }
 
 describe("sessionPersistence v3 serialization and migration", () => {
+  it("persists recent scrollback captured for hibernated sessions across restore/resave", () => {
+    restoreSessionRecentScrollback("sess-1", "recent terminal history");
+    const saved = serializeWorkspaceState("default", "/workspace/main", workspaceState());
+    expect(saved.workspaces.default.terminalSessions["sess-1"].recentScrollback).toBe("recent terminal history");
+
+    resetSessionLifecycleForTests();
+    const restored = deserializeWorkspaceState("default", saved, ["backend-1", "backend-2", "backend-3"])!;
+    const resaved = serializeWorkspaceState("default", "/workspace/main", restored);
+    expect(resaved.workspaces.default.terminalSessions["sess-1"].recentScrollback).toBe("recent terminal history");
+    resetSessionLifecycleForTests();
+  });
   it("preserves paired ownership and proxy identity despite local inventory absence", () => {
     const workspaceId = `daemon:${"a".repeat(64)}`;
     const project = { target: { kind: "pairedDaemon" as const, hostId: "host-a" }, remoteWorkspaceId: "remote-root" };

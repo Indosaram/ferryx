@@ -166,5 +166,45 @@ mod tests {
         loaded.prune_dead_routes();
         assert_eq!(loaded.routes.len(), 1);
         assert_eq!(loaded.routes[0].legacy_socket_path, existing_sock);
+
+        loaded.remove_route(&existing_sock);
+        assert!(loaded.routes.is_empty());
+    }
+
+    #[test]
+    fn test_handover_manifest_remove_multiple_unreachable_routes() {
+        let dir = tempdir().unwrap();
+        let manifest_path = dir.path().join("routes.json");
+
+        let sock1 = dir.path().join("sock1.sock");
+        let sock2 = dir.path().join("sock2.sock");
+        let sock3 = dir.path().join("sock3.sock");
+
+        let mut manifest = HandoverManifest::default();
+        manifest.add_or_update_route(HandoverRoute {
+            legacy_socket_path: sock1.clone(),
+            sessions: vec!["s1".into()],
+        });
+        manifest.add_or_update_route(HandoverRoute {
+            legacy_socket_path: sock2.clone(),
+            sessions: vec!["s2".into()],
+        });
+        manifest.add_or_update_route(HandoverRoute {
+            legacy_socket_path: sock3.clone(),
+            sessions: vec!["s3".into()],
+        });
+        manifest.save_to_path(&manifest_path).unwrap();
+
+        let unreachable = vec![sock1.clone(), sock3.clone()];
+        HandoverManifest::update_at_path(&manifest_path, |m| {
+            for path in &unreachable {
+                m.remove_route(path);
+            }
+        })
+        .unwrap();
+
+        let reloaded = HandoverManifest::load_from_path(&manifest_path);
+        assert_eq!(reloaded.routes.len(), 1);
+        assert_eq!(reloaded.routes[0].legacy_socket_path, sock2);
     }
 }

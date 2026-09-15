@@ -2329,6 +2329,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
           [action.sessionId]: {
             ...session,
             backendSessionId: action.backendSessionId,
+            processState: "running",
             cwd: action.cwd ?? session.cwd,
             daemonEpoch: action.daemonEpoch ?? null,
             lastOutputSequence: null,

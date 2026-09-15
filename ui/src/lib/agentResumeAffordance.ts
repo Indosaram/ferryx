@@ -5,6 +5,7 @@ import {
   canResumeAgent,
   normalizeAgentProviderSession,
 } from "./agentResume";
+import { isStandbyBackendSessionId } from "./sessionLifecycle";
 import type {
   AgentProviderSession,
   ReconnectLifecycle,
@@ -79,6 +80,10 @@ export function extractNormalizedProviderSession(session: TerminalSession): Agen
   return null;
 }
 
+function hasLiveBackend(session: TerminalSession): boolean {
+  return session.backendSessionId !== null && !isStandbyBackendSessionId(session.backendSessionId);
+}
+
 export function findConflictingActiveSession(
   session: TerminalSession,
   allSessions?: Readonly<Record<string, TerminalSession>> | readonly TerminalSession[],
@@ -96,7 +101,7 @@ export function findConflictingActiveSession(
     const candidateNorm = extractNormalizedProviderSession(candidate);
     if (!candidateNorm || !agentProviderSessionsEqual(targetAgent, targetNorm, candidateNorm)) continue;
 
-    const isLive = candidate.backendSessionId !== null || candidate.lifecycle !== "exited";
+    const isLive = hasLiveBackend(candidate) || candidate.lifecycle !== "exited";
     const isReconnecting =
       candidate.reconnectLifecycle === "validating" ||
       candidate.reconnectLifecycle === "spawning" ||
@@ -152,7 +157,7 @@ export function getAgentReconnectAffordance(
     });
   }
 
-  if (session.lifecycle !== "exited" || session.backendSessionId !== null) {
+  if (session.lifecycle !== "exited" || hasLiveBackend(session)) {
     return affordance("none", session, {
       canReconnect: false,
       providerSession,

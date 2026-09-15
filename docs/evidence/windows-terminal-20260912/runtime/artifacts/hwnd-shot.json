@@ -1,0 +1,152 @@
+[
+  {
+    "Hwnd": {
+      "value": 15140440
+    },
+    "Parent": {
+      "value": 0
+    },
+    "Class": "Tauri Window",
+    "Title": "Ferryx",
+    "Visible": true,
+    "L": 13,
+    "T": 63,
+    "R": 1263,
+    "B": 1013
+  },
+  {
+    "Hwnd": {
+      "value": 1901834
+    },
+    "Parent": {
+      "value": 0
+    },
+    "Class": "NVOpenGLPbuffer",
+    "Title": "NVOGLDC invisible",
+    "Visible": false,
+    "L": 32,
+    "T": 32,
+    "R": 2912,
+    "B": 1162
+  },
+  {
+    "Hwnd": {
+      "value": 2099500
+    },
+    "Parent": {
+      "value": 0
+    },
+    "Class": "wgpu Device Class 7ff615f99620",
+    "Title": "wgpu Device Class 7ff615f99620",
+    "Visible": false,
+    "L": 0,
+    "T": 0,
+    "R": 170,
+    "B": 47
+  },
+  {
+    "Hwnd": {
+      "value": 591294
+    },
+    "Parent": {
+      "value": 0
+    },
+    "Class": "NVOpenGLPbuffer",
+    "Title": "__wglDummyWindowFodder",
+    "Visible": false,
+    "L": 320,
+    "T": 320,
+    "R": 3200,
+    "B": 1450
+  },
+  {
+    "Hwnd": {
+      "value": 376373704
+    },
+    "Parent": {
+      "value": 0
+    },
+    "Class": "Tao Thread Event Target",
+    "Title": "",
+    "Visible": true,
+    "L": 0,
+    "T": 0,
+    "R": 18,
+    "B": 18
+  },
+  {
+    "Hwnd": {
+      "value": 9569800
+    },
+    "Parent": {
+      "value": 158401596
+    },
+    "Class": "MSCTFIME UI",
+    "Title": "MSCTFIME UI",
+    "Visible": false,
+    "L": 0,
+    "T": 0,
+    "R": 0,
+    "B": 0
+  },
+  {
+    "Hwnd": {
+      "value": 158401596
+    },
+    "Parent": {
+      "value": 15140440
+    },
+    "Class": "IME",
+    "Title": "Default IME",
+    "Visible": false,
+    "L": 0,
+    "T": 0,
+    "R": 0,
+    "B": 0
+  },
+  {
+    "Hwnd": {
+      "value": 307627886
+    },
+    "Parent": {
+      "value": 1901834
+    },
+    "Class": "IME",
+    "Title": "Default IME",
+    "Visible": false,
+    "L": 0,
+    "T": 0,
+    "R": 0,
+    "B": 0
+  },
+  {
+    "Hwnd": {
+      "value": 1050048
+    },
+    "Parent": {
+      "value": 2099500
+    },
+    "Class": "IME",
+    "Title": "Default IME",
+    "Visible": false,
+    "L": 0,
+    "T": 0,
+    "R": 0,
+    "B": 0
+  },
+  {
+    "Hwnd": {
+      "value": 263656
+    },
+    "Parent": {
+      "value": 591294
+    },
+    "Class": "IME",
+    "Title": "Default IME",
+    "Visible": false,
+    "L": 0,
+    "T": 0,
+    "R": 0,
+    "B": 0
+  }
+]

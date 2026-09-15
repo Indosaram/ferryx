@@ -1,0 +1,158 @@
+{
+  "time": "2026-09-12T22:21:40.9124378+09:00",
+  "mode": "postmessage-wmchar hwnd=15140440",
+  "echoLine": "echo FERRYX_WIN_START_OK",
+  "mainHwnd": {
+    "value": 15140440
+  },
+  "mainPid": 21620,
+  "mainTitle": "Ferryx",
+  "focusVerified": false,
+  "childCount": 12,
+  "children": [
+    {
+      "Hwnd": {
+        "value": 164496696
+      },
+      "Class": "FerryxNativeTerm",
+      "Title": "",
+      "Visible": true,
+      "L": 320,
+      "T": 139,
+      "R": 1364,
+      "B": 958
+    },
+    {
+      "Hwnd": {
+        "value": 11535376
+      },
+      "Class": "WRY_WEBVIEW",
+      "Title": "",
+      "Visible": true,
+      "L": 84,
+      "T": 107,
+      "R": 1364,
+      "B": 957
+    },
+    {
+      "Hwnd": {
+        "value": 2164660
+      },
+      "Class": "Chrome_WidgetWin_0",
+      "Title": "",
+      "Visible": true,
+      "L": 84,
+      "T": 107,
+      "R": 1364,
+      "B": 957
+    },
+    {
+      "Hwnd": {
+        "value": 263604
+      },
+      "Class": "Chrome_WidgetWin_0",
+      "Title": "",
+      "Visible": true,
+      "L": 84,
+      "T": 138,
+      "R": 315,
+      "B": 144
+    },
+    {
+      "Hwnd": {
+        "value": 263670
+      },
+      "Class": "Chrome_WidgetWin_0",
+      "Title": "",
+      "Visible": true,
+      "L": 312,
+      "T": 114,
+      "R": 315,
+      "B": 137
+    },
+    {
+      "Hwnd": {
+        "value": 263600
+      },
+      "Class": "Chrome_WidgetWin_0",
+      "Title": "",
+      "Visible": true,
+      "L": 286,
+      "T": 114,
+      "R": 288,
+      "B": 137
+    },
+    {
+      "Hwnd": {
+        "value": 198138
+      },
+      "Class": "Chrome_WidgetWin_0",
+      "Title": "",
+      "Visible": true,
+      "L": 260,
+      "T": 114,
+      "R": 263,
+      "B": 137
+    },
+    {
+      "Hwnd": {
+        "value": 1901996
+      },
+      "Class": "Chrome_WidgetWin_0",
+      "Title": "",
+      "Visible": true,
+      "L": 84,
+      "T": 114,
+      "R": 92,
+      "B": 137
+    },
+    {
+      "Hwnd": {
+        "value": 460286
+      },
+      "Class": "Chrome_WidgetWin_0",
+      "Title": "",
+      "Visible": true,
+      "L": 84,
+      "T": 107,
+      "R": 315,
+      "B": 114
+    },
+    {
+      "Hwnd": {
+        "value": 1050720
+      },
+      "Class": "Chrome_WidgetWin_1",
+      "Title": "Ferryx",
+      "Visible": true,
+      "L": 84,
+      "T": 107,
+      "R": 1364,
+      "B": 957
+    },
+    {
+      "Hwnd": {
+        "value": 197646
+      },
+      "Class": "Chrome_RenderWidgetHostHWND",
+      "Title": "Chrome Legacy Window",
+      "Visible": true,
+      "L": 84,
+      "T": 107,
+      "R": 1364,
+      "B": 958
+    },
+    {
+      "Hwnd": {
+        "value": 132610
+      },
+      "Class": "Intermediate D3D Window",
+      "Title": "",
+      "Visible": true,
+      "L": 84,
+      "T": 107,
+      "R": 1364,
+      "B": 957
+    }
+  ]
+}

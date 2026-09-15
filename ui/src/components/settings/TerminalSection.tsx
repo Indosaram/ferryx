@@ -8,6 +8,7 @@ import { Switch } from "../ui/switch";
 import { SettingsHeading } from "./primitives";
 import type { TerminalSectionProps } from "./types";
 import { isMacShortcutPlatform } from "../../lib/shortcuts";
+import { loadFileLinkEditor, parseFileLinkEditor, saveFileLinkEditor } from "../../lib/fileLinkSettings";
 
 export function TerminalSection({
   fontFamily,
@@ -25,6 +26,7 @@ export function TerminalSection({
   onUseImported,
 }: TerminalSectionProps) {
   const [familyDraft, setFamilyDraft] = useState(fontFamily);
+  const [fileEditor, setFileEditor] = useState(loadFileLinkEditor);
   const [sizeDraft, setSizeDraft] = useState(String(fontSize));
   const [scrollbackDraft, setScrollbackDraft] = useState(String(scrollback));
 
@@ -154,6 +156,29 @@ export function TerminalSection({
       </div>
 
       <div className="space-y-5">
+        <div>
+          <Label htmlFor="terminal-file-editor" className="mb-1.5 block text-[11px] font-medium">
+            File link editor
+          </Label>
+          <select
+            id="terminal-file-editor"
+            value={fileEditor}
+            onChange={(event) => {
+              const editor = parseFileLinkEditor(event.target.value);
+              saveFileLinkEditor(editor);
+              setFileEditor(editor);
+            }}
+            className="h-8 w-full rounded-md border border-input bg-background px-3 text-[11px] focus:outline-none focus:ring-1 focus:ring-ring"
+          >
+            <option value="system">System default</option>
+            <option value="vscode">Visual Studio Code</option>
+            <option value="cursor">Cursor</option>
+            <option value="zed">Zed</option>
+          </select>
+          <p className="mt-1 text-[11px] text-muted-foreground">
+            {isMacShortcutPlatform() ? "Cmd" : "Ctrl"}+click a local file path to open it. Choose an editor to jump to its line and column.
+          </p>
+        </div>
         <div>
           <Label
             htmlFor="terminal-font-family"

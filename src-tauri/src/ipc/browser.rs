@@ -1728,7 +1728,7 @@ fn shell_execute_result(result: isize) -> std::io::Result<()> {
     Ok(())
 }
 
-fn open_system_target(target: &std::ffi::OsStr) -> Result<(), IpcError> {
+pub(crate) fn open_system_target(target: &std::ffi::OsStr) -> Result<(), IpcError> {
     #[cfg(target_os = "windows")]
     {
         open_windows_target(target).map_err(|error| IpcError::internal(error.to_string()))
@@ -1760,60 +1760,105 @@ pub async fn cmd_browser_open_external(url: String) -> Result<(), IpcError> {
     }).await
 }
 
-fn resolve_file_link(
-    trimmed: &str,
-    cwd: Option<&str>,
-    home: Option<std::path::PathBuf>,
-) -> std::path::PathBuf {
-    if trimmed.starts_with("~/") || trimmed == "~" {
-        home.map(|h| match trimmed.strip_prefix("~/") {
-            Some(suffix) => h.join(suffix),
-            None => h,
-        })
-            .unwrap_or_else(|| std::path::PathBuf::from(trimmed))
-    } else if std::path::Path::new(trimmed).is_absolute() {
-        std::path::PathBuf::from(trimmed)
-    } else if let Some(cwd_dir) = cwd {
-        std::path::Path::new(cwd_dir).join(trimmed)
-    } else {
-        std::path::PathBuf::from(trimmed)
-    }
-}
-
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn cmd_open_file_path(
+    daemon_client: tauri::State<'_, std::sync::Arc<crate::daemon::DaemonClient>>,
     path: String,
     cwd: Option<String>,
-    _line: Option<u32>,
-    _col: Option<u32>,
+    session_id: Option<String>,
+    line: Option<u32>,
+    col: Option<u32>,
+    editor: Option<String>,
 ) -> Result<bool, IpcError> {
+    open_file_path_request(
+        Some(daemon_client.inner()),
+        path,
+        cwd,
+        session_id,
+        line,
+        col,
+        editor,
+    )
+    .await
+}
+
+/// Testable core of `cmd_open_file_path`, independent of Tauri state.
+///
+/// Resolution order for the terminal working directory:
+/// 1. `sessionId` — the live cwd of that local backend session, via the
+///    existing daemon cwd cache/describe machinery. Remote sessions are
+///    refused here rather than resolved against an unrelated local path.
+/// 2. `cwd` — the caller-supplied directory.
+/// 3. neither — the path must be absolute or `~`-rooted to resolve.
+pub async fn open_file_path_request(
+    daemon_client: Option<&std::sync::Arc<crate::daemon::DaemonClient>>,
+    path: String,
+    cwd: Option<String>,
+    session_id: Option<String>,
+    line: Option<u32>,
+    col: Option<u32>,
+    editor: Option<String>,
+) -> Result<bool, IpcError> {
+    let editor = crate::ipc::file_link::EditorTarget::parse(editor.as_deref())?;
+
+    let resolved_cwd = match session_id.as_deref() {
+        Some(session_id) => resolve_session_cwd(daemon_client, session_id).await?,
+        None => None,
+    };
+    let cwd = if session_id.is_some() {
+        if resolved_cwd.is_none() && !crate::ipc::file_link::is_absolute_token(&path)
+            && !path.starts_with('~') {
+            return Err(IpcError::new(crate::ipc::error::IpcErrorCode::Unsupported,
+                "The terminal's current directory could not be read. Use an absolute file path."));
+        }
+        resolved_cwd.map(|cwd| cwd.to_string_lossy().into_owned())
+    } else { cwd };
+
     crate::ipc::run_blocking::<bool, _>(move || {
-        let trimmed = path
-            .trim()
-            .trim_matches(|c| c == '\'' || c == '"' || c == '`');
-        if trimmed.is_empty() {
-            return Ok(false);
-        }
-
-        let candidate = resolve_file_link(
-            trimmed,
+        crate::ipc::file_link::open_file_link_blocking(
+            &path,
             cwd.as_deref(),
-            std::env::home_dir(),
-        );
-
-        if !candidate.exists() {
-            return Ok(false);
-        }
-
-        open_system_target(candidate.as_os_str())?;
-        Ok(true)
+            line,
+            col,
+            editor,
+        )
     })
     .await
 }
 
+async fn resolve_session_cwd(
+    daemon_client: Option<&std::sync::Arc<crate::daemon::DaemonClient>>,
+    session_id: &str,
+) -> Result<Option<std::path::PathBuf>, IpcError> {
+    // A paired-host relay session is rejected before any daemon round trip.
+    if crate::terminal::paired_runtime::Runtime::owns(session_id) {
+        return crate::ipc::file_link::session_cwd_guard(session_id, None, None);
+    }
+    let Some(daemon_client) = daemon_client else {
+        return crate::ipc::file_link::session_cwd_guard(
+            session_id,
+            None,
+            Some("daemon client unavailable"),
+        );
+    };
+    let details = match daemon_client.describe_session(session_id).await {
+        Ok(details) => details,
+        Err(error) => {
+            return crate::ipc::file_link::session_cwd_guard(session_id, None, Some(&error.message))
+        }
+    };
+    // Bypass the UI cwd cache: DescribeSession reads the live shell process.
+    let cwd = crate::ipc::file_link::session_cwd_guard(session_id, Some(&details), None)?;
+    if let Some(cwd) = cwd.clone() {
+        crate::ipc::terminal::update_cached_cwd(session_id.to_string(), cwd);
+    }
+    Ok(cwd)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{cmd_open_file_path, resolve_file_link, windows_open_request, WindowsOpenRequest};
+    use super::{windows_open_request, WindowsOpenRequest};
 
     #[test]
     fn external_open_propagates_failure() {
@@ -1838,12 +1883,14 @@ mod tests {
 
     #[test]
     fn file_link_expands_bare_home() {
+        use crate::ipc::file_link::resolve_file_link;
         let home = std::path::PathBuf::from("C:/Users/P13 fixture");
         assert_eq!(resolve_file_link("~", Some("C:/work"), Some(home.clone())), home);
     }
 
     #[test]
     fn file_link_expands_profile_relative_path() {
+        use crate::ipc::file_link::resolve_file_link;
         let home = std::path::PathBuf::from("C:/Users/P13 fixture");
         assert_eq!(
             resolve_file_link("~/two words & notes.txt", None, Some(home.clone())),
@@ -1867,19 +1914,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_cmd_open_file_path_rejects_nonexistent_file() {
-        let res = cmd_open_file_path(
+        let error = super::open_file_path_request(
+            None,
             "/nonexistent/file/path/that/does/not/exist.txt".to_string(),
+            None,
+            None,
             None,
             None,
             None,
         )
         .await
-        .expect("ipc result");
-        assert_eq!(res, false);
+        .expect_err("missing paths must error, never report a silent false");
+        assert_eq!(error.code, crate::ipc::error::IpcErrorCode::InvalidPath);
     }
 
     #[test]
     fn test_cmd_open_file_path_resolves_relative_with_cwd() {
+        use crate::ipc::file_link::resolve_file_link;
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         // Test the production resolver, not the user's default application.
         let resolved = resolve_file_link("Cargo.toml", Some(manifest_dir), None);

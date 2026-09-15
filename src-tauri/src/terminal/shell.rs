@@ -391,7 +391,7 @@ where
     E: Fn(&str) -> Option<String>,
 {
     match startup {
-        Some(TerminalStartup::RemoteSsh { .. }) => {
+        Some(TerminalStartup::RemoteSsh { .. }) | Some(TerminalStartup::PairedDaemon { .. }) => {
             Err(AgentResumeError::RemoteSshRequiresWorkspace)
         }
         Some(TerminalStartup::AgentResume {

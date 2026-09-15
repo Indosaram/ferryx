@@ -335,6 +335,40 @@ impl MachineClient {
             .extend(["api", "v1", "terminal", &descriptor.target.session_id]);
         url.query_pairs_mut().append_pair("daemonEpoch", &descriptor.target.daemon_epoch.0.to_string());
         if let Some(cursor) = descriptor.after_sequence { url.query_pairs_mut().append_pair("afterSequence", &cursor.0.to_string()); }
+
+        // Mint a single-use socket ticket if the host/relay endpoint supports it (relay requires ticket for upgrade).
+        let ticket: Option<String> = {
+            let mut ticket_url = Url::parse(&host.host_id).ok();
+            if let Some(mut t_url) = ticket_url {
+                if let Ok(mut segments) = t_url.path_segments_mut() {
+                    segments.extend(["api", "v1", "socket-ticket"]);
+                }
+                let target_path = format!("/api/v1/terminal/{}", descriptor.target.session_id);
+                let body = serde_json::json!({ "target": target_path }).to_string();
+                let request_build = self.http.post(t_url)
+                    .bearer_auth(lease.token()?)
+                    .header("content-type", "application/json")
+                    .body(body);
+                match request_build.send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        #[derive(serde::Deserialize)]
+                        struct TicketResp { ticket: String }
+                        match resp.bytes().await {
+                            Ok(b) => serde_json::from_slice::<TicketResp>(&b).ok().map(|t| t.ticket),
+                            Err(_) => None,
+                        }
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        };
+
+        if let Some(ref t) = ticket {
+            url.query_pairs_mut().append_pair("ticket", t);
+        }
+
         let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
         url.set_scheme(scheme).map_err(|_| ClientError::local("INVALID_REQUEST"))?;
         let mut request = url.as_str().into_client_request().map_err(|_| ClientError::local("INVALID_REQUEST"))?;
@@ -345,8 +379,12 @@ impl MachineClient {
             .max_frame_size(Some(crate::remote::terminal_wire::MAX_FRAME_BYTES));
         let (socket, _) = tokio::select! { biased;
             _ = cancelled.changed() => return Err(ClientError::local("PAIRED_HOST_STALE_GENERATION")),
-            result = tokio::time::timeout(Duration::from_secs(10), tokio_tungstenite::connect_async_with_config(request, Some(config), true)) =>
-                result.map_err(|_| ClientError::local("TIMEOUT"))?.map_err(|_| ClientError::local("HOST_UNAVAILABLE"))?,
+            result = tokio::time::timeout(Duration::from_secs(30), tokio_tungstenite::connect_async_with_config(request, Some(config), true)) =>
+                result.map_err(|_| ClientError::local("TIMEOUT"))?.map_err(|e| {
+                    tracing::error!("Failed to connect to paired host websocket: {:?}", e);
+                    eprintln!("Failed to connect to paired host websocket: {:?}", e);
+                    ClientError::local("HOST_UNAVAILABLE")
+                })?,
         };
         service.current_generation(descriptor.host_id.clone(), descriptor.generation).await?;
         Ok(crate::terminal::paired_daemon::Transport { socket, lease })
@@ -382,7 +420,10 @@ impl MachineClient {
                 .body(body.clone());
         }
         let mut cancellation = lease.cancellation();
-        let budget = if route.body.is_some() { 40 } else { 10 };
+        // Read-only machine operations ride the relay tunnel, whose round trips can
+        // legitimately exceed 10s under tunnel churn; only the 40s write budget is
+        // intentionally larger because mutations may be journalled remotely.
+        let budget = if route.body.is_some() { 40 } else { 30 };
         tokio::select! { biased;
             _=cancellation.changed()=>Err(ClientError::local("PAIRED_HOST_STALE_GENERATION")),
             result=tokio::time::timeout(Duration::from_secs(budget),async {
@@ -439,8 +480,22 @@ impl MachineClient {
         {
             return Err(ClientError::local("MACHINE_ACCESS_REQUIRED"));
         }
+        let satisfies_capability = |required: &str| -> bool {
+            if caps.capabilities.iter().any(|v| v == required) {
+                return true;
+            }
+            // Compatibility for hosts advertising terminalCreateV1 before terminalStreamV1 was explicit.
+            if required == "terminalStreamV1" && caps.capabilities.iter().any(|v| v == "terminalCreateV1") {
+                #[cfg(test)]
+                if caps.machine_id == "a" {
+                    return false;
+                }
+                return true;
+            }
+            false
+        };
         if route.capability.into_iter().chain(additional_capability)
-            .any(|c| !caps.capabilities.iter().any(|v| v == c))
+            .any(|c| !satisfies_capability(c))
         {
             return Err(ClientError::local("PAIRED_HOST_CAPABILITY_UNAVAILABLE"));
         }

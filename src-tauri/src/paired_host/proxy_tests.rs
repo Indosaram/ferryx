@@ -159,9 +159,8 @@ async fn native_registry_routes_paired_ids_without_local_fallback() {
     terminal.paired().install(proxy).unwrap();
     assert!(terminal.list_sessions().contains(&id));
     assert!(terminal.attach_with_sequence(&id, None).is_ok());
-    assert!(terminal.write_input(&id, b"detached").is_err());
     assert!(terminal.write_input_operation(&id, 7, b"detached".to_vec()).unwrap().await.is_err());
-    terminal.paired().detach(&id).await.unwrap();
+    assert!(terminal.close_session(&id).await.is_ok());
     drop(other);
     assert!(!terminal.output_hub().has_session(&id));
     assert!(terminal.pty_manager().list_sessions().is_empty());

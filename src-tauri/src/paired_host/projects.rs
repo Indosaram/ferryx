@@ -47,6 +47,31 @@ pub fn projects(host: &str, rows: m::Projects) -> Projects {
             .collect(),
     }
 }
+
+pub fn store_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join("paired_projects.json")
+}
+
+pub fn read_stored_projects(data_dir: &std::path::Path) -> std::collections::BTreeMap<String, Project> {
+    let path = store_path(data_dir);
+    match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+        Err(_) => std::collections::BTreeMap::new(),
+    }
+}
+
+pub fn save_stored_project(data_dir: &std::path::Path, p: Project) -> Result<(), std::io::Error> {
+    let mut map = read_stored_projects(data_dir);
+    map.insert(p.metadata.workspace_id.clone(), p);
+    let path = store_path(data_dir);
+    let bytes = serde_json::to_vec_pretty(&map)?;
+    std::fs::write(path, bytes)
+}
+
+pub fn resolve_stored_project(data_dir: &std::path::Path, workspace_id: &str) -> Option<Project> {
+    let map = read_stored_projects(data_dir);
+    map.get(workspace_id).cloned()
+}
 #[cfg(test)]
 #[path = "projects_tests.rs"]
 mod tests;

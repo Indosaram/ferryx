@@ -1522,7 +1522,7 @@ impl DaemonServer {
                     line.clear();
                     let should_check_retirement = matches!(
                         req.as_ref(),
-                        Ok(DaemonRequest::Close { .. }) | Ok(DaemonRequest::CommitHandover { .. })
+                        Ok(DaemonRequest::Close { .. }) | Ok(DaemonRequest::Hibernate { .. }) | Ok(DaemonRequest::CommitHandover { .. })
                     );
 
                     let resp = match req {
@@ -1710,7 +1710,16 @@ impl DaemonServer {
                 }
                 Ok(DaemonRequest::DescribeSession { session_id }) => {
                     if self.session_router.is_local_session(&session_id) {
-                        self.handle_describe_session(&session_id)
+                        let mut response = self.handle_describe_session(&session_id);
+                        if let Some(pid) = self.terminal_service.get_session(&session_id).and_then(|session| session.pid()) {
+                            let cwd = crate::ipc::run_blocking::<Option<PathBuf>, _>(move || {
+                                Ok(crate::ipc::terminal::process_cwd(pid))
+                            }).await;
+                            if let DaemonResponse::DescribeSessionOk { session } = &mut response {
+                                session.cwd = cwd.ok().flatten().map(|path| path.to_string_lossy().into_owned());
+                            }
+                        }
+                        response
                     } else if let Some(peer) = self.session_router.find_legacy_peer_for_session(&session_id) {
                         match peer.describe_session(&session_id).await {
                             Ok(session) => DaemonResponse::DescribeSessionOk { session },
@@ -1784,8 +1793,23 @@ impl DaemonServer {
                         DaemonResponse::ResetAgentStateOk
                     }
                 }
-                Ok(DaemonRequest::Write { session_id, .. } | DaemonRequest::Resize { session_id, .. }) if crate::terminal::paired_runtime::Runtime::owns(&session_id) => {
-                    DaemonResponse::Error { message: "Paired input requires a controller generation".into() }
+                Ok(DaemonRequest::Write { session_id, data }) if crate::terminal::paired_runtime::Runtime::owns(&session_id) => {
+                    match self.terminal_service.write_input_operation(&session_id, 0, data) {
+                        Ok(pending) => match pending.await {
+                            Ok(()) => DaemonResponse::WriteOk,
+                            Err(e) => DaemonResponse::Error { message: e.to_string() },
+                        },
+                        Err(e) => DaemonResponse::Error { message: e.to_string() },
+                    }
+                }
+                Ok(DaemonRequest::Resize { session_id, cols, rows }) if crate::terminal::paired_runtime::Runtime::owns(&session_id) => {
+                    match self.terminal_service.resize_operation(&session_id, 0, cols, rows) {
+                        Ok(pending) => match pending.await {
+                            Ok(()) => DaemonResponse::ResizeOk,
+                            Err(e) => DaemonResponse::Error { message: e.to_string() },
+                        },
+                        Err(e) => DaemonResponse::Error { message: e.to_string() },
+                    }
                 }
                 Ok(DaemonRequest::Write { session_id, data }) => {
                     if self.session_router.is_local_session(&session_id) {
@@ -1867,6 +1891,19 @@ impl DaemonServer {
                     } else {
                         // Idempotent close: closing an already closed or non-existent session is a success.
                         DaemonResponse::CloseOk
+                    }
+                }
+                Ok(DaemonRequest::Hibernate { session_id }) => {
+                    if self.session_router.is_local_session(&session_id) {
+                        match self.handle_hibernate(&session_id).await {
+                            Ok(()) => DaemonResponse::HibernateOk,
+                            Err(e) => DaemonResponse::Error {
+                                message: e.to_string(),
+                            },
+                        }
+                    } else {
+                        // Idempotent hibernate: a process that is already absent needs no work.
+                        DaemonResponse::HibernateOk
                     }
                 }
                 Ok(DaemonRequest::ListSessions) => {

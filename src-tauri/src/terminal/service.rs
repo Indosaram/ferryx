@@ -1,6 +1,8 @@
+use crate::daemon::session_lifecycle::{SessionLifecycleRegistry, SessionProcessState};
 use crate::terminal::output_hub::{SessionAttachment, TerminalOutputHub};
 use crate::terminal::{PtyError, PtyManager, PtySession, TerminalSignal};
 use crate::worktree::manager::WorktreeManager;
+use parking_lot::Mutex;
 use portable_pty::CommandBuilder;
 use std::path::Path;
 use std::sync::Arc;
@@ -12,6 +14,7 @@ pub struct TerminalService {
     output_hub: Arc<TerminalOutputHub>,
     remote: Arc<super::remote::RemoteRuntime>,
     paired: Arc<super::paired_runtime::Runtime>,
+    lifecycle: Arc<Mutex<SessionLifecycleRegistry>>,
 }
 
 impl Default for TerminalService {
@@ -30,6 +33,7 @@ impl TerminalService {
             paired: Arc::new(super::paired_runtime::Runtime::default()),
             pty_manager,
             output_hub,
+            lifecycle: Arc::new(Mutex::new(SessionLifecycleRegistry::default())),
         }
     }
 
@@ -37,6 +41,12 @@ impl TerminalService {
 
     pub fn remote(&self) -> &Arc<super::remote::RemoteRuntime> {
         &self.remote
+    }
+
+    /// Resource state of a daemon-owned process. Hibernated entries intentionally
+    /// outlive PTY teardown so callers can distinguish suspension from never-spawned state.
+    pub fn process_state(&self, session_id: &str) -> Option<SessionProcessState> {
+        self.lifecycle.lock().state(session_id)
     }
 
     /// Generation-aware admission. The returned future must be awaited for delivery status.
@@ -167,11 +177,13 @@ impl TerminalService {
         cols: u16,
         rows: u16,
     ) -> (String, broadcast::Receiver<Vec<u8>>) {
+        self.lifecycle.lock().mark_running(session_id.clone());
         let broadcast_rx = self.output_hub.register_session(&session_id);
         self.output_hub.record_initial_size(&session_id, cols, rows);
 
         // Spawn output pump task from PTY reader to OutputHub
         let output_hub = Arc::clone(&self.output_hub);
+        let lifecycle = Arc::clone(&self.lifecycle);
         let session_id_clone = session_id.clone();
         tokio::spawn(async move {
             while let Some(chunk) = pty_rx.recv().await {
@@ -183,6 +195,10 @@ impl TerminalService {
             }
             crate::terminal::metrics::clear_pty_read_timestamps(&session_id_clone);
             output_hub.remove_session(&session_id_clone);
+            let mut registry = lifecycle.lock();
+            if registry.state(&session_id_clone) != Some(SessionProcessState::Hibernated) {
+                registry.remove(&session_id_clone);
+            }
         });
 
         (session_id, broadcast_rx)
@@ -277,13 +293,37 @@ impl TerminalService {
                 .map_err(|e| PtyError::Other(e.to_string()));
         }
         self.output_hub.remove_session(session_id);
-        self.pty_manager.close_session(session_id).await
+        let result = self.pty_manager.close_session(session_id).await;
+        if result.is_ok() {
+            self.lifecycle.lock().remove(session_id);
+        }
+        result
+    }
+
+    pub async fn hibernate_session(&self, session_id: &str) -> Result<(), PtyError> {
+        if self.remote.contains(session_id) || super::paired_runtime::Runtime::owns(session_id) {
+            return Err(PtyError::Other("Session hibernation is supported only for local PTYs".into()));
+        }
+        self.lifecycle.lock().mark_hibernated(session_id.to_string());
+        self.output_hub.remove_session(session_id);
+        match self.pty_manager.close_session(session_id).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                if self.pty_manager.get_session(session_id).is_some() {
+                    self.lifecycle.lock().mark_running(session_id.to_string());
+                } else {
+                    self.lifecycle.lock().remove(session_id);
+                }
+                Err(error)
+            }
+        }
     }
 
     pub(crate) async fn close_machine_session(&self, session_id: &str,
         authorize: Arc<dyn Fn() -> Result<(), String> + Send + Sync>) -> Result<(), PtyError> {
         self.pty_manager.close_authorized(session_id, std::time::Duration::from_secs(5), authorize).await?;
         self.output_hub.remove_session(session_id);
+        self.lifecycle.lock().remove(session_id);
         Ok(())
     }
 

@@ -210,6 +210,10 @@ describe("getAgentReconnectAffordance", () => {
       expect(affordance.reason).toContain("does not support session resume");
     });
 
+    it("treats a standby backend as process-absent and reconnectable", () => {
+      const standby = createSession({ backendSessionId: "standby:session-1", lifecycle: "exited" });
+      expect(getAgentReconnectAffordance(standby)).toMatchObject({ status: "idle", canReconnect: true });
+    });
     it("returns none for plain terminal sessions without agentType or live sessions", () => {
       const plain = createSession({ agentType: null, agentSessionId: null, providerSession: null });
       const live = createSession({ lifecycle: "working", backendSessionId: "pty-1" });
