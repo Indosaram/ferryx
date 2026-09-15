@@ -1827,33 +1827,17 @@ pub async fn open_file_path_request(
     .await
 }
 
+/// Live cwd of a local backend terminal session.
+///
+/// The implementation lives in [`crate::ipc::file_preview_contract`] so the
+/// external-open path here and the read-only preview path share exactly one
+/// resolution (paired-host refusal, daemon `DescribeSession`, cwd cache
+/// refresh). This wrapper keeps the external launch behaviour unchanged.
 async fn resolve_session_cwd(
     daemon_client: Option<&std::sync::Arc<crate::daemon::DaemonClient>>,
     session_id: &str,
 ) -> Result<Option<std::path::PathBuf>, IpcError> {
-    // A paired-host relay session is rejected before any daemon round trip.
-    if crate::terminal::paired_runtime::Runtime::owns(session_id) {
-        return crate::ipc::file_link::session_cwd_guard(session_id, None, None);
-    }
-    let Some(daemon_client) = daemon_client else {
-        return crate::ipc::file_link::session_cwd_guard(
-            session_id,
-            None,
-            Some("daemon client unavailable"),
-        );
-    };
-    let details = match daemon_client.describe_session(session_id).await {
-        Ok(details) => details,
-        Err(error) => {
-            return crate::ipc::file_link::session_cwd_guard(session_id, None, Some(&error.message))
-        }
-    };
-    // Bypass the UI cwd cache: DescribeSession reads the live shell process.
-    let cwd = crate::ipc::file_link::session_cwd_guard(session_id, Some(&details), None)?;
-    if let Some(cwd) = cwd.clone() {
-        crate::ipc::terminal::update_cached_cwd(session_id.to_string(), cwd);
-    }
-    Ok(cwd)
+    crate::ipc::file_preview_contract::resolve_local_session_cwd(daemon_client, session_id).await
 }
 
 #[cfg(test)]

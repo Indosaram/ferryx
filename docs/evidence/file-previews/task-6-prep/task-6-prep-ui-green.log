@@ -1,0 +1,12 @@
+$ vitest run --maxWorkers=1 src/lib/filePreviewTypes.test.ts
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/preview/ui
+
+ ✓ src/lib/filePreviewTypes.test.ts (11 tests) 3ms
+
+ Test Files  1 passed (1)
+      Tests  11 passed (11)
+   Start at  16:03:54
+   Duration  1.52s (transform 52ms, setup 210ms, collect 19ms, tests 3ms, environment 593ms, prepare 475ms)
+
+EXIT=0
