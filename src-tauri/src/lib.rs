@@ -16,6 +16,8 @@ pub mod scoped_contracts;
 #[cfg(test)]
 mod rollout_tests;
 pub mod session;
+#[cfg(any(target_os = "macos", test))]
+mod shortcut_dispatch;
 pub mod ssh;
 pub mod terminal;
 pub mod util;
@@ -110,19 +112,19 @@ fn install_app_menu<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()>
             tracing::info!(event = "shortcut.native.menu", action = event_id,
                 pid = std::process::id(), wall_time_ms, "TEMPORARY-DIAGNOSTIC before menu dispatch");
         }
-        if let Some(window) = app.get_webview_window("main") {
-            match event_id {
-                "tab.newTerminal" => {
-                    let _ = window.emit("menu_new_terminal_tab", ());
-                }
-                "tab.close" => {
-                    let _ = window.emit("menu_close_tab", ());
-                }
-                "window.close" => {
+        match event_id {
+            "tab.newTerminal" => {
+                shortcut_dispatch::dispatch(app, "menu_new_terminal_tab", ());
+            }
+            "tab.close" => {
+                shortcut_dispatch::dispatch(app, "menu_close_tab", ());
+            }
+            "window.close" => {
+                if let Some(window) = app.get_window("main") {
                     let _ = window.close();
                 }
-                _ => {}
             }
+            _ => {}
         }
     });
     Ok(())
@@ -470,60 +472,69 @@ fn install_macos_key_monitor<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
             && is_unshifted_cmd_w(flags, chars_str.as_deref(), key_code)
         {
             if trace_chord { tracing::info!(event = "shortcut.native.forward", action = "menu_close_tab", "TEMPORARY-DIAGNOSTIC"); }
-            if let Some(window) = app_handle.get_webview_window("main") {
-                let _ = window.emit("menu_close_tab", ());
+            if shortcut_dispatch::dispatch(&app_handle, "menu_close_tab", ()) {
+                ptr::null_mut()
+            } else {
+                event_ptr.as_ptr()
             }
-            ptr::null_mut()
         } else if let Some(digit) = worktree_digit {
             if trace_chord { tracing::info!(event = "shortcut.native.forward", action = "menu_select_worktree", digit, "TEMPORARY-DIAGNOSTIC"); }
-            if let Some(window) = app_handle.get_webview_window("main") {
-                let _ = window.emit("menu_select_worktree", digit);
+            if shortcut_dispatch::dispatch(&app_handle, "menu_select_worktree", digit) {
+                ptr::null_mut()
+            } else {
+                event_ptr.as_ptr()
             }
-            ptr::null_mut()
         } else if let Some(digit) = if event_type == NSEventType::KeyDown { ctrl_digit(flags, chars_str.as_deref(), key_code) } else { None } {
             if trace_chord { tracing::info!(event = "shortcut.native.forward", action = "menu_select_tab", digit, "TEMPORARY-DIAGNOSTIC"); }
-            if let Some(window) = app_handle.get_webview_window("main") {
-                let _ = window.emit("menu_select_tab", digit);
+            if shortcut_dispatch::dispatch(&app_handle, "menu_select_tab", digit) {
+                ptr::null_mut()
+            } else {
+                event_ptr.as_ptr()
             }
-            ptr::null_mut()
         } else if let Some(is_next) = if event_type == NSEventType::KeyDown { is_ctrl_tab(flags, key_code).or_else(|| is_cmd_shift_bracket(flags, key_code)) } else { None } {
             let action = if is_next { "menu_next_tab" } else { "menu_prev_tab" };
             if trace_chord { tracing::info!(event = "shortcut.native.forward", action, "TEMPORARY-DIAGNOSTIC"); }
-            if let Some(window) = app_handle.get_webview_window("main") {
-                let _ = window.emit(action, ());
+            if shortcut_dispatch::dispatch(&app_handle, action, ()) {
+                ptr::null_mut()
+            } else {
+                event_ptr.as_ptr()
             }
-            ptr::null_mut()
         } else if event_type == NSEventType::KeyDown && is_unshifted_cmd_key(flags, key_code, ANSI_KEY_CODE_T) {
             if trace_chord { tracing::info!(event = "shortcut.native.forward", action = "menu_new_terminal_tab", "TEMPORARY-DIAGNOSTIC"); }
-            if let Some(window) = app_handle.get_webview_window("main") {
-                let _ = window.emit("menu_new_terminal_tab", ());
+            if shortcut_dispatch::dispatch(&app_handle, "menu_new_terminal_tab", ()) {
+                ptr::null_mut()
+            } else {
+                event_ptr.as_ptr()
             }
-            ptr::null_mut()
         } else if let Some(is_down) = if event_type == NSEventType::KeyDown { is_cmd_d_split(flags, key_code) } else { None } {
             let action = if is_down { "menu_split_down" } else { "menu_split_right" };
             if trace_chord { tracing::info!(event = "shortcut.native.forward", action, "TEMPORARY-DIAGNOSTIC"); }
-            if let Some(window) = app_handle.get_webview_window("main") {
-                let _ = window.emit(action, ());
+            if shortcut_dispatch::dispatch(&app_handle, action, ()) {
+                ptr::null_mut()
+            } else {
+                event_ptr.as_ptr()
             }
-            ptr::null_mut()
         } else if event_type == NSEventType::KeyDown && is_unshifted_cmd_key(flags, key_code, ANSI_KEY_CODE_K) {
             if trace_chord { tracing::info!(event = "shortcut.native.forward", action = "menu_command_palette", "TEMPORARY-DIAGNOSTIC"); }
-            if let Some(window) = app_handle.get_webview_window("main") {
-                let _ = window.emit("menu_command_palette", ());
+            if shortcut_dispatch::dispatch(&app_handle, "menu_command_palette", ()) {
+                ptr::null_mut()
+            } else {
+                event_ptr.as_ptr()
             }
-            ptr::null_mut()
         } else if event_type == NSEventType::KeyDown && is_unshifted_cmd_key(flags, key_code, ANSI_KEY_CODE_B) {
             if trace_chord { tracing::info!(event = "shortcut.native.forward", action = "menu_toggle_sidebar", "TEMPORARY-DIAGNOSTIC"); }
-            if let Some(window) = app_handle.get_webview_window("main") {
-                let _ = window.emit("menu_toggle_sidebar", ());
+            if shortcut_dispatch::dispatch(&app_handle, "menu_toggle_sidebar", ()) {
+                ptr::null_mut()
+            } else {
+                event_ptr.as_ptr()
             }
-            ptr::null_mut()
         } else if event_type == NSEventType::KeyDown && is_unshifted_cmd_key(flags, key_code, ANSI_KEY_CODE_COMMA) {
             if trace_chord { tracing::info!(event = "shortcut.native.forward", action = "menu_open_settings", "TEMPORARY-DIAGNOSTIC"); }
-            if let Some(window) = app_handle.get_webview_window("main") {
-                let _ = window.emit("menu_open_settings", ());
+            if shortcut_dispatch::dispatch(&app_handle, "menu_open_settings", ()) {
+                ptr::null_mut()
+            } else {
+                event_ptr.as_ptr()
             }
-            ptr::null_mut()
         } else {
             if trace_chord { tracing::info!(event = "shortcut.native.focus.start", "TEMPORARY-DIAGNOSTIC"); }
             let has_focused_terminal = {
