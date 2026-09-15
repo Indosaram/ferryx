@@ -4,8 +4,8 @@ import { createRemoteHostStore, remoteHostKey } from "../../state/remoteHostStor
 import { createPairedHostInventory, DEFAULT_RELAY_ORIGIN, type HostView, type PairedHostCommands } from "../../lib/pairedHostInventory";
 import { PairedMachinesSection } from "./PairedMachinesSection";
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true, invoke: vi.fn() }));
-const hostId = remoteHostKey("https://relay.example", "fixture");
-const host: HostView = { hostId, machineId: "fixture", relayOrigin: "https://relay.example", displayLabel: "Fixture", generation: "9", authStatus: "paired", grantScope: "machine", online: true };
+const hostId = remoteHostKey(DEFAULT_RELAY_ORIGIN, "fixture");
+const host: HostView = { hostId, machineId: "fixture", relayOrigin: DEFAULT_RELAY_ORIGIN, displayLabel: "Fixture", generation: "9", authStatus: "paired", grantScope: "machine", online: true };
 function fixture(overrides: Partial<HostView> = {}, proxy = true) {
   const store = createRemoteHostStore();
   const commands: PairedHostCommands = {
@@ -62,7 +62,7 @@ it("pairs and re-pairs only through native inventory and never selects a mirror 
   fireEvent.click(screen.getByRole("button", { name: "Re-pair Fixture" }));
   fireEvent.change(screen.getByLabelText("Machine PIN"), { target: { value: "123456" } });
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Pair machine" })); });
-  expect(commands.pair).toHaveBeenCalledExactlyOnceWith({ relayOrigin: host.relayOrigin, displayLabel: "Fixture", pin: "123456" });
+  expect(commands.pair).toHaveBeenCalledExactlyOnceWith({ relayOrigin: DEFAULT_RELAY_ORIGIN, displayLabel: "Machine", pin: "123456" });
   expect(store.getState().activeHostId).toBeNull();
   expect(store.getState().hosts[hostId].generation).toBe("10");
   expect(screen.getByLabelText("Machine PIN")).toHaveValue("");

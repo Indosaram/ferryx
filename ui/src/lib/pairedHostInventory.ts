@@ -2,8 +2,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { remoteHostKey, remoteHostStore, REMOTE_HOST_STORAGE_KEY, type HostEndpoint, type RemoteHostStore } from "../state/remoteHostStore";
 
 // The built-in relay is the product default: pairing must work with the PIN
-// alone. One source of truth, shared by every settings surface that asks for
-// a relay; the advanced pairing controls may override it per machine.
+// alone. Existing legacy identities remain on their original relay.
 export const DEFAULT_RELAY_ORIGIN = "https://relay.checka.cc";
 export const DEFAULT_MACHINE_LABEL = "Machine";
 
@@ -96,15 +95,16 @@ export function createPairedHostInventory(store: RemoteHostStore, commands = nat
       store.setState(s => ({ ...s, nativeStatus: "ready", machineFeaturesEnabled: true }));
     } catch { if (request === refreshRequest && started === revision) unavailable(); }
   }
-  async function pair(request: PairHostRequest): Promise<boolean> {
+  async function pair(request: PairHostRequest, onPaired?: (host: HostEndpoint) => void): Promise<boolean> {
     const started = ++revision;
     try {
       const relayOrigin = origin(request.relayOrigin);
       const host = endpoint(await commands.pair({ ...request, relayOrigin }));
       if (started !== revision || host.relayOrigin !== relayOrigin) return false;
       store.upsertHost(host);
+      onPaired?.(host);
       return true;
-    } catch { if (started === revision) unavailable(); return false; }
+    } catch { return false; }
   }
   async function forget(hostId: string): Promise<boolean> {
     const host = store.getState().hosts[hostId];

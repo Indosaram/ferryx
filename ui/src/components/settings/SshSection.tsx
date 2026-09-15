@@ -87,7 +87,12 @@ function sameConnection(left: SshHost, right: SshHost): boolean {
     left.authMethod === right.authMethod && left.disabled === right.disabled;
 }
 
-export function SshSection({ onOpenProject }: { onOpenProject?: (hostId: string) => void }) {
+export type SshSectionProps = {
+  onOpenProject?: (hostId: string) => void;
+  searchQuery?: string;
+};
+
+export function SshSection({ onOpenProject, searchQuery }: SshSectionProps) {
   const { hosts, loading, error: loadError } = useSshHosts();
   const hostsRef = useRef(hosts);
 
@@ -103,7 +108,9 @@ export function SshSection({ onOpenProject }: { onOpenProject?: (hostId: string)
   const [importError, setImportError] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
 
-  // System ~/.ssh/config State
+  const filteredHosts = searchQuery
+    ? hosts.filter(h => h.label.toLowerCase().includes(searchQuery.toLowerCase()) || h.hostname.toLowerCase().includes(searchQuery.toLowerCase()) || (h.username && h.username.toLowerCase().includes(searchQuery.toLowerCase())))
+    : hosts;
   const [systemConfig, setSystemConfig] = useState<SystemSshConfig | null>(null);
   const [systemConfigError, setSystemConfigError] = useState<string | null>(null);
   const [configPathOverride, setConfigPathOverride] = useState<string | null>(() =>
@@ -901,22 +908,22 @@ export function SshSection({ onOpenProject }: { onOpenProject?: (hostId: string)
             <Loader2 className="mr-2 size-3.5 animate-spin" />
             Loading SSH machines…
           </div>
-        ) : hosts.length === 0 ? (
+        ) : filteredHosts.length === 0 ? (
           <div
             className="rounded-lg border border-dashed border-border/80 p-8 text-center"
             data-testid="ssh-empty-state"
           >
             <Server className="mx-auto size-8 text-muted-foreground/40 mb-2.5" />
             <div className="text-[13px] font-medium text-foreground">
-              No SSH machines configured
+              {searchQuery ? "No matching SSH machines" : "No SSH machines configured"}
             </div>
             <p className="mt-1 text-[11px] text-muted-foreground max-w-sm mx-auto">
-              Add an SSH machine to connect to remote workspaces or run remote worktrees.
+              {searchQuery ? `No SSH machines match "${searchQuery}".` : "Add an SSH machine to connect to remote workspaces or run remote worktrees."}
             </p>
           </div>
         ) : (
           <div className="divide-y divide-border/40">
-            {hosts.map((host) => {
+            {filteredHosts.map((host) => {
               const test = testResults[host.id];
               const isBusy = busyHostId === host.id;
 
@@ -985,9 +992,23 @@ export function SshSection({ onOpenProject }: { onOpenProject?: (hostId: string)
                         data-testid={`ssh-runtime-${host.id}`}
                         data-platform={test.environment.platform}
                         data-git={String(test.environment.git)}
-                        className="text-[11px] text-muted-foreground space-y-1"
+                        className="text-[11px] text-muted-foreground space-y-1.5"
                       >
                         <div>{test.environment.platform === "windows" ? "Windows" : "POSIX"} · {test.environment.executor} {test.environment.version} · {test.environment.git ? "Git available" : "Git not installed"}</div>
+                        <div className="grid grid-cols-1 gap-1.5 pt-1.5 sm:grid-cols-3 border-t border-border/40 text-[11px]">
+                          <div>
+                            <span className="font-medium text-foreground">Connection: </span>
+                            <span className="text-emerald-600 dark:text-emerald-400">Reachable</span>
+                          </div>
+                          <div>
+                            <span className="font-medium text-foreground">Agent Integration: </span>
+                            <span>{preparedHosts[host.id] ? "Prepared" : "Pending"}</span>
+                          </div>
+                          <div>
+                            <span className="font-medium text-foreground">Terminal Helper: </span>
+                            <span>{test.environment.git ? "Ready" : "Setup needed"}</span>
+                          </div>
+                        </div>
                         <Button
                           type="button"
                           variant="ghost"

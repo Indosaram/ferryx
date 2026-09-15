@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle, Radio, Trash2 } from "lucide-react";
-import { isTauri } from "@tauri-apps/api/core";
 
 import {
   createPairingCode,
@@ -15,7 +14,6 @@ import {
 
 import { SettingRow, SettingsHeading } from "./primitives";
 import { DEFAULT_RELAY_ORIGIN } from "../../lib/pairedHostInventory";
-import { PairedMachinesSection } from "./PairedMachinesSection";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -91,7 +89,7 @@ async function copyTextToClipboard(text: string): Promise<boolean> {
   } catch { return false; }
 }
 
-export function RemoteAccessSection() {
+export function RemoteAccessSection({ detailsOnly = false }: { detailsOnly?: boolean } = {}) {
   const [status, setStatus] = useState<PairingGatewayStatus | null>(null);
   const statusRef = useRef<PairingGatewayStatus | null>(null);
   statusRef.current = status;
@@ -109,6 +107,9 @@ export function RemoteAccessSection() {
   const [pinCopied, setPinCopied] = useState(false);
   const [linkCopied, setLinkCopied] = useState(false);
   const [relayUrl, setRelayUrl] = useState("");
+  const previousMode = useRef<RemoteGatewayStatus["mode"] | null>(null);
+  const [statusError, setStatusError] = useState(false);
+  const [devicesError, setDevicesError] = useState(false);
   const [pairingUrl, setPairingUrl] = useState<string | null>(null);
   const copyTimerRef = useRef<number | null>(null);
 
@@ -131,15 +132,17 @@ export function RemoteAccessSection() {
 
   const refreshStatus = useCallback(async (): Promise<RemoteGatewayStatus | null> => {
     const [s, devList] = await Promise.all([
-      getRemoteStatus().catch(() => null),
-      listRemoteDevices().catch(() => []),
+      getRemoteStatus().catch(() => { setStatusError(true); return null; }),
+      listRemoteDevices().catch(() => { setDevicesError(true); return null; }),
     ]);
     if (s) {
       statusRef.current = s;
       setStatus(s);
+      setStatusError(false);
       if (s.relayUrl) setRelayUrl((current) => (current ? current : s.relayUrl ?? ""));
+      if (s.mode !== "off") previousMode.current = s.mode;
     }
-    setDevices(devList);
+    if (devList) { setDevices(devList); setDevicesError(false); }
     return s;
   }, []);
 
@@ -238,7 +241,7 @@ export function RemoteAccessSection() {
       } else {
         const trimmedRelay = relayUrl.trim();
         const s = await enableRemoteGateway({
-          mode: trimmedRelay ? "relay" : "localNetwork",
+          mode: trimmedRelay ? "relay" : previousMode.current === "tailscale" ? "tailscale" : "localNetwork",
           relayUrl: trimmedRelay || undefined,
         });
         statusRef.current = s;
@@ -255,7 +258,7 @@ export function RemoteAccessSection() {
   const handleRevoke = async (deviceId: string) => {
     setActionError(null);
     try {
-      await revokeRemoteDevice(deviceId);
+      if (!await revokeRemoteDevice(deviceId)) throw new Error("Could not revoke device. Refresh and retry.");
       setConfirmRevokeId(null);
       await refreshStatus();
     } catch (error: unknown) {
@@ -263,16 +266,27 @@ export function RemoteAccessSection() {
     }
   };
 
+  if (detailsOnly) return <section aria-label="Gateway diagnostics" className="space-y-2 text-sm">
+    {statusError ? <p role="alert">Gateway status unavailable.</p> : null}
+    <dl><dt>Configured mode</dt><dd>{status?.mode ?? "Unavailable"}</dd>
+      <dt>Effective relay</dt><dd>{status?.relayUrl ?? "None"}</dd>
+      <dt>Local endpoint / port</dt><dd>{status?.boundAddress ?? status?.localIp ?? "Unavailable"} / {status?.port ?? "Unavailable"}</dd>
+      <dt>Listener</dt><dd>{status?.enabled ? "Running" : "Stopped"}</dd>
+      <dt>Relay / control channel</dt><dd>{String(status?.relayConnected ?? false)} / {String(status?.controlChannelConnected ?? false)}</dd></dl>
+    {status && (status.relayUrl ? status.relayUrl !== DEFAULT_RELAY_ORIGIN : status.mode !== "off") ? <p data-testid="legacy-gateway">Legacy configuration. The existing connection is preserved; no automatic migration is performed.</p> : null}
+  </section>;
+
   return (
-    <section aria-labelledby="settings-remote-heading" aria-label="Remote Access">
+    <section aria-labelledby="settings-remote-heading" aria-label="Access to This Machine">
       <SettingsHeading
         icon={<Radio />}
-        title="Remote Access"
-        description="Access desktop terminal sessions from your phone. One switch turns remote access on; one QR code pairs any device, connecting through the relay and upgrading to a direct LAN or Tailscale path whenever it is reachable. Authorized browser profiles reconnect while Remote remains enabled; re-pair only after browser storage is cleared, a device is revoked, or a different browser profile/device is used."
+        title="Access to This Machine"
+        description="Controls incoming device access only. Outbound machines and workspace sessions are unaffected. Device access is not a machine-project grant."
       />
       <h2 id="settings-remote-heading" className="sr-only">
         Remote Access
       </h2>
+      {statusError ? <p role="alert">Gateway status unavailable. Reopen this section to retry.</p> : null}
       {actionError ? (
         <Alert
           variant="destructive"
@@ -291,21 +305,21 @@ export function RemoteAccessSection() {
       ) : null}
       <div className="border-y border-border">
         <SettingRow
-          label="Remote Access"
+          label="Allow remote access"
           description="Serve live terminal sessions to paired devices. Authorized browsers reconnect automatically while this stays on."
         >
           <Switch
             id="remote-access-enable"
             aria-label="Remote Access"
             checked={Boolean(status?.enabled)}
-            disabled={loading}
+            disabled={loading || !status || statusError}
             onCheckedChange={(checked) => void handleToggle(checked)}
           />
         </SettingRow>
 
         <SettingRow
           label="Relay / Signaling Server URL"
-          description="Public relay that carries pairing and traffic when a device is off your network. Leave empty to stay local-network only."
+          description="The standard relay is fixed. Existing connections are preserved; see Connection Details for effective configuration."
         >
           <Input
             type="url"
@@ -319,8 +333,8 @@ export function RemoteAccessSection() {
 
         {status?.enabled ? (
           <SettingRow
-            label="Pairing QR Code"
-            description="Scan with a phone camera to pair and connect in one step. The link carries the PIN plus direct-path hints."
+            label="Pair a Device"
+            description="Generate a device-access PIN. QR and link are optional conveniences; this does not grant machine-project access."
           >
             <Card className="flex w-[220px] flex-col items-center gap-2 rounded-lg border border-border bg-card p-3 shadow-none">
               {qrDataUrl ? (
@@ -413,7 +427,8 @@ export function RemoteAccessSection() {
       </div>
 
       <div className="mt-8 space-y-3">
-        <h3 className="text-[12px] font-semibold">Paired Devices</h3>
+        <h3 className="text-[12px] font-semibold">Authorized Devices</h3>
+        {devicesError ? <p role="alert">Authorized devices unavailable. Reopen this section to retry.</p> : null}
         <Card className="divide-y divide-border rounded-lg border border-border bg-card shadow-none">
           {devices.length === 0 ? (
             <div className="p-4 text-center text-[12px] text-muted-foreground">No paired devices.</div>
@@ -474,7 +489,6 @@ export function RemoteAccessSection() {
           )}
         </Card>
       </div>
-      {isTauri() ? <PairedMachinesSection /> : null}
     </section>
   );
 }

@@ -7,7 +7,6 @@ import {
   Keyboard,
   Palette,
   Radio,
-  Server,
   Settings2,
   Shield,
   TerminalSquare,
@@ -21,9 +20,9 @@ import { BrowserSection } from "./settings/BrowserSection";
 import { GeneralSection } from "./settings/GeneralSection";
 import { NotificationsSection } from "./settings/NotificationsSection";
 import { PermissionsSection } from "./settings/PermissionsSection";
-import { RemoteAccessSection } from "./settings/RemoteAccessSection";
+import { RemoteSection } from "./settings/RemoteSection";
+import type { MachineProjectTarget, RemoteContext } from "../lib/machineNavigation";
 import { ShortcutsSection } from "./settings/ShortcutsSection";
-import { SshSection } from "./settings/SshSection";
 import { TerminalSection } from "./settings/TerminalSection";
 import type { SectionId } from "./settings/types";
 
@@ -31,6 +30,8 @@ export type SettingsDialogProps = {
   open: boolean;
   onClose: () => void;
   initialSection?: SectionId;
+  remoteContext?: RemoteContext;
+  onOpenMachineProject?: (target: MachineProjectTarget, context: RemoteContext) => void;
   onOpenSshProject?: (hostId: string) => void;
 };
 
@@ -58,20 +59,21 @@ const VALID_SECTIONS: readonly SectionId[] = [
 ];
 
 function sanitizeSectionId(candidate: unknown): SectionId {
+  if (candidate === "ssh") return "remote";
   if (typeof candidate === "string" && VALID_SECTIONS.includes(candidate as SectionId)) {
     return candidate as SectionId;
   }
   return "general";
 }
 
-function SettingsDialogBody({ onClose, initialSection, onOpenSshProject }: SettingsDialogBodyProps) {
+function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenMachineProject, remoteContext }: SettingsDialogBodyProps) {
   const { settings, localSettings, nativePreferences, updateSettings, refreshNativePreferences } = useTerminalSettings();
   const [section, setSection] = useState<SectionId>(sanitizeSectionId(initialSection));
   const isMac = isMacShortcutPlatform();
   const backButtonRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
-    backButtonRef.current?.focus();
+    if (!remoteContext?.machine) backButtonRef.current?.focus();
   }, []);
 
   useEffect(() => {
@@ -147,8 +149,7 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject }: Setti
             <NavButton active={section === "browser"} icon={<Globe />} label="Browser" onClick={() => setSection("browser")} />
             <NavButton active={section === "notifications"} icon={<Bell />} label="Notifications" onClick={() => setSection("notifications")} />
             <NavButton active={section === "permissions"} icon={<Shield />} label="Permissions" onClick={() => setSection("permissions")} />
-            <NavButton active={section === "remote"} icon={<Radio />} label="Remote Access" onClick={() => setSection("remote")} />
-            <NavButton active={section === "ssh"} icon={<Server />} label="SSH Machines" onClick={() => setSection("ssh")} />
+            <NavButton active={section === "remote"} icon={<Radio />} label="Remote" onClick={() => setSection("remote")} />
           </nav>
         </div>
       </aside>
@@ -189,8 +190,7 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject }: Setti
           {section === "browser" ? <BrowserSection /> : null}
           {section === "notifications" ? <NotificationsSection /> : null}
           {section === "permissions" ? <PermissionsSection /> : null}
-          {section === "remote" ? <RemoteAccessSection /> : null}
-          {section === "ssh" ? <SshSection onOpenProject={onOpenSshProject} /> : null}
+          {section === "remote" ? <RemoteSection initialContext={remoteContext} legacySsh={initialSection === "ssh"} onOpenProject={onOpenMachineProject} onOpenSshProject={onOpenSshProject} /> : null}
         </div>
       </main>
     </div>

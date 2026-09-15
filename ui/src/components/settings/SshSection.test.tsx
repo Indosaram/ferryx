@@ -851,5 +851,28 @@ describe("SshSection Settings Component", () => {
 
       expect(screen.queryByRole("button", { name: /Choose File/i })).not.toBeInTheDocument();
     });
+
+    it("renders distinct Connection, Agent Integration, and Terminal Helper evidence when connection is verified", async () => {
+      const environment = { platform: "posix", executor: "sh", version: "test", home: "/home/test", temp: "/tmp", git: true };
+      invokeMock.mockImplementation(async (command: string) => {
+        if (command === "cmd_ssh_list_hosts") return [mockHost1];
+        if (command === "cmd_ssh_test_connection") return { host: mockHost1, reachable: true, checkedAt: 1, environment };
+        if (command === "cmd_ssh_read_system_config") return { path: "", exists: false, hosts: [], rawText: "" };
+        throw new Error(`Unexpected command ${command}`);
+      });
+
+      await act(async () => {
+        render(<SshSection />);
+      });
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "Test connection to Dev Server" }));
+      });
+
+      expect(screen.getByText("Connection:")).toBeInTheDocument();
+      expect(screen.getByText("Reachable")).toBeInTheDocument();
+      expect(screen.getByText("Agent Integration:")).toBeInTheDocument();
+      expect(screen.getByText("Terminal Helper:")).toBeInTheDocument();
+      expect(screen.getByText("Ready")).toBeInTheDocument();
+    });
   });
 });

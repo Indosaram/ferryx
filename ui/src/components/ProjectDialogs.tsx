@@ -68,12 +68,15 @@ export function deriveWorkspaceId(folderPath: string, existingProjects: Register
   return `${baseId}-${index}`;
 }
 
+import type { MachineProjectTarget } from "../lib/machineNavigation";
+
 export type AddProjectDialogProps = {
   projects?: RegisteredProject[];
   onClose: () => void;
   onRegistered: (project: RegisteredProject) => void;
   onOpenSettings?: (section: "ssh") => void;
   initialHostId?: string;
+  initialTarget?: MachineProjectTarget;
 };
 
 type AddProjectStep =
@@ -89,9 +92,11 @@ export function AddProjectDialog({
   onClose,
   onRegistered,
   onOpenSettings,
-  initialHostId,
+  initialHostId: legacyHostId,
+  initialTarget,
 }: AddProjectDialogProps) {
-  const [step, setStep] = useState<AddProjectStep>(initialHostId ? "remote-form" : "choose-location");
+  const initialHostId = initialTarget?.kind === "ssh" ? initialTarget.hostId : legacyHostId;
+  const [step, setStep] = useState<AddProjectStep>(initialTarget?.kind === "pairedDaemon" ? "paired-form" : initialHostId ? "remote-form" : "choose-location");
   const [workspaceId, setWorkspaceId] = useState("");
   const [repoPath, setRepoPath] = useState("");
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -303,7 +308,8 @@ export function AddProjectDialog({
   };
 
   if (step === "paired-form") {
-    return <PairedDaemonProjectForm onBack={() => setStep("choose-location")}
+    return <PairedDaemonProjectForm initialTarget={initialTarget?.kind === "pairedDaemon" ? initialTarget : undefined}
+      onBack={initialTarget ? handleDismiss : () => setStep("choose-location")}
       onClose={handleDismiss} onRegistered={onRegistered} />;
   }
 

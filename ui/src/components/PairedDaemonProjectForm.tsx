@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createPairedDaemonProjectAdapter } from "../lib/pairedDaemonProject";
+import type { MachineProjectTarget } from "../lib/machineNavigation";
 import type { DirectorySource } from "../lib/remoteDirectories";
 import type { RegisteredProject } from "../lib/tauri";
 import { remoteHostStore, type HostEndpoint } from "../state/remoteHostStore";
@@ -14,14 +15,18 @@ function unavailable(host: HostEndpoint | undefined, nativeReady: boolean): stri
   return null;
 }
 
-export function PairedDaemonProjectForm({ onBack, onClose, onRegistered }: {
+export function PairedDaemonProjectForm({ onBack, onClose, onRegistered, initialTarget }: {
+  initialTarget?: Extract<MachineProjectTarget, { kind: "pairedDaemon" }>; 
   onBack: () => void; onClose: () => void; onRegistered: (project: RegisteredProject) => void;
 }) {
   const state = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
   const hosts = Object.values(state.hosts);
-  const [hostId, setHostId] = useState(() => hosts[0]?.hostId ?? "");
+  const [selectedHostId, setHostId] = useState(() => hosts[0]?.hostId ?? "");
+  const hostId = initialTarget?.hostId ?? selectedHostId;
   const host = state.hosts[hostId];
-  const issue = unavailable(host, state.nativeStatus === "ready");
+  const issue = initialTarget && host?.generation !== initialTarget.generation
+    ? "Machine credentials changed. Return to Settings and check this machine again."
+    : unavailable(host, state.nativeStatus === "ready");
   const key = JSON.stringify([hostId, host?.generation, issue]);
   // Remounting discards selected paths, cached listings, negotiated capabilities and pending UI adoption.
   return <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6" role="presentation">
@@ -30,7 +35,7 @@ export function PairedDaemonProjectForm({ onBack, onClose, onRegistered }: {
       <p className="text-xs text-muted-foreground">Browse folders on the paired machine without SSH. Pair or manage machines in Settings &gt; Remote Access.</p>
       <PairedFolder key={key} host={host} issue={issue} onClose={onClose} onBack={onBack} onRegistered={onRegistered}
         hostSelector={(busy) => <label className="block text-xs">Paired machine
-          <select aria-label="Paired machine" value={hostId} disabled={busy} className="mt-1 h-8 w-full rounded border border-input bg-background px-2"
+          <select aria-label="Paired machine" value={hostId} disabled={busy || !!initialTarget} className="mt-1 h-8 w-full rounded border border-input bg-background px-2"
             onChange={event => setHostId(event.target.value)}>
             <option value="">Select a paired machine</option>
             {hosts.map(row => <option key={row.hostId} value={row.hostId}>{row.displayName ?? row.name}</option>)}
