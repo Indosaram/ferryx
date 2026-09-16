@@ -157,6 +157,18 @@ export type SpawnTerminalResult = {
   };
 };
 
+export type TerminalDescribeResult = {
+  sessionId: string;
+  workspaceId?: string | null;
+  worktree?: WorktreeIdentity | null;
+  cwd?: string | null;
+  cols: number;
+  rows: number;
+  running: boolean;
+  startSequence?: number | null;
+  endSequence?: number | null;
+};
+
 export function isTauriRuntime() {
   return isTauri();
 }
@@ -514,6 +526,11 @@ export async function attachTerminal(
 export async function getTerminalHistorySnapshot(sessionId: string): Promise<string> {
   if (!isTauri()) return "";
   return invokeCommand<string>("cmd_terminal_history_snapshot", { sessionId });
+}
+
+export async function describeTerminal(sessionId: string): Promise<TerminalDescribeResult | null> {
+  if (!isTauri()) return null;
+  return invokeCommand<TerminalDescribeResult>("cmd_terminal_describe", { sessionId });
 }
 
 export async function getTerminalCwd(sessionId: string): Promise<string | null> {

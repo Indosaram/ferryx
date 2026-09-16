@@ -191,6 +191,7 @@ vi.mock("./lib/tauri", () => ({
   spawnTerminal: native.spawnTerminal,
   spawnTerminalsBatch: vi.fn().mockResolvedValue([]),
   spawnTerminalDetailed: native.spawnTerminalDetailed,
+  describeTerminal: vi.fn().mockResolvedValue(null),
   closeTerminal: vi.fn().mockResolvedValue(undefined),
   attachTerminal: vi.fn().mockResolvedValue(undefined),
   getTerminalCwd: vi.fn(),

@@ -4,9 +4,20 @@ import { scheduleAgentAutoResume, resetAgentAutoResumeGuard } from "./agentAutoR
 import { saveGeneralSettings, resetGeneralSettings } from "./generalSettings";
 import { workspaceReducer } from "../state/workspaceStore";
 import { deserializeWorkspaceState, serializeWorkspaceState } from "./sessionPersistence";
+import { createAppReconnectDependencies } from "./appReconnectDependencies";
+import { describeTerminal, closeTerminal, type TerminalDescribeResult } from "./tauri";
 import type { TerminalSession } from "./types";
 import type { PersistedWorkspaceSession } from "./types";
 import type { WorkspaceState } from "../state/workspaceStore";
+
+vi.mock("./tauri", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./tauri")>();
+  return {
+    ...actual,
+    describeTerminal: vi.fn(),
+    closeTerminal: vi.fn(async () => undefined),
+  };
+});
 
 function coldAgent(): TerminalSession {
   return {
@@ -227,5 +238,72 @@ describe("agent reconnect cross-layer contracts", () => {
 
     resetGeneralSettings();
     vi.useRealTimers();
+  });
+
+  it("adopts live existing daemon session on AGENT_SESSION_CONFLICT without calling closeTerminal", async () => {
+    const session = coldAgent();
+    let state: WorkspaceState = {
+      sessions: { [session.id]: session },
+    } as any;
+
+    const existingBackendId = "existing-daemon-session-999";
+    const conflictError = {
+      code: "AGENT_SESSION_CONFLICT",
+      message: "Agent provider session is already owned by another terminal",
+      details: {
+        agentType: "claude",
+        providerKey: "session_id",
+        providerId: "provider-1",
+        existingSessionId: existingBackendId,
+      },
+    };
+
+    const spawn = vi.fn(async () => {
+      throw conflictError;
+    });
+    const dispatch = vi.fn((action: any) => {
+      state = workspaceReducer(state, action);
+    });
+
+    const describedSession: TerminalDescribeResult = {
+      sessionId: existingBackendId,
+      workspaceId: session.workspaceId,
+      worktree: null,
+      cwd: "/repo/adopted",
+      cols: 120,
+      rows: 40,
+      running: true,
+    };
+
+    vi.mocked(describeTerminal).mockResolvedValue(describedSession);
+    vi.mocked(closeTerminal).mockClear();
+
+    const deps = createAppReconnectDependencies({
+      getSessions: () => state.sessions,
+      dispatch,
+      spawn,
+    });
+
+    const attachSpy = vi.fn(deps.attach);
+    deps.attach = attachSpy;
+
+    const result = await reconnectAgentSession(session.id, deps);
+
+    expect(result.sessionId).toBe(existingBackendId);
+    expect(attachSpy).toHaveBeenCalledTimes(1);
+    expect(attachSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: existingBackendId }),
+      expect.objectContaining({ id: session.id }),
+    );
+    expect(closeTerminal).not.toHaveBeenCalled();
+    expect(dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "REBIND_SESSION_BACKEND",
+        sessionId: session.id,
+        backendSessionId: existingBackendId,
+      }),
+    );
+    expect(state.sessions[session.id].backendSessionId).toBe(existingBackendId);
+    expect(state.sessions[session.id].lifecycle).toBe("running");
   });
 });

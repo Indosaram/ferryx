@@ -124,7 +124,15 @@ export function useWorkspaceRuntime({
       code: ipcError.code,
       ...sanitizedDetails,
     });
-    setRuntimeError({ ...ipcError });
+    const finalError =
+      ipcError.code === "AGENT_SESSION_CONFLICT"
+        ? {
+            ...ipcError,
+            message:
+              "This conversation is already open in another terminal — switch to that tab or close it to resume here.",
+          }
+        : { ...ipcError };
+    setRuntimeError(finalError);
   }, []);
   const reportRuntimeErrorRef = useRef(reportRuntimeError);
   reportRuntimeErrorRef.current = reportRuntimeError;
