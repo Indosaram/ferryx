@@ -37,6 +37,11 @@ where
     Some(("LANG", locale))
 }
 
+pub fn apply_session_env(cmd: &mut CommandBuilder, session_id: &str, worktree_path: &str) {
+    cmd.env("FERRYX_SESSION_ID", session_id);
+    cmd.env("FERRYX_WORKTREE_PATH", worktree_path);
+}
+
 #[derive(Clone)]
 pub struct PtyManager {
     sessions: Arc<RwLock<HashMap<String, Arc<PtySession>>>>,
@@ -97,7 +102,7 @@ impl PtyManager {
     pub(crate) fn spawn_in_worktree_with_id(
         &self,
         session_id: String,
-        cmd: CommandBuilder,
+        mut cmd: CommandBuilder,
         cols: u16,
         rows: u16,
         worktree_manager: &WorktreeManager,
@@ -106,6 +111,11 @@ impl PtyManager {
         let canonical_worktree = worktree_manager
             .canonical_allowed_path(worktree_path)
             .map_err(|error| PtyError::Other(error.to_string()))?;
+        apply_session_env(
+            &mut cmd,
+            &session_id,
+            &canonical_worktree.to_string_lossy(),
+        );
         let rx = self.spawn_with_id_and_worktree(
             session_id.clone(),
             cmd,
@@ -143,7 +153,11 @@ impl PtyManager {
         // The agent extension reports state for the pane it runs in, so it needs the session
         // identity here: this is the first point where the id exists and the child is not yet
         // spawned.
-        cmd.env("FERRYX_SESSION_ID", &session_id);
+        if let Some(ref path) = worktree_path {
+            apply_session_env(&mut cmd, &session_id, &path.to_string_lossy());
+        } else {
+            cmd.env("FERRYX_SESSION_ID", &session_id);
+        }
         cmd.env(
             "FERRYX_AGENT_STATE_SOCKET",
             crate::daemon::agent_state_socket_path(),
@@ -662,6 +676,20 @@ mod tests {
         assert!(
             utf8_locale_override(lookup).is_some(),
             "empty LANG must not suppress the override"
+        );
+    }
+
+    #[test]
+    fn apply_session_env_sets_worktree_and_session_variables() {
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        apply_session_env(&mut cmd, "session-test-42", "/path/to/worktree");
+        assert_eq!(
+            cmd.get_env("FERRYX_SESSION_ID").and_then(|s| s.to_str()),
+            Some("session-test-42")
+        );
+        assert_eq!(
+            cmd.get_env("FERRYX_WORKTREE_PATH").and_then(|s| s.to_str()),
+            Some("/path/to/worktree")
         );
     }
 }
