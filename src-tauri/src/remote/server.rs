@@ -2783,6 +2783,32 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .with_state(state)
 }
 
+pub static ALLOW_INSECURE_DIRECT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_allow_insecure_direct(allow: bool) {
+    ALLOW_INSECURE_DIRECT.store(allow, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn is_insecure_direct_allowed() -> bool {
+    ALLOW_INSECURE_DIRECT.load(std::sync::atomic::Ordering::Relaxed)
+        || std::env::var("FERRYX_ALLOW_INSECURE_DIRECT")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        || std::env::var("FERRYX_ALLOW_INSECURE_LAN")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DirectGatewayGateStatus {
+    LoopbackOnly,
+    OverlaySecure { address: SocketAddr },
+    InsecureLanAllowed { address: SocketAddr },
+    InsecureLanGated { address: SocketAddr, reason: String },
+}
+
 pub struct RemoteServerHandle {
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
     relay_task: Option<tokio::task::JoinHandle<()>>,
@@ -2795,9 +2821,18 @@ pub struct RemoteServerHandle {
     /// coordinator's identity. Retained so stopping clears its own coordinator and
     /// leaves a newer owner's in place.
     published_pairing: Option<(Arc<RemoteGatewayState>, u64)>,
+    pub gate_status: DirectGatewayGateStatus,
 }
 
 impl RemoteServerHandle {
+    pub fn is_external_bound(&self) -> bool {
+        !self._extra_shutdown_txs.is_empty()
+    }
+
+    pub fn gate_status(&self) -> DirectGatewayGateStatus {
+        self.gate_status.clone()
+    }
+
     pub fn stop(self) {
         if let Some(task) = self.relay_task {
             task.abort();
@@ -2885,6 +2920,19 @@ pub async fn start_remote_server_with_resolver(
     state: Arc<RemoteGatewayState>,
     resolver: Arc<dyn crate::remote::state::InterfaceResolver>,
 ) -> Result<(RemoteServerHandle, SocketAddr), String> {
+    start_remote_server_with_resolver_and_insecure_opt_in(
+        state,
+        resolver,
+        is_insecure_direct_allowed(),
+    )
+    .await
+}
+
+pub async fn start_remote_server_with_resolver_and_insecure_opt_in(
+    state: Arc<RemoteGatewayState>,
+    resolver: Arc<dyn crate::remote::state::InterfaceResolver>,
+    allow_insecure_direct: bool,
+) -> Result<(RemoteServerHandle, SocketAddr), String> {
     let config = state.config.read().clone();
     if config.mode == RemoteNetworkMode::Off {
         return Err("Remote gateway is OFF".into());
@@ -2902,6 +2950,15 @@ pub async fn start_remote_server_with_resolver(
                 None
             }
         });
+    if config.mode == RemoteNetworkMode::Relay {
+        if let Some(url) = relay_url {
+            crate::remote::relay_client::validate_relay_url(
+                url,
+                crate::remote::relay_client::is_insecure_relay_allowed(),
+            )
+            .map_err(|err| format!("Invalid relay configuration: {err}"))?;
+        }
+    }
     let relay_token = std::env::var("FERRYX_MACHINE_TOKEN")
         .ok()
         .filter(|token| !token.trim().is_empty());
@@ -2928,25 +2985,65 @@ pub async fn start_remote_server_with_resolver(
     // listener that was already bound above, rather than ever widening the
     // bind to 0.0.0.0 as a fallback.
     let resolved = resolver.resolve(config.mode);
+    let mut gate_status = DirectGatewayGateStatus::LoopbackOnly;
     match resolved {
         // The baseline loopback listener already covers loopback addresses;
         // skip binding a second listener on the same address/port rather
         // than attempting (and failing) a duplicate bind.
-        Ok(Some(extra_ip)) if extra_ip.is_loopback() => {}
+        Ok(Some(extra_ip)) if extra_ip.is_loopback() => {
+            gate_status = DirectGatewayGateStatus::LoopbackOnly;
+        }
         Ok(Some(extra_ip)) => {
-            // Use the actual bound loopback port when the caller requested
-            // an OS-assigned port (0), so the external listener matches it.
+            // P19: Distinguish transports with a proven encryption overlay (e.g. Tailscale)
+            // from generic LAN (LocalNetwork). Non-loopback direct mode without proven overlay
+            // requires an explicit insecure opt-in; otherwise the non-loopback interface
+            // is gated and refuses to serve plaintext HTTP/WebSocket.
+            let is_overlay = config.mode == RemoteNetworkMode::Tailscale
+                || crate::remote::state::is_tailscale_cgnat_address(&extra_ip);
+            let insecure_opt_in = allow_insecure_direct || is_insecure_direct_allowed();
             let extra_addr: SocketAddr = (extra_ip, primary_local_addr.port()).into();
-            let extra_router = create_remote_router(Arc::clone(&state));
-            match bind_and_serve(extra_addr, Arc::clone(&state), extra_router, false).await {
-                Ok((_extra_local_addr, extra_shutdown_tx)) => {
-                    extra_shutdown_txs.push(extra_shutdown_tx);
+
+            if !is_overlay && !insecure_opt_in {
+                let reason = format!(
+                    "Insecure direct gateway on local network interface ({extra_ip}) is gated: \
+                     LocalNetwork mode binds unencrypted HTTP/WebSocket without TLS, exposing \
+                     credentials and terminal streams to same-L2 attackers. \
+                     Use an encrypted overlay (Tailscale) or set FERRYX_ALLOW_INSECURE_DIRECT=1."
+                );
+                tracing::warn!("{reason}");
+                gate_status = DirectGatewayGateStatus::InsecureLanGated {
+                    address: extra_addr,
+                    reason,
+                };
+            } else {
+                if !is_overlay && insecure_opt_in {
+                    tracing::warn!(
+                        "WARNING: Remote direct gateway bound to non-loopback interface {extra_addr} \
+                         without TLS. Plaintext HTTP/WebSocket traffic (pairing tokens, bearer credentials, \
+                         terminal streams) is exposed to same-L2 network observers. This configuration is INSECURE."
+                    );
+                    gate_status = DirectGatewayGateStatus::InsecureLanAllowed {
+                        address: extra_addr,
+                    };
+                } else {
+                    gate_status = DirectGatewayGateStatus::OverlaySecure {
+                        address: extra_addr,
+                    };
                 }
-                Err(err) => {
-                    let _ = shutdown_tx.send(());
-                    *state.is_running.write() = false;
-                    *state.bound_address.write() = None;
-                    return Err(err);
+
+                // Use the actual bound loopback port when the caller requested
+                // an OS-assigned port (0), so the external listener matches it.
+                let extra_router = create_remote_router(Arc::clone(&state));
+                match bind_and_serve(extra_addr, Arc::clone(&state), extra_router, false).await {
+                    Ok((_extra_local_addr, extra_shutdown_tx)) => {
+                        extra_shutdown_txs.push(extra_shutdown_tx);
+                    }
+                    Err(err) => {
+                        let _ = shutdown_tx.send(());
+                        *state.is_running.write() = false;
+                        *state.bound_address.write() = None;
+                        return Err(err);
+                    }
                 }
             }
         }
@@ -2998,10 +3095,34 @@ pub async fn start_remote_server_with_resolver(
             relay_task,
             published_pairing,
             _extra_shutdown_txs: extra_shutdown_txs,
+            gate_status,
         },
         primary_local_addr,
     ))
 }
+
+pub async fn start_remote_server_strict_with_resolver(
+    state: Arc<RemoteGatewayState>,
+    resolver: Arc<dyn crate::remote::state::InterfaceResolver>,
+) -> Result<(RemoteServerHandle, SocketAddr), String> {
+    let (handle, addr) = start_remote_server_with_resolver(Arc::clone(&state), resolver).await?;
+    if let DirectGatewayGateStatus::InsecureLanGated { reason, .. } = &handle.gate_status {
+        let err_reason = reason.clone();
+        handle.stop();
+        *state.is_running.write() = false;
+        *state.bound_address.write() = None;
+        return Err(err_reason);
+    }
+    Ok((handle, addr))
+}
+
+#[cfg(test)]
+#[path = "p19_insecure_direct_tests.rs"]
+mod p19_insecure_direct_tests;
+
+#[cfg(test)]
+#[path = "p20_insecure_relay_tests.rs"]
+mod p20_insecure_relay_tests;
 
 #[cfg(test)]
 #[path = "preference_http_tests.rs"]

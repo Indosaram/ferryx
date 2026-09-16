@@ -429,11 +429,11 @@ impl RelayClient {
     }
 
     fn control_url(&self) -> String {
-        format!("{}/tunnel/control", to_ws_base(&self.relay_url))
+        format!("{}/tunnel/control", to_ws_base(&self.relay_url).unwrap_or_else(|_| self.relay_url.clone()))
     }
 
     fn data_url(&self, session_id: &str) -> String {
-        format!("{}/tunnel/data/{}", to_ws_base(&self.relay_url), session_id)
+        format!("{}/tunnel/data/{}", to_ws_base(&self.relay_url).unwrap_or_else(|_| self.relay_url.clone()), session_id)
     }
 
     /// Runs the reverse tunnel client forever: connects the control
@@ -592,18 +592,141 @@ async fn read_control_json<T: serde::de::DeserializeOwned>(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, thiserror::Error)]
+pub enum RelayUrlSecurityError {
+    #[error("Invalid relay URL '{url}': {reason}")]
+    InvalidUrl { url: String, reason: String },
+
+    #[error("Insecure relay scheme: non-loopback relay '{url}' must use https:// or wss://")]
+    InsecureSchemeTlsRequired { url: String },
+
+    #[error("Insecure non-loopback relay '{url}' requires explicit development opt-in and is restricted to RFC1918 private network addresses")]
+    InsecureDevelopmentRelayRequiresOptIn { url: String },
+
+    #[error("Insecure relay '{url}' is on a public/non-private network: plaintext http/ws relay connections are forbidden over public networks")]
+    InsecurePublicRelayForbidden { url: String },
+}
+
+impl RelayUrlSecurityError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidUrl { .. } => "INVALID_RELAY_URL",
+            Self::InsecureSchemeTlsRequired { .. } => "INSECURE_RELAY_SCHEME",
+            Self::InsecureDevelopmentRelayRequiresOptIn { .. } => "INSECURE_RELAY_OPT_IN_REQUIRED",
+            Self::InsecurePublicRelayForbidden { .. } => "INSECURE_PUBLIC_RELAY_FORBIDDEN",
+        }
+    }
+
+    pub fn to_error_envelope(&self) -> serde_json::Value {
+        serde_json::json!({
+            "code": self.code(),
+            "message": self.to_string(),
+            "details": match self {
+                Self::InvalidUrl { url, reason } => serde_json::json!({ "url": url, "reason": reason }),
+                Self::InsecureSchemeTlsRequired { url } => serde_json::json!({ "url": url, "tlsRequired": true }),
+                Self::InsecureDevelopmentRelayRequiresOptIn { url } => serde_json::json!({ "url": url, "rfc1918Required": true, "optInRequired": true }),
+                Self::InsecurePublicRelayForbidden { url } => serde_json::json!({ "url": url, "publicNetwork": true }),
+            }
+        })
+    }
+}
+
+pub static ALLOW_INSECURE_RELAY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_allow_insecure_relay(allow: bool) {
+    ALLOW_INSECURE_RELAY.store(allow, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn is_insecure_relay_allowed() -> bool {
+    ALLOW_INSECURE_RELAY.load(std::sync::atomic::Ordering::Relaxed)
+        || std::env::var("FERRYX_ALLOW_INSECURE_RELAY")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+}
+
+pub fn is_loopback_host(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    let clean_host = host.trim_matches(|c| c == '[' || c == ']');
+    if let Ok(ip) = clean_host.parse::<std::net::IpAddr>() {
+        return ip.is_loopback();
+    }
+    false
+}
+
+pub fn is_rfc1918_private_host(host: &str) -> bool {
+    let clean_host = host.trim_matches(|c| c == '[' || c == ']');
+    if let Ok(std::net::IpAddr::V4(ipv4)) = clean_host.parse::<std::net::IpAddr>() {
+        ipv4.is_private()
+    } else {
+        false
+    }
+}
+
+pub fn validate_relay_url(
+    url_str: &str,
+    allow_insecure_dev: bool,
+) -> Result<String, RelayUrlSecurityError> {
+    let parsed = reqwest::Url::parse(url_str).map_err(|e| RelayUrlSecurityError::InvalidUrl {
+        url: url_str.to_string(),
+        reason: e.to_string(),
+    })?;
+
+    let scheme = parsed.scheme();
+    if !matches!(scheme, "http" | "https" | "ws" | "wss") {
+        return Err(RelayUrlSecurityError::InvalidUrl {
+            url: url_str.to_string(),
+            reason: format!("unsupported scheme '{scheme}', expected http(s) or ws(s)"),
+        });
+    }
+
+    let host = parsed.host_str().ok_or_else(|| RelayUrlSecurityError::InvalidUrl {
+        url: url_str.to_string(),
+        reason: "missing host in relay URL".to_string(),
+    })?;
+
+    let is_loopback = is_loopback_host(host);
+    let is_rfc1918 = is_rfc1918_private_host(host);
+
+    let rest = url_str
+        .split_once("://")
+        .map(|(_, r)| r)
+        .unwrap_or(url_str);
+    let trimmed_rest = rest.trim_end_matches('/');
+
+    match scheme {
+        "https" | "wss" => Ok(format!("wss://{trimmed_rest}")),
+        "http" | "ws" => {
+            if is_loopback {
+                Ok(format!("ws://{trimmed_rest}"))
+            } else if is_rfc1918 {
+                if allow_insecure_dev {
+                    tracing::warn!(
+                        "Insecure development relay allowed on RFC1918 private address '{host}'. Plaintext traffic is exposed on local network."
+                    );
+                    Ok(format!("ws://{trimmed_rest}"))
+                } else {
+                    Err(RelayUrlSecurityError::InsecureDevelopmentRelayRequiresOptIn {
+                        url: url_str.to_string(),
+                    })
+                }
+            } else {
+                Err(RelayUrlSecurityError::InsecurePublicRelayForbidden {
+                    url: url_str.to_string(),
+                })
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
 /// Rewrites an `http(s)://` (or already-`ws(s)://`) URL to its `ws(s)://`
 /// equivalent, trimming any trailing slash so path segments can be
 /// appended directly.
-fn to_ws_base(url: &str) -> String {
-    let rewritten = if let Some(rest) = url.strip_prefix("https://") {
-        format!("wss://{rest}")
-    } else if let Some(rest) = url.strip_prefix("http://") {
-        format!("ws://{rest}")
-    } else {
-        url.to_string()
-    };
-    rewritten.trim_end_matches('/').to_string()
+pub fn to_ws_base(url: &str) -> Result<String, RelayUrlSecurityError> {
+    validate_relay_url(url, is_insecure_relay_allowed())
 }
 
 /// Proxies frames bidirectionally between a relay data-channel WebSocket
@@ -986,12 +1109,12 @@ mod tests {
     #[test]
     fn to_ws_base_rewrites_https_and_trims_trailing_slash() {
         assert_eq!(
-            to_ws_base("https://relay.example.com/"),
+            to_ws_base("https://relay.example.com/").unwrap(),
             "wss://relay.example.com"
         );
-        assert_eq!(to_ws_base("http://localhost:8787"), "ws://localhost:8787");
+        assert_eq!(to_ws_base("http://localhost:8787").unwrap(), "ws://localhost:8787");
         assert_eq!(
-            to_ws_base("wss://relay.example.com"),
+            to_ws_base("wss://relay.example.com").unwrap(),
             "wss://relay.example.com"
         );
     }
