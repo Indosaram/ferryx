@@ -466,12 +466,27 @@ impl DaemonClient {
     }
     pub const PAIRED_MUTATION_BUDGET_SECS: u64 = 60;
     pub const PAIRED_CAPABILITIES_BUDGET_SECS: u64 = 45;
-    pub const PAIRED_HANDSHAKE_MARGIN_SECS: u64 = 20;
+    pub const PAIRED_JOURNAL_BUDGET_SECS: u64 = 45;
+    pub const PAIRED_QUERY_BUDGET_SECS: u64 = 45;
+    pub const PAIRED_TICKET_BUDGET_SECS: u64 = 45;
+    pub const PAIRED_HANDSHAKE_MARGIN_SECS: u64 = 30;
     pub const PAIRED_MUTATION_OUTER_TIMEOUT: Duration = Duration::from_secs(
-        Self::PAIRED_CAPABILITIES_BUDGET_SECS + Self::PAIRED_MUTATION_BUDGET_SECS + Self::PAIRED_HANDSHAKE_MARGIN_SECS,
+        Self::PAIRED_CAPABILITIES_BUDGET_SECS
+            + Self::PAIRED_JOURNAL_BUDGET_SECS
+            + Self::PAIRED_MUTATION_BUDGET_SECS
+            + Self::PAIRED_HANDSHAKE_MARGIN_SECS,
     );
     pub const PAIRED_QUERY_OUTER_TIMEOUT: Duration = Duration::from_secs(
-        Self::PAIRED_CAPABILITIES_BUDGET_SECS + 45 + Self::PAIRED_HANDSHAKE_MARGIN_SECS,
+        Self::PAIRED_CAPABILITIES_BUDGET_SECS
+            + Self::PAIRED_JOURNAL_BUDGET_SECS
+            + Self::PAIRED_QUERY_BUDGET_SECS
+            + Self::PAIRED_HANDSHAKE_MARGIN_SECS,
+    );
+    pub const PAIRED_REATTACH_OUTER_TIMEOUT: Duration = Duration::from_secs(
+        Self::PAIRED_CAPABILITIES_BUDGET_SECS
+            + Self::PAIRED_QUERY_BUDGET_SECS
+            + Self::PAIRED_TICKET_BUDGET_SECS
+            + Self::PAIRED_HANDSHAKE_MARGIN_SECS,
     );
     pub const PAIRED_DEFAULT_OUTER_TIMEOUT: Duration = Duration::from_secs(45);
 
@@ -484,7 +499,7 @@ impl DaemonClient {
                     Self::PAIRED_QUERY_OUTER_TIMEOUT
                 }
             }
-            DaemonRequest::PairedTerminalReattach { .. } => Duration::from_secs(90),
+            DaemonRequest::PairedTerminalReattach { .. } => Self::PAIRED_REATTACH_OUTER_TIMEOUT,
             _ => Self::PAIRED_DEFAULT_OUTER_TIMEOUT,
         }
     }
@@ -506,7 +521,7 @@ impl DaemonClient {
             let handshake = Self::paired_host_exchange(&mut connection, &DaemonRequest::Handshake { version: DAEMON_PROTOCOL_VERSION }).await?;
             if !matches!(handshake, DaemonResponse::HandshakeOk { version: DAEMON_PROTOCOL_VERSION, .. }) { return Err(ServiceError::unavailable()); }
             let capabilities = Self::paired_host_exchange(&mut connection, &DaemonRequest::GetCapabilities).await?;
-            if !matches!(capabilities, DaemonResponse::CapabilitiesOk { capabilities } if capabilities.iter().any(|c| c == "pairedHostInventoryV1")) { return Err(ServiceError::unavailable()); }
+            if !matches!(capabilities, DaemonResponse::CapabilitiesOk { ref capabilities } if capabilities.iter().any(|c| c == "pairedHostInventoryV1")) { return Err(ServiceError::unavailable()); }
             match Self::paired_host_exchange(&mut connection, &request).await? {
                 DaemonResponse::PairedHostError { error } => Err(error),
                 response => Ok(response),
@@ -1640,16 +1655,68 @@ impl DaemonClient {
                     Ok(_) => {},
                     Err(ref e) if e.code == "SESSION_NOT_FOUND" => {},
                     Err(ref e) if e.ambiguous || matches!(e.code.as_str(), "TIMEOUT" | "OPERATION_OUTCOME_UNKNOWN") => {
-                        let journal_req = crate::paired_host::client::OperationRequest {
-                            host_id: descriptor.host_id.clone(),
-                            generation: descriptor.generation,
-                            operation: crate::paired_host::client::Operation::Operation {
-                                request_id: cleanup_req_id.clone(),
-                            },
-                        };
-                        let _ = self.paired_host_operation(journal_req).await;
+                        // P12: an ambiguous close is not a success. Poll the operation
+                        // journal a bounded number of times for a definitive outcome;
+                        // if it stays unknown, refuse to acknowledge local-only success.
+                        let mut determined = false;
+                        for _attempt in 0..5 {
+                            let journal_req = crate::paired_host::client::OperationRequest {
+                                host_id: descriptor.host_id.clone(),
+                                generation: descriptor.generation,
+                                operation: crate::paired_host::client::Operation::Operation {
+                                    request_id: cleanup_req_id.clone(),
+                                },
+                            };
+                            match self.paired_host_operation(journal_req).await {
+                                Ok(op_resp) => match op_resp.result {
+                                    crate::paired_host::client::OperationResult::Operation(
+                                        crate::remote::machine_protocol::Operation::Completed { .. },
+                                    ) => {
+                                        determined = true;
+                                        break;
+                                    }
+                                    _ => {}
+                                },
+                                Err(journal_err)
+                                    if journal_err.code == "OPERATION_NOT_FOUND"
+                                        || journal_err.code == "SESSION_NOT_FOUND" =>
+                                {
+                                    // The request never committed remotely: treat as closed.
+                                    determined = true;
+                                    break;
+                                }
+                                Err(_) => {}
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                        }
+                        if !determined {
+                            return Err(IpcError::new(
+                                IpcErrorCode::Custom("REMOTE_CLOSE_UNCERTAIN".to_string()),
+                                "Remote paired-session close outcome is unknown; the session may still be running on the paired host",
+                            )
+                            .with_details(serde_json::json!({
+                                "cleanupRequestId": cleanup_req_id,
+                                "hostId": descriptor.host_id,
+                                "generation": descriptor.generation,
+                                "remoteSessionId": descriptor.target.session_id,
+                                "remoteCloseUnknown": true,
+                            })));
+                        }
                     }
-                    Err(_) => {},
+                    Err(e) => {
+                        // P12: a definitive remote failure must not be masked by the
+                        // local daemon close succeeding afterwards.
+                        return Err(IpcError::new(
+                            IpcErrorCode::Custom("REMOTE_CLOSE_FAILED".to_string()),
+                            format!("Remote paired-session close failed: {}", e.code),
+                        )
+                        .with_details(serde_json::json!({
+                            "hostId": descriptor.host_id,
+                            "generation": descriptor.generation,
+                            "remoteSessionId": descriptor.target.session_id,
+                            "cause": e.code,
+                        })));
+                    },
                 }
             }
         }
@@ -2003,6 +2070,55 @@ mod tests {
     use tokio::sync::oneshot;
 
     #[test]
+    fn test_p09_outer_budget_covers_all_underlying_phase_budgets() {
+        // Mutation performs: capabilities (45) + journal (45) + mutation (60) = 150s minimum before margin
+        let mutation_phases_sum = DaemonClient::PAIRED_CAPABILITIES_BUDGET_SECS
+            + DaemonClient::PAIRED_JOURNAL_BUDGET_SECS
+            + DaemonClient::PAIRED_MUTATION_BUDGET_SECS;
+        assert!(
+            DaemonClient::PAIRED_MUTATION_OUTER_TIMEOUT.as_secs() >= mutation_phases_sum,
+            "Mutation outer timeout ({}s) must be >= phase sum ({}s)",
+            DaemonClient::PAIRED_MUTATION_OUTER_TIMEOUT.as_secs(),
+            mutation_phases_sum
+        );
+
+        // Query performs: capabilities (45) + journal (45) + query (45) = 135s minimum before margin
+        let query_phases_sum = DaemonClient::PAIRED_CAPABILITIES_BUDGET_SECS
+            + DaemonClient::PAIRED_JOURNAL_BUDGET_SECS
+            + DaemonClient::PAIRED_QUERY_BUDGET_SECS;
+        assert!(
+            DaemonClient::PAIRED_QUERY_OUTER_TIMEOUT.as_secs() >= query_phases_sum,
+            "Query outer timeout ({}s) must be >= phase sum ({}s)",
+            DaemonClient::PAIRED_QUERY_OUTER_TIMEOUT.as_secs(),
+            query_phases_sum
+        );
+
+        // Reattach performs: capabilities (45) + session query (45) + ticket (45) = 135s minimum before margin
+        let reattach_phases_sum = DaemonClient::PAIRED_CAPABILITIES_BUDGET_SECS
+            + DaemonClient::PAIRED_QUERY_BUDGET_SECS
+            + DaemonClient::PAIRED_TICKET_BUDGET_SECS;
+        let reattach_req = DaemonRequest::PairedTerminalReattach {
+            descriptor: crate::terminal::paired_daemon::Descriptor {
+                host_id: "host-1".into(),
+                generation: crate::scoped_contracts::Epoch(1),
+                target: crate::remote::machine_protocol::RemoteTerminalTarget {
+                    machine_id: "m-1".into(),
+                    daemon_epoch: crate::scoped_contracts::Epoch(1),
+                    session_id: "s-1".into(),
+                },
+                after_sequence: None,
+            },
+        };
+        let reattach_timeout = DaemonClient::outer_deadline_for_request(&reattach_req);
+        assert!(
+            reattach_timeout.as_secs() >= reattach_phases_sum,
+            "Reattach outer timeout ({}s) must be >= phase sum ({}s)",
+            reattach_timeout.as_secs(),
+            reattach_phases_sum
+        );
+    }
+
+    #[test]
     fn p08_upgrade_rpc_inherits_admission() {
         let client = DaemonClient::new_with_socket(PathBuf::from("unused-p08.sock"));
         client.upgrade_requested.store(true, Ordering::SeqCst);
@@ -2082,7 +2198,7 @@ mod tests {
 
         assert!(!op_task.is_finished(), "Mutation timed out prematurely at <= 36s; outer deadline must exceed inner budget (> 120s)");
 
-        tokio::time::advance(Duration::from_secs(100)).await;
+        tokio::time::advance(Duration::from_secs(150)).await;
         let err = op_task.await.unwrap().unwrap_err();
 
         assert_eq!(err.code, "TIMEOUT", "Expected TIMEOUT error code on deadline expiry, got {}", err.code);
