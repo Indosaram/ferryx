@@ -60,6 +60,7 @@ const SESSION_PAIRING_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_PENDING_SESSIONS: usize = 100;
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(30);
 const SESSION_TRANSFER_TIMEOUT: Duration = Duration::from_secs(3600);
+const PAIRING_CLAIM_LEASE_DURATION: Duration = Duration::from_secs(45);
 const MAX_MESSAGE_SIZE: usize = 64 * 1024;
 
 /// Interval on which the background reaper sweeps the session registry for
@@ -119,6 +120,12 @@ struct RegisteredPairing {
     /// never be compared. Only this relay-stamped value may gate a claim.
     control_generation: u64,
     state: PairingState,
+    /// Fence token for the active temporary claim lease. Monotonically increasing
+    /// so that stale downstream completions or rollbacks cannot touch subsequent claims.
+    claim_fence: u64,
+    /// Expiry instant of the active claim lease. If a claim lease expires without
+    /// being consumed or rolled back, it can be reclaimed if the registration lease is still valid.
+    claim_expires_at: Option<Instant>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -145,6 +152,78 @@ impl Drop for SessionGuard {
         if self.armed {
             self.state.remove_pending(&self.session_id, self.generation);
         }
+    }
+}
+
+/// RAII guard for an in-flight pairing claim lease.
+///
+/// If downstream exchange fails, times out, or the request future is cancelled,
+/// dropping the guard atomically rolls the registration back from `Claimed` to
+/// `Ready` (or `Expired` if the pin lease expired). On downstream exchange success,
+/// `commit()` transitions the registration to `Consumed`.
+struct PairingClaimGuard {
+    armed: bool,
+    state: RelayState,
+    pub machine_id: String,
+    pub pin: String,
+    pub pairing_token: String,
+    pub control_generation: u64,
+    pub claim_fence: u64,
+}
+
+impl PairingClaimGuard {
+    pub fn commit(&mut self) {
+        if self.armed {
+            self.armed = false;
+            self.state.consume_pairing(
+                &self.pin,
+                &self.pairing_token,
+                self.control_generation,
+                self.claim_fence,
+            );
+        }
+    }
+
+    pub fn rollback(&mut self) {
+        if self.armed {
+            self.armed = false;
+            self.state.rollback_pairing(
+                &self.pin,
+                &self.pairing_token,
+                self.control_generation,
+                self.claim_fence,
+            );
+        }
+    }
+
+    pub fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PairingClaimGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.state.rollback_pairing(
+                &self.pin,
+                &self.pairing_token,
+                self.control_generation,
+                self.claim_fence,
+            );
+        }
+    }
+}
+
+impl std::fmt::Debug for PairingClaimGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PairingClaimGuard")
+            .field("armed", &self.armed)
+            .field("machine_id", &self.machine_id)
+            .field("pin", &self.pin)
+            .field("pairing_token", &self.pairing_token)
+            .field("control_generation", &self.control_generation)
+            .field("claim_fence", &self.claim_fence)
+            .finish()
     }
 }
 
@@ -735,9 +814,55 @@ impl RelayState {
                 registration,
                 control_generation: generation,
                 state: PairingState::Ready,
+                claim_fence: 0,
+                claim_expires_at: None,
             },
         );
         Ok(())
+    }
+
+    fn consume_pairing(
+        &self,
+        pin: &str,
+        token: &str,
+        control_generation: u64,
+        claim_fence: u64,
+    ) {
+        let mut pairings = self.inner.pairings.lock();
+        if let Some(p) = pairings.get_mut(pin) {
+            if p.state == PairingState::Claimed
+                && p.registration.pairing_token == token
+                && p.control_generation == control_generation
+                && p.claim_fence == claim_fence
+            {
+                p.claim_expires_at = None;
+                p.state = PairingState::Consumed;
+            }
+        }
+    }
+
+    fn rollback_pairing(
+        &self,
+        pin: &str,
+        token: &str,
+        control_generation: u64,
+        claim_fence: u64,
+    ) {
+        let mut pairings = self.inner.pairings.lock();
+        if let Some(p) = pairings.get_mut(pin) {
+            if p.state == PairingState::Claimed
+                && p.registration.pairing_token == token
+                && p.control_generation == control_generation
+                && p.claim_fence == claim_fence
+            {
+                p.claim_expires_at = None;
+                if p.registration.expires_at > current_time_secs() {
+                    p.state = PairingState::Ready;
+                } else {
+                    p.state = PairingState::Expired;
+                }
+            }
+        }
     }
 
     fn claim_pairing(
@@ -745,7 +870,7 @@ impl RelayState {
         ip: IpAddr,
         payload: &PublicPairExchangeRequest,
         machine: Option<&str>,
-    ) -> Result<(String, String, String, u64), StatusCode> {
+    ) -> Result<PairingClaimGuard, StatusCode> {
         let now = Instant::now();
         let mut admission = self.inner.pairing_admission.lock();
         admission.retain(|_, t| {
@@ -796,22 +921,35 @@ impl RelayState {
             let control_identity_is_live = live_generations
                 .get(&p.registration.machine_id)
                 .is_some_and(|current| *current == p.control_generation);
-            if p.state == PairingState::Ready
+            let is_claim_available = match p.state {
+                PairingState::Ready => true,
+                PairingState::Claimed => {
+                    p.claim_expires_at.is_some_and(|expires_at| now >= expires_at)
+                }
+                _ => false,
+            };
+            if is_claim_available
                 && p.registration.expires_at > current_time_secs()
                 && machine.is_none_or(|m| m == p.registration.machine_id)
                 && control_identity_is_live
             {
+                let claim_fence = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
                 p.state = PairingState::Claimed;
+                p.claim_fence = claim_fence;
+                p.claim_expires_at = Some(now + PAIRING_CLAIM_LEASE_DURATION);
                 // A caller can register its own known PINs. A match must not
                 // replenish its guessing budget before daemon authentication.
                 // The validated control generation travels with the claim so dispatch
                 // can refuse a channel that was replaced after this check.
-                return Ok((
-                    p.registration.machine_id.clone(),
-                    p.registration.pin.clone(),
-                    p.registration.pairing_token.clone(),
-                    p.control_generation,
-                ));
+                return Ok(PairingClaimGuard {
+                    armed: true,
+                    state: self.clone(),
+                    machine_id: p.registration.machine_id.clone(),
+                    pin: p.registration.pin.clone(),
+                    pairing_token: p.registration.pairing_token.clone(),
+                    control_generation: p.control_generation,
+                    claim_fence,
+                });
             }
         }
         tracker.failures += 1;
@@ -1342,11 +1480,11 @@ async fn exchange_http(
         .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
     let payload: PublicPairExchangeRequest =
         serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let (machine, pin, token, control_generation) = state.claim_pairing(ip, &payload, machine)?;
+    let mut claim = state.claim_pairing(ip, &payload, machine)?;
     // The loopback gateway calls its pairing secret `code`.
     let body = serde_json::to_vec(&serde_json::json!({
-        "code": token,
-        "pairingToken": token,
+        "code": claim.pairing_token,
+        "pairingToken": claim.pairing_token,
         "deviceName": payload.device_name,
         "installationId": payload.installation_id,
     }))
@@ -1355,8 +1493,8 @@ async fn exchange_http(
     headers.insert("content-type", "application/json".parse().unwrap());
     let response = proxy_http(
         &state,
-        &machine,
-        Some(control_generation),
+        &claim.machine_id,
+        Some(claim.control_generation),
         Method::POST,
         "/api/v1/pair/exchange",
         headers,
@@ -1377,14 +1515,11 @@ async fn exchange_http(
         if issued.token.is_empty() {
             return Err(StatusCode::BAD_GATEWAY);
         }
-        state.register_device_token(&machine, &issued.token);
-        if let Some(p) = state.inner.pairings.lock().get_mut(&pin) {
-            if p.state == PairingState::Claimed && p.registration.pairing_token == token {
-                p.state = PairingState::Consumed;
-            }
-        }
+        state.register_device_token(&claim.machine_id, &issued.token);
+        claim.commit();
         return Ok(Response::from_parts(parts, Body::from(body)));
     }
+    claim.rollback();
     Ok(response)
 }
 
@@ -2942,10 +3077,10 @@ mod tests {
             device_name: "second-device".into(),
             installation_id: None,
         };
-        let (claimed, _, _, _) = state
+        let claim = state
             .claim_pairing("127.0.0.1".parse().unwrap(), &request, None)
             .expect("an ordinary first pairing from a second machine must succeed");
-        assert_eq!(claimed, "machine-two");
+        assert_eq!(claim.machine_id, "machine-two");
 
         // An omitted client attempt number must not become a bypass either: the claim
         // is gated on the relay's own generation, so replacing the owner still revokes.
@@ -3053,10 +3188,10 @@ mod tests {
                 tx: restored_tx,
             },
         );
-        let (claimed_machine, _, _, _) = state
+        let claim = state
             .claim_pairing("127.0.0.3".parse().unwrap(), &request, None)
             .expect("live control identity must be able to complete the exchange");
-        assert_eq!(claimed_machine, machine);
+        assert_eq!(claim.machine_id, machine);
     }
 
     #[test]
@@ -4574,5 +4709,551 @@ mod tests {
         );
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_p01_regression_pair_exchange_5xx_failure_allows_retry() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let owner = identity(41, "p01_daemon_5xx");
+        let (mut daemon_control, auth) = authenticate(&base, &owner, false, false).await;
+        assert!(auth.success);
+        register_security_pin(&mut daemon_control, "p01_daemon_5xx").await;
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+
+        // 1. First attempt: client claims PIN, downstream daemon responds with 500
+        let request1 = client
+            .post(format!(
+                "{}/api/v1/pair/exchange",
+                base.replace("ws://", "http://")
+            ))
+            .body(r#"{"pin":"123456","deviceName":"retry-client"}"#)
+            .send();
+
+        let daemon_handle_500 = async {
+            let notice: IncomingSessionNotice = receive_json(&mut daemon_control).await;
+            let (mut data, _) = tokio_tungstenite::connect_async(format!(
+                "{base}/tunnel/data/{}",
+                notice.session_id
+            ))
+            .await
+            .unwrap();
+            let _frame = timeout(Duration::from_secs(5), data.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            data.send(TMessage::Binary(
+                b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n"
+                    .to_vec()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+            let _ = timeout(Duration::from_secs(5), data.next()).await;
+        };
+
+        let (res1, ()) = timeout(Duration::from_secs(5), async {
+            tokio::join!(request1, daemon_handle_500)
+        })
+        .await
+        .unwrap();
+        let res1 = res1.unwrap();
+        assert_eq!(res1.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+
+        // Pre-fix code leaves the registration in Claimed; post-fix rolls back to Ready.
+        assert_eq!(
+            state.inner.pairings.lock()["123456"].state,
+            PairingState::Ready,
+            "registration must roll back to Ready after downstream 5xx failure"
+        );
+
+        // 2. Retry with the SAME PIN: downstream daemon succeeds with 200 OK
+        let request2 = client
+            .post(format!(
+                "{}/api/v1/pair/exchange",
+                base.replace("ws://", "http://")
+            ))
+            .body(r#"{"pin":"123456","deviceName":"retry-client"}"#)
+            .send();
+
+        let base_clone = base.clone();
+        let daemon_task = tokio::spawn(async move {
+            let notice: IncomingSessionNotice = receive_json(&mut daemon_control).await;
+            let (mut data, _) = tokio_tungstenite::connect_async(format!(
+                "{base_clone}/tunnel/data/{}",
+                notice.session_id
+            ))
+            .await
+            .unwrap();
+            let frame = timeout(Duration::from_secs(5), data.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let raw = String::from_utf8(frame.into_data().to_vec()).unwrap();
+            assert!(raw.starts_with("POST /api/v1/pair/exchange HTTP/1.1\r\n"));
+            data.send(TMessage::Binary(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 29\r\n\r\n{\"token\":\"test-device-token\"}"
+                    .to_vec()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+            let _ = timeout(Duration::from_secs(5), data.next()).await;
+        });
+
+        let res2 = request2.await.unwrap();
+        assert_eq!(res2.status(), reqwest::StatusCode::OK);
+        assert_eq!(res2.text().await.unwrap(), r#"{"token":"test-device-token"}"#);
+        daemon_task.await.unwrap();
+        assert_eq!(
+            state.inner.pairings.lock()["123456"].state,
+            PairingState::Consumed
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_p01_regression_pair_exchange_transport_error_allows_retry() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let owner = identity(42, "p01_daemon_transport");
+        let (mut daemon_control, auth) = authenticate(&base, &owner, false, false).await;
+        assert!(auth.success);
+        register_security_pin(&mut daemon_control, "p01_daemon_transport").await;
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+
+        // 1. First attempt: downstream daemon closes data connection without sending HTTP response
+        let request1 = client
+            .post(format!(
+                "{}/api/v1/pair/exchange",
+                base.replace("ws://", "http://")
+            ))
+            .body(r#"{"pin":"123456","deviceName":"retry-client"}"#)
+            .send();
+
+        let daemon_handle_disconnect = async {
+            let notice: IncomingSessionNotice = receive_json(&mut daemon_control).await;
+            let (data, _) = tokio_tungstenite::connect_async(format!(
+                "{base}/tunnel/data/{}",
+                notice.session_id
+            ))
+            .await
+            .unwrap();
+            drop(data);
+        };
+
+        let (res1, ()) = timeout(Duration::from_secs(5), async {
+            tokio::join!(request1, daemon_handle_disconnect)
+        })
+        .await
+        .unwrap();
+        let res1 = res1.unwrap();
+        assert_eq!(res1.status(), reqwest::StatusCode::BAD_GATEWAY);
+
+        // Pre-fix code leaves the registration in Claimed; post-fix rolls back to Ready.
+        assert_eq!(
+            state.inner.pairings.lock()["123456"].state,
+            PairingState::Ready,
+            "registration must roll back to Ready after transport error"
+        );
+
+        // 2. Retry with the SAME PIN: downstream daemon succeeds with 200 OK
+        let request2 = client
+            .post(format!(
+                "{}/api/v1/pair/exchange",
+                base.replace("ws://", "http://")
+            ))
+            .body(r#"{"pin":"123456","deviceName":"retry-client"}"#)
+            .send();
+
+        let base_clone = base.clone();
+        let daemon_task = tokio::spawn(async move {
+            let notice: IncomingSessionNotice = receive_json(&mut daemon_control).await;
+            let (mut data, _) = tokio_tungstenite::connect_async(format!(
+                "{base_clone}/tunnel/data/{}",
+                notice.session_id
+            ))
+            .await
+            .unwrap();
+            let frame = timeout(Duration::from_secs(5), data.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let raw = String::from_utf8(frame.into_data().to_vec()).unwrap();
+            assert!(raw.starts_with("POST /api/v1/pair/exchange HTTP/1.1\r\n"));
+            data.send(TMessage::Binary(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 29\r\n\r\n{\"token\":\"test-device-token\"}"
+                    .to_vec()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+            let _ = timeout(Duration::from_secs(5), data.next()).await;
+        });
+
+        let res2 = request2.await.unwrap();
+        assert_eq!(res2.status(), reqwest::StatusCode::OK);
+        assert_eq!(res2.text().await.unwrap(), r#"{"token":"test-device-token"}"#);
+        daemon_task.await.unwrap();
+        assert_eq!(
+            state.inner.pairings.lock()["123456"].state,
+            PairingState::Consumed
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_p01_edge_concurrent_double_claim_exactly_one_wins() {
+        let state = test_state(vec![]);
+        let (generation, _notices) = state.register_control_channel("machine_alpha".into());
+        assert!(state
+            .register_pairing(
+                "machine_alpha",
+                generation,
+                security_registration("machine_alpha"),
+            )
+            .is_ok());
+
+        let req1 = PublicPairExchangeRequest {
+            pin: Some("123456".into()),
+            code: None,
+            pairing_token: None,
+            device_name: "client-one".into(),
+            installation_id: None,
+        };
+        let req2 = PublicPairExchangeRequest {
+            pin: Some("123456".into()),
+            code: None,
+            pairing_token: None,
+            device_name: "client-two".into(),
+            installation_id: None,
+        };
+
+        let ip1: IpAddr = "192.0.2.10".parse().unwrap();
+        let ip2: IpAddr = "192.0.2.20".parse().unwrap();
+
+        let state1 = state.clone();
+        let state2 = state.clone();
+
+        let (claim1, claim2) = tokio::join!(
+            tokio::spawn(async move { state1.claim_pairing(ip1, &req1, None) }),
+            tokio::spawn(async move { state2.claim_pairing(ip2, &req2, None) })
+        );
+
+        let res1 = claim1.unwrap();
+        let res2 = claim2.unwrap();
+
+        let one_won = (res1.is_ok() && res2.is_err()) || (res1.is_err() && res2.is_ok());
+        assert!(
+            one_won,
+            "exactly one claim must win when two requests claim the same PIN concurrently"
+        );
+
+        let err = match (&res1, &res2) {
+            (Err(e), Ok(_)) | (Ok(_), Err(e)) => *e,
+            _ => panic!("exactly one claim must win"),
+        };
+        assert_eq!(err, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_p01_edge_rollback_must_not_resurrect_consumed() {
+        let state = test_state(vec![]);
+        let (generation, _notices) = state.register_control_channel("machine_alpha".into());
+        let reg = security_registration("machine_alpha");
+        assert!(state
+            .register_pairing("machine_alpha", generation, reg.clone())
+            .is_ok());
+
+        let req = PublicPairExchangeRequest {
+            pin: Some("123456".into()),
+            code: None,
+            pairing_token: None,
+            device_name: "client-consumed".into(),
+            installation_id: None,
+        };
+        let ip: IpAddr = "192.0.2.30".parse().unwrap();
+
+        let mut claim = state
+            .claim_pairing(ip, &req, None)
+            .expect("claim should succeed");
+        assert_eq!(
+            state.inner.pairings.lock()["123456"].state,
+            PairingState::Claimed
+        );
+
+        let claim_fence = claim.claim_fence;
+        // Downstream succeeds: commit marks registration as Consumed
+        claim.commit();
+        assert_eq!(
+            state.inner.pairings.lock()["123456"].state,
+            PairingState::Consumed
+        );
+
+        // Attempt rollback (e.g. from an errant stale guard or duplicate error path)
+        state.rollback_pairing("123456", &reg.pairing_token, generation, claim_fence);
+        assert_eq!(
+            state.inner.pairings.lock()["123456"].state,
+            PairingState::Consumed,
+            "rollback must never resurrect a Consumed registration back to Ready"
+        );
+
+        // A consumed registration cannot be claimed again
+        assert_eq!(
+            state.claim_pairing(ip, &req, None).err(),
+            Some(StatusCode::NOT_FOUND)
+        );
+        assert_eq!(
+            state.inner.pairings.lock()["123456"].state,
+            PairingState::Consumed
+        );
+    }
+
+    #[tokio::test]
+    async fn test_p01_edge_lease_expiry_enforced_after_rollback() {
+        let state = test_state(vec![]);
+        let (generation, _notices) = state.register_control_channel("machine_alpha".into());
+        let reg = security_registration("machine_alpha");
+        assert!(state
+            .register_pairing("machine_alpha", generation, reg.clone())
+            .is_ok());
+
+        let req = PublicPairExchangeRequest {
+            pin: Some("123456".into()),
+            code: None,
+            pairing_token: None,
+            device_name: "client-expiry".into(),
+            installation_id: None,
+        };
+        let ip: IpAddr = "192.0.2.40".parse().unwrap();
+
+        // 1. Initial claim succeeds, downstream fails, rollback to Ready
+        let mut claim = state
+            .claim_pairing(ip, &req, None)
+            .expect("first claim should succeed");
+        assert_eq!(
+            state.inner.pairings.lock()["123456"].state,
+            PairingState::Claimed
+        );
+        claim.rollback();
+        assert_eq!(
+            state.inner.pairings.lock()["123456"].state,
+            PairingState::Ready
+        );
+
+        // 2. Lease expires: inject clock advance by setting expires_at into the past (no sleep)
+        state
+            .inner
+            .pairings
+            .lock()
+            .get_mut("123456")
+            .unwrap()
+            .registration
+            .expires_at = current_time_secs() - 10;
+
+        // 3. Retry after rollback MUST be rejected because lease expired
+        let ip2: IpAddr = "192.0.2.41".parse().unwrap();
+        assert_eq!(
+            state.claim_pairing(ip2, &req, None).err(),
+            Some(StatusCode::NOT_FOUND),
+            "claim must be rejected when lease expiry is reached after rollback"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_p01_edge_claim_rollback_when_already_expired_marks_expired() {
+        let state = test_state(vec![]);
+        let (generation, _notices) = state.register_control_channel("machine_alpha".into());
+        let reg = security_registration("machine_alpha");
+        assert!(state
+            .register_pairing("machine_alpha", generation, reg.clone())
+            .is_ok());
+
+        let req = PublicPairExchangeRequest {
+            pin: Some("123456".into()),
+            code: None,
+            pairing_token: None,
+            device_name: "client-in-flight-expiry".into(),
+            installation_id: None,
+        };
+        let ip: IpAddr = "192.0.2.50".parse().unwrap();
+
+        let mut claim = state
+            .claim_pairing(ip, &req, None)
+            .expect("claim should succeed");
+        assert_eq!(
+            state.inner.pairings.lock()["123456"].state,
+            PairingState::Claimed
+        );
+
+        // Registration lease expires while downstream exchange was in flight
+        state
+            .inner
+            .pairings
+            .lock()
+            .get_mut("123456")
+            .unwrap()
+            .registration
+            .expires_at = current_time_secs() - 10;
+
+        // Downstream fails, triggering rollback
+        claim.rollback();
+
+        // Expired registration must not become Ready
+        assert_ne!(
+            state.inner.pairings.lock()["123456"].state,
+            PairingState::Ready,
+            "expired registration must not be rolled back to Ready"
+        );
+
+        // Attempting to claim again is rejected
+        assert_eq!(
+            state.claim_pairing(ip, &req, None).err(),
+            Some(StatusCode::NOT_FOUND)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_p01_edge_claim_lease_timeout_allows_reclaim() {
+        let state = test_state(vec![]);
+        let (generation, _notices) = state.register_control_channel("machine_alpha".into());
+        let reg = security_registration("machine_alpha");
+        assert!(state
+            .register_pairing("machine_alpha", generation, reg.clone())
+            .is_ok());
+
+        let req = PublicPairExchangeRequest {
+            pin: Some("123456".into()),
+            code: None,
+            pairing_token: None,
+            device_name: "client-abandoned".into(),
+            installation_id: None,
+        };
+        let ip1: IpAddr = "192.0.2.60".parse().unwrap();
+        let mut claim1 = state
+            .claim_pairing(ip1, &req, None)
+            .expect("first claim should succeed");
+        assert_eq!(
+            state.inner.pairings.lock()["123456"].state,
+            PairingState::Claimed
+        );
+
+        // Disarm guard so dropping claim1 doesn't invoke rollback,
+        // simulating an abandoned in-flight claim lease (e.g. hung worker).
+        claim1.disarm();
+        drop(claim1);
+
+        assert_eq!(
+            state.inner.pairings.lock()["123456"].state,
+            PairingState::Claimed
+        );
+
+        // While claim lease is still active, another claim is refused
+        let ip2: IpAddr = "192.0.2.61".parse().unwrap();
+        assert_eq!(
+            state.claim_pairing(ip2, &req, None).err(),
+            Some(StatusCode::NOT_FOUND),
+            "concurrent claim must be refused while temporary lease is active"
+        );
+
+        // Inject clock / lease expiration: expire the claim lease
+        state
+            .inner
+            .pairings
+            .lock()
+            .get_mut("123456")
+            .unwrap()
+            .claim_expires_at = Some(Instant::now() - Duration::from_secs(1));
+
+        // Now that the temporary claim lease has expired, a subsequent claim succeeds
+        let claim2 = state
+            .claim_pairing(ip2, &req, None)
+            .expect("claim should succeed after claim lease expiry");
+        assert_eq!(
+            state.inner.pairings.lock()["123456"].state,
+            PairingState::Claimed
+        );
+        assert_ne!(claim2.claim_fence, 0);
+    }
+
+    #[tokio::test]
+    async fn test_p01_edge_stale_claim_fence_cannot_rollback_or_consume_newer_claim() {
+        let state = test_state(vec![]);
+        let (generation, _notices) = state.register_control_channel("machine_alpha".into());
+        let reg = security_registration("machine_alpha");
+        assert!(state
+            .register_pairing("machine_alpha", generation, reg.clone())
+            .is_ok());
+
+        let req = PublicPairExchangeRequest {
+            pin: Some("123456".into()),
+            code: None,
+            pairing_token: None,
+            device_name: "client-fencing".into(),
+            installation_id: None,
+        };
+        let ip1: IpAddr = "192.0.2.70".parse().unwrap();
+        let mut claim1 = state
+            .claim_pairing(ip1, &req, None)
+            .expect("first claim succeeds");
+        claim1.disarm();
+        let stale_fence = claim1.claim_fence;
+        drop(claim1);
+
+        // Expire first claim lease and re-claim
+        state
+            .inner
+            .pairings
+            .lock()
+            .get_mut("123456")
+            .unwrap()
+            .claim_expires_at = Some(Instant::now() - Duration::from_secs(1));
+
+        let ip2: IpAddr = "192.0.2.71".parse().unwrap();
+        let mut claim2 = state
+            .claim_pairing(ip2, &req, None)
+            .expect("second claim succeeds");
+        let active_fence = claim2.claim_fence;
+        assert_ne!(stale_fence, active_fence);
+
+        // Stale claim tries to roll back:
+        state.rollback_pairing("123456", &reg.pairing_token, generation, stale_fence);
+        // State must still be Claimed under the active fence!
+        assert_eq!(
+            state.inner.pairings.lock()["123456"].state,
+            PairingState::Claimed
+        );
+        assert_eq!(
+            state.inner.pairings.lock()["123456"].claim_fence,
+            active_fence
+        );
+
+        // Stale claim tries to consume:
+        state.consume_pairing("123456", &reg.pairing_token, generation, stale_fence);
+        // State must still be Claimed under active fence, NOT consumed!
+        assert_eq!(
+            state.inner.pairings.lock()["123456"].state,
+            PairingState::Claimed
+        );
+
+        // Active claim commits:
+        claim2.commit();
+        assert_eq!(
+            state.inner.pairings.lock()["123456"].state,
+            PairingState::Consumed
+        );
     }
 }
