@@ -29,6 +29,70 @@ pub struct LegacyPeer {
     known_sessions: Arc<RwLock<Vec<String>>>,
 }
 
+async fn perform_legacy_handshake<R, W>(
+    reader: &mut BufReader<R>,
+    writer: &mut W,
+) -> Result<(), String>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let hs = DaemonRequest::Handshake {
+        version: DAEMON_PROTOCOL_VERSION,
+    };
+    let mut hs_json = serde_json::to_string(&hs).map_err(|e| e.to_string())?;
+    hs_json.push('\n');
+    writer
+        .write_all(hs_json.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    writer.flush().await.map_err(|e| e.to_string())?;
+
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
+        .await
+        .map_err(|_| "Legacy handshake timed out".to_string())?
+        .map_err(|e| format!("Legacy handshake read failed: {e}"))?;
+
+    let hs_resp: DaemonResponse =
+        serde_json::from_str(line.trim()).map_err(|e| e.to_string())?;
+    match hs_resp {
+        DaemonResponse::HandshakeOk { .. } => Ok(()),
+        DaemonResponse::ProtocolMismatch { expected_version, .. } => {
+            // The legacy daemon is running an older protocol version.
+            // Retry the handshake with the version expected by the legacy daemon.
+            let retry_hs = DaemonRequest::Handshake {
+                version: expected_version,
+            };
+            let mut retry_json = serde_json::to_string(&retry_hs).map_err(|e| e.to_string())?;
+            retry_json.push('\n');
+            writer
+                .write_all(retry_json.as_bytes())
+                .await
+                .map_err(|e| e.to_string())?;
+            writer.flush().await.map_err(|e| e.to_string())?;
+
+            line.clear();
+            tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
+                .await
+                .map_err(|_| "Legacy handshake retry timed out".to_string())?
+                .map_err(|e| format!("Legacy handshake retry read failed: {e}"))?;
+
+            let retry_resp: DaemonResponse =
+                serde_json::from_str(line.trim()).map_err(|e| e.to_string())?;
+            match retry_resp {
+                DaemonResponse::HandshakeOk { .. } => Ok(()),
+                other => Err(format!(
+                    "Unexpected handshake retry response from legacy daemon: {other:?}"
+                )),
+            }
+        }
+        other => Err(format!(
+            "Unexpected handshake from legacy daemon: {other:?}"
+        )),
+    }
+}
+
 impl LegacyPeer {
     pub fn new(socket_path: PathBuf, initial_sessions: Vec<String>) -> Self {
         Self {
@@ -84,34 +148,9 @@ impl LegacyPeer {
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
 
-        let hs = DaemonRequest::Handshake {
-            version: DAEMON_PROTOCOL_VERSION,
-        };
-        let mut hs_json = serde_json::to_string(&hs).map_err(|e| e.to_string())?;
-        hs_json.push('\n');
-        write_half
-            .write_all(hs_json.as_bytes())
-            .await
-            .map_err(|e| e.to_string())?;
-        write_half.flush().await.map_err(|e| e.to_string())?;
+        perform_legacy_handshake(&mut reader, &mut write_half).await?;
 
         let mut line = String::new();
-        tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
-            .await
-            .map_err(|_| "Legacy handshake timed out".to_string())?
-            .map_err(|e| format!("Legacy handshake read failed: {e}"))?;
-
-        let hs_resp: DaemonResponse =
-            serde_json::from_str(line.trim()).map_err(|e| e.to_string())?;
-        match hs_resp {
-            DaemonResponse::HandshakeOk { .. } => {}
-            other => {
-                return Err(format!(
-                    "Unexpected handshake from legacy daemon: {other:?}"
-                ))
-            }
-        }
-
         let mut req_json = serde_json::to_string(req).map_err(|e| e.to_string())?;
         req_json.push('\n');
         write_half
@@ -269,33 +308,9 @@ impl LegacyPeer {
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
 
-        let hs = DaemonRequest::Handshake {
-            version: DAEMON_PROTOCOL_VERSION,
-        };
-        let mut hs_json = serde_json::to_string(&hs).map_err(|e| e.to_string())?;
-        hs_json.push('\n');
-        write_half
-            .write_all(hs_json.as_bytes())
-            .await
-            .map_err(|e| e.to_string())?;
-        write_half.flush().await.map_err(|e| e.to_string())?;
+        perform_legacy_handshake(&mut reader, &mut write_half).await?;
 
         let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .await
-            .map_err(|e| format!("Legacy attach handshake read failed: {e}"))?;
-        let hs_resp: DaemonResponse =
-            serde_json::from_str(line.trim()).map_err(|e| e.to_string())?;
-        match hs_resp {
-            DaemonResponse::HandshakeOk { .. } => {}
-            other => {
-                return Err(format!(
-                    "Unexpected handshake response from legacy: {other:?}"
-                ))
-            }
-        }
-
         let attach_req = DaemonRequest::Attach {
             session_id: session_id.to_string(),
             after_sequence,
@@ -421,33 +436,9 @@ impl LegacyPeer {
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
 
-        let hs = DaemonRequest::Handshake {
-            version: DAEMON_PROTOCOL_VERSION,
-        };
-        let mut hs_json = serde_json::to_string(&hs).map_err(|e| e.to_string())?;
-        hs_json.push('\n');
-        write_half
-            .write_all(hs_json.as_bytes())
-            .await
-            .map_err(|e| e.to_string())?;
-        write_half.flush().await.map_err(|e| e.to_string())?;
+        perform_legacy_handshake(&mut reader, &mut write_half).await?;
 
         let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .await
-            .map_err(|e| format!("Legacy attach handshake read failed: {e}"))?;
-        let hs_resp: DaemonResponse =
-            serde_json::from_str(line.trim()).map_err(|e| e.to_string())?;
-        match hs_resp {
-            DaemonResponse::HandshakeOk { .. } => {}
-            other => {
-                return Err(format!(
-                    "Unexpected handshake response from legacy: {other:?}"
-                ))
-            }
-        }
-
         let attach_req = DaemonRequest::Attach {
             session_id: session_id.to_string(),
             after_sequence,
@@ -565,22 +556,19 @@ impl LegacyPeer {
         let stream = self.connect_stream().await?;
         let (read, mut write) = stream.into_split();
         let mut reader = BufReader::new(read);
-        for request in [
-            DaemonRequest::Handshake { version: DAEMON_PROTOCOL_VERSION },
-            DaemonRequest::Attach { session_id: id.into(), after_sequence: None },
-        ] {
-            let mut wire = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
-            wire.push(b'\n');
-            write.write_all(&wire).await.map_err(|e| e.to_string())?;
-            let mut line = String::new();
-            tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut line)).await
-                .map_err(|_| "Recovery attach timed out")?.map_err(|e| e.to_string())?;
-            let response: DaemonResponse = serde_json::from_str(&line).map_err(|e| e.to_string())?;
-            if !matches!((request, response),
-                (DaemonRequest::Handshake { .. }, DaemonResponse::HandshakeOk { .. }) |
-                (DaemonRequest::Attach { .. }, DaemonResponse::AttachOk { .. })) {
-                return Err("Recovery attach rejected".into());
-            }
+
+        perform_legacy_handshake(&mut reader, &mut write).await?;
+
+        let request = DaemonRequest::Attach { session_id: id.into(), after_sequence: None };
+        let mut wire = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
+        wire.push(b'\n');
+        write.write_all(&wire).await.map_err(|e| e.to_string())?;
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut line)).await
+            .map_err(|_| "Recovery attach timed out")?.map_err(|e| e.to_string())?;
+        let response: DaemonResponse = serde_json::from_str(&line).map_err(|e| e.to_string())?;
+        if !matches!(response, DaemonResponse::AttachOk { .. }) {
+            return Err("Recovery attach rejected".into());
         }
         // The attach stream supplies its own initial status, avoiding a stale
         // independent Describe snapshot racing the subscription. Own both halves

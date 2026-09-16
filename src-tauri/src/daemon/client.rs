@@ -795,12 +795,33 @@ impl DaemonClient {
             ));
         }
 
-        let hs_resp: DaemonResponse = serde_json::from_str(line.trim()).map_err(|e| {
+        let mut hs_resp: DaemonResponse = serde_json::from_str(line.trim()).map_err(|e| {
             IpcError::new(
                 IpcErrorCode::ParseError,
                 format!("Handshake parse failed: {e}"),
             )
         })?;
+
+        // If the running daemon speaks an older protocol version, perform a compatibility handshake
+        // so that we can send UpgradeBinary to trigger rolling handover.
+        if let DaemonResponse::ProtocolMismatch { expected_version, .. } = hs_resp {
+            let compat_hs = DaemonRequest::Handshake {
+                version: expected_version,
+            };
+            if let Ok(mut json) = serde_json::to_string(&compat_hs) {
+                json.push('\n');
+                if write_half.write_all(json.as_bytes()).await.is_ok() && write_half.flush().await.is_ok() {
+                    let mut compat_line = String::new();
+                    if let Ok(Ok(n)) = tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut compat_line)).await {
+                        if n > 0 {
+                            if let Ok(compat_resp) = serde_json::from_str::<DaemonResponse>(compat_line.trim()) {
+                                hs_resp = compat_resp;
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         match hs_resp {
             DaemonResponse::HandshakeOk {
@@ -811,6 +832,17 @@ impl DaemonClient {
                 ..
             } => {
                 if version != DAEMON_PROTOCOL_VERSION {
+                    if self.upgrade_requested.load(Ordering::SeqCst) {
+                        // This connection was created specifically to send an UpgradeBinary request
+                        // to the running daemon. Allow the connection to proceed so rolling handover
+                        // can be requested even across protocol version boundaries.
+                        *self.epoch.write() = Some(epoch);
+                        return Ok(ActiveConnection {
+                            reader,
+                            writer: write_half,
+                        });
+                    }
+                    self.maybe_trigger_upgrade_if_stale(daemon_version, binary_mtime_ms);
                     return Err(daemon_protocol_mismatch_error(
                         DAEMON_PROTOCOL_VERSION,
                         version,
