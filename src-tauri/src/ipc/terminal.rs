@@ -696,47 +696,66 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                     (remote_workspace_id.clone(), None)
                 }
             } else if is_absolute {
-                // External worktree or path outside repo_root:
-                // Register the worktree path on the paired machine so it can serve as a workspace target.
-                let reg_op = crate::paired_host::client::Operation::RegisterProject {
-                    request: crate::remote::machine_protocol::RegisterRequest {
-                        request_id: uuid::Uuid::new_v4().to_string(),
-                        repo_path: cwd_str.to_string(),
-                    },
+                static REGISTERED_WORKTREES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+                    std::sync::OnceLock::new();
+                let cache_mutex = REGISTERED_WORKTREES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+                let cached_id = {
+                    cache_mutex.lock().unwrap().get(cwd_str.as_ref()).cloned()
                 };
-                match daemon_client
-                    .paired_host_operation(crate::paired_host::client::OperationRequest {
-                        host_id: host_id.clone(),
-                        generation: host.generation,
-                        operation: reg_op,
-                    })
-                    .await
-                {
-                    Ok(crate::paired_host::client::OperationResponse {
-                        result:
-                            crate::paired_host::client::OperationResult::RegisterProject(data),
-                        ..
-                    }) => {
-                        tracing::info!(
-                            path = %cwd_path.display(),
-                            remote_ws = %data.remote_workspace_id,
-                            "Registered worktree workspace on paired host"
-                        );
-                        (data.remote_workspace_id, None)
-                    }
-                    Ok(other) => {
-                        return Err(IpcError::internal(format!(
-                            "Remote machine rejected registration for worktree path '{}': {:?}",
-                            cwd_path.display(),
-                            other
-                        )));
-                    }
-                    Err(e) => {
-                        return Err(IpcError::internal(format!(
-                            "Failed to register remote worktree path '{}': {}",
-                            cwd_path.display(),
-                            e.code
-                        )));
+
+                if let Some(cached_id) = cached_id {
+                    tracing::info!(
+                        path = %cwd_path.display(),
+                        remote_ws = %cached_id,
+                        "Using cached worktree workspace on paired host"
+                    );
+                    (cached_id, None)
+                } else {
+                    // External worktree or path outside repo_root:
+                    // Register the worktree path on the paired machine so it can serve as a workspace target.
+                    let reg_op = crate::paired_host::client::Operation::RegisterProject {
+                        request: crate::remote::machine_protocol::RegisterRequest {
+                            request_id: uuid::Uuid::new_v4().to_string(),
+                            repo_path: cwd_str.to_string(),
+                        },
+                    };
+                    match daemon_client
+                        .paired_host_operation(crate::paired_host::client::OperationRequest {
+                            host_id: host_id.clone(),
+                            generation: host.generation,
+                            operation: reg_op,
+                        })
+                        .await
+                    {
+                        Ok(crate::paired_host::client::OperationResponse {
+                            result:
+                                crate::paired_host::client::OperationResult::RegisterProject(data),
+                            ..
+                        }) => {
+                            tracing::info!(
+                                path = %cwd_path.display(),
+                                remote_ws = %data.remote_workspace_id,
+                                "Registered worktree workspace on paired host"
+                            );
+                            cache_mutex.lock().unwrap().insert(cwd_str.to_string(), data.remote_workspace_id.clone());
+                            (data.remote_workspace_id, None)
+                        }
+                        Ok(other) => {
+                            tracing::warn!(
+                                path = %cwd_path.display(),
+                                response = ?other,
+                                "Remote machine rejected registration for worktree path, falling back to base remote workspace"
+                            );
+                            (remote_workspace_id.clone(), None)
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                path = %cwd_path.display(),
+                                error = %e.code,
+                                "Failed to register remote worktree path, falling back to base remote workspace"
+                            );
+                            (remote_workspace_id.clone(), None)
+                        }
                     }
                 }
             } else if cwd_path.components().all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir))

@@ -51,32 +51,34 @@ const Toaster = ({ ...props }: ToasterProps) => {
   const theme = useToastTheme();
 
   return (
-    <Sonner
-      theme={theme}
-      position="bottom-right"
-      closeButton
-      toastOptions={{ className: "font-sans text-sm", ...props.toastOptions }}
-      className="toaster group"
-      icons={{
-        success: <CircleCheckIcon className="size-4" />,
-        info: <InfoIcon className="size-4" />,
-        warning: <TriangleAlertIcon className="size-4" />,
-        error: <OctagonXIcon className="size-4" />,
-        loading: <Loader2Icon className="size-4 animate-spin" />,
-        ...props.icons,
-      }}
-      style={
-        {
-          "--normal-bg": "var(--popover)",
-          "--normal-text": "var(--popover-foreground)",
-          "--normal-border": "var(--border)",
-          "--border-radius": "var(--radius)",
-          "--width": "min(26rem, calc(100vw - 2rem))",
-          ...props.style,
-        } as React.CSSProperties
-      }
-      {...props}
-    />
+    <div data-native-terminal-yield="off">
+      <Sonner
+        theme={theme}
+        position="bottom-right"
+        closeButton
+        toastOptions={{ className: "font-sans text-sm", ...props.toastOptions }}
+        className="toaster group"
+        icons={{
+          success: <CircleCheckIcon className="size-4" />,
+          info: <InfoIcon className="size-4" />,
+          warning: <TriangleAlertIcon className="size-4" />,
+          error: <OctagonXIcon className="size-4" />,
+          loading: <Loader2Icon className="size-4 animate-spin" />,
+          ...props.icons,
+        }}
+        style={
+          {
+            "--normal-bg": "var(--popover)",
+            "--normal-text": "var(--popover-foreground)",
+            "--normal-border": "var(--border)",
+            "--border-radius": "var(--radius)",
+            "--width": "min(26rem, calc(100vw - 2rem))",
+            ...props.style,
+          } as React.CSSProperties
+        }
+        {...props}
+      />
+    </div>
   );
 };
 

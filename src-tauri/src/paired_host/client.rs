@@ -308,7 +308,7 @@ impl MachineClient {
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(Duration::from_secs(5))
-                .timeout(Duration::from_secs(40))
+                .timeout(Duration::from_secs(65))
                 .build()
                 .expect("native machine HTTP"),
         }
@@ -421,9 +421,9 @@ impl MachineClient {
         }
         let mut cancellation = lease.cancellation();
         // Read-only machine operations ride the relay tunnel, whose round trips can
-        // legitimately exceed 10s under tunnel churn; only the 40s write budget is
-        // intentionally larger because mutations may be journalled remotely.
-        let budget = if route.body.is_some() { 40 } else { 30 };
+        // legitimately exceed 10s under tunnel churn; mutation budget is larger because
+        // remote git/filesystem calls on enterprise repos can take tens of seconds.
+        let budget = if route.body.is_some() { 60 } else { 45 };
         tokio::select! { biased;
             _=cancellation.changed()=>Err(ClientError::local("PAIRED_HOST_STALE_GENERATION")),
             result=tokio::time::timeout(Duration::from_secs(budget),async {
@@ -435,7 +435,7 @@ impl MachineClient {
                 if status.as_u16()==204 { return Ok(b"null".to_vec()); }
                 let json=response.headers().get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|v| v.split(';').next()==Some("application/json"));
                 if !json { return Err(ClientError::local("PAIRED_HOST_INVALID_RESPONSE")); }
-                let bytes=tokio::time::timeout(Duration::from_secs(10),async {
+                let bytes=tokio::time::timeout(Duration::from_secs(budget),async {
                     let mut bytes=Vec::new();
                     while let Some(chunk)=response.chunk().await.map_err(|_| ClientError::local("HOST_UNAVAILABLE"))? {
                         if bytes.len()+chunk.len()>limit { return Err(ClientError::local("PAYLOAD_TOO_LARGE")); } bytes.extend_from_slice(&chunk);

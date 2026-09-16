@@ -32,22 +32,19 @@ describe("useNativeTerminalVisibility", () => {
   });
 
   it.each([
-    { platform: "non-Mac", mac: false, ownerVisible: true, optOut: false, toastVisible: false, interactive: false },
-    { platform: "Mac", mac: true, ownerVisible: true, optOut: false, toastVisible: true, interactive: false },
-    { platform: "hidden owner", mac: false, ownerVisible: false, optOut: false, toastVisible: false, interactive: false },
-    { platform: "opted-out toaster", mac: false, ownerVisible: true, optOut: true, toastVisible: true, interactive: true },
-  ])("restores presentation without unmounting when a persistent real toast is dismissed ($platform)", async ({ mac, ownerVisible, optOut, toastVisible, interactive }) => {
+    { platform: "non-Mac", mac: false, ownerVisible: true, toastVisible: true, interactive: true },
+    { platform: "Mac", mac: true, ownerVisible: true, toastVisible: true, interactive: true },
+    { platform: "hidden owner", mac: false, ownerVisible: false, toastVisible: false, interactive: false },
+  ])("keeps terminal interactive and visible when an error toast is displayed ($platform)", async ({ mac, ownerVisible, toastVisible, interactive }) => {
     // Given: an empty real Toaster and an already-subscribed visibility owner.
     vi.mocked(isMacShortcutPlatform).mockReturnValue(mac);
     vi.useFakeTimers(); // Sonner's deferred mount and exit-animation scheduler.
     const released = vi.fn();
-    const toastId = `native-visibility-${mac}-${ownerVisible}-${optOut}`;
+    const toastId = `native-visibility-${mac}-${ownerVisible}`;
     const wrapper = ({ children }: { children: React.ReactNode }) => (
       <NativeTerminalVisibilityProvider visible={ownerVisible}>
         {children}
-        <div data-native-terminal-yield={optOut ? "off" : undefined}>
-          <Toaster theme="light" position="bottom-right" closeButton />
-        </div>
+        <Toaster theme="light" position="bottom-right" closeButton />
       </NativeTerminalVisibilityProvider>
     );
     const { result, unmount } = renderHook(() => {
@@ -62,6 +59,7 @@ describe("useNativeTerminalVisibility", () => {
         await vi.runAllTimersAsync();
       });
       expect(document.querySelector("[data-sonner-toast]")).not.toBeNull();
+      // Toasts must NEVER block terminal typing or hide the surface.
       expect(result.current).toEqual({ visible: toastVisible, interactive });
       expect(released).not.toHaveBeenCalled();
       const closeButton = document.querySelector<HTMLButtonElement>("[data-sonner-toast] [data-close-button]");

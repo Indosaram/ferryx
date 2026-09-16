@@ -9,8 +9,9 @@ import {
 import { isMacShortcutPlatform } from "./shortcuts";
 
 const NativeTerminalVisibilityContext = createContext({ visible: true, occluded: false });
-// Match toast items through their exit animation, never the empty live region.
-const YIELDING_SURFACE_SELECTOR = '[role="dialog"], [role="search"], [data-sonner-toast]';
+// Match modal dialogs and search overlays that own input. Non-modal notifications
+// like toasts do NOT own input and must never block terminal interactivity.
+const YIELDING_SURFACE_SELECTOR = '[role="dialog"], [role="search"]';
 const OPT_OUT_SELECTOR = '[data-native-terminal-yield="off"]';
 
 function isYieldingSurfaceVisible(): boolean {
