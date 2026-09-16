@@ -395,4 +395,83 @@ describe("workspace store native activity subscription", () => {
     expect(result.current.unreadBadgeCount).toBe(1);
     expect(result.current.state.unreadTabIds[tabId]).toBe(true);
   });
+
+  it("syncs store focus to clicked pane when native focus event is emitted for its backend session", async () => {
+    const testServices = services();
+    const { result } = renderHook(() =>
+      useWorkspaceStore({ initialWorktrees: [worktree], services: testServices }),
+    );
+
+    let tabId = "";
+    await act(async () => {
+      const opened = await result.current.openTab(worktree);
+      if (!opened) throw new Error("expected openTab to return tabId");
+      tabId = opened;
+    });
+
+    await waitFor(() => expect(nativeListeners.focus.size).toBeGreaterThan(0));
+
+    const initialTabLayout = result.current.state.layout.layoutsByTabId[tabId];
+    const primaryLeafId = initialTabLayout.activeLeafId!;
+
+    await act(async () => {
+      await result.current.splitPane(tabId, primaryLeafId, "horizontal");
+    });
+
+    const splitTabLayout = result.current.state.layout.layoutsByTabId[tabId];
+    const secondaryLeafId = splitTabLayout.activeLeafId!;
+    expect(secondaryLeafId).not.toBe(primaryLeafId);
+
+    const secondarySessionId = splitTabLayout.sessionIdsByLeafId[secondaryLeafId];
+    const secondarySession = result.current.state.sessions[secondarySessionId];
+    const secondaryBackendSessionId = secondarySession?.backendSessionId;
+    expect(secondaryBackendSessionId).toBeDefined();
+
+    // Focus primary leaf so secondary is not active
+    act(() => {
+      result.current.focusPane(tabId, primaryLeafId);
+    });
+    expect(result.current.state.layout.layoutsByTabId[tabId]?.activeLeafId).toBe(primaryLeafId);
+
+    // Emitting native focus for secondary leaf's backend session must update activeLeafId and activeTabId
+    act(() => {
+      emitNativeFocus(secondaryBackendSessionId!);
+    });
+
+    expect(result.current.state.layout.layoutsByTabId[tabId]?.activeLeafId).toBe(secondaryLeafId);
+    expect(result.current.state.layout.activeTabId).toBe(tabId);
+  });
+
+  it("ignores native focus events for sessions parked in a non-active worktree layout", async () => {
+    const featureWorktree: Worktree = { ...worktree, path: "/repo/feature" };
+    const { result } = renderHook(() =>
+      useWorkspaceStore({ initialWorktrees: [worktree, featureWorktree], services: services() }),
+    );
+
+    let tabId = "";
+    await act(async () => {
+      const opened = await result.current.openTab(worktree);
+      if (!opened) throw new Error("expected openTab to return tabId");
+      tabId = opened;
+    });
+    await waitFor(() => expect(nativeListeners.focus.size).toBeGreaterThan(0));
+
+    const tabLayout = result.current.state.layout.layoutsByTabId[tabId];
+    const sessionId = tabLayout.sessionIdsByLeafId[tabLayout.activeLeafId!];
+    const backendSessionId = result.current.state.sessions[sessionId]?.backendSessionId;
+    expect(backendSessionId).toBeDefined();
+
+    // Switching to the second worktree parks the root layout (with our session) underneath.
+    await act(async () => {
+      await result.current.ensureTabForWorktree(featureWorktree);
+    });
+    expect(result.current.state.activeWorktreePath).toBe(featureWorktree.path);
+
+    // A stale in-flight native focus for the parked session must NOT navigate back to it.
+    act(() => {
+      emitNativeFocus(backendSessionId!);
+    });
+
+    expect(result.current.state.activeWorktreePath).toBe(featureWorktree.path);
+  });
 });

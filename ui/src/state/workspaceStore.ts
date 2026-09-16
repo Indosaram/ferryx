@@ -543,6 +543,20 @@ export function useWorkspaceStore({
       const resolved = resolveSession(backendSessionId);
       if (!resolved) return;
       dispatch({ type: "MARK_SESSION_ACTIVITY_SEEN", sessionId: resolved.sessionId });
+
+      // Native-surface clicks can only originate from panes of the currently visible active
+      // layout. A hit that only exists in a parked worktree layout means the event sat in flight
+      // across a worktree switch: navigating there would yank the user back to the previous
+      // worktree, so it is dropped. A leaf-less hit is a single-pane tab whose lone pane is
+      // already that tab's active pane, so it is dropped as well.
+      const found = locateSessionAcrossLayouts(stateRef.current, resolved.sessionId);
+      if (!found?.leafId || found.worktreePath) return;
+      const isAlreadyActive =
+        stateRef.current.layout.activeTabId === found.tabId &&
+        stateRef.current.layout.layoutsByTabId[found.tabId]?.activeLeafId === found.leafId;
+      if (!isAlreadyActive) {
+        dispatch({ type: "FOCUS_PANE", tabId: found.tabId, leafId: found.leafId });
+      }
     })
       .then((unlisten) => {
         if (subscribed) unlistenFocus = unlisten;

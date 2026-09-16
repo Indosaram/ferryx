@@ -5358,6 +5358,47 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     });
   });
 
+  it("does not let an inactive last-focused pane steal body keydowns", async () => {
+    resetNativeTerminalPaneForTest();
+    const sessionId = "term-session-last-focused";
+    const backendSessionId = "backend-last-focused";
+    const session = createSession(sessionId, backendSessionId);
+    render(<NativeTerminalPane sessionId={sessionId} session={session} active={false} />);
+
+    await waitFor(() => {
+      expect(nativeTerminalEventMocks.focusListeners.length).toBeGreaterThan(0);
+    });
+
+    tauriCoreMocks.invoke.mockClear();
+    tauriCoreMocks.invoke.mockResolvedValue(undefined);
+
+    act(() => {
+      for (const listener of nativeTerminalEventMocks.focusListeners) {
+        listener(backendSessionId);
+      }
+    });
+
+    (document.activeElement as HTMLElement)?.blur?.();
+    expect(document.activeElement).toBe(document.body);
+
+    act(() => {
+      document.body.dispatchEvent(
+        new globalThis.KeyboardEvent("keydown", {
+          key: "a",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+
+    // The store-derived `active` prop must keep deciding body-targeted keydowns even when this
+    // pane was the last natively focused terminal (mixed terminal+browser splits).
+    expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+      sessionId: backendSessionId,
+      input: { text: "a" },
+    });
+  });
+
   it("forwards Enter through the keydown fallback when activeElement is document.body", async () => {
     const session = createSession("term-session-fallback-enter");
     render(<NativeTerminalPane sessionId="term-session-fallback-enter" session={session} />);
