@@ -2,6 +2,7 @@ import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TerminalSession } from "../lib/types";
 import { NativeTerminalPane, resetNativeTerminalPaneForTest } from "./NativeTerminalPane";
+import { Toaster, toast } from "./ui/sonner";
 
 // Exercise the real active/session effect and DOM sink without native IPC.
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => false, invoke: vi.fn() }));
@@ -121,5 +122,38 @@ describe("NativeTerminalPane active non-null session focus ownership", () => {
     expect(focus).not.toHaveBeenCalled();
     expect(document.activeElement).toBe(other);
     focus.mockRestore();
+  });
+
+  it("retains input enabled and interactive state on NativeTerminalPane when an error toast is displayed", async () => {
+    render(
+      <>
+        <Toaster />
+        <NativeTerminalPane sessionId={session.id} session={{ ...session, backendSessionId: "backend-a" }} active={true} />
+      </>
+    );
+    const paneEl = screen.getByTestId("native-terminal-pane");
+    expect(paneEl.getAttribute("data-native-terminal-input-enabled")).toBe("true");
+
+    await act(async () => {
+      toast.error("Persistent error occurred", { id: "test-error-toast", duration: Infinity });
+      await vi.runAllTimersAsync();
+    });
+
+    // Error toast is mounted in the DOM
+    expect(document.querySelector("[data-sonner-toast]")).not.toBeNull();
+
+    // Terminal pane input MUST remain enabled so typing is never blocked
+    expect(paneEl.getAttribute("data-native-terminal-input-enabled")).toBe("true");
+
+    const closeButton = document.querySelector<HTMLButtonElement>("[data-sonner-toast] [data-close-button]");
+    if (closeButton) {
+      await act(async () => {
+        closeButton.click();
+        flushFrames();
+        await vi.runAllTimersAsync();
+        flushFrames();
+      });
+    }
+    expect(paneEl.getAttribute("data-native-terminal-input-enabled")).toBe("true");
   });
 });
