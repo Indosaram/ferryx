@@ -284,6 +284,7 @@ impl Runtime {
                 if !cwd.starts_with(root) {
                     return Err("FORBIDDEN: cwd outside project".into());
                 }
+                let cwd = prepare_spawn_cwd(&cwd);
 
                 let cols = parse_u16_dim(p.get("cols"), 80, "cols")?;
                 let rows = parse_u16_dim(p.get("rows"), 24, "rows")?;
@@ -743,6 +744,107 @@ fn default_platform_login_shell() -> (String, Vec<String>) {
     }
 }
 
+// Normalize a process cwd so that callers handing the path to a platform shell
+// (e.g. Windows `cmd.exe` via COMSPEC) do not pass a Win32 verbatim
+// (`\\?\C:\...`) or verbatim-UNC (`\\?\UNC\server\share`) form that the shell
+// rejects and silently falls back to the Windows directory. POSIX paths and
+// already-canonical Windows drive paths pass through unchanged.
+fn prepare_spawn_cwd(path: &Path) -> PathBuf {
+    let Some(path_str) = path.to_str() else {
+        return path.to_path_buf();
+    };
+
+    if let Some(rest) = path_str.strip_prefix(r"\\?\") {
+        if rest.len() >= 4 && rest[..4].eq_ignore_ascii_case(r"UNC\") {
+            return PathBuf::from(format!(r"\\{}", &rest[4..]));
+        }
+
+        let bytes = rest.as_bytes();
+        if bytes.len() >= 2
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && (bytes.len() == 2 || bytes[2] == b'\\' || bytes[2] == b'/')
+        {
+            return PathBuf::from(rest);
+        }
+    }
+
+    path.to_path_buf()
+}
+
 #[path = "helper_core_tests.rs"]
 #[cfg(test)]
 mod helper_core_tests;
+
+#[cfg(test)]
+mod ferryx_scope {
+    pub mod ssh {
+        pub mod helper {
+            pub mod prepare_spawn_cwd_tests {
+                use super::super::super::super::*;
+                use std::path::{Path, PathBuf};
+
+                #[test]
+                fn verbatim_drive_path_strips_prefix() {
+                    assert_eq!(
+                        prepare_spawn_cwd(Path::new(r"\\?\C:\Users\sook\.ferryx\project")),
+                        PathBuf::from(r"C:\Users\sook\.ferryx\project")
+                    );
+                }
+
+                #[test]
+                fn verbatim_unc_strips_prefix() {
+                    assert_eq!(
+                        prepare_spawn_cwd(Path::new(r"\\?\UNC\server\share\repo")),
+                        PathBuf::from(r"\\server\share\repo")
+                    );
+                }
+
+                #[test]
+                fn posix_path_unchanged() {
+                    assert_eq!(
+                        prepare_spawn_cwd(Path::new("/home/sook/repo")),
+                        PathBuf::from("/home/sook/repo")
+                    );
+                }
+
+                #[test]
+                fn plain_drive_path_unchanged() {
+                    assert_eq!(
+                        prepare_spawn_cwd(Path::new(r"C:\Users\sook\repo")),
+                        PathBuf::from(r"C:\Users\sook\repo")
+                    );
+                }
+
+                #[test]
+                fn rejection_of_cwd_outside_root_forbidden() {
+                    let runtime_dir = tempfile::tempdir().unwrap();
+                    let project_dir = tempfile::tempdir().unwrap();
+                    let runtime = Runtime::new(runtime_dir.path().to_path_buf(), "test-host".to_string(), "tok".to_string()).unwrap();
+                    runtime.handle(Request {
+                        protocol: 1,
+                        token: "tok".to_string(),
+                        op: "project.register".to_string(),
+                        params: json!({
+                            "id": "proj-out",
+                            "path": project_dir.path().to_string_lossy(),
+                        }),
+                    }).unwrap();
+
+                    let res = runtime.handle(Request {
+                        protocol: 1,
+                        token: "tok".to_string(),
+                        op: "pty.spawn".to_string(),
+                        params: json!({
+                            "projectId": "proj-out",
+                            "worktree": "..",
+                        }),
+                    });
+                    assert!(res.is_err());
+                    let err = res.unwrap_err();
+                    assert!(err.contains("FORBIDDEN: cwd outside project"), "expected FORBIDDEN error, got: {err}");
+                }
+            }
+        }
+    }
+}
