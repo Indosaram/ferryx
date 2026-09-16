@@ -27,10 +27,12 @@ it("loads paired owners without local registration and preserves rows on partial
   const retained = hook.result.current[project.workspaceId];
   adapter.projects.mockResolvedValue({ completeness: "partial", unavailableWorkspaceIds: [project.workspaceId], projects: [] });
   await act(async () => { changed({ workspaceId: project.workspaceId, kind: "created", worktree: { wsId: "repo", slug: "feature" } }); });
-  expect(hook.result.current[project.workspaceId]).toBe(retained);
+  expect(hook.result.current[project.workspaceId]?.[0]?.path).toBe("/srv/repo/feature");
+  expect((hook.result.current[project.workspaceId]?.[0] as any)?.stale).toBe(true);
   adapter.projects.mockRejectedValue(new Error("OFFLINE"));
   await act(async () => { changed({ workspaceId: project.workspaceId, kind: "pruned", worktree: { wsId: "repo", slug: "feature" } }); });
-  expect(hook.result.current[project.workspaceId]).toBe(retained);
+  expect(hook.result.current[project.workspaceId]?.[0]?.path).toBe("/srv/repo/feature");
+  expect((hook.result.current[project.workspaceId]?.[0] as any)?.stale).toBe(true);
   expect(services.listWorktrees).not.toHaveBeenCalled();
 });
 
@@ -220,4 +222,63 @@ it("replaces stale rows immediately on reconnect at generation N+1 before TTL ex
   expect(reconnectedRows[0].path).toBe("/srv/repo/feature-gen2");
   expect((reconnectedRows[0] as any).stale).toBeFalsy();
   expect((reconnectedRows[0] as any).freshness).toBeUndefined();
+});
+
+it("transitions cached rows to stale on event-driven relist failure (null/error) and evicts on TTL", async () => {
+  vi.useFakeTimers();
+  remoteHostStore.setState(s => ({
+    ...s,
+    nativeStatus: "ready",
+    machineFeaturesEnabled: true,
+    hosts: {
+      a: {
+        hostId: "a",
+        machineId: "machine-a",
+        generation: "1",
+        name: "Alpha",
+        address: "",
+        transport: "relay",
+        authStatus: "paired",
+        grantScope: "machine",
+        online: true,
+      },
+    },
+  }));
+  adapter.capabilities.mockResolvedValue({});
+  adapter.projects.mockResolvedValue({ completeness: "complete", unavailableWorkspaceIds: [], projects: [{ ...project, availability: "ready" }] });
+  const row = { ...projectRootWorktree(project), workspaceId: "repo", path: "/srv/repo/feature" };
+  adapter.worktrees.mockResolvedValue({ worktrees: [row] });
+
+  let changed!: (payload: WorktreeChangedPayload) => void;
+  const services = {
+    registerProject: vi.fn(async () => project),
+    listWorktrees: vi.fn(async () => []),
+    onWorktreeChanged: vi.fn(async (handler: typeof changed) => { changed = handler; return () => {}; }),
+    pairedWorktreeTtlMs: 30_000,
+  };
+
+  const hook = renderHook(() => useInactiveProjectWorktrees([project], "local", [], services));
+  await act(async () => { await services.onWorktreeChanged.mock.results[0].value; });
+
+  expect(hook.result.current[project.workspaceId]).toEqual([{ ...row, workspaceId: project.workspaceId }]);
+
+  // Now an event arrives, but adapter fails (returns null because incomplete/unavailable)
+  adapter.projects.mockResolvedValue({ completeness: "partial", unavailableWorkspaceIds: [project.workspaceId], projects: [] });
+
+  await act(async () => {
+    changed({ workspaceId: project.workspaceId, kind: "created", worktree: { wsId: "repo", slug: "feature" } });
+  });
+
+  // Cached rows MUST transition to stale/disabled with freshness metadata
+  const staleRows = hook.result.current[project.workspaceId];
+  expect(staleRows).toHaveLength(1);
+  expect((staleRows[0] as any).stale).toBe(true);
+  expect((staleRows[0] as any).disabled).toBe(true);
+  expect((staleRows[0] as any).freshness?.stale).toBe(true);
+
+  // TTL expiration
+  await act(async () => {
+    vi.advanceTimersByTime(30_000);
+  });
+  expect(hook.result.current[project.workspaceId]).toEqual([]);
 });

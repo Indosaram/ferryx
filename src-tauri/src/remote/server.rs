@@ -2448,6 +2448,24 @@ pub(super) fn machine_error(status: StatusCode, code: &str) -> Response {
     })).into_response()
 }
 
+pub(super) fn machine_error_with_details(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+    details: serde_json::Map<String, serde_json::Value>,
+) -> Response {
+    use crate::remote::machine_protocol::{ErrorEnvelope, MachineError};
+    (status, [(header::CACHE_CONTROL, "no-store")], Json(ErrorEnvelope {
+        error: MachineError {
+            code: code.into(),
+            message: message.into(),
+            retryable: matches!(code, "TIMEOUT" | "HOST_UNAVAILABLE" | "MACHINE_SERVICE_UNAVAILABLE" | "RATE_LIMITED" | "CAPACITY_EXCEEDED"),
+            request_id: uuid::Uuid::new_v4().to_string(),
+            details,
+        },
+    })).into_response()
+}
+
 pub(super) fn authenticate_machine_request(
     state: &RemoteGatewayState,
     headers: &HeaderMap,
@@ -2622,11 +2640,30 @@ async fn worktree_list_boundary(State(state): State<Arc<RemoteGatewayState>>, he
     if let Ok(manager) = state.workspace_registry.manager(&workspace_id) {
         let manager_clone = manager.clone();
         let ws_id = workspace_id.clone();
-        let rows: Vec<crate::worktree::Worktree> = crate::ipc::run_blocking(move || {
-            Ok::<_, crate::ipc::IpcError>(manager.list_worktrees().unwrap_or_default())
+        let rows_result: Result<Vec<crate::worktree::Worktree>, crate::ipc::IpcError> = crate::ipc::run_blocking(move || {
+            manager.list_worktrees().map_err(crate::ipc::IpcError::from)
         })
-        .await
-        .unwrap_or_default();
+        .await;
+
+        let rows = match rows_result {
+            Ok(rows) => rows,
+            Err(ipc_err) => {
+                let status_code = match ipc_err.code {
+                    crate::ipc::IpcErrorCode::WorkspaceNotFound | crate::ipc::IpcErrorCode::WorktreeNotFound => StatusCode::NOT_FOUND,
+                    _ => StatusCode::INTERNAL_SERVER_ERROR,
+                };
+                let mut details = serde_json::Map::new();
+                if let Some(serde_json::Value::Object(map)) = ipc_err.details {
+                    details = map;
+                }
+                return machine_error_with_details(
+                    status_code,
+                    &format!("{:?}", ipc_err.code),
+                    &ipc_err.message,
+                    details,
+                );
+            }
+        };
         let listed: Vec<crate::remote::machine_protocol::Worktree> = rows
             .into_iter()
             .map(|row| {
@@ -2998,8 +3035,9 @@ pub async fn start_remote_server_with_resolver_and_insecure_opt_in(
             // from generic LAN (LocalNetwork). Non-loopback direct mode without proven overlay
             // requires an explicit insecure opt-in; otherwise the non-loopback interface
             // is gated and refuses to serve plaintext HTTP/WebSocket.
-            let is_overlay = config.mode == RemoteNetworkMode::Tailscale
-                || crate::remote::state::is_tailscale_cgnat_address(&extra_ip);
+            let is_overlay = (config.mode == RemoteNetworkMode::Tailscale
+                || crate::remote::state::is_tailscale_cgnat_address(&extra_ip))
+                && crate::remote::state::verify_active_trusted_overlay(&extra_ip);
             let insecure_opt_in = allow_insecure_direct || is_insecure_direct_allowed();
             let extra_addr: SocketAddr = (extra_ip, primary_local_addr.port()).into();
 
@@ -3115,6 +3153,9 @@ pub async fn start_remote_server_strict_with_resolver(
     }
     Ok((handle, addr))
 }
+
+#[cfg(test)]
+pub(crate) static DIRECT_GATE_TEST_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[cfg(test)]
 #[path = "p19_insecure_direct_tests.rs"]
@@ -3882,5 +3923,86 @@ mod tests {
 
         let _ = stop.send(());
         let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn test_worktree_list_failure_returns_structured_error_not_200_empty() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo_fail");
+        std::fs::create_dir(&repo).unwrap();
+        crate::worktree::run_git(&repo, &["init", "--quiet"]).unwrap();
+        crate::worktree::run_git(
+            &repo,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        )
+        .unwrap();
+
+        let registry = WorkspaceRegistry::new();
+        registry.register("workspace-fail", &repo).unwrap();
+
+        // Corrupt git repo so manager.list_worktrees() fails
+        let git_dir = repo.join(".git");
+        std::fs::remove_dir_all(&git_dir).unwrap();
+
+        let pty = Arc::new(crate::terminal::PtyManager::new());
+        let hub = Arc::new(TerminalOutputHub::default());
+        let terminal_service = Arc::new(TerminalService::new(pty, hub));
+        let state = Arc::new(RemoteGatewayState::new(
+            terminal_service,
+            registry,
+        ));
+        {
+            let mut conf = state.config.write();
+            conf.mode = crate::remote::state::RemoteNetworkMode::LocalNetwork;
+            conf.port = 0;
+        }
+        crate::remote::server::set_allow_insecure_direct(true);
+
+        let code = state
+            .auth_manager
+            .create_pairing_code(crate::remote::auth::DevicePermission::Control);
+        let (token, _) = state
+            .auth_manager
+            .exchange_pairing_code(&code, "Client")
+            .unwrap();
+
+        let (handle, addr) = start_remote_server(Arc::clone(&state)).await.unwrap();
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!(
+                "http://{addr}/api/v1/workspace/worktrees?workspaceId=workspace-fail"
+            ))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap();
+
+        // Must NOT return HTTP 200 with empty array on discovery failure
+        assert_ne!(
+            resp.status(),
+            reqwest::StatusCode::OK,
+            "discovery failure must return non-success status, not 200 empty"
+        );
+        let status = resp.status();
+        let body = resp.bytes().await.unwrap();
+        let envelope: Result<crate::remote::machine_protocol::ErrorEnvelope, _> =
+            serde_json::from_slice(&body);
+        assert!(
+            envelope.is_ok(),
+            "expected structured error envelope on status {status}, got: {}",
+            String::from_utf8_lossy(&body)
+        );
+
+        handle.stop();
     }
 }

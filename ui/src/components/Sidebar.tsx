@@ -412,6 +412,7 @@ export function Sidebar({
                 const active = isProjectGroupActive(group, activeProjectId);
                 const expanded = !collapsedProjects.has(group.groupId);
                 const projectWorktrees = worktreesByProject.get(project.workspaceId) ?? [];
+                const staleSummary = projectWorktrees.find((w) => (w as any).stale || (w as any).freshness?.stale)?.hostSummary;
                 const projectActivity = summarizeProjectActivity(
                   projectWorktrees,
                   activityByWorktreePath,
@@ -446,6 +447,7 @@ export function Sidebar({
                     onRemoveProject={onRemoveProject ? () => onRemoveProject(project) : undefined}
                     onManageDisk={onManageDisk ? () => onManageDisk(project) : undefined}
                     isStandaloneRemote={isStandaloneRemote || (project.target?.kind === "pairedDaemon" && group.memberProjects.length === 1)}
+                    staleSummary={staleSummary}
                   />
                 );
 
@@ -609,6 +611,7 @@ type ProjectHeaderProps = {
   onManageDisk?: () => void;
   inert?: boolean;
   isStandaloneRemote?: boolean;
+  staleSummary?: string;
 };
 
 function ProjectHeader({
@@ -624,6 +627,7 @@ function ProjectHeader({
   onManageDisk,
   inert = false,
   isStandaloneRemote = true,
+  staleSummary,
 }: ProjectHeaderProps) {
   const { hosts } = useSshHosts();
   const remoteState = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
@@ -720,7 +724,7 @@ function ProjectHeader({
         >
           <Folder className="size-3.5 shrink-0" />
           <span className="min-w-0 flex-1 truncate">{projectLabel}</span>
-          {remote?.kind === "pairedDaemon" ? <span className="text-[10px] text-status-idle">{pairedConnectionStatus(remote.hostId, remoteState)}</span> : null}
+          {remote?.kind === "pairedDaemon" ? <span className="text-[10px] text-status-idle">{staleSummary ?? pairedConnectionStatus(remote.hostId, remoteState)}</span> : null}
           {activity.runningCount > 0 ? (
             <span
               data-testid="project-running-badge"
@@ -909,7 +913,12 @@ function groupWorktreesByProject(
         if (target.kind === "pairedDaemon") {
           for (let i = 0; i < bucket.length; i++) {
             if ((bucket[i].workspaceId ?? project.workspaceId) === member.workspaceId) {
-              bucket[i] = { ...bucket[i], workspaceId: member.workspaceId, hostLabel, hostSummary: remoteState ? pairedConnectionStatus(target.hostId, remoteState) : "Unavailable" };
+              const row = bucket[i];
+              const isStale = Boolean((row as any).stale || (row as any).freshness?.stale);
+              const summary = isStale && row.hostSummary
+                ? row.hostSummary
+                : (remoteState ? pairedConnectionStatus(target.hostId, remoteState) : "Unavailable");
+              bucket[i] = { ...row, workspaceId: member.workspaceId, hostLabel, hostSummary: summary };
             }
           }
         }

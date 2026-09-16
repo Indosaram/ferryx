@@ -583,4 +583,59 @@ describe("WorktreeList actions", () => {
     expect(badge).toHaveClass("truncate");
     expect(screen.queryByText("SSH")).not.toBeInTheDocument();
   });
+
+  it("renders stale/disabled worktree row with disabled select button and disabled action controls", () => {
+    const onSelect = vi.fn();
+    const onCreateWorktree = vi.fn();
+    const onDelete = vi.fn();
+
+    const staleWorktree: Worktree & { stale?: boolean; disabled?: boolean } = {
+      workspaceId: "ws-123456",
+      identity: { wsId: "ws-123456", slug: "stale-worktree" },
+      path: "/srv/repo/stale-worktree",
+      head: "def456",
+      branch: "refs/heads/orca/ws-123456/stale-worktree",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+      hostLabel: "Remote Host",
+      hostSummary: "Offline (stale)",
+      stale: true,
+      disabled: true,
+    };
+
+    render(
+      <WorktreeList
+        worktrees={[staleWorktree]}
+        activePath=""
+        agents={[]}
+        statuses={{}}
+        onSelect={onSelect}
+        onDelete={onDelete}
+        onCreateWorktree={onCreateWorktree}
+      />,
+    );
+
+    const row = screen.getByText("stale-worktree").closest(".group\\/worktree-row")!;
+    expect(row).toHaveAttribute("data-stale", "true");
+
+    // Main select button must be disabled
+    const selectBtn = row.querySelector("button[data-shortcut-worktree-path]");
+    expect(selectBtn).toBeDisabled();
+    fireEvent.click(selectBtn!);
+    expect(onSelect).not.toHaveBeenCalled();
+
+    // Add worktree button must be disabled
+    const addBtn = screen.getByRole("button", { name: "Add worktree" });
+    expect(addBtn).toBeDisabled();
+    fireEvent.click(addBtn);
+    expect(onCreateWorktree).not.toHaveBeenCalled();
+
+    // Delete worktree button must be disabled
+    const deleteBtn = screen.getByRole("button", { name: "Delete worktree" });
+    expect(deleteBtn).toBeDisabled();
+    fireEvent.click(deleteBtn);
+    expect(onDelete).not.toHaveBeenCalled();
+  });
 });

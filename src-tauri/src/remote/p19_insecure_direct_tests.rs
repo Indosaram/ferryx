@@ -43,8 +43,11 @@ fn create_test_state() -> Arc<RemoteGatewayState> {
     ))
 }
 
+use super::DIRECT_GATE_TEST_MUTEX;
+
 #[tokio::test]
 async fn test_p19_non_loopback_direct_without_insecure_opt_in_refuses_to_serve() {
+    let _guard = DIRECT_GATE_TEST_MUTEX.lock().await;
     // Reset insecure direct opt-in to default (false)
     set_allow_insecure_direct(false);
 
@@ -99,6 +102,7 @@ async fn test_p19_non_loopback_direct_without_insecure_opt_in_refuses_to_serve()
 
 #[tokio::test]
 async fn test_p19_overlay_mode_tailscale_unaffected() {
+    let _guard = DIRECT_GATE_TEST_MUTEX.lock().await;
     // Without insecure opt-in, overlay mode (Tailscale) must remain unaffected
     set_allow_insecure_direct(false);
 
@@ -139,6 +143,7 @@ async fn test_p19_overlay_mode_tailscale_unaffected() {
 
 #[tokio::test]
 async fn test_p19_non_loopback_direct_with_insecure_opt_in_binds_and_serves() {
+    let _guard = DIRECT_GATE_TEST_MUTEX.lock().await;
     // Explicitly opt in to insecure LAN mode
     set_allow_insecure_direct(true);
 
@@ -177,4 +182,81 @@ async fn test_p19_non_loopback_direct_with_insecure_opt_in_binds_and_serves() {
 
     // Reset back to secure default
     set_allow_insecure_direct(false);
+}
+
+#[tokio::test]
+async fn test_p19_cgnat_address_without_overlay_proof_is_gated() {
+    let _guard = DIRECT_GATE_TEST_MUTEX.lock().await;
+    set_allow_insecure_direct(false);
+
+    let state = create_test_state();
+    {
+        let mut config = state.config.write();
+        config.mode = RemoteNetworkMode::LocalNetwork;
+        config.port = 0;
+    }
+
+    // A CGNAT-range address (100.64.0.0/10) that is NOT a proven Tailscale interface
+    let cgnat_ip = Ipv4Addr::new(100, 64, 1, 2);
+    let resolver = Arc::new(LanInterfaceResolver { lan_ip: cgnat_ip });
+
+    let (handle, local_addr) = start_remote_server_with_resolver_and_insecure_opt_in(
+        Arc::clone(&state),
+        resolver.clone(),
+        false,
+    )
+    .await
+    .expect("gateway starts loopback baseline");
+
+    assert!(local_addr.ip().is_loopback());
+    assert!(
+        !handle.is_external_bound(),
+        "CGNAT address on physical/non-tailscale interface must NOT be exempted as overlay"
+    );
+    assert!(
+        matches!(handle.gate_status(), DirectGatewayGateStatus::InsecureLanGated { .. }),
+        "CGNAT address without authoritative overlay proof must be InsecureLanGated, got {:?}",
+        handle.gate_status()
+    );
+    handle.stop();
+}
+
+#[tokio::test]
+async fn test_p19_cgnat_address_with_authoritative_overlay_proof_is_exempt() {
+    let _guard = DIRECT_GATE_TEST_MUTEX.lock().await;
+    set_allow_insecure_direct(false);
+
+    let state = create_test_state();
+    {
+        let mut config = state.config.write();
+        config.mode = RemoteNetworkMode::LocalNetwork;
+        config.port = 0;
+    }
+
+    let tailscale_ip = crate::remote::state::SystemInterfaceResolver
+        .tailscale_address()
+        .expect("active Tailscale interface on workstation");
+
+    let resolver = Arc::new(LanInterfaceResolver { lan_ip: tailscale_ip });
+
+    let (handle, local_addr) = start_remote_server_with_resolver_and_insecure_opt_in(
+        Arc::clone(&state),
+        resolver,
+        false,
+    )
+    .await
+    .expect("authoritative overlay address starts without opt-in");
+
+    assert!(local_addr.ip().is_loopback());
+    assert!(
+        handle.is_external_bound(),
+        "Authoritative overlay interface must be bound without requiring insecure opt-in"
+    );
+    assert!(
+        matches!(handle.gate_status(), DirectGatewayGateStatus::OverlaySecure { .. }),
+        "Gate status must be OverlaySecure, got {:?}",
+        handle.gate_status()
+    );
+
+    handle.stop();
 }

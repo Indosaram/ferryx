@@ -122,6 +122,10 @@ pub struct DaemonRemoteStatus {
     pub relay_connected: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_channel_connected: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_status: Option<crate::remote::server::DirectGatewayGateStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -852,6 +856,8 @@ mod tests {
                 machine_id: None,
                 relay_connected: None,
                 control_channel_connected: None,
+                gate_status: None,
+                gate_reason: None,
             },
         };
         let status_json = serde_json::to_string(&remote_status_resp).expect("serialize status");

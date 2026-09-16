@@ -97,6 +97,7 @@ export const WorktreeRow = memo(function WorktreeRow({
   const handleContextMenu = (event: React.MouseEvent) => {
     event.preventDefault();
     event.stopPropagation();
+    if (isDisabled) return;
     const items: NativeMenuEntry[] = [
       { kind: "item", id: "reveal", label: isRemote ? "Local reveal unavailable over SSH" : fileManagerActionLabel(), enabled: !isRemote, icon: "reveal" },
       { kind: "item", id: "copy-path", label: isRemote ? "Copy Remote Path" : "Copy Worktree Path" },
@@ -153,12 +154,18 @@ export const WorktreeRow = memo(function WorktreeRow({
     });
   };
 
+  const isStale = Boolean((worktree as any).stale || (worktree as any).freshness?.stale);
+  const isDisabled = Boolean((worktree as any).disabled || isStale);
+
   return (
     <>
       <div
-        onContextMenu={handleContextMenu}
+        data-stale={isStale ? "true" : undefined}
+        data-disabled={isDisabled ? "true" : undefined}
+        onContextMenu={isDisabled ? undefined : handleContextMenu}
         className={cn(
           "group/worktree-row relative my-0.5 w-full rounded-md border transition-colors",
+          isDisabled && "opacity-60",
           active
             ? "border-[#6c6c6c] bg-[#3f3f3f]"
             : "border-transparent bg-transparent hover:bg-white/[0.04]",
@@ -166,12 +173,14 @@ export const WorktreeRow = memo(function WorktreeRow({
       >
         <button
           type="button"
-          onClick={() => onSelect(worktree)}
+          disabled={isDisabled}
+          onClick={isDisabled ? undefined : () => onSelect(worktree)}
           data-shortcut-worktree-path={worktree.path}
           data-shortcut-workspace-id={worktree.workspaceId ?? ""}
           aria-current={active ? "true" : undefined}
+          aria-disabled={isDisabled ? "true" : undefined}
           title={isRemote ? `Remote SSH root: ${worktree.path}${worktree.hostLabel ? ` (${worktree.hostLabel})` : ""}` : undefined}
-          className="flex min-h-[28px] w-full flex-col justify-center rounded-md px-2 py-1 pr-8 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          className="flex min-h-[28px] w-full flex-col justify-center rounded-md px-2 py-1 pr-8 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed"
         >
           <span className="flex min-w-0 flex-col">
             <span className="flex min-w-0 items-center gap-1.5">
@@ -224,8 +233,9 @@ export const WorktreeRow = memo(function WorktreeRow({
             <IconButton
               label="Add worktree"
               size="sm"
+              disabled={isDisabled}
               className="size-5"
-              onClick={() => onCreateWorktree(worktree)}
+              onClick={isDisabled ? undefined : () => onCreateWorktree(worktree)}
               onPointerDown={(event) => event.stopPropagation()}
             >
               <Plus className="size-3" />
@@ -235,14 +245,16 @@ export const WorktreeRow = memo(function WorktreeRow({
             <IconButton
               label={deleteButtonLabel}
               size="sm"
+              disabled={isDisabled}
               className="size-5 hover:text-destructive"
-              onClick={() => onDelete(worktree)}
+              onClick={isDisabled ? undefined : () => onDelete(worktree)}
               onPointerDown={(event) => event.stopPropagation()}
             >
               <Trash2 className="size-3" />
             </IconButton>
           ) : null}
         </div>
+
       </div>
 
     </>

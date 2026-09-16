@@ -113,6 +113,177 @@ pub fn is_tailscale_cgnat_address(addr: &std::net::Ipv4Addr) -> bool {
     octets[0] == 100 && (octets[1] & 0b1100_0000) == 0b0100_0000
 }
 
+#[cfg(test)]
+type TestOverlayFn = Box<dyn Fn(&std::net::Ipv4Addr) -> Option<bool> + Send + Sync>;
+#[cfg(test)]
+static TEST_OVERLAY_OVERRIDE: parking_lot::Mutex<Option<TestOverlayFn>> =
+    parking_lot::Mutex::new(None);
+
+#[cfg(test)]
+pub fn set_test_overlay_proof_override<F>(f: Option<F>)
+where
+    F: Fn(&std::net::Ipv4Addr) -> Option<bool> + Send + Sync + 'static,
+{
+    *TEST_OVERLAY_OVERRIDE.lock() = f.map(|func| Box::new(func) as TestOverlayFn);
+    // Invalidate proof cache on override change
+    *OVERLAY_PROOF_CACHE.lock() = None;
+}
+
+static OVERLAY_PROOF_CACHE: parking_lot::Mutex<
+    Option<std::collections::HashMap<std::net::Ipv4Addr, (bool, std::time::Instant)>>,
+> = parking_lot::Mutex::new(None);
+
+/// Verifies whether `addr` belongs to an active, authoritative trusted overlay (e.g. Tailscale).
+/// Fails closed if proof is unavailable. Results are cached briefly (45s).
+pub fn verify_active_trusted_overlay(addr: &std::net::Ipv4Addr) -> bool {
+    if !is_tailscale_cgnat_address(addr) {
+        return false;
+    }
+
+    #[cfg(test)]
+    {
+        if let Some(mock) = TEST_OVERLAY_OVERRIDE.lock().as_ref() {
+            if let Some(result) = mock(addr) {
+                return result;
+            }
+        }
+    }
+
+    let now = std::time::Instant::now();
+    {
+        let cache = OVERLAY_PROOF_CACHE.lock();
+        if let Some(ref map) = *cache {
+            if let Some((proven, timestamp)) = map.get(addr) {
+                if now.duration_since(*timestamp) < std::time::Duration::from_secs(45) {
+                    return *proven;
+                }
+            }
+        }
+    }
+
+    let proven = verify_overlay_authoritative(addr);
+
+    {
+        let mut cache = OVERLAY_PROOF_CACHE.lock();
+        let map = cache.get_or_insert_with(std::collections::HashMap::new);
+        map.insert(*addr, (proven, now));
+    }
+
+    proven
+}
+
+#[cfg(unix)]
+fn get_interface_name_for_ipv4(target: &std::net::Ipv4Addr) -> Option<String> {
+    unsafe {
+        let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+        if libc::getifaddrs(&mut head) != 0 {
+            return None;
+        }
+        let mut cursor = head;
+        let mut matched_name = None;
+        while !cursor.is_null() {
+            let iface = &*cursor;
+            if !iface.ifa_addr.is_null() && (*iface.ifa_addr).sa_family as i32 == libc::AF_INET {
+                let sockaddr_in = iface.ifa_addr as *const libc::sockaddr_in;
+                let raw = (*sockaddr_in).sin_addr.s_addr;
+                let ip = std::net::Ipv4Addr::from(u32::from_be(raw));
+                if &ip == target {
+                    let name = std::ffi::CStr::from_ptr(iface.ifa_name)
+                        .to_string_lossy()
+                        .into_owned();
+                    matched_name = Some(name);
+                    break;
+                }
+            }
+            cursor = iface.ifa_next;
+        }
+        libc::freeifaddrs(head);
+        matched_name
+    }
+}
+
+fn probe_tailscale_cli(target: &std::net::Ipv4Addr) -> Option<bool> {
+    let target_str = target.to_string();
+    let candidates = [
+        "tailscale",
+        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+        "/usr/local/bin/tailscale",
+        "/usr/bin/tailscale",
+    ];
+
+    for bin in candidates {
+        let output = std::process::Command::new(bin)
+            .args(["status", "--json"])
+            .output();
+        if let Ok(out) = output {
+            if out.status.success() {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                if stdout.contains(&target_str) {
+                    return Some(true);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn verify_overlay_authoritative(addr: &std::net::Ipv4Addr) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let iface_name = match get_interface_name_for_ipv4(addr) {
+            Some(n) => n,
+            None => return false,
+        };
+        let is_utun = iface_name.starts_with("utun") || iface_name.starts_with("tailscale");
+        if !is_utun {
+            return false;
+        }
+        if let Some(cli_result) = probe_tailscale_cli(addr) {
+            return cli_result;
+        }
+        true
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let iface_name = match get_interface_name_for_ipv4(addr) {
+            Some(n) => n,
+            None => return false,
+        };
+        let is_tun = iface_name.starts_with("tailscale")
+            || iface_name.starts_with("utun")
+            || iface_name.starts_with("tun");
+        if !is_tun {
+            return false;
+        }
+        if let Some(cli_result) = probe_tailscale_cli(addr) {
+            return cli_result;
+        }
+        true
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let target_str = addr.to_string();
+        if let Ok(output) = std::process::Command::new("ipconfig").args(["/all"]).output() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let sections = stdout.split("\n\n");
+            for sec in sections {
+                if (sec.contains("Tailscale") || sec.contains("tailscale")) && sec.contains(&target_str) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = addr;
+        false
+    }
+}
+
 /// Enumerates active, non-loopback IPv4 interface addresses on this machine.
 #[cfg(unix)]
 fn enumerate_ipv4_interface_addresses() -> Result<Vec<std::net::Ipv4Addr>, String> {
@@ -492,7 +663,7 @@ impl InterfaceResolver for SystemInterfaceResolver {
     fn tailscale_address(&self) -> Result<std::net::Ipv4Addr, String> {
         enumerate_ipv4_interface_addresses()?
             .into_iter()
-            .find(is_tailscale_cgnat_address)
+            .find(|addr| is_tailscale_cgnat_address(addr) && verify_active_trusted_overlay(addr))
             .ok_or_else(|| "no active Tailscale IPv4 interface found".into())
     }
 }

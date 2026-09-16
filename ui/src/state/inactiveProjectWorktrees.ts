@@ -116,17 +116,65 @@ export function useInactiveProjectWorktrees(
 
       if (target.target?.kind === "pairedDaemon") {
         const pairedTarget = target.target;
-        void listPairedProjectWorktrees(target).then(listed => {
-          if (!cancelled && listed !== null) {
+        const handleRelistStaleTransition = () => {
+          setWorktreesByProject((current) => {
+            const existing = current[workspaceId];
+            if (!existing || existing.length === 0) return current;
+            const host = remoteHostStore.getState().hosts[pairedTarget.hostId];
+            const isOffline = host ? !host.online : true;
+            const cachedGen = lastAuthoritativeGenRef.current[workspaceId] ?? host?.generation ?? (existing[0] as any)?.freshness?.generation ?? null;
+            const cachedAt = (existing[0] as any)?.freshness?.cachedAt ?? Date.now();
+            const staleRows: Worktree[] = existing.map((row) => ({
+              ...row,
+              stale: true,
+              offline: isOffline,
+              disabled: true,
+              hostSummary: isOffline ? "Offline (stale)" : "Stale",
+              freshness: {
+                stale: true,
+                offline: isOffline,
+                generation: cachedGen,
+                cachedAt,
+              },
+            }));
+
+            const ttlMs = servicesRef.current.pairedWorktreeTtlMs ?? DEFAULT_PAIRED_WORKTREE_TTL_MS;
+            if (ttlMs > 0 && !ttlTimersRef.current[workspaceId]) {
+              ttlTimersRef.current[workspaceId] = setTimeout(() => {
+                setWorktreesByProject((curr) => {
+                  const r = curr[workspaceId];
+                  if (r && r.some((item) => (item as any).stale)) {
+                    return { ...curr, [workspaceId]: [] };
+                  }
+                  return curr;
+                });
+                delete ttlTimersRef.current[workspaceId];
+              }, ttlMs);
+            }
+
+            return { ...current, [workspaceId]: staleRows };
+          });
+        };
+
+        void listPairedProjectWorktrees(target).then((listed) => {
+          if (cancelled) return;
+          if (listed !== null) {
             const host = remoteHostStore.getState().hosts[pairedTarget.hostId];
             lastAuthoritativeGenRef.current[workspaceId] = host?.generation ?? null;
             if (ttlTimersRef.current[workspaceId]) {
               clearTimeout(ttlTimersRef.current[workspaceId]);
               delete ttlTimersRef.current[workspaceId];
             }
-            setWorktreesByProject(current => ({ ...current, [workspaceId]: listed }));
+            setWorktreesByProject((current) => ({ ...current, [workspaceId]: listed }));
+          } else {
+            handleRelistStaleTransition();
           }
-        }).catch(error => switchDebug("inactive-worktrees.relist.error", { workspaceId, error: String(error) }));
+        }).catch((error) => {
+          switchDebug("inactive-worktrees.relist.error", { workspaceId, error: String(error) });
+          if (!cancelled) {
+            handleRelistStaleTransition();
+          }
+        });
         return;
       }
       const isSsh = target.target?.kind === "ssh";

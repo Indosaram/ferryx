@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { Sidebar } from "./Sidebar";
 import type { RegisteredProject } from "../lib/types";
+import { remoteHostStore } from "../state/remoteHostStore";
 
 const native = vi.hoisted(() => ({ openNativePopupMenu: vi.fn(), revealPath: vi.fn() }));
 vi.mock("../lib/nativeMenu", () => ({ openNativePopupMenu: native.openNativePopupMenu }));
@@ -324,4 +325,68 @@ it("preserves local worktrees in unified group when local project is active and 
   // Local worktree is active
   const localRow = screen.getByRole("button", { name: /main/ });
   expect(localRow).toHaveAttribute("aria-current", "true");
+});
+
+it("preserves stale/offline hostSummary for pairedDaemon project through grouping", () => {
+  const pairedProject: RegisteredProject = {
+    workspaceId: "daemon:paired-group",
+    repoRoot: "/srv/paired-repo",
+    gitRoot: "/srv/paired-repo",
+    target: { kind: "pairedDaemon", hostId: "host-alpha" },
+  };
+
+  const staleRow = {
+    workspaceId: "daemon:paired-group",
+    path: "/srv/paired-repo",
+    branch: "main",
+    head: "abc",
+    bare: false,
+    detached: false,
+    locked: null,
+    prunable: null,
+    hostLabel: "Alpha Machine",
+    hostSummary: "Offline (stale)",
+    stale: true,
+    offline: true,
+    disabled: true,
+    freshness: {
+      stale: true,
+      offline: true,
+    },
+  };
+
+  remoteHostStore.setState(s => ({
+    ...s,
+    nativeStatus: "ready",
+    machineFeaturesEnabled: true,
+    hosts: {
+      "host-alpha": {
+        hostId: "host-alpha",
+        machineId: "mach-a",
+        generation: "1",
+        name: "Alpha Machine",
+        address: "",
+        transport: "relay",
+        authStatus: "paired",
+        grantScope: "machine",
+        online: true,
+      },
+    },
+  }));
+
+  render(
+    <Sidebar
+      projects={[pairedProject]}
+      activeProjectId={pairedProject.workspaceId}
+      worktrees={[]}
+      inactiveProjectWorktrees={{ [pairedProject.workspaceId]: [staleRow as any] }}
+      agents={[]}
+      activePath=""
+      onSelectWorktree={vi.fn()}
+      onCreateWorktree={vi.fn()}
+    />,
+  );
+
+  expect(screen.getAllByText(/Offline \(stale\)/).length).toBeGreaterThanOrEqual(1);
+  expect(screen.queryByText(/Online \(relay\)/)).not.toBeInTheDocument();
 });

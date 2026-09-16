@@ -2052,6 +2052,19 @@ impl DaemonServer {
                     } else {
                         (Some(false), Some(false))
                     };
+                    let (gate_status, gate_reason) = {
+                        let handle_guard = self.remote_server_handle.lock();
+                        if let Some(h) = handle_guard.as_ref() {
+                            let gs = h.gate_status();
+                            let reason = match &gs {
+                                crate::remote::server::DirectGatewayGateStatus::InsecureLanGated { reason, .. } => Some(reason.clone()),
+                                _ => None,
+                            };
+                            (Some(gs), reason)
+                        } else {
+                            (None, None)
+                        }
+                    };
                     DaemonResponse::RemoteStatusOk {
                         status: DaemonRemoteStatus {
                             mode: config.mode,
@@ -2063,6 +2076,8 @@ impl DaemonServer {
                             machine_id,
                             relay_connected,
                             control_channel_connected,
+                            gate_status,
+                            gate_reason,
                         },
                     }
                 }
@@ -4836,5 +4851,77 @@ mod tests {
         assert!(output.status.success());
         let stdout_str = String::from_utf8_lossy(&output.stdout);
         assert_eq!(stdout_str.trim(), "ferryx-inherited-fd-payload");
+    }
+
+    #[tokio::test]
+    async fn test_daemon_production_configure_gated_status_projection() {
+        let _guard = crate::remote::server::DIRECT_GATE_TEST_MUTEX.lock().await;
+        use crate::remote::server::set_allow_insecure_direct;
+        set_allow_insecure_direct(false);
+
+        let server = Arc::new(DaemonServer::new());
+        let (client_stream, server_stream) = UnixStream::pair().expect("unix pair");
+        let server_clone = Arc::clone(&server);
+        let server_task = tokio::spawn(async move {
+            server_clone.handle_client(server_stream).await;
+        });
+
+        let (read_half, mut write_half) = client_stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+
+        // Configure to LocalNetwork without insecure opt-in
+        let conf_req = DaemonRequest::RemoteConfigure {
+            config: crate::remote::state::RemoteGatewayConfig {
+                mode: RemoteNetworkMode::LocalNetwork,
+                port: 0,
+                allow_control: true,
+                relay_url: None,
+            },
+        };
+        let mut json = serde_json::to_string(&conf_req).unwrap();
+        json.push('\n');
+        write_half.write_all(json.as_bytes()).await.unwrap();
+
+        reader.read_line(&mut line).await.unwrap();
+        let resp: DaemonResponse = serde_json::from_str(line.trim()).unwrap();
+        assert!(matches!(resp, DaemonResponse::RemoteConfigureOk));
+
+        // Now query RemoteGetStatus: must expose gate status + reason
+        line.clear();
+        let req = DaemonRequest::RemoteGetStatus;
+        let mut json = serde_json::to_string(&req).unwrap();
+        json.push('\n');
+        write_half.write_all(json.as_bytes()).await.unwrap();
+
+        reader.read_line(&mut line).await.unwrap();
+        let resp: DaemonResponse = serde_json::from_str(line.trim()).unwrap();
+        match resp {
+            DaemonResponse::RemoteStatusOk { status } => {
+                assert_eq!(status.mode, RemoteNetworkMode::LocalNetwork);
+                assert!(status.is_running);
+                assert!(
+                    matches!(
+                        status.gate_status,
+                        Some(crate::remote::server::DirectGatewayGateStatus::InsecureLanGated { .. })
+                    ),
+                    "expected InsecureLanGated in status response, got {:?}",
+                    status.gate_status
+                );
+                assert!(
+                    status
+                        .gate_reason
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("gated"),
+                    "expected gating reason in status response, got {:?}",
+                    status.gate_reason
+                );
+            }
+            other => panic!("Expected RemoteStatusOk, got {other:?}"),
+        }
+
+        drop(write_half);
+        let _ = server_task.await;
     }
 }
