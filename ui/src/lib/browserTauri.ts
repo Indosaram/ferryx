@@ -10,10 +10,31 @@ import type {
   LogicalRect,
 } from "./types";
 
+export const BROWSER_SESSION_CREATED_EVENT = "browser_session_created";
 export const BROWSER_OPEN_REQUESTED_EVENT = "browser_open_requested";
 export const BROWSER_DOWNLOAD_REQUESTED_EVENT = "browser_download_requested";
 export const BROWSER_SHORTCUT_REQUESTED_EVENT = "browser_shortcut_requested";
 export const BROWSER_SHORTCUT_EVENT = "ferryx:browser-shortcut";
+
+export type BrowserSessionCreatedPayload = {
+  browser: {
+    browserId: string;
+    webviewLabel: string;
+    workspaceId?: string | null;
+    worktreePath?: string | null;
+    profileId: string;
+    generation: number;
+    url: string;
+    title?: string | null;
+    loading: boolean;
+    canGoBack: boolean;
+    canGoForward: boolean;
+    zoomFactor: number;
+    loadError?: string | null;
+    visible: boolean;
+  };
+  workspaceId?: string | null;
+};
 
 export type BrowserOpenRequestedPayload = {
   browserId: string;
@@ -243,6 +264,12 @@ export function onBrowserOpenRequested(
   listener: (payload: BrowserOpenRequestedPayload) => void,
 ): Promise<UnlistenFn> {
   return listen<BrowserOpenRequestedPayload>(BROWSER_OPEN_REQUESTED_EVENT, (event) => listener(event.payload));
+}
+
+export function onBrowserSessionCreated(
+  listener: (payload: BrowserSessionCreatedPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<BrowserSessionCreatedPayload>(BROWSER_SESSION_CREATED_EVENT, (event) => listener(event.payload));
 }
 
 export function onBrowserDownloadRequested(

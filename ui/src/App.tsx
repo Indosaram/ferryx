@@ -25,7 +25,7 @@ import { useApplyAppearanceSettings } from "./lib/appearanceSettings";
 import { workspaceName } from "./lib/branchFilter";
 import { collectDagWatchRoots } from "./lib/dagWatchRoots";
 import { newBrowserTabUrl } from "./lib/browserSettings";
-import { BROWSER_SHORTCUT_EVENT, onBrowserOpenRequested, onBrowserShortcutRequested, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
+import { BROWSER_SHORTCUT_EVENT, onBrowserOpenRequested, onBrowserSessionCreated, onBrowserShortcutRequested, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
 import { registerBuiltInBrowserLinkOpener } from "./lib/linkRouting";
 import { useGeneralSettings } from "./lib/generalSettings";
 import { NotificationCoordinator, isWindowForegroundFocused } from "./lib/notificationCoordinator";
@@ -626,6 +626,7 @@ function WorkspaceApp({
     parkedActivityVersion,
     openTab,
     createBrowserTab,
+    adoptBrowserSession,
     duplicateBrowserTab,
     navigateBrowserTab,
     reloadBrowserTab,
@@ -2398,6 +2399,22 @@ function WorkspaceApp({
       unlisten?.();
     };
   }, [createBrowserTab, reportRuntimeError]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void onBrowserSessionCreated((payload) => {
+      if (activeRemoteHostRef.current) return;
+      adoptBrowserSession(payload.browser, payload.workspaceId ?? undefined);
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unlisten = cleanup;
+    }).catch(reportRuntimeError);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [adoptBrowserSession, reportRuntimeError]);
 
   // Terminal links and markdown editors route through routeHttpLink, which needs a live
   // opener to reach the built-in browser; without this registration every link silently

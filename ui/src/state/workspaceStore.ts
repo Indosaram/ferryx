@@ -10,7 +10,7 @@ import {
 import { resolveAgentLogo } from "../lib/agentIcon";
 import { agentDisplayNameForType, classifyTerminalTitleActivity, formatTabLabelFromTitle, isBareAgentTitle, normalizeTerminalTitle, parseAgentTitle } from "../lib/agentTitle";
 import { workspaceName } from "../lib/branchFilter";
-import { closeBrowser, createBrowser, navigateBrowser, reloadBrowser } from "../lib/browserTauri";
+import { closeBrowser, createBrowser, navigateBrowser, reloadBrowser, type BrowserSessionCreatedPayload } from "../lib/browserTauri";
 import { closeTerminal, DEFAULT_WORKSPACE_ID, discoverAgentProviderSession, getTerminalCwd, onNativeTerminalAgentState, onNativeTerminalBell, onNativeTerminalFocus, onNativeTerminalTitle, spawnTerminal, toIpcError, waitForTerminalExit } from "../lib/tauri";
 import * as tauriIpc from "../lib/tauri";
 import type { SpawnTerminalRequest } from "../lib/tauri";
@@ -29,6 +29,7 @@ import { createBrowserPaneContent, worktreeIdentity } from "../lib/types";
 import type {
   AgentProviderSession,
   ActiveAgent,
+  BrowserState,
   BrowserTab,
   LayoutState,
   PaneContent,
@@ -1297,6 +1298,63 @@ export function useWorkspaceStore({
     [dispatch, workspaceId],
   );
 
+  const adoptBrowserSession = useCallback(
+    (
+      browserState: BrowserState | BrowserSessionCreatedPayload["browser"],
+      targetWorkspaceId?: string | null,
+    ): string | null => {
+      const allTabs = [
+        ...stateRef.current.layout.tabs,
+        ...Object.values(stateRef.current.worktreeLayouts ?? {}).flatMap((layout) => layout.tabs),
+      ];
+      if (
+        allTabs.some((tab) => tab.kind === "browser" && tab.browserId === browserState.browserId) ||
+        isBrowserIdReferenced(stateRef.current, browserState.browserId)
+      ) {
+        return null;
+      }
+
+      const resolvedWorkspaceId = targetWorkspaceId ?? browserState.workspaceId ?? undefined;
+      const targetWorktreePathInput = browserState.worktreePath ?? undefined;
+
+      const matchedByWorkspaceId = resolvedWorkspaceId
+        ? stateRef.current.worktrees.find(
+            (wt) => wt.workspaceId === resolvedWorkspaceId || worktreeIdentity(wt)?.wsId === resolvedWorkspaceId,
+          )
+        : undefined;
+
+      const matchedByWorktreePath = targetWorktreePathInput
+        ? stateRef.current.worktrees.find((wt) => wt.path === targetWorktreePathInput)
+        : undefined;
+
+      const activeWorktree = getActiveWorktree(stateRef.current);
+
+      const targetWorktree = matchedByWorkspaceId ?? matchedByWorktreePath ?? activeWorktree;
+      const targetWorktreePath = targetWorktree?.path;
+
+      const tabId = createId("tab");
+      const browserTab: BrowserTab = {
+        kind: "browser",
+        id: tabId,
+        label: browserState.title || "Browser",
+        browserId: browserState.browserId,
+        url: browserState.url,
+        title: browserState.title,
+        loading: browserState.loading,
+        canGoBack: browserState.canGoBack,
+        canGoForward: browserState.canGoForward,
+        zoomFactor: browserState.zoomFactor,
+        loadError: browserState.loadError ?? null,
+        profileId: browserState.profileId,
+        worktreePath: targetWorktree?.path,
+      };
+
+      dispatch({ type: "ADD_TAB_WITH_SESSION", tab: browserTab, targetWorktreePath });
+      return tabId;
+    },
+    [dispatch],
+  );
+
   const duplicateBrowserTab = useCallback(
     async (tabId: string, profileId?: string) => {
       const source = stateRef.current.layout.tabs.find((tab) => tab.id === tabId);
@@ -1385,6 +1443,7 @@ export function useWorkspaceStore({
     activityNotificationTargets,
     openTab,
     createBrowserTab,
+    adoptBrowserSession,
     duplicateBrowserTab,
     navigateBrowserTab: navigateBrowserTabAction,
     reloadBrowserTab: reloadBrowserTabAction,
