@@ -12,10 +12,20 @@ import { getWorkspaceSnapshot } from "./workspaceSnapshotCache";
 import { listPairedProjectWorktrees } from "./pairedProjectWorktrees";
 import { remoteHostStore } from "./remoteHostStore";
 
+export type WorktreeFreshness = {
+  stale: boolean;
+  offline: boolean;
+  generation?: string | null;
+  cachedAt?: number;
+};
+
+export const DEFAULT_PAIRED_WORKTREE_TTL_MS = 60_000;
+
 export type InactiveProjectWorktreeServices = {
   registerProject: (request: { workspaceId: string; repoPath: string }) => Promise<RegisteredProject>;
   listWorktrees: (workspaceId: string) => Promise<Worktree[]>;
   onWorktreeChanged?: (handler: (payload: WorktreeChangedPayload) => void) => Promise<() => void>;
+  pairedWorktreeTtlMs?: number;
 };
 
 const defaultServices: InactiveProjectWorktreeServices = {
@@ -73,6 +83,18 @@ export function useInactiveProjectWorktrees(
   const onRegisteredRef = useRef(onRegistered);
   onRegisteredRef.current = onRegistered;
 
+  const lastAuthoritativeGenRef = useRef<Record<string, string | null>>({});
+  const ttlTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+
+  useEffect(() => {
+    return () => {
+      for (const timer of Object.values(ttlTimersRef.current)) {
+        clearTimeout(timer);
+      }
+      ttlTimersRef.current = {};
+    };
+  }, []);
+
   // Deletions of an inactive project's worktree (sidebar trash icon, another
   // desktop, remote client) arrive as backend `worktree_changed` events. The
   // active workspace refreshes itself, so this hook only needs to re-list the
@@ -93,8 +115,17 @@ export function useInactiveProjectWorktrees(
       if (!target) return;
 
       if (target.target?.kind === "pairedDaemon") {
+        const pairedTarget = target.target;
         void listPairedProjectWorktrees(target).then(listed => {
-          if (!cancelled && listed !== null) setWorktreesByProject(current => ({ ...current, [workspaceId]: listed }));
+          if (!cancelled && listed !== null) {
+            const host = remoteHostStore.getState().hosts[pairedTarget.hostId];
+            lastAuthoritativeGenRef.current[workspaceId] = host?.generation ?? null;
+            if (ttlTimersRef.current[workspaceId]) {
+              clearTimeout(ttlTimersRef.current[workspaceId]);
+              delete ttlTimersRef.current[workspaceId];
+            }
+            setWorktreesByProject(current => ({ ...current, [workspaceId]: listed }));
+          }
         }).catch(error => switchDebug("inactive-worktrees.relist.error", { workspaceId, error: String(error) }));
         return;
       }
@@ -221,10 +252,58 @@ export function useInactiveProjectWorktrees(
       setWorktreesByProject((current) => ({
         ...current,
         ...Object.fromEntries(resolved.flatMap(([id, rows]) => {
-          if (rows !== null) return [[id, [...rows]]];
+          const project = targets.find(target => target.workspaceId === id);
+          if (rows !== null) {
+            if (project?.target?.kind === "pairedDaemon") {
+              const host = remoteHostStore.getState().hosts[project.target.hostId];
+              lastAuthoritativeGenRef.current[id] = host?.generation ?? null;
+              if (ttlTimersRef.current[id]) {
+                clearTimeout(ttlTimersRef.current[id]);
+                delete ttlTimersRef.current[id];
+              }
+            }
+            return [[id, [...rows]]];
+          }
+          if (project?.target?.kind === "pairedDaemon") {
+            const existing = current[id];
+            if (existing && existing.length > 0) {
+              const host = remoteHostStore.getState().hosts[project.target.hostId];
+              const isOffline = host ? !host.online : true;
+              const cachedGen = lastAuthoritativeGenRef.current[id] ?? host?.generation ?? (existing[0] as any)?.freshness?.generation ?? null;
+              const cachedAt = (existing[0] as any)?.freshness?.cachedAt ?? Date.now();
+              const staleRows: Worktree[] = existing.map(row => ({
+                ...row,
+                stale: true,
+                offline: isOffline,
+                disabled: true,
+                hostSummary: isOffline ? "Offline (stale)" : "Stale",
+                freshness: {
+                  stale: true,
+                  offline: isOffline,
+                  generation: cachedGen,
+                  cachedAt,
+                },
+              }));
+
+              const ttlMs = servicesRef.current.pairedWorktreeTtlMs ?? DEFAULT_PAIRED_WORKTREE_TTL_MS;
+              if (ttlMs > 0 && !ttlTimersRef.current[id]) {
+                ttlTimersRef.current[id] = setTimeout(() => {
+                  setWorktreesByProject(curr => {
+                    const r = curr[id];
+                    if (r && r.some(item => (item as any).stale)) {
+                      return { ...curr, [id]: [] };
+                    }
+                    return curr;
+                  });
+                  delete ttlTimersRef.current[id];
+                }, ttlMs);
+              }
+
+              return [[id, staleRows]];
+            }
+          }
           // Preserve existing data on error. Keep the legacy local empty-cache
           // shape only when this workspace has never produced any rows.
-          const project = targets.find(target => target.workspaceId === id);
           return !current[id] && (!project?.target || project.target.kind === "local") ? [[id, []]] : [];
         })),
       }));

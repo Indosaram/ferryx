@@ -2,6 +2,13 @@ import { createPairedDaemonProjectAdapter, PairedOperationError } from "../lib/p
 import type { RegisteredProject, Worktree } from "../lib/types";
 import { remoteHostStore } from "./remoteHostStore";
 
+export type PairedWorktreeFreshness = {
+  stale: boolean;
+  offline: boolean;
+  generation?: string | null;
+  cachedAt?: number;
+};
+
 /** A missing/partial project inventory is not permission to erase cached rows. */
 export async function listPairedProjectWorktrees(project: RegisteredProject): Promise<Worktree[] | null> {
   if (project.target?.kind !== "pairedDaemon" || !project.remoteWorkspaceId) throw new Error("PAIRED_OWNER_REQUIRED");
