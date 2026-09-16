@@ -126,25 +126,68 @@ pub struct MigrationRequest {
     pub device_token: Secret,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ServiceError { pub code: String, pub message: String }
+#[serde(rename_all = "camelCase")]
+pub struct ServiceError {
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
+}
 impl ServiceError {
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            details: None,
+            retryable: None,
+        }
+    }
+    pub fn with_details(mut self, details: Option<serde_json::Value>) -> Self {
+        self.details = details;
+        self
+    }
+    pub fn with_retryable(mut self, retryable: bool) -> Self {
+        self.retryable = Some(retryable);
+        self
+    }
     pub fn unavailable() -> Self { InventoryError::Unavailable.into() }
     fn invalid() -> Self { InventoryError::InvalidInput.into() }
     fn migration() -> Self { InventoryError::MigrationPending.into() }
 }
 impl From<InventoryError> for ServiceError {
     fn from(error: InventoryError) -> Self {
-        let code = match error {
-            InventoryError::InvalidInput => "PAIRED_HOST_INVALID_INPUT",
-            InventoryError::StaleGeneration => "PAIRED_HOST_STALE_GENERATION",
-            InventoryError::Unauthorized => "PAIRED_HOST_UNAUTHORIZED",
-            InventoryError::MigrationPending => "PAIRED_HOST_MIGRATION_PENDING",
-            _ => "PAIRED_HOST_UNAVAILABLE",
+        let (code, retryable) = match error {
+            InventoryError::InvalidInput => ("PAIRED_HOST_INVALID_INPUT", false),
+            InventoryError::StaleGeneration => ("PAIRED_HOST_STALE_GENERATION", true),
+            InventoryError::Unauthorized => ("PAIRED_HOST_UNAUTHORIZED", false),
+            InventoryError::MigrationPending => ("PAIRED_HOST_MIGRATION_PENDING", false),
+            _ => ("PAIRED_HOST_UNAVAILABLE", true),
         };
-        Self { code: code.into(), message: error.to_string() }
+        Self {
+            code: code.into(),
+            message: error.to_string(),
+            details: None,
+            retryable: Some(retryable),
+        }
     }
 }
 pub type Result<T> = std::result::Result<T, ServiceError>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InventoryChangeEvent {
+    pub r#type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<HostView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<String>,
+}
+
+pub type InventoryEventSink = Arc<dyn Fn(InventoryChangeEvent) + Send + Sync>;
 
 struct Owner {
     directory: PathBuf,
@@ -155,6 +198,7 @@ struct Owner {
 pub struct PairedHostService {
     inventory: Arc<Mutex<Owner>>,
     http: reqwest::Client,
+    pub(crate) event_sink: Option<InventoryEventSink>,
     #[cfg(test)]
     loopback_http: bool,
 }
@@ -171,9 +215,13 @@ impl PairedHostService {
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(Duration::from_secs(5))
                 .timeout(Duration::from_secs(12)).build().expect("native HTTP client"),
+            event_sink: None,
             #[cfg(test)]
             loopback_http: false,
         }
+    }
+    pub fn set_event_sink(&mut self, sink: InventoryEventSink) {
+        self.event_sink = Some(sink);
     }
     #[cfg(test)]
     pub(crate) fn open_test_loopback(directory: PathBuf) -> Self {
@@ -221,20 +269,98 @@ impl PairedHostService {
         self.run(move |store| store.read_verified(&request.host_id, request.generation)).await
     }
     pub async fn forget(&self, host_id: String, expected: Epoch) -> Result<()> {
-        self.run(move |store| store.forget(&host_id, expected)).await
+        let host_id_clone = host_id.clone();
+        self.run(move |store| store.forget(&host_id, expected)).await?;
+        if let Some(sink) = &self.event_sink {
+            sink(InventoryChangeEvent {
+                r#type: "forget".into(),
+                host: None,
+                host_id: Some(host_id_clone),
+                generation: Some(expected.0.to_string()),
+            });
+        }
+        Ok(())
     }
     async fn json<T: DeserializeOwned>(&self, request: reqwest::RequestBuilder) -> Result<T> {
-        let mut response = request.send().await.map_err(|_| ServiceError::unavailable())?;
-        if matches!(response.status().as_u16(), 401 | 403) { return Err(InventoryError::Unauthorized.into()); }
-        if !response.status().is_success() { return Err(ServiceError::unavailable()); }
+        let response = match request.send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                if e.is_timeout() {
+                    return Err(ServiceError {
+                        code: "TIMEOUT".into(),
+                        message: "Request timed out".into(),
+                        details: None,
+                        retryable: Some(true),
+                    });
+                }
+                return Err(ServiceError {
+                    code: "TRANSPORT".into(),
+                    message: "Transport connection failed".into(),
+                    details: None,
+                    retryable: Some(true),
+                });
+            }
+        };
+
+        let status = response.status();
         const LIMIT: usize = 64 * 1024;
-        if response.content_length().is_some_and(|size| size > LIMIT as u64) { return Err(ServiceError::unavailable()); }
+        if response.content_length().is_some_and(|size| size > LIMIT as u64) {
+            if !status.is_success() {
+                return Err(map_http_error(status, &[]));
+            }
+            return Err(ServiceError {
+                code: "MALFORMED_RESPONSE".into(),
+                message: "Response payload exceeds maximum allowed size".into(),
+                details: None,
+                retryable: Some(false),
+            });
+        }
+
         let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|_| ServiceError::unavailable())? {
-            if bytes.len() + chunk.len() > LIMIT { return Err(ServiceError::unavailable()); }
+        let mut stream = response;
+        while let Some(chunk) = stream.chunk().await.map_err(|e| {
+            if e.is_timeout() {
+                ServiceError {
+                    code: "TIMEOUT".into(),
+                    message: "Response stream timed out".into(),
+                    details: None,
+                    retryable: Some(true),
+                }
+            } else {
+                ServiceError {
+                    code: "TRANSPORT".into(),
+                    message: "Transport stream error".into(),
+                    details: None,
+                    retryable: Some(true),
+                }
+            }
+        })? {
+            if bytes.len() + chunk.len() > LIMIT {
+                if !status.is_success() {
+                    return Err(map_http_error(status, &bytes));
+                }
+                return Err(ServiceError {
+                    code: "MALFORMED_RESPONSE".into(),
+                    message: "Response payload exceeds maximum allowed size".into(),
+                    details: None,
+                    retryable: Some(false),
+                });
+            }
             bytes.extend_from_slice(&chunk);
         }
-        serde_json::from_slice(&bytes).map_err(|_| ServiceError::unavailable())
+
+        if !status.is_success() {
+            return Err(map_http_error(status, &bytes));
+        }
+
+        serde_json::from_slice(&bytes).map_err(|e| {
+            ServiceError {
+                code: "MALFORMED_RESPONSE".into(),
+                message: format!("Failed to parse response JSON: {e}"),
+                details: None,
+                retryable: Some(false),
+            }
+        })
     }
     async fn authenticate(&self, origin: &str, machine: &str, token: &str) -> Result<GrantScope> {
         if token.is_empty() || token.len() > 8192 || !token.bytes().all(|b| (33..=126).contains(&b)) { return Err(ServiceError::invalid()); }
@@ -248,7 +374,23 @@ impl PairedHostService {
         })
     }
     pub async fn pair(&self, request: PairRequest) -> Result<HostView> {
-        tokio::time::timeout(Duration::from_secs(30), self.pair_inner(request)).await.map_err(|_| ServiceError::unavailable())?
+        let host = tokio::time::timeout(Duration::from_secs(30), self.pair_inner(request))
+            .await
+            .map_err(|_| ServiceError {
+                code: "TIMEOUT".into(),
+                message: "Pairing operation timed out after 30 seconds".into(),
+                details: None,
+                retryable: Some(true),
+            })??;
+        if let Some(sink) = &self.event_sink {
+            sink(InventoryChangeEvent {
+                r#type: "pair".into(),
+                host: Some(host.clone()),
+                host_id: Some(host.host_id.clone()),
+                generation: Some(host.generation.0.to_string()),
+            });
+        }
+        Ok(host)
     }
     async fn pair_inner(&self, request: PairRequest) -> Result<HostView> {
         let origin = self.origin(&request.relay_origin)?;
@@ -278,8 +420,19 @@ impl PairedHostService {
         }).await
     }
     pub async fn migrate_legacy(&self, request: MigrationRequest) -> Result<MigrationReceipt> {
-        tokio::time::timeout(Duration::from_secs(20), self.migrate_inner(request)).await.map_err(|_| ServiceError::migration())?
-            .map_err(|_| ServiceError::migration())
+        let receipt = tokio::time::timeout(Duration::from_secs(20), self.migrate_inner(request))
+            .await
+            .map_err(|_| ServiceError::migration())?
+            .map_err(|_| ServiceError::migration())?;
+        if let Some(sink) = &self.event_sink {
+            sink(InventoryChangeEvent {
+                r#type: "migrate".into(),
+                host: None,
+                host_id: Some(receipt.host_id.clone()),
+                generation: Some(receipt.generation.0.to_string()),
+            });
+        }
+        Ok(receipt)
     }
     async fn migrate_inner(&self, request: MigrationRequest) -> Result<MigrationReceipt> {
         let origin = self.origin(&request.relay_origin)?;
@@ -296,3 +449,171 @@ impl PairedHostService {
         }).await
     }
 }
+
+fn map_http_error(status: reqwest::StatusCode, bytes: &[u8]) -> ServiceError {
+    let json_obj = serde_json::from_slice::<serde_json::Value>(bytes).ok();
+
+    // Check for explicit code in JSON response
+    let explicit_code = json_obj.as_ref().and_then(|v| {
+        v.get("code")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                v.get("error").and_then(|e| {
+                    if let Some(s) = e.as_str() {
+                        if s.chars().all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit()) {
+                            Some(s)
+                        } else {
+                            None
+                        }
+                    } else if let Some(err_obj) = e.as_object() {
+                        err_obj.get("code").and_then(serde_json::Value::as_str)
+                    } else {
+                        None
+                    }
+                })
+            })
+    });
+
+    // Extract message if present
+    let raw_message = json_obj.as_ref().and_then(|v| {
+        v.get("message")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| v.get("error").and_then(serde_json::Value::as_str))
+            .or_else(|| {
+                v.get("error")
+                    .and_then(serde_json::Value::as_object)
+                    .and_then(|err_obj| err_obj.get("message").and_then(serde_json::Value::as_str))
+            })
+    }).or_else(|| {
+        if !bytes.is_empty() && bytes.len() <= 2048 {
+            std::str::from_utf8(bytes).ok()
+        } else {
+            None
+        }
+    });
+
+    // Map to canonical code and retryable flag
+    let (code, retryable) = if let Some(code) = explicit_code {
+        match code {
+            "PIN_EXPIRED" | "EXPIRED_PIN" => ("PIN_EXPIRED", false),
+            "INVALID_PIN" | "INVALID_CODE" => ("INVALID_PIN", false),
+            "PIN_NOT_FOUND" => ("PIN_NOT_FOUND", false),
+            "pairing_rate_limited" | "RATE_LIMITED" => ("RATE_LIMITED", true),
+            "WRONG_RELAY" | "INVALID_RELAY_ORIGIN" => ("WRONG_RELAY", false),
+            "MACHINE_GRANT_REQUIRED" => ("MACHINE_GRANT_REQUIRED", false),
+            "UNAUTHORIZED" | "PAIRED_HOST_UNAUTHORIZED" => ("UNAUTHORIZED", false),
+            "SERVICE_UNAVAILABLE" | "MACHINE_SERVICE_UNAVAILABLE" => ("SERVICE_UNAVAILABLE", true),
+            "TIMEOUT" => ("TIMEOUT", true),
+            other => (other, is_retryable_http_status(status.as_u16())),
+        }
+    } else {
+        match status.as_u16() {
+            400 => {
+                if raw_message.is_some_and(|m| {
+                    let lower = m.to_ascii_lowercase();
+                    lower.contains("pin") || lower.contains("code")
+                }) {
+                    ("INVALID_PIN", false)
+                } else {
+                    ("PAIRED_HOST_INVALID_INPUT", false)
+                }
+            }
+            401 | 403 => {
+                if raw_message.is_some_and(|m| m.to_ascii_lowercase().contains("expired")) {
+                    ("PIN_EXPIRED", false)
+                } else {
+                    ("UNAUTHORIZED", false)
+                }
+            }
+            404 => ("PIN_NOT_FOUND", false),
+            429 => ("RATE_LIMITED", true),
+            502 | 503 => ("SERVICE_UNAVAILABLE", true),
+            504 => ("TIMEOUT", true),
+            _ => ("PAIRED_HOST_UNAVAILABLE", true),
+        }
+    };
+
+    let message = if let Some(msg) = raw_message {
+        let trimmed = msg.trim();
+        let bounded = if trimmed.len() > 512 {
+            &trimmed[..512]
+        } else {
+            trimmed
+        };
+        sanitize_error_text(bounded)
+    } else {
+        match code {
+            "PIN_NOT_FOUND" => "The pairing PIN was not found or is invalid".into(),
+            "RATE_LIMITED" => "Pairing rate limited, please wait and retry".into(),
+            "SERVICE_UNAVAILABLE" => "Pairing relay or host service unavailable".into(),
+            "UNAUTHORIZED" => "Pairing authorization was rejected".into(),
+            "PIN_EXPIRED" => "The pairing PIN has expired".into(),
+            "INVALID_PIN" => "Invalid pairing PIN".into(),
+            "TIMEOUT" => "The pairing request timed out".into(),
+            "TRANSPORT" => "Transport error connecting to relay or host".into(),
+            _ => format!("Pairing failed with status {}", status.as_u16()),
+        }
+    };
+
+    let details = json_obj.as_ref().and_then(|v| {
+        v.get("details").cloned().or_else(|| {
+            if let Some(map) = v.as_object() {
+                let filtered: serde_json::Map<String, serde_json::Value> = map
+                    .iter()
+                    .filter(|(k, _)| *k != "code" && *k != "message" && *k != "error")
+                    .map(|(k, val)| (k.clone(), val.clone()))
+                    .collect();
+                if !filtered.is_empty() {
+                    Some(serde_json::Value::Object(filtered))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+    });
+
+    ServiceError {
+        code: code.into(),
+        message,
+        details,
+        retryable: Some(retryable),
+    }
+}
+
+fn is_retryable_http_status(status: u16) -> bool {
+    matches!(status, 429 | 502 | 503 | 504)
+}
+
+fn sanitize_error_text(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut word = String::new();
+
+    let flush_word = |word: &str, result: &mut String| {
+        if word.len() >= 32 && word.chars().all(|c| c.is_ascii_hexdigit()) {
+            result.push_str("[REDACTED]");
+        } else if word.len() == 6 && word.chars().all(|c| c.is_ascii_digit()) {
+            result.push_str("[REDACTED]");
+        } else {
+            result.push_str(word);
+        }
+    };
+
+    for c in text.chars() {
+        if c.is_ascii_alphanumeric() {
+            word.push(c);
+        } else {
+            if !word.is_empty() {
+                flush_word(&word, &mut result);
+                word.clear();
+            }
+            result.push(c);
+        }
+    }
+    if !word.is_empty() {
+        flush_word(&word, &mut result);
+    }
+    result
+}
+

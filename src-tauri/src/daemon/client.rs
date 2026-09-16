@@ -511,7 +511,7 @@ impl DaemonClient {
                 DaemonResponse::PairedHostError { error } => Err(error),
                 response => Ok(response),
             }
-        }).await.map_err(|_| ServiceError { code: "TIMEOUT".into(), message: "operation timed out".into() })?
+        }).await.map_err(|_| ServiceError::new("TIMEOUT", "operation timed out"))?
     }
     pub async fn paired_terminal_reattach(&self, descriptor: crate::terminal::paired_daemon::Descriptor) -> Result<(String, crate::scoped_contracts::Epoch), crate::paired_host::client::ClientError> {
         use crate::paired_host::client::ClientError;

@@ -349,10 +349,15 @@ impl AuthManager {
     }
 
     pub fn with_persistence(persistence_path: Option<PathBuf>) -> Self {
-        let mut persisted = persistence_path
-            .as_deref()
-            .and_then(load_persisted_auth)
-            .unwrap_or_default();
+        let mut persisted = match persistence_path.as_deref().map(load_persisted_auth) {
+            Some(Ok(Some(state))) => state,
+            Some(Ok(None)) => PersistedAuthState::default(),
+            Some(Err(err)) => {
+                tracing::error!("failed to load persisted auth state: {err}");
+                PersistedAuthState::default()
+            }
+            None => PersistedAuthState::default(),
+        };
         prune_revoked_and_idle_devices(&mut persisted, unix_now());
         Self {
             pairing_window: Arc::new(RwLock::new(PairingWindow {
@@ -592,7 +597,7 @@ impl AuthManager {
 
             if let Err(err) = self.persist_durable() {
                 if let Some(path) = self.persistence_path.as_deref() {
-                    if let Some(mut state) = load_persisted_auth(path) {
+                    if let Ok(Some(mut state)) = load_persisted_auth(path) {
                         prune_revoked_and_idle_devices(&mut state, unix_now());
                         *self.devices.write() = state.devices;
                         *self.tokens.write() = state.tokens;
@@ -647,7 +652,7 @@ impl AuthManager {
             self.devices.write().remove(&device_id);
             self.tokens.write().remove(&token);
             if let Some(path) = self.persistence_path.as_deref() {
-                if let Some(mut state) = load_persisted_auth(path) {
+                if let Ok(Some(mut state)) = load_persisted_auth(path) {
                     prune_revoked_and_idle_devices(&mut state, unix_now());
                     *self.devices.write() = state.devices;
                     *self.tokens.write() = state.tokens;
@@ -728,7 +733,7 @@ impl AuthManager {
             self.devices.write().remove(&device_id);
             self.tokens.write().remove(&token);
             if let Some(path) = self.persistence_path.as_deref() {
-                if let Some(mut state) = load_persisted_auth(path) {
+                if let Ok(Some(mut state)) = load_persisted_auth(path) {
                     prune_revoked_and_idle_devices(&mut state, unix_now());
                     *self.devices.write() = state.devices;
                     *self.tokens.write() = state.tokens;
@@ -881,7 +886,7 @@ impl AuthManager {
                 .map_err(|e| AuthError::Storage(format!("open remote auth lock: {e}")))?;
             file.lock()
                 .map_err(|e| AuthError::Storage(format!("lock remote auth state: {e}")))?;
-            if let Some(mut state) = load_persisted_auth(path) {
+            if let Some(mut state) = load_persisted_auth(path)? {
                 prune_revoked_and_idle_devices(&mut state, unix_now());
                 self.pairing_window.write().codes = state.pairing_codes;
                 *self.devices.write() = state.devices;
@@ -960,28 +965,30 @@ fn append_revocation_journal(path: &Path, device_id: &str) -> Result<(), AuthErr
     Ok(())
 }
 
-fn load_revocation_journal(path: &Path) -> std::collections::HashSet<String> {
+fn load_revocation_journal(path: &Path) -> Result<std::collections::HashSet<String>, AuthError> {
     let journal_path = revocation_journal_path(path);
     let mut set = std::collections::HashSet::new();
-    if let Ok(content) = std::fs::read_to_string(&journal_path) {
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if !trimmed.is_empty() {
-                set.insert(trimmed.to_string());
+    match std::fs::read_to_string(&journal_path) {
+        Ok(content) => {
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    set.insert(trimmed.to_string());
+                }
             }
+            Ok(set)
         }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(set),
+        Err(e) => Err(AuthError::Storage(format!("failed to read revocation journal: {e}"))),
     }
-    set
 }
 
 fn clear_revocation_journal(path: &Path, device_id: &str) -> Result<(), AuthError> {
     let journal_path = revocation_journal_path(path);
-    if !journal_path.exists() {
-        return Ok(());
-    }
     let content = match std::fs::read_to_string(&journal_path) {
         Ok(c) => c,
-        Err(_) => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(AuthError::Storage(format!("failed to read revocation journal for clear: {e}"))),
     };
     let remaining: Vec<&str> = content
         .lines()
@@ -992,26 +999,33 @@ fn clear_revocation_journal(path: &Path, device_id: &str) -> Result<(), AuthErro
         let _ = std::fs::remove_file(&journal_path);
     } else {
         let temp = journal_path.with_extension(format!("tmp.{}", std::process::id()));
-        if std::fs::write(&temp, remaining.join("\n") + "\n").is_ok() {
-            let _ = std::fs::rename(&temp, &journal_path);
-        }
+        std::fs::write(&temp, remaining.join("\n") + "\n")
+            .map_err(|e| AuthError::Storage(format!("failed to write updated revocation journal: {e}")))?;
+        std::fs::rename(&temp, &journal_path)
+            .map_err(|e| AuthError::Storage(format!("failed to rename updated revocation journal: {e}")))?;
     }
     Ok(())
 }
 
-fn load_persisted_auth(path: &Path) -> Option<PersistedAuthState> {
-    let bytes = std::fs::read(path).ok()?;
-    let mut state: PersistedAuthState = serde_json::from_slice(&bytes).ok()?;
-    apply_revocation_journal(&mut state, path);
-    Some(state)
+fn load_persisted_auth(path: &Path) -> Result<Option<PersistedAuthState>, AuthError> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(AuthError::Storage(format!("failed to read persisted auth: {e}"))),
+    };
+    let mut state: PersistedAuthState = serde_json::from_slice(&bytes)
+        .map_err(|e| AuthError::Storage(format!("failed to parse persisted auth: {e}")))?;
+    apply_revocation_journal(&mut state, path)?;
+    Ok(Some(state))
 }
 
-fn apply_revocation_journal(state: &mut PersistedAuthState, path: &Path) {
-    let revocations = load_revocation_journal(path);
+fn apply_revocation_journal(state: &mut PersistedAuthState, path: &Path) -> Result<(), AuthError> {
+    let revocations = load_revocation_journal(path)?;
     if !revocations.is_empty() {
         state.devices.retain(|id, _| !revocations.contains(id));
         state.tokens.retain(|_, device_id| !revocations.contains(device_id));
     }
+    Ok(())
 }
 
 /// Drops devices that older builds tombstoned with `revoked: true` or devices
@@ -1377,7 +1391,7 @@ mod tests {
         drop(generator);
         let approver = AuthManager::with_persistence(Some(path.clone()));
         let approved = approver.approve_pairing_code_cli(&code).unwrap();
-        let issued_token = load_persisted_auth(&path).unwrap().pairing_codes[&code]
+        let issued_token = load_persisted_auth(&path).unwrap().unwrap().pairing_codes[&code]
             .approved_token
             .clone()
             .unwrap();
@@ -1398,7 +1412,7 @@ mod tests {
         ));
         assert_eq!(reopened.validate_token(&token).unwrap().id, approved.id);
         let expired = gateway.create_pairing_code(DevicePermission::Control);
-        let mut state = load_persisted_auth(&path).unwrap();
+        let mut state = load_persisted_auth(&path).unwrap().unwrap();
         state.pairing_codes.get_mut(&expired).unwrap().created_at = Instant::now() - PAIRING_EXPIRY;
         write_private_json(&path, &state).unwrap();
         assert!(matches!(
@@ -2142,7 +2156,7 @@ mod persistence_tests {
         );
 
         // On restart (reopen with normal persistence), device must fail-closed (pruned via journal)
-        let reopened = AuthManager::with_persistence(Some(auth_path));
+        let reopened = AuthManager::with_persistence(Some(auth_path.clone()));
         assert!(
             reopened.list_devices().is_empty(),
             "revoked device must be pruned upon reload"
@@ -2150,6 +2164,42 @@ mod persistence_tests {
         assert!(
             matches!(reopened.validate_token(&token), Err(AuthError::Unauthorized)),
             "revoked token must be unauthorized"
+        );
+
+        // N3 extension: durable journal unreadable while previous snapshot remains readable must reject token, not accept it
+        std::fs::write(&journal_path, b"\xFF\xFE\xFD\x80\x81").unwrap();
+        let unreadable_journal_manager = AuthManager::with_persistence(Some(auth_path.clone()));
+        assert!(
+            unreadable_journal_manager.validate_token(&token).is_err(),
+            "durable journal unreadable while previous snapshot remains readable must reject token"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_n3_unreadable_journal_with_readable_snapshot_fails_closed() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let base_dir = temp_dir.path().join("auth");
+        std::fs::create_dir_all(&base_dir).unwrap();
+        let auth_path = base_dir.join("remote-auth.json");
+        let manager = AuthManager::with_persistence(Some(auth_path.clone()));
+
+        // Pair device successfully
+        let code = manager.create_pairing_code(DevicePermission::Control);
+        let (token, _device) = manager
+            .exchange_pairing_code(&code, "Test Device")
+            .expect("pairing must succeed");
+        assert!(manager.validate_token(&token).is_ok());
+
+        // Corrupt the revocation journal with invalid non-UTF-8 bytes
+        let journal_path = auth_path.with_extension("revocations");
+        std::fs::write(&journal_path, b"\xFF\xFE\xFD\x80\x81").unwrap();
+
+        // When the journal is unreadable, authentication MUST fail closed (reject token)
+        let reopened = AuthManager::with_persistence(Some(auth_path.clone()));
+        let validation_res = reopened.validate_token(&token);
+        assert!(
+            validation_res.is_err(),
+            "unreadable journal must reject token (fail closed), but got: {validation_res:?}"
         );
     }
 
