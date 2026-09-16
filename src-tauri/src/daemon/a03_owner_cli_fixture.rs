@@ -73,10 +73,10 @@ async fn owner_cli(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<
     Ok(CliOutput { pin, authority })
 }
 
-async fn handshake(socket: &Path) -> anyhow::Result<()> {
+async fn handshake(socket: &Path, expected_capabilities: &[&str]) -> anyhow::Result<()> {
     let stream = tokio::net::UnixStream::connect(socket).await?;
     let (read, mut write) = stream.into_split();
-    write.write_all(b"{\"type\":\"handshake\",\"version\":3}\n").await?;
+    write.write_all(format!("{{\"type\":\"handshake\",\"version\":{}}}\n", DAEMON_PROTOCOL_VERSION).as_bytes()).await?;
     let mut reader = tokio::io::BufReader::new(read);
     let mut line = String::new();
     tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line)).await??;
@@ -87,14 +87,14 @@ async fn handshake(socket: &Path) -> anyhow::Result<()> {
     line.clear();
     tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line)).await??;
     let response: DaemonResponse = serde_json::from_str(&line)?;
-    ensure!(matches!(response, DaemonResponse::CapabilitiesOk { capabilities }
-        if capabilities == vec!["machinePairingV1", "pairedHostInventoryV1"]), "local capabilities mismatch");
+    ensure!(matches!(response, DaemonResponse::CapabilitiesOk { ref capabilities }
+        if capabilities.as_slice() == expected_capabilities), "local capabilities mismatch");
     write.write_all(b"{\"type\":\"ping\"}\n").await?;
     line.clear();
     tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line)).await??;
     let response: DaemonResponse = serde_json::from_str(&line)?;
     ensure!(matches!(response, DaemonResponse::Pong), "legacy ping refused");
-    println!("A03 UDS protocol=3 exact_owner_pid={} capabilities=machinePairingV1,pairedHostInventoryV1 legacy_ping=pong", std::process::id());
+    println!("A03 UDS protocol={DAEMON_PROTOCOL_VERSION} exact_owner_pid={} capabilities={} legacy_ping=pong", std::process::id(), expected_capabilities.join(","));
     Ok(())
 }
 
@@ -145,7 +145,12 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             mode: RemoteNetworkMode::Relay, port: 0,
             relay_url: Some(relay_url.clone()), ..Default::default()
         }).await.map_err(anyhow::Error::msg)?;
-        handshake(&socket).await?;
+        let local_capabilities = {
+            let mut capabilities = vec!["machinePairingV1", "sshPasswordV1"];
+            if server.paired_hosts.available().await { capabilities.push("pairedHostInventoryV1"); }
+            capabilities
+        };
+        handshake(&socket, &local_capabilities).await?;
         let issued = owner_cli(binary, root, machine).await?;
         let expected = if machine { DeviceAccessScope::Machine } else { DeviceAccessScope::Mirror };
         // Prose is captured for human review, not pinned by a wording assertion.
@@ -176,7 +181,12 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
         let _: crate::remote::machine_protocol::Capabilities = serde_json::from_value(value.clone())?;
         ensure!(value["machineId"] == exchange.machine_id, "machine identity changed");
         ensure!(value["accessScope"] == serde_json::to_value(expected)?, "capability scope mismatch");
-        let expected_capabilities = if machine { serde_json::json!(["directoryBrowseV1", "machineWorkspaceV1", "managedWorktreesV1", "terminalCreateV1"]) } else { serde_json::json!([]) };
+        let machine_terminal_ready = server.remote_state.machine_services.as_ref().is_some_and(|services| services.workspaces.catalog().is_ok() && services.workspaces.journal.session_revision().is_ok());
+        let expected_capabilities = if machine {
+            let mut capabilities = vec!["directoryBrowseV1", "machineWorkspaceV1", "managedWorktreesV1"];
+            if machine_terminal_ready { capabilities.push("terminalCreateV1"); capabilities.push("terminalStreamV1"); }
+            serde_json::json!(capabilities)
+        } else { serde_json::json!([]) };
         ensure!(value["capabilities"] == expected_capabilities, "machine capability contract mismatch");
         ensure!(!value.to_string().contains(&root.to_string_lossy().to_string()), "capability leaks private path");
         ensure!(client.get(&capability_url).bearer_auth("invalid-credential").send().await?.status() == 401,
@@ -219,7 +229,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
         ensure!(client.get(&capability_url).bearer_auth(&exchange.token).send().await?.status() == 401,
             "revoked capability admitted");
         ensure!(probes.load(std::sync::atomic::Ordering::SeqCst) == 0, "revoked request probed identity");
-        handshake(&socket).await?;
+        handshake(&socket, &local_capabilities).await?;
         println!("A03 CAPABILITIES {value}");
         println!("A03 SURFACE scope={expected:?} permission=Control relay_exchange=200 capabilities=200 anonymous=401 revoked=401 machine_capabilities={expected_capabilities}");
         Ok::<_, anyhow::Error>(())
