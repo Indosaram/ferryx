@@ -461,7 +461,9 @@ describe("Sidebar navigation", () => {
     // Worktree creation is a per-project action, so the global titlebar must not offer it.
     expect(within(titlebar).queryByRole("button", { name: /add worktree/i })).not.toBeInTheDocument();
 
-    fireEvent.click(within(titlebar).getByRole("button", { name: "Add project" }));
+    const addProjectBtn = within(titlebar).getByRole("button", { name: "Add project" });
+    expect(addProjectBtn).toHaveAttribute("data-shortcut", "project.add");
+    fireEvent.click(addProjectBtn);
     expect(onAddProject).toHaveBeenCalledOnce();
     expect(onCreateWorktree).not.toHaveBeenCalled();
   });

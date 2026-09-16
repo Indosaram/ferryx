@@ -33,6 +33,8 @@ const TERMINAL_CHORD_CASES: readonly [string, ShortcutActionId, KeyboardEventIni
   ["focus previous terminal pane", "terminal.focusPrevious", { key: "[", metaKey: true }],
   ["find in terminal", "terminal.search", { key: "f", metaKey: true }],
   ["toggle sidebar", "sidebar.left.toggle", { key: "b", metaKey: true }],
+  ["add project primary", "project.add", { key: "o", metaKey: true }],
+  ["add project alias cmd-n", "project.add", { key: "n", metaKey: true }],
   ["open command palette primary", "commandPalette.open", { key: "k", metaKey: true }],
   ["open command palette alias cmd-p", "commandPalette.open", { key: "p", metaKey: true }],
   ["toggle settings", "settings.toggle", { key: ",", metaKey: true }],
@@ -126,6 +128,7 @@ describe("shortcut registry", () => {
       "terminal.focusPrevious",
       "terminal.search",
       "sidebar.left.toggle",
+      "project.add",
       "commandPalette.open",
       "settings.toggle",
       "zoom.in",
@@ -137,6 +140,10 @@ describe("shortcut registry", () => {
     expect(shortcutLabel("tab.newTerminal", false)).toBe("Ctrl+T");
     expect(shortcutLabel("sidebar.left.toggle", true)).toBe("⌘B");
     expect(shortcutLabel("sidebar.left.toggle", false)).toBe("Ctrl+B");
+    expect(shortcutLabel("project.add", true)).toBe("⌘O");
+    expect(shortcutLabel("project.add", false)).toBe("Ctrl+O");
+    expect(shortcutAliasesLabels("project.add", true)).toEqual(["⌘N"]);
+    expect(shortcutAliasesLabels("project.add", false)).toEqual(["Ctrl+N"]);
     expect(shortcutLabel("terminal.splitDown", true)).toBe("⌘⇧D");
     expect(shortcutLabel("terminal.focusNext", true)).toBe("⌘]");
     expect(shortcutLabel("terminal.focusNext", false)).toBe("Ctrl+]");
@@ -233,6 +240,7 @@ describe("shortcut registry", () => {
       "terminal.focusPrevious": vi.fn(),
       "terminal.search": vi.fn(),
       "sidebar.left.toggle": vi.fn(),
+      "project.add": vi.fn(),
       "commandPalette.open": vi.fn(),
       "settings.toggle": vi.fn(),
       "zoom.in": vi.fn(),

@@ -35,6 +35,7 @@ These match the in-app bindings defined in `ui/src/lib/shortcuts.ts`.
 | --- | --- |
 | <kbd>⌘K</kbd> / <kbd>⌘P</kbd> | Command palette |
 | <kbd>⌘B</kbd> | Toggle sidebar |
+| <kbd>⌘O</kbd> / <kbd>⌘N</kbd> | Add project |
 | <kbd>⌘,</kbd> | Settings |
 | <kbd>⌘=</kbd> | Zoom in |
 | <kbd>⌘-</kbd> | Zoom out |

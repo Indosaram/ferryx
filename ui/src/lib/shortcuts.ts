@@ -41,6 +41,7 @@ export type ShortcutActionId =
   | "terminal.focusPrevious"
   | "terminal.search"
   | "sidebar.left.toggle"
+  | "project.add"
   | "commandPalette.open"
   | "settings.toggle"
   | "zoom.in"
@@ -321,6 +322,14 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     group: "Global",
     binding: { key: "b", mod: true },
     source: "original",
+  },
+  {
+    id: "project.add",
+    title: "Add project",
+    group: "Global",
+    binding: { key: "o", mod: true },
+    aliases: [{ key: "n", mod: true }],
+    source: "ferryx",
   },
   {
     id: "commandPalette.open",
