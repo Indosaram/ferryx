@@ -3709,27 +3709,12 @@ async fn test_workspace_snapshot_refreshes_external_git_worktree_changes_after_i
         .iter()
         .any(|worktree| worktree.worktree_label.as_deref() == Some("external-change")));
 
-    let refresh_completed = state.next_snapshot_build();
-    let stale = state
-        .workspace_snapshot_at(
-            initial_time + crate::remote::state::WORKSPACE_SNAPSHOT_REFRESH_INTERVAL,
-        )
-        .await
-        .expect("stale snapshot while refresh starts");
-    assert!(!stale
-        .worktrees_for(workspace_id, None)
-        .iter()
-        .any(|worktree| worktree.worktree_label.as_deref() == Some("external-change")));
-
-    tokio::time::timeout(std::time::Duration::from_secs(2), refresh_completed)
-        .await
-        .expect("background snapshot refresh completes within the test bound");
     let refreshed = state
         .workspace_snapshot_at(
             initial_time + crate::remote::state::WORKSPACE_SNAPSHOT_REFRESH_INTERVAL,
         )
         .await
-        .expect("refreshed snapshot");
+        .expect("refreshed snapshot after interval");
     assert!(refreshed
         .worktrees_for(workspace_id, None)
         .iter()

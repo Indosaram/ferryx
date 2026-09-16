@@ -7,7 +7,9 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 #[cfg(test)]
 use tokio::sync::Notify;
@@ -575,7 +577,6 @@ pub struct RemoteGatewayState {
     pub socket_tickets: parking_lot::Mutex<std::collections::HashMap<String, (String, String, u64)>>,
     snapshot_cache: RwLock<Option<WorkspaceCacheEntry>>,
     snapshot_lock: tokio::sync::Mutex<()>,
-    snapshot_refreshing: AtomicBool,
     #[cfg(test)]
     snapshot_build_count: Arc<AtomicU64>,
     #[cfg(test)]
@@ -738,7 +739,6 @@ impl RemoteGatewayState {
             socket_tickets: parking_lot::Mutex::new(std::collections::HashMap::new()),
             snapshot_cache: RwLock::new(None),
             snapshot_lock: tokio::sync::Mutex::new(()),
-            snapshot_refreshing: AtomicBool::new(false),
             #[cfg(test)]
             snapshot_build_count: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
@@ -774,30 +774,15 @@ impl RemoteGatewayState {
             let cache = self.snapshot_cache.read();
             if let Some(entry) = cache.as_ref() {
                 observed_snapshot = Some(Arc::clone(&entry.snapshot));
-                if entry.revision == current_rev {
-                    let snapshot = Arc::clone(&entry.snapshot);
-                    if now.saturating_duration_since(entry.created_at)
-                        >= WORKSPACE_SNAPSHOT_REFRESH_INTERVAL
-                        && self
-                            .snapshot_refreshing
-                            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                            .is_ok()
-                    {
-                        let state = Arc::clone(self);
-                        let observed_snapshot = Some(Arc::clone(&snapshot));
-                        tokio::spawn(async move {
-                            if let Err(error) = state
-                                .rebuild_workspace_snapshot(now, observed_snapshot)
-                                .await
-                            {
-                                tracing::warn!(%error, "background workspace snapshot refresh failed");
-                            }
-                            state.snapshot_refreshing.store(false, Ordering::Release);
-                            #[cfg(test)]
-                            state.snapshot_build_completed.notify_one();
-                        });
-                    }
-                    return Ok(snapshot);
+                // P16: Only serve cached snapshot when within refresh interval.
+                // Once the refresh interval expires, await rebuild so explicit
+                // list/refresh requests reflect external worktree changes immediately
+                // without serving intentionally stale data.
+                if entry.revision == current_rev
+                    && now.saturating_duration_since(entry.created_at)
+                        < WORKSPACE_SNAPSHOT_REFRESH_INTERVAL
+                {
+                    return Ok(Arc::clone(&entry.snapshot));
                 }
             }
         }
@@ -860,10 +845,13 @@ impl RemoteGatewayState {
                 created_at: now,
             });
         }
+        #[cfg(test)]
+        self.snapshot_build_completed.notify_waiters();
         Ok(snapshot_arc)
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn next_snapshot_build(&self) -> impl std::future::Future<Output = ()> + '_ {
         self.snapshot_build_completed.notified()
     }
@@ -1527,5 +1515,125 @@ mod tests {
             .is_none(),
             "Windows-only variables must not be honored on Unix"
         );
+    }
+
+    #[tokio::test]
+    async fn test_workspace_snapshot_expired_cache_awaits_rebuild_and_reflects_external_changes() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let repo_root = dir.path().join("repo");
+        std::fs::create_dir_all(&repo_root).expect("create repo");
+        crate::worktree::run_git(&repo_root, &["init"]).expect("git init");
+        crate::worktree::run_git(
+            &repo_root,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+        )
+        .expect("git commit");
+
+        let registry = crate::worktree::WorkspaceRegistry::new();
+        let workspace_id = "ws-external-refresh-p16";
+        registry
+            .register(workspace_id, &repo_root)
+            .expect("register");
+        let state = Arc::new(RemoteGatewayState::new(
+            Arc::new(TerminalService::default()),
+            registry.clone(),
+        ));
+        let initial_time = std::time::Instant::now();
+
+        // 1. Initial snapshot: cache populated, no external worktree
+        let initial = state
+            .workspace_snapshot_at(initial_time)
+            .await
+            .expect("initial snapshot");
+        assert!(!initial
+            .worktrees_for(workspace_id, None)
+            .iter()
+            .any(|worktree| worktree.worktree_label.as_deref() == Some("external-change")));
+        assert_eq!(state.snapshot_build_count(), 1);
+
+        // 2. External git worktree created via CLI (does not bump registry revision)
+        let manager = registry.manager(workspace_id).expect("manager");
+        let identity = crate::worktree::WorktreeIdentity {
+            ws_id: workspace_id.to_string(),
+            slug: "external-change".to_string(),
+        };
+        let external_path = manager
+            .worktree_path_for(&identity.ws_id, &identity.slug)
+            .expect("external path");
+        let external_path_text = external_path.to_string_lossy().into_owned();
+        crate::worktree::run_git(
+            &repo_root,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "external-change",
+                &external_path_text,
+            ],
+        )
+        .expect("external git worktree add");
+
+        // Within refresh interval: served from cache (still without external-change)
+        let before_interval = state
+            .workspace_snapshot_at(
+                initial_time + WORKSPACE_SNAPSHOT_REFRESH_INTERVAL / 2,
+            )
+            .await
+            .expect("cached snapshot before expiry");
+        assert!(!before_interval
+            .worktrees_for(workspace_id, None)
+            .iter()
+            .any(|worktree| worktree.worktree_label.as_deref() == Some("external-change")));
+        assert_eq!(state.snapshot_build_count(), 1);
+
+        // 3. After refresh interval has expired:
+        // P16 remediation: an explicit list request must immediately reflect the external change
+        // rather than returning an intentionally stale snapshot and postponing freshness to the next request.
+        let after_interval = state
+            .workspace_snapshot_at(
+                initial_time + WORKSPACE_SNAPSHOT_REFRESH_INTERVAL,
+            )
+            .await
+            .expect("snapshot after refresh interval");
+        assert!(
+            after_interval
+                .worktrees_for(workspace_id, None)
+                .iter()
+                .any(|worktree| worktree.worktree_label.as_deref() == Some("external-change")),
+            "P16: snapshot request after refresh interval expired must reflect external worktree changes immediately"
+        );
+        assert_eq!(state.snapshot_build_count(), 2);
+
+        // 4. Now simulate external removal via CLI (again does not bump registry revision)
+        crate::worktree::run_git(
+            &repo_root,
+            &["worktree", "remove", "--force", &external_path_text],
+        )
+        .expect("external git worktree remove");
+
+        // After another refresh interval, removal must be immediately reflected
+        let after_removal = state
+            .workspace_snapshot_at(
+                initial_time + WORKSPACE_SNAPSHOT_REFRESH_INTERVAL * 2,
+            )
+            .await
+            .expect("snapshot after removal interval");
+        assert!(
+            !after_removal
+                .worktrees_for(workspace_id, None)
+                .iter()
+                .any(|worktree| worktree.worktree_label.as_deref() == Some("external-change")),
+            "P16: snapshot request after removal and refresh interval expired must reflect removal immediately"
+        );
+        assert_eq!(state.snapshot_build_count(), 3);
     }
 }
