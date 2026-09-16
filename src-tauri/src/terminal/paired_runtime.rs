@@ -19,6 +19,52 @@ fn default_descriptors_path() -> Option<PathBuf> {
     }
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FsFault {
+    None,
+    FailTempWrite,
+    FailRename,
+}
+
+#[cfg(test)]
+static TEST_FS_FAULT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+#[cfg(test)]
+impl FsFault {
+    pub(crate) fn set(fault: Self) {
+        let val = match fault {
+            Self::None => 0,
+            Self::FailTempWrite => 1,
+            Self::FailRename => 2,
+        };
+        TEST_FS_FAULT.store(val, std::sync::atomic::Ordering::SeqCst);
+    }
+    pub(crate) fn get() -> Self {
+        match TEST_FS_FAULT.load(std::sync::atomic::Ordering::SeqCst) {
+            1 => Self::FailTempWrite,
+            2 => Self::FailRename,
+            _ => Self::None,
+        }
+    }
+}
+
+fn fs_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(test)]
+    if FsFault::get() == FsFault::FailTempWrite {
+        return Err(std::io::Error::new(std::io::ErrorKind::Other, "injected temp write failure"));
+    }
+    std::fs::write(path, bytes)
+}
+
+fn fs_rename(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if FsFault::get() == FsFault::FailRename {
+        return Err(std::io::Error::new(std::io::ErrorKind::Other, "injected rename failure"));
+    }
+    std::fs::rename(from, to)
+}
+
 fn load_descriptors(path: &Path) -> HashMap<String, super::paired_daemon::Descriptor> {
     if let Ok(data) = std::fs::read(path) {
         if let Ok(map) = serde_json::from_slice::<HashMap<String, super::paired_daemon::Descriptor>>(&data) {
@@ -28,17 +74,37 @@ fn load_descriptors(path: &Path) -> HashMap<String, super::paired_daemon::Descri
     HashMap::new()
 }
 
-fn save_descriptors(path: &Path, descriptors: &HashMap<String, super::paired_daemon::Descriptor>) {
+fn save_descriptors(path: &Path, descriptors: &HashMap<String, super::paired_daemon::Descriptor>) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Ok(bytes) = serde_json::to_vec_pretty(descriptors) {
-        let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
-        if std::fs::write(&tmp, &bytes).is_ok() {
-            let _ = std::fs::remove_file(path);
-            let _ = std::fs::rename(&tmp, path);
+    let bytes = match serde_json::to_vec_pretty(descriptors) {
+        Ok(bytes) => bytes,
+        Err(e) => return Err(format!("PAIRED_DESCRIPTOR_SERIALIZE: {e}")),
+    };
+    // N2: write-then-atomic-replace WITHOUT removing the destination first.
+    // A failed temp write or failed rename must leave the previous good file
+    // intact and surface the error; the temp file is cleaned up on failure.
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    fs_write(&tmp, &bytes).map_err(|e| format!("PAIRED_DESCRIPTOR_TEMP_WRITE: {e}"))?;
+    if let Ok(f) = std::fs::File::open(&tmp) {
+        let _ = f.sync_all();
+    }
+    if let Err(e) = fs_rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("PAIRED_DESCRIPTOR_REPLACE: {e}"));
+    }
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
         }
     }
+    #[cfg(windows)]
+    {
+        let _ = std::fs::File::open(path).and_then(|f| f.sync_all());
+    }
+    Ok(())
 }
 
 type Reply = oneshot::Sender<Result<(), String>>;
@@ -107,15 +173,21 @@ impl Runtime {
     }
 
     pub fn set_store_path(&self, path: PathBuf) {
+        // N1: single lock order — the store-path snapshot is taken BEFORE the
+        // descriptors lock is ever acquired; no site may acquire store_path
+        // while holding descriptors.
         let loaded = load_descriptors(&path);
-        let mut desc_guard = self.descriptors.lock();
-        for (k, v) in loaded {
-            desc_guard.entry(k).or_insert(v);
-        }
-        let current = desc_guard.clone();
-        drop(desc_guard);
         *self.store_path.lock() = Some(path.clone());
-        save_descriptors(&path, &current);
+        let current = {
+            let mut desc_guard = self.descriptors.lock();
+            for (k, v) in loaded {
+                desc_guard.entry(k).or_insert(v);
+            }
+            desc_guard.clone()
+        };
+        if let Err(e) = save_descriptors(&path, &current) {
+            eprintln!("[paired_runtime] descriptor save failed after set_store_path: {e}");
+        }
     }
 
     pub fn owns(id: &str) -> bool { id.starts_with("daemon-session:") }
@@ -125,10 +197,18 @@ impl Runtime {
         self.descriptors.lock().get(id).cloned()
     }
     pub fn remove_descriptor(&self, id: &str) {
-        let mut descs = self.descriptors.lock();
-        if descs.remove(id).is_some() {
-            if let Some(ref path) = *self.store_path.lock() {
-                save_descriptors(path, &descs);
+        let path = self.store_path.lock().clone();
+        let snapshot = {
+            let mut descs = self.descriptors.lock();
+            let existed = descs.remove(id).is_some();
+            if !existed {
+                return;
+            }
+            descs.clone()
+        };
+        if let Some(ref path) = path {
+            if let Err(e) = save_descriptors(path, &snapshot) {
+                eprintln!("[paired_runtime] descriptor save failed after remove: {e}");
             }
         }
     }
@@ -139,11 +219,21 @@ impl Runtime {
         if owners.get(&id).is_some_and(|o| !o.task.is_finished()) { return Err("CONTROL_CONFLICT".into()); }
         owners.remove(&id);
 
-        {
+        // N1: store-path snapshot first, then the descriptors lock — never the
+        // reverse order. The map is cloned under the short lock and the disk
+        // save happens with NO runtime lock held.
+        let path = self.store_path.lock().clone();
+        let snapshot = {
             let mut descs = self.descriptors.lock();
             descs.insert(id.clone(), descriptor.clone());
-            if let Some(ref path) = *self.store_path.lock() {
-                save_descriptors(path, &descs);
+            descs.clone()
+        };
+        if let Some(ref path) = path {
+            if let Err(e) = save_descriptors(path, &snapshot) {
+                // Roll back the in-memory insert so memory and disk stay
+                // consistent: install did not persist, so it did not happen.
+                self.descriptors.lock().remove(&id);
+                return Err(e);
             }
         }
 
@@ -284,6 +374,46 @@ impl Runtime {
         (&mut owner.task).await.map_err(|_| "PAIRED_PROXY_UNAVAILABLE")?;
         result
     }
+
+    #[cfg(test)]
+    pub fn simulate_cursor_persistence(&self, task_id: &str, seq: Option<Epoch>) {
+        let changed = {
+            let mut descs = self.descriptors.lock();
+            if let Some(d) = descs.get_mut(task_id) {
+                if d.after_sequence != seq {
+                    d.after_sequence = seq;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                descs.insert(task_id.to_string(), super::paired_daemon::Descriptor {
+                    host_id: "https://relay.example.com".into(),
+                    generation: Epoch(1),
+                    target: crate::remote::machine_protocol::RemoteTerminalTarget {
+                        machine_id: "test-machine".into(),
+                        daemon_epoch: Epoch(1),
+                        session_id: task_id.to_string(),
+                    },
+                    after_sequence: seq,
+                });
+                true
+            }
+        };
+        if changed {
+            // N1: same single lock order as production paths — take the store
+            // path snapshot first, mutate descriptors under the short lock,
+            // then persist the snapshot with no lock held.
+            let path = self.store_path.lock().clone();
+            let snapshot = {
+                let descs = self.descriptors.lock();
+                descs.clone()
+            };
+            if let Some(ref path) = path {
+                let _ = save_descriptors(path, &snapshot);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -370,6 +500,138 @@ mod tests {
         assert_eq!(recovered.generation, descriptor.generation);
         assert_eq!(recovered.target, descriptor.target);
         assert_eq!(recovered.after_sequence, Some(Epoch(100)));
+    }
+
+    #[tokio::test]
+    async fn test_n2_save_failure_temp_write_propagates_error() {
+        static FAULT_SERIALIZER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _fault_guard = FAULT_SERIALIZER.lock();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store_path = temp_dir.path().join("paired_descriptors.json");
+        let hub = Arc::new(TerminalOutputHub::new(32));
+
+        let desc1 = Descriptor {
+            host_id: "https://relay.example.com".into(),
+            generation: Epoch(1),
+            target: RemoteTerminalTarget {
+                machine_id: "test-machine".into(),
+                daemon_epoch: Epoch(1),
+                session_id: "s1".into(),
+            },
+            after_sequence: None,
+        };
+        let runtime = Runtime::new(Some(store_path.clone()));
+        let p1 = Proxy::new(desc1.clone(), hub.clone()).unwrap();
+        let id1 = runtime.install(p1).expect("initial install should succeed");
+        assert!(store_path.exists());
+
+        FsFault::set(FsFault::FailTempWrite);
+        let desc2 = Descriptor {
+            host_id: "https://relay.example.com".into(),
+            generation: Epoch(1),
+            target: RemoteTerminalTarget {
+                machine_id: "test-machine".into(),
+                daemon_epoch: Epoch(1),
+                session_id: "s2".into(),
+            },
+            after_sequence: None,
+        };
+        let p2 = Proxy::new(desc2, hub.clone()).unwrap();
+        let res = runtime.install(p2);
+        FsFault::set(FsFault::None);
+
+        assert!(res.is_err(), "install must fail when temp write fails");
+        assert!(store_path.exists(), "existing store file must survive");
+        let reloaded = Runtime::new(Some(store_path.clone()));
+        assert!(reloaded.descriptor(&id1).is_some(), "original descriptor must still be present");
+    }
+
+    #[tokio::test]
+    async fn test_n2_save_failure_rename_preserves_existing_file() {
+        static FAULT_SERIALIZER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _fault_guard = FAULT_SERIALIZER.lock();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store_path = temp_dir.path().join("paired_descriptors.json");
+        let hub = Arc::new(TerminalOutputHub::new(32));
+
+        let desc1 = Descriptor {
+            host_id: "https://relay.example.com".into(),
+            generation: Epoch(1),
+            target: RemoteTerminalTarget {
+                machine_id: "test-machine".into(),
+                daemon_epoch: Epoch(1),
+                session_id: "s1".into(),
+            },
+            after_sequence: None,
+        };
+        let runtime = Runtime::new(Some(store_path.clone()));
+        let p1 = Proxy::new(desc1.clone(), hub.clone()).unwrap();
+        let id1 = runtime.install(p1).expect("initial install should succeed");
+        assert!(store_path.exists());
+
+        FsFault::set(FsFault::FailRename);
+        let desc2 = Descriptor {
+            host_id: "https://relay.example.com".into(),
+            generation: Epoch(1),
+            target: RemoteTerminalTarget {
+                machine_id: "test-machine".into(),
+                daemon_epoch: Epoch(1),
+                session_id: "s2".into(),
+            },
+            after_sequence: None,
+        };
+        let p2 = Proxy::new(desc2, hub.clone()).unwrap();
+        let res = runtime.install(p2);
+        FsFault::set(FsFault::None);
+
+        assert!(res.is_err(), "install must fail when rename fails");
+        assert!(store_path.exists(), "existing store file must survive rename failure (destructive save defect)");
+        let reloaded = Runtime::new(Some(store_path.clone()));
+        assert!(reloaded.descriptor(&id1).is_some(), "original descriptor must survive rename failure");
+    }
+
+    #[tokio::test]
+    async fn test_n1_concurrent_cursor_persistence_and_install_detach_deadlock() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store_path = temp_dir.path().join("paired_descriptors.json");
+        let runtime = Arc::new(Runtime::new(Some(store_path)));
+        let hub = Arc::new(TerminalOutputHub::new(32));
+
+        let r1 = runtime.clone();
+        let h1 = hub.clone();
+        let t1 = tokio::task::spawn_blocking(move || {
+            for i in 0..200 {
+                let desc = Descriptor {
+                    host_id: "https://relay.example.com".into(),
+                    generation: Epoch(1),
+                    target: RemoteTerminalTarget {
+                        machine_id: format!("m-{i}"),
+                        daemon_epoch: Epoch(1),
+                        session_id: format!("s-{i}"),
+                    },
+                    after_sequence: None,
+                };
+                if let Ok(proxy) = Proxy::new(desc, h1.clone()) {
+                    let _ = r1.install(proxy);
+                }
+            }
+        });
+
+        let r2 = runtime.clone();
+        let t2 = tokio::task::spawn_blocking(move || {
+            for i in 0..200 {
+                let id = format!("daemon-session:https://relay.example.com:m-{i}:1:s-{i}");
+                r2.simulate_cursor_persistence(&id, Some(Epoch(i as u64)));
+            }
+        });
+
+        let res = tokio::time::timeout(Duration::from_secs(3), async {
+            let (res1, res2) = tokio::join!(t1, t2);
+            res1.unwrap();
+            res2.unwrap();
+        }).await;
+
+        assert!(res.is_ok(), "deadlock detected: opposite lock order hung tasks");
     }
 }
 
