@@ -3,7 +3,7 @@ use crate::worktree::WorktreeError;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum IpcErrorCode {
     WorktreeBusy,
@@ -61,6 +61,118 @@ pub enum IpcErrorCode {
     InvalidArgument,
     InternalError,
     Unsupported,
+    // Paired host and machine protocol error codes (P08)
+    SessionExpired,
+    ParentSessionMismatch,
+    Timeout,
+    HostUnavailable,
+    OperationOutcomeUnknown,
+    OperationNotFound,
+    OperationResultExpired,
+    SessionOwnershipChanged,
+    ControlConflict,
+    StaleEpoch,
+    StaleGeneration,
+    PairedProxyUnavailable,
+    PairedHostRemoteError,
+    PairedHostInvalidResponse,
+    PairedHostStaleGeneration,
+    PairedHostRedirectRejected,
+    Unauthorized,
+    MachineAccessRequired,
+    MachineOwnerUnsupported,
+    MachineServiceUnavailable,
+    InvalidRequest,
+    UnsupportedPath,
+    PayloadTooLarge,
+    PermissionDenied,
+    RateLimited,
+    CapacityExceeded,
+    DirectoryNotFound,
+    ProjectNotFound,
+    ProjectBusy,
+    NotAGitRepository,
+    BaseRefUnavailable,
+    InvalidBaseRef,
+    InvalidWorktree,
+    WorkspaceIdMismatch,
+    OutputLimitExceeded,
+    RequestConflict,
+    StaleRevision,
+    AgentResumeUnsupported,
+    AuthExpired,
+    NotFound,
+    MethodNotAllowed,
+    #[serde(untagged)]
+    Custom(String),
+}
+
+impl IpcErrorCode {
+    pub fn from_code_str(s: &str) -> Self {
+        match s {
+            "SESSION_NOT_FOUND" => Self::SessionNotFound,
+            "SESSION_EXPIRED" => Self::SessionExpired,
+            "PARENT_SESSION_MISMATCH" => Self::ParentSessionMismatch,
+            "TIMEOUT" => Self::Timeout,
+            "HOST_UNAVAILABLE" => Self::HostUnavailable,
+            "OPERATION_OUTCOME_UNKNOWN" => Self::OperationOutcomeUnknown,
+            "OPERATION_NOT_FOUND" => Self::OperationNotFound,
+            "OPERATION_RESULT_EXPIRED" => Self::OperationResultExpired,
+            "SESSION_OWNERSHIP_CHANGED" => Self::SessionOwnershipChanged,
+            "CONTROL_CONFLICT" => Self::ControlConflict,
+            "STALE_EPOCH" => Self::StaleEpoch,
+            "STALE_GENERATION" => Self::StaleGeneration,
+            "PAIRED_PROXY_UNAVAILABLE" => Self::PairedProxyUnavailable,
+            "PAIRED_HOST_REMOTE_ERROR" => Self::PairedHostRemoteError,
+            "PAIRED_HOST_INVALID_RESPONSE" => Self::PairedHostInvalidResponse,
+            "PAIRED_HOST_STALE_GENERATION" => Self::PairedHostStaleGeneration,
+            "PAIRED_HOST_REDIRECT_REJECTED" => Self::PairedHostRedirectRejected,
+            "UNAUTHORIZED" => Self::Unauthorized,
+            "MACHINE_ACCESS_REQUIRED" => Self::MachineAccessRequired,
+            "MACHINE_OWNER_UNSUPPORTED" => Self::MachineOwnerUnsupported,
+            "MACHINE_SERVICE_UNAVAILABLE" => Self::MachineServiceUnavailable,
+            "INVALID_REQUEST" => Self::InvalidRequest,
+            "INVALID_PATH" => Self::InvalidPath,
+            "UNSUPPORTED_PATH" => Self::UnsupportedPath,
+            "PAYLOAD_TOO_LARGE" => Self::PayloadTooLarge,
+            "PERMISSION_DENIED" => Self::PermissionDenied,
+            "RATE_LIMITED" => Self::RateLimited,
+            "CAPACITY_EXCEEDED" => Self::CapacityExceeded,
+            "DIRECTORY_NOT_FOUND" => Self::DirectoryNotFound,
+            "PROJECT_NOT_FOUND" => Self::ProjectNotFound,
+            "PROJECT_BUSY" => Self::ProjectBusy,
+            "NOT_A_GIT_REPOSITORY" => Self::NotAGitRepository,
+            "BASE_REF_UNAVAILABLE" => Self::BaseRefUnavailable,
+            "INVALID_BASE_REF" => Self::InvalidBaseRef,
+            "INVALID_WORKTREE" => Self::InvalidWorktree,
+            "WORKSPACE_ID_MISMATCH" => Self::WorkspaceIdMismatch,
+            "WORKTREE_NOT_FOUND" => Self::WorktreeNotFound,
+            "WORKTREE_BUSY" => Self::WorktreeBusy,
+            "WORKTREE_EXISTS" | "WORKTREE_ALREADY_EXISTS" => Self::WorktreeAlreadyExists,
+            "WORKTREE_LOCKED" => Self::WorktreeLocked,
+            "DIRTY_WORKTREE" => Self::DirtyWorktree,
+            "UNMERGED_BRANCH" => Self::UnmergedBranch,
+            "WORKTREE_REMOVED_BRANCH_RETAINED" => Self::WorktreeRemovedBranchRetained,
+            "WORKTREE_REMOVED_PRUNE_FAILED" => Self::WorktreeRemovedPruneFailed,
+            "OUTPUT_LIMIT_EXCEEDED" => Self::OutputLimitExceeded,
+            "REQUEST_CONFLICT" => Self::RequestConflict,
+            "STALE_REVISION" => Self::StaleRevision,
+            "AGENT_RESUME_UNSUPPORTED" => Self::AgentResumeUnsupported,
+            "AGENT_SESSION_CONFLICT" => Self::AgentSessionConflict,
+            "AGENT_RESUME_INVALID" => Self::AgentResumeInvalid,
+            "AUTH_EXPIRED" => Self::AuthExpired,
+            "NOT_FOUND" => Self::NotFound,
+            "METHOD_NOT_ALLOWED" => Self::MethodNotAllowed,
+            "INTERNAL_ERROR" => Self::InternalError,
+            "UNSUPPORTED" => Self::Unsupported,
+            "INVALID_ARGUMENT" => Self::InvalidArgument,
+            "IO_ERROR" => Self::IoError,
+            "PARSE_ERROR" => Self::ParseError,
+            "GIT_ERROR" => Self::GitError,
+            "SCAN_CANCELLED" => Self::ScanCancelled,
+            other => Self::Custom(other.to_string()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -335,5 +447,28 @@ impl From<crate::ipc::cli_install::CliInstallError> for IpcError {
 impl std::fmt::Display for IpcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ipc_error_code_custom_roundtrip() {
+        let code = IpcErrorCode::Custom("MY_UNKNOWN_CODE".to_string());
+        let json_str = serde_json::to_string(&code).unwrap();
+        assert_eq!(json_str, "\"MY_UNKNOWN_CODE\"");
+        let deserialized: IpcErrorCode = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(deserialized, code);
+
+        let known = IpcErrorCode::SessionNotFound;
+        let known_str = serde_json::to_string(&known).unwrap();
+        assert_eq!(known_str, "\"SESSION_NOT_FOUND\"");
+        let deserialized_known: IpcErrorCode = serde_json::from_str(&known_str).unwrap();
+        assert_eq!(deserialized_known, known);
+
+        let from_str = IpcErrorCode::from_code_str("CUSTOM_CODE_123");
+        assert_eq!(from_str, IpcErrorCode::Custom("CUSTOM_CODE_123".to_string()));
     }
 }

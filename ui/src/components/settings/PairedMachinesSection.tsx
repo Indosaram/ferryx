@@ -55,10 +55,10 @@ export function PairedMachinesSection({
     setPin("");
     let context: PairedHostContext | undefined;
     try {
-      const paired = await inventory.pair(request, host => {
+      const result = await inventory.pair(request, host => {
         context = { hostId: host.hostId, generation: host.generation! };
       });
-      if (!paired || !context) setError("PAIR_FAILED");
+      if (!result.ok || !context) setError(!result.ok ? result.error.code : "PAIR_FAILED");
       else {
         setSelected(context.hostId);
         await checkHost(context);

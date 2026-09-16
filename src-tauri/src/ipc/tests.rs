@@ -1387,10 +1387,10 @@ async fn test_p10_ambiguous_create_session_reconciles_via_journal() {
                                         },
                                     }
                                 }
-                                _ => DaemonResponse::Error { message: "unexpected op".into() },
+                                _ => DaemonResponse::Error { message: "unexpected op".into(), code: None, details: None },
                             }
                         }
-                        _ => DaemonResponse::Error { message: "unexpected req".into() },
+                        _ => DaemonResponse::Error { message: "unexpected req".into(), code: None, details: None },
                     };
                     let bytes = serde_json::to_vec(&resp).unwrap();
                     let _ = write.write_all(&bytes).await;
@@ -1510,10 +1510,10 @@ async fn test_p11_reattach_failure_cleanup_reconciles_and_reaps_unknown() {
                                         }
                                     }
                                 }
-                                _ => DaemonResponse::Error { message: "unexpected op".into() },
+                                _ => DaemonResponse::Error { message: "unexpected op".into(), code: None, details: None },
                             }
                         }
-                        _ => DaemonResponse::Error { message: "unexpected req".into() },
+                        _ => DaemonResponse::Error { message: "unexpected req".into(), code: None, details: None },
                     };
                     let bytes = serde_json::to_vec(&resp).unwrap();
                     let _ = write.write_all(&bytes).await;
@@ -1637,7 +1637,7 @@ async fn test_p12_close_terminates_remote_session_while_detach_preserves_it() {
                                         },
                                     }
                                 }
-                                _ => DaemonResponse::Error { message: "unexpected op".into() },
+                                _ => DaemonResponse::Error { message: "unexpected op".into(), code: None, details: None },
                             }
                         }
                         DaemonRequest::PairedTerminalDetach { .. } => {
@@ -1648,7 +1648,7 @@ async fn test_p12_close_terminates_remote_session_while_detach_preserves_it() {
                             local_close.store(true, Ordering::SeqCst);
                             DaemonResponse::CloseOk
                         }
-                        _ => DaemonResponse::Error { message: "unexpected req".into() },
+                        _ => DaemonResponse::Error { message: "unexpected req".into(), code: None, details: None },
                     };
                     let bytes = serde_json::to_vec(&resp).unwrap();
                     let _ = write.write_all(&bytes).await;

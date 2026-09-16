@@ -16,6 +16,7 @@ import {
   DEFAULT_MACHINE_LABEL,
   DEFAULT_RELAY_ORIGIN,
   pairedHostInventory,
+  type PairedHostError,
 } from "../../lib/pairedHostInventory";
 import {
   createPairedDaemonProjectAdapter,
@@ -73,6 +74,39 @@ const explanations: Record<string, string> = {
   UNCHECKED: "Check the remote machine capabilities before adding a project.",
   READY: "Machine project capabilities verified.",
 };
+
+export function getModalErrorMessage(error: PairedHostError | string): string {
+  const code = typeof error === "string" ? error : error.code;
+  switch (code) {
+    case "PIN_EXPIRED":
+    case "EXPIRED_PIN":
+      return "PIN expired. Obtain a fresh machine PIN on the remote machine ('ferryx-cli pair generate --access machine') and retry.";
+    case "INVALID_PIN":
+      return "Invalid PIN. Check the PIN entered and obtain a fresh machine PIN if needed.";
+    case "WRONG_RELAY":
+    case "INVALID_RELAY_ORIGIN":
+      return `Relay mismatch. Verify both machines use the same relay origin (default: ${DEFAULT_RELAY_ORIGIN}).`;
+    case "DAEMON_UNAVAILABLE":
+    case "HOST_UNAVAILABLE":
+      return "Remote daemon unavailable. Start the daemon on the remote machine with 'ferryx-cli --daemon' and retry.";
+    case "STALE_HOST_GENERATION":
+    case "PAIRED_HOST_STALE_GENERATION":
+      return "Credentials changed during this request. Refresh the inventory and retry.";
+    case "MACHINE_GRANT_REQUIRED":
+      return "Needs machine access. A mirror PIN cannot authorize projects. Re-pair with an owner-issued machine PIN.";
+    case "PAIRED_HOST_UNAUTHORIZED":
+    case "UNAUTHORIZED":
+      return "Authorization rejected. Check machine permissions and retry.";
+    case "NATIVE_CONTEXT_REQUIRED":
+      return "Native host inventory is unavailable. Use the desktop app with a compatible local daemon.";
+    case "PAIR_FAILED":
+    default:
+      if (typeof error === "object" && error.message && error.message !== code && error.message !== "PAIRED_HOST_UNAVAILABLE") {
+        return error.message;
+      }
+      return explanations[code] ?? "Could not pair. Check connectivity and daemon compatibility, obtain a fresh machine-access PIN, and retry.";
+  }
+}
 
 async function defaultNegotiate(context: PairedHostContext) {
   const result = await createPairedDaemonProjectAdapter(context).capabilities();
@@ -137,6 +171,7 @@ export function AddMachineModal({
   // Status state
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [structuredError, setStructuredError] = useState<PairedHostError | null>(null);
   const [successTarget, setSuccessTarget] = useState<{ target: MachineProjectTarget; name: string } | null>(null);
   const [importResult, setImportResult] = useState<{ count: number; hosts: SshHost[] } | null>(null);
 
@@ -247,17 +282,26 @@ export function AddMachineModal({
 
     setBusy(true);
     setError(null);
+    setStructuredError(null);
 
     let pairedContext: PairedHostContext | undefined;
     try {
-      const ok = await inventory.pair(
+      const result = await inventory.pair(
         { relayOrigin: DEFAULT_RELAY_ORIGIN, displayLabel: DEFAULT_MACHINE_LABEL, pin },
         host => { pairedContext = { hostId: host.hostId, generation: host.generation! }; },
       );
       if (isDismissedRef.current || !isMountedRef.current) return;
 
-      if (!ok || !pairedContext) {
-        setError(explanations.PAIR_FAILED);
+      if (!result.ok || !pairedContext) {
+        const err = !result.ok
+          ? result.error
+          : {
+              code: "PAIR_FAILED",
+              message: "Pairing context missing after successful exchange",
+              retryable: false,
+            };
+        setStructuredError(err);
+        setError(getModalErrorMessage(err));
         setBusy(false);
         return;
       }
@@ -265,11 +309,16 @@ export function AddMachineModal({
       // Initial live auth/scope check
       let host = store.getState().hosts[pairedContext.hostId];
       if (!host || host.generation !== pairedContext.generation || host.authStatus !== "paired" || host.grantScope !== "machine") {
-        setError(
-          !host || host.generation !== pairedContext.generation
-            ? explanations.STALE_HOST_GENERATION
-            : explanations.MACHINE_GRANT_REQUIRED,
-        );
+        const errCode = !host || host.generation !== pairedContext.generation
+          ? "STALE_HOST_GENERATION"
+          : "MACHINE_GRANT_REQUIRED";
+        const err: PairedHostError = {
+          code: errCode,
+          message: explanations[errCode] ?? errCode,
+          retryable: errCode === "STALE_HOST_GENERATION",
+        };
+        setStructuredError(err);
+        setError(getModalErrorMessage(err));
         setBusy(false);
         return;
       }
@@ -281,11 +330,16 @@ export function AddMachineModal({
       // RECHECK live paired generation/auth after await negotiate and before project offer!
       host = store.getState().hosts[pairedContext.hostId];
       if (!host || host.generation !== pairedContext.generation || host.authStatus !== "paired" || host.grantScope !== "machine") {
-        setError(
-          !host || host.generation !== pairedContext.generation
-            ? explanations.STALE_HOST_GENERATION
-            : explanations.MACHINE_GRANT_REQUIRED,
-        );
+        const errCode = !host || host.generation !== pairedContext.generation
+          ? "STALE_HOST_GENERATION"
+          : "MACHINE_GRANT_REQUIRED";
+        const err: PairedHostError = {
+          code: errCode,
+          message: explanations[errCode] ?? errCode,
+          retryable: errCode === "STALE_HOST_GENERATION",
+        };
+        setStructuredError(err);
+        setError(getModalErrorMessage(err));
         setBusy(false);
         return;
       }
@@ -488,7 +542,41 @@ export function AddMachineModal({
         {error ? (
           <div role="alert" className="flex items-start gap-2 rounded-md border border-destructive/50 bg-destructive/10 p-3 text-xs text-destructive">
             <AlertCircle className="size-4 shrink-0 mt-0.5" />
-            <span className="break-words">{error}</span>
+            <div className="flex flex-col gap-1 w-full">
+              <span className="break-words">{error}</span>
+              {structuredError?.code === "PIN_EXPIRED" || structuredError?.code === "EXPIRED_PIN" ? (
+                <span className="text-[11px] font-medium text-destructive/90">
+                  Action: Obtain a fresh PIN on the remote machine with &lsquo;ferryx-cli pair generate --access machine&rsquo; and enter it above.
+                </span>
+              ) : structuredError?.code === "WRONG_RELAY" || structuredError?.code === "INVALID_RELAY_ORIGIN" ? (
+                <span className="text-[11px] font-medium text-destructive/90">
+                  Action: Verify both machines use the same relay URL (default: {DEFAULT_RELAY_ORIGIN}).
+                </span>
+              ) : structuredError?.code === "DAEMON_UNAVAILABLE" || structuredError?.code === "HOST_UNAVAILABLE" ? (
+                <span className="text-[11px] font-medium text-destructive/90">
+                  Action: Ensure &lsquo;ferryx-cli --daemon&rsquo; is running on the remote machine.
+                </span>
+              ) : structuredError?.code === "STALE_HOST_GENERATION" || structuredError?.code === "PAIRED_HOST_STALE_GENERATION" ? (
+                <div className="mt-1 flex items-center gap-2">
+                  <span className="text-[11px] font-medium text-destructive/90">
+                    Action: Inventory changed.
+                  </span>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-6 px-2 text-[11px]"
+                    onClick={() => {
+                      void inventory.refresh();
+                      setError(null);
+                      setStructuredError(null);
+                    }}
+                  >
+                    Refresh inventory
+                  </Button>
+                </div>
+              ) : null}
+            </div>
           </div>
         ) : null}
 
@@ -496,7 +584,7 @@ export function AddMachineModal({
         {successTarget ? (
           <div className="space-y-4 py-4 text-center">
             <div className="flex justify-center">
-              <CheckCircle2 className="size-10 text-emerald-500" />
+              <CheckCircle2 className="size-10 text-status-success" />
             </div>
             <p className="text-sm font-medium text-foreground">
               Machine &ldquo;{successTarget.name}&rdquo; connected and verified successfully!

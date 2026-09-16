@@ -13,7 +13,7 @@ pub const WORKTREE_CHANGED_EVENT: &str = "worktree_changed";
 pub(crate) fn worktree_response(response: DaemonResponse) -> Result<DaemonResponse, IpcError> {
     match response {
         DaemonResponse::WorktreeError { error } => Err(error),
-        DaemonResponse::Error { message } => Err(IpcError::internal(message)),
+        DaemonResponse::Error { message, .. } => Err(IpcError::internal(message)),
         response => Ok(response),
     }
 }

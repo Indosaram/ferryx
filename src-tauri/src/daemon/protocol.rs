@@ -457,6 +457,10 @@ pub enum DaemonResponse {
     #[serde(rename_all = "camelCase")]
     Error {
         message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<serde_json::Value>,
     },
 }
 

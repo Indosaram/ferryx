@@ -198,7 +198,7 @@ impl LegacyPeer {
                 *self.known_sessions.write() = sessions.clone();
                 Ok(sessions)
             }
-            DaemonResponse::Error { message } => Err(message),
+            DaemonResponse::Error { message, .. } => Err(message),
             other => Err(format!("Unexpected response for ListSessions: {other:?}")),
         }
     }
@@ -211,7 +211,7 @@ impl LegacyPeer {
             .await?
         {
             DaemonResponse::DescribeSessionOk { session } => Ok(session),
-            DaemonResponse::Error { message } => Err(message),
+            DaemonResponse::Error { message, .. } => Err(message),
             other => Err(format!(
                 "Unexpected response for DescribeSession: {other:?}"
             )),
@@ -227,7 +227,7 @@ impl LegacyPeer {
             .await?
         {
             DaemonResponse::WriteOk => Ok(()),
-            DaemonResponse::Error { message } => Err(message),
+            DaemonResponse::Error { message, .. } => Err(message),
             other => Err(format!("Unexpected response for Write: {other:?}")),
         }
     }
@@ -242,7 +242,7 @@ impl LegacyPeer {
             .await?
         {
             DaemonResponse::ResizeOk => Ok(()),
-            DaemonResponse::Error { message } => Err(message),
+            DaemonResponse::Error { message, .. } => Err(message),
             other => Err(format!("Unexpected response for Resize: {other:?}")),
         }
     }
@@ -256,7 +256,7 @@ impl LegacyPeer {
             .await?
         {
             DaemonResponse::SignalOk => Ok(()),
-            DaemonResponse::Error { message } => Err(message),
+            DaemonResponse::Error { message, .. } => Err(message),
             other => Err(format!("Unexpected response for Signal: {other:?}")),
         }
     }
@@ -270,7 +270,7 @@ impl LegacyPeer {
         self.remove_session(session_id);
         match resp {
             DaemonResponse::CloseOk => Ok(()),
-            DaemonResponse::Error { message } => Err(message),
+            DaemonResponse::Error { message, .. } => Err(message),
             other => Err(format!("Unexpected response for Close: {other:?}")),
         }
     }
@@ -290,7 +290,7 @@ impl LegacyPeer {
             DaemonResponse::DiscoverAgentSessionOk {
                 provider_session_id,
             } => Ok(provider_session_id),
-            DaemonResponse::Error { message } => Err(message),
+            DaemonResponse::Error { message, .. } => Err(message),
             other => Err(format!(
                 "Unexpected response for DiscoverAgentSession: {other:?}"
             )),
@@ -305,7 +305,7 @@ impl LegacyPeer {
             .await?
         {
             DaemonResponse::ResetAgentStateOk => Ok(()),
-            DaemonResponse::Error { message } => Err(message),
+            DaemonResponse::Error { message, .. } => Err(message),
             other => Err(format!(
                 "Unexpected response for ResetAgentState: {other:?}"
             )),
@@ -501,7 +501,7 @@ impl LegacyPeer {
                 let (tx, rx) = broadcast::channel(2048);
                 (snapshot, tx, rx)
             }
-            DaemonResponse::Error { message } => return Err(message),
+            DaemonResponse::Error { message, .. } => return Err(message),
             other => return Err(format!("Unexpected response for Attach: {other:?}")),
         };
 

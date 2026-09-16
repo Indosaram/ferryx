@@ -395,7 +395,7 @@ async fn read_limited_line<R: tokio::io::AsyncRead + Unpin>(
 }
 
 fn ipc_error_code_string(code: IpcErrorCode) -> String {
-    serde_json::to_value(code)
+    serde_json::to_value(&code)
         .ok()
         .and_then(|value| value.as_str().map(str::to_string))
         .unwrap_or_else(|| format!("{code:?}"))

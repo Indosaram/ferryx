@@ -356,7 +356,35 @@ pub fn should_request_upgrade(
     }
 }
 
-pub(crate) fn parse_attach_error_response(message: String, session_id: &str) -> IpcError {
+pub(crate) fn parse_attach_error_response(
+    message: String,
+    code: Option<String>,
+    details: Option<serde_json::Value>,
+    session_id: &str,
+) -> IpcError {
+    if let Some(ref c) = code {
+        if c == "SESSION_NOT_FOUND" {
+            let details = details.unwrap_or_else(|| {
+                serde_json::json!({
+                    "source": "daemon_attach",
+                    "kind": "session_not_found",
+                    "sessionId": session_id,
+                })
+            });
+            return IpcError::new(IpcErrorCode::SessionNotFound, message).with_details(details);
+        } else {
+            let ipc_code = IpcErrorCode::from_code_str(c);
+            let mut err = IpcError::new(ipc_code, message);
+            if let Some(d) = details {
+                err = err.with_details(d);
+            }
+            return err;
+        }
+    }
+
+    // Backward tolerance: older daemons without structured wire error responses
+    // fall back to matching legacy string prefixes. Kept strictly for backward
+    // compatibility with unversioned daemons.
     let is_session_not_found = (message
         .strip_prefix("Session '")
         .and_then(|m| m.strip_suffix("' not found"))
@@ -903,7 +931,7 @@ impl DaemonClient {
                 expected_version,
                 received_version,
             )),
-            DaemonResponse::Error { message } => {
+            DaemonResponse::Error { message, .. } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }
             _ => Err(IpcError::new(
@@ -1002,7 +1030,7 @@ impl DaemonClient {
 
         match resp {
             DaemonResponse::RegisterWorkspaceOk => Ok(()),
-            DaemonResponse::Error { message } => {
+            DaemonResponse::Error { message, .. } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }
             _ => Err(IpcError::new(
@@ -1025,7 +1053,7 @@ impl DaemonClient {
 
         match resp {
             DaemonResponse::UnregisterWorkspaceOk => Ok(()),
-            DaemonResponse::Error { message } => {
+            DaemonResponse::Error { message, .. } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }
             _ => Err(IpcError::new(
@@ -1123,7 +1151,7 @@ impl DaemonClient {
                 expected_version,
                 received_version,
             )),
-            DaemonResponse::Error { message } => {
+            DaemonResponse::Error { message, .. } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }
             _ => Err(IpcError::new(
@@ -1145,7 +1173,7 @@ impl DaemonClient {
 
         match resp {
             DaemonResponse::DescribeSessionOk { session } => Ok(session),
-            DaemonResponse::Error { message } => {
+            DaemonResponse::Error { message, .. } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }
             _ => Err(IpcError::new(
@@ -1170,7 +1198,7 @@ impl DaemonClient {
             DaemonResponse::DiscoverAgentSessionOk {
                 provider_session_id,
             } => Ok(provider_session_id),
-            DaemonResponse::Error { message } => Err(IpcError::internal(message)),
+            DaemonResponse::Error { message, .. } => Err(IpcError::internal(message)),
             _ => Err(IpcError::internal(
                 "Unexpected daemon agent-session discovery response",
             )),
@@ -1185,7 +1213,7 @@ impl DaemonClient {
             .await?
         {
             DaemonResponse::ResetAgentStateOk => Ok(()),
-            DaemonResponse::Error { message } => Err(IpcError::internal(message)),
+            DaemonResponse::Error { message, .. } => Err(IpcError::internal(message)),
             _ => Err(IpcError::internal(
                 "Unexpected daemon reset agent state response",
             )),
@@ -1257,7 +1285,7 @@ impl DaemonClient {
                     self.maybe_trigger_upgrade_if_stale(daemon_version, binary_mtime_ms);
                 }
                 DaemonResponse::SubscribeRemoteEventsOk => {}
-                DaemonResponse::Error { message } => {
+                DaemonResponse::Error { message, .. } => {
                     return Err(IpcError::new(IpcErrorCode::InternalError, message));
                 }
                 other => {
@@ -1362,7 +1390,7 @@ impl DaemonClient {
                     received_version,
                 ));
             }
-            DaemonResponse::Error { message } => {
+            DaemonResponse::Error { message, .. } => {
                 return Err(IpcError::new(IpcErrorCode::InternalError, message));
             }
             _ => {
@@ -1471,8 +1499,8 @@ impl DaemonClient {
                     stream_task: task,
                 })
             }
-            DaemonResponse::Error { message } => {
-                Err(parse_attach_error_response(message, session_id))
+            DaemonResponse::Error { message, code, details } => {
+                Err(parse_attach_error_response(message, code, details, session_id))
             }
             _ => Err(IpcError::new(
                 IpcErrorCode::InternalError,
@@ -1500,7 +1528,7 @@ impl DaemonClient {
             DaemonResponse::RemoteSessionError { failure } =>
                 Err(IpcError::internal(failure.to_string()).with_details(serde_json::to_value(failure)
                     .map_err(|error| IpcError::internal(error.to_string()))?)),
-            DaemonResponse::Error { message } => Err(IpcError::internal(message)),
+            DaemonResponse::Error { message, .. } => Err(IpcError::internal(message)),
             _ => Err(IpcError::internal("Unexpected remote session classification response")),
         }
     }
@@ -1532,7 +1560,7 @@ impl DaemonClient {
 
         match resp {
             DaemonResponse::WriteOk => Ok(()),
-            DaemonResponse::Error { message } => {
+            DaemonResponse::Error { message, .. } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }
             _ => Err(IpcError::new(
@@ -1559,7 +1587,7 @@ impl DaemonClient {
 
         match resp {
             DaemonResponse::ResizeOk => Ok(()),
-            DaemonResponse::Error { message } => {
+            DaemonResponse::Error { message, .. } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }
             _ => Err(IpcError::new(
@@ -1583,7 +1611,7 @@ impl DaemonClient {
 
         match resp {
             DaemonResponse::SignalOk => Ok(()),
-            DaemonResponse::Error { message } => {
+            DaemonResponse::Error { message, .. } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }
             _ => Err(IpcError::new(
@@ -1634,8 +1662,26 @@ impl DaemonClient {
 
         match resp {
             DaemonResponse::CloseOk => Ok(()),
-            DaemonResponse::Error { message } => {
-                Err(IpcError::new(IpcErrorCode::InternalError, message))
+            DaemonResponse::Error { message, code, details } => {
+                if code.as_deref() == Some("SESSION_NOT_FOUND") {
+                    let det = details.unwrap_or_else(|| {
+                        serde_json::json!({
+                            "source": "daemon_close",
+                            "kind": "session_not_found",
+                            "sessionId": session_id,
+                        })
+                    });
+                    Err(IpcError::new(IpcErrorCode::SessionNotFound, message).with_details(det))
+                } else if let Some(ref c) = code {
+                    let ipc_code = IpcErrorCode::from_code_str(c);
+                    let mut err = IpcError::new(ipc_code, message);
+                    if let Some(d) = details {
+                        err = err.with_details(d);
+                    }
+                    Err(err)
+                } else {
+                    Err(IpcError::new(IpcErrorCode::InternalError, message))
+                }
             }
             _ => Err(IpcError::new(
                 IpcErrorCode::InternalError,
@@ -1665,7 +1711,7 @@ impl DaemonClient {
 
         match resp {
             DaemonResponse::HibernateOk => Ok(()),
-            DaemonResponse::Error { message } => {
+            DaemonResponse::Error { message, .. } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }
             _ => Err(IpcError::new(
@@ -1684,7 +1730,7 @@ impl DaemonClient {
 
         match resp {
             DaemonResponse::SuspendOk => Ok(()),
-            DaemonResponse::Error { message } => {
+            DaemonResponse::Error { message, .. } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }
             _ => Err(IpcError::new(
@@ -1703,7 +1749,7 @@ impl DaemonClient {
 
         match resp {
             DaemonResponse::ResumeOk => Ok(()),
-            DaemonResponse::Error { message } => {
+            DaemonResponse::Error { message, .. } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }
             _ => Err(IpcError::new(
@@ -1721,7 +1767,7 @@ impl DaemonClient {
                 *self.epoch.write() = Some(epoch);
                 Ok(sessions)
             }
-            DaemonResponse::Error { message } => {
+            DaemonResponse::Error { message, .. } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }
             _ => Err(IpcError::new(
@@ -1735,7 +1781,7 @@ impl DaemonClient {
         let resp = self.send_request(DaemonRequest::Ping).await?;
         match resp {
             DaemonResponse::Pong => Ok(()),
-            DaemonResponse::Error { message } => {
+            DaemonResponse::Error { message, .. } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }
             _ => Err(IpcError::new(
@@ -1749,7 +1795,7 @@ impl DaemonClient {
         let resp = self.send_request(DaemonRequest::RemoteGetStatus).await?;
         match resp {
             DaemonResponse::RemoteStatusOk { status } => Ok(status),
-            DaemonResponse::Error { message } => {
+            DaemonResponse::Error { message, .. } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }
             _ => Err(IpcError::new(
@@ -1765,7 +1811,7 @@ impl DaemonClient {
             .await?;
         match resp {
             DaemonResponse::RemoteConfigureOk => Ok(()),
-            DaemonResponse::Error { message } => {
+            DaemonResponse::Error { message, .. } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }
             _ => Err(IpcError::new(
@@ -1784,7 +1830,7 @@ impl DaemonClient {
             .await?;
         match resp {
             DaemonResponse::RemotePairingCodeOk { code, .. } => Ok(code),
-            DaemonResponse::Error { message } => {
+            DaemonResponse::Error { message, .. } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }
             _ => Err(IpcError::new(
@@ -1808,7 +1854,7 @@ impl DaemonClient {
                 machine_id,
                 relay_url,
             } => Ok((code, pairing_token, machine_id, relay_url)),
-            DaemonResponse::Error { message } => {
+            DaemonResponse::Error { message, .. } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }
             _ => Err(IpcError::new(
@@ -1822,7 +1868,7 @@ impl DaemonClient {
         let resp = self.send_request(DaemonRequest::RemoteListDevices).await?;
         match resp {
             DaemonResponse::RemoteListDevicesOk { devices } => Ok(devices),
-            DaemonResponse::Error { message } => {
+            DaemonResponse::Error { message, .. } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }
             _ => Err(IpcError::new(
@@ -1840,7 +1886,7 @@ impl DaemonClient {
             .await?;
         match resp {
             DaemonResponse::RemoteRevokeDeviceOk => Ok(()),
-            DaemonResponse::Error { message } => {
+            DaemonResponse::Error { message, .. } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }
             _ => Err(IpcError::new(
@@ -1867,7 +1913,7 @@ impl DaemonClient {
             .await?;
         match resp {
             DaemonResponse::RemoteSetActiveSelectionOk => Ok(()),
-            DaemonResponse::Error { message } => {
+            DaemonResponse::Error { message, .. } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }
             _ => Err(IpcError::new(
@@ -1885,7 +1931,7 @@ impl DaemonClient {
             .await?;
         match resp {
             DaemonResponse::RemoteGetActiveSelectionOk { selection } => Ok(selection),
-            DaemonResponse::Error { message } => {
+            DaemonResponse::Error { message, .. } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }
             _ => Err(IpcError::new(
@@ -1902,7 +1948,7 @@ impl DaemonClient {
 
         match resp {
             DaemonResponse::SaveSessionOk => Ok(()),
-            DaemonResponse::Error { message } => {
+            DaemonResponse::Error { message, .. } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }
             _ => Err(IpcError::new(
@@ -1917,7 +1963,7 @@ impl DaemonClient {
 
         match resp {
             DaemonResponse::LoadSessionOk { session } => Ok(session),
-            DaemonResponse::Error { message } => {
+            DaemonResponse::Error { message, .. } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }
             _ => Err(IpcError::new(
@@ -1932,7 +1978,7 @@ impl DaemonClient {
 
         match resp {
             DaemonResponse::ClearSessionOk => Ok(()),
-            DaemonResponse::Error { message } => {
+            DaemonResponse::Error { message, .. } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }
             _ => Err(IpcError::new(
@@ -2884,7 +2930,7 @@ mod tests {
 
     #[test]
     fn test_attach_session_not_found_exact_match() {
-        let err = parse_attach_error_response("Session 'test-id' not found".to_string(), "test-id");
+        let err = parse_attach_error_response("Session 'test-id' not found".to_string(), None, None, "test-id");
         assert_eq!(err.code, IpcErrorCode::SessionNotFound);
         assert_eq!(err.message, "Session 'test-id' not found");
         let details = err.details.expect("expected details");
@@ -2892,7 +2938,7 @@ mod tests {
         assert_eq!(details.get("kind").and_then(|v| v.as_str()), Some("session_not_found"));
         assert_eq!(details.get("sessionId").and_then(|v| v.as_str()), Some("test-id"));
 
-        let pty_err = parse_attach_error_response("PTY session 'test-id' not found".to_string(), "test-id");
+        let pty_err = parse_attach_error_response("PTY session 'test-id' not found".to_string(), None, None, "test-id");
         assert_eq!(pty_err.code, IpcErrorCode::SessionNotFound);
         assert_eq!(pty_err.message, "PTY session 'test-id' not found");
         let pty_details = pty_err.details.expect("expected details");
@@ -2903,7 +2949,7 @@ mod tests {
 
     #[test]
     fn test_attach_session_not_found_wrong_id() {
-        let err = parse_attach_error_response("Session 'other-id' not found".to_string(), "test-id");
+        let err = parse_attach_error_response("Session 'other-id' not found".to_string(), None, None, "test-id");
         assert_eq!(err.code, IpcErrorCode::InternalError);
         assert_eq!(err.message, "Session 'other-id' not found");
         assert!(err.details.is_none());
@@ -2911,7 +2957,7 @@ mod tests {
 
     #[test]
     fn test_attach_arbitrary_error_not_session_not_found() {
-        let err = parse_attach_error_response("Internal server error".to_string(), "test-id");
+        let err = parse_attach_error_response("Internal server error".to_string(), None, None, "test-id");
         assert_eq!(err.code, IpcErrorCode::InternalError);
         assert_eq!(err.message, "Internal server error");
         assert!(err.details.is_none());
@@ -2921,9 +2967,32 @@ mod tests {
     fn test_attach_malformed_overlapping_not_found_message_does_not_panic() {
         // "Session ' not found" has length 19; prefix is 9, suffix is 10.
         // In the old code, slicing [9..19-10] was [9..9] or would panic on shorter overlapping messages.
-        let err = parse_attach_error_response("Session ' not found".to_string(), "test-id");
+        let err = parse_attach_error_response("Session ' not found".to_string(), None, None, "test-id");
         assert_eq!(err.code, IpcErrorCode::InternalError);
         assert!(err.details.is_none());
+    }
+
+    #[test]
+    fn test_p07_attach_error_with_structured_session_not_found_ignores_divergent_message() {
+        // P07 regression: When daemon sends SESSION_NOT_FOUND via structured wire response, but message
+        // text is divergent (e.g. localized or from different PTY backend),
+        // it must classify as SessionNotFound, NOT InternalError.
+        let err = parse_attach_error_response(
+            "Terminal process terminated unexpectedly".to_string(),
+            Some("SESSION_NOT_FOUND".to_string()),
+            Some(serde_json::json!({
+                "source": "daemon_attach",
+                "kind": "session_not_found",
+                "sessionId": "test-id",
+            })),
+            "test-id",
+        );
+        assert_eq!(err.code, IpcErrorCode::SessionNotFound);
+        assert_ne!(err.code, IpcErrorCode::InternalError);
+        assert_eq!(err.message, "Terminal process terminated unexpectedly");
+        let details = err.details.expect("expected details");
+        assert_eq!(details.get("source").and_then(|v| v.as_str()), Some("daemon_attach"));
+        assert_eq!(details.get("sessionId").and_then(|v| v.as_str()), Some("test-id"));
     }
 
     #[test]

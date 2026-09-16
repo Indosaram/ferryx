@@ -101,7 +101,7 @@ describe("classifyNativeTerminalAttachError", () => {
   });
 
   describe("SESSION_NOT_FOUND with legacy message match", () => {
-    it("should return confirmed-missing for exact legacy message without details", () => {
+    it("p07_regression_should_drop_literal_string_fallback_when_code_is_present_without_typed_details", () => {
       const error: StructuredIpcError = {
         code: "SESSION_NOT_FOUND",
         message: `Session '${requestedSessionId}' not found`,
@@ -110,13 +110,30 @@ describe("classifyNativeTerminalAttachError", () => {
 
       const result = classifyNativeTerminalAttachError(error, requestedSessionId);
 
-      expect(result.status).toBe("confirmed-missing");
-      if (result.status === "confirmed-missing") {
-        expect(result.reason).toBe("legacy-message-match");
+      // Under P07, structured code must not fall back to literal message match.
+      // Without valid typed details, it must return unverified-missing.
+      expect(result.status).toBe("unverified-missing");
+      if (result.status === "unverified-missing") {
+        expect(result.reason).toBe("unclear-origin");
       }
     });
 
-    it("should return confirmed-missing for exact legacy message with undefined details", () => {
+    it("should return unverified-missing for exact legacy message without details", () => {
+      const error: StructuredIpcError = {
+        code: "SESSION_NOT_FOUND",
+        message: `Session '${requestedSessionId}' not found`,
+        details: {},
+      };
+
+      const result = classifyNativeTerminalAttachError(error, requestedSessionId);
+
+      expect(result.status).toBe("unverified-missing");
+      if (result.status === "unverified-missing") {
+        expect(result.reason).toBe("unclear-origin");
+      }
+    });
+
+    it("should return unverified-missing for exact legacy message with undefined details", () => {
       const error: StructuredIpcError = {
         code: "SESSION_NOT_FOUND",
         message: `Session '${requestedSessionId}' not found`,
@@ -125,10 +142,13 @@ describe("classifyNativeTerminalAttachError", () => {
 
       const result = classifyNativeTerminalAttachError(error, requestedSessionId);
 
-      expect(result.status).toBe("confirmed-missing");
+      expect(result.status).toBe("unverified-missing");
+      if (result.status === "unverified-missing") {
+        expect(result.reason).toBe("unclear-origin");
+      }
     });
 
-    it("should return confirmed-missing when message matches and details.sessionId matches", () => {
+    it("should return unverified-missing when message matches and details lacks source/kind", () => {
       const error: StructuredIpcError = {
         code: "SESSION_NOT_FOUND",
         message: `Session '${requestedSessionId}' not found`,
@@ -140,7 +160,10 @@ describe("classifyNativeTerminalAttachError", () => {
 
       const result = classifyNativeTerminalAttachError(error, requestedSessionId);
 
-      expect(result.status).toBe("confirmed-missing");
+      expect(result.status).toBe("unverified-missing");
+      if (result.status === "unverified-missing") {
+        expect(result.reason).toBe("unclear-origin");
+      }
     });
 
     it("should return operational-error when message matches but details.sessionId conflicts", () => {
@@ -426,6 +449,8 @@ describe("classifyNativeTerminalAttachError", () => {
         code: "SESSION_NOT_FOUND",
         message: `Session '${idWithQuote}' not found`,
         details: {
+          source: "daemon_attach",
+          kind: "session_not_found",
           sessionId: idWithQuote,
         },
       };
@@ -611,7 +636,7 @@ describe("classifyNativeTerminalAttachError", () => {
       expect(result.status).toBe("confirmed-missing");
     });
 
-    it("should fall back to message when typed details incomplete", () => {
+    it("should return unverified-missing when typed details incomplete", () => {
       const error: StructuredIpcError = {
         code: "SESSION_NOT_FOUND",
         message: `Session '${requestedSessionId}' not found`,
@@ -623,7 +648,10 @@ describe("classifyNativeTerminalAttachError", () => {
 
       const result = classifyNativeTerminalAttachError(error, requestedSessionId);
 
-      expect(result.status).toBe("confirmed-missing");
+      expect(result.status).toBe("unverified-missing");
+      if (result.status === "unverified-missing") {
+        expect(result.reason).toBe("unclear-origin");
+      }
     });
 
     it("should report reason for each confirmed-missing path", () => {
@@ -637,12 +665,6 @@ describe("classifyNativeTerminalAttachError", () => {
         },
       };
 
-      const legacyMessageError: StructuredIpcError = {
-        code: "SESSION_NOT_FOUND",
-        message: `Session '${requestedSessionId}' not found`,
-        details: {},
-      };
-
       const legacyInternalError: StructuredIpcError = {
         code: "INTERNAL_ERROR",
         message: `Session '${requestedSessionId}' not found`,
@@ -650,18 +672,12 @@ describe("classifyNativeTerminalAttachError", () => {
       };
 
       const result1 = classifyNativeTerminalAttachError(typedDetailsError, requestedSessionId);
-      const result2 = classifyNativeTerminalAttachError(legacyMessageError, requestedSessionId);
       const result3 = classifyNativeTerminalAttachError(legacyInternalError, requestedSessionId);
 
       expect(result1).toEqual({
         status: "confirmed-missing",
         sessionId: requestedSessionId,
         reason: "daemon-attach-not-found",
-      });
-      expect(result2).toEqual({
-        status: "confirmed-missing",
-        sessionId: requestedSessionId,
-        reason: "legacy-message-match",
       });
       expect(result3).toEqual({
         status: "confirmed-missing",

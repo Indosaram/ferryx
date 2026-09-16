@@ -521,6 +521,8 @@ impl DaemonSessionService {
     }
 
     pub(super) async fn restore_remote_sessions_at(&self, path: PathBuf) -> Result<(), String> {
+        let paired_path = path.with_file_name("paired_descriptors.json");
+        self.terminal_service.paired().set_store_path(paired_path);
         let records: Vec<DurableRemoteSession> = crate::ipc::run_blocking(move || {
             let value = load_session_from_path(&path)?
                 .and_then(|mut s| s.extra.remove("remoteSessions"))
@@ -1480,12 +1482,13 @@ impl DaemonSessionService {
             };
         }
         if super::super::terminal::paired_runtime::Runtime::owns(session_id) {
-            if self.terminal_service.paired().contains(session_id) {
+            if let Some(_descriptor) = self.terminal_service.paired().descriptor(session_id) {
                 let (start_sequence, end_sequence) = self
                     .terminal_service
                     .output_hub()
                     .session_sequence_range(session_id)
                     .unwrap_or((None, None));
+                let running = self.terminal_service.paired().contains(session_id);
                 return DaemonResponse::DescribeSessionOk {
                     session: DaemonSessionDetails {
                         session_id: session_id.into(),
@@ -1494,7 +1497,7 @@ impl DaemonSessionService {
                         cwd: None,
                         cols: 80,
                         rows: 24,
-                        running: true,
+                        running,
                         start_sequence,
                         end_sequence,
                     },
@@ -1504,6 +1507,12 @@ impl DaemonSessionService {
         let Some(pty_session) = self.terminal_service.get_session(session_id) else {
             return DaemonResponse::Error {
                 message: format!("Session '{session_id}' not found"),
+                code: Some("SESSION_NOT_FOUND".to_string()),
+                details: Some(serde_json::json!({
+                    "source": "daemon_describe",
+                    "kind": "session_not_found",
+                    "sessionId": session_id,
+                })),
             };
         };
 

@@ -1,7 +1,7 @@
 // allow: SIZE_OK — IPC module bundling terminal commands, output batching, and macOS libproc CWD resolution within constrained write scope
 use crate::daemon::client::{DaemonAttachment, DaemonClient};
 use crate::daemon::protocol::{DaemonStreamMessage, TerminalStartup};
-use crate::ipc::{run_blocking, IpcError};
+use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
 use crate::terminal::TerminalSignal;
 use crate::worktree::{WorkspaceRegistry, WorktreeError, WorktreeIdentity};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -742,10 +742,26 @@ pub async fn reconcile_ambiguous_create(
                                 return Ok(Some(session));
                             }
                             crate::remote::machine_protocol::OperationOutcome::Error { error } => {
-                                return Err(IpcError::internal(error.code));
+                                let client_err = crate::paired_host::client::ClientError {
+                                    code: error.code.clone(),
+                                    machine_error: Some(error.clone()),
+                                    request_id: if error.request_id.is_empty() {
+                                        Some(request_id.to_string())
+                                    } else {
+                                        Some(error.request_id.clone())
+                                    },
+                                    ambiguous: false,
+                                };
+                                return Err(map_client_error(&client_err, Some(host_id), Some(generation)));
                             }
                             _ => {
-                                return Err(IpcError::internal("OPERATION_OUTCOME_UNKNOWN"));
+                                let unknown_err = crate::paired_host::client::ClientError {
+                                    code: "OPERATION_OUTCOME_UNKNOWN".to_string(),
+                                    machine_error: None,
+                                    request_id: Some(request_id.to_string()),
+                                    ambiguous: true,
+                                };
+                                return Err(map_client_error(&unknown_err, Some(host_id), Some(generation)));
                             }
                         }
                     }
@@ -756,14 +772,26 @@ pub async fn reconcile_ambiguous_create(
                         crate::remote::machine_protocol::Operation::OutcomeUnknown { .. },
                     ) => {
                         if attempts >= MAX_RECONCILE_ATTEMPTS {
-                            return Err(IpcError::internal("OPERATION_OUTCOME_UNKNOWN"));
+                            let unknown_err = crate::paired_host::client::ClientError {
+                                code: "OPERATION_OUTCOME_UNKNOWN".to_string(),
+                                machine_error: None,
+                                request_id: Some(request_id.to_string()),
+                                ambiguous: true,
+                            };
+                            return Err(map_client_error(&unknown_err, Some(host_id), Some(generation)));
                         }
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         continue;
                     }
                     _ => {
                         if attempts >= MAX_RECONCILE_ATTEMPTS {
-                            return Err(IpcError::internal("OPERATION_OUTCOME_UNKNOWN"));
+                            let unknown_err = crate::paired_host::client::ClientError {
+                                code: "OPERATION_OUTCOME_UNKNOWN".to_string(),
+                                machine_error: None,
+                                request_id: Some(request_id.to_string()),
+                                ambiguous: true,
+                            };
+                            return Err(map_client_error(&unknown_err, Some(host_id), Some(generation)));
                         }
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         continue;
@@ -771,14 +799,14 @@ pub async fn reconcile_ambiguous_create(
                 }
             }
             Err(e) if e.code == "OPERATION_NOT_FOUND" => {
-                return Err(IpcError::internal("OPERATION_NOT_FOUND"));
+                return Err(map_client_error(&e, Some(host_id), Some(generation)));
             }
             Err(e) if attempts < MAX_RECONCILE_ATTEMPTS => {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
             }
             Err(e) => {
-                return Err(IpcError::internal(e.code));
+                return Err(map_client_error(&e, Some(host_id), Some(generation)));
             }
         }
     }
@@ -1257,10 +1285,18 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
             Err(ref e) if e.ambiguous || matches!(e.code.as_str(), "TIMEOUT" | "OPERATION_OUTCOME_UNKNOWN") => {
                 match reconcile_ambiguous_create(&daemon_client, &host_id, host.generation, &client_request_id, false).await? {
                     Some(session) => session,
-                    None => return Err(IpcError::internal("OPERATION_OUTCOME_UNKNOWN")),
+                    None => {
+                        let unknown_err = crate::paired_host::client::ClientError {
+                            code: "OPERATION_OUTCOME_UNKNOWN".to_string(),
+                            machine_error: None,
+                            request_id: Some(client_request_id.clone()),
+                            ambiguous: true,
+                        };
+                        return Err(map_client_error(&unknown_err, Some(&host_id), Some(host.generation)));
+                    }
                 }
             }
-            Err(e) => return Err(IpcError::internal(e.code)),
+            Err(e) => return Err(map_client_error(&e, Some(&host_id), Some(host.generation))),
         };
 
         let descriptor = crate::terminal::paired_daemon::Descriptor {
@@ -1294,7 +1330,7 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                             cleanup_req_id,
                         )
                         .await;
-                        return Err(IpcError::internal(reattach_error.code));
+                        return Err(map_client_error(&reattach_error, Some(&host_id), Some(host.generation)));
                     }
                 }
             }
@@ -1311,7 +1347,7 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                     cleanup_req_id,
                 )
                 .await;
-                return Err(IpcError::internal(reattach_error.code));
+                return Err(map_client_error(&reattach_error, Some(&host_id), Some(host.generation)));
             }
         };
 
@@ -1818,7 +1854,7 @@ pub(crate) fn remote_control_result(reply: crate::daemon::protocol::DaemonRespon
     match reply {
         DaemonResponse::WriteOk | DaemonResponse::ResizeOk => Ok(()),
         DaemonResponse::RemoteSessionError { failure } => Err(IpcError::internal(failure.to_string()).with_details(serde_json::to_value(failure).map_err(|e| IpcError::internal(e.to_string()))?)),
-        DaemonResponse::Error { message } => Err(IpcError::internal(message)),
+        DaemonResponse::Error { message, .. } => Err(IpcError::internal(message)),
         _ => Err(IpcError::internal("Unexpected remote control response")),
     }
 }
@@ -1910,3 +1946,113 @@ pub async fn cmd_terminal_list(
     }
     Ok(summaries)
 }
+
+pub(crate) fn map_client_error(
+    err: &crate::paired_host::client::ClientError,
+    host_id: Option<&str>,
+    generation: Option<crate::scoped_contracts::Epoch>,
+) -> IpcError {
+    let code = IpcErrorCode::from_code_str(&err.code);
+    let message = err
+        .machine_error
+        .as_ref()
+        .map(|m| m.message.clone())
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| err.code.clone());
+
+    let mut details = serde_json::Map::new();
+    if let Some(ref req_id) = err.request_id {
+        details.insert("requestId".to_string(), serde_json::Value::String(req_id.clone()));
+    } else if let Some(ref me) = err.machine_error {
+        if !me.request_id.is_empty() {
+            details.insert("requestId".to_string(), serde_json::Value::String(me.request_id.clone()));
+        }
+    }
+
+    details.insert("ambiguous".to_string(), serde_json::Value::Bool(err.ambiguous));
+
+    if let Some(ref me) = err.machine_error {
+        if let Ok(val) = serde_json::to_value(me) {
+            details.insert("machineError".to_string(), val);
+        }
+    }
+
+    if let Some(h) = host_id {
+        details.insert("hostId".to_string(), serde_json::Value::String(h.to_string()));
+    }
+
+    if let Some(g) = generation {
+        details.insert("generation".to_string(), serde_json::json!(g));
+    }
+
+    IpcError::new(code, message).with_details(serde_json::Value::Object(details))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ipc::IpcErrorCode;
+
+    #[test]
+    fn test_p08_client_error_surfaces_as_typed_ipc_error_code_and_not_internal() {
+        // G009-A & P08: Assert that a daemon/paired failure (e.g. SESSION_NOT_FOUND)
+        // surfaces as a TYPED IpcErrorCode variant,
+        // preserving requestId, ambiguous, machineError, hostId, generation in details,
+        // and FAILS if the mapping is reverted to IpcError::internal("...") (assert code != internal).
+        let client_err = crate::paired_host::client::ClientError {
+            code: "SESSION_NOT_FOUND".to_string(),
+            machine_error: Some(crate::remote::machine_protocol::MachineError {
+                code: "SESSION_NOT_FOUND".to_string(),
+                message: "Remote session terminated".to_string(),
+                retryable: false,
+                request_id: "req-test-123".to_string(),
+                details: serde_json::Map::new(),
+            }),
+            request_id: Some("req-test-123".to_string()),
+            ambiguous: false,
+        };
+
+        let ipc_err = map_client_error(
+            &client_err,
+            Some("paired-host-42"),
+            Some(crate::scoped_contracts::Epoch(10)),
+        );
+
+        // Crucial mutation proof assertions:
+        assert_eq!(ipc_err.code, IpcErrorCode::SessionNotFound);
+        assert_ne!(ipc_err.code, IpcErrorCode::InternalError);
+        assert_eq!(ipc_err.message, "Remote session terminated");
+
+        let details = ipc_err.details.expect("expected structured details");
+        assert_eq!(details.get("requestId").and_then(|v| v.as_str()), Some("req-test-123"));
+        assert_eq!(details.get("ambiguous").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(details.get("hostId").and_then(|v| v.as_str()), Some("paired-host-42"));
+        assert_eq!(details.get("generation").and_then(|v| v.as_str()), Some("10"));
+        assert!(details.get("machineError").is_some());
+    }
+
+    #[test]
+    fn test_p08_client_error_variants_and_passthrough_mapping() {
+        // Test various produced codes map to typed variants
+        for (code, expected) in [
+            ("SESSION_EXPIRED", IpcErrorCode::SessionExpired),
+            ("PARENT_SESSION_MISMATCH", IpcErrorCode::ParentSessionMismatch),
+            ("TIMEOUT", IpcErrorCode::Timeout),
+            ("HOST_UNAVAILABLE", IpcErrorCode::HostUnavailable),
+            ("OPERATION_OUTCOME_UNKNOWN", IpcErrorCode::OperationOutcomeUnknown),
+        ] {
+            let err = crate::paired_host::client::ClientError::local(code);
+            let ipc = map_client_error(&err, None, None);
+            assert_eq!(ipc.code, expected);
+            assert_ne!(ipc.code, IpcErrorCode::InternalError);
+        }
+
+        // Test unknown code keeps stable passthrough mapping (not INTERNAL_ERROR)
+        let custom_err = crate::paired_host::client::ClientError::local("UNKNOWN_PAIRED_CODE_XYZ");
+        let ipc = map_client_error(&custom_err, None, None);
+        assert_ne!(ipc.code, IpcErrorCode::InternalError);
+        let serialized_code = serde_json::to_value(&ipc.code).unwrap();
+        assert_eq!(serialized_code, "UNKNOWN_PAIRED_CODE_XYZ");
+    }
+}
+

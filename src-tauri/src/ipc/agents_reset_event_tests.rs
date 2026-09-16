@@ -129,6 +129,8 @@ async fn reset_scenario(succeeds: bool) {
         } else {
             DaemonResponse::Error {
                 message: "fixture rejection".into(),
+                code: None,
+                details: None,
             }
         };
         writer

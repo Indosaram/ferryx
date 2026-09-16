@@ -1,4 +1,5 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { remoteHostKey, remoteHostStore, REMOTE_HOST_STORAGE_KEY, type HostEndpoint, type RemoteHostStore } from "../state/remoteHostStore";
 
 // The built-in relay is the product default: pairing must work with the PIN
@@ -19,6 +20,78 @@ export interface HostView {
 export interface MigrationReceipt { hostId: string; generation: string }
 export interface PairHostRequest { relayOrigin: string; pin: string; displayLabel: string }
 export interface LegacyCredentialRequest { relayOrigin: string; machineId: string; displayLabel: string; deviceToken: string }
+
+export interface PairedHostError {
+  code: string;
+  message: string;
+  details?: unknown;
+  retryable: boolean;
+}
+
+export type PairResult =
+  | { ok: true; host: HostEndpoint }
+  | { ok: false; error: PairedHostError };
+
+export interface InventoryChangeEvent {
+  type: "update" | "forget" | "reset" | "reconnect" | "pair" | "migrate" | "revoke";
+  host?: HostView;
+  hostId?: string;
+  generation?: string;
+}
+
+export type InventoryUnlisten = () => void;
+
+export function extractPairedHostError(err: unknown): PairedHostError {
+  if (err && typeof err === "object") {
+    const obj = err as Record<string, unknown>;
+    if (typeof obj.code === "string") {
+      const code = obj.code;
+      const rawMessage = typeof obj.message === "string" ? obj.message : code;
+      // Sanitize: ensure credentials (PINs, tokens) are never leaked in message
+      const message = rawMessage
+        .replace(/[0-9a-fA-F]{32,}/g, "[REDACTED]")
+        .replace(/\b[0-9]{6}\b/g, "[REDACTED]");
+      const details = obj.details;
+      const retryable = typeof obj.retryable === "boolean"
+        ? obj.retryable
+        : isRetryableCode(code);
+      return { code, message, details, retryable };
+    }
+  }
+  if (typeof err === "string" && /^[A-Z0-9_]+$/.test(err)) {
+    return {
+      code: err,
+      message: err,
+      retryable: isRetryableCode(err),
+    };
+  }
+  return {
+    code: "PAIRED_HOST_UNAVAILABLE",
+    message: "PAIRED_HOST_UNAVAILABLE",
+    retryable: true,
+  };
+}
+
+function isRetryableCode(code: string): boolean {
+  switch (code) {
+    case "PIN_EXPIRED":
+    case "EXPIRED_PIN":
+    case "INVALID_PIN":
+    case "WRONG_RELAY":
+    case "INVALID_RELAY_ORIGIN":
+    case "MACHINE_GRANT_REQUIRED":
+    case "UNAUTHORIZED":
+      return false;
+    case "TIMEOUT":
+    case "HOST_UNAVAILABLE":
+    case "PAIRED_HOST_UNAVAILABLE":
+    case "DAEMON_UNAVAILABLE":
+    case "PAIRED_HOST_STALE_GENERATION":
+    default:
+      return true;
+  }
+}
+
 export interface PairedHostCommands {
   list(): Promise<HostView[]>;
   capabilities(): Promise<{ pairedHostInventoryV1: boolean; pairedDaemonProxyV1: boolean }>;
@@ -28,9 +101,17 @@ export interface PairedHostCommands {
   read(request: MigrationReceipt): Promise<HostView>;
 }
 // No raw native exception crosses this boundary: it may contain request credentials.
+// Structured error fields {code, message, details, retryable} are sanitized and preserved.
 async function command<T>(name: string, request?: object): Promise<T> {
   try { return await invoke<T>(name, request ? { request } : undefined); }
-  catch { throw new Error("PAIRED_HOST_UNAVAILABLE"); }
+  catch (err) {
+    const structured = extractPairedHostError(err);
+    const error = new Error(structured.message) as Error & PairedHostError;
+    error.code = structured.code;
+    error.details = structured.details;
+    error.retryable = structured.retryable;
+    throw error;
+  }
 }
 export const nativePairedHostCommands: PairedHostCommands = {
   list: () => command("paired_host_list"),
@@ -62,6 +143,10 @@ function endpoint(view: HostView): HostEndpoint {
 export function createPairedHostInventory(store: RemoteHostStore, commands = nativePairedHostCommands, storage?: Storage) {
   let revision = 0;
   let refreshRequest = 0;
+  let appWideUnlisten: InventoryUnlisten | null = null;
+  const fencedGenerations = new Map<string, bigint>();
+  const tombstones = new Map<string, bigint>();
+
   // Machine features follow native inventory readiness alone; there is no
   // user-facing rollout gate. A local inventory failure fails closed below.
   let projectsEnabled = true;
@@ -82,30 +167,140 @@ export function createPairedHostInventory(store: RemoteHostStore, commands = nat
     const requestRevision = revision;
     return () => generation !== undefined && requestRevision === revision && store.getState().hosts[hostId]?.generation === generation;
   }
+
+  function updateHostWithFence(view: HostView): boolean {
+    const incomingGen = BigInt(view.generation);
+    const hostId = view.hostId;
+    const currentFenced = fencedGenerations.get(hostId);
+    if (currentFenced !== undefined && incomingGen < currentFenced) {
+      return false; // older generation rejected
+    }
+    const tombstoneGen = tombstones.get(hostId);
+    if (tombstoneGen !== undefined && incomingGen <= tombstoneGen) {
+      return false; // forgotten at equal or newer generation
+    }
+    fencedGenerations.set(hostId, incomingGen);
+    tombstones.delete(hostId);
+    const host = endpoint(view);
+    store.upsertHost(host);
+    return true;
+  }
+
+  function forgetHostWithFence(hostId: string, generationStr: string): boolean {
+    const gen = BigInt(generationStr);
+    const currentFenced = fencedGenerations.get(hostId);
+    if (currentFenced !== undefined && gen < currentFenced) {
+      return false;
+    }
+    fencedGenerations.set(hostId, gen);
+    tombstones.set(hostId, gen);
+    store.removeHost(hostId);
+    return true;
+  }
+
+  function handleNativeEvent(event: InventoryChangeEvent) {
+    if (!event || typeof event !== "object") return;
+    ++revision; // Invalidate any in-flight refresh!
+    if (event.type === "update" || event.type === "pair") {
+      if (event.host) {
+        updateHostWithFence(event.host);
+      }
+    } else if (event.type === "forget") {
+      if (event.hostId && event.generation) {
+        forgetHostWithFence(event.hostId, event.generation);
+      }
+    } else if (event.type === "reconnect" || event.type === "reset" || event.type === "migrate") {
+      if (event.host) {
+        updateHostWithFence(event.host);
+      } else {
+        void refresh();
+      }
+    } else if (event.type === "revoke") {
+      if (event.hostId) {
+        const existing = store.getState().hosts[event.hostId];
+        if (existing) {
+          store.upsertHost({ ...existing, authStatus: "revoked", online: false });
+        }
+      }
+    }
+  }
+
+  async function subscribeAppWide(): Promise<InventoryUnlisten> {
+    if (appWideUnlisten) return appWideUnlisten;
+    if (isTauri()) {
+      try {
+        const unlisten = await listen<InventoryChangeEvent>("paired_host_inventory_changed", (e) => {
+          handleNativeEvent(e.payload);
+        });
+        appWideUnlisten = () => {
+          unlisten();
+          appWideUnlisten = null;
+        };
+        return appWideUnlisten;
+      } catch (err) {
+        console.warn("Failed to subscribe app-wide to paired host inventory events", err);
+      }
+    }
+    return () => {};
+  }
+
   async function refresh() {
     const request = ++refreshRequest;
     const started = revision;
     try {
       const [views, capability] = await Promise.all([commands.list(), commands.capabilities()]);
       if (capability.pairedHostInventoryV1 !== true) throw new Error("INVENTORY_UNAVAILABLE");
-      const hosts = views.map(endpoint);
+      const validViews = views.filter(v => {
+        const gen = BigInt(v.generation);
+        const fenced = fencedGenerations.get(v.hostId);
+        if (fenced !== undefined && gen < fenced) return false;
+        const tomb = tombstones.get(v.hostId);
+        if (tomb !== undefined && gen <= tomb) return false;
+        return true;
+      });
+      const hosts = validViews.map(endpoint);
       if (request !== refreshRequest || started !== revision) return;
+      for (const v of validViews) {
+        fencedGenerations.set(v.hostId, BigInt(v.generation));
+      }
       proxyAvailable = capability.pairedDaemonProxyV1 === true;
       store.setHosts(hosts);
       store.setState(s => ({ ...s, nativeStatus: "ready", machineFeaturesEnabled: true }));
     } catch { if (request === refreshRequest && started === revision) unavailable(); }
   }
-  async function pair(request: PairHostRequest, onPaired?: (host: HostEndpoint) => void): Promise<boolean> {
+
+  async function pair(request: PairHostRequest, onPaired?: (host: HostEndpoint) => void): Promise<PairResult> {
     const started = ++revision;
     try {
       const relayOrigin = origin(request.relayOrigin);
       const host = endpoint(await commands.pair({ ...request, relayOrigin }));
-      if (started !== revision || host.relayOrigin !== relayOrigin) return false;
+      if (started !== revision || host.relayOrigin !== relayOrigin) {
+        return {
+          ok: false,
+          error: {
+            code: "STALE_HOST_GENERATION",
+            message: "Credentials changed during this request. Refresh the inventory and retry.",
+            retryable: true,
+          },
+        };
+      }
+      fencedGenerations.set(host.hostId, BigInt(host.generation!));
+      tombstones.delete(host.hostId);
       store.upsertHost(host);
       onPaired?.(host);
-      return true;
-    } catch { return false; }
+      return { ok: true, host };
+    } catch (err) {
+      const structured = extractPairedHostError(err);
+      return { ok: false, error: structured };
+    }
   }
+
+  /** Deprecated boolean shim for backwards compatibility with external callers */
+  async function pairBoolean(request: PairHostRequest, onPaired?: (host: HostEndpoint) => void): Promise<boolean> {
+    const result = await pair(request, onPaired);
+    return result.ok;
+  }
+
   async function forget(hostId: string): Promise<boolean> {
     const host = store.getState().hosts[hostId];
     if (!host?.generation) return false;
@@ -113,6 +308,9 @@ export function createPairedHostInventory(store: RemoteHostStore, commands = nat
     try {
       await commands.forget({ hostId, generation: host.generation });
       if (started !== revision || store.getState().hosts[hostId]?.generation !== host.generation) return false;
+      const gen = BigInt(host.generation);
+      fencedGenerations.set(hostId, gen);
+      tombstones.set(hostId, gen);
       store.removeHost(hostId);
       return true;
     } catch { if (started === revision) unavailable(); return false; }
@@ -161,12 +359,25 @@ export function createPairedHostInventory(store: RemoteHostStore, commands = nat
       if (started === revision) store.setState(s => ({ ...s, migrationStatus: pending ? "pending" : "complete" }));
     } catch { store.setState(s => ({ ...s, migrationStatus: "pending" })); }
   }
-  return { refresh, pair, forget, capture, migrateLegacy, setProjectsEnabled, getProjectsEnabled, hasProxyCapability };
+  return {
+    refresh,
+    pair,
+    pairBoolean,
+    forget,
+    capture,
+    migrateLegacy,
+    setProjectsEnabled,
+    getProjectsEnabled,
+    hasProxyCapability,
+    subscribeAppWide,
+    handleNativeEvent,
+  };
 }
 export const pairedHostInventory = createPairedHostInventory(remoteHostStore, nativePairedHostCommands,
   typeof localStorage === "undefined" ? undefined : localStorage);
 export async function bootstrapPairedHostInventory() {
   if (!isTauri()) return;
+  await pairedHostInventory.subscribeAppWide();
   await pairedHostInventory.migrateLegacy();
   await pairedHostInventory.refresh();
 }

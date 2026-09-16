@@ -23,8 +23,8 @@ impl DaemonSessionService {
                     if target.session_id != id { return Err("SESSION_OWNERSHIP_CHANGED".into()); }
                     Ok(detail)
                 },
-                DaemonResponse::Error { message } if message == "SESSION_NOT_FOUND" => Err(message),
-                DaemonResponse::Error { message } if message == "HOST_UNAVAILABLE" => Err(message),
+                DaemonResponse::Error { message, .. } if message == "SESSION_NOT_FOUND" => Err(message),
+                DaemonResponse::Error { message, .. } if message == "HOST_UNAVAILABLE" => Err(message),
                 _ => Err("MACHINE_OWNER_UNSUPPORTED".into()),
             };
         }

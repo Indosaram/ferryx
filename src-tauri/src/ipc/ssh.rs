@@ -663,7 +663,7 @@ mod tests {
         let result = import_config_into_store(&path, "Host new-box\n  HostName new.example\n");
         let saved = std::fs::read(&path).expect("read inventory after import");
         assert_eq!(
-            (result.as_ref().err().map(|error| error.code), saved.as_slice()),
+            (result.as_ref().err().map(|error| error.code.clone()), saved.as_slice()),
             (Some(IpcErrorCode::ParseError), original.as_slice()),
         );
         assert!(!path.with_extension("json.tmp").exists());

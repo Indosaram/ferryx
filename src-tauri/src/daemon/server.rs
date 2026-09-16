@@ -1021,6 +1021,27 @@ impl Default for DaemonServer {
     }
 }
 
+
+fn daemon_error(message: impl ToString) -> DaemonResponse {
+    DaemonResponse::Error {
+        message: message.to_string(),
+        code: None,
+        details: None,
+    }
+}
+
+fn daemon_session_not_found(session_id: &str, source: &'static str) -> DaemonResponse {
+    DaemonResponse::Error {
+        message: format!("Session '{session_id}' not found"),
+        code: Some("SESSION_NOT_FOUND".to_string()),
+        details: Some(serde_json::json!({
+            "source": source,
+            "kind": "session_not_found",
+            "sessionId": session_id,
+        })),
+    }
+}
+
 impl DaemonServer {
     pub fn new() -> Self {
         // Headless CLI constructs synchronously inside its multi-thread runtime.
@@ -1576,18 +1597,18 @@ impl DaemonServer {
                 Ok(DaemonRequest::MachineSessionMetadata { target, report }) => {
                     match Box::pin(self.session_service.validate_machine_agent_report(target, report)).await {
                         Ok(session) => DaemonResponse::MachineSessionDetailOk { detail: crate::remote::machine_protocol::SessionDetail::Running { session } },
-                        Err(message) => DaemonResponse::Error { message },
+                        Err(message) => daemon_error(message),
                     }
                 }
                 Ok(DaemonRequest::MachineSessionDetail { session_id }) => {
                     match Box::pin(self.session_service.machine_detail_routed(&session_id, crate::scoped_contracts::Epoch(self.epoch))).await {
                         Ok(detail) => DaemonResponse::MachineSessionDetailOk { detail },
-                        Err(message) => DaemonResponse::Error { message },
+                        Err(message) => daemon_error(message),
                     }
                 }
                 Ok(DaemonRequest::RetryRemoteSession { session_id }) => {
                     match self.validate_session_ssh_target(&session_id).await {
-                        Err(e) => DaemonResponse::Error { message: e.to_string() },
+                        Err(e) => daemon_error(e.to_string()),
                         Ok(()) => match self.terminal_service.remote().retry(&session_id) {
                             Ok(()) => DaemonResponse::RetryRemoteSessionOk,
                             Err(failure) => DaemonResponse::RemoteSessionError { failure },
@@ -1596,19 +1617,19 @@ impl DaemonServer {
                 },
                 Ok(DaemonRequest::RemoteWrite { session_id, generation, data }) if crate::terminal::paired_runtime::Runtime::owns(&session_id) => {
                     match self.terminal_service.write_input_operation(&session_id, generation, data) {
-                        Ok(op) => match op.await { Ok(()) => DaemonResponse::WriteOk, Err(e) => DaemonResponse::Error { message: e.to_string() } },
-                        Err(e) => DaemonResponse::Error { message: e.to_string() },
+                        Ok(op) => match op.await { Ok(()) => DaemonResponse::WriteOk, Err(e) => daemon_error(e.to_string()) },
+                        Err(e) => daemon_error(e.to_string()),
                     }
                 }
                 Ok(DaemonRequest::RemoteResize { session_id, generation, cols, rows }) if crate::terminal::paired_runtime::Runtime::owns(&session_id) => {
                     match self.terminal_service.resize_operation(&session_id, generation, cols, rows) {
-                        Ok(op) => match op.await { Ok(()) => DaemonResponse::ResizeOk, Err(e) => DaemonResponse::Error { message: e.to_string() } },
-                        Err(e) => DaemonResponse::Error { message: e.to_string() },
+                        Ok(op) => match op.await { Ok(()) => DaemonResponse::ResizeOk, Err(e) => daemon_error(e.to_string()) },
+                        Err(e) => daemon_error(e.to_string()),
                     }
                 }
                 Ok(DaemonRequest::RemoteWrite { session_id, generation, data }) => {
                     match self.validate_session_ssh_target(&session_id).await {
-                        Err(e) => DaemonResponse::Error { message: e.to_string() },
+                        Err(e) => daemon_error(e.to_string()),
                         Ok(()) => match self.terminal_service.remote().write(&session_id, generation, data) {
                         Ok(op) => match op.await { Ok(()) => DaemonResponse::WriteOk, Err(failure) => DaemonResponse::RemoteSessionError { failure } },
                         Err(failure) => DaemonResponse::RemoteSessionError { failure },
@@ -1617,7 +1638,7 @@ impl DaemonServer {
                 }
                 Ok(DaemonRequest::RemoteResize { session_id, generation, cols, rows }) => {
                     match self.validate_session_ssh_target(&session_id).await {
-                        Err(e) => DaemonResponse::Error { message: e.to_string() },
+                        Err(e) => daemon_error(e.to_string()),
                         Ok(()) => match self.terminal_service.remote().resize(&session_id, generation, cols, rows) {
                         Ok(op) => match op.await { Ok(()) => DaemonResponse::ResizeOk, Err(failure) => DaemonResponse::RemoteSessionError { failure } },
                         Err(failure) => DaemonResponse::RemoteSessionError { failure },
@@ -1627,13 +1648,13 @@ impl DaemonServer {
                 Ok(DaemonRequest::CreateWorktree { workspace_id, worktree, base_ref }) => {
                     match crate::remote::workspace_api::worktrees::owner_mutation(self.remote_state().clone(), workspace_id, worktree, base_ref, None).await {
                         Ok(response) => response,
-                        Err(message) => DaemonResponse::Error { message },
+                        Err(message) => daemon_error(message),
                     }
                 }
                 Ok(DaemonRequest::DeleteWorktree { workspace_id, worktree, delete_branch, destructive }) => {
                     match crate::remote::workspace_api::worktrees::owner_mutation(self.remote_state().clone(), workspace_id, worktree, None, Some((delete_branch, destructive))).await {
                         Ok(response) => response,
-                        Err(message) => DaemonResponse::Error { message },
+                        Err(message) => daemon_error(message),
                     }
                 }
                 Ok(DaemonRequest::RegisterWorkspace {
@@ -1645,12 +1666,12 @@ impl DaemonServer {
                         .map_err(crate::ipc::IpcError::internal)).await
                 } {
                     Ok(()) => DaemonResponse::RegisterWorkspaceOk,
-                    Err(e) => DaemonResponse::Error { message: e.to_string() },
+                    Err(e) => daemon_error(e.to_string()),
                 },
                 Ok(DaemonRequest::UnregisterWorkspace { workspace_id }) => {
                     match self.handle_unregister_workspace(&workspace_id).await {
                         Ok(()) => DaemonResponse::UnregisterWorkspaceOk,
-                        Err(e) => DaemonResponse::Error { message: e },
+                        Err(e) => daemon_error(e),
                     }
                 }
                 Ok(DaemonRequest::Spawn {
@@ -1684,10 +1705,8 @@ impl DaemonServer {
                                     session,
                                 }
                             }
-                            DaemonResponse::Error { message } => DaemonResponse::Error { message },
-                            _ => DaemonResponse::Error {
-                                message: "Failed to describe spawned session".to_string(),
-                            },
+                            DaemonResponse::Error { message, .. } => daemon_error(message),
+                            _ => daemon_error("Failed to describe spawned session".to_string(),),
                         },
                         Err(SpawnError::AgentSessionConflict {
                             agent_type,
@@ -1703,9 +1722,7 @@ impl DaemonServer {
                         Err(SpawnError::InvalidAgentResume(message)) => {
                             DaemonResponse::AgentResumeInvalid { message }
                         }
-                        Err(e) => DaemonResponse::Error {
-                            message: e.to_string(),
-                        },
+                        Err(e) => daemon_error(e.to_string(),),
                     }
                 }
                 Ok(DaemonRequest::DescribeSession { session_id }) => {
@@ -1723,12 +1740,10 @@ impl DaemonServer {
                     } else if let Some(peer) = self.session_router.find_legacy_peer_for_session(&session_id) {
                         match peer.describe_session(&session_id).await {
                             Ok(session) => DaemonResponse::DescribeSessionOk { session },
-                            Err(message) => DaemonResponse::Error { message },
+                            Err(message) => daemon_error(message),
                         }
                     } else {
-                        DaemonResponse::Error {
-                            message: format!("Session '{session_id}' not found"),
-                        }
+                        daemon_session_not_found(&session_id, "daemon_describe")
                     }
                 }
                 Ok(DaemonRequest::DiscoverAgentSession {
@@ -1758,12 +1773,10 @@ impl DaemonServer {
                     } else if let Some(peer) = self.session_router.find_legacy_peer_for_session(&session_id) {
                         match peer.discover_agent_session(&session_id, &agent_type).await {
                             Ok(provider_session_id) => DaemonResponse::DiscoverAgentSessionOk { provider_session_id },
-                            Err(message) => DaemonResponse::Error { message },
+                            Err(message) => daemon_error(message),
                         }
                     } else {
-                        DaemonResponse::Error {
-                            message: format!("Session '{session_id}' not found"),
-                        }
+                        daemon_session_not_found(&session_id, "daemon_discover_agent")
                     }
                 }
                 Ok(DaemonRequest::ResetAgentState { session_id }) => {
@@ -1781,7 +1794,7 @@ impl DaemonServer {
                                 self.agent_states.release_manual(&session_id);
                                 DaemonResponse::ResetAgentStateOk
                             }
-                            Ok(Err(message)) => DaemonResponse::Error { message },
+                            Ok(Err(message)) => daemon_error(message),
                             Err(_) => {
                                 tracing::warn!(session_id, "peer reset_agent_state timed out; releasing locally");
                                 self.agent_states.release_manual(&session_id);
@@ -1797,37 +1810,33 @@ impl DaemonServer {
                     match self.terminal_service.write_input_operation(&session_id, 0, data) {
                         Ok(pending) => match pending.await {
                             Ok(()) => DaemonResponse::WriteOk,
-                            Err(e) => DaemonResponse::Error { message: e.to_string() },
+                            Err(e) => daemon_error(e.to_string()),
                         },
-                        Err(e) => DaemonResponse::Error { message: e.to_string() },
+                        Err(e) => daemon_error(e.to_string()),
                     }
                 }
                 Ok(DaemonRequest::Resize { session_id, cols, rows }) if crate::terminal::paired_runtime::Runtime::owns(&session_id) => {
                     match self.terminal_service.resize_operation(&session_id, 0, cols, rows) {
                         Ok(pending) => match pending.await {
                             Ok(()) => DaemonResponse::ResizeOk,
-                            Err(e) => DaemonResponse::Error { message: e.to_string() },
+                            Err(e) => daemon_error(e.to_string()),
                         },
-                        Err(e) => DaemonResponse::Error { message: e.to_string() },
+                        Err(e) => daemon_error(e.to_string()),
                     }
                 }
                 Ok(DaemonRequest::Write { session_id, data }) => {
                     if self.session_router.is_local_session(&session_id) {
                         match self.write_session_input(&session_id, data).await {
                             Ok(()) => DaemonResponse::WriteOk,
-                            Err(e) => DaemonResponse::Error {
-                                message: e.to_string(),
-                            },
+                            Err(e) => daemon_error(e.to_string(),),
                         }
                     } else if let Some(peer) = self.session_router.find_legacy_peer_for_session(&session_id) {
                         match peer.write_input(&session_id, &data).await {
                             Ok(()) => DaemonResponse::WriteOk,
-                            Err(message) => DaemonResponse::Error { message },
+                            Err(message) => daemon_error(message),
                         }
                     } else {
-                        DaemonResponse::Error {
-                            message: format!("Session '{session_id}' not found"),
-                        }
+                        daemon_session_not_found(&session_id, "daemon_write")
                     }
                 }
                 Ok(DaemonRequest::Resize {
@@ -1838,47 +1847,38 @@ impl DaemonServer {
                     if self.session_router.is_local_session(&session_id) {
                         match self.resize_session(&session_id, cols, rows).await {
                             Ok(()) => DaemonResponse::ResizeOk,
-                            Err(e) => DaemonResponse::Error {
-                                message: e.to_string(),
-                            },
+                            Err(e) => daemon_error(e.to_string(),),
                         }
                     } else if let Some(peer) = self.session_router.find_legacy_peer_for_session(&session_id) {
                         match peer.resize(&session_id, cols, rows).await {
                             Ok(()) => DaemonResponse::ResizeOk,
-                            Err(message) => DaemonResponse::Error { message },
+                            Err(message) => daemon_error(message),
                         }
                     } else {
-                        DaemonResponse::Error {
-                            message: format!("Session '{session_id}' not found"),
-                        }
+                        daemon_session_not_found(&session_id, "daemon_resize")
                     }
                 }
                 Ok(DaemonRequest::Signal { session_id, signal }) => {
                     if self.session_router.is_local_session(&session_id) {
                         match self.terminal_service.signal(&session_id, signal) {
                             Ok(()) => DaemonResponse::SignalOk,
-                            Err(e) => DaemonResponse::Error {
-                                message: e.to_string(),
-                            },
+                            Err(e) => daemon_error(e.to_string(),),
                         }
                     } else if let Some(peer) = self.session_router.find_legacy_peer_for_session(&session_id) {
                         match peer.signal(&session_id, signal).await {
                             Ok(()) => DaemonResponse::SignalOk,
-                            Err(message) => DaemonResponse::Error { message },
+                            Err(message) => daemon_error(message),
                         }
                     } else {
-                        DaemonResponse::Error {
-                            message: format!("Session '{session_id}' not found"),
-                        }
+                        daemon_session_not_found(&session_id, "daemon_signal")
                     }
                 }
                 Ok(DaemonRequest::Close { session_id }) => {
                     if self.session_router.is_local_session(&session_id) {
                         match self.handle_close(&session_id).await {
                             Ok(()) => DaemonResponse::CloseOk,
-                            Err(e) => DaemonResponse::Error {
-                                message: e.to_string(),
-                            },
+                            Err(crate::terminal::PtyError::SessionNotFound(_)) => daemon_session_not_found(&session_id, "daemon_close"),
+                            Err(e) => daemon_error(e),
                         }
                     } else if let Some(peer) = self.session_router.find_legacy_peer_for_session(&session_id) {
                         match peer.close(&session_id).await {
@@ -1886,7 +1886,7 @@ impl DaemonServer {
                                 self.agent_states.remove(&session_id);
                                 DaemonResponse::CloseOk
                             }
-                            Err(message) => DaemonResponse::Error { message },
+                            Err(message) => daemon_error(message),
                         }
                     } else {
                         // Idempotent close: closing an already closed or non-existent session is a success.
@@ -1897,9 +1897,7 @@ impl DaemonServer {
                     if self.session_router.is_local_session(&session_id) {
                         match self.handle_hibernate(&session_id).await {
                             Ok(()) => DaemonResponse::HibernateOk,
-                            Err(e) => DaemonResponse::Error {
-                                message: e.to_string(),
-                            },
+                            Err(e) => daemon_error(e.to_string(),),
                         }
                     } else {
                         // Idempotent hibernate: a process that is already absent needs no work.
@@ -1910,36 +1908,24 @@ impl DaemonServer {
                     if self.session_router.is_local_session(&session_id) {
                         match self.handle_suspend(&session_id).await {
                             Ok(()) => DaemonResponse::SuspendOk,
-                            Err(e) => DaemonResponse::Error {
-                                message: e.to_string(),
-                            },
+                            Err(e) => daemon_error(e.to_string(),),
                         }
                     } else if self.session_router.find_legacy_peer_for_session(&session_id).is_some() {
-                        DaemonResponse::Error {
-                            message: "Session suspend is not supported for peer sessions".to_string(),
-                        }
+                        daemon_error("Session suspend is not supported for peer sessions".to_string(),)
                     } else {
-                        DaemonResponse::Error {
-                            message: format!("Session '{session_id}' not found"),
-                        }
+                        daemon_session_not_found(&session_id, "daemon_suspend")
                     }
                 }
                 Ok(DaemonRequest::Resume { session_id }) => {
                     if self.session_router.is_local_session(&session_id) {
                         match self.handle_resume(&session_id).await {
                             Ok(()) => DaemonResponse::ResumeOk,
-                            Err(e) => DaemonResponse::Error {
-                                message: e.to_string(),
-                            },
+                            Err(e) => daemon_error(e.to_string(),),
                         }
                     } else if self.session_router.find_legacy_peer_for_session(&session_id).is_some() {
-                        DaemonResponse::Error {
-                            message: "Session resume is not supported for peer sessions".to_string(),
-                        }
+                        daemon_error("Session resume is not supported for peer sessions".to_string(),)
                     } else {
-                        DaemonResponse::Error {
-                            message: format!("Session '{session_id}' not found"),
-                        }
+                        daemon_session_not_found(&session_id, "daemon_resume")
                     }
                 }
                 Ok(DaemonRequest::ListSessions) => {
@@ -1955,7 +1941,7 @@ impl DaemonServer {
                 }) => {
                     let agent_subscription = self.agent_states.subscribe(&session_id);
                     if let Err(error) = self.validate_session_ssh_target(&session_id).await {
-                        DaemonResponse::Error { message: error.to_string() }
+                        daemon_error(error.to_string())
                     } else if self.session_router.is_local_session(&session_id) {
                         let is_remote = self.terminal_service.remote().contains(&session_id);
                         match self
@@ -2014,9 +2000,8 @@ impl DaemonServer {
                                 .await;
                                 return;
                             }
-                            Err(e) => DaemonResponse::Error {
-                                message: e.to_string(),
-                            },
+                            Err(crate::terminal::PtyError::SessionNotFound(_)) => daemon_session_not_found(&session_id, "daemon_attach"),
+                            Err(e) => daemon_error(e),
                         }
                     } else if let Some(peer) = self.session_router.find_legacy_peer_for_session(&session_id) {
                         if let Err(e) = peer.attach_and_stream(
@@ -2026,33 +2011,31 @@ impl DaemonServer {
                             agent_subscription,
                             Arc::clone(&self.agent_states),
                         ).await {
-                            DaemonResponse::Error { message: e }
+                            daemon_error(e)
                         } else {
                             return;
                         }
                     } else {
-                        DaemonResponse::Error {
-                            message: format!("Session '{session_id}' not found"),
-                        }
+                        daemon_session_not_found(&session_id, "daemon_attach")
                     }
                 }
                 Ok(DaemonRequest::SaveSession { session }) => {
                     let res = crate::ipc::run_blocking(move || save_session_to_path(&get_default_session_path(), &session)).await;
                     match res {
                         Ok(()) => DaemonResponse::SaveSessionOk,
-                        Err(e) => DaemonResponse::Error { message: e.to_string() },
+                        Err(e) => daemon_error(e.to_string()),
                     }
                 }
                 Ok(DaemonRequest::LoadSession) => {
                     match crate::ipc::run_blocking(move || load_session_from_path(&get_default_session_path())).await {
                         Ok(session) => DaemonResponse::LoadSessionOk { session },
-                        Err(e) => DaemonResponse::Error { message: e.to_string() },
+                        Err(e) => daemon_error(e.to_string()),
                     }
                 }
                 Ok(DaemonRequest::ClearSession) => {
                     match crate::ipc::run_blocking(move || clear_session_from_path(&get_default_session_path())).await {
                         Ok(()) => DaemonResponse::ClearSessionOk,
-                        Err(e) => DaemonResponse::Error { message: e.to_string() },
+                        Err(e) => daemon_error(e.to_string()),
                     }
                 }
                 Ok(DaemonRequest::RemoteGetStatus) => {
@@ -2086,7 +2069,7 @@ impl DaemonServer {
                 Ok(DaemonRequest::RemoteConfigure { config }) => {
                     match self.handle_remote_configure(config).await {
                         Ok(()) => DaemonResponse::RemoteConfigureOk,
-                        Err(e) => DaemonResponse::Error { message: e },
+                        Err(e) => daemon_error(e),
                     }
                 }
                 Ok(DaemonRequest::PairedTerminalReattach { descriptor }) => {
@@ -2104,7 +2087,7 @@ impl DaemonServer {
                 }
                 Ok(DaemonRequest::PairedTerminalDetach { session_id }) => match self.terminal_service.paired().detach(&session_id).await {
                     Ok(()) => DaemonResponse::CloseOk,
-                    Err(message) => DaemonResponse::Error { message },
+                    Err(message) => daemon_error(message),
                 },
                 Ok(DaemonRequest::PairedTerminalDescriptor { session_id }) => {
                     let descriptor = self.terminal_service.paired().descriptor(&session_id);
@@ -2173,9 +2156,7 @@ impl DaemonServer {
                     }
 
                     if let Some(e) = config_error {
-                        DaemonResponse::Error {
-                            message: format!("Relay is unreachable or registration failed: {e}"),
-                        }
+                        daemon_error(format!("Relay is unreachable or registration failed: {e}"),)
                     } else {
                         let is_relay_mode = auto_configured
                             || self.remote_state.config.read().mode == RemoteNetworkMode::Relay;
@@ -2227,13 +2208,11 @@ impl DaemonServer {
                                         } else {
                                             format!("Relay is unreachable or registration failed: {message}")
                                         };
-                                        DaemonResponse::Error { message }
+                                        daemon_error(message)
                                     }
                                 }
                             }
-                            None if is_relay_mode => DaemonResponse::Error {
-                                message: "Relay is unreachable or registration failed: relay client is not connected".to_string(),
-                            },
+                            None if is_relay_mode => daemon_error("Relay is unreachable or registration failed: relay client is not connected".to_string(),),
                             None => {
                                 match self.remote_state.auth_manager.create_scoped_pairing_code(perm, scope) {
                                     Ok(code) => {
@@ -2252,7 +2231,7 @@ impl DaemonServer {
                                             relay_url: None,
                                         }
                                     }
-                                    Err(error) => DaemonResponse::Error { message: error.to_string() },
+                                    Err(error) => daemon_error(error.to_string()),
                                 }
                             }
                         }
@@ -2265,12 +2244,8 @@ impl DaemonServer {
                 Ok(DaemonRequest::RemoteRevokeDevice { device_id }) => {
                     match self.remote_state.auth_manager.revoke_device(&device_id) {
                         Ok(true) => DaemonResponse::RemoteRevokeDeviceOk,
-                        Ok(false) => DaemonResponse::Error {
-                            message: format!("Device '{device_id}' not found"),
-                        },
-                        Err(err) => DaemonResponse::Error {
-                            message: format!("Failed to persist revocation: {err}"),
-                        },
+                        Ok(false) => daemon_error(format!("Device '{device_id}' not found"),),
+                        Err(err) => daemon_error(format!("Failed to persist revocation: {err}"),),
                     }
                 }
                 Ok(DaemonRequest::RemoteSetActiveSelection { selection, ssh_store_path }) => {
@@ -2327,7 +2302,7 @@ impl DaemonServer {
                                     active_sessions,
                                 }
                             }
-                            Err(e) => DaemonResponse::Error { message: e },
+                            Err(e) => daemon_error(e),
                         }
                     }
                     #[cfg(not(unix))]
@@ -2344,24 +2319,22 @@ impl DaemonServer {
                         manager.commit_handover(&service).map_err(crate::ipc::IpcError::internal)
                     }).await {
                         Ok(()) => DaemonResponse::CommitHandoverOk,
-                        Err(e) => DaemonResponse::Error { message: e.to_string() },
+                        Err(e) => daemon_error(e.to_string()),
                     }
                 }
                 Ok(DaemonRequest::AbortHandover) => {
                     match self.handover_manager.abort_handover() {
                         Ok(()) => DaemonResponse::AbortHandoverOk,
-                        Err(e) => DaemonResponse::Error { message: e },
+                        Err(e) => daemon_error(e),
                     }
                 }
                 Ok(DaemonRequest::Shutdown) => {
                     match self.persist_remote_sessions_at(self.remote_sessions_path.clone()).await {
                         Ok(()) => std::process::exit(0),
-                        Err(message) => DaemonResponse::Error { message },
+                        Err(message) => daemon_error(message),
                     }
                 }
-                Err(e) => DaemonResponse::Error {
-                    message: format!("Malformed request: {e}"),
-                },
+                Err(e) => daemon_error(format!("Malformed request: {e}"),),
             };
 
             let mut resp_json = serde_json::to_string(&resp).unwrap();
@@ -2448,11 +2421,8 @@ impl DaemonServer {
                 new_binary_path,
                 std::env::current_exe().ok()
             );
-            return DaemonResponse::Error {
-                message: "Daemon upgrade unavailable: the running daemon's executable no longer \
-                          exists on disk and no valid newBinaryPath was supplied"
-                    .into(),
-            };
+            return daemon_error("Daemon upgrade unavailable: the running daemon's executable no longer \
+                          exists on disk and no valid newBinaryPath was supplied");
         };
 
         // If no explicit new binary path was provided by the GUI, check if upgrade is needed
@@ -2493,9 +2463,7 @@ impl DaemonServer {
         {
             Ok(res) => res,
             Err(e) => {
-                return DaemonResponse::Error {
-                    message: format!("Failed to prepare handover: {e}"),
-                }
+                return daemon_error(format!("Failed to prepare handover: {e}"),)
             }
         };
 
@@ -4015,7 +3983,7 @@ mod tests {
         reader.read_line(&mut line).await.unwrap();
         let resp: DaemonResponse = serde_json::from_str(line.trim()).unwrap();
         match resp {
-            DaemonResponse::Error { message } => {
+            DaemonResponse::Error { message, .. } => {
                 assert!(
                     message.contains("Relay is unreachable") || message.contains("registration failed"),
                     "unexpected error message: {message}"
@@ -4224,7 +4192,7 @@ mod tests {
                 assert!(machine_id.is_some());
                 assert_eq!(relay_url, Some(mock_relay_url));
             }
-            DaemonResponse::Error { message } => {
+            DaemonResponse::Error { message, .. } => {
                 panic!("Expected RemotePairingCodeOk, got Error: {message}");
             }
             other => panic!("Expected RemotePairingCodeOk, got {other:?}"),
@@ -4392,7 +4360,7 @@ mod tests {
         let server = Arc::new(DaemonServer::new());
         let resp = server.handle_describe_session("nonexistent-session-id");
         match resp {
-            DaemonResponse::Error { message } => {
+            DaemonResponse::Error { message, .. } => {
                 assert!(message.contains("not found"));
             }
             other => panic!("Expected Error, got {other:?}"),

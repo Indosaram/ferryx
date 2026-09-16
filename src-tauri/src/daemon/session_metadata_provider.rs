@@ -31,7 +31,7 @@ impl DaemonSessionService {
                 DaemonResponse::MachineSessionDetailOk {
                     detail: crate::remote::machine_protocol::SessionDetail::Running { session },
                 } if session.target == target => Ok(session),
-                DaemonResponse::Error { message } => Err(message),
+                DaemonResponse::Error { message, .. } => Err(message),
                 _ => Err("MACHINE_OWNER_UNSUPPORTED".into()),
             };
         }

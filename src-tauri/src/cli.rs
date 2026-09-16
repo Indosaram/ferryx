@@ -255,7 +255,7 @@ pub fn run_pair_cli(command: PairCliCommand) -> Result<(), String> {
                     match client.send_request(DaemonRequest::RemoteCreateMachinePairingCode).await? {
                         DaemonResponse::RemotePairingCodeOk { code, pairing_token, machine_id, relay_url } =>
                             Ok((code, pairing_token, machine_id, relay_url)),
-                        DaemonResponse::Error { message } => Err(crate::ipc::IpcError::new(crate::ipc::IpcErrorCode::InternalError, message)),
+                        DaemonResponse::Error { message, .. } => Err(crate::ipc::IpcError::new(crate::ipc::IpcErrorCode::InternalError, message)),
                         _ => Err(crate::ipc::IpcError::new(crate::ipc::IpcErrorCode::InternalError, "Daemon does not support machine pairing")),
                     }
                 } else {

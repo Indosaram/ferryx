@@ -22,6 +22,11 @@ pub struct Transport {
     pub(crate) socket: WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
     pub(crate) lease: CredentialLease,
 }
+impl std::fmt::Debug for Transport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Transport").finish()
+    }
+}
 impl Transport {
     async fn receive(&mut self) -> Result<Message> {
         self.lease.token()?;

@@ -72,16 +72,8 @@ export function classifyNativeTerminalAttachError(
         }
       }
 
-      const legacyExpectedMessage = `Session '${requestedSessionId}' not found`;
-      const ptyExpectedMessage = `PTY session '${requestedSessionId}' not found`;
-      if (message === legacyExpectedMessage || message === ptyExpectedMessage) {
-        return {
-          status: "confirmed-missing",
-          sessionId: requestedSessionId,
-          reason: "legacy-message-match",
-        };
-      }
-
+      // P07: Literal-string fallback is dropped when structured code SESSION_NOT_FOUND is present.
+      // Classification is driven strictly by code + typed details.
       return {
         status: "unverified-missing",
         reason: "unclear-origin",
@@ -96,6 +88,8 @@ export function classifyNativeTerminalAttachError(
         };
       }
 
+      // Backward tolerance: legacy daemons without structured error responses
+      // previously emitted INTERNAL_ERROR with prose messages.
       const legacyExpectedMessage = `Session '${requestedSessionId}' not found`;
       const ptyExpectedMessage = `PTY session '${requestedSessionId}' not found`;
       if (message === legacyExpectedMessage || message === ptyExpectedMessage) {
@@ -118,9 +112,11 @@ export function classifyNativeTerminalAttachError(
     };
   }
 
+  // Backward tolerance: legacy callers or raw strings where no structured error code exists yet.
   if (typeof error === "string") {
     const expectedMessage = `Session '${requestedSessionId}' not found`;
-    if (error === expectedMessage) {
+    const ptyExpectedMessage = `PTY session '${requestedSessionId}' not found`;
+    if (error === expectedMessage || error === ptyExpectedMessage) {
       return {
         status: "unverified-missing",
         reason: "raw-string-match",

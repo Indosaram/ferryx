@@ -1,8 +1,10 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { createRemoteHostStore, remoteHostKey, REMOTE_HOST_STORAGE_KEY } from "../state/remoteHostStore";
 import { createPairedHostInventory, nativePairedHostCommands, type HostView, type PairedHostCommands } from "./pairedHostInventory";
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true, invoke: vi.fn() }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
 const hostId = remoteHostKey("https://relay.example", "fixture");
 const view: HostView = { hostId, relayOrigin: "https://relay.example", machineId: "fixture", displayLabel: "Fixture", generation: "9", grantScope: "machine", authStatus: "paired", online: true };
 const token = "private-fixture-bearer";
@@ -118,6 +120,27 @@ it("out-of-order refresh cannot replace a newer response", async () => {
   old.resolve([{ ...view, generation: "8", displayLabel: "stale" }]); await first;
   expect(store.getState().hosts[hostId].generation).toBe("9");
 });
+it("generation fence cancels in-flight refresh from overwriting newer generation state", async () => {
+  const { inventory, store, commands } = fixture();
+  await inventory.refresh();
+  expect(store.getState().hosts[hostId].generation).toBe("9");
+
+  // In-flight refresh is started which will return generation "9"
+  const pendingRefresh = deferred<HostView[]>();
+  vi.mocked(commands.list).mockReturnValueOnce(pendingRefresh.promise);
+  const refreshPromise = inventory.refresh();
+
+  // Meanwhile, host is updated to newer generation "10" (e.g. via push or pair)
+  store.upsertHost({ ...store.getState().hosts[hostId], generation: "10" });
+  expect(store.getState().hosts[hostId].generation).toBe("10");
+
+  // In-flight refresh completes with older generation "9"
+  pendingRefresh.resolve([view]);
+  await refreshPromise;
+
+  // The generation fence must PREVENT older generation "9" from overwriting newer "10"!
+  expect(store.getState().hosts[hostId].generation).toBe("10");
+});
 it("forget fences pending refresh and host callbacks, re-pair creates a new generation", async () => {
   const { inventory, store, commands } = fixture(); await inventory.refresh();
   const current = inventory.capture(hostId); const old = deferred<HostView[]>();
@@ -125,7 +148,9 @@ it("forget fences pending refresh and host callbacks, re-pair creates a new gene
   const pending = inventory.refresh(); expect(await inventory.forget(hostId)).toBe(true);
   old.resolve([view]); await pending;
   expect(store.getState().hosts[hostId]).toBeUndefined(); expect(current()).toBe(false);
-  expect(await inventory.pair({ relayOrigin: view.relayOrigin, pin: "123456", displayLabel: "Fixture" })).toBe(true);
+  const pairResult = await inventory.pair({ relayOrigin: view.relayOrigin, pin: "123456", displayLabel: "Fixture" });
+  expect(pairResult.ok).toBe(true);
+  expect(await inventory.pairBoolean({ relayOrigin: view.relayOrigin, pin: "123456", displayLabel: "Fixture" })).toBe(true);
   expect(store.getState().hosts[hostId].generation).toBe("10"); expect(current()).toBe(false);
 });
 it("re-pair fences a pending migration without deleting original credentials", async () => {
@@ -143,4 +168,71 @@ it("native pair invokes PIN-only command and errors are sanitized", async () => 
   expect(invoke).toHaveBeenCalledWith("paired_host_pair", { request });
   vi.mocked(invoke).mockRejectedValue(new Error(token));
   await expect(nativePairedHostCommands.migrate({ ...request, machineId: "fixture", deviceToken: token })).rejects.toThrow("PAIRED_HOST_UNAVAILABLE");
+});
+it("subscribes app-wide to native inventory generation/online/auth change events and atomically updates entries", async () => {
+  let eventHandler!: (event: { payload: any }) => void;
+  vi.mocked(listen).mockImplementation(async (name, handler) => {
+    if (name === "paired_host_inventory_changed") {
+      eventHandler = handler as any;
+    }
+    return () => {};
+  });
+
+  const { inventory, store, commands } = fixture();
+  await inventory.refresh();
+  expect(store.getState().hosts[hostId].generation).toBe("9");
+  expect(store.getState().hosts[hostId].online).toBe(true);
+
+  // Subscribe app-wide
+  await (inventory as any).subscribeAppWide();
+  expect(listen).toHaveBeenCalledWith("paired_host_inventory_changed", expect.any(Function));
+
+  // Native push: host generation advances to 11, goes offline, authStatus revoked
+  eventHandler({
+    payload: {
+      type: "update",
+      host: { ...view, generation: "11", online: false, authStatus: "revoked" },
+    },
+  });
+
+  expect(store.getState().hosts[hostId].generation).toBe("11");
+  expect(store.getState().hosts[hostId].online).toBe(false);
+  expect(store.getState().hosts[hostId].authStatus).toBe("revoked");
+
+  // In-flight refresh that was initiated before the push must NOT overwrite newer state
+  const pending = deferred<HostView[]>();
+  vi.mocked(commands.list).mockReturnValueOnce(pending.promise);
+  const refreshPromise = inventory.refresh();
+  // Old view has generation 9
+  pending.resolve([view]);
+  await refreshPromise;
+
+  expect(store.getState().hosts[hostId].generation).toBe("11");
+  expect(store.getState().hosts[hostId].online).toBe(false);
+  expect(store.getState().hosts[hostId].authStatus).toBe("revoked");
+});
+it("preserves structured error {code, message, details, retryable} on pair failure", async () => {
+  const { inventory, commands } = fixture();
+  const structuredError = {
+    code: "PIN_EXPIRED",
+    message: "The pairing PIN has expired",
+    details: { expiredAt: 12345 },
+    retryable: false,
+  };
+  vi.mocked(commands.pair).mockRejectedValue(structuredError);
+
+  const result = await (inventory as any).pair({
+    relayOrigin: view.relayOrigin,
+    pin: "123456",
+    displayLabel: "Fixture",
+  });
+
+  expect(result).toEqual({
+    ok: false,
+    error: expect.objectContaining({
+      code: "PIN_EXPIRED",
+      message: expect.stringContaining("expired"),
+      retryable: false,
+    }),
+  });
 });
