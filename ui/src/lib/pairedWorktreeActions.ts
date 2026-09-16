@@ -65,7 +65,9 @@ export function createPairedWorktreeActions(project: RegisteredProject, supplied
     },
     async previewDelete(worktree: Worktree) {
       const identity = worktreeIdentity(worktree);
-      if (!identity || identity.wsId !== workspaceId) throw new PairedOperationError("INVALID_NAMESPACE");
+      const branchParts = worktree.branch?.replace(/^refs\/heads\//, "").split("/");
+      const branchWsId = branchParts && branchParts[0] === "orca" ? branchParts[1] : null;
+      if (!identity || identity.wsId !== workspaceId || (branchWsId && branchWsId !== workspaceId)) throw new PairedOperationError("INVALID_NAMESPACE");
       const a = await ready();
       const status = await a.worktreeStatus(workspaceId, identity);
       if (status.workspaceId !== workspaceId || status.worktree.wsId !== identity.wsId || status.worktree.slug !== identity.slug) throw new PairedOperationError("CROSS_HOST_RESULT");
@@ -77,7 +79,9 @@ export function createPairedWorktreeActions(project: RegisteredProject, supplied
       const a = await ready();
       if (pending) { await reconcile(a, "delete"); return; }
       const identity = worktreeIdentity(worktree);
-      if (!identity || identity.wsId !== workspaceId || revision === null) throw new PairedOperationError("INVALID_NAMESPACE");
+      const branchParts = worktree.branch?.replace(/^refs\/heads\//, "").split("/");
+      const branchWsId = branchParts && branchParts[0] === "orca" ? branchParts[1] : null;
+      if (!identity || identity.wsId !== workspaceId || (branchWsId && branchWsId !== workspaceId) || revision === null) throw new PairedOperationError("INVALID_NAMESPACE");
       const requestId = safeRandomUUID();
       try {
         await a.deleteWorktree({ requestId, workspaceId, worktree: identity, expectedRevision: revision, deleteBranch: true });

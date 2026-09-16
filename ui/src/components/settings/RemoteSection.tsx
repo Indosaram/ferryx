@@ -549,10 +549,10 @@ export function RemoteSection({
                             title={explanations[code]}
                             className={`text-xs font-medium shrink-0 ${
                               code === "READY"
-                                ? "text-emerald-500"
+                                ? "text-status-success"
                                 : code === "OFFLINE"
                                 ? "text-muted-foreground"
-                                : "text-amber-500"
+                                : "text-status-warning"
                             }`}
                           >
                             {concisePairedStatus[code] ?? "Unchecked"}
@@ -769,10 +769,10 @@ export function RemoteSection({
                             title={testState?.error || statusText}
                             className={`text-xs font-medium shrink-0 ${
                               code === "READY" || code === "REACHABLE"
-                                ? "text-emerald-500"
+                                ? "text-status-success"
                                 : code === "DISABLED" || code === "UNCHECKED"
                                 ? "text-muted-foreground"
-                                : "text-amber-500"
+                                : "text-status-warning"
                             }`}
                           >
                             {statusText}

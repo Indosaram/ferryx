@@ -19,7 +19,7 @@ describe("delete dialog missing paired owner", () => {
     });
     expect(native.previewWorktreeDelete).not.toHaveBeenCalled();
     expect(screen.getByText("PAIRED_OWNER_REQUIRED")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Delete worktree and branch" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Delete remote worktree" })).toBeDisabled();
     expect(native.deleteWorktree).not.toHaveBeenCalled();
     expect(native.deleteWorktreeDestructive).not.toHaveBeenCalled();
   });

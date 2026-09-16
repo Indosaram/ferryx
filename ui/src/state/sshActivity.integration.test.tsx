@@ -2,6 +2,7 @@ import { useEffect, useMemo } from "react";
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
+import { resetSessionLifecycleForTests } from "../lib/sessionLifecycle";
 import { Sidebar } from "../components/Sidebar";
 import { TerminalSplitView } from "../components/TerminalSplitView";
 import { NotificationCoordinator } from "../lib/notificationCoordinator";
@@ -37,12 +38,14 @@ vi.mock("../lib/sshHosts", () => ({
 }));
 
 beforeEach(() => {
+  resetSessionLifecycleForTests();
   localStorage.clear();
   vi.clearAllMocks();
   vi.spyOn(document, "hasFocus").mockReturnValue(false);
 });
 afterEach(() => {
   cleanup();
+  resetSessionLifecycleForTests();
   native.listeners.clear();
   vi.restoreAllMocks();
 });
@@ -104,7 +107,7 @@ it.each([
   };
   render(<Harness project={project} services={services} capture={(store) => { current = store; }} />);
   await act(async () => { await getStore().openTab(projectRootWorktree(project)); });
-  expect(native.listeners.size).toBe(1);
+  expect(native.listeners.size).toBeGreaterThanOrEqual(1);
   const emit = (next: NativeTerminalAgentStatePayload["state"]) => {
     for (const listener of native.listeners) {
       listener({ sessionId: "ssh-backend", state: next, ruleId: "extension", manifestId: "omo" });

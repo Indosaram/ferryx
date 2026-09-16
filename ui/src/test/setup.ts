@@ -1,21 +1,70 @@
 import "@testing-library/jest-dom/vitest";
 
-// NWSAPI delegates these native states back to jsdom's matches(), which itself
-// calls NWSAPI. Reject only recursive native delegation; the outer evaluation
-// still parses selectors and checks document.fullscreenElement normally.
+// NWSAPI does not implement :modal or :fullscreen. We delegate top-layer
+// states without recursive loops while preserving compound selectors and
+// full document.fullscreenElement state tracking.
 if (typeof Element !== "undefined") {
   const originalMatches = Element.prototype.matches;
   const activeStateMatches = new WeakMap<Element, Set<string>>();
+
+  function isFullscreen(el: Element): boolean {
+    const doc = el.ownerDocument ?? (typeof document !== "undefined" ? document : null);
+    return Boolean(doc && doc.fullscreenElement === el);
+  }
+
+  function isModal(el: Element): boolean {
+    if (el.matches(":fullscreen")) return true;
+    if (el.tagName === "DIALOG" && (el as HTMLDialogElement).open) {
+      return el.getAttribute("aria-modal") === "true";
+    }
+    return false;
+  }
+
   Element.prototype.matches = function (selector: string): boolean {
-    if (selector !== ":modal" && selector !== ":fullscreen") {
+    if (!selector.includes(":modal") && !selector.includes(":fullscreen")) {
       return originalMatches.call(this, selector);
     }
+
     const active = activeStateMatches.get(this) ?? new Set<string>();
     if (active.has(selector)) return false;
     active.add(selector);
     activeStateMatches.set(this, active);
+
     try {
-      return originalMatches.call(this, selector);
+      if (selector === ":fullscreen") {
+        return isFullscreen(this);
+      }
+      if (selector === ":modal") {
+        return isModal(this);
+      }
+
+      if (selector.includes(",")) {
+        return selector.split(",").some((part) => this.matches(part.trim()));
+      }
+
+      let currentSelector = selector;
+
+      if (currentSelector.includes(":not(:fullscreen)")) {
+        if (this.matches(":fullscreen")) return false;
+        currentSelector = currentSelector.replaceAll(":not(:fullscreen)", "");
+      }
+      if (currentSelector.includes(":not(:modal)")) {
+        if (this.matches(":modal")) return false;
+        currentSelector = currentSelector.replaceAll(":not(:modal)", "");
+      }
+
+      if (currentSelector.includes(":fullscreen")) {
+        if (!this.matches(":fullscreen")) return false;
+        currentSelector = currentSelector.replaceAll(":fullscreen", "");
+      }
+      if (currentSelector.includes(":modal")) {
+        if (!this.matches(":modal")) return false;
+        currentSelector = currentSelector.replaceAll(":modal", "");
+      }
+
+      const remainder = currentSelector.trim();
+      if (!remainder || remainder === "*") return true;
+      return originalMatches.call(this, remainder);
     } finally {
       active.delete(selector);
       if (active.size === 0) activeStateMatches.delete(this);
