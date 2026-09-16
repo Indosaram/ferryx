@@ -28,12 +28,15 @@ export interface SshRemoteEnvironment {
   git: boolean;
 }
 
+export type SshHelperProbeState = "installed" | "missing" | "unknown";
+
 export interface SshTargetSummary {
   host: SshHost;
   reachable: boolean;
   lastError?: string | null;
   checkedAt: number;
   environment?: SshRemoteEnvironment | null;
+  helper?: SshHelperProbeState | null;
   diagnostic?: { code: string; message: string; details?: { stage?: string } } | null;
 }
 

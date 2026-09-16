@@ -353,6 +353,72 @@ fn ssh_helper_setup_map_error_retains_diagnostic_cause() {
     assert!(cause.get("stderr").and_then(serde_json::Value::as_str).unwrap().contains("FERRYX_ERR_HELPER_MISSING"));
 }
 
+#[test]
+fn ssh_helper_setup_probe_state_serde_camel_case() {
+    assert_eq!(serde_json::to_string(&HelperProbeState::Installed).unwrap(), "\"installed\"");
+    assert_eq!(serde_json::to_string(&HelperProbeState::Missing).unwrap(), "\"missing\"");
+    assert_eq!(serde_json::to_string(&HelperProbeState::Unknown).unwrap(), "\"unknown\"");
+}
+
+#[test]
+fn ssh_helper_setup_probe_classifies_ready_marker_as_installed() {
+    assert_eq!(
+        classify_probe_result(Ok(b"FERRYX_HELPER_READY\n")),
+        HelperProbeState::Installed
+    );
+}
+
+#[test]
+fn ssh_helper_setup_probe_classifies_missing_sentinel_as_missing() {
+    let err = IpcError::new(IpcErrorCode::IoError, "SSH command failed (exit 1): FERRYX_ERR_HELPER_MISSING")
+        .with_details(serde_json::json!({
+            "stage": "execution",
+            "exitCode": 1,
+            "stderr": "FERRYX_ERR_HELPER_MISSING\r\n",
+        }));
+    assert_eq!(classify_probe_result(Err(&err)), HelperProbeState::Missing);
+}
+
+#[test]
+fn ssh_helper_setup_probe_classifies_not_executable_sentinel_as_missing() {
+    let err = IpcError::new(IpcErrorCode::IoError, "SSH command failed (exit 1): FERRYX_ERR_HELPER_NOT_EXECUTABLE")
+        .with_details(serde_json::json!({
+            "stage": "execution",
+            "exitCode": 1,
+            "stderr": "FERRYX_ERR_HELPER_NOT_EXECUTABLE\r\n",
+        }));
+    assert_eq!(classify_probe_result(Err(&err)), HelperProbeState::Missing);
+
+    let posix_err = IpcError::new(IpcErrorCode::IoError, "exit 126")
+        .with_details(serde_json::json!({
+            "stage": "execution",
+            "exitCode": 126,
+            "stderr": "sh: helper: Permission denied",
+        }));
+    assert_eq!(classify_probe_result(Err(&posix_err)), HelperProbeState::Missing);
+}
+
+#[test]
+fn ssh_helper_setup_probe_classifies_timeout_as_unknown() {
+    let err = runtime::error(IpcErrorCode::IoError, "transport", "SSH operation timed out");
+    assert_eq!(classify_probe_result(Err(&err)), HelperProbeState::Unknown);
+}
+
+#[test]
+fn ssh_helper_setup_probe_classifies_unexpected_output_as_unknown() {
+    assert_eq!(
+        classify_probe_result(Ok(b"some unrelated output\n")),
+        HelperProbeState::Unknown
+    );
+    let err = IpcError::new(IpcErrorCode::IoError, "SSH command failed (exit 2)")
+        .with_details(serde_json::json!({
+            "stage": "execution",
+            "exitCode": 2,
+            "stderr": "unexpected failure",
+        }));
+    assert_eq!(classify_probe_result(Err(&err)), HelperProbeState::Unknown);
+}
+
 #[cfg(unix)]
 #[test]
 fn ssh_helper_setup_process_start_rejects_symlink_root_without_writing_log() {

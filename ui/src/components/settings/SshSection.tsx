@@ -31,6 +31,7 @@ import {
   updateSshHost,
   useSshHosts,
   type SshAuthMethod,
+  type SshHelperProbeState,
   type SshHost,
   type SshRemoteEnvironment,
   type SystemSshConfig,
@@ -77,6 +78,7 @@ interface TestState {
   reachable?: boolean;
   error?: string | null;
   environment?: SshRemoteEnvironment | null;
+  helper?: SshHelperProbeState | null;
   stage?: string;
 }
 
@@ -389,6 +391,7 @@ export function SshSection({ onOpenProject, searchQuery }: SshSectionProps) {
           reachable: summary.reachable,
           error: summary.lastError,
           environment: summary.environment,
+          helper: summary.helper ?? null,
           stage: summary.diagnostic?.details?.stage,
         },
       }));
@@ -1006,7 +1009,7 @@ export function SshSection({ onOpenProject, searchQuery }: SshSectionProps) {
                           </div>
                           <div>
                             <span className="font-medium text-foreground">Terminal Helper: </span>
-                            <span>{test.environment.git ? "Ready" : "Setup needed"}</span>
+                            <span>{test.helper === "installed" ? "Ready" : test.helper === "missing" ? "Setup needed" : "Not verified"}</span>
                           </div>
                         </div>
                         <Button

@@ -856,7 +856,7 @@ describe("SshSection Settings Component", () => {
       const environment = { platform: "posix", executor: "sh", version: "test", home: "/home/test", temp: "/tmp", git: true };
       invokeMock.mockImplementation(async (command: string) => {
         if (command === "cmd_ssh_list_hosts") return [mockHost1];
-        if (command === "cmd_ssh_test_connection") return { host: mockHost1, reachable: true, checkedAt: 1, environment };
+        if (command === "cmd_ssh_test_connection") return { host: mockHost1, reachable: true, checkedAt: 1, environment, helper: "installed" };
         if (command === "cmd_ssh_read_system_config") return { path: "", exists: false, hosts: [], rawText: "" };
         throw new Error(`Unexpected command ${command}`);
       });
@@ -873,6 +873,48 @@ describe("SshSection Settings Component", () => {
       expect(screen.getByText("Agent Integration:")).toBeInTheDocument();
       expect(screen.getByText("Terminal Helper:")).toBeInTheDocument();
       expect(screen.getByText("Ready")).toBeInTheDocument();
+    });
+
+    it("does not claim Terminal Helper is Ready from git alone without helper evidence", async () => {
+      const environment = { platform: "posix", executor: "sh", version: "test", home: "/home/test", temp: "/tmp", git: true };
+      invokeMock.mockImplementation(async (command: string) => {
+        if (command === "cmd_ssh_list_hosts") return [mockHost1];
+        if (command === "cmd_ssh_test_connection") return { host: mockHost1, reachable: true, checkedAt: 1, environment };
+        if (command === "cmd_ssh_read_system_config") return { path: "", exists: false, hosts: [], rawText: "" };
+        throw new Error(`Unexpected command ${command}`);
+      });
+
+      await act(async () => {
+        render(<SshSection />);
+      });
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "Test connection to Dev Server" }));
+      });
+
+      expect(screen.getByText("Terminal Helper:")).toBeInTheDocument();
+      expect(screen.queryByText("Ready")).not.toBeInTheDocument();
+      expect(screen.getByText("Not verified")).toBeInTheDocument();
+    });
+
+    it("renders Setup needed when helper probe state is missing", async () => {
+      const environment = { platform: "posix", executor: "sh", version: "test", home: "/home/test", temp: "/tmp", git: true };
+      invokeMock.mockImplementation(async (command: string) => {
+        if (command === "cmd_ssh_list_hosts") return [mockHost1];
+        if (command === "cmd_ssh_test_connection") return { host: mockHost1, reachable: true, checkedAt: 1, environment, helper: "missing" };
+        if (command === "cmd_ssh_read_system_config") return { path: "", exists: false, hosts: [], rawText: "" };
+        throw new Error(`Unexpected command ${command}`);
+      });
+
+      await act(async () => {
+        render(<SshSection />);
+      });
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "Test connection to Dev Server" }));
+      });
+
+      expect(screen.getByText("Terminal Helper:")).toBeInTheDocument();
+      expect(screen.getByText("Setup needed")).toBeInTheDocument();
+      expect(screen.queryByText("Ready")).not.toBeInTheDocument();
     });
   });
 });

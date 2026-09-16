@@ -16,6 +16,23 @@ pub struct HelperLocation {
     pub root: String,
 }
 
+/// Honest Terminal Helper readiness from a bounded, non-installing remote check.
+///
+/// `Installed` means the helper binary was observed present (and executable on
+/// POSIX) at the default location. `Missing` means the remote explicitly
+/// reported the binary absent or not executable. `Unknown` covers every other
+/// outcome (timeout, transport failure, unexpected output): no claim is made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum HelperProbeState {
+    Installed,
+    Missing,
+    Unknown,
+}
+
+/// Stdout marker printed by the probe script when the helper binary checks out.
+const PROBE_READY_MARKER: &str = "FERRYX_HELPER_READY";
+
 #[derive(Debug, Deserialize)]
 struct HelperReadyEvent {
     event: String,
@@ -301,6 +318,104 @@ pub async fn ensure_started(
     match output {
         Ok(stdout_bytes) => parse_ready_output(&stdout_bytes),
         Err(err) => Err(map_ensure_started_error(err, location)),
+    }
+}
+
+/// Pure classification of a probe outcome: no I/O, unit-testable.
+///
+/// `Ok(stdout)` with the success marker means the binary was observed ready.
+/// Either explicit stderr sentinel (missing or not-executable) means the helper
+/// is not usable. Timeouts, transport failures, and anything else stay
+/// `Unknown` so the UI never claims readiness it did not observe.
+pub(crate) fn classify_probe_result(result: Result<&[u8], &IpcError>) -> HelperProbeState {
+    match result {
+        Ok(stdout) => {
+            let text = std::str::from_utf8(stdout).unwrap_or("");
+            if text.contains(PROBE_READY_MARKER) {
+                HelperProbeState::Installed
+            } else {
+                HelperProbeState::Unknown
+            }
+        }
+        Err(err) => classify_probe_error(err),
+    }
+}
+
+fn classify_probe_error(err: &IpcError) -> HelperProbeState {
+    let details = err.details.as_ref();
+    let stage = details
+        .and_then(|d| d.get("stage"))
+        .and_then(|s| s.as_str());
+    let exit_code = details
+        .and_then(|d| d.get("exitCode"))
+        .and_then(|c| c.as_i64());
+    let stderr = details
+        .and_then(|d| d.get("stderr"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("");
+
+    // Transport and connection failures (exit 255, timeouts) say nothing about
+    // the helper binary, so they must not read as Missing.
+    if exit_code == Some(255) || stage == Some("transport") {
+        return HelperProbeState::Unknown;
+    }
+
+    let has_missing_marker = stderr.contains("FERRYX_ERR_HELPER_MISSING")
+        || err.message.contains("FERRYX_ERR_HELPER_MISSING");
+    let has_not_executable_marker = stderr.contains("FERRYX_ERR_HELPER_NOT_EXECUTABLE")
+        || err.message.contains("FERRYX_ERR_HELPER_NOT_EXECUTABLE");
+
+    // Contradictory signals are untrustworthy: claim nothing.
+    if (has_missing_marker && has_not_executable_marker)
+        || (exit_code == Some(126) && has_missing_marker)
+        || (exit_code == Some(127) && has_not_executable_marker)
+    {
+        return HelperProbeState::Unknown;
+    }
+
+    // Windows sshd.exe normalizes child exit codes to 1, so the explicit
+    // stderr sentinels are the reliable signal there; POSIX adds 127/126.
+    // Both sentinels mean the helper is not usable at its default location.
+    if has_missing_marker || has_not_executable_marker || exit_code == Some(127) || exit_code == Some(126) {
+        HelperProbeState::Missing
+    } else {
+        HelperProbeState::Unknown
+    }
+}
+
+/// Bounded (<=15s), non-installing readiness check for the helper binary.
+///
+/// Only tests existence (plus executability on POSIX) at `default_location`:
+/// it never writes, never installs, and never executes or spawns the helper,
+/// so no persistent remote process can linger. Remote platform dispatch and
+/// the bounded exec helper mirror `ensure_started`.
+pub async fn probe_ready(host: &SshHost, environment: &RemoteEnvironment) -> HelperProbeState {
+    let location = match default_location(host, environment) {
+        Ok(location) => location,
+        Err(_) => return HelperProbeState::Unknown,
+    };
+    let script = match environment.platform {
+        RemotePlatform::Posix => format!(
+            "exe={}; \
+             if [ ! -f \"$exe\" ]; then printf 'FERRYX_ERR_HELPER_MISSING\\n' >&2; exit 127; fi; \
+             if [ ! -x \"$exe\" ]; then printf 'FERRYX_ERR_HELPER_NOT_EXECUTABLE\\n' >&2; exit 126; fi; \
+             printf 'FERRYX_HELPER_READY\\n'",
+            direct::quote_posix(&location.executable)
+        ),
+        RemotePlatform::Windows => format!(
+            "$exe = {}; \
+             if (-not [System.IO.File]::Exists($exe)) {{ [Console]::Error.WriteLine('FERRYX_ERR_HELPER_MISSING'); exit 127; }}; \
+             [Console]::WriteLine('FERRYX_HELPER_READY')",
+            runtime::powershell_data(&location.executable)
+        ),
+    };
+    let plan = match direct::ssh_plan(host, environment.executor.command(&script), false) {
+        Ok(plan) => plan,
+        Err(_) => return HelperProbeState::Unknown,
+    };
+    match direct::bounded_output(&plan, Duration::from_secs(10)).await {
+        Ok(stdout) => classify_probe_result(Ok(&stdout)),
+        Err(err) => classify_probe_result(Err(&err)),
     }
 }
 

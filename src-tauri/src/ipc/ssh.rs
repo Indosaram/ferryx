@@ -36,6 +36,8 @@ pub struct SshTargetSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
     pub environment: Option<crate::ssh::runtime::RemoteEnvironment>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub helper: Option<crate::ssh::helper_setup::HelperProbeState>,
     pub diagnostic: Option<IpcError>,
     pub checked_at: u64,
 }
@@ -356,11 +358,18 @@ pub async fn cmd_ssh_test_connection(
         Ok(environment) => (Some(environment), None),
         Err(error) => (None, Some(error)),
     };
+    // Non-installing helper check, only when the host is reachable. Any probe
+    // failure (timeout, transport error) classifies to Unknown, never an Err.
+    let helper = match &environment {
+        Some(environment) => Some(crate::ssh::helper_setup::probe_ready(&host, environment).await),
+        None => None,
+    };
     Ok(SshTargetSummary {
         host,
         reachable,
         last_error: diagnostic.as_ref().map(|e| e.message.clone()),
         environment,
+        helper,
         diagnostic,
         checked_at: now_millis(),
     })
