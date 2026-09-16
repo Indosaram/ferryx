@@ -124,10 +124,91 @@ export const nativePairedHostCommands: PairedHostCommands = {
 function validGeneration(value: unknown): value is string {
   return typeof value === "string" && /^(0|[1-9][0-9]*)$/.test(value) && BigInt(value) <= 18446744073709551615n;
 }
+
+export function normalizeRelayOrigin(value: string): string {
+  if (typeof value !== "string") throw new Error("INVALID_RELAY_ORIGIN");
+  const trimmed = value.trim();
+  if (!trimmed) throw new Error("INVALID_RELAY_ORIGIN");
+  try {
+    const url = new URL(trimmed);
+    const isLoopback = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1" || url.hostname === "[::1]";
+    const validProtocol = url.protocol === "https:" || (url.protocol === "http:" && isLoopback);
+    if (!validProtocol || url.username || url.password || (url.pathname !== "/" && url.pathname !== "") || url.search || url.hash) {
+      throw new Error("INVALID_RELAY_ORIGIN");
+    }
+    return url.origin;
+  } catch (err) {
+    if (err instanceof Error && err.message === "INVALID_RELAY_ORIGIN") throw err;
+    throw new Error("INVALID_RELAY_ORIGIN");
+  }
+}
+
+export interface ParsedPairingInvite {
+  pin?: string;
+  relayOrigin?: string;
+}
+
+export function parsePairingInvite(input: string): ParsedPairingInvite | null {
+  if (!input || typeof input !== "string") return null;
+  const trimmed = input.trim();
+  if (!trimmed.includes("://") && !trimmed.startsWith("#pair=")) return null;
+
+  try {
+    if (trimmed.startsWith("#pair=")) {
+      const hashParams = new URLSearchParams(trimmed.slice(1));
+      const pin = hashParams.get("pair") || undefined;
+      const relayParam = hashParams.get("relay");
+      let relayOrigin: string | undefined;
+      if (relayParam) {
+        try { relayOrigin = normalizeRelayOrigin(relayParam); } catch {}
+      }
+      return { pin, relayOrigin };
+    }
+
+    const url = new URL(trimmed);
+    const isLoopback = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1" || url.hostname === "[::1]";
+    if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopback)) {
+      return null;
+    }
+
+    let pin: string | undefined;
+    let relayOrigin: string | undefined;
+
+    if (url.hash) {
+      const hash = url.hash.replace(/^#/, "");
+      const hashParams = new URLSearchParams(hash);
+      const p = hashParams.get("pair");
+      if (p) pin = p;
+      const r = hashParams.get("relay");
+      if (r) {
+        try { relayOrigin = normalizeRelayOrigin(r); } catch {}
+      }
+    }
+
+    if (!pin && url.search) {
+      const p = url.searchParams.get("pair");
+      if (p) pin = p;
+      const r = url.searchParams.get("relay");
+      if (r && !relayOrigin) {
+        try { relayOrigin = normalizeRelayOrigin(r); } catch {}
+      }
+    }
+
+    if (!relayOrigin) {
+      try {
+        relayOrigin = normalizeRelayOrigin(url.origin);
+      } catch {}
+    }
+
+    if (!pin && !relayOrigin) return null;
+    return { pin, relayOrigin };
+  } catch {
+    return null;
+  }
+}
+
 function origin(value: string): string {
-  const url = new URL(value);
-  if (url.protocol !== "https:" || url.username || url.password || url.pathname !== "/" || url.search || url.hash) throw new Error("INVALID_RELAY_ORIGIN");
-  return url.origin;
+  return normalizeRelayOrigin(value);
 }
 function endpoint(view: HostView): HostEndpoint {
   if (!view || typeof view.machineId !== "string" || !view.machineId || typeof view.displayLabel !== "string"

@@ -15,9 +15,12 @@ import type { MachineProjectTarget } from "../../lib/machineNavigation";
 import {
   DEFAULT_MACHINE_LABEL,
   DEFAULT_RELAY_ORIGIN,
+  normalizeRelayOrigin,
+  parsePairingInvite,
   pairedHostInventory,
   type PairedHostError,
 } from "../../lib/pairedHostInventory";
+import { getRemoteStatus } from "../../lib/tauri";
 import {
   createPairedDaemonProjectAdapter,
   type PairedHostContext,
@@ -138,6 +141,17 @@ export interface AddMachineModalProps {
   onSuccess: (result: VerifiedMachineResult) => void;
   onOfferProject?: (target: MachineProjectTarget) => void;
   onImportDone?: (selectedHostId: string) => void;
+  initialRelayOrigin?: string;
+  getStoredRelayOrigin?: () => Promise<string | null>;
+}
+
+async function defaultGetStoredRelayOrigin(): Promise<string | null> {
+  try {
+    const status = await getRemoteStatus();
+    return status?.relayUrl ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export function AddMachineModal({
@@ -149,11 +163,14 @@ export function AddMachineModal({
   onSuccess,
   onOfferProject,
   onImportDone,
+  initialRelayOrigin,
+  getStoredRelayOrigin = defaultGetStoredRelayOrigin,
 }: AddMachineModalProps) {
   const [activeTab, setActiveTab] = useState<"pin" | "ssh" | "import">("pin");
 
   // PIN state
   const [pin, setPin] = useState("");
+  const [relayOrigin, setRelayOrigin] = useState(initialRelayOrigin ?? DEFAULT_RELAY_ORIGIN);
 
   // SSH state
   const [sshForm, setSshForm] = useState<HostFormData>(DEFAULT_SSH_FORM);
@@ -219,6 +236,23 @@ export function AddMachineModal({
   // Read system SSH config when modal opens or path changes
   useEffect(() => {
     if (!isOpen) return;
+    if (initialRelayOrigin) {
+      setRelayOrigin(initialRelayOrigin);
+    } else {
+      void getStoredRelayOrigin()
+        .then(stored => {
+          if (isMountedRef.current && !isDismissedRef.current && stored && stored.trim()) {
+            try {
+              const normalized = normalizeRelayOrigin(stored);
+              setRelayOrigin(normalized);
+            } catch {
+              // retain current if stored relay is invalid
+            }
+          }
+        })
+        .catch(() => {});
+    }
+
     void readSystemSshConfig(configPathOverride)
       .then(cfg => {
         if (isMountedRef.current && !isDismissedRef.current) {
@@ -241,9 +275,11 @@ export function AddMachineModal({
     if (busy) return;
     isDismissedRef.current = true;
     setError(null);
+    setStructuredError(null);
     setSuccessTarget(null);
     setImportResult(null);
     setPin("");
+    setRelayOrigin(initialRelayOrigin ?? DEFAULT_RELAY_ORIGIN);
     setSshForm(DEFAULT_SSH_FORM);
     setSshPasswordInput("");
     setConfigText("");
@@ -276,6 +312,26 @@ export function AddMachineModal({
     }
   };
 
+  const handlePinChange = (value: string) => {
+    const invite = parsePairingInvite(value);
+    if (invite) {
+      if (invite.pin) setPin(invite.pin);
+      if (invite.relayOrigin) setRelayOrigin(invite.relayOrigin);
+    } else {
+      setPin(value);
+    }
+  };
+
+  const handleRelayOriginChange = (value: string) => {
+    const invite = parsePairingInvite(value);
+    if (invite?.relayOrigin) {
+      setRelayOrigin(invite.relayOrigin);
+      if (invite.pin) setPin(invite.pin);
+    } else {
+      setRelayOrigin(value);
+    }
+  };
+
   const handlePairSubmit = async (e: FormEvent) => {
     e.preventDefault();
     if (busy || !pin.trim()) return;
@@ -284,10 +340,39 @@ export function AddMachineModal({
     setError(null);
     setStructuredError(null);
 
+    let effectivePin = pin.trim();
+    let effectiveRelay = relayOrigin.trim() || DEFAULT_RELAY_ORIGIN;
+
+    const inviteFromPin = parsePairingInvite(effectivePin);
+    if (inviteFromPin) {
+      if (inviteFromPin.pin) effectivePin = inviteFromPin.pin;
+      if (inviteFromPin.relayOrigin) effectiveRelay = inviteFromPin.relayOrigin;
+    }
+
+    const inviteFromRelay = parsePairingInvite(effectiveRelay);
+    if (inviteFromRelay) {
+      if (inviteFromRelay.relayOrigin) effectiveRelay = inviteFromRelay.relayOrigin;
+      if (inviteFromRelay.pin && !effectivePin) effectivePin = inviteFromRelay.pin;
+    }
+
+    try {
+      effectiveRelay = normalizeRelayOrigin(effectiveRelay);
+    } catch {
+      const err: PairedHostError = {
+        code: "INVALID_RELAY_ORIGIN",
+        message: "INVALID_RELAY_ORIGIN",
+        retryable: false,
+      };
+      setStructuredError(err);
+      setError(getModalErrorMessage(err));
+      setBusy(false);
+      return;
+    }
+
     let pairedContext: PairedHostContext | undefined;
     try {
       const result = await inventory.pair(
-        { relayOrigin: DEFAULT_RELAY_ORIGIN, displayLabel: DEFAULT_MACHINE_LABEL, pin },
+        { relayOrigin: effectiveRelay, displayLabel: DEFAULT_MACHINE_LABEL, pin: effectivePin },
         host => { pairedContext = { hostId: host.hostId, generation: host.generation! }; },
       );
       if (isDismissedRef.current || !isMountedRef.current) return;
@@ -691,8 +776,36 @@ export function AddMachineModal({
                   <code className="block rounded bg-muted/60 px-2 py-1 font-mono text-[11px] text-foreground">
                     ferryx-cli pair generate --access machine
                   </code>
-                  <p className="pt-1">
-                    Relay: <span className="font-mono text-foreground">{DEFAULT_RELAY_ORIGIN}</span>
+                </div>
+
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <Label htmlFor="add-machine-relay" className="text-xs font-medium">
+                      Relay Origin
+                    </Label>
+                    {relayOrigin !== DEFAULT_RELAY_ORIGIN ? (
+                      <button
+                        type="button"
+                        disabled={busy}
+                        className="text-[11px] text-muted-foreground hover:text-foreground underline cursor-pointer"
+                        onClick={() => setRelayOrigin(DEFAULT_RELAY_ORIGIN)}
+                      >
+                        Reset to default
+                      </button>
+                    ) : null}
+                  </div>
+                  <Input
+                    id="add-machine-relay"
+                    aria-label="Relay Origin"
+                    type="text"
+                    autoComplete="off"
+                    disabled={busy}
+                    value={relayOrigin}
+                    placeholder={DEFAULT_RELAY_ORIGIN}
+                    onChange={e => handleRelayOriginChange(e.target.value)}
+                  />
+                  <p className="text-[11px] text-muted-foreground">
+                    Default: <span className="font-mono">{DEFAULT_RELAY_ORIGIN}</span>. Enter a custom relay or paste an invite link below.
                   </p>
                 </div>
 
@@ -709,7 +822,7 @@ export function AddMachineModal({
                     required
                     value={pin}
                     placeholder="Enter 6-digit PIN"
-                    onChange={e => setPin(e.target.value)}
+                    onChange={e => handlePinChange(e.target.value)}
                   />
                 </div>
 

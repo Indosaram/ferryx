@@ -2,7 +2,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { createRemoteHostStore, remoteHostKey, REMOTE_HOST_STORAGE_KEY } from "../state/remoteHostStore";
-import { createPairedHostInventory, nativePairedHostCommands, type HostView, type PairedHostCommands } from "./pairedHostInventory";
+import { createPairedHostInventory, nativePairedHostCommands, normalizeRelayOrigin, parsePairingInvite, type HostView, type PairedHostCommands } from "./pairedHostInventory";
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true, invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
 const hostId = remoteHostKey("https://relay.example", "fixture");
@@ -236,3 +236,76 @@ it("preserves structured error {code, message, details, retryable} on pair failu
     }),
   });
 });
+
+it("pairing stores canonical custom relayOrigin and persists it across refresh and subsequent connections", async () => {
+  const store = createRemoteHostStore();
+  const customOrigin = "https://custom-relay.example.com";
+  const customHostId = remoteHostKey(customOrigin, "fixture");
+  const customView: HostView = {
+    hostId: customHostId,
+    relayOrigin: customOrigin,
+    machineId: "fixture",
+    displayLabel: "Custom Fixture",
+    generation: "1",
+    grantScope: "machine",
+    authStatus: "paired",
+    online: true,
+  };
+  const commands: PairedHostCommands = {
+    list: vi.fn().mockResolvedValue([customView]),
+    capabilities: vi.fn().mockResolvedValue({ pairedHostInventoryV1: true, pairedDaemonProxyV1: true }),
+    pair: vi.fn().mockResolvedValue(customView),
+    forget: vi.fn().mockResolvedValue(undefined),
+    migrate: vi.fn().mockResolvedValue({ hostId: customHostId, generation: "1" }),
+    read: vi.fn().mockResolvedValue(customView),
+  };
+  const inventory = createPairedHostInventory(store, commands, localStorage);
+
+  const pairResult = await inventory.pair({
+    relayOrigin: customOrigin,
+    pin: "654321",
+    displayLabel: "Custom Fixture",
+  });
+
+  expect(pairResult.ok).toBe(true);
+  expect(commands.pair).toHaveBeenCalledWith({
+    relayOrigin: customOrigin,
+    pin: "654321",
+    displayLabel: "Custom Fixture",
+  });
+
+  // Host in store has custom relayOrigin and address
+  const host = store.getState().hosts[customHostId];
+  expect(host).toBeDefined();
+  expect(host.relayOrigin).toBe(customOrigin);
+  expect(host.address).toBe(customOrigin);
+  expect(host.hostId).toBe(customHostId);
+
+  // Subsequent refresh retains the custom relay origin from native list
+  await inventory.refresh();
+  const refreshedHost = store.getState().hosts[customHostId];
+  expect(refreshedHost.relayOrigin).toBe(customOrigin);
+  expect(refreshedHost.address).toBe(customOrigin);
+});
+
+it("normalizes relay origin and extracts origin and pin from invite links with #pair=", () => {
+  expect(normalizeRelayOrigin("https://relay.checka.cc")).toBe("https://relay.checka.cc");
+  expect(normalizeRelayOrigin("https://relay.checka.cc/")).toBe("https://relay.checka.cc");
+  expect(normalizeRelayOrigin("http://localhost:43821")).toBe("http://localhost:43821");
+  expect(normalizeRelayOrigin("http://127.0.0.1:43821/")).toBe("http://127.0.0.1:43821");
+  expect(() => normalizeRelayOrigin("http://insecure-remote.com")).toThrow("INVALID_RELAY_ORIGIN");
+  expect(() => normalizeRelayOrigin("https://relay.example.com/subpath")).toThrow("INVALID_RELAY_ORIGIN");
+
+  const invite1 = parsePairingInvite("https://custom-relay.org/#pair=849201");
+  expect(invite1).toEqual({ pin: "849201", relayOrigin: "https://custom-relay.org" });
+
+  const invite2 = parsePairingInvite("https://relay.org/#pair=123456&relay=https%3A%2F%2Fother-relay.org");
+  expect(invite2).toEqual({ pin: "123456", relayOrigin: "https://other-relay.org" });
+
+  const invite3 = parsePairingInvite("http://localhost:43821/#pair=654321");
+  expect(invite3).toEqual({ pin: "654321", relayOrigin: "http://localhost:43821" });
+
+  expect(parsePairingInvite("123456")).toBeNull();
+  expect(parsePairingInvite("")).toBeNull();
+});
+

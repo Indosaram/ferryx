@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
 import { AddMachineModal, getModalErrorMessage } from "./AddMachineModal";
 import { createRemoteHostStore } from "../../state/remoteHostStore";
-import type { PairedHostError, PairResult } from "../../lib/pairedHostInventory";
+import { DEFAULT_RELAY_ORIGIN, DEFAULT_MACHINE_LABEL, type PairedHostError, type PairResult } from "../../lib/pairedHostInventory";
 
 afterEach(() => {
   cleanup();
@@ -184,3 +184,159 @@ describe("AddMachineModal - P05 structured per-status error UX", () => {
     expect(mockInventory.refresh).toHaveBeenCalled();
   });
 });
+
+describe("AddMachineModal - P04 custom relay origin support", () => {
+  it("pairing without a custom relay uses the default origin (DEFAULT_RELAY_ORIGIN)", async () => {
+    const store = createRemoteHostStore();
+    const mockInventory = {
+      refresh: vi.fn().mockResolvedValue(undefined),
+      pair: vi.fn().mockResolvedValue({
+        ok: false,
+        error: { code: "PAIR_FAILED", message: "Failed", retryable: false },
+      } as PairResult),
+    };
+
+    render(
+      <AddMachineModal
+        isOpen={true}
+        onClose={() => {}}
+        inventory={mockInventory as any}
+        store={store}
+      />
+    );
+
+    const pinInput = screen.getByPlaceholderText("Enter 6-digit PIN");
+    fireEvent.change(pinInput, { target: { value: "123456" } });
+    fireEvent.click(screen.getByRole("button", { name: /pair machine/i }));
+
+    await waitFor(() => {
+      expect(mockInventory.pair).toHaveBeenCalledWith(
+        expect.objectContaining({
+          relayOrigin: DEFAULT_RELAY_ORIGIN,
+          pin: "123456",
+          displayLabel: DEFAULT_MACHINE_LABEL,
+        }),
+        expect.any(Function),
+      );
+    });
+  });
+
+  it("entering a custom relay origin sends the pair request to THAT origin", async () => {
+    const store = createRemoteHostStore();
+    const mockInventory = {
+      refresh: vi.fn().mockResolvedValue(undefined),
+      pair: vi.fn().mockResolvedValue({
+        ok: false,
+        error: { code: "PAIR_FAILED", message: "Failed", retryable: false },
+      } as PairResult),
+    };
+
+    render(
+      <AddMachineModal
+        isOpen={true}
+        onClose={() => {}}
+        inventory={mockInventory as any}
+        store={store}
+      />
+    );
+
+    // Relay origin input should be available
+    const relayInput = screen.getByLabelText(/relay origin/i);
+    expect(relayInput).toBeInTheDocument();
+    fireEvent.change(relayInput, { target: { value: "https://my-custom-relay.internal" } });
+
+    const pinInput = screen.getByPlaceholderText("Enter 6-digit PIN");
+    fireEvent.change(pinInput, { target: { value: "654321" } });
+    fireEvent.click(screen.getByRole("button", { name: /pair machine/i }));
+
+    await waitFor(() => {
+      expect(mockInventory.pair).toHaveBeenCalledWith(
+        expect.objectContaining({
+          relayOrigin: "https://my-custom-relay.internal",
+          pin: "654321",
+        }),
+        expect.any(Function),
+      );
+    });
+  });
+
+  it("pasting an invite link with #pair= into the PIN field extracts PIN and sends pair request to THAT origin", async () => {
+    const store = createRemoteHostStore();
+    const mockInventory = {
+      refresh: vi.fn().mockResolvedValue(undefined),
+      pair: vi.fn().mockResolvedValue({
+        ok: false,
+        error: { code: "PAIR_FAILED", message: "Failed", retryable: false },
+      } as PairResult),
+    };
+
+    render(
+      <AddMachineModal
+        isOpen={true}
+        onClose={() => {}}
+        inventory={mockInventory as any}
+        store={store}
+      />
+    );
+
+    const pinInput = screen.getByPlaceholderText("Enter 6-digit PIN");
+    fireEvent.change(pinInput, {
+      target: { value: "https://invite-relay.example.com/#pair=998877" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /pair machine/i }));
+
+    await waitFor(() => {
+      expect(mockInventory.pair).toHaveBeenCalledWith(
+        expect.objectContaining({
+          relayOrigin: "https://invite-relay.example.com",
+          pin: "998877",
+        }),
+        expect.any(Function),
+      );
+    });
+  });
+
+  it("prefills custom relay from stored remote gateway status and uses it for pairing", async () => {
+    const store = createRemoteHostStore();
+    const mockInventory = {
+      refresh: vi.fn().mockResolvedValue(undefined),
+      pair: vi.fn().mockResolvedValue({
+        ok: false,
+        error: { code: "PAIR_FAILED", message: "Failed", retryable: false },
+      } as PairResult),
+    };
+
+    const getStoredRelayOrigin = vi.fn().mockResolvedValue("https://prefilled-relay.corp");
+
+    render(
+      <AddMachineModal
+        isOpen={true}
+        onClose={() => {}}
+        inventory={mockInventory as any}
+        store={store}
+        getStoredRelayOrigin={getStoredRelayOrigin}
+      />
+    );
+
+    // Wait for prefilled relay origin to be populated
+    await waitFor(() => {
+      const relayInput = screen.getByLabelText(/relay origin/i) as HTMLInputElement;
+      expect(relayInput.value).toBe("https://prefilled-relay.corp");
+    });
+
+    const pinInput = screen.getByPlaceholderText("Enter 6-digit PIN");
+    fireEvent.change(pinInput, { target: { value: "112233" } });
+    fireEvent.click(screen.getByRole("button", { name: /pair machine/i }));
+
+    await waitFor(() => {
+      expect(mockInventory.pair).toHaveBeenCalledWith(
+        expect.objectContaining({
+          relayOrigin: "https://prefilled-relay.corp",
+          pin: "112233",
+        }),
+        expect.any(Function),
+      );
+    });
+  });
+});
+
