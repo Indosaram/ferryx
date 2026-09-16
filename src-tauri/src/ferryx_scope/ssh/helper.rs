@@ -285,6 +285,7 @@ impl Runtime {
                     return Err("FORBIDDEN: cwd outside project".into());
                 }
                 let cwd = prepare_spawn_cwd(&cwd);
+                ensure_cwd_spawnable(&cwd)?;
 
                 let cols = parse_u16_dim(p.get("cols"), 80, "cols")?;
                 let rows = parse_u16_dim(p.get("rows"), 24, "rows")?;
@@ -772,6 +773,21 @@ fn prepare_spawn_cwd(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+// Rejects UNC working directories before spawning: the default Windows login
+// shell (cmd.exe) cannot use a UNC cwd and silently falls back to the Windows
+// directory, so a UNC project would launch outside the requested path. Fail
+// explicitly instead. POSIX canonical paths always start with '/', so this
+// check never fires there.
+fn ensure_cwd_spawnable(cwd: &Path) -> Result<(), String> {
+    if cwd.as_os_str().to_string_lossy().starts_with(r"\\") {
+        return Err(
+            r"UNSUPPORTED: UNC cwd cannot be used by the default cmd.exe shell; map a drive letter (net use X: \\server\share) or launch a UNC-capable shell"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 #[path = "helper_core_tests.rs"]
 #[cfg(test)]
 mod helper_core_tests;
@@ -814,6 +830,26 @@ mod ferryx_scope {
                         prepare_spawn_cwd(Path::new(r"C:\Users\sook\repo")),
                         PathBuf::from(r"C:\Users\sook\repo")
                     );
+                }
+
+                #[test]
+                fn unc_cwd_rejected_with_explicit_error() {
+                    let err = ensure_cwd_spawnable(Path::new(r"\\server\share\repo")).unwrap_err();
+                    assert!(err.contains("UNSUPPORTED: UNC cwd"), "expected UNC rejection, got: {err}");
+                }
+
+                #[test]
+                fn verbatim_unc_normalizes_then_rejects() {
+                    let normalized = prepare_spawn_cwd(Path::new(r"\\?\UNC\server\share\repo"));
+                    assert_eq!(normalized, PathBuf::from(r"\\server\share\repo"));
+                    let err = ensure_cwd_spawnable(&normalized).unwrap_err();
+                    assert!(err.contains("UNSUPPORTED: UNC cwd"), "expected UNC rejection after normalization, got: {err}");
+                }
+
+                #[test]
+                fn drive_and_posix_cwd_spawnable() {
+                    assert!(ensure_cwd_spawnable(Path::new(r"C:\Users\sook\repo")).is_ok());
+                    assert!(ensure_cwd_spawnable(Path::new("/home/sook/repo")).is_ok());
                 }
 
                 #[test]
