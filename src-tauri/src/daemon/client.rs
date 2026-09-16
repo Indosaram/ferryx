@@ -802,20 +802,27 @@ impl DaemonClient {
             )
         })?;
 
-        // If the running daemon speaks an older protocol version, perform a compatibility handshake
-        // so that we can send UpgradeBinary to trigger rolling handover.
+        // If the running daemon speaks an older protocol version, it closed the connection
+        // after emitting ProtocolMismatch. Reconnect with a fresh stream and perform a compatibility
+        // handshake so that we can send UpgradeBinary to trigger rolling handover.
         if let DaemonResponse::ProtocolMismatch { expected_version, .. } = hs_resp {
-            let compat_hs = DaemonRequest::Handshake {
-                version: expected_version,
-            };
-            if let Ok(mut json) = serde_json::to_string(&compat_hs) {
-                json.push('\n');
-                if write_half.write_all(json.as_bytes()).await.is_ok() && write_half.flush().await.is_ok() {
-                    let mut compat_line = String::new();
-                    if let Ok(Ok(n)) = tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut compat_line)).await {
-                        if n > 0 {
-                            if let Ok(compat_resp) = serde_json::from_str::<DaemonResponse>(compat_line.trim()) {
-                                hs_resp = compat_resp;
+            if let Ok(stream) = Self::connect_socket(&self.socket_path).await {
+                let (rh, mut wh) = stream.into_split();
+                let mut r = BufReader::new(rh);
+                let compat_hs = DaemonRequest::Handshake {
+                    version: expected_version,
+                };
+                if let Ok(mut json) = serde_json::to_string(&compat_hs) {
+                    json.push('\n');
+                    if wh.write_all(json.as_bytes()).await.is_ok() && wh.flush().await.is_ok() {
+                        let mut compat_line = String::new();
+                        if let Ok(Ok(n)) = tokio::time::timeout(Duration::from_secs(5), r.read_line(&mut compat_line)).await {
+                            if n > 0 {
+                                if let Ok(compat_resp) = serde_json::from_str::<DaemonResponse>(compat_line.trim()) {
+                                    reader = r;
+                                    write_half = wh;
+                                    hs_resp = compat_resp;
+                                }
                             }
                         }
                     }
