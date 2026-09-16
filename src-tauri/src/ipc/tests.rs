@@ -1421,6 +1421,303 @@ async fn test_p10_ambiguous_create_session_reconciles_via_journal() {
 }
 
 #[tokio::test]
+async fn test_p10_background_reconciler_adopts_delayed_completed_session() {
+    use crate::daemon::protocol::{
+        DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION,
+    };
+    use crate::ipc::terminal::{
+        clear_pending_creates_for_test, get_pending_create, reconcile_ambiguous_create,
+        PendingCreateStatus,
+    };
+    use crate::paired_host::client::{Operation, OperationResponse, OperationResult};
+    use crate::remote::machine_protocol as m;
+    use crate::scoped_contracts::Epoch;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    clear_pending_creates_for_test();
+
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("p10_adopt.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+
+    let poll_count = Arc::new(AtomicUsize::new(0));
+    let poll_count_clone = poll_count.clone();
+
+    let fixture_session = m::Session {
+        title: None,
+        agent_type: None,
+        provider_session: None,
+        workspace_id: "ws-p10".into(),
+        worktree: None,
+        target: m::RemoteTerminalTarget {
+            machine_id: "m-1".into(),
+            session_id: "remote-p10-delayed".into(),
+            daemon_epoch: Epoch(1),
+        },
+        cols: 80,
+        rows: 24,
+        running: true,
+        start_sequence: Epoch(0),
+        end_sequence: Epoch(0),
+        cwd: "/remote/dir".into(),
+    };
+    let fixture_for_server = fixture_session.clone();
+
+    let server = tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => break,
+            };
+            let polls = poll_count_clone.clone();
+            let fixture = fixture_for_server.clone();
+            tokio::spawn(async move {
+                let (read, mut write) = stream.into_split();
+                let mut reader = BufReader::new(read);
+                let mut line = String::new();
+                while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                    let req: DaemonRequest = match serde_json::from_str(line.trim()) {
+                        Ok(r) => r,
+                        Err(_) => { line.clear(); continue; }
+                    };
+                    line.clear();
+                    let resp = match req {
+                        DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+                            version: DAEMON_PROTOCOL_VERSION,
+                            pid: std::process::id(),
+                            epoch: 1,
+                            binary_path: None,
+                            binary_mtime_ms: None,
+                            daemon_version: None,
+                        },
+                        DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
+                            capabilities: vec!["pairedHostInventoryV1".into()],
+                        },
+                        DaemonRequest::PairedHostOperation { request } => {
+                            match request.operation {
+                                Operation::Operation { request_id } => {
+                                    let current = polls.fetch_add(1, Ordering::SeqCst);
+                                    if current < 5 {
+                                        // Return Pending for the first 5 polls (exceeding 3 inline attempts)
+                                        DaemonResponse::PairedHostOperationOk {
+                                            response: OperationResponse {
+                                                host_id: "host-1".into(),
+                                                generation: Epoch(1),
+                                                result: OperationResult::Operation(m::Operation::Pending {
+                                                    request_id,
+                                                }),
+                                            },
+                                        }
+                                    } else {
+                                        // Resolves Completed on subsequent poll
+                                        DaemonResponse::PairedHostOperationOk {
+                                            response: OperationResponse {
+                                                host_id: "host-1".into(),
+                                                generation: Epoch(1),
+                                                result: OperationResult::Operation(m::Operation::Completed {
+                                                    request_id,
+                                                    outcome: m::OperationOutcome::Session {
+                                                        session: fixture.clone(),
+                                                    },
+                                                }),
+                                            },
+                                        }
+                                    }
+                                }
+                                _ => DaemonResponse::Error { message: "unexpected op".into(), code: None, details: None },
+                            }
+                        }
+                        DaemonRequest::PairedTerminalReattach { .. } => {
+                            DaemonResponse::PairedTerminalReattachOk {
+                                session_id: "proxy-p10-adopted".into(),
+                                generation: Epoch(1),
+                            }
+                        }
+                        _ => DaemonResponse::Error { message: "unexpected req".into(), code: None, details: None },
+                    };
+                    let bytes = serde_json::to_vec(&resp).unwrap();
+                    let _ = write.write_all(&bytes).await;
+                    let _ = write.write_all(b"\n").await;
+                    let _ = write.flush().await;
+                }
+            });
+        }
+    });
+
+    let client = DaemonClient::new_with_socket(socket);
+    let req_id = "a0000000-0000-0000-0000-000000000099";
+
+    let inline_res = reconcile_ambiguous_create(&client, "host-1", Epoch(1), req_id, false).await;
+    assert!(inline_res.is_err(), "Inline reconcile should exhaust attempts and return Err");
+
+    // Wait for background reconciler to adopt session
+    let mut adopted = false;
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        if let Some(record) = get_pending_create(req_id) {
+            if let PendingCreateStatus::Adopted { proxy_session_id } = record.status {
+                assert_eq!(proxy_session_id, "proxy-p10-adopted");
+                adopted = true;
+                break;
+            }
+        }
+    }
+    assert!(adopted, "Delayed Completed create must be adopted by background reconciler");
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_p10_background_reconciler_closes_cancelled_delayed_completed_session() {
+    use crate::daemon::protocol::{
+        DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION,
+    };
+    use crate::ipc::terminal::{
+        clear_pending_creates_for_test, reconcile_ambiguous_create,
+    };
+    use crate::paired_host::client::{Operation, OperationResponse, OperationResult};
+    use crate::remote::machine_protocol as m;
+    use crate::scoped_contracts::Epoch;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    clear_pending_creates_for_test();
+
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("p10_cancel.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+
+    let poll_count = Arc::new(AtomicUsize::new(0));
+    let poll_count_clone = poll_count.clone();
+    let close_called = Arc::new(AtomicBool::new(false));
+    let close_called_clone = close_called.clone();
+
+    let fixture_session = m::Session {
+        title: None,
+        agent_type: None,
+        provider_session: None,
+        workspace_id: "ws-p10-cancel".into(),
+        worktree: None,
+        target: m::RemoteTerminalTarget {
+            machine_id: "m-1".into(),
+            session_id: "remote-p10-to-close".into(),
+            daemon_epoch: Epoch(1),
+        },
+        cols: 80,
+        rows: 24,
+        running: true,
+        start_sequence: Epoch(0),
+        end_sequence: Epoch(0),
+        cwd: "/remote/dir".into(),
+    };
+    let fixture_for_server = fixture_session.clone();
+
+    let server = tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => break,
+            };
+            let polls = poll_count_clone.clone();
+            let fixture = fixture_for_server.clone();
+            let close_flag = close_called_clone.clone();
+            tokio::spawn(async move {
+                let (read, mut write) = stream.into_split();
+                let mut reader = BufReader::new(read);
+                let mut line = String::new();
+                while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                    let req: DaemonRequest = match serde_json::from_str(line.trim()) {
+                        Ok(r) => r,
+                        Err(_) => { line.clear(); continue; }
+                    };
+                    line.clear();
+                    let resp = match req {
+                        DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+                            version: DAEMON_PROTOCOL_VERSION,
+                            pid: std::process::id(),
+                            epoch: 1,
+                            binary_path: None,
+                            binary_mtime_ms: None,
+                            daemon_version: None,
+                        },
+                        DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
+                            capabilities: vec!["pairedHostInventoryV1".into()],
+                        },
+                        DaemonRequest::PairedHostOperation { request } => {
+                            match request.operation {
+                                Operation::Operation { request_id } => {
+                                    let current = polls.fetch_add(1, Ordering::SeqCst);
+                                    if current < 5 {
+                                        DaemonResponse::PairedHostOperationOk {
+                                            response: OperationResponse {
+                                                host_id: "host-1".into(),
+                                                generation: Epoch(1),
+                                                result: OperationResult::Operation(m::Operation::Pending {
+                                                    request_id,
+                                                }),
+                                            },
+                                        }
+                                    } else {
+                                        DaemonResponse::PairedHostOperationOk {
+                                            response: OperationResponse {
+                                                host_id: "host-1".into(),
+                                                generation: Epoch(1),
+                                                result: OperationResult::Operation(m::Operation::Completed {
+                                                    request_id,
+                                                    outcome: m::OperationOutcome::Session {
+                                                        session: fixture.clone(),
+                                                    },
+                                                }),
+                                            },
+                                        }
+                                    }
+                                }
+                                Operation::CloseSession { .. } => {
+                                    close_flag.store(true, Ordering::SeqCst);
+                                    DaemonResponse::PairedHostOperationOk {
+                                        response: OperationResponse {
+                                            host_id: "host-1".into(),
+                                            generation: Epoch(1),
+                                            result: OperationResult::CloseSession(()),
+                                        },
+                                    }
+                                }
+                                _ => DaemonResponse::Error { message: "unexpected op".into(), code: None, details: None },
+                            }
+                        }
+                        _ => DaemonResponse::Error { message: "unexpected req".into(), code: None, details: None },
+                    };
+                    let bytes = serde_json::to_vec(&resp).unwrap();
+                    let _ = write.write_all(&bytes).await;
+                    let _ = write.write_all(b"\n").await;
+                    let _ = write.flush().await;
+                }
+            });
+        }
+    });
+
+    let client = DaemonClient::new_with_socket(socket);
+    let req_id = "a0000000-0000-0000-0000-000000000098";
+
+    let inline_res = reconcile_ambiguous_create(&client, "host-1", Epoch(1), req_id, true).await;
+    assert!(inline_res.is_err(), "Inline reconcile should exhaust attempts and return Err");
+
+    // Wait for background reconciler to close the session
+    let mut closed = false;
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        if close_called.load(Ordering::SeqCst) {
+            closed = true;
+            break;
+        }
+    }
+    assert!(closed, "Cancelled delayed Completed create must be closed by background reconciler");
+
+    server.abort();
+}
+
+#[tokio::test]
 async fn test_p11_reattach_failure_cleanup_reconciles_and_reaps_unknown() {
     use crate::daemon::protocol::{
         DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION,
@@ -1684,3 +1981,467 @@ async fn test_p12_close_terminates_remote_session_while_detach_preserves_it() {
 
     server.abort();
 }
+
+#[tokio::test]
+async fn test_p11_reaper_retains_exhausted_records_in_dead_letter_list() {
+    use crate::daemon::protocol::{
+        DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION,
+    };
+    use crate::ipc::terminal::{
+        clear_pending_cleanups_for_test, execute_cleanup_close, get_exhausted_cleanups,
+        get_pending_cleanups, reap_cleanup_unknowns, CleanupOutcome,
+    };
+    use crate::paired_host::client::{ClientError, Operation};
+    use crate::remote::machine_protocol as m;
+    use crate::scoped_contracts::Epoch;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    clear_pending_cleanups_for_test();
+
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("p11_dead_letter.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+
+    let server = tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => break,
+            };
+            tokio::spawn(async move {
+                let (read, mut write) = stream.into_split();
+                let mut reader = BufReader::new(read);
+                let mut line = String::new();
+                while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                    let req: DaemonRequest = match serde_json::from_str(line.trim()) {
+                        Ok(r) => r,
+                        Err(_) => { line.clear(); continue; }
+                    };
+                    line.clear();
+                    let resp = match req {
+                        DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+                            version: DAEMON_PROTOCOL_VERSION,
+                            pid: std::process::id(),
+                            epoch: 1,
+                            binary_path: None,
+                            binary_mtime_ms: None,
+                            daemon_version: None,
+                        },
+                        DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
+                            capabilities: vec!["pairedHostInventoryV1".into()],
+                        },
+                        DaemonRequest::PairedHostOperation { request } => {
+                            match request.operation {
+                                Operation::CloseSession { .. } => {
+                                    DaemonResponse::PairedHostOperationError {
+                                        error: ClientError {
+                                            code: "TIMEOUT".into(),
+                                            machine_error: None,
+                                            ambiguous: true,
+                                            request_id: Some("req-p11-dead".into()),
+                                        },
+                                    }
+                                }
+                                Operation::Operation { request_id } => {
+                                    DaemonResponse::PairedHostOperationOk {
+                                        response: crate::paired_host::client::OperationResponse {
+                                            host_id: "host-1".into(),
+                                            generation: Epoch(1),
+                                            result: crate::paired_host::client::OperationResult::Operation(m::Operation::Pending {
+                                                request_id,
+                                            }),
+                                        },
+                                    }
+                                }
+                                _ => DaemonResponse::Error { message: "unexpected op".into(), code: None, details: None },
+                            }
+                        }
+                        _ => DaemonResponse::Error { message: "unexpected req".into(), code: None, details: None },
+                    };
+                    let bytes = serde_json::to_vec(&resp).unwrap();
+                    let _ = write.write_all(&bytes).await;
+                    let _ = write.write_all(b"\n").await;
+                    let _ = write.flush().await;
+                }
+            });
+        }
+    });
+
+    let client = DaemonClient::new_with_socket(socket);
+    let cleanup_req_id = "req-p11-dead".to_string();
+
+    let outcome = execute_cleanup_close(
+        &client,
+        "host-1",
+        Epoch(1),
+        "remote-s-dead",
+        Epoch(1),
+        cleanup_req_id.clone(),
+    ).await;
+
+    assert!(matches!(outcome, CleanupOutcome::Unknown { .. }));
+    assert_eq!(get_pending_cleanups().len(), 1);
+
+    // Reap attempt 1 (item.attempts becomes 2)
+    let _ = reap_cleanup_unknowns(&client).await;
+    assert_eq!(get_pending_cleanups().len(), 1);
+
+    // Reap attempt 2 (item.attempts becomes 3)
+    let _ = reap_cleanup_unknowns(&client).await;
+    assert_eq!(get_pending_cleanups().len(), 1);
+
+    // Reap attempt 3 (reaches MAX_REAP_ATTEMPTS = 3; must move to exhausted dead-letter list)
+    let _ = reap_cleanup_unknowns(&client).await;
+    assert_eq!(get_pending_cleanups().len(), 0, "Pending cleanups must be empty after exhausting attempts");
+    assert_eq!(get_exhausted_cleanups().len(), 1, "Exhausted cleanups must be retained in dead-letter list");
+    assert_eq!(get_exhausted_cleanups()[0].cleanup_request_id, cleanup_req_id);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_p11_start_cleanup_reaper_schedules_background_resolution() {
+    use crate::daemon::protocol::{
+        DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION,
+    };
+    use crate::ipc::terminal::{
+        clear_pending_cleanups_for_test, execute_cleanup_close, get_pending_cleanups,
+        start_cleanup_reaper,
+    };
+    use crate::paired_host::client::{ClientError, Operation};
+    use crate::remote::machine_protocol as m;
+    use crate::scoped_contracts::Epoch;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    clear_pending_cleanups_for_test();
+
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("p11_reaper_lifecycle.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+
+    let server = tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => break,
+            };
+            tokio::spawn(async move {
+                let (read, mut write) = stream.into_split();
+                let mut reader = BufReader::new(read);
+                let mut line = String::new();
+                while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                    let req: DaemonRequest = match serde_json::from_str(line.trim()) {
+                        Ok(r) => r,
+                        Err(_) => { line.clear(); continue; }
+                    };
+                    line.clear();
+                    let resp = match req {
+                        DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+                            version: DAEMON_PROTOCOL_VERSION,
+                            pid: std::process::id(),
+                            epoch: 1,
+                            binary_path: None,
+                            binary_mtime_ms: None,
+                            daemon_version: None,
+                        },
+                        DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
+                            capabilities: vec!["pairedHostInventoryV1".into()],
+                        },
+                        DaemonRequest::PairedHostOperation { request } => {
+                            match request.operation {
+                                Operation::CloseSession { .. } => {
+                                    DaemonResponse::PairedHostOperationError {
+                                        error: ClientError {
+                                            code: "TIMEOUT".into(),
+                                            machine_error: None,
+                                            ambiguous: true,
+                                            request_id: Some("req-p11-bg".into()),
+                                        },
+                                    }
+                                }
+                                Operation::Operation { request_id } => {
+                                    DaemonResponse::PairedHostOperationOk {
+                                        response: crate::paired_host::client::OperationResponse {
+                                            host_id: "host-1".into(),
+                                            generation: Epoch(1),
+                                            result: crate::paired_host::client::OperationResult::Operation(m::Operation::Completed {
+                                                request_id,
+                                                outcome: m::OperationOutcome::NoContent,
+                                            }),
+                                        },
+                                    }
+                                }
+                                _ => DaemonResponse::Error { message: "unexpected op".into(), code: None, details: None },
+                            }
+                        }
+                        _ => DaemonResponse::Error { message: "unexpected req".into(), code: None, details: None },
+                    };
+                    let bytes = serde_json::to_vec(&resp).unwrap();
+                    let _ = write.write_all(&bytes).await;
+                    let _ = write.write_all(b"\n").await;
+                    let _ = write.flush().await;
+                }
+            });
+        }
+    });
+
+    let client = Arc::new(DaemonClient::new_with_socket(socket));
+    let cleanup_req_id = "req-p11-bg".to_string();
+
+    let _ = execute_cleanup_close(
+        &client,
+        "host-1",
+        Epoch(1),
+        "remote-s-bg",
+        Epoch(1),
+        cleanup_req_id,
+    ).await;
+
+    assert_eq!(get_pending_cleanups().len(), 1);
+
+    start_cleanup_reaper(client.clone()).await;
+
+    // PairedHostOperation cycles against the in-process UDS fixture can take
+    // tens of seconds each (same budget class as the other paired tests in
+    // this file); give the reaper's first cycle a matching bounded window.
+    let mut resolved = false;
+    for _ in 0..3000 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        if get_pending_cleanups().is_empty() {
+            resolved = true;
+            break;
+        }
+    }
+    assert!(resolved, "Background reaper must resolve pending cleanup");
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_p12_close_definitive_remote_error_aborts_local_close() {
+    use crate::daemon::protocol::{
+        DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION,
+    };
+    use crate::ipc::IpcErrorCode;
+    use crate::paired_host::client::{ClientError, Operation};
+    use crate::remote::machine_protocol as m;
+    use crate::scoped_contracts::Epoch;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("p12_def.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+
+    let local_close_called = Arc::new(AtomicBool::new(false));
+    let local_close_clone = local_close_called.clone();
+
+    let server = tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => break,
+            };
+            let local_close = local_close_clone.clone();
+            tokio::spawn(async move {
+                let (read, mut write) = stream.into_split();
+                let mut reader = BufReader::new(read);
+                let mut line = String::new();
+                while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                    let req: DaemonRequest = match serde_json::from_str(line.trim()) {
+                        Ok(r) => r,
+                        Err(_) => { line.clear(); continue; }
+                    };
+                    line.clear();
+                    let resp = match req {
+                        DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+                            version: DAEMON_PROTOCOL_VERSION,
+                            pid: std::process::id(),
+                            epoch: 1,
+                            binary_path: None,
+                            binary_mtime_ms: None,
+                            daemon_version: None,
+                        },
+                        DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
+                            capabilities: vec!["pairedHostInventoryV1".into()],
+                        },
+                        DaemonRequest::PairedTerminalDescriptor { .. } => {
+                            DaemonResponse::PairedTerminalDescriptorOk {
+                                descriptor: Some(crate::terminal::paired_daemon::Descriptor {
+                                    host_id: "host-p12".into(),
+                                    generation: Epoch(1),
+                                    target: m::RemoteTerminalTarget {
+                                        machine_id: "m-1".into(),
+                                        daemon_epoch: Epoch(1),
+                                        session_id: "remote-pty-def".into(),
+                                    },
+                                    after_sequence: None,
+                                }),
+                            }
+                        }
+                        DaemonRequest::PairedHostOperation { request } => {
+                            match request.operation {
+                                Operation::CloseSession { .. } => {
+                                    DaemonResponse::PairedHostOperationError {
+                                        error: ClientError {
+                                            code: "PERMISSION_DENIED".into(),
+                                            machine_error: None,
+                                            ambiguous: false,
+                                            request_id: Some("req-p12-def".into()),
+                                        },
+                                    }
+                                }
+                                _ => DaemonResponse::Error { message: "unexpected op".into(), code: None, details: None },
+                            }
+                        }
+                        DaemonRequest::Close { .. } => {
+                            local_close.store(true, Ordering::SeqCst);
+                            DaemonResponse::CloseOk
+                        }
+                        _ => DaemonResponse::Error { message: "unexpected req".into(), code: None, details: None },
+                    };
+                    let bytes = serde_json::to_vec(&resp).unwrap();
+                    let _ = write.write_all(&bytes).await;
+                    let _ = write.write_all(b"\n").await;
+                    let _ = write.flush().await;
+                }
+            });
+        }
+    });
+
+    let client = DaemonClient::new_with_socket(socket);
+    let err = client
+        .close_terminal("daemon-session:paired-p12-def")
+        .await
+        .expect_err("Definitive remote error must cause close_terminal to fail");
+
+    assert_eq!(err.code, IpcErrorCode::from_code_str("REMOTE_CLOSE_FAILED"));
+    let details = err.details.expect("Error details must be present");
+    assert_eq!(details.get("cause").and_then(|v| v.as_str()), Some("PERMISSION_DENIED"));
+    assert_eq!(details.get("hostId").and_then(|v| v.as_str()), Some("host-p12"));
+    assert_eq!(details.get("remoteSessionId").and_then(|v| v.as_str()), Some("remote-pty-def"));
+    assert!(!local_close_called.load(Ordering::SeqCst), "Local close must NOT proceed on definitive remote close failure");
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_p12_close_ambiguous_remote_error_exhausts_and_aborts_local_close() {
+    use crate::daemon::protocol::{
+        DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION,
+    };
+    use crate::ipc::IpcErrorCode;
+    use crate::paired_host::client::{ClientError, Operation, OperationResponse, OperationResult};
+    use crate::remote::machine_protocol as m;
+    use crate::scoped_contracts::Epoch;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("p12_amb.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+
+    let local_close_called = Arc::new(AtomicBool::new(false));
+    let local_close_clone = local_close_called.clone();
+
+    let server = tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => break,
+            };
+            let local_close = local_close_clone.clone();
+            tokio::spawn(async move {
+                let (read, mut write) = stream.into_split();
+                let mut reader = BufReader::new(read);
+                let mut line = String::new();
+                while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                    let req: DaemonRequest = match serde_json::from_str(line.trim()) {
+                        Ok(r) => r,
+                        Err(_) => { line.clear(); continue; }
+                    };
+                    line.clear();
+                    let resp = match req {
+                        DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+                            version: DAEMON_PROTOCOL_VERSION,
+                            pid: std::process::id(),
+                            epoch: 1,
+                            binary_path: None,
+                            binary_mtime_ms: None,
+                            daemon_version: None,
+                        },
+                        DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
+                            capabilities: vec!["pairedHostInventoryV1".into()],
+                        },
+                        DaemonRequest::PairedTerminalDescriptor { .. } => {
+                            DaemonResponse::PairedTerminalDescriptorOk {
+                                descriptor: Some(crate::terminal::paired_daemon::Descriptor {
+                                    host_id: "host-p12".into(),
+                                    generation: Epoch(1),
+                                    target: m::RemoteTerminalTarget {
+                                        machine_id: "m-1".into(),
+                                        daemon_epoch: Epoch(1),
+                                        session_id: "remote-pty-amb".into(),
+                                    },
+                                    after_sequence: None,
+                                }),
+                            }
+                        }
+                        DaemonRequest::PairedHostOperation { request } => {
+                            match request.operation {
+                                Operation::CloseSession { .. } => {
+                                    DaemonResponse::PairedHostOperationError {
+                                        error: ClientError {
+                                            code: "TIMEOUT".into(),
+                                            machine_error: None,
+                                            ambiguous: true,
+                                            request_id: Some("req-p12-amb".into()),
+                                        },
+                                    }
+                                }
+                                Operation::Operation { request_id } => {
+                                    DaemonResponse::PairedHostOperationOk {
+                                        response: OperationResponse {
+                                            host_id: "host-p12".into(),
+                                            generation: Epoch(1),
+                                            result: OperationResult::Operation(m::Operation::Pending {
+                                                request_id,
+                                            }),
+                                        },
+                                    }
+                                }
+                                _ => DaemonResponse::Error { message: "unexpected op".into(), code: None, details: None },
+                            }
+                        }
+                        DaemonRequest::Close { .. } => {
+                            local_close.store(true, Ordering::SeqCst);
+                            DaemonResponse::CloseOk
+                        }
+                        _ => DaemonResponse::Error { message: "unexpected req".into(), code: None, details: None },
+                    };
+                    let bytes = serde_json::to_vec(&resp).unwrap();
+                    let _ = write.write_all(&bytes).await;
+                    let _ = write.write_all(b"\n").await;
+                    let _ = write.flush().await;
+                }
+            });
+        }
+    });
+
+    let client = DaemonClient::new_with_socket(socket);
+    let err = client
+        .close_terminal("daemon-session:paired-p12-amb")
+        .await
+        .expect_err("Ambiguous remote close with pending journal must cause close_terminal to fail");
+
+    assert_eq!(err.code, IpcErrorCode::from_code_str("REMOTE_CLOSE_UNCERTAIN"));
+    let details = err.details.expect("Error details must be present");
+    assert_eq!(details.get("remoteCloseUnknown").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(details.get("hostId").and_then(|v| v.as_str()), Some("host-p12"));
+    assert_eq!(details.get("remoteSessionId").and_then(|v| v.as_str()), Some("remote-pty-amb"));
+    assert!(details.get("cleanupRequestId").is_some());
+    assert!(!local_close_called.load(Ordering::SeqCst), "Local close must NOT proceed on uncertain remote close");
+
+    server.abort();
+}
+

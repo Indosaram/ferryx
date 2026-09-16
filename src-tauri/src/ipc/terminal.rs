@@ -694,6 +694,183 @@ pub(crate) fn resolve_paired_spawn_target(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PendingCreateStatus {
+    Pending,
+    Completed { session_id: String },
+    Adopted { proxy_session_id: String },
+    Cancelled,
+    Failed { error: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingCreateRecord {
+    pub request_id: String,
+    pub host_id: String,
+    pub generation: crate::scoped_contracts::Epoch,
+    pub workspace_id: Option<String>,
+    pub cancelled: bool,
+    pub status: PendingCreateStatus,
+    pub session: Option<crate::remote::machine_protocol::Session>,
+}
+
+static PENDING_CREATES: std::sync::LazyLock<Mutex<std::collections::HashMap<String, PendingCreateRecord>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+pub fn get_pending_creates() -> std::collections::HashMap<String, PendingCreateRecord> {
+    PENDING_CREATES.lock().clone()
+}
+
+pub fn get_pending_create(request_id: &str) -> Option<PendingCreateRecord> {
+    PENDING_CREATES.lock().get(request_id).cloned()
+}
+
+pub fn cancel_pending_create(request_id: &str) {
+    let mut guard = PENDING_CREATES.lock();
+    if let Some(record) = guard.get_mut(request_id) {
+        record.cancelled = true;
+    }
+}
+
+pub fn clear_pending_creates_for_test() {
+    PENDING_CREATES.lock().clear();
+}
+
+const PENDING_CREATE_BACKGROUND_WINDOW_SECS: u64 = 600;
+const PENDING_CREATE_BACKGROUND_POLL_MS: u64 = 250;
+
+/// P10: a create whose journal outcome stayed unknown after the inline burst is
+/// NOT abandoned — the logical intent is retained and a bounded background
+/// reconciler keeps polling until the remote journal becomes terminal.
+fn register_pending_create(
+    host_id: &str,
+    generation: crate::scoped_contracts::Epoch,
+    request_id: &str,
+    cancelled: bool,
+) {
+    PENDING_CREATES.lock().insert(
+        request_id.to_string(),
+        PendingCreateRecord {
+            request_id: request_id.to_string(),
+            host_id: host_id.to_string(),
+            generation,
+            workspace_id: None,
+            cancelled,
+            status: PendingCreateStatus::Pending,
+            session: None,
+        },
+    );
+}
+
+fn spawn_background_create_reconciler(
+    daemon_client: &DaemonClient,
+    host_id: &str,
+    generation: crate::scoped_contracts::Epoch,
+    request_id: &str,
+) {
+    let client = daemon_client.clone();
+    let host_id = host_id.to_string();
+    let request_id = request_id.to_string();
+    tokio::spawn(async move {
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(PENDING_CREATE_BACKGROUND_WINDOW_SECS);
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(PENDING_CREATE_BACKGROUND_POLL_MS)).await;
+            if std::time::Instant::now() >= deadline {
+                // Window exhausted: leave the record Pending so a later pass
+                // (or operator action) can still reconcile it.
+                break;
+            }
+            let (cancelled, still_pending) = {
+                let guard = PENDING_CREATES.lock();
+                match guard.get(&request_id) {
+                    Some(record) => (record.cancelled, matches!(record.status, PendingCreateStatus::Pending)),
+                    None => return,
+                }
+            };
+            if !still_pending {
+                return;
+            }
+            let journal_req = crate::paired_host::client::OperationRequest {
+                host_id: host_id.clone(),
+                generation,
+                operation: crate::paired_host::client::Operation::Operation {
+                    request_id: request_id.clone(),
+                },
+            };
+            let journal_resp = match client.paired_host_operation(journal_req).await {
+                Ok(resp) => resp,
+                Err(_) => continue,
+            };
+            let terminal = match journal_resp.result {
+                crate::paired_host::client::OperationResult::Operation(
+                    crate::remote::machine_protocol::Operation::Completed { outcome, .. },
+                ) => Some(outcome),
+                _ => None,
+            };
+            let Some(outcome) = terminal else { continue };
+            match outcome {
+                crate::remote::machine_protocol::OperationOutcome::Session { session } => {
+                    if cancelled {
+                        let close_req = crate::remote::machine_protocol::CloseSessionRequest {
+                            request_id: uuid::Uuid::new_v4().to_string(),
+                            daemon_epoch: session.target.daemon_epoch.clone(),
+                        };
+                        let _ = client
+                            .paired_host_operation(crate::paired_host::client::OperationRequest {
+                                host_id: host_id.clone(),
+                                generation,
+                                operation: crate::paired_host::client::Operation::CloseSession {
+                                    session_id: session.target.session_id.clone(),
+                                    request: close_req,
+                                },
+                            })
+                            .await;
+                        let mut guard = PENDING_CREATES.lock();
+                        if let Some(record) = guard.get_mut(&request_id) {
+                            record.status = PendingCreateStatus::Cancelled;
+                        }
+                    } else {
+                        let descriptor = crate::terminal::paired_daemon::Descriptor {
+                            host_id: host_id.clone(),
+                            generation,
+                            target: session.target.clone(),
+                            after_sequence: None,
+                        };
+                        let discovered_session_id = session.target.session_id.clone();
+                        let reattach = client.paired_terminal_reattach(descriptor).await;
+                        let mut guard = PENDING_CREATES.lock();
+                        if let Some(record) = guard.get_mut(&request_id) {
+                            match reattach {
+                                Ok((proxy_session_id, _)) => {
+                                    record.session = Some(session);
+                                    record.status = PendingCreateStatus::Adopted { proxy_session_id };
+                                }
+                                Err(_) => {
+                                    record.session = Some(session);
+                                    record.status = PendingCreateStatus::Completed {
+                                        session_id: discovered_session_id,
+                                    };
+                                }
+                            }
+                        }
+                    }
+                    return;
+                }
+                crate::remote::machine_protocol::OperationOutcome::Error { error } => {
+                    let mut guard = PENDING_CREATES.lock();
+                    if let Some(record) = guard.get_mut(&request_id) {
+                        record.status = PendingCreateStatus::Failed { error: error.message.clone() };
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
+    });
+}
+
 pub async fn reconcile_ambiguous_create(
     daemon_client: &DaemonClient,
     host_id: &str,
@@ -772,6 +949,8 @@ pub async fn reconcile_ambiguous_create(
                         crate::remote::machine_protocol::Operation::OutcomeUnknown { .. },
                     ) => {
                         if attempts >= MAX_RECONCILE_ATTEMPTS {
+                            register_pending_create(host_id, generation, request_id, cancelled);
+                            spawn_background_create_reconciler(daemon_client, host_id, generation, request_id);
                             let unknown_err = crate::paired_host::client::ClientError {
                                 code: "OPERATION_OUTCOME_UNKNOWN".to_string(),
                                 machine_error: None,
@@ -785,6 +964,8 @@ pub async fn reconcile_ambiguous_create(
                     }
                     _ => {
                         if attempts >= MAX_RECONCILE_ATTEMPTS {
+                            register_pending_create(host_id, generation, request_id, cancelled);
+                            spawn_background_create_reconciler(daemon_client, host_id, generation, request_id);
                             let unknown_err = crate::paired_host::client::ClientError {
                                 code: "OPERATION_OUTCOME_UNKNOWN".to_string(),
                                 machine_error: None,
@@ -840,14 +1021,44 @@ pub struct CleanupRecord {
 }
 
 static PENDING_CLEANUPS: Mutex<Vec<CleanupRecord>> = Mutex::new(Vec::new());
+static EXHAUSTED_CLEANUPS: Mutex<Vec<CleanupRecord>> = Mutex::new(Vec::new());
 
 pub fn get_pending_cleanups() -> Vec<CleanupRecord> {
     PENDING_CLEANUPS.lock().clone()
 }
 
+pub fn get_exhausted_cleanups() -> Vec<CleanupRecord> {
+    EXHAUSTED_CLEANUPS.lock().clone()
+}
+
 pub fn clear_pending_cleanups_for_test() {
     PENDING_CLEANUPS.lock().clear();
+    EXHAUSTED_CLEANUPS.lock().clear();
 }
+
+pub fn clear_exhausted_cleanups_for_test() {
+    EXHAUSTED_CLEANUPS.lock().clear();
+}
+
+pub async fn start_cleanup_reaper(daemon_client: Arc<DaemonClient>) {
+    // P11: schedule the cleanup reaper from a real lifecycle. One reaper per
+    // process; the first pass runs immediately so restart-time leftovers are
+    // resolved without waiting for the tick interval.
+    static REAPER_STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if REAPER_STARTED.set(()).is_err() {
+        return;
+    }
+    tokio::spawn(async move {
+        loop {
+            let resolved = reap_cleanup_unknowns(&daemon_client).await;
+            if resolved > 0 {
+                eprintln!("[ipc::terminal] cleanup reaper resolved {resolved} ambiguous close(s)");
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        }
+    });
+}
+
 
 pub async fn execute_cleanup_close(
     daemon_client: &DaemonClient,
@@ -944,6 +1155,9 @@ pub async fn reap_cleanup_unknowns(daemon_client: &DaemonClient) -> usize {
 
     for mut item in pending {
         if item.attempts >= MAX_REAP_ATTEMPTS {
+            // P11: exhausted cleanups must be retained, not silently dropped —
+            // the uncertainty is still real and must stay observable/diagnosable.
+            EXHAUSTED_CLEANUPS.lock().push(item);
             continue;
         }
         item.attempts += 1;
@@ -965,23 +1179,25 @@ pub async fn reap_cleanup_unknowns(daemon_client: &DaemonClient) -> usize {
                     continue;
                 }
             }
-            Err(e) if e.code == "OPERATION_NOT_FOUND" => {
-                let retry_req_id = uuid::Uuid::new_v4().to_string();
-                let close_req = crate::remote::machine_protocol::CloseSessionRequest {
-                    request_id: retry_req_id.clone(),
-                    daemon_epoch: item.daemon_epoch.clone(),
-                };
-                let retry_op = crate::paired_host::client::OperationRequest {
-                    host_id: item.host_id.clone(),
-                    generation: item.generation,
-                    operation: crate::paired_host::client::Operation::CloseSession {
-                        session_id: item.session_id.clone(),
-                        request: close_req,
-                    },
-                };
-                if daemon_client.paired_host_operation(retry_op).await.is_ok() {
-                    resolved_count += 1;
-                    continue;
+            Err(e) => {
+                if e.code == "OPERATION_NOT_FOUND" {
+                    let retry_req_id = uuid::Uuid::new_v4().to_string();
+                    let close_req = crate::remote::machine_protocol::CloseSessionRequest {
+                        request_id: retry_req_id.clone(),
+                        daemon_epoch: item.daemon_epoch.clone(),
+                    };
+                    let retry_op = crate::paired_host::client::OperationRequest {
+                        host_id: item.host_id.clone(),
+                        generation: item.generation,
+                        operation: crate::paired_host::client::Operation::CloseSession {
+                            session_id: item.session_id.clone(),
+                            request: close_req,
+                        },
+                    };
+                    if daemon_client.paired_host_operation(retry_op).await.is_ok() {
+                        resolved_count += 1;
+                        continue;
+                    }
                 }
             }
             _ => {}
