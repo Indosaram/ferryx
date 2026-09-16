@@ -44,13 +44,14 @@ async fn socket_fixture(native: bool, drop_connected: bool, spontaneous: Option<
         .route("/api/v1/pair/exchange", post(|| async { Json(json!({"token":"fixture-secret","machineId":"a","device":{"id":"d","name":"d","permission":"control","accessScope":"machine","createdAt":1,"lastSeenAt":1}})) }))
         .route("/host/a/api/v1/capabilities", get(|| async { Json(json!({"apiVersion":1,"machineId":"a","daemonEpoch":"1","platform":"linux","accessScope":"machine","permission":"control","capabilities":["terminalCreateV1","terminalStreamV1"],"limits":{"directoryEntries":1000,"terminalSessions":64}})) }))
         .route("/host/a/api/v1/sessions/s", get(|| async { Json(json!({"status":"running","session":{"target":{"machineId":"a","daemonEpoch":"1","sessionId":"s"},"workspaceId":"w","worktree":null,"cwd":"/fixture","cols":80,"rows":24,"running":true,"providerSession":null,"startSequence":"10","endSequence":"10"}})) }))
+        .route("/host/a/api/v1/socket-ticket", post(|| async { Json(json!({"ticket":"fixture-ticket"})) }))
         .route("/host/a/api/v1/terminal/s", get(move |ws: WebSocketUpgrade, headers: axum::http::HeaderMap, uri: axum::http::Uri| {
             let input_tx = input_tx.clone();
             let closed_tx = closed_tx.clone();
             let terminate_rx = terminate_rx.clone();
             async move {
                 assert_eq!(headers["authorization"], "Bearer fixture-secret");
-                assert_eq!(uri.query(), Some("daemonEpoch=1"));
+                assert_eq!(uri.query(), Some("daemonEpoch=1&ticket=fixture-ticket"));
                 ws.on_upgrade(move |mut socket| async move {
                     socket.send(Message::Text(json!({"type":"attached","target":{"machineId":"a","daemonEpoch":"1","sessionId":"s"},"generation":"7","cols":80,"rows":24,"startSequence":"10","endSequence":"10","replayGap":null}).to_string().into())).await.unwrap();
                     socket.send(Message::Binary(encode_frame(Metadata::Replay { start: Some(10), end: Some(10), gap: None }, b"hello", false).unwrap().into())).await.unwrap();

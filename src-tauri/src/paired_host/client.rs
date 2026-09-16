@@ -305,6 +305,95 @@ impl Operation {
         Ok(r)
     }
 }
+fn is_relay_transport(url: &Url) -> bool {
+    url.path_segments()
+        .and_then(|mut s| s.next())
+        .is_some_and(|first| first == "host")
+}
+
+fn map_ticket_error(status: reqwest::StatusCode, bytes: &[u8]) -> ClientError {
+    if let Ok(envelope) = serde_json::from_slice::<m::ErrorEnvelope>(bytes) {
+        let mut error = project_remote_error(envelope.error);
+        if !error.details.contains_key("status") {
+            error.details.insert("status".into(), serde_json::json!(status.as_u16()));
+        }
+        if !error.details.contains_key("httpStatus") {
+            error.details.insert("httpStatus".into(), serde_json::json!(status.as_u16()));
+        }
+        return ClientError {
+            code: error.code.clone(),
+            request_id: if error.request_id.is_empty() {
+                None
+            } else {
+                Some(error.request_id.clone())
+            },
+            machine_error: Some(error),
+            ambiguous: false,
+        };
+    }
+    if let Ok(error) = serde_json::from_slice::<m::MachineError>(bytes) {
+        let mut error = project_remote_error(error);
+        if !error.details.contains_key("status") {
+            error.details.insert("status".into(), serde_json::json!(status.as_u16()));
+        }
+        if !error.details.contains_key("httpStatus") {
+            error.details.insert("httpStatus".into(), serde_json::json!(status.as_u16()));
+        }
+        return ClientError {
+            code: error.code.clone(),
+            request_id: if error.request_id.is_empty() {
+                None
+            } else {
+                Some(error.request_id.clone())
+            },
+            machine_error: Some(error),
+            ambiguous: false,
+        };
+    }
+    let code = match status.as_u16() {
+        401 => "UNAUTHORIZED",
+        403 => "PERMISSION_DENIED",
+        404 => "NOT_FOUND",
+        429 => "RATE_LIMITED",
+        503 => "MACHINE_SERVICE_UNAVAILABLE",
+        504 => "TIMEOUT",
+        400 => "INVALID_REQUEST",
+        _ => "PAIRED_HOST_REMOTE_ERROR",
+    };
+    let message = if let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) {
+        if let Some(err_str) = v.get("error").and_then(|e| e.as_str()) {
+            err_str.to_string()
+        } else {
+            format!(
+                "The paired host ticket request failed with HTTP status {}",
+                status.as_u16()
+            )
+        }
+    } else {
+        format!(
+            "The paired host ticket request failed with HTTP status {}",
+            status.as_u16()
+        )
+    };
+    let mut details = serde_json::Map::new();
+    details.insert("status".into(), serde_json::json!(status.as_u16()));
+    details.insert("httpStatus".into(), serde_json::json!(status.as_u16()));
+    let retryable = matches!(status.as_u16(), 429 | 503 | 504);
+    let machine_error = m::MachineError {
+        code: code.to_string(),
+        message,
+        retryable,
+        request_id: String::new(),
+        details,
+    };
+    ClientError {
+        code: code.to_string(),
+        request_id: None,
+        machine_error: Some(machine_error),
+        ambiguous: false,
+    }
+}
+
 pub struct MachineClient {
     http: reqwest::Client,
 }
@@ -343,6 +432,7 @@ impl MachineClient {
         }
         let (host, lease) = service.capture_operation(descriptor.host_id.clone(), descriptor.generation).await?;
         let mut url = Url::parse(&host.host_id).map_err(|_| ClientError::local("INVALID_REQUEST"))?;
+        let is_relay = is_relay_transport(&url);
         url.path_segments_mut().map_err(|_| ClientError::local("INVALID_REQUEST"))?
             .extend(["api", "v1", "terminal", &descriptor.target.session_id]);
         url.query_pairs_mut().append_pair("daemonEpoch", &descriptor.target.daemon_epoch.0.to_string());
@@ -350,30 +440,40 @@ impl MachineClient {
 
         // Mint a single-use socket ticket if the host/relay endpoint supports it (relay requires ticket for upgrade).
         let ticket: Option<String> = {
-            let ticket_url = Url::parse(&host.host_id).ok();
-            if let Some(mut t_url) = ticket_url {
-                if let Ok(mut segments) = t_url.path_segments_mut() {
-                    segments.extend(["api", "v1", "socket-ticket"]);
+            let mut t_url = Url::parse(&host.host_id).map_err(|_| ClientError::local("INVALID_REQUEST"))?;
+            t_url.path_segments_mut().map_err(|_| ClientError::local("INVALID_REQUEST"))?
+                .extend(["api", "v1", "socket-ticket"]);
+            let target_path = format!("/api/v1/terminal/{}", descriptor.target.session_id);
+            let body = serde_json::json!({ "target": target_path }).to_string();
+            let token = lease.token()?;
+            let request_build = self.http.post(t_url)
+                .bearer_auth(token)
+                .header("content-type", "application/json")
+                .body(body);
+            let resp = match request_build.send().await {
+                Ok(resp) => resp,
+                Err(err) => {
+                    let code = if err.is_timeout() { "TIMEOUT" } else { "HOST_UNAVAILABLE" };
+                    return Err(ClientError::local(code));
                 }
-                let target_path = format!("/api/v1/terminal/{}", descriptor.target.session_id);
-                let body = serde_json::json!({ "target": target_path }).to_string();
-                let request_build = self.http.post(t_url)
-                    .bearer_auth(lease.token()?)
-                    .header("content-type", "application/json")
-                    .body(body);
-                match request_build.send().await {
-                    Ok(resp) if resp.status().is_success() => {
-                        #[derive(serde::Deserialize)]
-                        struct TicketResp { ticket: String }
-                        match resp.bytes().await {
-                            Ok(b) => serde_json::from_slice::<TicketResp>(&b).ok().map(|t| t.ticket),
-                            Err(_) => None,
-                        }
-                    }
-                    _ => None,
-                }
+            };
+            let status = resp.status();
+            if status.is_success() {
+                #[derive(serde::Deserialize)]
+                struct TicketResp { ticket: String }
+                let bytes = resp.bytes().await.map_err(|_| ClientError::local("PAIRED_HOST_INVALID_RESPONSE"))?;
+                let tr = serde_json::from_slice::<TicketResp>(&bytes).map_err(|_| ClientError::local("PAIRED_HOST_INVALID_RESPONSE"))?;
+                Some(tr.ticket)
             } else {
-                None
+                // The Authorization-header fallback is allowed ONLY on the direct path
+                // when the server explicitly signals the legacy capability (404).
+                let legacy_direct = !is_relay && status == reqwest::StatusCode::NOT_FOUND;
+                if legacy_direct {
+                    None
+                } else {
+                    let bytes = resp.bytes().await.unwrap_or_default();
+                    return Err(map_ticket_error(status, &bytes));
+                }
             }
         };
 
