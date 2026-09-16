@@ -136,6 +136,33 @@ pub struct BrowserSessionSummary {
     pub visible: bool,
 }
 
+impl From<&BrowserState> for BrowserSessionSummary {
+    fn from(state: &BrowserState) -> Self {
+        Self {
+            browser_id: state.browser_id.clone(),
+            webview_label: state.webview_label.clone(),
+            workspace_id: state.workspace_id.clone(),
+            profile_id: state.profile_id.clone(),
+            url: state.url.clone(),
+            title: state.title.clone(),
+            visible: state.visible,
+        }
+    }
+}
+
+impl From<BrowserState> for BrowserSessionSummary {
+    fn from(state: BrowserState) -> Self {
+        Self::from(&state)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserSessionCreatedPayload {
+    pub browser: BrowserState,
+    pub workspace_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowserStateChangedPayload {

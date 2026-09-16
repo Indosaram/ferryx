@@ -853,14 +853,43 @@ fn keep_or_discard_fresh_webview(session_exists: bool) -> Result<(), String> {
     }
 }
 
-#[tauri::command]
-pub async fn cmd_browser_create<R: tauri::Runtime>(
-    app: AppHandle<R>,
-    manager: State<'_, Arc<BrowserManager>>,
+static CREATED_SESSION_IDS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+pub fn record_session_created(browser_id: &str) {
+    let mut ids = CREATED_SESSION_IDS.lock();
+    ids.retain(|id| id != browser_id);
+    ids.push(browser_id.to_string());
+}
+
+pub fn identify_browser_session(manager: &BrowserManager) -> Option<BrowserSessionSummary> {
+    let visible_sessions: Vec<BrowserSessionSummary> = manager
+        .list_sessions()
+        .into_iter()
+        .filter(|s| s.visible)
+        .collect();
+
+    if visible_sessions.is_empty() {
+        return None;
+    }
+
+    if visible_sessions.len() == 1 {
+        return visible_sessions.into_iter().next();
+    }
+
+    let ids = CREATED_SESSION_IDS.lock();
+    visible_sessions
+        .into_iter()
+        .max_by_key(|s| ids.iter().rposition(|id| id == &s.browser_id))
+}
+
+pub async fn create_browser_session<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &Arc<BrowserManager>,
     request: CreateBrowserRequest,
 ) -> Result<BrowserState, IpcError> {
     if let Some(restored_browser_id) = request.browser_id.as_deref() {
         if let Ok(existing) = manager.get_state(restored_browser_id) {
+            record_session_created(&existing.browser_id);
             return Ok(existing);
         }
     }
@@ -877,6 +906,7 @@ pub async fn cmd_browser_create<R: tauri::Runtime>(
         .into());
     }
     let state = manager.register_session(request.clone())?;
+    record_session_created(&state.browser_id);
 
     #[cfg(not(target_os = "macos"))]
     let profile_data_dir = match request.profile.as_ref() {
@@ -908,9 +938,9 @@ pub async fn cmd_browser_create<R: tauri::Runtime>(
         let bridge_browser_id = browser_id.clone();
         let bridge_profile_id = profile_id.clone();
         let bridge_worktree_path = worktree_path.clone();
-        let page_manager = Arc::clone(manager.inner());
-        let title_manager = Arc::clone(manager.inner());
-        let creation_manager = Arc::clone(manager.inner());
+        let page_manager = Arc::clone(manager);
+        let title_manager = Arc::clone(manager);
+        let creation_manager = Arc::clone(manager);
         let page_browser_id = browser_id.clone();
         let title_browser_id = browser_id.clone();
 
@@ -1157,40 +1187,59 @@ pub async fn cmd_browser_create<R: tauri::Runtime>(
 }
 
 #[tauri::command]
+pub async fn cmd_browser_create<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    manager: State<'_, Arc<BrowserManager>>,
+    request: CreateBrowserRequest,
+) -> Result<BrowserState, IpcError> {
+    create_browser_session(&app, manager.inner(), request).await
+}
+
+pub async fn navigate_browser_session<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &Arc<BrowserManager>,
+    browser_id: &str,
+    url: &str,
+) -> Result<(), IpcError> {
+    let valid_url = manager.update_url(browser_id, url)?;
+    let state = manager.get_state(browser_id)?;
+
+    if let Some(webview) = app.get_webview(&state.webview_label) {
+        emit_browser_state(&webview, &state);
+        let parsed = valid_url
+            .parse()
+            .map_err(|error| BrowserError::NavigationFailed(format!("invalid target URL: {error}")))?;
+        if let Err(error) = webview.navigate(parsed) {
+            let message = error.to_string();
+            if let Ok(error_state) = manager.update_navigation_state(
+                browser_id,
+                None,
+                None,
+                Some(false),
+                None,
+                None,
+                Some(message.clone()),
+            ) {
+                emit_browser_state(&webview, &error_state);
+            }
+            return Err(BrowserError::NavigationFailed(message).into());
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn cmd_browser_navigate<R: tauri::Runtime>(
     app: AppHandle<R>,
     manager: State<'_, Arc<BrowserManager>>,
     browser_id: String,
     url: String,
 ) -> Result<(), IpcError> {
-    let valid_url = manager.update_url(&browser_id, &url)?;
     let state = manager.get_state(&browser_id)?;
-
-    // A missing webview is a real defect, not a no-op: swallowing it leaves a browser tab that
-    // never loads and reports no error, which is indistinguishable from a rendering failure.
-    let webview = app
-        .get_webview(&state.webview_label)
-        .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
-    emit_browser_state(&webview, &state);
-    let parsed = valid_url
-        .parse()
-        .map_err(|error| BrowserError::NavigationFailed(format!("invalid target URL: {error}")))?;
-    if let Err(error) = webview.navigate(parsed) {
-        let message = error.to_string();
-        if let Ok(error_state) = manager.update_navigation_state(
-            &browser_id,
-            None,
-            None,
-            Some(false),
-            None,
-            None,
-            Some(message.clone()),
-        ) {
-            emit_browser_state(&webview, &error_state);
-        }
-        return Err(BrowserError::NavigationFailed(message).into());
+    if app.get_webview(&state.webview_label).is_none() {
+        return Err(BrowserError::WebviewNotFound(state.webview_label).into());
     }
-    Ok(())
+    navigate_browser_session(&app, manager.inner(), &browser_id, &url).await
 }
 
 fn history_navigation<R: tauri::Runtime>(
@@ -1652,25 +1701,42 @@ pub async fn browser_automation_act<R: tauri::Runtime>(
     Ok(())
 }
 
+pub async fn close_browser_session<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &Arc<BrowserManager>,
+    browser_id: &str,
+) -> Result<(), IpcError> {
+    let session = manager
+        .remove_session(browser_id)
+        .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
+    CREATED_SESSION_IDS.lock().retain(|id| id != browser_id);
+    #[cfg(target_os = "linux")]
+    {
+        let browser_id_clone = browser_id.to_string();
+        let _ = app.run_on_main_thread(move || {
+            let _ = crate::browser::linux::implementation::detach_child(&browser_id_clone);
+        });
+    }
+    if let Some(webview) = app.get_webview(&session.webview_label) {
+        let _ = webview.close();
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn cmd_browser_close<R: tauri::Runtime>(
     app: AppHandle<R>,
     manager: State<'_, Arc<BrowserManager>>,
     browser_id: String,
 ) -> Result<(), IpcError> {
-    if let Some(session) = manager.remove_session(&browser_id) {
-        #[cfg(target_os = "linux")]
-        {
-            let browser_id_clone = browser_id.clone();
-            let _ = app.run_on_main_thread(move || {
-                let _ = crate::browser::linux::implementation::detach_child(&browser_id_clone);
-            });
-        }
-        if let Some(webview) = app.get_webview(&session.webview_label) {
-            let _ = webview.close();
-        }
+    match close_browser_session(&app, manager.inner(), &browser_id).await {
+        Ok(()) => Ok(()),
+        Err(IpcError {
+            code: crate::ipc::error::IpcErrorCode::BrowserNotFound,
+            ..
+        }) => Ok(()),
+        Err(error) => Err(error),
     }
-    Ok(())
 }
 
 #[tauri::command]

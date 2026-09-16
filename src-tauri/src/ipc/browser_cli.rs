@@ -1,23 +1,50 @@
 use crate::browser::{
     BrowserAutomationRequest, BrowserAutomationSnapshot, BrowserError, BrowserManager,
-    BrowserSessionSummary,
+    BrowserSessionCreatedPayload, BrowserSessionSummary, CreateBrowserRequest,
 };
-use crate::ipc::browser::{browser_automation_act, browser_automation_snapshot};
-use crate::ipc::error::IpcErrorCode;
+use crate::ipc::browser::{
+    browser_automation_act, browser_automation_snapshot, close_browser_session,
+    create_browser_session, identify_browser_session, navigate_browser_session,
+};
+use crate::ipc::error::{IpcError, IpcErrorCode};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 use tokio::io::BufReader;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "camelCase")]
 pub enum BrowserCliRequest {
     List,
-    Snapshot { browser_id: String },
-    Act { request: BrowserAutomationRequest },
+    Snapshot {
+        browser_id: String,
+    },
+    Act {
+        request: BrowserAutomationRequest,
+    },
+    #[serde(rename_all = "camelCase")]
+    Open {
+        url: String,
+        #[serde(default, alias = "workspace_id")]
+        workspace_id: Option<String>,
+        #[serde(default, alias = "worktree_path")]
+        worktree_path: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    Navigate {
+        #[serde(alias = "browser_id")]
+        browser_id: String,
+        url: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Close {
+        #[serde(alias = "browser_id")]
+        browser_id: String,
+    },
+    Identify,
 }
 
 /// An authenticated request line: the capability token plus the command itself.
@@ -129,6 +156,14 @@ pub enum BrowserCliResponse {
         snapshot: BrowserAutomationSnapshot,
     },
     Acted,
+    Opened {
+        browser: BrowserSessionSummary,
+    },
+    Navigated,
+    Closed,
+    Identified {
+        browser: Option<BrowserSessionSummary>,
+    },
     Error {
         code: String,
         message: String,
@@ -488,6 +523,75 @@ async fn execute_request<R: tauri::Runtime>(
                     code: ipc_error_code_string(error.code),
                     message: error.message,
                 },
+            }
+        }
+        BrowserCliRequest::Open {
+            url,
+            workspace_id,
+            worktree_path,
+        } => {
+            if let Err(browser_error) = crate::browser::validate_url(&url) {
+                let ipc_error = IpcError::from(browser_error);
+                return BrowserCliResponse::Error {
+                    code: ipc_error_code_string(ipc_error.code),
+                    message: ipc_error.message,
+                };
+            }
+            let create_req = CreateBrowserRequest {
+                browser_id: None,
+                workspace_id: workspace_id.clone(),
+                worktree_path,
+                url,
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            };
+            match create_browser_session(app, manager, create_req).await {
+                Ok(state) => {
+                    let payload = BrowserSessionCreatedPayload {
+                        browser: state.clone(),
+                        workspace_id,
+                    };
+                    let _ = app.emit(crate::browser::guest::BROWSER_SESSION_CREATED_EVENT, payload);
+                    BrowserCliResponse::Opened {
+                        browser: BrowserSessionSummary::from(state),
+                    }
+                }
+                Err(error) => BrowserCliResponse::Error {
+                    code: ipc_error_code_string(error.code),
+                    message: error.message,
+                },
+            }
+        }
+        BrowserCliRequest::Navigate { browser_id, url } => {
+            if let Err(browser_error) = crate::browser::validate_url(&url) {
+                let ipc_error = IpcError::from(browser_error);
+                return BrowserCliResponse::Error {
+                    code: ipc_error_code_string(ipc_error.code),
+                    message: ipc_error.message,
+                };
+            }
+            match navigate_browser_session(app, manager, &browser_id, &url).await {
+                Ok(()) => BrowserCliResponse::Navigated,
+                Err(error) => BrowserCliResponse::Error {
+                    code: ipc_error_code_string(error.code),
+                    message: error.message,
+                },
+            }
+        }
+        BrowserCliRequest::Close { browser_id } => {
+            match close_browser_session(app, manager, &browser_id).await {
+                Ok(()) => BrowserCliResponse::Closed,
+                Err(error) => BrowserCliResponse::Error {
+                    code: ipc_error_code_string(error.code),
+                    message: error.message,
+                },
+            }
+        }
+        BrowserCliRequest::Identify => {
+            BrowserCliResponse::Identified {
+                browser: identify_browser_session(manager),
             }
         }
     }
@@ -1196,5 +1300,276 @@ mod tests {
 
         let result = send_browser_cli_request_at_path(BrowserCliRequest::List, &port_path).await;
         assert!(matches!(result, Err(BrowserError::CliUnavailable(_))));
+    }
+
+    async fn send_raw_line<R: tauri::Runtime>(
+        app_handle: AppHandle<R>,
+        manager: Arc<BrowserManager>,
+        token: &str,
+        raw_json: &str,
+    ) -> serde_json::Value {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let (client_stream, server_stream) = tokio::io::duplex(8192);
+        let token_clone = Arc::new(token.to_string());
+        let handler_task = tokio::spawn(async move {
+            handle_connection(server_stream, app_handle, manager, token_clone).await
+        });
+
+        let (client_reader, mut client_writer) = tokio::io::split(client_stream);
+        let mut line = raw_json.as_bytes().to_vec();
+        line.push(b'\n');
+        client_writer.write_all(&line).await.expect("write raw json line");
+        client_writer.flush().await.expect("flush raw json line");
+
+        let mut response_line = String::new();
+        BufReader::new(client_reader)
+            .read_line(&mut response_line)
+            .await
+            .expect("read response line");
+
+        let handler_result = handler_task.await.expect("handler task completed");
+        assert!(handler_result.is_ok());
+
+        serde_json::from_str(response_line.trim()).expect("deserialize response JSON")
+    }
+
+    #[tokio::test]
+    async fn test_browser_cli_open_round_trip() {
+        use tauri::Listener;
+
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(BrowserManager::new());
+        let token = "test-token";
+
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
+        app.listen("browser_session_created", move |event| {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(event.payload()) {
+                let _ = event_tx.send(payload);
+            }
+        });
+
+        let raw_req = format!(
+            "{{\"command\":\"open\",\"url\":\"https://example.com\",\"workspaceId\":\"ws-a\",\"token\":\"{token}\"}}"
+        );
+        let resp = send_raw_line(app.handle().clone(), Arc::clone(&manager), token, &raw_req).await;
+
+        assert_eq!(resp["type"], "opened", "unexpected response: {resp:?}");
+        assert!(
+            resp["browser"]["url"] == "https://example.com"
+                || resp["browser"]["url"] == "https://example.com/",
+            "unexpected browser url: {:?}",
+            resp["browser"]["url"]
+        );
+        assert_eq!(resp["browser"]["workspaceId"], "ws-a");
+
+        let opened_id = resp["browser"]["browserId"].as_str().expect("browserId");
+
+        let list_req = format!("{{\"command\":\"list\",\"token\":\"{token}\"}}");
+        let list_resp = send_raw_line(app.handle().clone(), Arc::clone(&manager), token, &list_req).await;
+        assert_eq!(list_resp["type"], "list");
+        let sessions = list_resp["sessions"].as_array().expect("sessions array");
+        assert!(sessions.iter().any(|s| s["browserId"] == opened_id && (s["url"] == "https://example.com" || s["url"] == "https://example.com/")));
+
+        let event_payload = event_rx.try_recv().expect("received browser_session_created event");
+        assert_eq!(event_payload["browser"]["browserId"], opened_id);
+        assert_eq!(event_payload["workspaceId"], "ws-a");
+    }
+
+    #[tokio::test]
+    async fn test_browser_cli_open_rejects_file_scheme() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(BrowserManager::new());
+        let token = "test-token";
+
+        let raw_req = format!(
+            "{{\"command\":\"open\",\"url\":\"file:///etc/passwd\",\"token\":\"{token}\"}}"
+        );
+        let resp = send_raw_line(app.handle().clone(), Arc::clone(&manager), token, &raw_req).await;
+
+        assert_eq!(resp["type"], "error", "unexpected response: {resp:?}");
+        assert_eq!(resp["code"], "BROWSER_URL_SCHEME_DENIED", "unexpected response: {resp:?}");
+    }
+
+    #[tokio::test]
+    async fn test_browser_cli_open_rejects_javascript_scheme() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(BrowserManager::new());
+        let token = "test-token";
+
+        let raw_req = format!(
+            "{{\"command\":\"open\",\"url\":\"javascript:alert(1)\",\"token\":\"{token}\"}}"
+        );
+        let resp = send_raw_line(app.handle().clone(), Arc::clone(&manager), token, &raw_req).await;
+
+        assert_eq!(resp["type"], "error", "unexpected response: {resp:?}");
+        assert_eq!(resp["code"], "BROWSER_URL_SCHEME_DENIED", "unexpected response: {resp:?}");
+    }
+
+    #[tokio::test]
+    async fn test_browser_cli_navigate_round_trip() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(BrowserManager::new());
+        let token = "test-token";
+
+        // Navigate to unknown browserId -> Error BROWSER_NOT_FOUND
+        let raw_req_unknown = format!(
+            "{{\"command\":\"navigate\",\"browserId\":\"unknown-browser-id\",\"url\":\"https://example.com\",\"token\":\"{token}\"}}"
+        );
+        let resp_unknown = send_raw_line(
+            app.handle().clone(),
+            Arc::clone(&manager),
+            token,
+            &raw_req_unknown,
+        )
+        .await;
+        assert_eq!(resp_unknown["type"], "error", "unexpected response: {resp_unknown:?}");
+        assert_eq!(resp_unknown["code"], "BROWSER_NOT_FOUND", "unexpected response: {resp_unknown:?}");
+
+        // Navigate existing (register one via manager.register_session) -> Navigated and url updates in list
+        let registered = manager
+            .register_session(CreateBrowserRequest {
+                browser_id: None,
+                workspace_id: None,
+                worktree_path: None,
+                url: "https://initial.example.com".to_string(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .expect("register session");
+
+        let raw_req_existing = format!(
+            "{{\"command\":\"navigate\",\"browserId\":\"{}\",\"url\":\"https://updated.example.com\",\"token\":\"{token}\"}}",
+            registered.browser_id
+        );
+        let resp_existing = send_raw_line(
+            app.handle().clone(),
+            Arc::clone(&manager),
+            token,
+            &raw_req_existing,
+        )
+        .await;
+        assert_eq!(resp_existing["type"], "navigated", "unexpected response: {resp_existing:?}");
+
+        // List confirms updated url
+        let list_req = format!("{{\"command\":\"list\",\"token\":\"{token}\"}}");
+        let list_resp = send_raw_line(app.handle().clone(), Arc::clone(&manager), token, &list_req).await;
+        let sessions = list_resp["sessions"].as_array().expect("sessions array");
+        let found = sessions.iter().find(|s| s["browserId"] == registered.browser_id);
+        assert!(found.is_some(), "session not found in list");
+        assert!(
+            found.unwrap()["url"] == "https://updated.example.com"
+                || found.unwrap()["url"] == "https://updated.example.com/",
+            "unexpected updated url: {:?}",
+            found.unwrap()["url"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_browser_cli_close_round_trip() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(BrowserManager::new());
+        let token = "test-token";
+
+        let registered = manager
+            .register_session(CreateBrowserRequest {
+                browser_id: None,
+                workspace_id: None,
+                worktree_path: None,
+                url: "https://example.com".to_string(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .expect("register session");
+
+        // Close existing -> Closed then list is empty
+        let raw_req_close = format!(
+            "{{\"command\":\"close\",\"browserId\":\"{}\",\"token\":\"{token}\"}}",
+            registered.browser_id
+        );
+        let resp_close = send_raw_line(
+            app.handle().clone(),
+            Arc::clone(&manager),
+            token,
+            &raw_req_close,
+        )
+        .await;
+        assert_eq!(resp_close["type"], "closed", "unexpected response: {resp_close:?}");
+
+        let list_req = format!("{{\"command\":\"list\",\"token\":\"{token}\"}}");
+        let list_resp = send_raw_line(app.handle().clone(), Arc::clone(&manager), token, &list_req).await;
+        let sessions = list_resp["sessions"].as_array().expect("sessions array");
+        assert!(sessions.is_empty(), "expected empty list after close, got: {sessions:?}");
+
+        // Close again -> Error BROWSER_NOT_FOUND
+        let resp_close_again = send_raw_line(
+            app.handle().clone(),
+            Arc::clone(&manager),
+            token,
+            &raw_req_close,
+        )
+        .await;
+        assert_eq!(resp_close_again["type"], "error", "unexpected response: {resp_close_again:?}");
+        assert_eq!(resp_close_again["code"], "BROWSER_NOT_FOUND", "unexpected response: {resp_close_again:?}");
+    }
+
+    #[tokio::test]
+    async fn test_browser_cli_identify_round_trip() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(BrowserManager::new());
+        let token = "test-token";
+
+        // Identify with empty manager -> Identified with None (browser == null)
+        let raw_req_identify = format!("{{\"command\":\"identify\",\"token\":\"{token}\"}}");
+        let resp_empty = send_raw_line(
+            app.handle().clone(),
+            Arc::clone(&manager),
+            token,
+            &raw_req_identify,
+        )
+        .await;
+        assert_eq!(resp_empty["type"], "identified", "unexpected response: {resp_empty:?}");
+        assert!(resp_empty["browser"].is_null(), "expected null browser for empty manager");
+
+        // Identify with a registered visible session -> Identified with Some
+        let registered = manager
+            .register_session(CreateBrowserRequest {
+                browser_id: None,
+                workspace_id: None,
+                worktree_path: None,
+                url: "https://example.com".to_string(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .expect("register session");
+
+        let resp_visible = send_raw_line(
+            app.handle().clone(),
+            Arc::clone(&manager),
+            token,
+            &raw_req_identify,
+        )
+        .await;
+        assert_eq!(resp_visible["type"], "identified", "unexpected response: {resp_visible:?}");
+        assert!(!resp_visible["browser"].is_null(), "expected Some browser for visible session");
+        assert_eq!(resp_visible["browser"]["browserId"], registered.browser_id);
     }
 }

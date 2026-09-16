@@ -16,6 +16,25 @@ pub enum LaunchMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BrowserCliCommand {
     List,
+    Open {
+        url: String,
+        workspace_id: Option<String>,
+        worktree_path: Option<String>,
+    },
+    Navigate {
+        browser_id: String,
+        url: String,
+    },
+    Close {
+        browser_id: String,
+    },
+    Identify,
+    Url {
+        browser_id: String,
+    },
+    Title {
+        browser_id: String,
+    },
     Snapshot {
         browser_id: String,
     },
@@ -37,6 +56,9 @@ pub enum BrowserCliCommand {
     },
 }
 
+const BROWSER_USAGE: &str =
+    "expected `ferryx browser <list|open|navigate|close|identify|url|title|snapshot|click|fill|keypress>`";
+
 fn required_option(args: &[String], name: &str) -> Result<String, String> {
     let index = args
         .iter()
@@ -45,6 +67,17 @@ fn required_option(args: &[String], name: &str) -> Result<String, String> {
     args.get(index + 1)
         .filter(|value| !value.starts_with("--"))
         .cloned()
+        .ok_or_else(|| format!("missing value for {name}"))
+}
+
+fn optional_option(args: &[String], name: &str) -> Result<Option<String>, String> {
+    let Some(index) = args.iter().position(|arg| arg == name) else {
+        return Ok(None);
+    };
+    args.get(index + 1)
+        .filter(|value| !value.starts_with("--"))
+        .cloned()
+        .map(Some)
         .ok_or_else(|| format!("missing value for {name}"))
 }
 
@@ -58,10 +91,38 @@ where
         .map(|arg| arg.as_ref().to_string())
         .collect::<Vec<_>>();
     if args.get(1).is_none_or(|arg| arg != "browser") {
-        return Err("expected `ferryx browser <list|snapshot|click|fill|keypress>`".into());
+        return Err(BROWSER_USAGE.into());
     }
     match args.get(2).map(String::as_str) {
         Some("list") => Ok(BrowserCliCommand::List),
+        Some("open") => {
+            let url = required_option(&args, "--url")?;
+            let workspace_id = optional_option(&args, "--workspace")?;
+            let worktree_path = optional_option(&args, "--worktree-path")?;
+            Ok(BrowserCliCommand::Open {
+                url,
+                workspace_id,
+                worktree_path,
+            })
+        }
+        Some("navigate") => {
+            let browser_id = required_option(&args, "--browser-id")?;
+            let url = required_option(&args, "--url")?;
+            Ok(BrowserCliCommand::Navigate { browser_id, url })
+        }
+        Some("close") => {
+            let browser_id = required_option(&args, "--browser-id")?;
+            Ok(BrowserCliCommand::Close { browser_id })
+        }
+        Some("identify") => Ok(BrowserCliCommand::Identify),
+        Some("url") => {
+            let browser_id = required_option(&args, "--browser-id")?;
+            Ok(BrowserCliCommand::Url { browser_id })
+        }
+        Some("title") => {
+            let browser_id = required_option(&args, "--browser-id")?;
+            Ok(BrowserCliCommand::Title { browser_id })
+        }
         Some("snapshot") => {
             let browser_id = required_option(&args, "--browser-id")?;
             Ok(BrowserCliCommand::Snapshot { browser_id })
@@ -97,13 +158,29 @@ where
                 key: required_option(&args, "--key")?,
             })
         }
-        _ => Err("expected `ferryx browser <list|snapshot|click|fill|keypress>`".into()),
+        _ => Err(BROWSER_USAGE.into()),
     }
 }
 
 fn browser_cli_request(command: BrowserCliCommand) -> BrowserCliRequest {
     match command {
         BrowserCliCommand::List => BrowserCliRequest::List,
+        BrowserCliCommand::Open {
+            url,
+            workspace_id,
+            worktree_path,
+        } => BrowserCliRequest::Open {
+            url,
+            workspace_id,
+            worktree_path,
+        },
+        BrowserCliCommand::Navigate { browser_id, url } => {
+            BrowserCliRequest::Navigate { browser_id, url }
+        }
+        BrowserCliCommand::Close { browser_id } => BrowserCliRequest::Close { browser_id },
+        BrowserCliCommand::Identify => BrowserCliRequest::Identify,
+        BrowserCliCommand::Url { browser_id } => BrowserCliRequest::Snapshot { browser_id },
+        BrowserCliCommand::Title { browser_id } => BrowserCliRequest::Snapshot { browser_id },
         BrowserCliCommand::Snapshot { browser_id } => BrowserCliRequest::Snapshot { browser_id },
         BrowserCliCommand::Click {
             browser_id,
@@ -430,38 +507,48 @@ pub fn run_remote_cli(command: RemoteCliCommand) -> Result<(), String> {
     }
 }
 
-pub fn run_browser_cli(command: BrowserCliCommand) -> Result<(), String> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .build()
-        .map_err(|error| error.to_string())?;
-    let response = runtime
-        .block_on(send_browser_cli_request(browser_cli_request(command)))
-        .map_err(|error| error.to_string())?;
+fn format_browser_cli_response(
+    command: &BrowserCliCommand,
+    response: BrowserCliResponse,
+) -> Result<String, String> {
     match response {
         BrowserCliResponse::List { sessions } => {
-            println!(
-                "{}",
-                serde_json::to_string(&sessions).map_err(|error| error.to_string())?
-            );
-            Ok(())
+            serde_json::to_string(&sessions).map_err(|error| error.to_string())
         }
-        BrowserCliResponse::Snapshot { snapshot } => {
-            println!(
-                "{}",
-                serde_json::to_string(&snapshot).map_err(|error| error.to_string())?
-            );
-            Ok(())
+        BrowserCliResponse::Snapshot { snapshot } => match command {
+            BrowserCliCommand::Url { .. } => Ok(snapshot.url),
+            BrowserCliCommand::Title { .. } => Ok(snapshot.title),
+            _ => serde_json::to_string(&snapshot).map_err(|error| error.to_string()),
+        },
+        BrowserCliResponse::Acted => Ok(serde_json::json!({ "type": "acted" }).to_string()),
+        BrowserCliResponse::Opened { browser } => {
+            serde_json::to_string(&browser).map_err(|error| error.to_string())
         }
-        BrowserCliResponse::Acted => {
-            println!("{}", serde_json::json!({ "type": "acted" }));
-            Ok(())
+        BrowserCliResponse::Navigated => {
+            Ok(serde_json::json!({ "type": "navigated" }).to_string())
+        }
+        BrowserCliResponse::Closed => Ok(serde_json::json!({ "type": "closed" }).to_string()),
+        BrowserCliResponse::Identified { browser } => {
+            serde_json::to_string(&browser).map_err(|error| error.to_string())
         }
         BrowserCliResponse::Error { code, message } => {
             print_browser_cli_error(&code, &message);
             Err(message)
         }
     }
+}
+
+pub fn run_browser_cli(command: BrowserCliCommand) -> Result<(), String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .map_err(|error| error.to_string())?;
+    let response = runtime
+        .block_on(send_browser_cli_request(browser_cli_request(command.clone())))
+        .map_err(|error| error.to_string())?;
+    let output = format_browser_cli_response(&command, response)?;
+    println!("{output}");
+    Ok(())
 }
 
 pub fn parse_launch_mode<I, T>(args: I) -> LaunchMode
@@ -831,6 +918,269 @@ mod tests {
             ])
             .expect("value parses"),
             Some(std::path::PathBuf::from("/tmp/ferryx-handover.json"))
+        );
+    }
+
+    #[test]
+    fn browser_open_cli_happy_path() {
+        let args = vec!["ferryx", "browser", "open", "--url", "https://example.com"];
+        assert_eq!(
+            parse_browser_cli(&args).expect("parse browser open"),
+            BrowserCliCommand::Open {
+                url: "https://example.com".into(),
+                workspace_id: None,
+                worktree_path: None,
+            }
+        );
+
+        let full_args = vec![
+            "ferryx",
+            "browser",
+            "open",
+            "--url",
+            "https://example.com",
+            "--workspace",
+            "ws-123",
+            "--worktree-path",
+            "/path/to/worktree",
+        ];
+        assert_eq!(
+            parse_browser_cli(&full_args).expect("parse browser open with optional flags"),
+            BrowserCliCommand::Open {
+                url: "https://example.com".into(),
+                workspace_id: Some("ws-123".into()),
+                worktree_path: Some("/path/to/worktree".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn browser_open_cli_missing_options() {
+        let args_no_url = vec!["ferryx", "browser", "open"];
+        assert!(parse_browser_cli(&args_no_url).is_err());
+
+        let args_empty_url = vec!["ferryx", "browser", "open", "--url"];
+        assert!(parse_browser_cli(&args_empty_url).is_err());
+
+        let args_empty_ws = vec![
+            "ferryx",
+            "browser",
+            "open",
+            "--url",
+            "https://example.com",
+            "--workspace",
+        ];
+        assert!(parse_browser_cli(&args_empty_ws).is_err());
+
+        let args_empty_wt = vec![
+            "ferryx",
+            "browser",
+            "open",
+            "--url",
+            "https://example.com",
+            "--worktree-path",
+        ];
+        assert!(parse_browser_cli(&args_empty_wt).is_err());
+    }
+
+    #[test]
+    fn browser_navigate_cli_happy_and_missing() {
+        let happy = vec![
+            "ferryx",
+            "browser",
+            "navigate",
+            "--browser-id",
+            "b-1",
+            "--url",
+            "https://example.com",
+        ];
+        assert_eq!(
+            parse_browser_cli(&happy).expect("parse browser navigate"),
+            BrowserCliCommand::Navigate {
+                browser_id: "b-1".into(),
+                url: "https://example.com".into(),
+            }
+        );
+
+        let missing_url = vec!["ferryx", "browser", "navigate", "--browser-id", "b-1"];
+        assert!(parse_browser_cli(&missing_url).is_err());
+
+        let missing_id = vec![
+            "ferryx",
+            "browser",
+            "navigate",
+            "--url",
+            "https://example.com",
+        ];
+        assert!(parse_browser_cli(&missing_id).is_err());
+    }
+
+    #[test]
+    fn browser_close_cli_happy_and_missing() {
+        let happy = vec!["ferryx", "browser", "close", "--browser-id", "b-1"];
+        assert_eq!(
+            parse_browser_cli(&happy).expect("parse browser close"),
+            BrowserCliCommand::Close {
+                browser_id: "b-1".into(),
+            }
+        );
+
+        let missing_id = vec!["ferryx", "browser", "close"];
+        assert!(parse_browser_cli(&missing_id).is_err());
+    }
+
+    #[test]
+    fn browser_identify_cli_happy() {
+        let happy = vec!["ferryx", "browser", "identify"];
+        assert_eq!(
+            parse_browser_cli(&happy).expect("parse browser identify"),
+            BrowserCliCommand::Identify
+        );
+    }
+
+    #[test]
+    fn browser_url_cli_happy_and_missing() {
+        let happy = vec!["ferryx", "browser", "url", "--browser-id", "b-1"];
+        assert_eq!(
+            parse_browser_cli(&happy).expect("parse browser url"),
+            BrowserCliCommand::Url {
+                browser_id: "b-1".into(),
+            }
+        );
+
+        let missing_id = vec!["ferryx", "browser", "url"];
+        assert!(parse_browser_cli(&missing_id).is_err());
+    }
+
+    #[test]
+    fn browser_title_cli_happy_and_missing() {
+        let happy = vec!["ferryx", "browser", "title", "--browser-id", "b-1"];
+        assert_eq!(
+            parse_browser_cli(&happy).expect("parse browser title"),
+            BrowserCliCommand::Title {
+                browser_id: "b-1".into(),
+            }
+        );
+
+        let missing_id = vec!["ferryx", "browser", "title"];
+        assert!(parse_browser_cli(&missing_id).is_err());
+    }
+
+    #[test]
+    fn browser_cli_unknown_subcommand_and_usage() {
+        let err = parse_browser_cli(&["ferryx", "browser", "unknown"]).unwrap_err();
+        assert_eq!(
+            err,
+            "expected `ferryx browser <list|open|navigate|close|identify|url|title|snapshot|click|fill|keypress>`"
+        );
+
+        let err_no_browser = parse_browser_cli(&["ferryx", "other"]).unwrap_err();
+        assert_eq!(
+            err_no_browser,
+            "expected `ferryx browser <list|open|navigate|close|identify|url|title|snapshot|click|fill|keypress>`"
+        );
+    }
+
+    #[test]
+    fn browser_cli_request_mappings() {
+        assert_eq!(
+            browser_cli_request(BrowserCliCommand::Open {
+                url: "https://example.com".into(),
+                workspace_id: Some("ws-1".into()),
+                worktree_path: Some("/tree".into()),
+            }),
+            BrowserCliRequest::Open {
+                url: "https://example.com".into(),
+                workspace_id: Some("ws-1".into()),
+                worktree_path: Some("/tree".into()),
+            }
+        );
+
+        assert_eq!(
+            browser_cli_request(BrowserCliCommand::Navigate {
+                browser_id: "b-1".into(),
+                url: "https://example.com".into(),
+            }),
+            BrowserCliRequest::Navigate {
+                browser_id: "b-1".into(),
+                url: "https://example.com".into(),
+            }
+        );
+
+        assert_eq!(
+            browser_cli_request(BrowserCliCommand::Close {
+                browser_id: "b-1".into(),
+            }),
+            BrowserCliRequest::Close {
+                browser_id: "b-1".into(),
+            }
+        );
+
+        assert_eq!(
+            browser_cli_request(BrowserCliCommand::Identify),
+            BrowserCliRequest::Identify
+        );
+
+        assert_eq!(
+            browser_cli_request(BrowserCliCommand::Url {
+                browser_id: "b-1".into(),
+            }),
+            BrowserCliRequest::Snapshot {
+                browser_id: "b-1".into(),
+            }
+        );
+
+        assert_eq!(
+            browser_cli_request(BrowserCliCommand::Title {
+                browser_id: "b-1".into(),
+            }),
+            BrowserCliRequest::Snapshot {
+                browser_id: "b-1".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn browser_formatter_prints_only_url_or_title_from_snapshot() {
+        let snapshot = crate::browser::BrowserAutomationSnapshot {
+            browser_id: "b-1".into(),
+            generation: 1,
+            url: "https://example.com/page".into(),
+            title: "Example Title".into(),
+            elements: vec![],
+        };
+        let response = BrowserCliResponse::Snapshot {
+            snapshot: snapshot.clone(),
+        };
+
+        let url_output = format_browser_cli_response(
+            &BrowserCliCommand::Url {
+                browser_id: "b-1".into(),
+            },
+            response.clone(),
+        )
+        .expect("format url");
+        assert_eq!(url_output, "https://example.com/page");
+
+        let title_output = format_browser_cli_response(
+            &BrowserCliCommand::Title {
+                browser_id: "b-1".into(),
+            },
+            response.clone(),
+        )
+        .expect("format title");
+        assert_eq!(title_output, "Example Title");
+
+        let snapshot_output = format_browser_cli_response(
+            &BrowserCliCommand::Snapshot {
+                browser_id: "b-1".into(),
+            },
+            response,
+        )
+        .expect("format snapshot");
+        assert_eq!(
+            snapshot_output,
+            serde_json::to_string(&snapshot).unwrap()
         );
     }
 }

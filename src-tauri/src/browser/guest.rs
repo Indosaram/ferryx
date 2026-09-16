@@ -1,5 +1,6 @@
 use tauri::Url;
 
+pub const BROWSER_SESSION_CREATED_EVENT: &str = "browser_session_created";
 pub const BROWSER_OPEN_REQUESTED_EVENT: &str = "browser_open_requested";
 pub const BROWSER_DOWNLOAD_REQUESTED_EVENT: &str = "browser_download_requested";
 pub const BROWSER_SHORTCUT_REQUESTED_EVENT: &str = "browser_shortcut_requested";
