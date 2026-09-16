@@ -353,7 +353,7 @@ mod publication_tests {
             let payload = Bytes::from(serde_json::json!({"requestId":request,"workspaceId":workspace,"worktree":{"wsId":workspace,"slug":"fenced"}}).to_string());
             let task = tokio::spawn(mutate_worktree(state.clone(), headers.clone(), payload.clone(), false));
             let entered = tokio::time::timeout(Duration::from_secs(10), entered_rx).await;
-            if revoke { assert!(state.auth_manager.revoke_device(&device.id)); } else { task.abort(); }
+            if revoke { assert!(state.auth_manager.revoke_device(&device.id).unwrap()); } else { task.abort(); }
             let response = task.await;
             drop(gate);
             let slots = tokio::time::timeout(Duration::from_secs(10), service.project_mutations.clone().acquire_many_owned(8)).await.unwrap().unwrap();

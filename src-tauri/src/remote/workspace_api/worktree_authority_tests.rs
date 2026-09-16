@@ -449,7 +449,7 @@ async fn owner_http_gate_and_eight_admissions() {
         let ninth = client.post(&endpoint).bearer_auth(&token).body("{}").send().await.unwrap();
         assert_eq!(ninth.status().as_u16(), 429);
         // Revoke while HTTP jobs wait; no queued Git may be authorized later.
-        assert!(state.auth_manager.revoke_device(&device));
+        assert!(state.auth_manager.revoke_device(&device).unwrap());
     drop(held.take());
     let mut statuses = Vec::new();
     while let Some(joined) = tokio::time::timeout(Duration::from_secs(45), jobs.join_next()).await.unwrap() { statuses.push(joined.unwrap()); }

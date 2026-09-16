@@ -221,7 +221,7 @@ async fn project_http_fixture(inject_request_failure: bool) {
                     serde_json::from_slice(&reply.bytes().await.unwrap()).unwrap();
                 assert_eq!(p.workspace_id, project.workspace_id);
             }
-            assert!(state.auth_manager.revoke_device(&device.id));
+            assert!(state.auth_manager.revoke_device(&device.id).unwrap());
             assert_eq!(
                 client
                     .get(format!("http://{addr}/api/v1/workspace/projects"))
@@ -468,7 +468,7 @@ async fn r12_revocation_fences() {
             tokio::spawn(super::workspace_api::register(State(state.clone()), headers, payload))
         };
         let entered = tokio::time::timeout(std::time::Duration::from_secs(10), entered_rx).await;
-        state.auth_manager.revoke_device(&device.id);
+        let _ = state.auth_manager.revoke_device(&device.id);
         let response = task.await.unwrap();
         release_tx.send(()).unwrap();
         drop(gate);
@@ -752,7 +752,7 @@ async fn r12_router_auth_admission() {
         assert_eq!(super::workspace_api::AUTH_SLOTS.available_permits(), 0);
         let health = reqwest::Client::builder().no_proxy().build().unwrap().get(format!("http://{addr}/api/v1/health")).send().await.unwrap();
         assert_eq!(health.status().as_u16(), 200);
-        state.auth_manager.revoke_device(&device.id);
+        let _ = state.auth_manager.revoke_device(&device.id);
     }).catch_unwind().await;
     { let (lock, condition) = &*release; *lock.lock().unwrap() = true; condition.notify_all(); }
     for mut socket in sockets {

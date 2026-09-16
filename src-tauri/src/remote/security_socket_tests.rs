@@ -82,7 +82,7 @@ async fn a10_real_socket_reservation_transfers_http_close_authority() {
         drop(second);
         eprintln!("A10 actual socket release: reserved other=409; controlled15s expiry=attach; creator close=409; sole current controller close=204; original_pid={pid:?} epoch={epoch} reaped=true");
     }).catch_unwind().await;
-    state.auth_manager.revoke_device(&device.id); state.auth_manager.revoke_device(&other_device.id);
+    let _ = state.auth_manager.revoke_device(&device.id); let _ = state.auth_manager.revoke_device(&other_device.id);
     for id in backend.list_sessions() { backend.close_session(&id).await.unwrap(); services.sessions.wait_machine_lifecycle(&id).await.unwrap(); }
     server.stop().await;
     drop(services); drop(state); drop(owner);
@@ -473,7 +473,7 @@ async fn revocation_closes_device_sockets(path: &str) {
         frame(&mut other).await,
         ServerWebSocketFrame::Close
     ));
-    state
+    let _ = state
         .auth_manager
         .revoke_device(&state.auth_manager.validate_token(&other_token).unwrap().id);
     assert!(matches!(
@@ -658,7 +658,7 @@ async fn revocation_cancels_pending_input(path: &str) {
     write_client_ws_frame(&mut socket, 2, b"pending input").await;
     tokio::time::timeout(DEADLINE, entered).await.unwrap();
     assert_eq!(backend.input_gate.pending.load(Ordering::SeqCst), 1);
-    assert!(state.auth_manager.revoke_device(&device.id));
+    assert!(state.auth_manager.revoke_device(&device.id).unwrap());
     assert!(matches!(
         frame(&mut socket).await,
         ServerWebSocketFrame::Close
@@ -700,7 +700,7 @@ async fn revocation_during_attachment(path: &str) {
     })
     .await
     .unwrap();
-    assert!(state.auth_manager.revoke_device(&device.id));
+    assert!(state.auth_manager.revoke_device(&device.id).unwrap());
     gate.release.notify_one();
     let status = tokio::time::timeout(DEADLINE, handshake).await.unwrap();
     assert_eq!(
@@ -751,7 +751,7 @@ async fn revocation_before_upgrade_callback(path: &str) {
     })
     .await
     .unwrap();
-    assert!(state.auth_manager.revoke_device(&device.id));
+    assert!(state.auth_manager.revoke_device(&device.id).unwrap());
     gate.release.notify_one();
     let mut socket = tokio::time::timeout(DEADLINE, handshake).await.unwrap();
     assert!(
