@@ -916,5 +916,47 @@ describe("SshSection Settings Component", () => {
       expect(screen.getByText("Setup needed")).toBeInTheDocument();
       expect(screen.queryByText("Ready")).not.toBeInTheDocument();
     });
+
+    it("renders additive 업데이트 가능 state and invokes cmd_ssh_provision_helper when remote helper is stale", async () => {
+      const environment = { platform: "posix", executor: "sh", version: "test", home: "/home/test", temp: "/tmp", git: true };
+      const provisionCalls: unknown[] = [];
+      invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+        if (command === "cmd_ssh_list_hosts") return [mockHost1];
+        if (command === "cmd_ssh_test_connection") return { host: mockHost1, reachable: true, checkedAt: 1, environment, helper: "installed" };
+        if (command === "cmd_ssh_read_system_config") return { path: "", exists: false, hosts: [], rawText: "" };
+        if (command === "cmd_ssh_helper_update_state") {
+          return {
+            installed: true,
+            remoteVersion: "2026.900.0",
+            bundledVersion: "2026.908.1",
+            bundledPath: "/test/resources/helpers/ferryx-remote-helper",
+          };
+        }
+        if (command === "cmd_ssh_provision_helper") {
+          provisionCalls.push(args);
+          return { executable: "/home/test/.ferryx/bin/ferryx-remote-helper", root: "/home/test/.ferryx/helper/test" };
+        }
+        throw new Error(`Unexpected command ${command}`);
+      });
+
+      await act(async () => {
+        render(<SshSection />);
+      });
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "Test connection to Dev Server" }));
+      });
+
+      expect(screen.getByText("Terminal Helper:")).toBeInTheDocument();
+      expect(screen.getByText("Ready")).toBeInTheDocument();
+      expect(screen.getByText(/업데이트 가능/)).toBeInTheDocument();
+
+      const updateBtn = screen.getByRole("button", { name: /업데이트|Update helper/ });
+      expect(updateBtn).toBeInTheDocument();
+      await act(async () => {
+        fireEvent.click(updateBtn);
+      });
+
+      expect(provisionCalls.length).toBe(1);
+    });
   });
 });

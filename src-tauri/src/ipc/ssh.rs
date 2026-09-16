@@ -452,6 +452,168 @@ pub async fn cmd_ssh_prepare_integration(host: SshHost) -> Result<(), IpcError> 
     crate::ssh::direct::ensure_remote_extension_installed(&host).await
 }
 
+pub fn bundled_helper_path<R: Runtime>(
+    app: &AppHandle<R>,
+    target_triple: &str,
+) -> Result<PathBuf, IpcError> {
+    let filename = if target_triple.contains("windows") {
+        "ferryx-remote-helper.exe"
+    } else {
+        "ferryx-remote-helper"
+    };
+
+    let mut candidates = Vec::new();
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(resource_dir.join("helpers").join(target_triple).join(filename));
+        candidates.push(resource_dir.join("resources").join("helpers").join(target_triple).join(filename));
+    }
+    candidates.push(PathBuf::from("src-tauri/resources/helpers").join(target_triple).join(filename));
+    candidates.push(PathBuf::from("resources/helpers").join(target_triple).join(filename));
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        candidates.push(PathBuf::from(manifest_dir).join("resources/helpers").join(target_triple).join(filename));
+    }
+
+    for candidate in candidates {
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(IpcError::new(
+        IpcErrorCode::CliExecutableNotFound,
+        format!("Bundled helper binary for target '{target_triple}' not found"),
+    ))
+}
+
+pub fn bundled_helper_version<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
+    let mut candidates = Vec::new();
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(resource_dir.join("helpers").join("manifest.json"));
+        candidates.push(resource_dir.join("resources").join("helpers").join("manifest.json"));
+    }
+    candidates.push(PathBuf::from("src-tauri/resources/helpers/manifest.json"));
+    candidates.push(PathBuf::from("resources/helpers/manifest.json"));
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        candidates.push(PathBuf::from(manifest_dir).join("resources/helpers").join("manifest.json"));
+    }
+
+    for candidate in candidates {
+        if candidate.is_file() {
+            if let Ok(bytes) = std::fs::read(&candidate) {
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                    if let Some(v) = val.get("helperVersion").and_then(|v| v.as_str()) {
+                        return Some(v.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+pub async fn resolve_remote_target_triple(
+    host: &SshHost,
+    env: &crate::ssh::runtime::RemoteEnvironment,
+) -> Result<String, IpcError> {
+    match env.platform {
+        crate::ssh::runtime::RemotePlatform::Windows => {
+            Ok("x86_64-pc-windows-msvc".to_string())
+        }
+        crate::ssh::runtime::RemotePlatform::Posix => {
+            let script = "uname -s; uname -m";
+            let plan = crate::ssh::direct::ssh_plan(host, env.executor.command(script), false)?;
+            let output = crate::ssh::direct::bounded_output(&plan, std::time::Duration::from_secs(3))
+                .await
+                .map_err(|e| {
+                    IpcError::new(
+                        IpcErrorCode::Unsupported,
+                        format!("Failed to determine remote architecture: {e}"),
+                    )
+                })?;
+            let text = std::str::from_utf8(&output).map_err(|_| {
+                IpcError::new(
+                    IpcErrorCode::Unsupported,
+                    "Remote architecture probe returned non-UTF8 output",
+                )
+            })?;
+            let lines: Vec<&str> = text.lines().map(str::trim).filter(|s| !s.is_empty()).collect();
+            let (os, arch) = match lines.as_slice() {
+                [os, arch, ..] => (*os, *arch),
+                [os] => (*os, "x86_64"),
+                _ => {
+                    return Err(IpcError::new(
+                        IpcErrorCode::Unsupported,
+                        "Could not detect remote operating system or architecture for provisioning",
+                    ));
+                }
+            };
+
+            let target = crate::ssh::helper_assets::resolve_target_from_probe(os, arch)?;
+            Ok(target.triple().to_string())
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HelperUpdateState {
+    pub installed: bool,
+    pub remote_version: Option<String>,
+    pub bundled_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundled_path: Option<PathBuf>,
+}
+
+#[tauri::command]
+pub async fn cmd_ssh_provision_helper(
+    host: SshHost,
+    local_binary: PathBuf,
+) -> Result<crate::ssh::helper_setup::HelperLocation, IpcError> {
+    let environment = crate::ssh::runtime::detect(&host).await?;
+    crate::ssh::helper_setup::provision(&host, &environment, &local_binary).await
+}
+
+#[tauri::command]
+pub async fn cmd_ssh_helper_update_state<R: Runtime>(
+    app: AppHandle<R>,
+    host: SshHost,
+) -> Result<HelperUpdateState, IpcError> {
+    let bundled_ver = bundled_helper_version(&app);
+
+    let env = match crate::ssh::runtime::detect(&host).await {
+        Ok(e) => e,
+        Err(_) => {
+            return Ok(HelperUpdateState {
+                installed: false,
+                remote_version: None,
+                bundled_version: bundled_ver,
+                bundled_path: None,
+            });
+        }
+    };
+
+    let probe = crate::ssh::helper_setup::probe_ready(&host, &env).await;
+    let installed = probe == crate::ssh::helper_setup::HelperProbeState::Installed;
+
+    let remote_version = if installed {
+        crate::ssh::helper_setup::installed_version(&host, &env).await
+    } else {
+        None
+    };
+
+    let bundled_path = match resolve_remote_target_triple(&host, &env).await {
+        Ok(triple) => bundled_helper_path(&app, &triple).ok(),
+        Err(_) => None,
+    };
+
+    Ok(HelperUpdateState {
+        installed,
+        remote_version,
+        bundled_version: bundled_ver,
+        bundled_path,
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SshClipboardImagePaste {

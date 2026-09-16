@@ -1089,3 +1089,27 @@ fn ssh_process_survival_concurrent_spawn_atomic_reservation() {
         p_path.exists()
     );
 }
+
+#[test]
+fn helper_handshake_includes_helper_version() {
+    let runtime_dir = tempfile::tempdir().unwrap();
+    let runtime = make_runtime(&runtime_dir, "tok-version-test");
+    let resp = runtime.handle(Request {
+        protocol: 1,
+        token: "tok-version-test".to_string(),
+        op: "handshake".to_string(),
+        params: json!({}),
+    }).unwrap();
+
+    assert_eq!(resp["helperVersion"], "2026.908.1");
+}
+
+#[test]
+fn helper_process_version_flag_prints_version() {
+    let mut out = Vec::new();
+    let res = super::super::process::run_with_io(vec!["--version".to_string()], &mut out);
+    assert!(res.is_ok());
+    let text = String::from_utf8(out).unwrap();
+    assert_eq!(text.trim(), "2026.908.1");
+}
+

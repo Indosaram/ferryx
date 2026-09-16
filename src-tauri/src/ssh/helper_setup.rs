@@ -124,45 +124,19 @@ pub async fn install(
     .map_err(|e| IpcError::new(IpcErrorCode::InternalError, format!("Join error in blocking offload: {e}")))?
     ?;
 
-    let script = match env.platform {
-        RemotePlatform::Posix => format!(
-            "dest={}; parent=$(dirname \"$dest\"); mkdir -p \"$parent\" && chmod 700 \"$parent\"; \
-             tmp=\"${{dest}}.tmp.$$\"; trap 'rm -f \"$tmp\"' EXIT HUP INT TERM; \
-             cat > \"$tmp\" && chmod 700 \"$tmp\" && mv -f \"$tmp\" \"$dest\"",
-            direct::quote_posix(&location.executable)
-        ),
-        RemotePlatform::Windows => format!(
-            "$dest = {}; $dir = [System.IO.Path]::GetDirectoryName($dest); \
-             if (-not [System.IO.Directory]::Exists($dir)) {{ [System.IO.Directory]::CreateDirectory($dir) | Out-Null }}; \
-             $tmp = \"$dest.tmp.\" + [System.Guid]::NewGuid().ToString('N'); \
-             $backup = $null; \
-             try {{ \
-                 $in = [System.Console]::OpenStandardInput(); \
-                 $file = [System.IO.File]::Create($tmp); \
-                 $in.CopyTo($file); \
-                 $file.Close(); \
-                 $aclRes = & icacls $tmp /inheritance:r /grant:r \"$($env:USERNAME):(F)\" 2>&1; \
-                 if ($LASTEXITCODE -ne 0) {{ throw \"Failed to set private ACL on helper binary: $aclRes\" }}; \
-                 if ([System.IO.File]::Exists($dest)) {{ \
-                     $backup = \"$dest.bak.\" + [System.Guid]::NewGuid().ToString('N'); \
-                     [System.IO.File]::Move($dest, $backup); \
-                 }}; \
-                 [System.IO.File]::Move($tmp, $dest); \
-                 if ($backup -and [System.IO.File]::Exists($backup)) {{ [System.IO.File]::Delete($backup); }} \
-             }} catch {{ \
-                 if ($backup -and [System.IO.File]::Exists($backup)) {{ \
-                     try {{ [System.IO.File]::Move($backup, $dest) }} catch {{}} \
-                 }}; \
-                 throw \
-             }} finally {{ \
-                 if ([System.IO.File]::Exists($tmp)) {{ [System.IO.File]::Delete($tmp) }} \
-             }}",
-            runtime::powershell_data(&location.executable)
-        ),
+    let (cmd, input_bytes) = match env.platform {
+        RemotePlatform::Posix => {
+            let script = build_posix_upload_script(location, &binary_data);
+            (env.executor.command("sh -s"), script.into_bytes())
+        }
+        RemotePlatform::Windows => {
+            let script = build_windows_upload_script(location, &binary_data);
+            (env.executor.command("-Command -"), script.into_bytes())
+        }
     };
 
-    let plan = direct::ssh_plan(host, env.executor.command(&script), false)?;
-    direct::bounded_output_with_stdin(&plan, Duration::from_secs(60), binary_data)
+    let plan = direct::ssh_plan(host, cmd, false)?;
+    direct::bounded_output_with_stdin(&plan, Duration::from_secs(60), input_bytes)
         .await
         .map_err(|mut err| {
             if let Some(details) = err.details.as_mut() {
@@ -417,6 +391,156 @@ pub async fn probe_ready(host: &SshHost, environment: &RemoteEnvironment) -> Hel
         Ok(stdout) => classify_probe_result(Ok(&stdout)),
         Err(err) => classify_probe_result(Err(&err)),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum HelperUpgradeDecision {
+    Install,
+    NoOp,
+    Upgrade,
+}
+
+pub fn parse_installed_version_output(stdout: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(stdout).ok()?;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let token = trimmed.split_whitespace().last()?;
+        if token.contains('.')
+            && token.chars().next().map_or(false, |c| c.is_ascii_digit())
+            && token.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '+')
+        {
+            return Some(token.to_string());
+        }
+    }
+    None
+}
+
+pub async fn installed_version(
+    host: &SshHost,
+    env: &RemoteEnvironment,
+) -> Option<String> {
+    let location = default_location(host, env).ok()?;
+    let script = match env.platform {
+        RemotePlatform::Posix => format!(
+            "exe={}; \
+             if [ ! -f \"$exe\" ] || [ ! -x \"$exe\" ]; then exit 127; fi; \
+             exec \"$exe\" --version",
+            direct::quote_posix(&location.executable)
+        ),
+        RemotePlatform::Windows => format!(
+            "$exe = {}; \
+             if (-not [System.IO.File]::Exists($exe)) {{ exit 127; }}; \
+             & $exe --version",
+            runtime::powershell_data(&location.executable)
+        ),
+    };
+    let plan = direct::ssh_plan(host, env.executor.command(&script), false).ok()?;
+    match direct::bounded_output(&plan, Duration::from_secs(10)).await {
+        Ok(stdout) => parse_installed_version_output(&stdout),
+        Err(_) => None,
+    }
+}
+
+pub fn decide_helper_upgrade(
+    installed: bool,
+    remote_version: Option<&str>,
+    bundled_version: &str,
+) -> HelperUpgradeDecision {
+    if !installed {
+        HelperUpgradeDecision::Install
+    } else {
+        match remote_version {
+            Some(remote) if remote == bundled_version => HelperUpgradeDecision::NoOp,
+            _ => HelperUpgradeDecision::Upgrade,
+        }
+    }
+}
+
+pub fn chunk_base64(bytes: &[u8], line_length: usize) -> String {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let encoded = STANDARD.encode(bytes);
+    let mut chunked = String::with_capacity(encoded.len() + (encoded.len() / line_length) * 2);
+    for chunk in encoded.as_bytes().chunks(line_length) {
+        chunked.push_str(std::str::from_utf8(chunk).unwrap_or(""));
+        chunked.push('\n');
+    }
+    chunked
+}
+
+pub fn build_posix_upload_script(location: &HelperLocation, binary_bytes: &[u8]) -> String {
+    let chunked = chunk_base64(binary_bytes, 76);
+    format!(
+        "dest={}; root={}; \
+         parent=$(dirname \"$dest\"); mkdir -p \"$parent\" && chmod 700 \"$parent\"; \
+         tmp=\"${{dest}}.tmp.$$\"; trap 'rm -f \"$tmp\"' EXIT HUP INT TERM; \
+         (base64 -d 2>/dev/null || base64 -D 2>/dev/null || openssl enc -base64 -d 2>/dev/null) << 'FERRYX_HELPER_PAYLOAD_EOF' > \"$tmp\"\n\
+{}\
+FERRYX_HELPER_PAYLOAD_EOF\n\
+         chmod 700 \"$tmp\" && \
+         if [ -f \"$root/endpoint.json\" ]; then \
+             pid=$(tr -d ' \\t\\r\\n' < \"$root/endpoint.json\" 2>/dev/null | sed -n 's/.*\"pid\":\\([0-9]\\{{1,\\}}\\).*/\\1/p'); \
+             if [ -n \"$pid\" ] && [ \"$pid\" -gt 0 ] 2>/dev/null; then kill \"$pid\" 2>/dev/null || true; sleep 0.2; fi; \
+         fi; \
+         mv -f \"$tmp\" \"$dest\" && printf 'FERRYX_INSTALL_OK\\n'",
+        direct::quote_posix(&location.executable),
+        direct::quote_posix(&location.root),
+        chunked
+    )
+}
+
+pub fn build_windows_upload_script(location: &HelperLocation, binary_bytes: &[u8]) -> String {
+    let chunked = chunk_base64(binary_bytes, 76);
+    format!(
+        "$ProgressPreference='SilentlyContinue'; $ErrorActionPreference='Stop'; \
+         [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false); \
+         try {{ \
+             $dest = {}; \
+             $root = {}; \
+             $dir = [System.IO.Path]::GetDirectoryName($dest); \
+             if (-not [System.IO.Directory]::Exists($dir)) {{ [System.IO.Directory]::CreateDirectory($dir) | Out-Null }}; \
+             $tmp = \"$dest.tmp.\" + [System.Guid]::NewGuid().ToString('N'); \
+             $b64 = @'\n\
+{}\
+'@;\n\
+             [System.IO.File]::WriteAllBytes($tmp, [System.Convert]::FromBase64String($b64.Trim())); \
+             $aclRes = & icacls $tmp /inheritance:r /grant:r \"$($env:USERNAME):(F)\" 2>&1; \
+             if ($LASTEXITCODE -ne 0) {{ throw \"Failed to set private ACL on helper binary: $aclRes\" }}; \
+             $epPath = Join-Path $root 'endpoint.json'; \
+             if ([System.IO.File]::Exists($epPath)) {{ \
+                 try {{ \
+                     $ep = Get-Content -Raw $epPath | ConvertFrom-Json; \
+                     if ($ep.pid) {{ taskkill /PID $ep.pid /F /T 2>&1 | Out-Null; Start-Sleep -Milliseconds 200; }} \
+                 }} catch {{}} \
+             }}; \
+             $old = \"$dest.old\"; \
+             if ([System.IO.File]::Exists($old)) {{ [System.IO.File]::Delete($old); }}; \
+             if ([System.IO.File]::Exists($dest)) {{ [System.IO.File]::Move($dest, $old); }}; \
+             [System.IO.File]::Move($tmp, $dest); \
+             if ([System.IO.File]::Exists($old)) {{ try {{ [System.IO.File]::Delete($old); }} catch {{}} }}; \
+             [Console]::WriteLine('FERRYX_INSTALL_OK'); \
+         }} catch {{ \
+             [Console]::Error.Write($_.Exception.Message); \
+             exit 1; \
+         }}",
+        runtime::powershell_data(&location.executable),
+        runtime::powershell_data(&location.root),
+        chunked
+    )
+}
+
+pub async fn provision(
+    host: &SshHost,
+    env: &RemoteEnvironment,
+    local_binary: &Path,
+) -> Result<HelperLocation, IpcError> {
+    let location = default_location(host, env)?;
+    install(host, env, &location, local_binary).await?;
+    ensure_started(host, env, &location).await?;
+    Ok(location)
 }
 
 #[cfg(test)]

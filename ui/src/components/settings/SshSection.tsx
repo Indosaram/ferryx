@@ -15,7 +15,7 @@ import {
   Trash2,
 } from "lucide-react";
 
-import { isTauri } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 
 import {
@@ -80,6 +80,10 @@ interface TestState {
   environment?: SshRemoteEnvironment | null;
   helper?: SshHelperProbeState | null;
   stage?: string;
+  remoteVersion?: string | null;
+  bundledVersion?: string | null;
+  bundledPath?: string | null;
+  provisioning?: boolean;
 }
 
 function sameConnection(left: SshHost, right: SshHost): boolean {
@@ -384,6 +388,24 @@ export function SshSection({ onOpenProject, searchQuery }: SshSectionProps) {
     try {
       const summary = await testSshConnection(host);
       if (!isCurrentHost(host)) return;
+      let remoteVersion: string | null = null;
+      let bundledVersion: string | null = null;
+      let bundledPath: string | null = null;
+      if (summary.reachable && isTauri()) {
+        try {
+          const updateState = await invoke<{
+            installed: boolean;
+            remoteVersion?: string | null;
+            bundledVersion?: string | null;
+            bundledPath?: string | null;
+          }>("cmd_ssh_helper_update_state", { host });
+          remoteVersion = updateState.remoteVersion ?? null;
+          bundledVersion = updateState.bundledVersion ?? null;
+          bundledPath = updateState.bundledPath ?? null;
+        } catch {
+          // Update state check is best-effort
+        }
+      }
       setTestResults((prev) => ({
         ...prev,
         [host.id]: {
@@ -393,6 +415,9 @@ export function SshSection({ onOpenProject, searchQuery }: SshSectionProps) {
           environment: summary.environment,
           helper: summary.helper ?? null,
           stage: summary.diagnostic?.details?.stage,
+          remoteVersion,
+          bundledVersion,
+          bundledPath,
         },
       }));
     } catch (err) {
@@ -405,6 +430,50 @@ export function SshSection({ onOpenProject, searchQuery }: SshSectionProps) {
           error: extractIpcErrorMessage(err, "Connection test failed."),
         },
       }));
+    }
+  };
+
+  const handleProvisionHelper = async (host: SshHost, bundledPath: string) => {
+    if (isFormOpen || busyHostId) return;
+    setTestResults((prev) => ({
+      ...prev,
+      [host.id]: { ...prev[host.id], provisioning: true },
+    }));
+    setActionError(null);
+    try {
+      await invoke("cmd_ssh_provision_helper", { host, localBinary: bundledPath });
+      if (!isCurrentHost(host)) return;
+      try {
+        const updateState = await invoke<{
+          installed: boolean;
+          remoteVersion?: string | null;
+          bundledVersion?: string | null;
+          bundledPath?: string | null;
+        }>("cmd_ssh_helper_update_state", { host });
+        setTestResults((prev) => ({
+          ...prev,
+          [host.id]: {
+            ...prev[host.id],
+            helper: updateState.installed ? "installed" : prev[host.id]?.helper,
+            remoteVersion: updateState.remoteVersion ?? null,
+            bundledVersion: updateState.bundledVersion ?? null,
+            bundledPath: updateState.bundledPath ?? null,
+            provisioning: false,
+          },
+        }));
+      } catch {
+        setTestResults((prev) => ({
+          ...prev,
+          [host.id]: { ...prev[host.id], provisioning: false },
+        }));
+      }
+    } catch (error) {
+      if (!isCurrentHost(host)) return;
+      setTestResults((prev) => ({
+        ...prev,
+        [host.id]: { ...prev[host.id], provisioning: false },
+      }));
+      setActionError(extractIpcErrorMessage(error, "Helper provisioning failed."));
     }
   };
 
@@ -1010,8 +1079,25 @@ export function SshSection({ onOpenProject, searchQuery }: SshSectionProps) {
                           <div>
                             <span className="font-medium text-foreground">Terminal Helper: </span>
                             <span>{test.helper === "installed" ? "Ready" : test.helper === "missing" ? "Setup needed" : "Not verified"}</span>
+                            {test.remoteVersion && test.bundledVersion && test.remoteVersion !== test.bundledVersion ? (
+                              <span className="ml-1 text-amber-600 dark:text-amber-400">
+                                {" "}· 업데이트 가능 ({test.remoteVersion} → {test.bundledVersion})
+                              </span>
+                            ) : null}
                           </div>
                         </div>
+                        {test.remoteVersion && test.bundledVersion && test.remoteVersion !== test.bundledVersion && test.bundledPath ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={isBusy || test.provisioning || !!host.disabled || isFormOpen}
+                            onClick={() => handleProvisionHelper(host, test.bundledPath!)}
+                            aria-label={`Update helper on ${host.label}`}
+                          >
+                            {test.provisioning ? "업데이트 중…" : "업데이트 (Update helper)"}
+                          </Button>
+                        ) : null}
                         <Button
                           type="button"
                           variant="ghost"

@@ -3,6 +3,17 @@ use super::helper::{read_frame, write_frame, Request, Runtime};
 use serde_json::{json, Value};
 use std::{io::{Read, Write}, path::{Path, PathBuf}, sync::Arc};
 
+pub const HELPER_VERSION: &str = "2026.908.1";
+
+pub fn run_with_io(args: impl IntoIterator<Item=String>, mut out: impl Write) -> Result<(), String> {
+    let args: Vec<_> = args.into_iter().collect();
+    if args.iter().any(|arg| arg == "--version" || arg == "-V") {
+        writeln!(out, "{HELPER_VERSION}").map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    run(args)
+}
+
 #[cfg(windows)]
 mod process_windows;
 
@@ -372,6 +383,10 @@ pub fn bridge(root: &Path, mut input: impl Read, mut output: impl Write) -> Resu
 /// Binary entry: integrator calls this instead of any Tauri initialization.
 pub fn run(args: impl IntoIterator<Item=String>) -> Result<(),String> {
     let args: Vec<_> = args.into_iter().collect();
+    if args.iter().any(|arg| arg == "--version" || arg == "-V") {
+        println!("{HELPER_VERSION}");
+        return Ok(());
+    }
     let flag = |name: &str| args.windows(2).find(|pair|pair[0]==name).map(|pair|pair[1].clone());
     let root = flag("--root").or_else(||std::env::var("FERRYX_REMOTE_ROOT").ok()).map(PathBuf::from).ok_or("REMOTE_RUNTIME_MISSING: configure FERRYX_REMOTE_ROOT or --root")?;
     match args.first().map(String::as_str) {

@@ -437,3 +437,122 @@ fn ssh_helper_setup_process_start_rejects_symlink_root_without_writing_log() {
     let content = std::fs::read(&sentinel).expect("read sentinel");
     assert_eq!(content, b"ORIGINAL_SENTINEL_DATA");
 }
+
+#[test]
+fn ssh_helper_setup_installed_version_parses_clean_version() {
+    assert_eq!(
+        parse_installed_version_output(b"2026.908.1\n"),
+        Some("2026.908.1".to_string())
+    );
+    assert_eq!(
+        parse_installed_version_output(b"ferryx-remote-helper 2026.908.1\n"),
+        Some("2026.908.1".to_string())
+    );
+    assert_eq!(
+        parse_installed_version_output(b"prefix 2026.908.1 \r\n"),
+        Some("2026.908.1".to_string())
+    );
+}
+
+#[test]
+fn ssh_helper_setup_installed_version_rejects_unparseable_output() {
+    assert_eq!(parse_installed_version_output(b""), None);
+    assert_eq!(parse_installed_version_output(b"not a version"), None);
+    assert_eq!(parse_installed_version_output(b"command not found\n"), None);
+    assert_eq!(parse_installed_version_output(b"exit status 1\n"), None);
+}
+
+#[test]
+fn ssh_helper_setup_decide_upgrade_matrix() {
+    // Missing -> Install
+    assert_eq!(
+        decide_helper_upgrade(false, None, "2026.908.1"),
+        HelperUpgradeDecision::Install
+    );
+    assert_eq!(
+        decide_helper_upgrade(false, Some("2026.908.1"), "2026.908.1"),
+        HelperUpgradeDecision::Install
+    );
+
+    // Installed, equal version -> NoOp
+    assert_eq!(
+        decide_helper_upgrade(true, Some("2026.908.1"), "2026.908.1"),
+        HelperUpgradeDecision::NoOp
+    );
+
+    // Installed, different version -> Upgrade
+    assert_eq!(
+        decide_helper_upgrade(true, Some("2026.900.0"), "2026.908.1"),
+        HelperUpgradeDecision::Upgrade
+    );
+
+    // Installed, unknown/None remote version -> Upgrade
+    assert_eq!(
+        decide_helper_upgrade(true, None, "2026.908.1"),
+        HelperUpgradeDecision::Upgrade
+    );
+}
+
+#[test]
+fn ssh_helper_setup_build_upload_script_contains_expected_tokens() {
+    let loc = HelperLocation {
+        executable: "/home/user/.ferryx/bin/ferryx-remote-helper".into(),
+        root: "/home/user/.ferryx/helper/test-host".into(),
+    };
+    let payload = b"test payload for upload";
+
+    let posix = build_posix_upload_script(&loc, payload);
+    assert!(posix.contains("FERRYX_HELPER_PAYLOAD_EOF"));
+    assert!(posix.contains("base64"));
+    assert!(posix.contains("endpoint.json"));
+    assert!(posix.contains("kill"));
+    assert!(posix.contains("mv -f"));
+    assert!(posix.contains("chmod 700"));
+
+    let win_loc = HelperLocation {
+        executable: "C:\\Users\\user\\.ferryx\\bin\\ferryx-remote-helper.exe".into(),
+        root: "C:\\Users\\user\\.ferryx\\helper\\test-host".into(),
+    };
+    let win = build_windows_upload_script(&win_loc, payload);
+    assert!(win.contains("FromBase64String"));
+    assert!(win.contains("endpoint.json"));
+    assert!(win.contains("taskkill /PID"));
+    assert!(win.contains(".old"));
+    assert!(win.contains("Move"));
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_helper_setup_posix_upload_script_execution_test() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let dir = tempfile::tempdir().unwrap();
+    let bin_dir = dir.path().join("bin");
+    let root_dir = dir.path().join("root");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    std::fs::create_dir_all(&root_dir).unwrap();
+
+    let exe_path = bin_dir.join("ferryx-remote-helper");
+    let loc = HelperLocation {
+        executable: exe_path.to_str().unwrap().to_string(),
+        root: root_dir.to_str().unwrap().to_string(),
+    };
+    let payload = b"FERRYX_REMOTE_HELPER_TEST_BINARY_BYTES";
+
+    let script = build_posix_upload_script(&loc, payload);
+
+    let mut child = Command::new("sh")
+        .args(["-s"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    child.stdin.take().unwrap().write_all(script.as_bytes()).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "script stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(std::fs::read(&exe_path).unwrap(), payload);
+}
+

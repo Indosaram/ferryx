@@ -169,6 +169,7 @@ impl Runtime {
                 "epoch": self.epoch,
                 "os": std::env::consts::OS,
                 "arch": std::env::consts::ARCH,
+                "helperVersion": super::process::HELPER_VERSION,
             })),
             "project.register" => {
                 let id = text(p, "id")?;
