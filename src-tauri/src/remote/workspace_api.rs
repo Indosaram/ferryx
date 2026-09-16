@@ -48,7 +48,7 @@ tokio::task_local! { pub(super) static ADMISSION: Arc<Admission>; }
 pub(super) static AUTH_SLOTS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> = std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(16)));
 
 pub(super) async fn admit(state: Arc<RemoteGatewayState>, headers: HeaderMap, mutation: bool, id: &str) -> Result<Arc<Admission>, Response> {
-    let deadline = Instant::now() + Duration::from_secs(if mutation {40} else {10});
+    let deadline = Instant::now() + Duration::from_secs(if mutation { 40 } else { 35 });
     admit_until(state, headers, mutation, id, deadline).await
 }
 

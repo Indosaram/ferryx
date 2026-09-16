@@ -28,7 +28,7 @@ impl Transport {
         let mut cancelled = self.lease.cancellation();
         tokio::select! { biased;
             _ = cancelled.changed() => Err(error("PAIRED_HOST_STALE_GENERATION")),
-            result = tokio::time::timeout(Duration::from_secs(15), self.socket.next()) =>
+            result = tokio::time::timeout(Duration::from_secs(60), self.socket.next()) =>
                 result.map_err(|_| error("TIMEOUT"))?.ok_or_else(|| error("HOST_UNAVAILABLE"))?.map_err(|_| error("HOST_UNAVAILABLE")),
         }
     }
@@ -37,7 +37,7 @@ impl Transport {
         let mut cancelled = self.lease.cancellation();
         tokio::select! { biased;
             _ = cancelled.changed() => Err(error("PAIRED_HOST_STALE_GENERATION")),
-            result = tokio::time::timeout(Duration::from_secs(5), self.socket.send(message)) =>
+            result = tokio::time::timeout(Duration::from_secs(30), self.socket.send(message)) =>
                 result.map_err(|_| error("TIMEOUT"))?.map_err(|_| error("HOST_UNAVAILABLE")),
         }
     }

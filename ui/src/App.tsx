@@ -9,6 +9,7 @@ import { EmptyWorkspaceView } from "./components/EmptyWorkspaceView";
 import { SshWorkspaceStatus } from "./components/SshWorkspaceStatus";
 import { AddProjectDialog, AddWorktreeDialog, RemoveProjectDialog } from "./components/ProjectDialogs";
 import { Sidebar } from "./components/Sidebar";
+import { NotificationCenterPopover } from "./components/notification/NotificationCenterPopover";
 import { ShortcutHints } from "./components/ShortcutHints";
 import { TerminalSplitView } from "./components/TerminalSplitView";
 import { RemoteHostConnection } from "./remote/RemoteApp";
@@ -102,7 +103,7 @@ import { isPairedWorkspaceId, isRemoteWorkspaceId, registerRemoteProject, toRegi
 import { hasValidProjectTarget, projectRootWorktree } from "./lib/projectIdentity";
 import { groupProjects } from "./lib/projectGrouping";
 import { scheduleAgentAutoResume } from "./lib/agentAutoResume";
-import { isStandbyBackendSessionId } from "./lib/sessionLifecycle";
+import { isStandbyBackendSessionId, setSessionRebindHandler } from "./lib/sessionLifecycle";
 import { getAgentReconnectAffordance } from "./lib/agentResumeAffordance";
 import { createAppReconnectDependencies } from "./lib/appReconnectDependencies";
 import { replaceExitedShellSession } from "./lib/shellReplacement";
@@ -1361,6 +1362,35 @@ function WorkspaceApp({
   }, [activeProject.workspaceId]);
 
   useEffect(() => {
+    setSessionRebindHandler(async (sessionId, backendSessionId, cwd, daemonEpoch) => {
+      const current = stateRef.current;
+      const nextState = workspaceReducer(current, {
+        type: "REBIND_SESSION_BACKEND",
+        sessionId,
+        backendSessionId,
+        cwd,
+        daemonEpoch,
+      });
+      dispatchWorkspaceAction({
+        type: "REBIND_SESSION_BACKEND",
+        sessionId,
+        backendSessionId,
+        cwd,
+        daemonEpoch,
+      });
+      const project = activeProjectRef.current;
+      if (project) {
+        await persistSessionStrict(project.workspaceId, project.repoRoot, nextState).catch((err) => {
+          console.error("Failed to persist rebound session:", err);
+        });
+      }
+    });
+    return () => {
+      setSessionRebindHandler(null);
+    };
+  }, [dispatchWorkspaceAction, persistSessionStrict]);
+
+  useEffect(() => {
     if (registeredProjectId !== activeProject.workspaceId || pendingAgentAutoResume === null) return;
     const pending = pendingAgentAutoResume;
     setPendingAgentAutoResume(null);
@@ -1372,7 +1402,6 @@ function WorkspaceApp({
       workspaceId: activeProject.workspaceId,
       state: pending.state,
       recoveredFromHmr,
-      ignorePolicy: true,
       reconnect: async (sessionId) => {
         // The app, not the user, initiated this resume; the working→idle blip it
         // produces when the agent lands back at its prompt is not user attention.
@@ -1445,6 +1474,7 @@ function WorkspaceApp({
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isNotificationCenterOpen, setIsNotificationCenterOpen] = useState(false);
   const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
   const [settingsInitialSection, setSettingsInitialSection] = useState<SectionId | undefined>(undefined);
   const [searchLeafId, setSearchLeafId] = useState<string | null>(null);
@@ -2266,6 +2296,12 @@ function WorkspaceApp({
     preloadSettingsDialog();
     setIsSettingsOpen((current) => !current);
   }, []);
+  const handleToggleNotificationCenter = useCallback(() => {
+    setIsNotificationCenterOpen((current) => !current);
+  }, []);
+  const handleCloseNotificationCenter = useCallback(() => {
+    setIsNotificationCenterOpen(false);
+  }, []);
   const handleCloseSearch = useCallback(() => setSearchLeafId(null), []);
   const handleCloseDeleteTarget = useCallback(() => setDeleteTarget(null), []);
   const handleDeleteWorktree = useCallback((worktree: Worktree) => {
@@ -2584,6 +2620,7 @@ function WorkspaceApp({
         return {
           "sidebar.left.toggle": toggleSidebar,
           "settings.toggle": handleToggleSettings,
+          "notifications.toggle": handleToggleNotificationCenter,
         };
       }
       return {
@@ -2625,6 +2662,7 @@ function WorkspaceApp({
         "project.add": handleOpenAddProject,
         "commandPalette.open": handleOpenCommandPalette,
         "settings.toggle": handleToggleSettings,
+        "notifications.toggle": handleToggleNotificationCenter,
         "zoom.in": browserShortcutsActive ? undefined : handleZoomIn,
         "zoom.out": browserShortcutsActive ? undefined : handleZoomOut,
         "zoom.reset": browserShortcutsActive ? undefined : handleZoomReset,
@@ -2645,6 +2683,7 @@ function WorkspaceApp({
       handleSelectTerminalTabByIndex,
       handleSelectWorktreeByIndex,
       handleSplitActive,
+      handleToggleNotificationCenter,
       handleToggleSettings,
       handleUnsplitActive,
       handleZoomIn,
@@ -2720,6 +2759,8 @@ function WorkspaceApp({
               : getHmrWorkspaceState(workspaceId) ?? getWorkspaceSnapshot(workspaceId);
             return Boolean(snapshot && hasNavigableSession(snapshot, sessionId));
           }}
+          isNotificationCenterOpen={isNotificationCenterOpen}
+          onOpenChangeNotificationCenter={setIsNotificationCenterOpen}
           onToggle={toggleSidebar}
         />
       ) : (
@@ -2867,6 +2908,20 @@ function WorkspaceApp({
         )}
       </main>
 
+      {!isSidebarOpen && isNotificationCenterOpen ? (
+        <NotificationCenterPopover
+          open={true}
+          onClose={handleCloseNotificationCenter}
+          onNavigateToSession={handleNotificationTarget}
+          isSessionNavigable={(workspaceId, sessionId) => {
+            if (!projectsRef.current.some((project) => project.workspaceId === workspaceId)) return false;
+            const snapshot = workspaceId === activeProjectRef.current.workspaceId
+              ? stateRef.current
+              : getHmrWorkspaceState(workspaceId) ?? getWorkspaceSnapshot(workspaceId);
+            return Boolean(snapshot && hasNavigableSession(snapshot, sessionId));
+          }}
+        />
+      ) : null}
       {isCommandPaletteOpen && !activeRemoteHost ? (
         <CommandPalette
           open={true}

@@ -1906,6 +1906,42 @@ impl DaemonServer {
                         DaemonResponse::HibernateOk
                     }
                 }
+                Ok(DaemonRequest::Suspend { session_id }) => {
+                    if self.session_router.is_local_session(&session_id) {
+                        match self.handle_suspend(&session_id).await {
+                            Ok(()) => DaemonResponse::SuspendOk,
+                            Err(e) => DaemonResponse::Error {
+                                message: e.to_string(),
+                            },
+                        }
+                    } else if self.session_router.find_legacy_peer_for_session(&session_id).is_some() {
+                        DaemonResponse::Error {
+                            message: "Session suspend is not supported for peer sessions".to_string(),
+                        }
+                    } else {
+                        DaemonResponse::Error {
+                            message: format!("Session '{session_id}' not found"),
+                        }
+                    }
+                }
+                Ok(DaemonRequest::Resume { session_id }) => {
+                    if self.session_router.is_local_session(&session_id) {
+                        match self.handle_resume(&session_id).await {
+                            Ok(()) => DaemonResponse::ResumeOk,
+                            Err(e) => DaemonResponse::Error {
+                                message: e.to_string(),
+                            },
+                        }
+                    } else if self.session_router.find_legacy_peer_for_session(&session_id).is_some() {
+                        DaemonResponse::Error {
+                            message: "Session resume is not supported for peer sessions".to_string(),
+                        }
+                    } else {
+                        DaemonResponse::Error {
+                            message: format!("Session '{session_id}' not found"),
+                        }
+                    }
+                }
                 Ok(DaemonRequest::ListSessions) => {
                     let sessions = self.session_router.list_sessions().await;
                     DaemonResponse::ListSessionsOk {

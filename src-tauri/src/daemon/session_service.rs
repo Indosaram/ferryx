@@ -225,6 +225,19 @@ pub struct DaemonSessionService {
 }
 
 impl DaemonSessionService {
+    pub(crate) fn max_machine_sessions(&self) -> usize {
+        if let Ok(val) = std::env::var("FERRYX_MAX_MACHINE_SESSIONS") {
+            if let Ok(parsed) = val.parse::<usize>() {
+                return parsed;
+            }
+        }
+        if cfg!(test) {
+            64
+        } else {
+            256
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn journal_spawn_probe_handles(&self) -> (Arc<tokio::sync::Mutex<()>>, Arc<TerminalService>) {
         (self.spawn_lock.clone(), self.terminal_service.clone())
@@ -968,6 +981,7 @@ impl DaemonSessionService {
         let handover_manager = self.handover_manager.clone();
         let machine_lifecycles = self.machine_lifecycles.clone();
         let client_request_id = client_request_id.to_string();
+        let max_machine_sessions = self.max_machine_sessions();
         crate::ipc::run_blocking(move || {
             // Cancellation cannot release admission before PTY ownership is published.
             let _spawn_guard = _spawn_guard;
@@ -1106,7 +1120,7 @@ impl DaemonSessionService {
 
                 let raw_id = if let Some(machine) = &machine {
                     (machine.check)()?;
-                    if terminal_service.list_sessions().iter().filter(|id| workspace_service.journal.owns_session(id)).count() >= 64 {
+                    if terminal_service.list_sessions().iter().filter(|id| workspace_service.journal.owns_session(id)).count() >= max_machine_sessions {
                         return Err("CAPACITY_EXCEEDED".to_string().into());
                     }
                     match workspace_service.journal.begin(&machine.device, &machine.request.request_id, "createSession", &machine.digest, &serde_json::to_string(&machine.target).expect("target"))? {
@@ -1310,6 +1324,20 @@ impl DaemonSessionService {
         self.release_session_ownership(session_id);
         self.agent_states.remove(session_id);
         Ok(())
+    }
+
+    pub(super) async fn handle_suspend(
+        &self,
+        session_id: &str,
+    ) -> Result<(), crate::terminal::PtyError> {
+        self.terminal_service.suspend_session(session_id).await
+    }
+
+    pub(super) async fn handle_resume(
+        &self,
+        session_id: &str,
+    ) -> Result<(), crate::terminal::PtyError> {
+        self.terminal_service.resume_session(session_id).await
     }
 
     pub(super) fn session_is_live(&self, session_id: &str) -> bool {

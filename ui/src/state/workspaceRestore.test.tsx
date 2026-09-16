@@ -857,4 +857,94 @@ describe("workspaceRestore coordinator", () => {
     expect(tauriMocks.spawnTerminal).not.toHaveBeenCalled();
     unmount();
   });
+
+  it("under Active Only policy, puts non-active tab missing sessions into standby while leaving active tab session eager", async () => {
+    localStorage.setItem(
+      "ferryx.settings.general",
+      JSON.stringify({ confirmCloseTab: false, sessionRestorePolicy: "activeOnly", sessionIdleTimeoutMinutes: 30 }),
+    );
+
+    const workspaceId = "ws-active-only";
+    const persisted = {
+      version: 2,
+      timestamp: Date.now(),
+      activeWorkspaceId: workspaceId,
+      workspaces: {
+        [workspaceId]: {
+          workspaceId,
+          repoRoot: "/repo/test",
+          worktrees: [{ path: "/repo/test", branch: "main", head: "111", isMain: true, isLocked: false }],
+          activeWorktreePath: "/repo/test",
+          layout: {
+            splitMode: "none" as const,
+            primaryTabId: "tab-1",
+            secondaryTabId: null,
+            activeTabId: "tab-1",
+            tabs: [
+              {
+                id: "tab-1",
+                sessionId: "sess-1",
+                label: "active-tab",
+                kind: "terminal" as const,
+              },
+              {
+                id: "tab-2",
+                sessionId: "sess-2",
+                label: "inactive-tab",
+                kind: "terminal" as const,
+              },
+            ],
+          },
+          terminalSessions: {
+            "sess-1": {
+              localSessionId: "sess-1",
+              backendSessionId: "backend-1",
+              cwd: "/repo/test",
+              worktreePath: "/repo/test",
+              lifecycle: "exited" as const,
+            },
+            "sess-2": {
+              localSessionId: "sess-2",
+              backendSessionId: "backend-2",
+              cwd: "/repo/test",
+              worktreePath: "/repo/test",
+              lifecycle: "exited" as const,
+            },
+          },
+        },
+      },
+    };
+
+    const restoreWorkspace = vi.fn();
+    const loadSessionFn = vi.fn(async () => persisted);
+    // Neither backend is live in the daemon, so both are missing.
+    const listLiveBackendSessionIdsFn = vi.fn(async () => []);
+
+    const { unmount } = renderHook(() =>
+      useWorkspaceRestore({
+        workspaceId,
+        recoveredFromHmr: false,
+        restoreWorkspace,
+        loadSessionFn,
+        listLiveBackendSessionIdsFn: listLiveBackendSessionIdsFn as any,
+      }),
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(restoreWorkspace).toHaveBeenCalledTimes(1);
+    const restored = restoreWorkspace.mock.calls[0][0] as WorkspaceState;
+
+    // Active tab's session (sess-1) is active: should NOT be put to standby sleep
+    expect(restored.sessions["sess-1"]?.backendSessionId).toBeNull();
+
+    // Inactive tab's session (sess-2) is inactive under Active Only: should be put to standby sleep
+    expect(restored.sessions["sess-2"]?.backendSessionId).toMatch(/^standby:/);
+
+    localStorage.removeItem("ferryx.settings.general");
+    unmount();
+  });
 });

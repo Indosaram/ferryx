@@ -139,6 +139,8 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
             | DaemonRequest::MachineSessionDetail { .. }
             | DaemonRequest::Spawn { .. }
             | DaemonRequest::Hibernate { .. }
+            | DaemonRequest::Suspend { .. }
+            | DaemonRequest::Resume { .. }
             | DaemonRequest::ListSessions
             | DaemonRequest::DescribeSession { .. }
             | DaemonRequest::DiscoverAgentSession { .. }
@@ -173,6 +175,8 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::Signal { .. } => "signal",
         DaemonRequest::Close { .. } => "close",
         DaemonRequest::Hibernate { .. } => "hibernate",
+        DaemonRequest::Suspend { .. } => "suspend",
+        DaemonRequest::Resume { .. } => "resume",
         DaemonRequest::ListSessions => "listSessions",
         DaemonRequest::DescribeSession { .. } => "describeSession",
         DaemonRequest::DiscoverAgentSession { .. } => "discoverAgentSession",
@@ -1587,6 +1591,44 @@ impl DaemonClient {
 
         match resp {
             DaemonResponse::HibernateOk => Ok(()),
+            DaemonResponse::Error { message } => {
+                Err(IpcError::new(IpcErrorCode::InternalError, message))
+            }
+            _ => Err(IpcError::new(
+                IpcErrorCode::InternalError,
+                "Unexpected daemon response",
+            )),
+        }
+    }
+
+    pub async fn suspend_terminal(&self, session_id: &str) -> Result<(), IpcError> {
+        let resp = self
+            .send_request(DaemonRequest::Suspend {
+                session_id: session_id.to_string(),
+            })
+            .await?;
+
+        match resp {
+            DaemonResponse::SuspendOk => Ok(()),
+            DaemonResponse::Error { message } => {
+                Err(IpcError::new(IpcErrorCode::InternalError, message))
+            }
+            _ => Err(IpcError::new(
+                IpcErrorCode::InternalError,
+                "Unexpected daemon response",
+            )),
+        }
+    }
+
+    pub async fn resume_terminal(&self, session_id: &str) -> Result<(), IpcError> {
+        let resp = self
+            .send_request(DaemonRequest::Resume {
+                session_id: session_id.to_string(),
+            })
+            .await?;
+
+        match resp {
+            DaemonResponse::ResumeOk => Ok(()),
             DaemonResponse::Error { message } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }

@@ -13,6 +13,7 @@ pub enum SessionProcessState {
     Standby,
     Running,
     Hibernated,
+    Suspended,
 }
 
 impl Default for SessionProcessState {
@@ -62,6 +63,12 @@ impl SessionLifecycleRegistry {
     pub fn mark_hibernated(&mut self, session_id: impl Into<String>) {
         let record = self.records.entry(session_id.into()).or_default();
         record.state = SessionProcessState::Hibernated;
+        record.idle_since = None;
+    }
+
+    pub fn mark_suspended(&mut self, session_id: impl Into<String>) {
+        let record = self.records.entry(session_id.into()).or_default();
+        record.state = SessionProcessState::Suspended;
         record.idle_since = None;
     }
 
@@ -124,6 +131,9 @@ mod tests {
 
         registry.mark_hibernated("session-a");
         assert_eq!(registry.state("session-a"), Some(SessionProcessState::Hibernated));
+
+        registry.mark_suspended("session-a");
+        assert_eq!(registry.state("session-a"), Some(SessionProcessState::Suspended));
     }
 
     #[test]

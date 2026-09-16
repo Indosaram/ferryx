@@ -3,11 +3,12 @@ import { useSyncExternalStore } from "react";
 import type { TerminalActivityState } from "./activity";
 import { loadGeneralSettings } from "./generalSettings";
 import { isPairedWorkspaceId, isRemoteWorkspaceId } from "./remoteProject";
-import { getTerminalHistorySnapshot, hibernateTerminal, onNativeTerminalAgentState } from "./tauri";
+import { getTerminalHistorySnapshot, hibernateTerminal, onNativeTerminalAgentState, suspendTerminal, resumeTerminal, closeTerminal, spawnTerminalDetailed } from "./tauri";
 import type { SessionProcessState, TerminalSession } from "./types";
+import { safeRandomUUID } from "./uuid";
 
 export type { SessionProcessState } from "./types";
-export type SessionLifecycleAction = "hibernate" | "restart";
+export type SessionLifecycleAction = "suspend" | "resume" | "restart" | "hibernate";
 
 export const STANDBY_BACKEND_PREFIX = "standby:";
 const MAX_PERSISTED_SCROLLBACK_CHARS = 256_000;
@@ -22,10 +23,17 @@ export function isStandbyBackendSessionId(sessionId: string | null | undefined):
 
 export function getSessionProcessState(session: TerminalSession | null | undefined): SessionProcessState {
   if (!session) return "standby";
-  if (session.backendSessionId && !isStandbyBackendSessionId(session.backendSessionId)) return "running";
+  if (session.backendSessionId && !isStandbyBackendSessionId(session.backendSessionId)) {
+    if (isSessionSleeping(session.id) || session.processState === "suspended") {
+      return "suspended";
+    }
+    return "running";
+  }
   if (isStandbyBackendSessionId(session.backendSessionId)) {
+    if (session.processState === "suspended") return "suspended";
     return session.processState === "hibernated" ? "hibernated" : "standby";
   }
+  if (session.processState === "suspended") return "suspended";
   if (isSessionSleeping(session.id) || session.processState === "hibernated") return "hibernated";
   return "standby";
 }
@@ -42,9 +50,23 @@ const sleepingSessionIds = new Set<string>();
 const manualHibernateHoldIds = new Set<string>();
 const sleepingListeners = new Set<() => void>();
 const actionListeners = new Set<(action: SessionLifecycleAction, sessionId: string) => void>();
+const inFlightResumes = new Map<string, Promise<void>>();
 let sleepingSnapshot = "";
 let monitoringStarted = false;
 let idleSweepTimer: ReturnType<typeof setInterval> | null = null;
+
+export type SessionRebindHandler = (
+  sessionId: string,
+  backendSessionId: string,
+  cwd?: string,
+  daemonEpoch?: string | null,
+) => Promise<void> | void;
+
+let globalRebindHandler: SessionRebindHandler | null = null;
+
+export function setSessionRebindHandler(handler: SessionRebindHandler | null): void {
+  globalRebindHandler = handler;
+}
 
 function emitSleepingChange(): void {
   sleepingSnapshot = [...sleepingSessionIds].sort().join("\u0000");
@@ -169,6 +191,132 @@ async function captureRecentScrollback(sessionId: string, backendSessionId: stri
   }
 }
 
+export async function suspendRegisteredSession(sessionId: string): Promise<void> {
+  const entry = registeredSessions.get(sessionId);
+  if (!entry) {
+    setSessionSleeping(sessionId, true);
+    return;
+  }
+  const session = entry.session;
+  if (isRemoteWorkspaceId(session.workspaceId) || isPairedWorkspaceId(session.workspaceId)) return;
+  const backendSessionId = session.backendSessionId;
+  if (!backendSessionId || isStandbyBackendSessionId(backendSessionId)) {
+    entry.session = { ...session, processState: "suspended" };
+    setSessionSleeping(sessionId, true);
+    return;
+  }
+
+  await captureRecentScrollback(sessionId, backendSessionId);
+  setSessionSleeping(sessionId, true);
+  try {
+    await suspendTerminal(backendSessionId);
+  } catch (error) {
+    setSessionSleeping(sessionId, false);
+    throw error;
+  }
+  entry.session = { ...session, processState: "suspended" };
+  entry.idleSince = null;
+}
+
+export async function resumeRegisteredSession(sessionId: string): Promise<void> {
+  const existing = inFlightResumes.get(sessionId);
+  if (existing) return existing;
+
+  const promise = (async () => {
+    const entry = registeredSessions.get(sessionId);
+    manualHibernateHoldIds.delete(sessionId);
+    if (!entry) {
+      setSessionSleeping(sessionId, false);
+      return;
+    }
+    const session = entry.session;
+    const backendSessionId = session.backendSessionId;
+    if (!backendSessionId || isStandbyBackendSessionId(backendSessionId)) {
+      setSessionSleeping(sessionId, false);
+      entry.session = { ...session, processState: "standby" };
+      return;
+    }
+
+    try {
+      await resumeTerminal(backendSessionId);
+      setSessionSleeping(sessionId, false);
+      entry.session = { ...session, processState: "running" };
+      entry.idleSince = Date.now();
+    } catch (error) {
+      setSessionSleeping(sessionId, false);
+      throw error;
+    }
+  })();
+
+  inFlightResumes.set(sessionId, promise);
+  try {
+    await promise;
+  } finally {
+    inFlightResumes.delete(sessionId);
+  }
+}
+
+export async function restartRegisteredSession(
+  sessionId: string,
+  onRebind?: SessionRebindHandler,
+): Promise<void> {
+  const entry = registeredSessions.get(sessionId);
+  manualHibernateHoldIds.delete(sessionId);
+  if (!entry) {
+    setSessionSleeping(sessionId, false);
+    return;
+  }
+  const session = entry.session;
+  const oldBackendId = session.backendSessionId;
+  if (oldBackendId && !isStandbyBackendSessionId(oldBackendId)) {
+    try {
+      await closeTerminal(oldBackendId);
+    } catch (err) {
+      console.warn(`Failed to close old terminal ${oldBackendId} during restart:`, err);
+    }
+  }
+
+  setSessionSleeping(sessionId, false);
+
+  if (!isRemoteWorkspaceId(session.workspaceId) && !isPairedWorkspaceId(session.workspaceId)) {
+    try {
+      const clientRequestId = `restart-${sessionId}-${safeRandomUUID()}`;
+      const spawnResult = await spawnTerminalDetailed({
+        workspaceId: session.workspaceId,
+        worktree: session.worktree,
+        cwd: session.cwd,
+        clientRequestId,
+        startup: null,
+      });
+      entry.session = {
+        ...session,
+        backendSessionId: spawnResult.sessionId,
+        processState: "running",
+        lifecycle: "working",
+      };
+      entry.idleSince = Date.now();
+
+      const rebind = onRebind ?? globalRebindHandler;
+      if (rebind) {
+        await rebind(
+          sessionId,
+          spawnResult.sessionId,
+          spawnResult.session.cwd ?? session.cwd,
+          spawnResult.daemonEpoch,
+        );
+      }
+    } catch (error) {
+      entry.session = {
+        ...session,
+        backendSessionId: null,
+        processState: "standby",
+        lifecycle: "failed",
+      };
+      throw error;
+    }
+  }
+}
+
 export async function hibernateRegisteredSession(sessionId: string): Promise<void> {
   const entry = registeredSessions.get(sessionId);
   if (!entry) {
@@ -208,7 +356,7 @@ async function sweepIdleSessions(): Promise<void> {
     !isRemoteWorkspaceId(entry.session.workspaceId) &&
     !isPairedWorkspaceId(entry.session.workspaceId),
   );
-  await Promise.allSettled(candidates.map(([sessionId]) => hibernateRegisteredSession(sessionId)));
+  await Promise.allSettled(candidates.map(([sessionId]) => suspendRegisteredSession(sessionId)));
 }
 
 function ensureLifecycleMonitoring(): void {
@@ -225,13 +373,31 @@ function ensureLifecycleMonitoring(): void {
 }
 
 export function requestSessionLifecycleAction(action: SessionLifecycleAction, sessionId: string): void {
-  if (action === "hibernate") manualHibernateHoldIds.add(sessionId);
-  else manualHibernateHoldIds.delete(sessionId);
+  if (action === "suspend" || action === "hibernate") {
+    manualHibernateHoldIds.add(sessionId);
+  } else {
+    manualHibernateHoldIds.delete(sessionId);
+  }
   for (const listener of actionListeners) listener(action, sessionId);
-  void hibernateRegisteredSession(sessionId).catch((error) => {
-    if (action === "hibernate") manualHibernateHoldIds.delete(sessionId);
-    console.warn(`Failed to ${action} session`, error);
-  });
+  if (action === "suspend") {
+    void suspendRegisteredSession(sessionId).catch((error) => {
+      manualHibernateHoldIds.delete(sessionId);
+      console.warn(`Failed to suspend session`, error);
+    });
+  } else if (action === "resume") {
+    void resumeRegisteredSession(sessionId).catch((error) => {
+      console.warn(`Failed to resume session`, error);
+    });
+  } else if (action === "restart") {
+    void restartRegisteredSession(sessionId).catch((error) => {
+      console.warn(`Failed to restart session`, error);
+    });
+  } else if (action === "hibernate") {
+    void hibernateRegisteredSession(sessionId).catch((error) => {
+      manualHibernateHoldIds.delete(sessionId);
+      console.warn(`Failed to hibernate session`, error);
+    });
+  }
 }
 
 export function subscribeSessionLifecycleActions(
@@ -246,6 +412,7 @@ export function resetSessionLifecycleForTests(): void {
   recentScrollbackBySessionId.clear();
   sleepingSessionIds.clear();
   manualHibernateHoldIds.clear();
+  inFlightResumes.clear();
   sleepingSnapshot = "";
   monitoringStarted = false;
   if (idleSweepTimer) clearInterval(idleSweepTimer);

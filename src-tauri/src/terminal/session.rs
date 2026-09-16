@@ -11,6 +11,75 @@ use tokio::task::JoinHandle;
 #[path = "windows_input.rs"]
 pub(crate) mod windows_input;
 
+#[cfg(windows)]
+mod windows_suspend {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+
+    const PROCESS_SUSPEND_RESUME: u32 = 0x0800;
+    const PROCESS_SET_QUOTA: u32 = 0x0100;
+    const PROCESS_QUERY_INFORMATION: u32 = 0x0400;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> HANDLE;
+        fn K32EmptyWorkingSet(process: HANDLE) -> i32;
+    }
+
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn NtSuspendProcess(process: HANDLE) -> i32;
+        fn NtResumeProcess(process: HANDLE) -> i32;
+    }
+
+    pub fn suspend_process(pid: u32) -> Result<(), String> {
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_SUSPEND_RESUME | PROCESS_SET_QUOTA | PROCESS_QUERY_INFORMATION,
+                0,
+                pid,
+            )
+        };
+        if handle.is_null() {
+            return Err(format!(
+                "OpenProcess failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let status = unsafe { NtSuspendProcess(handle) };
+        if status < 0 {
+            unsafe {
+                CloseHandle(handle);
+            }
+            return Err(format!("NtSuspendProcess failed with status {status:#x}"));
+        }
+        unsafe {
+            K32EmptyWorkingSet(handle);
+        }
+        unsafe {
+            CloseHandle(handle);
+        }
+        Ok(())
+    }
+
+    pub fn resume_process(pid: u32) -> Result<(), String> {
+        let handle = unsafe { OpenProcess(PROCESS_SUSPEND_RESUME, 0, pid) };
+        if handle.is_null() {
+            return Err(format!(
+                "OpenProcess failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let status = unsafe { NtResumeProcess(handle) };
+        unsafe {
+            CloseHandle(handle);
+        }
+        if status < 0 {
+            return Err(format!("NtResumeProcess failed with status {status:#x}"));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PtySessionState {
     Starting,
@@ -26,6 +95,8 @@ pub enum TerminalSignal {
     Interrupt,
     Terminate,
     Kill,
+    Stop,
+    Continue,
 }
 
 pub(crate) struct PtySessionConfig {
@@ -338,6 +409,8 @@ impl PtySession {
             TerminalSignal::Interrupt => libc::SIGINT,
             TerminalSignal::Terminate => libc::SIGTERM,
             TerminalSignal::Kill => libc::SIGKILL,
+            TerminalSignal::Stop => libc::SIGSTOP,
+            TerminalSignal::Continue => libc::SIGCONT,
         };
 
         // portable-pty creates the child as the PTY session/process-group leader on Unix.
@@ -359,6 +432,24 @@ impl PtySession {
         match signal {
             TerminalSignal::Interrupt => self.write_input(&[0x03]),
             TerminalSignal::Terminate | TerminalSignal::Kill => self.kill(),
+            #[cfg(windows)]
+            TerminalSignal::Stop => {
+                let pid = self
+                    .pid()
+                    .ok_or_else(|| PtyError::KillError("PID not available for signal".into()))?;
+                windows_suspend::suspend_process(pid).map_err(PtyError::Other)
+            }
+            #[cfg(windows)]
+            TerminalSignal::Continue => {
+                let pid = self
+                    .pid()
+                    .ok_or_else(|| PtyError::KillError("PID not available for signal".into()))?;
+                windows_suspend::resume_process(pid).map_err(PtyError::Other)
+            }
+            #[cfg(not(windows))]
+            TerminalSignal::Stop | TerminalSignal::Continue => Err(PtyError::Other(
+                "Process suspend/resume is not supported on this platform".into(),
+            )),
         }
     }
 

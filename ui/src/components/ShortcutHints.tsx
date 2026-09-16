@@ -87,7 +87,7 @@ export function ShortcutHints(props: ShortcutHintsProps) {
         }
         for (const shortcut of SHORTCUTS) {
           if (!enabled.has(shortcut.id) || !actions.includes(shortcut.id)) continue;
-          if (editing && shortcut.id !== "settings.toggle" && shortcut.id !== "commandPalette.open" && !shortcut.id.startsWith("browser.")) continue;
+          if (editing && shortcut.id !== "settings.toggle" && shortcut.id !== "commandPalette.open" && shortcut.id !== "notifications.toggle" && !shortcut.id.startsWith("browser.")) continue;
           const binding = [shortcut.binding, ...(shortcut.aliases ?? [])].map((candidate) => resolveBinding(candidate, isMac)).find((candidate) =>
             (!event.metaKey || Boolean(candidate.mod && isMac))
             && (!event.ctrlKey || Boolean(candidate.control || (candidate.mod && !isMac)))

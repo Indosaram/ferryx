@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as tauri from "./tauri";
 
 import {
   clearSleepingSessions,
@@ -11,9 +12,13 @@ import {
   registerSessionSnapshot,
   requestSessionLifecycleAction,
   resetSessionLifecycleForTests,
+  restartRegisteredSession,
   restoreSessionRecentScrollback,
+  resumeRegisteredSession,
   setSessionActive,
+  setSessionRebindHandler,
   setSessionSleeping,
+  suspendRegisteredSession,
 } from "./sessionLifecycle";
 import type { TerminalSession } from "./types";
 
@@ -86,5 +91,55 @@ describe("sessionLifecycle", () => {
     expect(stored).toBeDefined();
     expect(stored!.length).toBe(256_000);
     expect(stored!.endsWith("tail")).toBe(true);
+  });
+
+  it("suspendRegisteredSession preserves backendSessionId and marks processState suspended", async () => {
+    const live = session("backend-live-1", "running");
+    registerSessionSnapshot(live, "idle");
+
+    await suspendRegisteredSession(live.id);
+    expect(isSessionSleeping(live.id)).toBe(true);
+    expect(getSessionProcessState(live)).toBe("suspended");
+    // Crucial: backendSessionId is NOT wiped!
+    expect(live.backendSessionId).toBe("backend-live-1");
+  });
+
+  it("resumeRegisteredSession clears sleeping bit and restores running state", async () => {
+    const live = session("backend-live-1", "running");
+    registerSessionSnapshot(live, "idle");
+
+    await suspendRegisteredSession(live.id);
+    expect(isSessionSleeping(live.id)).toBe(true);
+
+    await resumeRegisteredSession(live.id);
+    expect(isSessionSleeping(live.id)).toBe(false);
+    expect(getSessionProcessState(live)).toBe("running");
+  });
+
+  it("restartRegisteredSession closes old backend and allocates a fresh running shell, invoking rebind handler", async () => {
+    const live = session("backend-old", "running");
+    registerSessionSnapshot(live, "idle");
+
+    const closeSpy = vi.spyOn(tauri, "closeTerminal").mockResolvedValue(undefined as any);
+    const spawnSpy = vi.spyOn(tauri, "spawnTerminalDetailed").mockResolvedValue({
+      sessionId: "backend-new",
+      session: { sessionId: "backend-new", cwd: "/repo/main" } as any,
+      daemonEpoch: "epoch-1",
+    });
+
+    const rebindSpy = vi.fn();
+    setSessionRebindHandler(rebindSpy);
+
+    await restartRegisteredSession(live.id);
+
+    expect(closeSpy).toHaveBeenCalledWith("backend-old");
+    expect(spawnSpy).toHaveBeenCalled();
+    expect(rebindSpy).toHaveBeenCalledWith("session-a", "backend-new", "/repo/main", "epoch-1");
+    expect(isSessionSleeping(live.id)).toBe(false);
+    expect(getSessionProcessState(live)).toBe("running");
+
+    setSessionRebindHandler(null);
+    closeSpy.mockRestore();
+    spawnSpy.mockRestore();
   });
 });

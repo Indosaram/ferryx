@@ -16,12 +16,13 @@ function Fixture({ isMac = true, onNew = () => undefined }: { isMac?: boolean; o
       <ShortcutHints
         isMac={isMac}
         getContext={() => context}
-        enabledActions={["tab.newTerminal", "tab.newBrowser", "browser.back", "settings.toggle", "tab.select1", "tab.select2", "workspace.select1", "workspace.select2"]}
+        enabledActions={["tab.newTerminal", "tab.newBrowser", "browser.back", "settings.toggle", "notifications.toggle", "tab.select1", "tab.select2", "workspace.select1", "workspace.select2"]}
       />
       <button data-shortcut="tab.newTerminal">New</button>
       <button data-shortcut="tab.newBrowser">Browser</button>
       <button data-shortcut="browser.back">Back</button>
       <button data-shortcut="settings.toggle">Settings</button>
+      <button data-shortcut="notifications.toggle">Notifications</button>
       <button data-shortcut="tab.newTerminal" disabled>Disabled</button>
       <div data-shortcut-scope-active="false"><button data-shortcut="tab.newTerminal">Inactive</button></div>
       <button data-tab-dnd-id="first">First tab</button>
@@ -98,7 +99,7 @@ describe("modifier-held shortcut targets", () => {
     render(<Fixture />);
     hold();
     fireEvent.keyDown(window, { key: "Shift", metaKey: true, shiftKey: true });
-    expect(hints().map((hint) => hint.dataset.shortcutHint)).toEqual(["tab.newBrowser"]);
+    expect(hints().map((hint) => hint.dataset.shortcutHint).sort()).toEqual(["notifications.toggle", "tab.newBrowser"]);
     fireEvent.keyUp(window, { key: "Meta", shiftKey: true });
     expect(hints()).toHaveLength(0);
   });
@@ -124,6 +125,7 @@ describe("modifier-held shortcut targets", () => {
     hold();
     expect(hints().some((hint) => hint.dataset.shortcutHint === "tab.newTerminal")).toBe(false);
     expect(hints().some((hint) => hint.dataset.shortcutHint === "settings.toggle")).toBe(true);
+    expect(hints().some((hint) => hint.dataset.shortcutHint === "notifications.toggle")).toBe(true);
   });
 
   it.each(["blur", "compositionstart", "pointerdown", "visibilitychange"])("clears visible hints on %s", (event) => {

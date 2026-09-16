@@ -37,6 +37,7 @@ These match the in-app bindings defined in `ui/src/lib/shortcuts.ts`.
 | <kbd>⌘B</kbd> | Toggle sidebar |
 | <kbd>⌘O</kbd> / <kbd>⌘N</kbd> | Add project |
 | <kbd>⌘,</kbd> | Settings |
+| <kbd>⌘⇧N</kbd> / <kbd>⌘⇧I</kbd> | Toggle notification center |
 | <kbd>⌘=</kbd> | Zoom in |
 | <kbd>⌘-</kbd> | Zoom out |
 | <kbd>⌘0</kbd> | Reset zoom |

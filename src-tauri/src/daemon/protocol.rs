@@ -204,6 +204,14 @@ pub enum DaemonRequest {
         session_id: String,
     },
     #[serde(rename_all = "camelCase")]
+    Suspend {
+        session_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Resume {
+        session_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
     RetryRemoteSession { session_id: String },
     #[serde(rename_all = "camelCase")]
     RemoteSessionDetails { session_id: String },
@@ -361,6 +369,8 @@ pub enum DaemonResponse {
     SignalOk,
     CloseOk,
     HibernateOk,
+    SuspendOk,
+    ResumeOk,
     #[serde(rename_all = "camelCase")]
     ListSessionsOk {
         epoch: u64,

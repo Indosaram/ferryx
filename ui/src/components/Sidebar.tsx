@@ -105,6 +105,8 @@ type SidebarProps = {
   onHide?: () => void;
   onNavigateToSession?: (target: { workspaceId: string; sessionId: string; revision: number }) => void;
   isSessionNavigable?: IsSessionNavigable;
+  isNotificationCenterOpen?: boolean;
+  onOpenChangeNotificationCenter?: (open: boolean) => void;
 };
 
 export function Sidebar({
@@ -134,6 +136,8 @@ export function Sidebar({
   onHide,
   onNavigateToSession,
   isSessionNavigable,
+  isNotificationCenterOpen,
+  onOpenChangeNotificationCenter,
 }: SidebarProps) {
   const worktreeRegionRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
@@ -523,6 +527,8 @@ export function Sidebar({
 
         <div className="flex shrink-0 items-center justify-end gap-1 border-t border-worktree-sidebar-border px-2 py-1.5">
           <NotificationCenterButton
+            isNotificationCenterOpen={isNotificationCenterOpen}
+            onOpenChangeNotificationCenter={onOpenChangeNotificationCenter}
             onNavigateToSession={onNavigateToSession}
             isSessionNavigable={isSessionNavigable}
           />

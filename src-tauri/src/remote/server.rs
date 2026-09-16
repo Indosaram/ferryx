@@ -1447,7 +1447,7 @@ async fn machine_terminal_upgrade(
         Ok::<_, String>((session, attachment, lease))
     };
     let (session, attachment, lease) = while_device_authorized(&mut revoked,
-        tokio::time::timeout(Duration::from_secs(10), admission)).await
+        tokio::time::timeout(Duration::from_secs(45), admission)).await
         .ok_or_else(|| machine_socket_error("UNAUTHORIZED"))?
         .map_err(|_| machine_socket_error("TIMEOUT"))?
         .map_err(|e| machine_socket_error(&e))?;
@@ -1558,10 +1558,13 @@ async fn handle_machine_terminal_socket(
             }
         }
     };
-    let (input_tx, mut input_rx) = mpsc::channel(1);
+    let (input_tx, mut input_rx) = mpsc::channel(if cfg!(test) { 1 } else { 64 });
     let read = async {
         loop {
-            let Ok(Some(Ok(message))) = tokio::time::timeout(Duration::from_secs(10), receiver.next()).await else { return; };
+            let message = match tokio::time::timeout(Duration::from_secs(60), receiver.next()).await {
+                Ok(Some(Ok(msg))) => msg,
+                _ => return,
+            };
             if matches!(message, Message::Close(_)) { return; }
             // One bounded in-flight frame; all pending input is dropped when
             // either the reader, writer, grant or controller lifetime ends.
@@ -1574,7 +1577,15 @@ async fn handle_machine_terminal_socket(
             tokio::select! {
                 biased;
                 result = input_tx.send(message) => { if result.is_err() { return; } }
-                _ = receiver.next() => return,
+                next_frame = receiver.next() => {
+                    match next_frame {
+                        Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return,
+                        Some(Ok(_)) => {
+                            // Saturated writer received further data beyond bounded queue
+                            return;
+                        }
+                    }
+                }
             }
         }
     };

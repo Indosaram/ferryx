@@ -1099,6 +1099,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_terminal_signal,
         cmd_terminal_close,
         cmd_terminal_hibernate,
+        cmd_terminal_suspend,
+        cmd_terminal_resume,
         cmd_terminal_list,
         cmd_terminal_preferences,
         cmd_terminal_apply_overrides,

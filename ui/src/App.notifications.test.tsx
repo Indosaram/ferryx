@@ -956,6 +956,110 @@ describe("App notification coordinator wiring", () => {
       expect(view.queryByTestId("notification-center-badge")).toBeNull();
     });
 
+    it("toggles the notification center with the keyboard shortcut Cmd+Shift+N", async () => {
+      renderNotificationCenter = true;
+      currentActivityTargets = [target];
+      const view = render(<App />);
+      await act(async () => { await nativeFocusTrackingReady; });
+      nativeFocusChanged?.({ payload: false });
+      act(() => { emitActivityTargets(); });
+
+      // Initially closed
+      expect(view.queryByRole("dialog", { name: "Notifications" })).toBeNull();
+
+      // Press Cmd+Shift+N
+      act(() => {
+        window.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "n",
+            code: "KeyN",
+            metaKey: true,
+            shiftKey: true,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      });
+
+      // Now open
+      expect(view.getByRole("dialog", { name: "Notifications" })).toBeInTheDocument();
+
+      // Press Cmd+Shift+N again to toggle closed
+      act(() => {
+        window.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "n",
+            code: "KeyN",
+            metaKey: true,
+            shiftKey: true,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      });
+
+      // Now closed
+      expect(view.queryByRole("dialog", { name: "Notifications" })).toBeNull();
+    });
+
+    it("opens the notification center via shortcut even when sidebar is closed", async () => {
+      renderNotificationCenter = true;
+      currentActivityTargets = [target];
+      const view = render(<App />);
+      await act(async () => { await nativeFocusTrackingReady; });
+      nativeFocusChanged?.({ payload: false });
+      act(() => { emitActivityTargets(); });
+
+      // Close the sidebar via Cmd+B
+      act(() => {
+        window.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "b",
+            code: "KeyB",
+            metaKey: true,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      });
+
+      // Confirm mock sidebar is gone
+      expect(view.queryByTestId("mock-sidebar")).toBeNull();
+
+      // Press Cmd+Shift+N to open notifications
+      act(() => {
+        window.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "n",
+            code: "KeyN",
+            metaKey: true,
+            shiftKey: true,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      });
+
+      // Notification center popover should be open even without sidebar
+      expect(view.getByRole("dialog", { name: "Notifications" })).toBeInTheDocument();
+
+      // Press Cmd+Shift+N again to toggle closed
+      act(() => {
+        window.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "n",
+            code: "KeyN",
+            metaKey: true,
+            shiftKey: true,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      });
+
+      expect(view.queryByRole("dialog", { name: "Notifications" })).toBeNull();
+    });
+
     it("preserves unread history across unmount and restart from persisted storage", async () => {
       currentActivityTargets = [target];
       await act(async () => { render(<App />); });

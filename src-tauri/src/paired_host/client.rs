@@ -338,7 +338,7 @@ impl MachineClient {
 
         // Mint a single-use socket ticket if the host/relay endpoint supports it (relay requires ticket for upgrade).
         let ticket: Option<String> = {
-            let mut ticket_url = Url::parse(&host.host_id).ok();
+            let ticket_url = Url::parse(&host.host_id).ok();
             if let Some(mut t_url) = ticket_url {
                 if let Ok(mut segments) = t_url.path_segments_mut() {
                     segments.extend(["api", "v1", "socket-ticket"]);

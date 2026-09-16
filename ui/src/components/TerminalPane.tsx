@@ -12,8 +12,10 @@ import {
   isSessionSleeping,
   isStandbyBackendSessionId,
   registerSessionSnapshot,
+  resumeRegisteredSession,
   setSessionActive,
   setSessionSleeping,
+  useSleepingSessionIds,
 } from "../lib/sessionLifecycle";
 import { toIpcError } from "../lib/tauri";
 import type { TerminalSession } from "../lib/types";
@@ -96,6 +98,7 @@ export function TerminalPane({
   const titleId = useId();
   const descId = useId();
   const autoResumeKeyRef = useRef<string | null>(null);
+  const sleepingSessionIds = useSleepingSessionIds();
 
   const isSshSession = isRemoteWorkspaceId(session.workspaceId);
   const isSpawning = session.reconnectLifecycle === "spawning" || session.reconnectLifecycle === "validating";
@@ -107,6 +110,8 @@ export function TerminalPane({
   const isSshLegacyLost = isSshSession && !isSpawning && remoteState === "legacyLost";
   const showSshOverlay = isSshSession && (isSshReconnecting || isSshDisconnected || isSshExpired || isSshLegacyLost);
   const isExited = isSshSession ? showSshOverlay : session.backendSessionId === null || isStandbyBackendSessionId(session.backendSessionId) || session.lifecycle === "exited";
+  const isSuspended =
+    !isExited && (sleepingSessionIds.has(session.id) || session.processState === "suspended");
   const affordance = getAgentReconnectAffordance(session, sessions);
   const isAgentSession = Boolean(
     (session.agentType && session.agentType.trim().length > 0) ||
@@ -163,6 +168,20 @@ export function TerminalPane({
     }
   };
 
+  const handleResume = () => {
+    void resumeRegisteredSession(session.id).catch((error) => {
+      console.warn("Failed to resume suspended session:", error);
+    });
+  };
+
+  useEffect(() => {
+    if (active && isSuspended && !isSessionAutoResumeHeld(session.id)) {
+      void resumeRegisteredSession(session.id).catch((error) => {
+        console.warn("Failed to auto-resume active suspended session:", error);
+      });
+    }
+  }, [active, isSuspended, session.id]);
+
   useEffect(() => {
     registerSessionSnapshot(session, activity?.state);
     setSessionActive(session.id, active);
@@ -201,6 +220,17 @@ export function TerminalPane({
   // If the native paired proxy session has not been established or expired,
   // do not mount local path/PTY tooling or offer SSH/agent respawn.
   if (isPairedWorkspaceId(session.workspaceId) && (!session.backendSessionId || session.remoteConnectionState === "expired")) {
+    if (session.reconnectLifecycle === "spawning" || session.lifecycle === "working") {
+      return (
+        <div data-testid="paired-terminal-spawning" role="status" className="flex h-full items-center justify-center p-6 text-center text-sm text-muted-foreground">
+          <div className="flex flex-col items-center gap-2">
+            <span className="inline-block size-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+            <h2 className="font-medium text-foreground">Connecting to paired terminal...</h2>
+            <p>Establishing native session with the paired daemon.</p>
+          </div>
+        </div>
+      );
+    }
     return <div data-testid="paired-terminal-unavailable" role="status" className="flex h-full items-center justify-center p-6 text-center text-sm text-muted-foreground">
       <div>
         <h2 className="font-medium text-foreground">Paired terminal unavailable</h2>
@@ -214,6 +244,7 @@ export function TerminalPane({
   return (
     <div
       data-testid="terminal-pane-surface"
+      onClick={isSuspended ? handleResume : undefined}
       className="relative h-full w-full min-h-0 min-w-0 overflow-hidden"
     >
       <DagPaneBadge
@@ -239,6 +270,29 @@ export function TerminalPane({
           sessionId={session.backendSessionId ?? session.id}
           onClose={onCloseSearch ?? (() => undefined)}
         />
+      ) : null}
+      {isSuspended ? (
+        <div
+          role="button"
+          tabIndex={0}
+          data-testid="terminal-suspended-overlay"
+          onClick={handleResume}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              handleResume();
+            }
+          }}
+          className="absolute inset-0 z-20 flex cursor-pointer items-center justify-center bg-background/85 px-6 text-center select-none"
+        >
+          <div className="flex max-w-sm flex-col items-center rounded-lg border border-border bg-card p-5 shadow-lg">
+            <div className="mb-3 flex size-9 shrink-0 items-center justify-center rounded-md border border-border bg-muted/60">
+              <span className="text-lg">💤</span>
+            </div>
+            <h2 className="text-sm font-medium text-foreground">Suspended</h2>
+            <p className="mt-1 text-xs text-muted-foreground">Click to resume</p>
+          </div>
+        </div>
       ) : null}
       {isExited ? (
         <div

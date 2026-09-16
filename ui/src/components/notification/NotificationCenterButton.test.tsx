@@ -13,12 +13,13 @@ describe("NotificationCenterButton", () => {
 
   afterEach(cleanup);
 
-  it("renders bell IconButton with no-drag class and data-testid", () => {
+  it("renders bell IconButton with no-drag class, data-testid, and data-shortcut", () => {
     render(<NotificationCenterButton store={store} />);
     const button = screen.getByTestId("notification-center-button");
     expect(button).toBeInTheDocument();
     expect(button).toHaveClass("no-drag");
     expect(button).toHaveAttribute("aria-label", "Notifications");
+    expect(button).toHaveAttribute("data-shortcut", "notifications.toggle");
   });
 
   it("shows no badge when unread count is 0", () => {
@@ -105,5 +106,22 @@ describe("NotificationCenterButton", () => {
 
     // Badge should be cleared
     expect(screen.queryByTestId("notification-center-badge")).toBeNull();
+  });
+
+  it("supports controlled open and onOpenChange", () => {
+    const onOpenChange = vi.fn();
+    const { rerender } = render(
+      <NotificationCenterButton store={store} open={false} onOpenChange={onOpenChange} />,
+    );
+    expect(screen.queryByRole("dialog", { name: "Notifications" })).toBeNull();
+
+    fireEvent.click(screen.getByTestId("notification-center-button"));
+    expect(onOpenChange).toHaveBeenCalledWith(true);
+
+    rerender(<NotificationCenterButton store={store} open={true} onOpenChange={onOpenChange} />);
+    expect(screen.getByRole("dialog", { name: "Notifications" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("notification-center-button"));
+    expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 });

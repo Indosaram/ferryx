@@ -152,7 +152,7 @@ impl Runtime {
     fn operation(&self, id: &str, command: impl FnOnce(Reply) -> Command + Send + 'static) -> Result<super::remote::RemoteOperation, super::PtyError> {
         let sender = self.sender(id).map_err(super::PtyError::Other)?;
         Ok(Box::pin(async move {
-            let result = tokio::time::timeout(Duration::from_secs(10), async {
+            let result = tokio::time::timeout(Duration::from_secs(30), async {
                 let (tx, rx) = oneshot::channel();
                 sender.try_send(command(tx)).map_err(|_| "PAIRED_PROXY_UNAVAILABLE".to_string())?;
                 rx.await.map_err(|_| "PAIRED_PROXY_UNAVAILABLE".to_string())?
@@ -166,7 +166,7 @@ impl Runtime {
         if owner.task.is_finished() { return Ok(()); }
         let (tx, rx) = oneshot::channel();
         owner.sender.send(Command::Detach(tx)).await.map_err(|_| "PAIRED_PROXY_UNAVAILABLE")?;
-        let result = tokio::time::timeout(Duration::from_secs(10), rx).await.map_err(|_| "TIMEOUT")?.map_err(|_| "PAIRED_PROXY_UNAVAILABLE")?;
+        let result = tokio::time::timeout(Duration::from_secs(30), rx).await.map_err(|_| "TIMEOUT")?.map_err(|_| "PAIRED_PROXY_UNAVAILABLE")?;
         // The acknowledgement is emitted only after socket and hub destruction.
         (&mut owner.task).await.map_err(|_| "PAIRED_PROXY_UNAVAILABLE")?;
         result

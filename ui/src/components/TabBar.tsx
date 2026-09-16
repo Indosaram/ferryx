@@ -311,9 +311,9 @@ export function TabBar({
     }
     if (tab.kind !== "browser") {
       items.push({ kind: "separator" });
-      items.push({ kind: "item", id: "hibernate-session", label: "Hibernate Session" });
+      items.push({ kind: "item", id: "suspend-session", label: "Suspend Session" });
       items.push({ kind: "item", id: "restart-session", label: "Restart Session" });
-      actions["hibernate-session"] = () => requestSessionLifecycleAction("hibernate", tab.sessionId);
+      actions["suspend-session"] = () => requestSessionLifecycleAction("suspend", tab.sessionId);
       actions["restart-session"] = () => {
         onActivate(tab.id);
         requestSessionLifecycleAction("restart", tab.sessionId);
@@ -394,7 +394,7 @@ export function TabBar({
         <div className="flex min-w-0 items-stretch overflow-x-auto scrollbar-none" role="tablist">
           {tabs.map((tab, index) => {
             const active = tab.id === activeTabId;
-            const sleeping = tab.kind !== "browser" && !active && sleepingSessionIds.has(tab.sessionId);
+            const sleeping = tab.kind !== "browser" && sleepingSessionIds.has(tab.sessionId);
             return (
               <SortableTab
                 key={tab.id}

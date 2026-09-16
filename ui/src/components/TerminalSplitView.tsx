@@ -18,8 +18,9 @@ import {
 } from "@dnd-kit/core";
 import { sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 import { getEventCoordinates } from "@dnd-kit/utilities";
-import { Columns2, Rows2, X } from "lucide-react";
+import { Columns2, Moon, Play, Rows2, X } from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";
+import { requestSessionLifecycleAction, useSleepingSessionIds } from "../lib/sessionLifecycle";
 
 import type { ActivitySummary, TerminalActivity } from "../lib/activity";
 import type {
@@ -1061,6 +1062,8 @@ const PaneLeafView = React.memo(function PaneLeafView({
   // policy keeps macOS surfaces below the DOM feedback and yields on other platforms.
   const showsDropFeedback = dropFeedbackLeafId === leafId;
   const attentionFrameEnabled = useAttentionFrameEnabled();
+  const sleepingSessionIds = useSleepingSessionIds();
+  const isSuspended = content.kind === "terminal" && (sleepingSessionIds.has(session.id) || session.processState === "suspended");
   const needsAttention = attentionFrameEnabled && Boolean(
     activity && !activity.seen && (activity.state === "waiting" || activity.state === "done"),
   );
@@ -1165,6 +1168,20 @@ const PaneLeafView = React.memo(function PaneLeafView({
         onMouseLeave={() => setIsHoveredTop(false)}
       >
         <div className="flex items-center gap-0.5">
+          {content.kind === "terminal" ? (
+            <IconButton
+              label={isSuspended ? "Resume pane" : "Suspend pane"}
+              size="sm"
+              className="size-5 rounded p-0 text-muted-foreground/70 hover:bg-accent/60 hover:text-foreground"
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                requestSessionLifecycleAction(isSuspended ? "resume" : "suspend", session.id);
+              }}
+            >
+              {isSuspended ? <Play className="size-3" /> : <Moon className="size-3" />}
+            </IconButton>
+          ) : null}
           <IconButton
             label="Split pane right"
             data-shortcut={tab.kind !== "browser" ? "terminal.splitRight" : undefined}

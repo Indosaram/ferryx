@@ -44,6 +44,7 @@ export type ShortcutActionId =
   | "project.add"
   | "commandPalette.open"
   | "settings.toggle"
+  | "notifications.toggle"
   | "zoom.in"
   | "zoom.out"
   | "zoom.reset";
@@ -347,6 +348,14 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     source: "original",
   },
   {
+    id: "notifications.toggle",
+    title: "Toggle notification center",
+    group: "Global",
+    binding: { key: "n", mod: true, shift: true },
+    aliases: [{ key: "i", mod: true, shift: true }],
+    source: "ferryx",
+  },
+  {
     id: "zoom.in",
     title: "Zoom in terminal",
     group: "View",
@@ -446,7 +455,8 @@ export function useShortcuts(
           !isTerminalTarget(event.target) &&
           shortcut.id !== "commandPalette.open" &&
           !shortcut.id.startsWith("browser.") &&
-          shortcut.id !== "settings.toggle"
+          shortcut.id !== "settings.toggle" &&
+          shortcut.id !== "notifications.toggle"
         ) {
           trace("reject", { action: shortcut.id, reason: "editable-target" });
           continue;

@@ -272,3 +272,23 @@ async fn sixty_four_live_machine_sessions_are_the_admission_limit() {
     eprintln!("A09 capacity cleanup: all 64 PTYs reaped; all lifecycle writers completed; root removed");
     if let Err(panic) = result { std::panic::resume_unwind(panic); }
 }
+
+#[tokio::test]
+async fn machine_session_capacity_limit_is_configurable() {
+    let (_root, owner, _template) = fixture().await;
+    let service = owner.session_service.clone();
+    
+    // Default in test mode is 64
+    std::env::remove_var("FERRYX_MAX_MACHINE_SESSIONS");
+    assert_eq!(service.max_machine_sessions(), 64);
+
+    // Configurable via environment variable
+    std::env::set_var("FERRYX_MAX_MACHINE_SESSIONS", "128");
+    assert_eq!(service.max_machine_sessions(), 128);
+
+    std::env::set_var("FERRYX_MAX_MACHINE_SESSIONS", "256");
+    assert_eq!(service.max_machine_sessions(), 256);
+
+    std::env::remove_var("FERRYX_MAX_MACHINE_SESSIONS");
+    assert_eq!(service.max_machine_sessions(), 64);
+}

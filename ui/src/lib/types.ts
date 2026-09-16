@@ -83,7 +83,7 @@ export type DiskScanSnapshot = {
 
 export type TerminalSignal = "interrupt" | "terminate" | "kill";
 
-export type SessionProcessState = "standby" | "running" | "hibernated";
+export type SessionProcessState = "standby" | "running" | "suspended" | "hibernated";
 
 export type TerminalSessionSummary = {
   sessionId: string;

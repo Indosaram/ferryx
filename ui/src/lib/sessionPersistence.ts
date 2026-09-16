@@ -401,7 +401,7 @@ export function deserializeWorkspaceState(
     let daemonEpoch: string | null = null;
     let lastOutputSequence: string | null = null;
     let lifecycle: TerminalLifecycle = "exited";
-    let processState: SessionProcessState = sess.processState === "hibernated" ? "hibernated" : "standby";
+    let processState: SessionProcessState = sess.processState === "suspended" ? "suspended" : sess.processState === "hibernated" ? "hibernated" : "standby";
 
     const isSshSession = ws.target?.kind === "ssh" || workspaceId.startsWith("ssh:");
     const isPairedSession = ws.target?.kind === "pairedDaemon";

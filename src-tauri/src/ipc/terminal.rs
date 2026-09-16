@@ -425,6 +425,8 @@ pub enum TerminalSignalRequest {
     Interrupt,
     Terminate,
     Kill,
+    Stop,
+    Continue,
 }
 
 impl From<TerminalSignalRequest> for TerminalSignal {
@@ -433,6 +435,8 @@ impl From<TerminalSignalRequest> for TerminalSignal {
             TerminalSignalRequest::Interrupt => TerminalSignal::Interrupt,
             TerminalSignalRequest::Terminate => TerminalSignal::Terminate,
             TerminalSignalRequest::Kill => TerminalSignal::Kill,
+            TerminalSignalRequest::Stop => TerminalSignal::Stop,
+            TerminalSignalRequest::Continue => TerminalSignal::Continue,
         }
     }
 }
@@ -1585,6 +1589,22 @@ pub async fn cmd_terminal_hibernate(
 ) -> Result<(), IpcError> {
     invalidate_cached_cwd(&session_id);
     daemon_client.hibernate_terminal(&session_id).await
+}
+
+#[tauri::command]
+pub async fn cmd_terminal_suspend(
+    daemon_client: State<'_, Arc<DaemonClient>>,
+    session_id: String,
+) -> Result<(), IpcError> {
+    daemon_client.suspend_terminal(&session_id).await
+}
+
+#[tauri::command]
+pub async fn cmd_terminal_resume(
+    daemon_client: State<'_, Arc<DaemonClient>>,
+    session_id: String,
+) -> Result<(), IpcError> {
+    daemon_client.resume_terminal(&session_id).await
 }
 
 #[tauri::command]

@@ -29,6 +29,7 @@ import {
 import { useNativeTerminalVisibilityState } from "../lib/nativeTerminalVisibility";
 import { classifyNativeTerminalAttachError } from "../lib/nativeTerminalAttachPolicy";
 import { isRemoteWorkspaceId, pasteClipboardImageToRemote } from "../lib/remoteProject";
+import { useSleepingSessionIds } from "../lib/sessionLifecycle";
 import { extractIpcErrorMessage } from "../lib/sshHosts";
 import type { NativeTerminalScrollbarPayload, TerminalSession } from "../lib/types";
 
@@ -520,13 +521,19 @@ export function NativeTerminalPane({
   const scrollbarHideTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isScrollbarHoveredRef = useRef(false);
   const scrollbarRevisionRef = useRef(0);
+  const sleepingSessionIds = useSleepingSessionIds();
+  const suspended = Boolean(
+    (session && sleepingSessionIds.has(session.id)) ||
+    (sessionId && sleepingSessionIds.has(sessionId)) ||
+    session?.processState === "suspended"
+  );
   // Native Tauri commands identify the PTY/surface by `backendSessionId`. When callers only
   // supply `sessionId` without a `session` object, fall back safely to `sessionId``.
   // When a `session` object is provided, require `backendSessionId` so we never attach with local frontend ID.
   // Exited sessions have already reaped their daemon PTY and stream tasks; attaching would trigger SESSION_NOT_FOUND.
   const isExited = session ? session.backendSessionId === null || session.lifecycle === "exited" : false;
-  const visible = interactive && !isExited;
-  const targetSessionId = isExited
+  const visible = interactive && !isExited && !suspended;
+  const targetSessionId = isExited || suspended
     ? null
     : session
       ? (session.backendSessionId ?? null)
@@ -538,7 +545,7 @@ export function NativeTerminalPane({
     readonly bindingKey: string | null;
   } | null>(null);
   const retainedPresentation = presentation?.paneIdentity === paneIdentity ? presentation : null;
-  const surfaceSessionId = targetSessionId ?? (isExited && isMacShortcutPlatform() ? retainedPresentation?.backendSessionId ?? null : null);
+  const surfaceSessionId = targetSessionId ?? (isExited && !suspended && isMacShortcutPlatform() ? retainedPresentation?.backendSessionId ?? null : null);
   // Exiting stops input, not the presented surface's attachment lifetime.
   // Keep its exact identity even if the exited session drops epoch/generation metadata.
   const bindingKey = targetSessionId
@@ -568,11 +575,11 @@ export function NativeTerminalPane({
     readonly live: boolean;
   } | null>(null);
   useLayoutEffect(() => {
-    attachmentOwnerRef.current = surfaceVisible && surfaceSessionId
+    attachmentOwnerRef.current = surfaceVisible && !suspended && surfaceSessionId
       ? { sessionId: surfaceSessionId, bindingKey, live: targetSessionId !== null }
       : null;
     return () => { attachmentOwnerRef.current = null; };
-  }, [bindingKey, surfaceSessionId, surfaceVisible, targetSessionId]);
+  }, [bindingKey, surfaceSessionId, surfaceVisible, suspended, targetSessionId]);
   const surfaceOwnerRef = useRef<{ readonly sessionId: string } | null>(null);
   // Commit-scoped identity: A -> B -> A and hide/show must not revive old input.
   // Layout cleanup invalidates it before passive surface teardown or queued IPC.
@@ -2229,8 +2236,8 @@ export function NativeTerminalPane({
     <div
       ref={containerRef}
       data-testid="native-terminal-pane"
-      data-native-terminal-visible={surfaceVisible ? "true" : "false"}
-      data-native-terminal-presented={surfaceVisible && retainedPresentation !== null ? "true" : "false"}
+      data-native-terminal-visible={surfaceVisible && !suspended ? "true" : "false"}
+      data-native-terminal-presented={surfaceVisible && !suspended && retainedPresentation !== null ? "true" : "false"}
       data-native-terminal-input-enabled={visible ? "true" : "false"}
       className={cn("terminal-host relative h-full w-full min-h-0 min-w-0 bg-transparent", isCmdHeld && linkHover && "cursor-pointer", className)}
       style={style}
