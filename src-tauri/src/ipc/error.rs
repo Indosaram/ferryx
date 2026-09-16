@@ -46,6 +46,8 @@ pub enum IpcErrorCode {
     BrowserAutomationTargetNotFound,
     BrowserAutomationFailed,
     BrowserCliUnavailable,
+    BrowserWaitTimeout,
+    BrowserScreenshotFailed,
     PtyCreationError,
     PtySpawnError,
     PtyIoError,
@@ -170,6 +172,8 @@ impl IpcErrorCode {
             "PARSE_ERROR" => Self::ParseError,
             "GIT_ERROR" => Self::GitError,
             "SCAN_CANCELLED" => Self::ScanCancelled,
+            "BROWSER_WAIT_TIMEOUT" => Self::BrowserWaitTimeout,
+            "BROWSER_SCREENSHOT_FAILED" => Self::BrowserScreenshotFailed,
             other => Self::Custom(other.to_string()),
         }
     }

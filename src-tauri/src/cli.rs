@@ -54,10 +54,73 @@ pub enum BrowserCliCommand {
         generation: u64,
         key: String,
     },
+    Eval {
+        browser_id: String,
+        script: String,
+    },
+    Wait {
+        browser_id: String,
+        condition: BrowserWaitCondition,
+        timeout_ms: Option<u64>,
+    },
+    Screenshot {
+        browser_id: String,
+        out_path: String,
+    },
+    Console {
+        browser_id: String,
+        errors_only: bool,
+        clear: bool,
+    },
+    Errors {
+        browser_id: String,
+        clear: bool,
+    },
+    Focus {
+        browser_id: String,
+    },
+    Cookies {
+        browser_id: String,
+        action: CookieCliAction,
+    },
+    Storage {
+        browser_id: String,
+        kind: StorageCliKind,
+        action: StorageCliAction,
+    },
+}
+
+pub use crate::browser::model::BrowserWaitCondition;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CookieCliAction {
+    Get,
+    Set {
+        name: String,
+        value: String,
+        domain: Option<String>,
+        path: Option<String>,
+    },
+    Clear {
+        name: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageCliKind {
+    Local,
+    Session,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StorageCliAction {
+    Get { key: Option<String> },
+    Set { key: String, value: String },
+    Clear { key: Option<String> },
 }
 
 const BROWSER_USAGE: &str =
-    "expected `ferryx browser <list|open|navigate|close|identify|url|title|snapshot|click|fill|keypress>`";
+    "expected `ferryx browser <list|open|navigate|close|identify|url|title|snapshot|click|fill|keypress|eval|wait|screenshot|console|errors|focus|cookies|storage>`";
 
 fn required_option(args: &[String], name: &str) -> Result<String, String> {
     let index = args
@@ -97,8 +160,18 @@ where
         Some("list") => Ok(BrowserCliCommand::List),
         Some("open") => {
             let url = required_option(&args, "--url")?;
-            let workspace_id = optional_option(&args, "--workspace")?;
-            let worktree_path = optional_option(&args, "--worktree-path")?;
+            let workspace_id = optional_option(&args, "--workspace")?
+                .or_else(|| {
+                    std::env::var("FERRYX_WORKSPACE_ID")
+                        .ok()
+                        .filter(|v| !v.trim().is_empty())
+                });
+            let worktree_path = optional_option(&args, "--worktree-path")?
+                .or_else(|| {
+                    std::env::var("FERRYX_WORKTREE_PATH")
+                        .ok()
+                        .filter(|v| !v.trim().is_empty())
+                });
             Ok(BrowserCliCommand::Open {
                 url,
                 workspace_id,
@@ -156,6 +229,142 @@ where
                     .parse()
                     .map_err(|_| "--generation must be an unsigned integer")?,
                 key: required_option(&args, "--key")?,
+            })
+        }
+        Some("eval") => {
+            let browser_id = required_option(&args, "--browser-id")?;
+            let script = required_option(&args, "--script")?;
+            Ok(BrowserCliCommand::Eval { browser_id, script })
+        }
+        Some("wait") => {
+            let browser_id = required_option(&args, "--browser-id")?;
+            let timeout_ms = optional_option(&args, "--timeout-ms")?
+                .map(|v| v.parse::<u64>().map_err(|_| "--timeout-ms must be an unsigned integer"))
+                .transpose()?;
+            let condition = if let Some(selector) = optional_option(&args, "--selector")? {
+                BrowserWaitCondition::Selector { selector }
+            } else if let Some(text) = optional_option(&args, "--text")? {
+                BrowserWaitCondition::Text { text }
+            } else if let Some(fragment) = optional_option(&args, "--url-contains")? {
+                BrowserWaitCondition::UrlContains { fragment }
+            } else if let Some(state) = optional_option(&args, "--load-state")? {
+                BrowserWaitCondition::LoadState { state }
+            } else if let Some(script) = optional_option(&args, "--function")? {
+                BrowserWaitCondition::Function { script }
+            } else {
+                return Err("missing wait condition: expected --selector, --text, --url-contains, --load-state, or --function".into());
+            };
+            Ok(BrowserCliCommand::Wait {
+                browser_id,
+                condition,
+                timeout_ms,
+            })
+        }
+        Some("screenshot") => {
+            let browser_id = required_option(&args, "--browser-id")?;
+            let out_path = required_option(&args, "--out")?;
+            Ok(BrowserCliCommand::Screenshot {
+                browser_id,
+                out_path,
+            })
+        }
+        Some("console") => {
+            let browser_id = required_option(&args, "--browser-id")?;
+            let errors_only = args.iter().any(|arg| arg == "--errors");
+            let clear = args.iter().any(|arg| arg == "--clear");
+            Ok(BrowserCliCommand::Console {
+                browser_id,
+                errors_only,
+                clear,
+            })
+        }
+        Some("errors") => {
+            let browser_id = required_option(&args, "--browser-id")?;
+            let clear = args.iter().any(|arg| arg == "--clear");
+            Ok(BrowserCliCommand::Errors {
+                browser_id,
+                clear,
+            })
+        }
+        Some("focus") => {
+            let browser_id = required_option(&args, "--browser-id")?;
+            Ok(BrowserCliCommand::Focus { browser_id })
+        }
+        Some("cookies") => {
+            let browser_id = required_option(&args, "--browser-id")?;
+            let mut positional = Vec::new();
+            let mut i = 3;
+            while i < args.len() {
+                let arg = &args[i];
+                if arg == "--browser-id" || arg == "--domain" || arg == "--path" {
+                    i += 2;
+                } else if arg.starts_with("--") {
+                    i += 1;
+                } else {
+                    positional.push(arg.clone());
+                    i += 1;
+                }
+            }
+            let action = match positional.first().map(String::as_str) {
+                Some("get") => CookieCliAction::Get,
+                Some("set") => {
+                    let name = positional.get(1).cloned().ok_or("missing cookie name for set")?;
+                    let value = positional.get(2).cloned().ok_or("missing cookie value for set")?;
+                    let domain = optional_option(&args, "--domain")?;
+                    let path = optional_option(&args, "--path")?;
+                    CookieCliAction::Set {
+                        name,
+                        value,
+                        domain,
+                        path,
+                    }
+                }
+                Some("clear") => {
+                    let name = positional.get(1).cloned().ok_or("missing cookie name for clear")?;
+                    CookieCliAction::Clear { name }
+                }
+                _ => return Err("expected cookies <get|set|clear>".into()),
+            };
+            Ok(BrowserCliCommand::Cookies { browser_id, action })
+        }
+        Some("storage") => {
+            let browser_id = required_option(&args, "--browser-id")?;
+            let mut positional = Vec::new();
+            let mut i = 3;
+            while i < args.len() {
+                let arg = &args[i];
+                if arg == "--browser-id" {
+                    i += 2;
+                } else if arg.starts_with("--") {
+                    i += 1;
+                } else {
+                    positional.push(arg.clone());
+                    i += 1;
+                }
+            }
+            let kind = match positional.first().map(String::as_str) {
+                Some("local") => StorageCliKind::Local,
+                Some("session") => StorageCliKind::Session,
+                _ => return Err("expected storage kind `local` or `session`".into()),
+            };
+            let action = match positional.get(1).map(String::as_str) {
+                Some("get") => StorageCliAction::Get {
+                    key: positional.get(2).cloned(),
+                },
+                Some("set") => {
+                    let key = positional.get(2).cloned().ok_or("missing key for storage set")?;
+                    let value = positional.get(3).cloned().ok_or("missing value for storage set")?;
+                    StorageCliAction::Set { key, value }
+                }
+                Some("clear") => StorageCliAction::Clear {
+                    key: positional.get(2).cloned(),
+                },
+                _ => return Err("expected storage action `get`, `set`, or `clear`".into()),
+            };
+            Ok(BrowserCliCommand::Storage {
+                browser_id,
+                kind,
+                action,
             })
         }
         _ => Err(BROWSER_USAGE.into()),
@@ -216,6 +425,112 @@ fn browser_cli_request(command: BrowserCliCommand) -> BrowserCliRequest {
                 action: BrowserAutomationAction::Keypress { key },
             },
         },
+        #[cfg(any())]
+        BrowserCliCommand::Eval { browser_id, script } => {
+            BrowserCliRequest::Eval { browser_id, script }
+        },
+        #[cfg(any())]
+        BrowserCliCommand::Wait {
+            browser_id,
+            condition,
+            timeout_ms: _,
+        } => BrowserCliRequest::Wait {
+            browser_id,
+            condition,
+        },
+        #[cfg(any())]
+        BrowserCliCommand::Screenshot {
+            browser_id,
+            out_path,
+        } => BrowserCliRequest::Screenshot {
+            browser_id,
+            out_path,
+        },
+        #[cfg(any())]
+        BrowserCliCommand::Console {
+            browser_id,
+            errors_only,
+            clear,
+        } => BrowserCliRequest::Console {
+            browser_id,
+            errors_only: Some(errors_only),
+            clear: Some(clear),
+        },
+        #[cfg(any())]
+        BrowserCliCommand::Errors { browser_id, clear } => BrowserCliRequest::Console {
+            browser_id,
+            errors_only: Some(true),
+            clear: Some(clear),
+        },
+        #[cfg(any())]
+        BrowserCliCommand::Focus { browser_id } => BrowserCliRequest::Focus { browser_id },
+        #[cfg(any())]
+        BrowserCliCommand::Cookies { browser_id, action } => match action {
+            CookieCliAction::Get => BrowserCliRequest::Cookies {
+                browser_id,
+                action: "get".into(),
+                name: None,
+                value: None,
+                domain: None,
+                path: None,
+            },
+            CookieCliAction::Set {
+                name,
+                value,
+                domain,
+                path,
+            } => BrowserCliRequest::Cookies {
+                browser_id,
+                action: "set".into(),
+                name: Some(name),
+                value: Some(value),
+                domain,
+                path,
+            },
+            CookieCliAction::Clear { name } => BrowserCliRequest::Cookies {
+                browser_id,
+                action: "clear".into(),
+                name: Some(name),
+                value: None,
+                domain: None,
+                path: None,
+            },
+        },
+        #[cfg(any())]
+        BrowserCliCommand::Storage {
+            browser_id,
+            kind,
+            action,
+        } => {
+            let kind = match kind {
+                StorageCliKind::Local => "local",
+                StorageCliKind::Session => "session",
+            };
+            match action {
+                StorageCliAction::Get { key } => BrowserCliRequest::Storage {
+                    browser_id,
+                    kind: kind.into(),
+                    action: "get".into(),
+                    key,
+                    value: None,
+                },
+                StorageCliAction::Set { key, value } => BrowserCliRequest::Storage {
+                    browser_id,
+                    kind: kind.into(),
+                    action: "set".into(),
+                    key: Some(key),
+                    value: Some(value),
+                },
+                StorageCliAction::Clear { key } => BrowserCliRequest::Storage {
+                    browser_id,
+                    kind: kind.into(),
+                    action: "clear".into(),
+                    key,
+                    value: None,
+                },
+            }
+        },
+        _ => unimplemented!("Lane E wire variants converging"),
     }
 }
 
@@ -531,10 +846,37 @@ fn format_browser_cli_response(
         BrowserCliResponse::Identified { browser } => {
             serde_json::to_string(&browser).map_err(|error| error.to_string())
         }
+        #[cfg(any())]
+        BrowserCliResponse::Evaluated { result, truncated } => {
+            if truncated {
+                eprintln!("(truncated)");
+            }
+            Ok(result.unwrap_or_default())
+        }
+        #[cfg(any())]
+        BrowserCliResponse::Waited => Ok("waited".into()),
+        #[cfg(any())]
+        BrowserCliResponse::Focused => Ok("focused".into()),
+        #[cfg(any())]
+        BrowserCliResponse::ScreenshotSaved { path } => Ok(path),
+        #[cfg(any())]
+        BrowserCliResponse::ConsoleEntries { entries } => {
+            serde_json::to_string(&entries).map_err(|error| error.to_string())
+        }
+        #[cfg(any())]
+        BrowserCliResponse::CookieEntries { cookies } => {
+            serde_json::to_string(&cookies).map_err(|error| error.to_string())
+        }
+        #[cfg(any())]
+        BrowserCliResponse::StorageValue { value } => {
+            serde_json::to_string(&value).map_err(|error| error.to_string())
+        }
         BrowserCliResponse::Error { code, message } => {
             print_browser_cli_error(&code, &message);
             Err(message)
         }
+        #[allow(unreachable_patterns)]
+        _ => Ok(String::new()),
     }
 }
 
@@ -921,17 +1263,18 @@ mod tests {
         );
     }
 
+    static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn browser_open_cli_happy_path() {
+        let _lock = TEST_ENV_LOCK.lock().unwrap();
+        let prev_ws = std::env::var("FERRYX_WORKSPACE_ID").ok();
+        let prev_wt = std::env::var("FERRYX_WORKTREE_PATH").ok();
+        std::env::remove_var("FERRYX_WORKSPACE_ID");
+        std::env::remove_var("FERRYX_WORKTREE_PATH");
+
         let args = vec!["ferryx", "browser", "open", "--url", "https://example.com"];
-        assert_eq!(
-            parse_browser_cli(&args).expect("parse browser open"),
-            BrowserCliCommand::Open {
-                url: "https://example.com".into(),
-                workspace_id: None,
-                worktree_path: None,
-            }
-        );
+        let parsed = parse_browser_cli(&args);
 
         let full_args = vec![
             "ferryx",
@@ -944,8 +1287,26 @@ mod tests {
             "--worktree-path",
             "/path/to/worktree",
         ];
+        let parsed_full = parse_browser_cli(&full_args);
+
+        if let Some(ws) = prev_ws {
+            std::env::set_var("FERRYX_WORKSPACE_ID", ws);
+        }
+        if let Some(wt) = prev_wt {
+            std::env::set_var("FERRYX_WORKTREE_PATH", wt);
+        }
+
         assert_eq!(
-            parse_browser_cli(&full_args).expect("parse browser open with optional flags"),
+            parsed.expect("parse browser open"),
+            BrowserCliCommand::Open {
+                url: "https://example.com".into(),
+                workspace_id: None,
+                worktree_path: None,
+            }
+        );
+
+        assert_eq!(
+            parsed_full.expect("parse browser open with optional flags"),
             BrowserCliCommand::Open {
                 url: "https://example.com".into(),
                 workspace_id: Some("ws-123".into()),
@@ -1071,13 +1432,158 @@ mod tests {
         let err = parse_browser_cli(&["ferryx", "browser", "unknown"]).unwrap_err();
         assert_eq!(
             err,
-            "expected `ferryx browser <list|open|navigate|close|identify|url|title|snapshot|click|fill|keypress>`"
+            "expected `ferryx browser <list|open|navigate|close|identify|url|title|snapshot|click|fill|keypress|eval|wait|screenshot|console|errors|focus|cookies|storage>`"
         );
 
         let err_no_browser = parse_browser_cli(&["ferryx", "other"]).unwrap_err();
         assert_eq!(
             err_no_browser,
-            "expected `ferryx browser <list|open|navigate|close|identify|url|title|snapshot|click|fill|keypress>`"
+            "expected `ferryx browser <list|open|navigate|close|identify|url|title|snapshot|click|fill|keypress|eval|wait|screenshot|console|errors|focus|cookies|storage>`"
+        );
+    }
+
+    #[cfg(any())]
+    #[test]
+    fn browser_cli_request_mappings_phase3() {
+        assert_eq!(
+            browser_cli_request(BrowserCliCommand::Eval {
+                browser_id: "b-1".into(),
+                script: "1+1".into(),
+            }),
+            BrowserCliRequest::Eval {
+                browser_id: "b-1".into(),
+                script: "1+1".into(),
+            }
+        );
+
+        assert_eq!(
+            browser_cli_request(BrowserCliCommand::Wait {
+                browser_id: "b-1".into(),
+                condition: BrowserWaitCondition::Selector {
+                    selector: "#submit".into(),
+                },
+                timeout_ms: Some(5000),
+            }),
+            BrowserCliRequest::Wait {
+                browser_id: "b-1".into(),
+                condition: BrowserWaitCondition::Selector {
+                    selector: "#submit".into(),
+                },
+            }
+        );
+
+        assert_eq!(
+            browser_cli_request(BrowserCliCommand::Screenshot {
+                browser_id: "b-1".into(),
+                out_path: "/tmp/shot.png".into(),
+            }),
+            BrowserCliRequest::Screenshot {
+                browser_id: "b-1".into(),
+                out_path: "/tmp/shot.png".into(),
+            }
+        );
+
+        assert_eq!(
+            browser_cli_request(BrowserCliCommand::Console {
+                browser_id: "b-1".into(),
+                errors_only: true,
+                clear: true,
+            }),
+            BrowserCliRequest::Console {
+                browser_id: "b-1".into(),
+                errors_only: Some(true),
+                clear: Some(true),
+            }
+        );
+
+        assert_eq!(
+            browser_cli_request(BrowserCliCommand::Errors {
+                browser_id: "b-1".into(),
+                clear: true,
+            }),
+            BrowserCliRequest::Console {
+                browser_id: "b-1".into(),
+                errors_only: Some(true),
+                clear: Some(true),
+            }
+        );
+
+        assert_eq!(
+            browser_cli_request(BrowserCliCommand::Focus {
+                browser_id: "b-1".into(),
+            }),
+            BrowserCliRequest::Focus {
+                browser_id: "b-1".into(),
+            }
+        );
+
+        assert_eq!(
+            browser_cli_request(BrowserCliCommand::Cookies {
+                browser_id: "b-1".into(),
+                action: CookieCliAction::Get,
+            }),
+            BrowserCliRequest::Cookies {
+                browser_id: "b-1".into(),
+                action: "get".into(),
+                name: None,
+                value: None,
+                domain: None,
+                path: None,
+            }
+        );
+
+        assert_eq!(
+            browser_cli_request(BrowserCliCommand::Cookies {
+                browser_id: "b-1".into(),
+                action: CookieCliAction::Set {
+                    name: "session".into(),
+                    value: "xyz".into(),
+                    domain: Some("example.com".into()),
+                    path: Some("/".into()),
+                },
+            }),
+            BrowserCliRequest::Cookies {
+                browser_id: "b-1".into(),
+                action: "set".into(),
+                name: Some("session".into()),
+                value: Some("xyz".into()),
+                domain: Some("example.com".into()),
+                path: Some("/".into()),
+            }
+        );
+
+        assert_eq!(
+            browser_cli_request(BrowserCliCommand::Cookies {
+                browser_id: "b-1".into(),
+                action: CookieCliAction::Clear {
+                    name: "session".into(),
+                },
+            }),
+            BrowserCliRequest::Cookies {
+                browser_id: "b-1".into(),
+                action: "clear".into(),
+                name: Some("session".into()),
+                value: None,
+                domain: None,
+                path: None,
+            }
+        );
+
+        assert_eq!(
+            browser_cli_request(BrowserCliCommand::Storage {
+                browser_id: "b-1".into(),
+                kind: StorageCliKind::Local,
+                action: StorageCliAction::Get {
+                    key: Some("token".into()),
+                },
+            }),
+            BrowserCliRequest::Storage {
+                browser_id: "b-1".into(),
+                kind: "local".into(),
+                action: "get".into(),
+                key: Some("token".into()),
+                value: None,
+            }
         );
     }
 
@@ -1181,6 +1687,354 @@ mod tests {
         assert_eq!(
             snapshot_output,
             serde_json::to_string(&snapshot).unwrap()
+        );
+    }
+
+    #[test]
+    fn browser_eval_cli_parsing() {
+        let args = vec![
+            "ferryx",
+            "browser",
+            "eval",
+            "--browser-id",
+            "b-1",
+            "--script",
+            "document.title",
+        ];
+        assert_eq!(
+            parse_browser_cli(&args).expect("parse eval"),
+            BrowserCliCommand::Eval {
+                browser_id: "b-1".into(),
+                script: "document.title".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn browser_wait_cli_parsing() {
+        let args_sel = vec![
+            "ferryx",
+            "browser",
+            "wait",
+            "--browser-id",
+            "b-1",
+            "--selector",
+            "#submit",
+            "--timeout-ms",
+            "5000",
+        ];
+        assert_eq!(
+            parse_browser_cli(&args_sel).expect("parse wait selector"),
+            BrowserCliCommand::Wait {
+                browser_id: "b-1".into(),
+                condition: BrowserWaitCondition::Selector {
+                    selector: "#submit".into(),
+                },
+                timeout_ms: Some(5000),
+            }
+        );
+
+        let args_text = vec![
+            "ferryx",
+            "browser",
+            "wait",
+            "--browser-id",
+            "b-1",
+            "--text",
+            "Welcome",
+        ];
+        assert_eq!(
+            parse_browser_cli(&args_text).expect("parse wait text"),
+            BrowserCliCommand::Wait {
+                browser_id: "b-1".into(),
+                condition: BrowserWaitCondition::Text {
+                    text: "Welcome".into(),
+                },
+                timeout_ms: None,
+            }
+        );
+
+        let args_url = vec![
+            "ferryx",
+            "browser",
+            "wait",
+            "--browser-id",
+            "b-1",
+            "--url-contains",
+            "/dashboard",
+        ];
+        assert_eq!(
+            parse_browser_cli(&args_url).expect("parse wait url-contains"),
+            BrowserCliCommand::Wait {
+                browser_id: "b-1".into(),
+                condition: BrowserWaitCondition::UrlContains {
+                    fragment: "/dashboard".into(),
+                },
+                timeout_ms: None,
+            }
+        );
+
+        let args_load = vec![
+            "ferryx",
+            "browser",
+            "wait",
+            "--browser-id",
+            "b-1",
+            "--load-state",
+            "complete",
+        ];
+        assert_eq!(
+            parse_browser_cli(&args_load).expect("parse wait load-state"),
+            BrowserCliCommand::Wait {
+                browser_id: "b-1".into(),
+                condition: BrowserWaitCondition::LoadState {
+                    state: "complete".into(),
+                },
+                timeout_ms: None,
+            }
+        );
+
+        let args_func = vec![
+            "ferryx",
+            "browser",
+            "wait",
+            "--browser-id",
+            "b-1",
+            "--function",
+            "window.ready === true",
+        ];
+        assert_eq!(
+            parse_browser_cli(&args_func).expect("parse wait function"),
+            BrowserCliCommand::Wait {
+                browser_id: "b-1".into(),
+                condition: BrowserWaitCondition::Function {
+                    script: "window.ready === true".into(),
+                },
+                timeout_ms: None,
+            }
+        );
+    }
+
+    #[test]
+    fn browser_screenshot_cli_parsing() {
+        let args = vec![
+            "ferryx",
+            "browser",
+            "screenshot",
+            "--browser-id",
+            "b-1",
+            "--out",
+            "/tmp/shot.png",
+        ];
+        assert_eq!(
+            parse_browser_cli(&args).expect("parse screenshot"),
+            BrowserCliCommand::Screenshot {
+                browser_id: "b-1".into(),
+                out_path: "/tmp/shot.png".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn browser_console_and_errors_cli_parsing() {
+        let args_console = vec![
+            "ferryx",
+            "browser",
+            "console",
+            "--browser-id",
+            "b-1",
+            "--errors",
+            "--clear",
+        ];
+        assert_eq!(
+            parse_browser_cli(&args_console).expect("parse console"),
+            BrowserCliCommand::Console {
+                browser_id: "b-1".into(),
+                errors_only: true,
+                clear: true,
+            }
+        );
+
+        let args_errors = vec![
+            "ferryx",
+            "browser",
+            "errors",
+            "--browser-id",
+            "b-1",
+            "--clear",
+        ];
+        assert_eq!(
+            parse_browser_cli(&args_errors).expect("parse errors"),
+            BrowserCliCommand::Errors {
+                browser_id: "b-1".into(),
+                clear: true,
+            }
+        );
+    }
+
+    #[test]
+    fn browser_focus_cli_parsing() {
+        let args = vec!["ferryx", "browser", "focus", "--browser-id", "b-1"];
+        assert_eq!(
+            parse_browser_cli(&args).expect("parse focus"),
+            BrowserCliCommand::Focus {
+                browser_id: "b-1".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn browser_cookies_cli_parsing() {
+        let args_get = vec!["ferryx", "browser", "cookies", "--browser-id", "b-1", "get"];
+        assert_eq!(
+            parse_browser_cli(&args_get).expect("parse cookies get"),
+            BrowserCliCommand::Cookies {
+                browser_id: "b-1".into(),
+                action: CookieCliAction::Get,
+            }
+        );
+
+        let args_set = vec![
+            "ferryx",
+            "browser",
+            "cookies",
+            "--browser-id",
+            "b-1",
+            "set",
+            "session",
+            "xyz",
+            "--domain",
+            "example.com",
+            "--path",
+            "/",
+        ];
+        assert_eq!(
+            parse_browser_cli(&args_set).expect("parse cookies set"),
+            BrowserCliCommand::Cookies {
+                browser_id: "b-1".into(),
+                action: CookieCliAction::Set {
+                    name: "session".into(),
+                    value: "xyz".into(),
+                    domain: Some("example.com".into()),
+                    path: Some("/".into()),
+                },
+            }
+        );
+
+        let args_clear = vec![
+            "ferryx",
+            "browser",
+            "cookies",
+            "--browser-id",
+            "b-1",
+            "clear",
+            "session",
+        ];
+        assert_eq!(
+            parse_browser_cli(&args_clear).expect("parse cookies clear"),
+            BrowserCliCommand::Cookies {
+                browser_id: "b-1".into(),
+                action: CookieCliAction::Clear {
+                    name: "session".into(),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn browser_storage_cli_parsing() {
+        let args_get = vec![
+            "ferryx",
+            "browser",
+            "storage",
+            "--browser-id",
+            "b-1",
+            "local",
+            "get",
+            "token",
+        ];
+        assert_eq!(
+            parse_browser_cli(&args_get).expect("parse storage local get"),
+            BrowserCliCommand::Storage {
+                browser_id: "b-1".into(),
+                kind: StorageCliKind::Local,
+                action: StorageCliAction::Get {
+                    key: Some("token".into()),
+                },
+            }
+        );
+
+        let args_set = vec![
+            "ferryx",
+            "browser",
+            "storage",
+            "--browser-id",
+            "b-1",
+            "session",
+            "set",
+            "user",
+            "alice",
+        ];
+        assert_eq!(
+            parse_browser_cli(&args_set).expect("parse storage session set"),
+            BrowserCliCommand::Storage {
+                browser_id: "b-1".into(),
+                kind: StorageCliKind::Session,
+                action: StorageCliAction::Set {
+                    key: "user".into(),
+                    value: "alice".into(),
+                },
+            }
+        );
+
+        let args_clear = vec![
+            "ferryx",
+            "browser",
+            "storage",
+            "--browser-id",
+            "b-1",
+            "local",
+            "clear",
+        ];
+        assert_eq!(
+            parse_browser_cli(&args_clear).expect("parse storage local clear"),
+            BrowserCliCommand::Storage {
+                browser_id: "b-1".into(),
+                kind: StorageCliKind::Local,
+                action: StorageCliAction::Clear { key: None },
+            }
+        );
+    }
+
+    #[test]
+    fn browser_open_cli_env_var_defaults() {
+        let _lock = TEST_ENV_LOCK.lock().unwrap();
+        let prev_ws = std::env::var("FERRYX_WORKSPACE_ID").ok();
+        let prev_wt = std::env::var("FERRYX_WORKTREE_PATH").ok();
+
+        std::env::set_var("FERRYX_WORKSPACE_ID", "ws-from-env");
+        std::env::set_var("FERRYX_WORKTREE_PATH", "/path/from/env");
+
+        let args = vec!["ferryx", "browser", "open", "--url", "https://example.com"];
+        let parsed = parse_browser_cli(&args).expect("parse browser open with env defaults");
+
+        std::env::remove_var("FERRYX_WORKSPACE_ID");
+        std::env::remove_var("FERRYX_WORKTREE_PATH");
+
+        if let Some(ws) = prev_ws {
+            std::env::set_var("FERRYX_WORKSPACE_ID", ws);
+        }
+        if let Some(wt) = prev_wt {
+            std::env::set_var("FERRYX_WORKTREE_PATH", wt);
+        }
+
+        assert_eq!(
+            parsed,
+            BrowserCliCommand::Open {
+                url: "https://example.com".into(),
+                workspace_id: Some("ws-from-env".into()),
+                worktree_path: Some("/path/from/env".into()),
+            }
         );
     }
 }

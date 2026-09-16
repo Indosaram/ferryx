@@ -6,6 +6,7 @@ pub mod guest;
 pub mod linux;
 pub mod manager;
 pub mod model;
+pub mod screenshot;
 pub mod security;
 #[cfg(test)]
 pub mod tests;

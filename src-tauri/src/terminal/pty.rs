@@ -37,9 +37,20 @@ where
     Some(("LANG", locale))
 }
 
-pub fn apply_session_env(cmd: &mut CommandBuilder, session_id: &str, worktree_path: &str) {
+pub fn apply_session_env(
+    cmd: &mut CommandBuilder,
+    session_id: &str,
+    worktree_path: &str,
+    workspace_id: Option<&str>,
+) {
     cmd.env("FERRYX_SESSION_ID", session_id);
     cmd.env("FERRYX_WORKTREE_PATH", worktree_path);
+    if let Some(ws) = workspace_id {
+        let trimmed = ws.trim();
+        if !trimmed.is_empty() {
+            cmd.env("FERRYX_WORKSPACE_ID", trimmed);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -111,10 +122,17 @@ impl PtyManager {
         let canonical_worktree = worktree_manager
             .canonical_allowed_path(worktree_path)
             .map_err(|error| PtyError::Other(error.to_string()))?;
+        let workspace_id = worktree_manager
+            .find_worktree(&canonical_worktree)
+            .ok()
+            .flatten()
+            .and_then(|w| w.orca_info())
+            .map(|info| info.ws_id);
         apply_session_env(
             &mut cmd,
             &session_id,
             &canonical_worktree.to_string_lossy(),
+            workspace_id.as_deref(),
         );
         let rx = self.spawn_with_id_and_worktree(
             session_id.clone(),
@@ -154,7 +172,7 @@ impl PtyManager {
         // identity here: this is the first point where the id exists and the child is not yet
         // spawned.
         if let Some(ref path) = worktree_path {
-            apply_session_env(&mut cmd, &session_id, &path.to_string_lossy());
+            apply_session_env(&mut cmd, &session_id, &path.to_string_lossy(), None);
         } else {
             cmd.env("FERRYX_SESSION_ID", &session_id);
         }
@@ -682,7 +700,7 @@ mod tests {
     #[test]
     fn apply_session_env_sets_worktree_and_session_variables() {
         let mut cmd = CommandBuilder::new("/bin/sh");
-        apply_session_env(&mut cmd, "session-test-42", "/path/to/worktree");
+        apply_session_env(&mut cmd, "session-test-42", "/path/to/worktree", Some("ws-42"));
         assert_eq!(
             cmd.get_env("FERRYX_SESSION_ID").and_then(|s| s.to_str()),
             Some("session-test-42")
@@ -691,5 +709,17 @@ mod tests {
             cmd.get_env("FERRYX_WORKTREE_PATH").and_then(|s| s.to_str()),
             Some("/path/to/worktree")
         );
+        assert_eq!(
+            cmd.get_env("FERRYX_WORKSPACE_ID").and_then(|s| s.to_str()),
+            Some("ws-42")
+        );
+
+        let mut cmd_no_ws = CommandBuilder::new("/bin/sh");
+        apply_session_env(&mut cmd_no_ws, "session-test-42", "/path/to/worktree", None);
+        assert_eq!(cmd_no_ws.get_env("FERRYX_WORKSPACE_ID"), None);
+
+        let mut cmd_empty_ws = CommandBuilder::new("/bin/sh");
+        apply_session_env(&mut cmd_empty_ws, "session-test-42", "/path/to/worktree", Some(""));
+        assert_eq!(cmd_empty_ws.get_env("FERRYX_WORKSPACE_ID"), None);
     }
 }

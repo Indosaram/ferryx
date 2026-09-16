@@ -264,3 +264,30 @@ pub struct BrowserAutomationRequest {
     pub generation: u64,
     pub action: BrowserAutomationAction,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "condition", rename_all = "camelCase")]
+pub enum BrowserWaitCondition {
+    Selector { selector: String },
+    Text { text: String },
+    UrlContains { fragment: String },
+    LoadState { state: String },
+    Function { script: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserConsoleEntry {
+    pub level: String,
+    pub text: String,
+    #[serde(alias = "at_ms")]
+    pub at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserCookieEntry {
+    pub name: String,
+    pub value: String,
+}
+

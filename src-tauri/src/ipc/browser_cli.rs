@@ -1,6 +1,7 @@
 use crate::browser::{
-    BrowserAutomationRequest, BrowserAutomationSnapshot, BrowserError, BrowserManager,
-    BrowserSessionCreatedPayload, BrowserSessionSummary, CreateBrowserRequest,
+    BrowserAutomationRequest, BrowserAutomationSnapshot, BrowserConsoleEntry, BrowserCookieEntry,
+    BrowserError, BrowserManager, BrowserSessionCreatedPayload, BrowserSessionSummary,
+    BrowserWaitCondition, CreateBrowserRequest,
 };
 use crate::ipc::browser::{
     browser_automation_act, browser_automation_snapshot, close_browser_session,
@@ -45,6 +46,64 @@ pub enum BrowserCliRequest {
         browser_id: String,
     },
     Identify,
+    #[serde(rename_all = "camelCase")]
+    Eval {
+        #[serde(alias = "browser_id")]
+        browser_id: String,
+        script: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Wait {
+        #[serde(alias = "browser_id")]
+        browser_id: String,
+        condition: BrowserWaitCondition,
+    },
+    #[serde(rename_all = "camelCase")]
+    Console {
+        #[serde(alias = "browser_id")]
+        browser_id: String,
+        #[serde(default, alias = "errors_only")]
+        errors_only: Option<bool>,
+        #[serde(default)]
+        clear: Option<bool>,
+    },
+    #[serde(rename_all = "camelCase")]
+    Focus {
+        #[serde(alias = "browser_id")]
+        browser_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Screenshot {
+        #[serde(alias = "browser_id")]
+        browser_id: String,
+        #[serde(alias = "out_path")]
+        out_path: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Cookies {
+        #[serde(alias = "browser_id")]
+        browser_id: String,
+        action: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        value: Option<String>,
+        #[serde(default)]
+        domain: Option<String>,
+        #[serde(default)]
+        path: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    Storage {
+        #[serde(alias = "browser_id")]
+        browser_id: String,
+        kind: String,
+        action: String,
+        #[serde(default)]
+        key: Option<String>,
+        #[serde(default)]
+        value: Option<String>,
+    },
 }
 
 /// An authenticated request line: the capability token plus the command itself.
@@ -163,6 +222,24 @@ pub enum BrowserCliResponse {
     Closed,
     Identified {
         browser: Option<BrowserSessionSummary>,
+    },
+    Evaluated {
+        result: Option<String>,
+        truncated: bool,
+    },
+    Waited,
+    Focused,
+    ScreenshotSaved {
+        path: String,
+    },
+    ConsoleEntries {
+        entries: Vec<BrowserConsoleEntry>,
+    },
+    CookieEntries {
+        cookies: Vec<BrowserCookieEntry>,
+    },
+    StorageValue {
+        value: Option<String>,
     },
     Error {
         code: String,
@@ -592,6 +669,128 @@ async fn execute_request<R: tauri::Runtime>(
         BrowserCliRequest::Identify => {
             BrowserCliResponse::Identified {
                 browser: identify_browser_session(manager),
+            }
+        }
+        BrowserCliRequest::Eval { browser_id, script } => {
+            match crate::ipc::browser::eval_browser_session(app, manager, &browser_id, &script).await {
+                Ok((result, truncated)) => BrowserCliResponse::Evaluated { result, truncated },
+                Err(error) => BrowserCliResponse::Error {
+                    code: ipc_error_code_string(error.code),
+                    message: error.message,
+                },
+            }
+        }
+        BrowserCliRequest::Wait {
+            browser_id,
+            condition,
+        } => {
+            match crate::ipc::browser::wait_browser_session(app, manager, &browser_id, condition).await {
+                Ok(()) => BrowserCliResponse::Waited,
+                Err(error) => BrowserCliResponse::Error {
+                    code: ipc_error_code_string(error.code),
+                    message: error.message,
+                },
+            }
+        }
+        BrowserCliRequest::Console {
+            browser_id,
+            errors_only,
+            clear,
+        } => {
+            match crate::ipc::browser::console_browser_session(
+                app,
+                manager,
+                &browser_id,
+                errors_only.unwrap_or(false),
+                clear.unwrap_or(false),
+            )
+            .await
+            {
+                Ok(entries) => BrowserCliResponse::ConsoleEntries { entries },
+                Err(error) => BrowserCliResponse::Error {
+                    code: ipc_error_code_string(error.code),
+                    message: error.message,
+                },
+            }
+        }
+        BrowserCliRequest::Focus { browser_id } => {
+            match crate::ipc::browser::focus_browser_session(app, manager, &browser_id) {
+                Ok(()) => BrowserCliResponse::Focused,
+                Err(error) => BrowserCliResponse::Error {
+                    code: ipc_error_code_string(error.code),
+                    message: error.message,
+                },
+            }
+        }
+        BrowserCliRequest::Screenshot {
+            browser_id,
+            out_path,
+        } => {
+            match crate::ipc::browser::screenshot_browser_session(
+                app,
+                manager,
+                &browser_id,
+                &out_path,
+            )
+            .await
+            {
+                Ok(path) => BrowserCliResponse::ScreenshotSaved { path },
+                Err(error) => BrowserCliResponse::Error {
+                    code: ipc_error_code_string(error.code),
+                    message: error.message,
+                },
+            }
+        }
+        BrowserCliRequest::Cookies {
+            browser_id,
+            action,
+            name,
+            value,
+            domain,
+            path,
+        } => {
+            match crate::ipc::browser::cookies_browser_session(
+                app,
+                manager,
+                &browser_id,
+                &action,
+                name.as_deref(),
+                value.as_deref(),
+                domain.as_deref(),
+                path.as_deref(),
+            )
+            .await
+            {
+                Ok(cookies) => BrowserCliResponse::CookieEntries { cookies },
+                Err(error) => BrowserCliResponse::Error {
+                    code: ipc_error_code_string(error.code),
+                    message: error.message,
+                },
+            }
+        }
+        BrowserCliRequest::Storage {
+            browser_id,
+            kind,
+            action,
+            key,
+            value,
+        } => {
+            match crate::ipc::browser::storage_browser_session(
+                app,
+                manager,
+                &browser_id,
+                &kind,
+                &action,
+                key.as_deref(),
+                value.as_deref(),
+            )
+            .await
+            {
+                Ok(value) => BrowserCliResponse::StorageValue { value },
+                Err(error) => BrowserCliResponse::Error {
+                    code: ipc_error_code_string(error.code),
+                    message: error.message,
+                },
             }
         }
     }
@@ -1571,5 +1770,219 @@ mod tests {
         assert_eq!(resp_visible["type"], "identified", "unexpected response: {resp_visible:?}");
         assert!(!resp_visible["browser"].is_null(), "expected Some browser for visible session");
         assert_eq!(resp_visible["browser"]["browserId"], registered.browser_id);
+    }
+
+    #[test]
+    fn test_browser_cli_phase3_wire_serialization() {
+        use crate::browser::model::{BrowserConsoleEntry, BrowserCookieEntry, BrowserWaitCondition};
+
+        // Eval
+        let req = BrowserCliRequest::Eval {
+            browser_id: "b1".into(),
+            script: "1 + 1".into(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains(r#""command":"eval""#));
+        assert!(json.contains(r#""browserId":"b1""#));
+        let parsed: BrowserCliRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+
+        // Wait
+        let req = BrowserCliRequest::Wait {
+            browser_id: "b1".into(),
+            condition: BrowserWaitCondition::Selector {
+                selector: "#main".into(),
+            },
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains(r#""command":"wait""#));
+        assert!(json.contains(r##""selector":"#main""##));
+        let parsed: BrowserCliRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+
+        // Console
+        let req = BrowserCliRequest::Console {
+            browser_id: "b1".into(),
+            errors_only: Some(true),
+            clear: Some(false),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains(r#""command":"console""#));
+        let parsed: BrowserCliRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+
+        // Focus
+        let req = BrowserCliRequest::Focus {
+            browser_id: "b1".into(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains(r#""command":"focus""#));
+        let parsed: BrowserCliRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+
+        // Screenshot
+        let req = BrowserCliRequest::Screenshot {
+            browser_id: "b1".into(),
+            out_path: "/tmp/shot.png".into(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains(r#""command":"screenshot""#));
+        assert!(json.contains(r#""outPath":"/tmp/shot.png""#));
+        let parsed: BrowserCliRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+
+        // Cookies
+        let req = BrowserCliRequest::Cookies {
+            browser_id: "b1".into(),
+            action: "get".into(),
+            name: Some("foo".into()),
+            value: None,
+            domain: None,
+            path: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains(r#""command":"cookies""#));
+        let parsed: BrowserCliRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+
+        // Storage
+        let req = BrowserCliRequest::Storage {
+            browser_id: "b1".into(),
+            kind: "local".into(),
+            action: "get".into(),
+            key: Some("theme".into()),
+            value: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains(r#""command":"storage""#));
+        let parsed: BrowserCliRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+
+        // Responses
+        let resp = BrowserCliResponse::Evaluated {
+            result: Some("hello".into()),
+            truncated: false,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains(r#""type":"evaluated""#));
+
+        let resp = BrowserCliResponse::Waited;
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains(r#""type":"waited""#));
+
+        let resp = BrowserCliResponse::Focused;
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains(r#""type":"focused""#));
+
+        let resp = BrowserCliResponse::ScreenshotSaved {
+            path: "/tmp/shot.png".into(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains(r#""type":"screenshotSaved""#));
+
+        let resp = BrowserCliResponse::ConsoleEntries {
+            entries: vec![BrowserConsoleEntry {
+                level: "warn".into(),
+                text: "careful".into(),
+                at_ms: 1234,
+            }],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains(r#""type":"consoleEntries""#));
+
+        let resp = BrowserCliResponse::CookieEntries {
+            cookies: vec![BrowserCookieEntry {
+                name: "c1".into(),
+                value: "v1".into(),
+            }],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains(r#""type":"cookieEntries""#));
+
+        let resp = BrowserCliResponse::StorageValue {
+            value: Some("dark".into()),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains(r#""type":"storageValue""#));
+    }
+
+    #[tokio::test]
+    async fn test_browser_cli_phase3_registered_missing_webview_round_trip() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(BrowserManager::new());
+        let token = "test-token";
+
+        let registered = manager
+            .register_session(CreateBrowserRequest {
+                browser_id: None,
+                workspace_id: None,
+                worktree_path: None,
+                url: "https://example.com".to_string(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .expect("register session");
+
+        let b_id = &registered.browser_id;
+
+        // Eval on registered session without webview -> WEBVIEW_NOT_FOUND
+        let raw = format!(
+            "{{\"command\":\"eval\",\"browserId\":\"{b_id}\",\"script\":\"1+1\",\"token\":\"{token}\"}}"
+        );
+        let resp = send_raw_line(app.handle().clone(), Arc::clone(&manager), token, &raw).await;
+        assert_eq!(resp["type"], "error");
+        assert!(resp["code"] == "WEBVIEW_NOT_FOUND" || resp["code"] == "BROWSER_WEBVIEW_NOT_FOUND");
+
+        // Wait on registered session without webview -> WEBVIEW_NOT_FOUND
+        let raw = format!(
+            "{{\"command\":\"wait\",\"browserId\":\"{b_id}\",\"condition\":{{\"condition\":\"selector\",\"selector\":\"#none\"}},\"token\":\"{token}\"}}"
+        );
+        let resp = send_raw_line(app.handle().clone(), Arc::clone(&manager), token, &raw).await;
+        assert_eq!(resp["type"], "error");
+        assert!(resp["code"] == "WEBVIEW_NOT_FOUND" || resp["code"] == "BROWSER_WEBVIEW_NOT_FOUND");
+
+        // Console on registered session without webview -> WEBVIEW_NOT_FOUND
+        let raw = format!(
+            "{{\"command\":\"console\",\"browserId\":\"{b_id}\",\"token\":\"{token}\"}}"
+        );
+        let resp = send_raw_line(app.handle().clone(), Arc::clone(&manager), token, &raw).await;
+        assert_eq!(resp["type"], "error");
+        assert!(resp["code"] == "WEBVIEW_NOT_FOUND" || resp["code"] == "BROWSER_WEBVIEW_NOT_FOUND");
+
+        // Focus on registered session without webview -> WEBVIEW_NOT_FOUND
+        let raw = format!(
+            "{{\"command\":\"focus\",\"browserId\":\"{b_id}\",\"token\":\"{token}\"}}"
+        );
+        let resp = send_raw_line(app.handle().clone(), Arc::clone(&manager), token, &raw).await;
+        assert_eq!(resp["type"], "error");
+        assert!(resp["code"] == "WEBVIEW_NOT_FOUND" || resp["code"] == "BROWSER_WEBVIEW_NOT_FOUND");
+
+        // Screenshot on registered session without webview -> WEBVIEW_NOT_FOUND
+        let raw = format!(
+            "{{\"command\":\"screenshot\",\"browserId\":\"{b_id}\",\"outPath\":\"/tmp/test.png\",\"token\":\"{token}\"}}"
+        );
+        let resp = send_raw_line(app.handle().clone(), Arc::clone(&manager), token, &raw).await;
+        assert_eq!(resp["type"], "error");
+        assert!(resp["code"] == "WEBVIEW_NOT_FOUND" || resp["code"] == "BROWSER_WEBVIEW_NOT_FOUND");
+
+        // Cookies on registered session without webview -> WEBVIEW_NOT_FOUND
+        let raw = format!(
+            "{{\"command\":\"cookies\",\"browserId\":\"{b_id}\",\"action\":\"get\",\"token\":\"{token}\"}}"
+        );
+        let resp = send_raw_line(app.handle().clone(), Arc::clone(&manager), token, &raw).await;
+        assert_eq!(resp["type"], "error");
+        assert!(resp["code"] == "WEBVIEW_NOT_FOUND" || resp["code"] == "BROWSER_WEBVIEW_NOT_FOUND");
+
+        // Storage on registered session without webview -> WEBVIEW_NOT_FOUND
+        let raw = format!(
+            "{{\"command\":\"storage\",\"browserId\":\"{b_id}\",\"kind\":\"local\",\"action\":\"get\",\"key\":\"k\",\"token\":\"{token}\"}}"
+        );
+        let resp = send_raw_line(app.handle().clone(), Arc::clone(&manager), token, &raw).await;
+        assert_eq!(resp["type"], "error");
+        assert!(resp["code"] == "WEBVIEW_NOT_FOUND" || resp["code"] == "BROWSER_WEBVIEW_NOT_FOUND");
     }
 }

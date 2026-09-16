@@ -10,7 +10,7 @@ use crate::browser::{
     BROWSER_CLEAR_FIND_SCRIPT, BROWSER_DOWNLOAD_REQUESTED_EVENT, BROWSER_OPEN_REQUESTED_EVENT,
     BROWSER_SHORTCUT_REQUESTED_EVENT,
 };
-use crate::ipc::error::IpcError;
+use crate::ipc::error::{IpcError, IpcErrorCode};
 #[cfg(target_os = "macos")]
 use parking_lot::Mutex;
 use serde::Deserialize;
@@ -1524,13 +1524,12 @@ pub async fn cmd_browser_set_zoom<R: tauri::Runtime>(
     Ok(clamped)
 }
 
-#[tauri::command]
-pub async fn cmd_browser_focus<R: tauri::Runtime>(
-    app: AppHandle<R>,
-    manager: State<'_, Arc<BrowserManager>>,
-    browser_id: String,
+pub fn focus_browser_session<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &BrowserManager,
+    browser_id: &str,
 ) -> Result<(), IpcError> {
-    let state = manager.get_state(&browser_id)?;
+    let state = manager.get_state(browser_id)?;
     let webview = app
         .get_webview(&state.webview_label)
         .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
@@ -1538,6 +1537,15 @@ pub async fn cmd_browser_focus<R: tauri::Runtime>(
         BrowserError::Internal(format!("failed to focus browser webview: {error}"))
     })?;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn cmd_browser_focus<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    manager: State<'_, Arc<BrowserManager>>,
+    browser_id: String,
+) -> Result<(), IpcError> {
+    focus_browser_session(&app, &manager, &browser_id)
 }
 
 #[tauri::command]
@@ -1924,6 +1932,7 @@ async fn resolve_session_cwd(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use super::{windows_open_request, WindowsOpenRequest};
 
     #[test]
@@ -2003,4 +2012,390 @@ mod tests {
         assert_eq!(resolved, std::path::Path::new(manifest_dir).join("Cargo.toml"));
         assert!(resolved.is_file());
     }
+
+    #[test]
+    fn test_build_wait_condition_script() {
+        use crate::browser::model::BrowserWaitCondition;
+
+        let s = build_wait_condition_script(&BrowserWaitCondition::Selector {
+            selector: "#my-id".into(),
+        });
+        assert!(s.contains("document.querySelector"));
+
+        let t = build_wait_condition_script(&BrowserWaitCondition::Text {
+            text: "Loaded".into(),
+        });
+        assert!(t.contains("innerText.includes"));
+
+        let u = build_wait_condition_script(&BrowserWaitCondition::UrlContains {
+            fragment: "/done".into(),
+        });
+        assert!(u.contains("location.href.includes"));
+
+        let lc = build_wait_condition_script(&BrowserWaitCondition::LoadState {
+            state: "complete".into(),
+        });
+        assert!(lc.contains("document.readyState"));
+
+        let li = build_wait_condition_script(&BrowserWaitCondition::LoadState {
+            state: "interactive".into(),
+        });
+        assert!(li.contains("interactive"));
+        assert!(li.contains("complete"));
+
+        let f = build_wait_condition_script(&BrowserWaitCondition::Function {
+            script: "1 + 1 === 2".into(),
+        });
+        assert!(f.contains("eval"));
+    }
+
+    #[test]
+    fn test_truncate_eval_result() {
+        let short = "small string".to_string();
+        let (res, truncated) = truncate_eval_result(short.clone());
+        assert_eq!(res, short);
+        assert!(!truncated);
+
+        // Unicode multibyte character repeat: 30_000 3-byte characters = 90_000 bytes
+        let long = "中".repeat(30_000);
+        let (res, truncated) = truncate_eval_result(long);
+        assert!(truncated);
+        assert!(res.len() <= 65536);
+        assert!(std::str::from_utf8(res.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn test_cookie_parse_and_script() {
+        let raw = "a=1; b=2; c=3";
+        let parsed = parse_document_cookie(raw);
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0].name, "a");
+        assert_eq!(parsed[0].value, "1");
+
+        let get_script = build_cookie_script("get", None, None, None, None).unwrap();
+        assert!(get_script.contains("document.cookie"));
+
+        let set_script = build_cookie_script("set", Some("k"), Some("v"), Some("example.com"), Some("/")).unwrap();
+        assert!(set_script.contains("document.cookie ="));
+        assert!(set_script.contains("k=v"));
+        assert!(set_script.contains("domain=example.com"));
+
+        let clear_script = build_cookie_script("clear", Some("k"), None, None, None).unwrap();
+        assert!(clear_script.contains("Max-Age=0") || clear_script.contains("expires="));
+    }
+
+    #[test]
+    fn test_storage_script() {
+        let get_s = build_storage_script("local", "get", Some("key1"), None).unwrap();
+        assert!(get_s.contains("localStorage.getItem"));
+
+        let set_s = build_storage_script("session", "set", Some("key2"), Some("val2")).unwrap();
+        assert!(set_s.contains("sessionStorage.setItem"));
+
+        let clear_k = build_storage_script("local", "clear", Some("key1"), None).unwrap();
+        assert!(clear_k.contains("localStorage.removeItem"));
+
+        let clear_all = build_storage_script("local", "clear", None, None).unwrap();
+        assert!(clear_all.contains("localStorage.clear"));
+    }
 }
+
+pub fn build_wait_condition_script(
+    condition: &crate::browser::model::BrowserWaitCondition,
+) -> String {
+    use crate::browser::model::BrowserWaitCondition;
+    match condition {
+        BrowserWaitCondition::Selector { selector } => {
+            let sel_json = serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".into());
+            format!(r#"(() => {{ try {{ return document.querySelector({sel_json}) !== null; }} catch (_) {{ return false; }} }})()"#)
+        }
+        BrowserWaitCondition::Text { text } => {
+            let text_json = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".into());
+            format!(r#"(() => {{ try {{ return Boolean(document.body && document.body.innerText.includes({text_json})); }} catch (_) {{ return false; }} }})()"#)
+        }
+        BrowserWaitCondition::UrlContains { fragment } => {
+            let frag_json = serde_json::to_string(fragment).unwrap_or_else(|_| "\"\"".into());
+            format!(r#"(() => {{ try {{ return location.href.includes({frag_json}); }} catch (_) {{ return false; }} }})()"#)
+        }
+        BrowserWaitCondition::LoadState { state } => {
+            if state.eq_ignore_ascii_case("interactive") {
+                r#"(() => { return document.readyState === "interactive" || document.readyState === "complete"; })()"#.into()
+            } else if state.eq_ignore_ascii_case("complete") {
+                r#"(() => { return document.readyState === "complete"; })()"#.into()
+            } else {
+                let state_json = serde_json::to_string(state).unwrap_or_else(|_| "\"\"".into());
+                format!(r#"(() => {{ return document.readyState === {state_json}; }})()"#)
+            }
+        }
+        BrowserWaitCondition::Function { script } => {
+            let script_json = serde_json::to_string(script).unwrap_or_else(|_| "\"\"".into());
+            format!(r#"(() => {{ try {{ return Boolean(eval({script_json})); }} catch (_) {{ return false; }} }})()"#)
+        }
+    }
+}
+
+pub fn parse_eval_boolean(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed == "true" || trimmed == "\"true\"" {
+        return true;
+    }
+    if let Ok(b) = serde_json::from_str::<bool>(trimmed) {
+        return b;
+    }
+    if let Ok(s) = serde_json::from_str::<String>(trimmed) {
+        return s == "true";
+    }
+    false
+}
+
+const MAX_EVAL_BYTES: usize = 65536;
+
+pub fn truncate_eval_result(result: String) -> (String, bool) {
+    if result.len() <= MAX_EVAL_BYTES {
+        (result, false)
+    } else {
+        let mut end = MAX_EVAL_BYTES;
+        while end > 0 && !result.is_char_boundary(end) {
+            end -= 1;
+        }
+        (result[..end].to_string(), true)
+    }
+}
+
+pub fn parse_document_cookie(raw: &str) -> Vec<crate::browser::model::BrowserCookieEntry> {
+    use crate::browser::model::BrowserCookieEntry;
+    let unquoted = if let Ok(s) = serde_json::from_str::<String>(raw) {
+        s
+    } else {
+        raw.to_string()
+    };
+    let mut entries = Vec::new();
+    for part in unquoted.split(';') {
+        let trimmed = part.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some((name, val)) = trimmed.split_once('=') {
+            entries.push(BrowserCookieEntry {
+                name: name.trim().to_string(),
+                value: val.trim().to_string(),
+            });
+        }
+    }
+    entries
+}
+
+pub fn build_cookie_script(
+    action: &str,
+    name: Option<&str>,
+    value: Option<&str>,
+    domain: Option<&str>,
+    path: Option<&str>,
+) -> Result<String, String> {
+    match action.to_ascii_lowercase().as_str() {
+        "get" | "list" => Ok("(() => { return document.cookie; })()".to_string()),
+        "set" => {
+            let name = name.ok_or_else(|| "cookie name is required for set".to_string())?;
+            let value = value.unwrap_or("");
+            let mut cookie_str = format!("{name}={value}");
+            if let Some(d) = domain {
+                cookie_str.push_str(&format!("; domain={d}"));
+            }
+            if let Some(p) = path {
+                cookie_str.push_str(&format!("; path={p}"));
+            } else {
+                cookie_str.push_str("; path=/");
+            }
+            let encoded = serde_json::to_string(&cookie_str).map_err(|e| e.to_string())?;
+            Ok(format!("(() => {{ document.cookie = {encoded}; return document.cookie; }})()"))
+        }
+        "clear" | "delete" => {
+            let name = name.ok_or_else(|| "cookie name is required for clear".to_string())?;
+            let mut cookie_str = format!("{name}=; Max-Age=0; expires=Thu, 01 Jan 1970 00:00:00 GMT");
+            if let Some(d) = domain {
+                cookie_str.push_str(&format!("; domain={d}"));
+            }
+            if let Some(p) = path {
+                cookie_str.push_str(&format!("; path={p}"));
+            } else {
+                cookie_str.push_str("; path=/");
+            }
+            let encoded = serde_json::to_string(&cookie_str).map_err(|e| e.to_string())?;
+            Ok(format!("(() => {{ document.cookie = {encoded}; return document.cookie; }})()"))
+        }
+        other => Err(format!("unknown cookie action: {other}")),
+    }
+}
+
+pub fn build_storage_script(
+    kind: &str,
+    action: &str,
+    key: Option<&str>,
+    value: Option<&str>,
+) -> Result<String, String> {
+    let storage_obj = match kind.to_ascii_lowercase().as_str() {
+        "local" | "localstorage" => "localStorage",
+        "session" | "sessionstorage" => "sessionStorage",
+        _ => return Err(format!("invalid storage kind: {kind}")),
+    };
+    match action.to_ascii_lowercase().as_str() {
+        "get" => {
+            let key_str = key.ok_or_else(|| "key is required for storage get".to_string())?;
+            let key_json = serde_json::to_string(key_str).map_err(|e| e.to_string())?;
+            Ok(format!("(() => {{ return {storage_obj}.getItem({key_json}); }})()"))
+        }
+        "set" => {
+            let key_str = key.ok_or_else(|| "key is required for storage set".to_string())?;
+            let val_str = value.unwrap_or("");
+            let key_json = serde_json::to_string(key_str).map_err(|e| e.to_string())?;
+            let val_json = serde_json::to_string(val_str).map_err(|e| e.to_string())?;
+            Ok(format!("(() => {{ {storage_obj}.setItem({key_json}, {val_json}); return {storage_obj}.getItem({key_json}); }})()"))
+        }
+        "clear" | "delete" | "remove" => {
+            if let Some(k) = key {
+                let key_json = serde_json::to_string(k).map_err(|e| e.to_string())?;
+                Ok(format!("(() => {{ {storage_obj}.removeItem({key_json}); return null; }})()"))
+            } else {
+                Ok(format!("(() => {{ {storage_obj}.clear(); return null; }})()"))
+            }
+        }
+        other => Err(format!("unknown storage action: {other}")),
+    }
+}
+
+pub fn parse_storage_result(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed == "null" || trimmed == "undefined" || trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(s) = serde_json::from_str::<String>(trimmed) {
+        Some(s)
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+pub async fn eval_browser_session<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &BrowserManager,
+    browser_id: &str,
+    script: &str,
+) -> Result<(Option<String>, bool), IpcError> {
+    let state = manager.get_state(browser_id)?;
+    let webview = app
+        .get_webview(&state.webview_label)
+        .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
+    let raw = eval_webview(webview, script.to_string()).await?;
+    let (truncated_str, truncated) = truncate_eval_result(raw);
+    let result = if truncated_str == "undefined" {
+        None
+    } else {
+        Some(truncated_str)
+    };
+    Ok((result, truncated))
+}
+
+pub async fn wait_browser_session<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &BrowserManager,
+    browser_id: &str,
+    condition: crate::browser::model::BrowserWaitCondition,
+) -> Result<(), IpcError> {
+    let state = manager.get_state(browser_id)?;
+    let webview = app
+        .get_webview(&state.webview_label)
+        .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
+    let script = build_wait_condition_script(&condition);
+    let start = tokio::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(15);
+    let interval = std::time::Duration::from_millis(250);
+
+    loop {
+        if let Ok(res) = eval_webview(webview.clone(), script.clone()).await {
+            if parse_eval_boolean(&res) {
+                return Ok(());
+            }
+        }
+        if start.elapsed() >= timeout {
+            return Err(IpcError::new(
+                IpcErrorCode::BrowserWaitTimeout,
+                "browser wait condition timed out after 15s",
+            ));
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
+pub async fn console_browser_session<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &BrowserManager,
+    browser_id: &str,
+    errors_only: bool,
+    clear: bool,
+) -> Result<Vec<crate::browser::model::BrowserConsoleEntry>, IpcError> {
+    let state = manager.get_state(browser_id)?;
+    let webview = app
+        .get_webview(&state.webview_label)
+        .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
+    let script = crate::browser::guest::build_console_drain_script(clear, errors_only);
+    let raw = eval_webview(webview, script).await?;
+    let entries = crate::browser::guest::parse_console_drain_result(&raw)
+        .map_err(|e| BrowserError::AutomationFailed(e))?;
+    Ok(entries)
+}
+
+pub async fn screenshot_browser_session<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &BrowserManager,
+    browser_id: &str,
+    out_path: &str,
+) -> Result<String, IpcError> {
+    let state = manager.get_state(browser_id)?;
+    crate::browser::screenshot::take_browser_screenshot(app, &state.webview_label, out_path).await
+}
+
+pub async fn cookies_browser_session<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &BrowserManager,
+    browser_id: &str,
+    action: &str,
+    name: Option<&str>,
+    value: Option<&str>,
+    domain: Option<&str>,
+    path: Option<&str>,
+) -> Result<Vec<crate::browser::model::BrowserCookieEntry>, IpcError> {
+    let state = manager.get_state(browser_id)?;
+    let webview = app
+        .get_webview(&state.webview_label)
+        .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
+    let script = build_cookie_script(action, name, value, domain, path)
+        .map_err(|e| IpcError::new(IpcErrorCode::InvalidArgument, e))?;
+    let raw = eval_webview(webview, script).await?;
+    let mut entries = parse_document_cookie(&raw);
+    if action == "get" || action == "list" {
+        if let Some(target_name) = name {
+            entries.retain(|c| c.name == target_name);
+        }
+    }
+    Ok(entries)
+}
+
+pub async fn storage_browser_session<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &BrowserManager,
+    browser_id: &str,
+    kind: &str,
+    action: &str,
+    key: Option<&str>,
+    value: Option<&str>,
+) -> Result<Option<String>, IpcError> {
+    let state = manager.get_state(browser_id)?;
+    let webview = app
+        .get_webview(&state.webview_label)
+        .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
+    let script = build_storage_script(kind, action, key, value)
+        .map_err(|e| IpcError::new(IpcErrorCode::InvalidArgument, e))?;
+    let raw = eval_webview(webview, script).await?;
+    Ok(parse_storage_result(&raw))
+}
+

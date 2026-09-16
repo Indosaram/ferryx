@@ -53,6 +53,53 @@ const BRIDGE_SCRIPT_TEMPLATE: &str = r#"
   if (window.__ferryxBrowserBridgeInstalled) return;
   Object.defineProperty(window, '__ferryxBrowserBridgeInstalled', { value: true });
 
+  const consoleRing = (window.__FERRYX_BROWSER_CONSOLE__ = window.__FERRYX_BROWSER_CONSOLE__ || []);
+  const pushConsoleEntry = (level, text) => {
+    try {
+      while (consoleRing.length >= 500) {
+        consoleRing.shift();
+      }
+      consoleRing.push({
+        level: String(level),
+        text: String(text),
+        atMs: Date.now(),
+        at_ms: Date.now(),
+      });
+    } catch (_) {}
+  };
+
+  ['log', 'info', 'warn', 'error'].forEach((level) => {
+    const original = console[level];
+    if (typeof original === 'function') {
+      console[level] = function (...args) {
+        try {
+          const text = args.map((arg) => {
+            if (arg === null) return 'null';
+            if (arg === undefined) return 'undefined';
+            if (typeof arg === 'object') {
+              try { return JSON.stringify(arg); } catch (_) { return String(arg); }
+            }
+            return String(arg);
+          }).join(' ');
+          pushConsoleEntry(level, text);
+        } catch (_) {}
+        return original.apply(this, args);
+      };
+    }
+  });
+
+  const originalOnError = window.onerror;
+  window.onerror = function (message, source, lineno, colno, error) {
+    try {
+      const text = error && error.stack ? String(error.stack) : `${message} at ${source}:${lineno}:${colno}`;
+      pushConsoleEntry('error', text);
+    } catch (_) {}
+    if (typeof originalOnError === 'function') {
+      return originalOnError.apply(this, arguments);
+    }
+    return false;
+  };
+
   // This script runs at document start, before any page script, so these
   // references are still pristine. `route` below builds a URL containing the
   // bridge nonce and hands it to `assign`; resolving either function at call
@@ -374,4 +421,57 @@ mod tests {
         assert!(script.contains(&format!("&nonce=${{{nonce_json}}}")));
         assert!(!script.contains(BRIDGE_NONCE_PLACEHOLDER));
     }
+
+    #[test]
+    fn test_console_drain_script_and_parser() {
+        let drain_script_all = build_console_drain_script(false, false);
+        assert!(drain_script_all.contains("__FERRYX_BROWSER_CONSOLE__"));
+
+        let sample_json = r#"[{"level":"log","text":"hello world","atMs":12345678},{"level":"error","text":"failed","atMs":12345679}]"#;
+        let entries = parse_console_drain_result(sample_json).expect("parse console entries");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].level, "log");
+        assert_eq!(entries[0].text, "hello world");
+        assert_eq!(entries[0].at_ms, 12345678);
+        assert_eq!(entries[1].level, "error");
+
+        let bridge = browser_guest_bridge_script(TEST_NONCE);
+        assert!(bridge.contains("__FERRYX_BROWSER_CONSOLE__"));
+        assert!(bridge.contains("500"));
+    }
 }
+
+pub fn build_console_drain_script(clear: bool, errors_only: bool) -> String {
+    format!(
+        r#"(() => {{
+  const ring = window.__FERRYX_BROWSER_CONSOLE__ || [];
+  let entries = ring;
+  if ({errors_only}) {{
+    entries = ring.filter(e => e.level === "error");
+  }}
+  if ({clear}) {{
+    if ({errors_only}) {{
+      window.__FERRYX_BROWSER_CONSOLE__ = ring.filter(e => e.level !== "error");
+    }} else {{
+      window.__FERRYX_BROWSER_CONSOLE__ = [];
+    }}
+  }}
+  return JSON.stringify(entries);
+}})()"#,
+        errors_only = errors_only,
+        clear = clear,
+    )
+}
+
+pub fn parse_console_drain_result(raw_json: &str) -> Result<Vec<crate::browser::model::BrowserConsoleEntry>, String> {
+    if let Ok(entries) = serde_json::from_str::<Vec<crate::browser::model::BrowserConsoleEntry>>(raw_json) {
+        return Ok(entries);
+    }
+    if let Ok(unquoted) = serde_json::from_str::<String>(raw_json) {
+        if let Ok(entries) = serde_json::from_str::<Vec<crate::browser::model::BrowserConsoleEntry>>(&unquoted) {
+            return Ok(entries);
+        }
+    }
+    Err("failed to parse console drain entries".to_string())
+}
+
