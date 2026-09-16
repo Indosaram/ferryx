@@ -281,6 +281,19 @@ impl TerminalService {
         self.pty_manager.signal(session_id, signal)
     }
 
+    pub async fn detach_session(&self, session_id: &str) -> Result<(), PtyError> {
+        if super::paired_runtime::Runtime::owns(session_id) {
+            self.paired
+                .detach(session_id)
+                .await
+                .map_err(PtyError::Other)?;
+            self.output_hub.remove_session(session_id);
+            self.lifecycle.lock().remove(session_id);
+            return Ok(());
+        }
+        Err(PtyError::Other("Session detach is supported only for paired sessions".into()))
+    }
+
     pub async fn close_session(&self, session_id: &str) -> Result<(), PtyError> {
         if super::paired_runtime::Runtime::owns(session_id) {
             self.paired

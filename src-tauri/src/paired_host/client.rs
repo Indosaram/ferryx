@@ -172,6 +172,18 @@ struct Route {
     request_id: Option<String>,
 }
 impl Operation {
+    pub fn is_mutation(&self) -> bool {
+        matches!(
+            self,
+            Self::RegisterProject { .. }
+                | Self::UnregisterProject { .. }
+                | Self::CreateWorktree { .. }
+                | Self::DeleteWorktree { .. }
+                | Self::CreateSession { .. }
+                | Self::CloseSession { .. }
+        )
+    }
+
     fn route(&self) -> Result<Route> {
         let mut r = Route {
             method: Method::GET,

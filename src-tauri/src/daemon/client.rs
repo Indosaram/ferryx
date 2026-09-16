@@ -436,10 +436,40 @@ impl DaemonClient {
         if response.len() > LIMIT || response.last() != Some(&b'\n') { return Err(ServiceError::unavailable()); }
         serde_json::from_slice(&response).map_err(|_| ServiceError::unavailable())
     }
+    pub const PAIRED_MUTATION_BUDGET_SECS: u64 = 60;
+    pub const PAIRED_CAPABILITIES_BUDGET_SECS: u64 = 45;
+    pub const PAIRED_HANDSHAKE_MARGIN_SECS: u64 = 20;
+    pub const PAIRED_MUTATION_OUTER_TIMEOUT: Duration = Duration::from_secs(
+        Self::PAIRED_CAPABILITIES_BUDGET_SECS + Self::PAIRED_MUTATION_BUDGET_SECS + Self::PAIRED_HANDSHAKE_MARGIN_SECS,
+    );
+    pub const PAIRED_QUERY_OUTER_TIMEOUT: Duration = Duration::from_secs(
+        Self::PAIRED_CAPABILITIES_BUDGET_SECS + 45 + Self::PAIRED_HANDSHAKE_MARGIN_SECS,
+    );
+    pub const PAIRED_DEFAULT_OUTER_TIMEOUT: Duration = Duration::from_secs(45);
+
+    pub fn outer_deadline_for_request(request: &DaemonRequest) -> Duration {
+        match request {
+            DaemonRequest::PairedHostOperation { request: op } => {
+                if op.operation.is_mutation() {
+                    Self::PAIRED_MUTATION_OUTER_TIMEOUT
+                } else {
+                    Self::PAIRED_QUERY_OUTER_TIMEOUT
+                }
+            }
+            DaemonRequest::PairedTerminalReattach { .. } => Duration::from_secs(90),
+            _ => Self::PAIRED_DEFAULT_OUTER_TIMEOUT,
+        }
+    }
+
     /// Connect only: capability absence never triggers spawn, upgrade, or retry.
     async fn paired_host_request(&self, request: DaemonRequest) -> crate::paired_host::service::Result<DaemonResponse> {
+        let timeout = Self::outer_deadline_for_request(&request);
+        self.paired_host_request_with_timeout(request, timeout).await
+    }
+
+    async fn paired_host_request_with_timeout(&self, request: DaemonRequest, timeout: Duration) -> crate::paired_host::service::Result<DaemonResponse> {
         use crate::paired_host::service::ServiceError;
-        tokio::time::timeout(Duration::from_secs(35), async {
+        tokio::time::timeout(timeout, async {
             let socket_path = self.socket_path.clone();
             crate::ipc::run_blocking(move || Self::validate_existing_socket_path(&socket_path)).await.map_err(|_| ServiceError::unavailable())?;
             let stream = Self::connect_socket(&self.socket_path).await.map_err(|_| ServiceError::unavailable())?;
@@ -453,7 +483,7 @@ impl DaemonClient {
                 DaemonResponse::PairedHostError { error } => Err(error),
                 response => Ok(response),
             }
-        }).await.map_err(|_| ServiceError::unavailable())?
+        }).await.map_err(|_| ServiceError { code: "TIMEOUT".into(), message: "operation timed out".into() })?
     }
     pub async fn paired_terminal_reattach(&self, descriptor: crate::terminal::paired_daemon::Descriptor) -> Result<(String, crate::scoped_contracts::Epoch), crate::paired_host::client::ClientError> {
         use crate::paired_host::client::ClientError;
@@ -1564,6 +1594,38 @@ impl DaemonClient {
     }
 
     pub async fn close_terminal(&self, session_id: &str) -> Result<(), IpcError> {
+        if session_id.starts_with("daemon-session:") {
+            if let Ok(Some(descriptor)) = self.paired_terminal_descriptor(session_id.to_string()).await {
+                let cleanup_req_id = uuid::Uuid::new_v4().to_string();
+                let close_op = crate::paired_host::client::OperationRequest {
+                    host_id: descriptor.host_id.clone(),
+                    generation: descriptor.generation,
+                    operation: crate::paired_host::client::Operation::CloseSession {
+                        session_id: descriptor.target.session_id.clone(),
+                        request: crate::remote::machine_protocol::CloseSessionRequest {
+                            request_id: cleanup_req_id.clone(),
+                            daemon_epoch: descriptor.target.daemon_epoch.clone(),
+                        },
+                    },
+                };
+                match self.paired_host_operation(close_op).await {
+                    Ok(_) => {},
+                    Err(ref e) if e.code == "SESSION_NOT_FOUND" => {},
+                    Err(ref e) if e.ambiguous || matches!(e.code.as_str(), "TIMEOUT" | "OPERATION_OUTCOME_UNKNOWN") => {
+                        let journal_req = crate::paired_host::client::OperationRequest {
+                            host_id: descriptor.host_id.clone(),
+                            generation: descriptor.generation,
+                            operation: crate::paired_host::client::Operation::Operation {
+                                request_id: cleanup_req_id.clone(),
+                            },
+                        };
+                        let _ = self.paired_host_operation(journal_req).await;
+                    }
+                    Err(_) => {},
+                }
+            }
+        }
+
         let resp = self
             .send_request(DaemonRequest::Close {
                 session_id: session_id.to_string(),
@@ -1580,6 +1642,18 @@ impl DaemonClient {
                 "Unexpected daemon response",
             )),
         }
+    }
+
+    pub async fn detach_terminal(&self, session_id: &str) -> Result<(), IpcError> {
+        if !session_id.starts_with("daemon-session:") {
+            return Err(IpcError::new(
+                IpcErrorCode::InvalidArgument,
+                "Detach is supported only for paired sessions",
+            ));
+        }
+        self.paired_terminal_detach(session_id.to_string())
+            .await
+            .map_err(|e| IpcError::new(IpcErrorCode::InternalError, e.code))
     }
 
     pub async fn hibernate_terminal(&self, session_id: &str) -> Result<(), IpcError> {
@@ -1892,6 +1966,84 @@ mod tests {
         assert!(rpc.upgrade_requested.compare_exchange(false, true,
             Ordering::SeqCst, Ordering::SeqCst).is_err(),
             "an internal stale handshake must not admit another upgrade");
+    }
+
+    #[tokio::test]
+    async fn test_p09_paired_host_request_timeout_budget_and_ambiguity() {
+        tokio::time::pause();
+
+        let dir = tempdir().unwrap();
+        let socket = dir.path().join("p09.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut reader = BufReader::new(read);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let reply = DaemonResponse::HandshakeOk {
+                version: DAEMON_PROTOCOL_VERSION,
+                pid: std::process::id(),
+                epoch: 1,
+                binary_path: None,
+                binary_mtime_ms: None,
+                daemon_version: None,
+            };
+            write.write_all(format!("{}\n", serde_json::to_string(&reply).unwrap()).as_bytes()).await.unwrap();
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+            let caps_reply = DaemonResponse::CapabilitiesOk {
+                capabilities: vec!["pairedHostInventoryV1".into()],
+            };
+            write.write_all(format!("{}\n", serde_json::to_string(&caps_reply).unwrap()).as_bytes()).await.unwrap();
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+            tokio::time::sleep(Duration::from_secs(300)).await;
+        });
+
+        let client = DaemonClient::new_with_socket(socket);
+        let req_id = "p09-test-request-id".to_string();
+        let op_req = crate::paired_host::client::OperationRequest {
+            host_id: "host-1".into(),
+            generation: crate::scoped_contracts::Epoch(1),
+            operation: crate::paired_host::client::Operation::CreateSession {
+                request: crate::remote::machine_protocol::CreateSessionRequest {
+                    request_id: req_id.clone(),
+                    workspace_id: "ws-1".into(),
+                    worktree: None,
+                    cols: 80,
+                    rows: 24,
+                    inherit_from_session_id: None,
+                    cwd_relative: None,
+                    startup: crate::remote::machine_protocol::Startup::Shell,
+                },
+            },
+        };
+
+        let op_task = tokio::spawn(async move {
+            client.paired_host_operation(op_req).await
+        });
+
+        // Give the task a moment to connect and do handshake before advancing time
+        tokio::task::yield_now().await;
+
+        // Advance time by 36 seconds:
+        // Pre-fix: 35s flat timeout has already fired and failed with PAIRED_HOST_UNAVAILABLE.
+        // Post-fix: Outer deadline exceeds 120s (inner 60 + 45 + margin), so it is STILL pending at 36s.
+        tokio::time::advance(Duration::from_secs(36)).await;
+        tokio::task::yield_now().await;
+
+        assert!(!op_task.is_finished(), "Mutation timed out prematurely at <= 36s; outer deadline must exceed inner budget (> 120s)");
+
+        tokio::time::advance(Duration::from_secs(100)).await;
+        let err = op_task.await.unwrap().unwrap_err();
+
+        assert_eq!(err.code, "TIMEOUT", "Expected TIMEOUT error code on deadline expiry, got {}", err.code);
+        assert!(err.ambiguous, "Ambiguous must be true when mutation transport deadline expires");
+        assert_eq!(err.request_id, Some(req_id));
+
+        server.abort();
     }
 
     #[tokio::test]

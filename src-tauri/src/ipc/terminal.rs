@@ -694,6 +694,278 @@ pub(crate) fn resolve_paired_spawn_target(
     }
 }
 
+pub async fn reconcile_ambiguous_create(
+    daemon_client: &DaemonClient,
+    host_id: &str,
+    generation: crate::scoped_contracts::Epoch,
+    request_id: &str,
+    cancelled: bool,
+) -> Result<Option<crate::remote::machine_protocol::Session>, IpcError> {
+    const MAX_RECONCILE_ATTEMPTS: usize = 3;
+    let mut attempts = 0;
+
+    loop {
+        attempts += 1;
+        let journal_req = crate::paired_host::client::OperationRequest {
+            host_id: host_id.to_string(),
+            generation,
+            operation: crate::paired_host::client::Operation::Operation {
+                request_id: request_id.to_string(),
+            },
+        };
+
+        match daemon_client.paired_host_operation(journal_req).await {
+            Ok(op_resp) => {
+                match op_resp.result {
+                    crate::paired_host::client::OperationResult::Operation(
+                        crate::remote::machine_protocol::Operation::Completed { outcome, .. },
+                    ) => {
+                        match outcome {
+                            crate::remote::machine_protocol::OperationOutcome::Session { session } => {
+                                if cancelled {
+                                    let close_req = crate::remote::machine_protocol::CloseSessionRequest {
+                                        request_id: uuid::Uuid::new_v4().to_string(),
+                                        daemon_epoch: session.target.daemon_epoch.clone(),
+                                    };
+                                    let _ = daemon_client
+                                        .paired_host_operation(crate::paired_host::client::OperationRequest {
+                                            host_id: host_id.to_string(),
+                                            generation,
+                                            operation: crate::paired_host::client::Operation::CloseSession {
+                                                session_id: session.target.session_id.clone(),
+                                                request: close_req,
+                                            },
+                                        })
+                                        .await;
+                                    return Ok(None);
+                                }
+                                return Ok(Some(session));
+                            }
+                            crate::remote::machine_protocol::OperationOutcome::Error { error } => {
+                                return Err(IpcError::internal(error.code));
+                            }
+                            _ => {
+                                return Err(IpcError::internal("OPERATION_OUTCOME_UNKNOWN"));
+                            }
+                        }
+                    }
+                    crate::paired_host::client::OperationResult::Operation(
+                        crate::remote::machine_protocol::Operation::Pending { .. },
+                    )
+                    | crate::paired_host::client::OperationResult::Operation(
+                        crate::remote::machine_protocol::Operation::OutcomeUnknown { .. },
+                    ) => {
+                        if attempts >= MAX_RECONCILE_ATTEMPTS {
+                            return Err(IpcError::internal("OPERATION_OUTCOME_UNKNOWN"));
+                        }
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                    _ => {
+                        if attempts >= MAX_RECONCILE_ATTEMPTS {
+                            return Err(IpcError::internal("OPERATION_OUTCOME_UNKNOWN"));
+                        }
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                }
+            }
+            Err(e) if e.code == "OPERATION_NOT_FOUND" => {
+                return Err(IpcError::internal("OPERATION_NOT_FOUND"));
+            }
+            Err(e) if attempts < MAX_RECONCILE_ATTEMPTS => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+            Err(e) => {
+                return Err(IpcError::internal(e.code));
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CleanupOutcome {
+    Success,
+    Unknown {
+        host_id: String,
+        generation: crate::scoped_contracts::Epoch,
+        session_id: String,
+        daemon_epoch: crate::scoped_contracts::Epoch,
+        cleanup_request_id: String,
+    },
+    Failed {
+        error: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CleanupRecord {
+    pub host_id: String,
+    pub generation: crate::scoped_contracts::Epoch,
+    pub session_id: String,
+    pub daemon_epoch: crate::scoped_contracts::Epoch,
+    pub cleanup_request_id: String,
+    pub attempts: usize,
+    pub resolved: bool,
+}
+
+static PENDING_CLEANUPS: Mutex<Vec<CleanupRecord>> = Mutex::new(Vec::new());
+
+pub fn get_pending_cleanups() -> Vec<CleanupRecord> {
+    PENDING_CLEANUPS.lock().clone()
+}
+
+pub fn clear_pending_cleanups_for_test() {
+    PENDING_CLEANUPS.lock().clear();
+}
+
+pub async fn execute_cleanup_close(
+    daemon_client: &DaemonClient,
+    host_id: &str,
+    generation: crate::scoped_contracts::Epoch,
+    session_id: &str,
+    daemon_epoch: crate::scoped_contracts::Epoch,
+    cleanup_request_id: String,
+) -> CleanupOutcome {
+    let close_req = crate::remote::machine_protocol::CloseSessionRequest {
+        request_id: cleanup_request_id.clone(),
+        daemon_epoch: daemon_epoch.clone(),
+    };
+    let op_req = crate::paired_host::client::OperationRequest {
+        host_id: host_id.to_string(),
+        generation,
+        operation: crate::paired_host::client::Operation::CloseSession {
+            session_id: session_id.to_string(),
+            request: close_req,
+        },
+    };
+
+    match daemon_client.paired_host_operation(op_req).await {
+        Ok(_) => CleanupOutcome::Success,
+        Err(e) if e.code == "SESSION_NOT_FOUND" => CleanupOutcome::Success,
+        Err(e) if e.ambiguous || matches!(e.code.as_str(), "TIMEOUT" | "OPERATION_OUTCOME_UNKNOWN") => {
+            let journal_req = crate::paired_host::client::OperationRequest {
+                host_id: host_id.to_string(),
+                generation,
+                operation: crate::paired_host::client::Operation::Operation {
+                    request_id: cleanup_request_id.clone(),
+                },
+            };
+            match daemon_client.paired_host_operation(journal_req).await {
+                Ok(resp) => {
+                    if let crate::paired_host::client::OperationResult::Operation(
+                        crate::remote::machine_protocol::Operation::Completed { .. },
+                    ) = resp.result {
+                        CleanupOutcome::Success
+                    } else {
+                        let mut guard = PENDING_CLEANUPS.lock();
+                        guard.push(CleanupRecord {
+                            host_id: host_id.to_string(),
+                            generation,
+                            session_id: session_id.to_string(),
+                            daemon_epoch,
+                            cleanup_request_id: cleanup_request_id.clone(),
+                            attempts: 1,
+                            resolved: false,
+                        });
+                        CleanupOutcome::Unknown {
+                            host_id: host_id.to_string(),
+                            generation,
+                            session_id: session_id.to_string(),
+                            daemon_epoch,
+                            cleanup_request_id,
+                        }
+                    }
+                }
+                _ => {
+                    let mut guard = PENDING_CLEANUPS.lock();
+                    guard.push(CleanupRecord {
+                        host_id: host_id.to_string(),
+                        generation,
+                        session_id: session_id.to_string(),
+                        daemon_epoch,
+                        cleanup_request_id: cleanup_request_id.clone(),
+                        attempts: 1,
+                        resolved: false,
+                    });
+                    CleanupOutcome::Unknown {
+                        host_id: host_id.to_string(),
+                        generation,
+                        session_id: session_id.to_string(),
+                        daemon_epoch,
+                        cleanup_request_id,
+                    }
+                }
+            }
+        }
+        Err(e) => CleanupOutcome::Failed { error: e.code },
+    }
+}
+
+pub async fn reap_cleanup_unknowns(daemon_client: &DaemonClient) -> usize {
+    let pending = {
+        let mut guard = PENDING_CLEANUPS.lock();
+        std::mem::take(&mut *guard)
+    };
+
+    let mut remaining = Vec::new();
+    let mut resolved_count = 0;
+    const MAX_REAP_ATTEMPTS: usize = 3;
+
+    for mut item in pending {
+        if item.attempts >= MAX_REAP_ATTEMPTS {
+            continue;
+        }
+        item.attempts += 1;
+
+        let journal_req = crate::paired_host::client::OperationRequest {
+            host_id: item.host_id.clone(),
+            generation: item.generation,
+            operation: crate::paired_host::client::Operation::Operation {
+                request_id: item.cleanup_request_id.clone(),
+            },
+        };
+
+        match daemon_client.paired_host_operation(journal_req).await {
+            Ok(resp) => {
+                if let crate::paired_host::client::OperationResult::Operation(
+                    crate::remote::machine_protocol::Operation::Completed { .. },
+                ) = resp.result {
+                    resolved_count += 1;
+                    continue;
+                }
+            }
+            Err(e) if e.code == "OPERATION_NOT_FOUND" => {
+                let retry_req_id = uuid::Uuid::new_v4().to_string();
+                let close_req = crate::remote::machine_protocol::CloseSessionRequest {
+                    request_id: retry_req_id.clone(),
+                    daemon_epoch: item.daemon_epoch.clone(),
+                };
+                let retry_op = crate::paired_host::client::OperationRequest {
+                    host_id: item.host_id.clone(),
+                    generation: item.generation,
+                    operation: crate::paired_host::client::Operation::CloseSession {
+                        session_id: item.session_id.clone(),
+                        request: close_req,
+                    },
+                };
+                if daemon_client.paired_host_operation(retry_op).await.is_ok() {
+                    resolved_count += 1;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        remaining.push(item);
+    }
+
+    let mut guard = PENDING_CLEANUPS.lock();
+    guard.extend(remaining);
+    resolved_count
+}
+
 #[tauri::command]
 pub async fn cmd_terminal_spawn<R: Runtime>(
     app: AppHandle<R>,
@@ -951,7 +1223,7 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
             .await;
 
         if let Err(ref e) = op_resp {
-            if resolved_inherit.is_some() && matches!(e.code.as_str(), "SESSION_NOT_FOUND" | "PARENT_SESSION_MISMATCH" | "SESSION_EXPIRED") {
+            if !e.ambiguous && resolved_inherit.is_some() && matches!(e.code.as_str(), "SESSION_NOT_FOUND" | "PARENT_SESSION_MISMATCH" | "SESSION_EXPIRED") {
                 tracing::warn!(
                     parent_sid = ?resolved_inherit,
                     error = %e.code,
@@ -975,13 +1247,20 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
             }
         }
 
-        let op_resp = op_resp.map_err(|e| IpcError::internal(e.code))?;
-
-        let remote_session = match op_resp.result {
-            crate::paired_host::client::OperationResult::CreateSession(session) => session,
-            other => {
-                return Err(IpcError::internal(format!("Unexpected operation result: {other:?}")));
+        let remote_session = match op_resp {
+            Ok(resp) => match resp.result {
+                crate::paired_host::client::OperationResult::CreateSession(session) => session,
+                other => {
+                    return Err(IpcError::internal(format!("Unexpected operation result: {other:?}")));
+                }
+            },
+            Err(ref e) if e.ambiguous || matches!(e.code.as_str(), "TIMEOUT" | "OPERATION_OUTCOME_UNKNOWN") => {
+                match reconcile_ambiguous_create(&daemon_client, &host_id, host.generation, &client_request_id, false).await? {
+                    Some(session) => session,
+                    None => return Err(IpcError::internal("OPERATION_OUTCOME_UNKNOWN")),
+                }
             }
+            Err(e) => return Err(IpcError::internal(e.code)),
         };
 
         let descriptor = crate::terminal::paired_daemon::Descriptor {
@@ -1005,21 +1284,16 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                 match daemon_client.paired_terminal_reattach(descriptor).await {
                     Ok(result) => result,
                     Err(reattach_error) => {
-                        let _ = daemon_client
-                            .paired_host_operation(crate::paired_host::client::OperationRequest {
-                                host_id: host_id.clone(),
-                                generation: host.generation,
-                                operation:
-                                    crate::paired_host::client::Operation::CloseSession {
-                                        session_id: remote_session.target.session_id.clone(),
-                                        request:
-                                            crate::remote::machine_protocol::CloseSessionRequest {
-                                                request_id: uuid::Uuid::new_v4().to_string(),
-                                                daemon_epoch: remote_session.target.daemon_epoch.clone(),
-                                            },
-                                    },
-                            })
-                            .await;
+                        let cleanup_req_id = uuid::Uuid::new_v4().to_string();
+                        let _cleanup_outcome = execute_cleanup_close(
+                            &daemon_client,
+                            &host_id,
+                            host.generation,
+                            &remote_session.target.session_id,
+                            remote_session.target.daemon_epoch.clone(),
+                            cleanup_req_id,
+                        )
+                        .await;
                         return Err(IpcError::internal(reattach_error.code));
                     }
                 }
@@ -1027,21 +1301,16 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
             Err(reattach_error) => {
                 // The remote PTY was already created above; a failed reattach must
                 // not leak an idle shell on the paired machine.
-                let _ = daemon_client
-                    .paired_host_operation(crate::paired_host::client::OperationRequest {
-                        host_id: host_id.clone(),
-                        generation: host.generation,
-                        operation:
-                            crate::paired_host::client::Operation::CloseSession {
-                                session_id: remote_session.target.session_id.clone(),
-                                request:
-                                    crate::remote::machine_protocol::CloseSessionRequest {
-                                        request_id: uuid::Uuid::new_v4().to_string(),
-                                        daemon_epoch: remote_session.target.daemon_epoch.clone(),
-                                    },
-                            },
-                    })
-                    .await;
+                let cleanup_req_id = uuid::Uuid::new_v4().to_string();
+                let _cleanup_outcome = execute_cleanup_close(
+                    &daemon_client,
+                    &host_id,
+                    host.generation,
+                    &remote_session.target.session_id,
+                    remote_session.target.daemon_epoch.clone(),
+                    cleanup_req_id,
+                )
+                .await;
                 return Err(IpcError::internal(reattach_error.code));
             }
         };
@@ -1355,6 +1624,14 @@ pub async fn cmd_terminal_history_snapshot(
 }
 
 #[tauri::command]
+pub async fn cmd_terminal_describe(
+    daemon_client: State<'_, Arc<DaemonClient>>,
+    session_id: String,
+) -> Result<crate::daemon::protocol::DaemonSessionDetails, IpcError> {
+    daemon_client.describe_session(&session_id).await
+}
+
+#[tauri::command]
 pub async fn cmd_terminal_get_cwd(
     daemon_client: State<'_, Arc<DaemonClient>>,
     session_id: String,
@@ -1571,6 +1848,15 @@ pub async fn cmd_terminal_remote_retry(
     session_id: String,
 ) -> Result<crate::daemon::protocol::DaemonResponse, IpcError> {
     daemon_client.retry_remote_session(&session_id).await
+}
+
+#[tauri::command]
+pub async fn cmd_terminal_detach(
+    daemon_client: State<'_, Arc<DaemonClient>>,
+    session_id: String,
+) -> Result<(), IpcError> {
+    invalidate_cached_cwd(&session_id);
+    daemon_client.detach_terminal(&session_id).await
 }
 
 #[tauri::command]
