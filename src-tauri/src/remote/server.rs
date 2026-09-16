@@ -2588,8 +2588,120 @@ async fn worktree_mutation_boundary(State(state): State<Arc<RemoteGatewayState>>
         .map_err(|_| machine_error(StatusCode::GATEWAY_TIMEOUT, "TIMEOUT"))?
         .map_err(|_| machine_error(StatusCode::SERVICE_UNAVAILABLE, "MACHINE_SERVICE_UNAVAILABLE"))?
 }
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopWorktreeListQuery {
+    workspace_id: Option<String>,
+    #[serde(rename = "workspace_id")]
+    workspace_id_snake: Option<String>,
+}
+
 async fn worktree_list_boundary(State(state): State<Arc<RemoteGatewayState>>, headers: HeaderMap, uri: axum::http::Uri) -> Response {
-    super::workspace_api::worktrees::read(state, headers, uri.query().map(str::to_owned), false).await
+    let token = match extract_token(&headers) {
+        Some(t) => t,
+        None => return machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"),
+    };
+    let device = match state.auth_manager.validate_token(&token) {
+        Ok(d) => d,
+        Err(_) => return machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"),
+    };
+
+    if device.access_scope == DeviceAccessScope::Machine && state.machine_services.is_some() {
+        return super::workspace_api::worktrees::read(state, headers, uri.query().map(str::to_owned), false).await;
+    }
+
+    let axum::extract::Query(q) = match axum::extract::Query::<DesktopWorktreeListQuery>::try_from_uri(&uri) {
+        Ok(q) => q,
+        Err(_) => return machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST"),
+    };
+    let workspace_id = match q.workspace_id.or(q.workspace_id_snake) {
+        Some(id) if !id.trim().is_empty() => id,
+        _ => return machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST"),
+    };
+
+    if let Ok(manager) = state.workspace_registry.manager(&workspace_id) {
+        let manager_clone = manager.clone();
+        let ws_id = workspace_id.clone();
+        let rows: Vec<crate::worktree::Worktree> = crate::ipc::run_blocking(move || {
+            Ok::<_, crate::ipc::IpcError>(manager.list_worktrees().unwrap_or_default())
+        })
+        .await
+        .unwrap_or_default();
+        let listed: Vec<crate::remote::machine_protocol::Worktree> = rows
+            .into_iter()
+            .map(|row| {
+                let info = row.orca_info();
+                let identity = info
+                    .filter(|i| i.ws_id == ws_id && row.path != manager_clone.repo_root())
+                    .filter(|i| {
+                        manager_clone
+                            .worktree_path_for(&i.ws_id, &i.slug)
+                            .ok()
+                            .as_ref()
+                            == Some(&row.path)
+                    })
+                    .map(|i| crate::remote::machine_protocol::WorktreeIdentity {
+                        ws_id: i.ws_id,
+                        slug: i.slug,
+                    });
+                crate::remote::machine_protocol::Worktree {
+                    workspace_id: ws_id.clone(),
+                    managed: identity.is_some(),
+                    identity,
+                    path: row.path.to_string_lossy().into_owned(),
+                    head: row.head,
+                    branch: row.branch,
+                    bare: row.bare,
+                    detached: row.detached,
+                    locked: row.locked,
+                    prunable: row.prunable,
+                }
+            })
+            .collect();
+
+        let revision = crate::scoped_contracts::Epoch(state.workspace_registry.revision());
+        return (
+            StatusCode::OK,
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(crate::remote::machine_protocol::Worktrees {
+                revision,
+                worktrees: listed,
+            }),
+        )
+            .into_response();
+    }
+
+    if crate::ssh::projects::is_remote(&workspace_id) {
+        if let Ok(ssh_projects) = super::ssh::projects(&state).await {
+            if let Some(project) = ssh_projects.into_iter().find(|p| p.workspace_id == workspace_id) {
+                let label = super::ssh::label(&project);
+                let worktrees = vec![crate::remote::machine_protocol::Worktree {
+                    workspace_id: workspace_id.clone(),
+                    managed: false,
+                    identity: None,
+                    path: project.repo_root.clone(),
+                    head: String::new(),
+                    branch: Some(label),
+                    bare: false,
+                    detached: false,
+                    locked: None,
+                    prunable: None,
+                }];
+                let revision = crate::scoped_contracts::Epoch(state.workspace_registry.revision());
+                return (
+                    StatusCode::OK,
+                    [(header::CACHE_CONTROL, "no-store")],
+                    Json(crate::remote::machine_protocol::Worktrees {
+                        revision,
+                        worktrees,
+                    }),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    machine_error(StatusCode::NOT_FOUND, "PROJECT_NOT_FOUND")
 }
 async fn worktree_status_boundary(State(state): State<Arc<RemoteGatewayState>>, headers: HeaderMap, uri: axum::http::Uri) -> Response {
     super::workspace_api::worktrees::read(state, headers, uri.query().map(str::to_owned), true).await
@@ -3501,5 +3613,153 @@ mod tests {
         );
 
         let _ = watcher.await;
+    }
+
+    #[tokio::test]
+    async fn test_workspace_worktrees_scoped_request_and_not_found() {
+        let root = tempfile::tempdir().unwrap();
+        let repo_a = root.path().join("repo_a");
+        std::fs::create_dir(&repo_a).unwrap();
+        crate::worktree::run_git(&repo_a, &["init", "--quiet"]).unwrap();
+        crate::worktree::run_git(
+            &repo_a,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        )
+        .unwrap();
+
+        let repo_b = root.path().join("repo_b");
+        std::fs::create_dir(&repo_b).unwrap();
+        crate::worktree::run_git(&repo_b, &["init", "--quiet"]).unwrap();
+        crate::worktree::run_git(
+            &repo_b,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        )
+        .unwrap();
+
+        let pty = Arc::new(crate::terminal::PtyManager::new());
+        let hub = Arc::new(TerminalOutputHub::default());
+        let terminal_service = Arc::new(TerminalService::new(Arc::clone(&pty), Arc::clone(&hub)));
+        let registry = WorkspaceRegistry::new();
+        registry.register("workspace-a", &repo_a).unwrap();
+        registry.register("workspace-b", &repo_b).unwrap();
+
+        let mgr_b = registry.manager("workspace-b").unwrap();
+        let wt_b_path = mgr_b.worktree_path_for("workspace-b", "feat-b").unwrap();
+        mgr_b
+            .create_worktree(crate::worktree::CreateWorktreeOptions {
+                ws_id: "workspace-b".into(),
+                slug: "feat-b".into(),
+                path: wt_b_path.clone(),
+                base_ref: None,
+            })
+            .unwrap();
+
+        let state = Arc::new(RemoteGatewayState::new(
+            Arc::clone(&terminal_service),
+            registry.clone(),
+        ));
+
+        // Set active desktop selection to workspace-a
+        *state.active_selection.write() = Some(RemoteActiveDesktopSelection {
+            workspace_id: Some("workspace-a".to_string()),
+            attention_inventory: Vec::new(),
+            worktree_slug: None,
+            worktree_label: None,
+            session_id: None,
+            tab_id: None,
+            terminal_tabs: Vec::new(),
+        });
+
+        let code = state
+            .auth_manager
+            .create_pairing_code(crate::remote::auth::DevicePermission::Control);
+        let (token, _) = state
+            .auth_manager
+            .exchange_pairing_code(&code, "Client")
+            .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let router = create_remote_router(Arc::clone(&state));
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async {
+                    let _ = stopped.await;
+                })
+                .await
+                .unwrap();
+        });
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+
+        // 1. Request worktrees for workspace-b when active is workspace-a
+        let resp_b = client
+            .get(format!(
+                "http://{addr}/api/v1/workspace/worktrees?workspaceId=workspace-b"
+            ))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp_b.status(), reqwest::StatusCode::OK);
+
+        let body_b = resp_b.bytes().await.unwrap();
+        let json_b: serde_json::Value = serde_json::from_slice(&body_b).unwrap();
+        let worktrees = json_b["worktrees"].as_array().expect("worktrees array");
+        assert!(
+            worktrees.iter().any(|wt| {
+                wt["identity"]["slug"] == "feat-b"
+                    || wt["branch"] == "refs/heads/orca/workspace-b/feat-b"
+                    || wt["path"].as_str().is_some_and(|p: &str| p.contains("wt_b"))
+            }),
+            "expected workspace-b worktrees to contain feat-b, got: {json_b:?}"
+        );
+        assert!(
+            !worktrees.iter().any(|wt| wt["workspaceId"] == "workspace-a"),
+            "expected no workspace-a worktrees in workspace-b response, got: {json_b:?}"
+        );
+
+        // 2. Request worktrees for unknown workspace -> must return structured 404
+        let resp_unknown = client
+            .get(format!(
+                "http://{addr}/api/v1/workspace/worktrees?workspaceId=unknown-workspace"
+            ))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp_unknown.status(), reqwest::StatusCode::NOT_FOUND);
+
+        let body_unknown = resp_unknown.bytes().await.unwrap();
+        let envelope: crate::remote::machine_protocol::ErrorEnvelope =
+            serde_json::from_slice(&body_unknown).unwrap();
+        assert_eq!(envelope.error.code, "PROJECT_NOT_FOUND");
+        assert!(!envelope.error.retryable);
+
+        let _ = stop.send(());
+        let _ = task.await;
     }
 }

@@ -124,9 +124,16 @@ export class RemoteClient {
     return this.fetchJson("/api/v1/workspace/state");
   }
 
-  async listWorktrees(_workspaceId: string): Promise<Worktree[]> {
-    const state = await this.getWorkspaceState();
-    return state.worktrees || [];
+  async listWorktrees(workspaceId: string): Promise<Worktree[]> {
+    const query = new URLSearchParams({ workspaceId });
+    const res = await this.fetchJson<{
+      revision?: string;
+      worktrees: Worktree[];
+    } | Worktree[]>(`/api/v1/workspace/worktrees?${query.toString()}`);
+    if (Array.isArray(res)) {
+      return res;
+    }
+    return res.worktrees || [];
   }
 
   async createWorktree(request: {
