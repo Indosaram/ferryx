@@ -144,7 +144,7 @@ async fn observes_stopped_relay_coordinator_breaks_local_daemon_pairing() {
     tokio::task::yield_now().await;
     assert!(f.daemon.remote_state().relay_pairing.read().is_some());
     let result = request(&f.daemon, DaemonRequest::RemoteCreatePairingCode { permission: Some(DevicePermission::View) }).await;
-    let DaemonResponse::Error { message } = result else { panic!("expected stale-coordinator error, got {result:?}"); };
+    let DaemonResponse::Error { message, .. } = result else { panic!("expected stale-coordinator error, got {result:?}"); };
     assert!(message.contains("channel closed") || message.contains("disconnected"), "unexpected error: {message}");
     // Remove only the stale handle; the same local request now succeeds.
     *f.daemon.remote_state().relay_pairing.write() = None;
@@ -183,7 +183,7 @@ async fn observes_cli_daemon_error_starts_competing_relay_owner() {
         let req: DaemonRequest = serde_json::from_str(line.trim()).unwrap();
         assert!(matches!(req, DaemonRequest::RemoteCreatePairingCode { .. }));
         let response = request(&daemon, req).await;
-        let DaemonResponse::Error { ref message } = response else { panic!("expected a real daemon refusal, got {response:?}"); };
+        let DaemonResponse::Error { ref message, .. } = response else { panic!("expected a real daemon refusal, got {response:?}"); };
         assert!(message.contains("Ready -> Registering"), "unexpected daemon refusal: {message}");
         write.write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes()).await.unwrap();
         let _ = observed_tx.send(message.clone());

@@ -1,5 +1,5 @@
 //! Opt-in integration against a provisioned Windows OpenSSH endpoint.
-use ferryx_lib::ipc::ssh::cmd_ssh_test_connection;
+use ferryx_lib::ipc::ssh::ssh_test_connection_summary;
 use ferryx_lib::ssh::{direct, operations, runtime};
 use ferryx_lib::ssh::{SshAuthMethod, SshHost, SshHostSource};
 use std::time::Duration;
@@ -22,7 +22,7 @@ fn host() -> SshHost {
 #[tokio::test]
 #[ignore = "requires FERRYX_SSH_WINDOWS_HOST and a trusted Windows OpenSSH endpoint"]
 async fn windows_connection_test_accepts_the_remote_shell() {
-    let summary = cmd_ssh_test_connection(host()).await.expect("SSH test");
+    let summary = ssh_test_connection_summary(host()).await;
     assert!(summary.reachable, "{:?}", summary.last_error);
     assert_eq!(
         summary.environment.unwrap().platform,

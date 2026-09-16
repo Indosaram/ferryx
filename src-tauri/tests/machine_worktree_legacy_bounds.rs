@@ -65,7 +65,7 @@ async fn service_less_fixture(inject_readiness_failure: bool) {
             }).catch_unwind().await;
             // Revoke and await the request even if accept/read/parse failed.
             // The bounded Git owner then tears down its process group.
-            assert!(auth.revoke_device(&device.id));
+            assert!(auth.revoke_device(&device.id).expect("revoke must succeed"));
             let status = job.await;
             if inject_readiness_failure {
                 assert_eq!(status.unwrap(), 401);

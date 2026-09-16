@@ -228,7 +228,7 @@ async fn cli_refusal_exits_without_replacing_owner_and_original_pin_redeems() {
     let (_ipc, observed) = serve_one_cli_request(&f).await;
     let child = pair_cli().env("FERRYX_RELAY_URL", &f.base).spawn().unwrap();
     let response = timeout(LIMIT, observed).await.unwrap().unwrap();
-    let DaemonResponse::Error { message } = response else { panic!("expected refusal, got {response:?}"); };
+    let DaemonResponse::Error { message, .. } = response else { panic!("expected refusal, got {response:?}"); };
     assert!(message.contains("Ready -> Registering"), "unexpected refusal: {message}");
     let output = timeout(LIMIT, child.wait_with_output()).await.unwrap().unwrap();
     assert!(!output.status.success(), "a real refusal must exit unsuccessfully");

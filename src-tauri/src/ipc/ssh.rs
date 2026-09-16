@@ -343,16 +343,12 @@ pub async fn cmd_ssh_delete_host<R: Runtime>(
     .await
 }
 
-#[tauri::command]
-pub async fn cmd_ssh_test_connection(
-    daemon_client: tauri::State<'_, std::sync::Arc<crate::daemon::client::DaemonClient>>,
-    host: SshHost,
-) -> Result<SshTargetSummary, IpcError> {
+/// Build a live SSH target summary for a host. Shared by the Tauri command and
+/// integration QA tests; performs the credential-transaction-guarded probe and
+/// helper check without touching daemon-stored passwords.
+pub async fn ssh_test_connection_summary(host: SshHost) -> SshTargetSummary {
     let _transaction = SSH_CREDENTIAL_TRANSACTION.lock().await;
     let result = crate::ssh::runtime::detect(&host).await;
-    if result.as_ref().err().and_then(|e| e.details.as_ref()).and_then(|v| v.get("stage")).and_then(|v|v.as_str()) == Some("authentication") {
-        clear_password_in_daemon(&daemon_client, host.clone()).await?;
-    }
     let reachable = result.is_ok();
     let (environment, diagnostic) = match result {
         Ok(environment) => (Some(environment), None),
@@ -364,7 +360,7 @@ pub async fn cmd_ssh_test_connection(
         Some(environment) => Some(crate::ssh::helper_setup::probe_ready(&host, environment).await),
         None => None,
     };
-    Ok(SshTargetSummary {
+    SshTargetSummary {
         host,
         reachable,
         last_error: diagnostic.as_ref().map(|e| e.message.clone()),
@@ -372,7 +368,26 @@ pub async fn cmd_ssh_test_connection(
         helper,
         diagnostic,
         checked_at: now_millis(),
-    })
+    }
+}
+
+#[tauri::command]
+pub async fn cmd_ssh_test_connection(
+    daemon_client: tauri::State<'_, std::sync::Arc<crate::daemon::client::DaemonClient>>,
+    host: SshHost,
+) -> Result<SshTargetSummary, IpcError> {
+    let summary = ssh_test_connection_summary(host.clone()).await;
+    let authentication_stage_failed = summary
+        .diagnostic
+        .as_ref()
+        .and_then(|e| e.details.as_ref())
+        .and_then(|v| v.get("stage"))
+        .and_then(|v| v.as_str())
+        == Some("authentication");
+    if authentication_stage_failed {
+        clear_password_in_daemon(&daemon_client, host).await?;
+    }
+    Ok(summary)
 }
 
 #[tauri::command]
