@@ -102,6 +102,7 @@ import { isPairedWorkspaceId, isRemoteWorkspaceId, registerRemoteProject, toRegi
 import { hasValidProjectTarget, projectRootWorktree } from "./lib/projectIdentity";
 import { groupProjects } from "./lib/projectGrouping";
 import { scheduleAgentAutoResume } from "./lib/agentAutoResume";
+import { isStandbyBackendSessionId } from "./lib/sessionLifecycle";
 import { getAgentReconnectAffordance } from "./lib/agentResumeAffordance";
 import { createAppReconnectDependencies } from "./lib/appReconnectDependencies";
 import { replaceExitedShellSession } from "./lib/shellReplacement";
@@ -1161,30 +1162,42 @@ function WorkspaceApp({
       restoreWorkspace(restoredState);
 
       const deadSessions = Object.values(restoredState.sessions).filter(
-        (session) => session.backendSessionId === null && !isRemoteWorkspaceId(session.workspaceId),
+        (session) =>
+          (session.backendSessionId === null || isStandbyBackendSessionId(session.backendSessionId)) &&
+          !isRemoteWorkspaceId(session.workspaceId),
       );
 
       const shellRecoverySessionIds: string[] = [];
+      let hasResumableAgents = false;
       for (const session of deadSessions) {
         const isAgent = Boolean(session.agentType || session.providerSession || session.agentSessionId);
         if (!isAgent) {
-          shellRecoverySessionIds.push(session.id);
+          // Only eagerly spawn fallback shells for null backendSessionIds, not standby sessions
+          if (session.backendSessionId === null) {
+            shellRecoverySessionIds.push(session.id);
+          }
         } else {
           const affordance = getAgentReconnectAffordance(session, restoredState.sessions);
-          if (!affordance.canReconnect) {
+          if (affordance.canReconnect) {
+            hasResumableAgents = true;
+          } else if (session.backendSessionId === null) {
             shellRecoverySessionIds.push(session.id);
           }
         }
       }
 
-      setPendingBackendRecovery({
-        workspaceId: activeProjectRef.current.workspaceId,
-        sessionIds: shellRecoverySessionIds,
-      });
-      setPendingAgentAutoResume({
-        workspaceId: activeProjectRef.current.workspaceId,
-        state: restoredState,
-      });
+      if (shellRecoverySessionIds.length > 0) {
+        setPendingBackendRecovery({
+          workspaceId: activeProjectRef.current.workspaceId,
+          sessionIds: shellRecoverySessionIds,
+        });
+      }
+      if (hasResumableAgents) {
+        setPendingAgentAutoResume({
+          workspaceId: activeProjectRef.current.workspaceId,
+          state: restoredState,
+        });
+      }
     },
     [restoreWorkspace],
   );

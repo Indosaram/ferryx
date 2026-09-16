@@ -174,7 +174,7 @@ export function TerminalPane({
   }, [active, activity?.state, isExited, session]);
 
   useEffect(() => {
-    if (!active || !isExited || isPending || isSshSession || !isSessionSleeping(session.id) || isSessionAutoResumeHeld(session.id)) return;
+    if (!isExited || isPending || isSshSession || !isSessionSleeping(session.id) || isSessionAutoResumeHeld(session.id)) return;
     const key = `${session.id}:${session.backendSessionId ?? "none"}:${session.reconnectLifecycle ?? "idle"}`;
     if (autoResumeKeyRef.current === key) return;
     if (isAgentSession) {

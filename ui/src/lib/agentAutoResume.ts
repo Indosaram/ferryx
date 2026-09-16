@@ -1,5 +1,6 @@
 import { getAgentReconnectAffordance } from "./agentResumeAffordance";
 import { loadGeneralSettings } from "./generalSettings";
+import { isStandbyBackendSessionId } from "./sessionLifecycle";
 import type { TerminalSession, TerminalTab } from "./types";
 import type { WorkspaceState } from "../state/workspaceStore";
 
@@ -66,7 +67,7 @@ export function collectAutoResumeCandidates(
   const sessions = allSessions ?? state.sessions;
   const rawCandidates = Object.values(sessions).filter((session) =>
     (allowedSessionIds === undefined || allowedSessionIds.has(session.id)) &&
-    session.backendSessionId === null &&
+    (session.backendSessionId === null || isStandbyBackendSessionId(session.backendSessionId)) &&
     typeof session.agentType === "string" &&
     session.agentType.trim().length > 0,
   );

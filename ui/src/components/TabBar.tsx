@@ -394,7 +394,7 @@ export function TabBar({
         <div className="flex min-w-0 items-stretch overflow-x-auto scrollbar-none" role="tablist">
           {tabs.map((tab, index) => {
             const active = tab.id === activeTabId;
-            const sleeping = tab.kind !== "browser" && sleepingSessionIds.has(tab.sessionId);
+            const sleeping = tab.kind !== "browser" && !active && sleepingSessionIds.has(tab.sessionId);
             return (
               <SortableTab
                 key={tab.id}

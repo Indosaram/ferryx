@@ -99,17 +99,22 @@ export async function defaultListLiveBackendSessionIds(): Promise<Array<{ sessio
 
 function activeRestoreSessionIds(state: WorkspaceState): Set<string> {
   const sessionIds = new Set<string>();
-  const focusedGroupId = state.layout.focusedGroupId;
-  const activeTabId = focusedGroupId
-    ? state.layout.tabGroups?.[focusedGroupId]?.activeTabId ?? state.layout.activeTabId
-    : state.layout.activeTabId;
-  if (!activeTabId) return sessionIds;
-  const tab = state.layout.tabs.find((candidate) => candidate.id === activeTabId);
-  if (!tab || tab.kind === "browser") return sessionIds;
-  sessionIds.add(tab.sessionId);
-  const paneLayout = state.layout.layoutsByTabId?.[activeTabId];
-  for (const sessionId of Object.values(paneLayout?.sessionIdsByLeafId ?? {})) {
-    if (sessionId) sessionIds.add(sessionId);
+  // 1. All tabs and split panes in the active worktree layout
+  for (const tab of state.layout.tabs) {
+    if (tab.kind === "browser") continue;
+    sessionIds.add(tab.sessionId);
+    const paneLayout = state.layout.layoutsByTabId?.[tab.id];
+    for (const sessionId of Object.values(paneLayout?.sessionIdsByLeafId ?? {})) {
+      if (sessionId) sessionIds.add(sessionId);
+    }
+  }
+  // 2. All sessions matching the active worktree path
+  if (state.activeWorktreePath) {
+    for (const session of Object.values(state.sessions)) {
+      if (session.worktreePath === state.activeWorktreePath) {
+        sessionIds.add(session.id);
+      }
+    }
   }
   return sessionIds;
 }
