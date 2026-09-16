@@ -506,3 +506,245 @@ fn operation_requires_machine_workspace_capability() {
     let operation=Operation::Operation {request_id:"3941b9de-b16d-4d9a-ae0a-118f90fd91f4".into()};
     assert_eq!(operation.route().unwrap().capability,Some("machineWorkspaceV1"));
 }
+
+#[tokio::test]
+async fn gatefix_p06_relay_ticket_failure_surfaces_typed_error_without_ws_retry() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    for (status_code, expected_code, json_body) in [
+        (
+            axum::http::StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED",
+            Some(json!({
+                "error": {
+                    "code": "UNAUTHORIZED",
+                    "message": "Revoked credential",
+                    "retryable": false,
+                    "requestId": "3941b9de-b16d-4d9a-ae0a-118f90fd91f4",
+                    "details": { "status": 401 }
+                }
+            })),
+        ),
+        (
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "RATE_LIMITED",
+            Some(json!({
+                "error": {
+                    "code": "RATE_LIMITED",
+                    "message": "Rate limit exceeded",
+                    "retryable": true,
+                    "requestId": "3941b9de-b16d-4d9a-ae0a-118f90fd91f4",
+                    "details": { "status": 429 }
+                }
+            })),
+        ),
+        (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "MACHINE_SERVICE_UNAVAILABLE",
+            None,
+        ),
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            None,
+        ),
+    ] {
+        let ws_attempts = Arc::new(AtomicUsize::new(0));
+        let ws_attempts_clone = ws_attempts.clone();
+        let body_clone = json_body.clone();
+        let route = Router::new()
+            .route(
+                "/host/a/api/v1/sessions/s",
+                get(|| async {
+                    Json(json!({
+                        "status": "running",
+                        "session": {
+                            "target": { "machineId": "a", "daemonEpoch": "1", "sessionId": "s" },
+                            "workspaceId": "w",
+                            "worktree": null,
+                            "cwd": "/fixture",
+                            "cols": 80,
+                            "rows": 24,
+                            "running": true,
+                            "providerSession": null,
+                            "startSequence": "0",
+                            "endSequence": "0"
+                        }
+                    }))
+                }),
+            )
+            .route(
+                "/host/a/api/v1/socket-ticket",
+                post(move || {
+                    let body = body_clone.clone();
+                    async move {
+                        if let Some(b) = body {
+                            (status_code, Json(b)).into_response()
+                        } else {
+                            status_code.into_response()
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/host/a/api/v1/terminal/s",
+                get(move || {
+                    let attempts = ws_attempts_clone.clone();
+                    async move {
+                        attempts.fetch_add(1, Ordering::SeqCst);
+                        axum::http::StatusCode::FORBIDDEN
+                    }
+                }),
+            );
+
+        let root = crate::ipc::run_blocking(|| Ok(tempfile::tempdir().unwrap()))
+            .await
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let router = Router::new()
+            .route(
+                "/api/v1/pair/exchange",
+                post(|| async {
+                    Json(json!({
+                        "token": "fixture-secret",
+                        "machineId": "a",
+                        "device": {
+                            "id": "d",
+                            "name": "d",
+                            "permission": "control",
+                            "accessScope": "machine",
+                            "createdAt": 1,
+                            "lastSeenAt": 1
+                        }
+                    }))
+                }),
+            )
+            .route(
+                "/host/a/api/v1/capabilities",
+                get(|| async {
+                    let mut c = caps("a");
+                    c["capabilities"] = json!(["machineWorkspaceV1", "terminalCreateV1", "terminalStreamV1"]);
+                    Json(c)
+                }),
+            )
+            .merge(route);
+
+        let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let service = PairedHostService::open_test_loopback(root.path().join("data"));
+        let host = service
+            .pair(PairRequest {
+                relay_origin: origin,
+                pin: Secret("fixture".into()),
+                display_label: "fixture".into(),
+            })
+            .await
+            .unwrap();
+
+        let descriptor = crate::terminal::paired_daemon::Descriptor {
+            host_id: host.host_id,
+            generation: host.generation,
+            target: m::RemoteTerminalTarget {
+                machine_id: "a".into(),
+                daemon_epoch: Epoch(1),
+                session_id: "s".into(),
+            },
+            after_sequence: None,
+        };
+
+        let result = MachineClient::new().attach_terminal(&service, &descriptor).await;
+        cleanup(root, task).await;
+
+        assert_eq!(
+            ws_attempts.load(Ordering::SeqCst),
+            0,
+            "No WebSocket retry must be attempted when ticket minting fails on relay transport ({})",
+            expected_code
+        );
+
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("ticket mint failure must be returned as an error"),
+        };
+        assert_eq!(err.code, expected_code);
+        let machine_err = err.machine_error.expect("structured machine error must be preserved");
+        assert_eq!(machine_err.code, expected_code);
+        assert_eq!(
+            machine_err.details.get("status").and_then(|v| v.as_u64()),
+            Some(status_code.as_u16() as u64)
+        );
+        assert_eq!(
+            machine_err.details.get("httpStatus").and_then(|v| v.as_u64()),
+            Some(status_code.as_u16() as u64)
+        );
+    }
+}
+
+#[test]
+fn test_is_relay_transport_classification() {
+    assert!(is_relay_transport(&Url::parse("https://relay.checka.cc/host/m1").unwrap()));
+    assert!(is_relay_transport(&Url::parse("http://127.0.0.1:8787/host/target-id").unwrap()));
+    assert!(is_relay_transport(&Url::parse("https://custom.relay.io:8443/host/abc%20123/api/v1").unwrap()));
+
+    assert!(!is_relay_transport(&Url::parse("http://127.0.0.1:43821").unwrap()));
+    assert!(!is_relay_transport(&Url::parse("http://127.0.0.1:43821/").unwrap()));
+    assert!(!is_relay_transport(&Url::parse("http://192.168.1.10:43821/api/v1").unwrap()));
+    assert!(!is_relay_transport(&Url::parse("https://direct-gateway.internal:443/api/v1/terminal/s").unwrap()));
+}
+
+#[test]
+fn test_map_ticket_error_structured_and_plain() {
+    // 1. Structured JSON ErrorEnvelope
+    let body = serde_json::to_vec(&json!({
+        "error": {
+            "code": "UNAUTHORIZED",
+            "message": "Token expired",
+            "retryable": false,
+            "requestId": "3941b9de-b16d-4d9a-ae0a-118f90fd91f4",
+            "details": { "reason": "expired" }
+        }
+    })).unwrap();
+    let err = map_ticket_error(reqwest::StatusCode::UNAUTHORIZED, &body);
+    assert_eq!(err.code, "UNAUTHORIZED");
+    let me = err.machine_error.unwrap();
+    assert_eq!(me.details["status"], 401);
+    assert_eq!(me.details["httpStatus"], 401);
+    assert_eq!(err.request_id.as_deref(), Some("3941b9de-b16d-4d9a-ae0a-118f90fd91f4"));
+
+    // 2. Relay simple json error
+    let relay_err_body = serde_json::to_vec(&json!({
+        "error": "Device token not authorized for this machine"
+    })).unwrap();
+    let err2 = map_ticket_error(reqwest::StatusCode::UNAUTHORIZED, &relay_err_body);
+    assert_eq!(err2.code, "UNAUTHORIZED");
+    let me2 = err2.machine_error.unwrap();
+    assert_eq!(me2.message, "Device token not authorized for this machine");
+    assert_eq!(me2.details["status"], 401);
+    assert_eq!(me2.details["httpStatus"], 401);
+    assert!(!me2.retryable);
+
+    // 3. Plain text / empty body 429
+    let err3 = map_ticket_error(reqwest::StatusCode::TOO_MANY_REQUESTS, b"");
+    assert_eq!(err3.code, "RATE_LIMITED");
+    let me3 = err3.machine_error.unwrap();
+    assert_eq!(me3.details["status"], 429);
+    assert!(me3.retryable);
+
+    // 4. Plain text / empty body 503
+    let err4 = map_ticket_error(reqwest::StatusCode::SERVICE_UNAVAILABLE, b"Service Unavailable");
+    assert_eq!(err4.code, "MACHINE_SERVICE_UNAVAILABLE");
+    let me4 = err4.machine_error.unwrap();
+    assert_eq!(me4.details["status"], 503);
+    assert!(me4.retryable);
+
+    // 5. 404 NOT_FOUND
+    let err5 = map_ticket_error(reqwest::StatusCode::NOT_FOUND, b"");
+    assert_eq!(err5.code, "NOT_FOUND");
+    let me5 = err5.machine_error.unwrap();
+    assert_eq!(me5.details["status"], 404);
+    assert!(!me5.retryable);
+}
+
