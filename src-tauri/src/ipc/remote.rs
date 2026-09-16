@@ -357,7 +357,10 @@ pub async fn cmd_remote_device_revoke(
             }
         }
         RemoteGatewayManagerInner::State { state, .. } => {
-            Ok(state.auth_manager.revoke_device(&device_id))
+            state
+                .auth_manager
+                .revoke_device(&device_id)
+                .map_err(|e| IpcError::internal(e.to_string()))
         }
     }
 }

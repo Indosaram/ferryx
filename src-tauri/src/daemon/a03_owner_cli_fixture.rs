@@ -210,7 +210,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
         let error: crate::remote::machine_protocol::ErrorEnvelope = serde_json::from_slice(&response.bytes().await?)?;
         ensure!(error.error.code == if machine { "INVALID_REQUEST" } else { "MACHINE_ACCESS_REQUIRED" }, "session refusal mismatch");
         println!("A03 DIRECTORY scope={expected:?} status={} native_projection_verified={} sentinel_unchanged=true sessions_status={}", if machine {200} else {403}, machine, if machine {400} else {403});
-        ensure!(server.remote_state.auth_manager.revoke_device(&exchange.device.id), "revoke failed");
+        ensure!(server.remote_state.auth_manager.revoke_device(&exchange.device.id)?, "revoke failed");
         let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed = Arc::clone(&probes);
         *server.remote_state.identity_probe.write() = Some(Arc::new(move || {

@@ -93,7 +93,7 @@ async fn ac09_private_http_child() {
         println!("AC09 anonymous HTTP {}", anonymous.status());
         assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
         for (token, device) in &grants {
-            assert!(state.auth_manager.revoke_device(&device.id));
+            assert!(state.auth_manager.revoke_device(&device.id).unwrap());
             let revoked = client.get(&url).bearer_auth(token).send().await.unwrap();
             println!("AC09 revoked {:?}/{:?} HTTP {}", device.access_scope, device.permission, revoked.status());
             assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);

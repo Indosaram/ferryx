@@ -136,7 +136,7 @@ async fn auth_boundary_fixture(revoke: bool, inject: bool) {
         assert!(!inject, "injected auth fixture failure");
         if revoke {
             let auth = state.auth_manager.clone();
-            crate::ipc::run_blocking(move || { assert!(auth.revoke_device(&device.id)); Ok(()) }).await.unwrap();
+            crate::ipc::run_blocking(move || { assert!(auth.revoke_device(&device.id).unwrap()); Ok(()) }).await.unwrap();
             *gate.0.lock().unwrap() = true; gate.1.notify_all();
         } else {
             let response = client.get(&url).bearer_auth(&token).send().await.unwrap();
@@ -454,7 +454,7 @@ async fn directory_http_fixture(inject_send_failure: bool) {
             .unwrap();
         let auth = request_state.auth_manager.clone();
         crate::ipc::run_blocking(move || {
-            assert!(auth.revoke_device(&device.id));
+            assert!(auth.revoke_device(&device.id).unwrap());
             Ok(())
         })
         .await

@@ -361,6 +361,11 @@ async fn pair_exchange(
             )
                 .into_response(),
             AuthError::Unauthorized => (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(),
+            AuthError::Storage(err) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Auth storage error: {err}"),
+            )
+                .into_response(),
         })?;
 
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(PairExchangeResponse {
@@ -1191,10 +1196,10 @@ async fn revoke_device(
         ));
     }
 
-    if state.auth_manager.revoke_device(&device_id) {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err((StatusCode::NOT_FOUND, "Device not found".into()))
+    match state.auth_manager.revoke_device(&device_id) {
+        Ok(true) => Ok(StatusCode::NO_CONTENT),
+        Ok(false) => Err((StatusCode::NOT_FOUND, "Device not found".into())),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
     }
 }
 

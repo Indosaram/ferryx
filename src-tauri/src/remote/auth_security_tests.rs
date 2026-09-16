@@ -180,7 +180,7 @@ async fn revocation_is_latched_and_registration_after_validation_cannot_miss_it(
     let (token, device) = auth.exchange_pairing_code(&code, "victim").unwrap();
     let mut early = auth.device_revocation(&device.id).unwrap();
     let validated = auth.validate_token(&token).unwrap();
-    assert!(auth.revoke_device(&device.id));
+    assert!(auth.revoke_device(&device.id).unwrap());
     // The wait starts AFTER revocation; a notify-only scheme loses this signal.
     tokio::time::timeout(Duration::from_secs(5), early.wait_for(|revoked| *revoked))
         .await

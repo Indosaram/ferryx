@@ -95,7 +95,7 @@ fn a03_owner_machine_purpose_survives_persistence_and_exchange() {
     assert_eq!(device.access_scope, DeviceAccessScope::Machine);
     let reopened = AuthManager::with_persistence(Some(path));
     assert_eq!(reopened.validate_token(&token).unwrap().access_scope, DeviceAccessScope::Machine);
-    assert!(reopened.revoke_device(&device.id));
+    assert!(reopened.revoke_device(&device.id).unwrap());
     assert!(reopened.validate_token(&token).is_err());
 }
 

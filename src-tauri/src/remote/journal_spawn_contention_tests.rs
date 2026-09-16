@@ -80,7 +80,7 @@ async fn spawn_contention(expire: bool) {
         assert!(spawn_lock.try_lock().is_err());
         if !expire {
             let auth = state.auth_manager.clone(); let device = device.clone();
-            crate::ipc::run_blocking(move || Ok(auth.revoke_device(&device))).await.unwrap();
+            crate::ipc::run_blocking(move || Ok(auth.revoke_device(&device).unwrap())).await.unwrap();
         }
         let result = tokio::time::timeout(Duration::from_secs(45), response.as_mut().unwrap()).await.unwrap().unwrap().unwrap();
         response.take();
@@ -92,7 +92,7 @@ async fn spawn_contention(expire: bool) {
     }).catch_unwind().await;
     // Revoke even on RED before releasing the writer: cleanup must never spawn a PTY.
     let auth = state.auth_manager.clone(); let revoke_device = device.clone();
-    crate::ipc::run_blocking(move || Ok(auth.revoke_device(&revoke_device))).await.unwrap();
+    crate::ipc::run_blocking(move || Ok(auth.revoke_device(&revoke_device).unwrap())).await.unwrap();
     drop(gate.take());
     let _ = release_tx.send(());
     if let Some(writer) = writer { writer.join().unwrap(); }

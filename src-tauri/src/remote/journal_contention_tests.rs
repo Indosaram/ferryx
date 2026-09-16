@@ -233,7 +233,7 @@ async fn contention(mutation: bool, revoke: bool, expire: bool) {
         assert!(health.is_ok(), "journal mutex blocked unrelated HTTP executor: {health:?}");
         eprintln!("JOURNAL_CONTENTION mutation={mutation} independent_http_responded=true");
         if revoke {
-            crate::ipc::run_blocking(move || Ok(auth_state.auth_manager.revoke_device(&device_id)))
+            crate::ipc::run_blocking(move || Ok(auth_state.auth_manager.revoke_device(&device_id).unwrap()))
                 .await.unwrap().then_some(()).unwrap();
         }
         if revoke || expire {

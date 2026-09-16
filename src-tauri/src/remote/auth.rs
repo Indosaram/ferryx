@@ -333,6 +333,8 @@ pub struct AuthManager {
     revocations: Arc<RwLock<HashMap<String, tokio::sync::watch::Sender<bool>>>>,
     persistence_path: Option<PathBuf>,
     last_persisted_at: Arc<RwLock<Instant>>,
+    #[cfg(test)]
+    injected_snapshot_failure: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Default for AuthManager {
@@ -364,6 +366,8 @@ impl AuthManager {
             revocations: Arc::new(RwLock::new(HashMap::new())),
             persistence_path,
             last_persisted_at: Arc::new(RwLock::new(Instant::now())),
+            #[cfg(test)]
+            injected_snapshot_failure: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -412,7 +416,7 @@ impl AuthManager {
     }
 
     fn issue_pairing_code(&self, default_permission: DevicePermission, access_scope: DeviceAccessScope) -> String {
-        let _transaction = self.begin_transaction();
+        let _transaction = self.begin_transaction().ok();
         let pin: u32 = rand::thread_rng().gen_range(100_000..=999_999);
         let code = format!("{pin:06}");
 
@@ -466,7 +470,7 @@ impl AuthManager {
     }
 
     fn issue_pairing_capability(&self, token: &str, permission: DevicePermission, access_scope: DeviceAccessScope) {
-        let _transaction = self.begin_transaction();
+        let _transaction = self.begin_transaction().ok();
         let mut window = self.pairing_window.write();
         window.refresh(Instant::now());
         window.codes.insert(
@@ -485,7 +489,7 @@ impl AuthManager {
     }
 
     pub(crate) fn cancel_pairing_capability(&self, token: &str) {
-        let _transaction = self.begin_transaction();
+        let _transaction = self.begin_transaction().ok();
         self.pairing_window.write().codes.remove(token);
         self.persist_best_effort();
     }
@@ -504,7 +508,7 @@ impl AuthManager {
         device_name: &str,
         installation_id: Option<&str>,
     ) -> Result<(String, DeviceInfo), AuthError> {
-        let _transaction = self.begin_transaction();
+        let _transaction = self.begin_transaction()?;
         let pairing = {
             // Lookup, failure accounting and single-use consumption share one
             // lock. No concurrent request can spend the same budget slot/code.
@@ -538,7 +542,7 @@ impl AuthManager {
 
         let now = unix_now();
 
-        if let Some(token) = pairing.approved_token {
+        if let Some(token) = pairing.approved_token.clone() {
             let existing_device = effective_installation_id.as_deref().and_then(|inst_id| {
                 self.devices
                     .read()
@@ -586,7 +590,20 @@ impl AuthManager {
                 }
             };
 
-            self.persist_best_effort();
+            if let Err(err) = self.persist_durable() {
+                if let Some(path) = self.persistence_path.as_deref() {
+                    if let Some(mut state) = load_persisted_auth(path) {
+                        prune_revoked_and_idle_devices(&mut state, unix_now());
+                        *self.devices.write() = state.devices;
+                        *self.tokens.write() = state.tokens;
+                    }
+                }
+                self.pairing_window
+                    .write()
+                    .codes
+                    .insert(code.to_string(), pairing);
+                return Err(err);
+            }
             return Ok((token, info));
         }
 
@@ -625,8 +642,23 @@ impl AuthManager {
         };
 
         self.devices.write().insert(device_id.clone(), info.clone());
-        self.tokens.write().insert(token.clone(), device_id);
-        self.persist_best_effort();
+        self.tokens.write().insert(token.clone(), device_id.clone());
+        if let Err(err) = self.persist_durable() {
+            self.devices.write().remove(&device_id);
+            self.tokens.write().remove(&token);
+            if let Some(path) = self.persistence_path.as_deref() {
+                if let Some(mut state) = load_persisted_auth(path) {
+                    prune_revoked_and_idle_devices(&mut state, unix_now());
+                    *self.devices.write() = state.devices;
+                    *self.tokens.write() = state.tokens;
+                }
+            }
+            self.pairing_window
+                .write()
+                .codes
+                .insert(code.to_string(), pairing);
+            return Err(err);
+        }
         Ok((token, info))
     }
 
@@ -638,7 +670,7 @@ impl AuthManager {
             return Err(AuthError::InvalidPairingCode);
         }
 
-        let _transaction = self.begin_transaction();
+        let _transaction = self.begin_transaction()?;
         let mut pairing = {
             let mut window = self.pairing_window.write();
             window.refresh(Instant::now());
@@ -686,18 +718,34 @@ impl AuthManager {
         };
 
         self.devices.write().insert(device_id.clone(), info.clone());
-        self.tokens.write().insert(token.clone(), device_id);
-        pairing.approved_token = Some(token);
+        self.tokens.write().insert(token.clone(), device_id.clone());
+        pairing.approved_token = Some(token.clone());
         self.pairing_window
             .write()
             .codes
-            .insert(code.to_string(), pairing);
-        self.persist_best_effort();
+            .insert(code.to_string(), pairing.clone());
+        if let Err(err) = self.persist_durable() {
+            self.devices.write().remove(&device_id);
+            self.tokens.write().remove(&token);
+            if let Some(path) = self.persistence_path.as_deref() {
+                if let Some(mut state) = load_persisted_auth(path) {
+                    prune_revoked_and_idle_devices(&mut state, unix_now());
+                    *self.devices.write() = state.devices;
+                    *self.tokens.write() = state.tokens;
+                }
+            }
+            pairing.approved_token = None;
+            self.pairing_window
+                .write()
+                .codes
+                .insert(code.to_string(), pairing);
+            return Err(err);
+        }
         Ok(info)
     }
 
     pub fn validate_token(&self, token: &str) -> Result<DeviceInfo, AuthError> {
-        let _transaction = self.begin_transaction();
+        let _transaction = self.begin_transaction()?;
         let device_id = {
             let tokens = self.tokens.read();
             tokens.get(token).cloned()
@@ -754,8 +802,8 @@ impl AuthManager {
     /// Deletes the device and every token issued to it. The device disappears
     /// from [`Self::list_devices`] immediately instead of lingering as a
     /// revoked entry.
-    pub fn revoke_device(&self, device_id: &str) -> bool {
-        let _transaction = self.begin_transaction();
+    pub fn revoke_device(&self, device_id: &str) -> Result<bool, AuthError> {
+        let _transaction = self.begin_transaction()?;
         let changed = {
             let mut devices = self.devices.write();
             if devices.remove(device_id).is_some() {
@@ -770,9 +818,22 @@ impl AuthManager {
             }
         };
         if changed {
-            self.persist_best_effort();
+            if let Some(path) = self.persistence_path.as_deref() {
+                // Fail-closed durable write: append to revocation journal first
+                append_revocation_journal(path, device_id)?;
+                // Atomically persist snapshot; if this fails, error is propagated and journal record remains
+                self.persist_durable()?;
+                // Once snapshot is durable, clear journal entry
+                let _ = clear_revocation_journal(path, device_id);
+            }
         }
-        changed
+        Ok(changed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_injected_snapshot_failure(&self, fail: bool) {
+        self.injected_snapshot_failure
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
 
     #[cfg(test)]
@@ -797,11 +858,12 @@ impl AuthManager {
     // and serializes reload/mutation/save across both clones and independent processes.
     // It uses a distinct sidecar extension ("tx.lock") so holding a transaction does not
     // deadlock with the low-level store flock ("lock") acquired during write_private_json.
-    fn begin_transaction(&self) -> (MutexGuard<'_, ()>, Option<std::fs::File>) {
+    fn begin_transaction(&self) -> Result<(MutexGuard<'_, ()>, Option<std::fs::File>), AuthError> {
         let guard = self.transaction.lock();
-        let file = self.persistence_path.as_deref().map(|path| {
+        let file = if let Some(path) = self.persistence_path.as_deref() {
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).expect("create remote auth directory");
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| AuthError::Storage(format!("create remote auth directory: {e}")))?;
             }
             let mut open_opts = std::fs::OpenOptions::new();
             open_opts
@@ -816,22 +878,25 @@ impl AuthManager {
             }
             let file = open_opts
                 .open(path.with_extension("tx.lock"))
-                .expect("open remote auth lock");
-            file.lock().expect("lock remote auth state");
+                .map_err(|e| AuthError::Storage(format!("open remote auth lock: {e}")))?;
+            file.lock()
+                .map_err(|e| AuthError::Storage(format!("lock remote auth state: {e}")))?;
             if let Some(mut state) = load_persisted_auth(path) {
                 prune_revoked_and_idle_devices(&mut state, unix_now());
                 self.pairing_window.write().codes = state.pairing_codes;
                 *self.devices.write() = state.devices;
                 *self.tokens.write() = state.tokens;
             }
-            file
-        });
-        (guard, file)
+            Some(file)
+        } else {
+            None
+        };
+        Ok((guard, file))
     }
 
-    fn persist_best_effort(&self) {
+    fn persist_durable(&self) -> Result<(), AuthError> {
         let Some(path) = self.persistence_path.as_deref() else {
-            return;
+            return Ok(());
         };
         *self.last_persisted_at.write() = Instant::now();
         let snapshot = PersistedAuthState {
@@ -839,7 +904,17 @@ impl AuthManager {
             tokens: self.tokens.read().clone(),
             pairing_codes: self.pairing_window.read().codes.clone(),
         };
-        if let Err(error) = write_private_json(path, &snapshot) {
+        #[cfg(test)]
+        if self.injected_snapshot_failure.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(AuthError::Storage("Injected disk-full error during snapshot write".to_string()));
+        }
+        write_private_json(path, &snapshot)
+            .map_err(|error| AuthError::Storage(format!("failed to persist remote auth state: {error}")))?;
+        Ok(())
+    }
+
+    fn persist_best_effort(&self) {
+        if let Err(error) = self.persist_durable() {
             tracing::warn!("failed to persist remote auth state: {error}");
         }
     }
@@ -852,9 +927,91 @@ fn unix_now() -> u64 {
         .as_secs()
 }
 
+fn revocation_journal_path(auth_path: &Path) -> PathBuf {
+    auth_path.with_extension("revocations")
+}
+
+fn append_revocation_journal(path: &Path, device_id: &str) -> Result<(), AuthError> {
+    let journal_path = revocation_journal_path(path);
+    if let Some(parent) = journal_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| AuthError::Storage(format!("create auth directory for revocation journal: {e}")))?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).write(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&journal_path)
+        .map_err(|e| AuthError::Storage(format!("open revocation journal: {e}")))?;
+    use std::io::Write as _;
+    writeln!(file, "{device_id}")
+        .map_err(|e| AuthError::Storage(format!("write to revocation journal: {e}")))?;
+    file.sync_all()
+        .map_err(|e| AuthError::Storage(format!("sync revocation journal: {e}")))?;
+    if let Some(parent) = journal_path.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+    Ok(())
+}
+
+fn load_revocation_journal(path: &Path) -> std::collections::HashSet<String> {
+    let journal_path = revocation_journal_path(path);
+    let mut set = std::collections::HashSet::new();
+    if let Ok(content) = std::fs::read_to_string(&journal_path) {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                set.insert(trimmed.to_string());
+            }
+        }
+    }
+    set
+}
+
+fn clear_revocation_journal(path: &Path, device_id: &str) -> Result<(), AuthError> {
+    let journal_path = revocation_journal_path(path);
+    if !journal_path.exists() {
+        return Ok(());
+    }
+    let content = match std::fs::read_to_string(&journal_path) {
+        Ok(c) => c,
+        Err(_) => return Ok(()),
+    };
+    let remaining: Vec<&str> = content
+        .lines()
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && *id != device_id)
+        .collect();
+    if remaining.is_empty() {
+        let _ = std::fs::remove_file(&journal_path);
+    } else {
+        let temp = journal_path.with_extension(format!("tmp.{}", std::process::id()));
+        if std::fs::write(&temp, remaining.join("\n") + "\n").is_ok() {
+            let _ = std::fs::rename(&temp, &journal_path);
+        }
+    }
+    Ok(())
+}
+
 fn load_persisted_auth(path: &Path) -> Option<PersistedAuthState> {
     let bytes = std::fs::read(path).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    let mut state: PersistedAuthState = serde_json::from_slice(&bytes).ok()?;
+    apply_revocation_journal(&mut state, path);
+    Some(state)
+}
+
+fn apply_revocation_journal(state: &mut PersistedAuthState, path: &Path) {
+    let revocations = load_revocation_journal(path);
+    if !revocations.is_empty() {
+        state.devices.retain(|id, _| !revocations.contains(id));
+        state.tokens.retain(|_, device_id| !revocations.contains(device_id));
+    }
 }
 
 /// Drops devices that older builds tombstoned with `revoked: true` or devices
@@ -992,7 +1149,7 @@ fn validate_machine_grant(permission: DevicePermission, scope: DeviceAccessScope
     Ok(())
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AuthError {
     #[error("Invalid pairing code")]
     InvalidPairingCode,
@@ -1002,6 +1159,8 @@ pub enum AuthError {
     PairingRateLimited,
     #[error("Unauthorized access")]
     Unauthorized,
+    #[error("Auth storage error: {0}")]
+    Storage(String),
 }
 
 #[cfg(test)]
@@ -1761,7 +1920,7 @@ mod persistence_tests {
         let manager = AuthManager::with_persistence(Some(path.clone()));
         let code = manager.create_pairing_code(DevicePermission::Control);
         let (token, device) = manager.exchange_pairing_code(&code, "Phone").expect("pair");
-        assert!(manager.revoke_device(&device.id));
+        assert!(manager.revoke_device(&device.id).unwrap());
 
         assert!(
             manager.list_devices().is_empty(),
@@ -1881,7 +2040,151 @@ mod persistence_tests {
         // Revoking must persist immediately
         std::fs::remove_file(&path).expect("remove file before revoke");
         assert!(!path.exists());
-        assert!(manager.revoke_device(&device.id));
+        assert!(manager.revoke_device(&device.id).unwrap());
         assert!(path.exists(), "revoke_device must persist immediately");
+    }
+
+    #[tokio::test]
+    async fn test_p03_begin_transaction_runtime_io_failure_propagates_storage_error() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let ro_dir = temp_dir.path().join("readonly");
+        std::fs::create_dir_all(&ro_dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        }
+        let auth_path = ro_dir.join("remote-auth.json");
+        let manager = AuthManager::with_persistence(Some(auth_path));
+
+        let result = manager.validate_token("any-token");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o700));
+        }
+
+        assert!(
+            result.is_err(),
+            "validate_token must return an error on runtime I/O failure"
+        );
+        assert!(
+            matches!(result, Err(AuthError::Storage(_))),
+            "expected AuthError::Storage, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_p02_pairing_fails_when_storage_unwritable() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let base_dir = temp_dir.path().join("auth");
+        std::fs::create_dir_all(&base_dir).unwrap();
+        let auth_path = base_dir.join("remote-auth.json");
+        let manager = AuthManager::with_persistence(Some(auth_path.clone()));
+
+        let code = manager.create_pairing_code(DevicePermission::Control);
+
+        // Inject snapshot storage failure (e.g. disk full)
+        manager.set_injected_snapshot_failure(true);
+
+        let exchange_res = manager.exchange_pairing_code(&code, "Test Device");
+
+        assert!(
+            exchange_res.is_err(),
+            "pairing exchange must fail when durable persistence fails, but got: {:?}",
+            exchange_res
+        );
+        assert!(
+            matches!(exchange_res, Err(AuthError::Storage(_))),
+            "pairing exchange must return typed Storage error, got: {:?}",
+            exchange_res
+        );
+
+        // Reopened manager must not contain the uncommitted device
+        manager.set_injected_snapshot_failure(false);
+        let reopened = AuthManager::with_persistence(Some(auth_path));
+        assert!(reopened.list_devices().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_p02_revoke_under_injected_disk_full_leaves_fail_closed_durable_record() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let base_dir = temp_dir.path().join("auth");
+        std::fs::create_dir_all(&base_dir).unwrap();
+        let auth_path = base_dir.join("remote-auth.json");
+        let manager = AuthManager::with_persistence(Some(auth_path.clone()));
+
+        // Pair device successfully
+        let code = manager.create_pairing_code(DevicePermission::Control);
+        let (token, device) = manager
+            .exchange_pairing_code(&code, "Test Device")
+            .expect("pairing must succeed");
+        assert!(manager.validate_token(&token).is_ok());
+
+        // Inject disk-full during snapshot write
+        manager.set_injected_snapshot_failure(true);
+
+        // Revocation fails durable snapshot write, but writes revocation journal
+        let revoke_res = manager.revoke_device(&device.id);
+        assert!(
+            matches!(revoke_res, Err(AuthError::Storage(_))),
+            "revoke under disk-full must return typed Storage error, got: {revoke_res:?}"
+        );
+
+        // Revocation journal file must exist and contain the revoked device id
+        let journal_path = auth_path.with_extension("revocations");
+        assert!(journal_path.exists(), "revocation journal file must exist");
+        let journal_content = std::fs::read_to_string(&journal_path).expect("read journal");
+        assert!(
+            journal_content.contains(&device.id),
+            "journal must contain device id: {journal_content}"
+        );
+
+        // On restart (reopen with normal persistence), device must fail-closed (pruned via journal)
+        let reopened = AuthManager::with_persistence(Some(auth_path));
+        assert!(
+            reopened.list_devices().is_empty(),
+            "revoked device must be pruned upon reload"
+        );
+        assert!(
+            matches!(reopened.validate_token(&token), Err(AuthError::Unauthorized)),
+            "revoked token must be unauthorized"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_edge_concurrent_pairing_claims_single_winner() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let auth_path = temp_dir.path().join("remote-auth.json");
+        let manager = Arc::new(AuthManager::with_persistence(Some(auth_path)));
+
+        let code = manager.create_pairing_code(DevicePermission::Control);
+
+        let manager1 = Arc::clone(&manager);
+        let code1 = code.clone();
+        let task1 = tokio::spawn(async move {
+            manager1.exchange_pairing_code(&code1, "Device 1")
+        });
+
+        let manager2 = Arc::clone(&manager);
+        let code2 = code.clone();
+        let task2 = tokio::spawn(async move {
+            manager2.exchange_pairing_code(&code2, "Device 2")
+        });
+
+        let (res1, res2) = tokio::join!(task1, task2);
+        let res1 = res1.expect("task1 join");
+        let res2 = res2.expect("task2 join");
+
+        let (winner, loser) = match (res1, res2) {
+            (Ok(w), Err(l)) => (w, l),
+            (Err(l), Ok(w)) => (w, l),
+            (r1, r2) => panic!("Expected exactly one winner and one loser, got: r1={r1:?}, r2={r2:?}"),
+        };
+
+        assert_eq!(loser, AuthError::InvalidPairingCode);
+        assert!(!winner.0.is_empty());
+        assert_eq!(manager.list_devices().len(), 1);
     }
 }

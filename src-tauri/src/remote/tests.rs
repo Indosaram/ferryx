@@ -40,7 +40,7 @@ fn test_auth_manager_pairing_and_revocation() {
     assert_eq!(validated.id, device.id);
 
     // Revoke device: it is deleted outright, so its token is simply unknown.
-    assert!(auth.revoke_device(&device.id));
+    assert!(auth.revoke_device(&device.id).unwrap());
     assert!(auth.list_devices().is_empty());
     assert!(matches!(
         auth.validate_token(&token),
@@ -185,7 +185,7 @@ async fn test_terminal_preferences_requires_a_valid_unrevoked_remote_token() {
     .await;
     assert_eq!(valid_status, 200);
 
-    assert!(state.auth_manager.revoke_device(&device.id));
+    assert!(state.auth_manager.revoke_device(&device.id).unwrap());
     let (revoked_status, _) = http_request(
         addr,
         "GET",

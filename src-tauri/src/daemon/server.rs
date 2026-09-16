@@ -2263,12 +2263,14 @@ impl DaemonServer {
                     DaemonResponse::RemoteListDevicesOk { devices }
                 }
                 Ok(DaemonRequest::RemoteRevokeDevice { device_id }) => {
-                    if self.remote_state.auth_manager.revoke_device(&device_id) {
-                        DaemonResponse::RemoteRevokeDeviceOk
-                    } else {
-                        DaemonResponse::Error {
+                    match self.remote_state.auth_manager.revoke_device(&device_id) {
+                        Ok(true) => DaemonResponse::RemoteRevokeDeviceOk,
+                        Ok(false) => DaemonResponse::Error {
                             message: format!("Device '{device_id}' not found"),
-                        }
+                        },
+                        Err(err) => DaemonResponse::Error {
+                            message: format!("Failed to persist revocation: {err}"),
+                        },
                     }
                 }
                 Ok(DaemonRequest::RemoteSetActiveSelection { selection, ssh_store_path }) => {
