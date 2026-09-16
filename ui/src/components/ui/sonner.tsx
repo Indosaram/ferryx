@@ -51,7 +51,7 @@ const Toaster = ({ ...props }: ToasterProps) => {
   const theme = useToastTheme();
 
   return (
-    <div data-native-terminal-yield="off">
+    <div data-native-terminal-yield="off" className="selectable">
       <Sonner
         theme={theme}
         position="bottom-right"

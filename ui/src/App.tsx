@@ -20,6 +20,7 @@ import { ConfirmCloseTabDialog } from "./components/ConfirmCloseTabDialog";
 import { TerminalLinkActions } from "./components/TerminalLinkActions";
 import { Toaster, toast } from "./components/ui/sonner";
 import { IconButton } from "./components/ui/IconButton";
+import { copyTextToClipboard } from "./lib/clipboard";
 import { useApplyAppearanceSettings } from "./lib/appearanceSettings";
 import { workspaceName } from "./lib/branchFilter";
 import { collectDagWatchRoots } from "./lib/dagWatchRoots";
@@ -997,12 +998,10 @@ function WorkspaceApp({
       action: {
         label: "Copy",
         onClick: () => {
-          void navigator.clipboard
-            .writeText(clipboardText)
-            .then(() => {
-              toast.success("Copied error to clipboard");
-            })
-            .catch(() => {});
+          void copyTextToClipboard(clipboardText).then((ok) => {
+            if (ok) toast.success("Copied error to clipboard");
+            else toast.error("Failed to copy error to clipboard");
+          });
         },
       },
     });

@@ -13,6 +13,7 @@ import {
 } from "../../lib/tauri";
 
 import { SettingRow, SettingsHeading } from "./primitives";
+import { copyTextToClipboard } from "../../lib/clipboard";
 import { DEFAULT_RELAY_ORIGIN } from "../../lib/pairedHostInventory";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Badge } from "../ui/badge";
@@ -66,27 +67,6 @@ export function buildPairingUrl(
   const port = status?.port ?? DEFAULT_PORT;
   const host = status?.localIp ?? status?.boundAddress ?? "localhost";
   return `http://${host.includes(":") ? host : `${host}:${port}`}/#pair=${encodeURIComponent(token)}`;
-}
-
-async function copyTextToClipboard(text: string): Promise<boolean> {
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch { /* fall through to legacy path */ }
-  try {
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.setAttribute("readonly", "");
-    ta.style.position = "fixed";
-    ta.style.opacity = "0";
-    document.body.appendChild(ta);
-    ta.select();
-    const ok = document.execCommand("copy");
-    ta.remove();
-    return ok;
-  } catch { return false; }
 }
 
 export function RemoteAccessSection({ detailsOnly = false }: { detailsOnly?: boolean } = {}) {
