@@ -1461,7 +1461,15 @@ function WorkspaceApp({
     activeAgentCount: number;
   } | null>(null);
   const [worktreeStatuses, setWorktreeStatuses] = useState<Record<string, DirtyState | undefined>>({});
-  const [pendingWorktreePath, setPendingWorktreePath] = useState<string | null>(null);
+  const [pendingWorktree, setPendingWorktree] = useState<Worktree | null>(null);
+  const pendingWorktreePath = pendingWorktree?.path ?? null;
+  const setPendingWorktreePath = useCallback((path: string | null) => {
+    if (path === null) {
+      setPendingWorktree(null);
+    } else {
+      setPendingWorktree((current) => (current?.path === path ? current : { path, head: "", branch: null, bare: false, detached: false, locked: null, prunable: null }));
+    }
+  }, []);
   const [pendingRemoteSlug, setPendingRemoteSlug] = useState<{
     workspaceId: string;
     createTerminal?: boolean;
@@ -1614,11 +1622,14 @@ function WorkspaceApp({
       });
       if (owner && owner.workspaceId !== activeProjectRef.current.workspaceId) {
         handleSelectProject(owner);
-        setPendingWorktreePath(worktree.path);
+        setPendingWorktree(worktree);
         return;
       }
-      if (activeProjectRef.current.target?.kind === "ssh" && registeredProjectIdRef.current !== activeProjectRef.current.workspaceId) {
-        setPendingWorktreePath(worktree.path);
+      if (
+        (activeProjectRef.current.target?.kind === "ssh" || activeProjectRef.current.target?.kind === "pairedDaemon") &&
+        registeredProjectIdRef.current !== activeProjectRef.current.workspaceId
+      ) {
+        setPendingWorktree(worktree);
         return;
       }
       runTabOperation(() => ensureTabForWorktree(worktree));
@@ -1627,31 +1638,34 @@ function WorkspaceApp({
   );
 
   useEffect(() => {
-    if (!pendingWorktreePath) return;
+    if (!pendingWorktree) return;
     if (activeRemoteHostRef.current) return;
-    if (activeProject.target?.kind === "ssh" && (registeredProjectId !== activeProject.workspaceId ||
-      workspaceRestoreStatus === "idle" || workspaceRestoreStatus === "loading")) return;
-    const target = state.worktrees.find((worktree) => worktree.path === pendingWorktreePath);
-    if (!target) {
-      switchDebug("worktree.select.pending", {
-        workspaceId: activeProject.workspaceId,
-        pendingWorktreePath,
-        availableWorktreePaths: state.worktrees.map((worktree) => worktree.path),
-      });
+    if (
+      (activeProject.target?.kind === "ssh" || activeProject.target?.kind === "pairedDaemon") &&
+      (registeredProjectId !== activeProject.workspaceId ||
+        workspaceRestoreStatus === "idle" ||
+        workspaceRestoreStatus === "loading")
+    ) {
       return;
     }
+    const target =
+      state.worktrees.find((worktree) => worktree.path === pendingWorktree.path) ??
+      inactiveProjectWorktrees[activeProject.workspaceId]?.find((worktree) => worktree.path === pendingWorktree.path) ??
+      pendingWorktree;
+
     switchDebug("worktree.select.pending.resolved", {
       workspaceId: activeProject.workspaceId,
       worktreePath: target.path,
       tabCount: state.layout.tabs.length,
     });
-    setPendingWorktreePath(null);
+    setPendingWorktree(null);
     runTabOperation(() => ensureTabForWorktree(target));
   }, [
     activeProject.workspaceId,
     activeProject.target,
     ensureTabForWorktree,
-    pendingWorktreePath,
+    inactiveProjectWorktrees,
+    pendingWorktree,
     registeredProjectId,
     workspaceRestoreStatus,
     runTabOperation,
@@ -1704,7 +1718,7 @@ function WorkspaceApp({
       return;
     }
     if (state.workspaceId && state.workspaceId !== pendingRemoteSlug.workspaceId) return;
-    if (activeProject.target?.kind === "ssh" &&
+    if ((activeProject.target?.kind === "ssh" || activeProject.target?.kind === "pairedDaemon") &&
       (registeredProjectId !== activeProject.workspaceId ||
         workspaceRestoreStatus === "idle" || workspaceRestoreStatus === "loading")) return;
     const target = pendingRemoteSlug.slug
@@ -1870,7 +1884,12 @@ function WorkspaceApp({
   const handleAddTerminalTab = useCallback((shell?: string) => {
     if (activeRemoteHostRef.current) return;
     if (activeProjectRef.current.target?.kind === "pairedDaemon" && remoteHostStore.getState().machineFeaturesEnabled !== true) return;
-    if (activeProjectRef.current.target?.kind === "ssh" && registeredProjectIdRef.current !== activeProjectRef.current.workspaceId) return;
+    if (
+      (activeProjectRef.current.target?.kind === "ssh" || activeProjectRef.current.target?.kind === "pairedDaemon") &&
+      registeredProjectIdRef.current !== activeProjectRef.current.workspaceId
+    ) {
+      return;
+    }
     const activeWt = activeWorktreeRef.current;
     if (!activeWt) return;
     runTabOperation(() => openTab(activeWt, undefined, undefined, shell));
@@ -1879,7 +1898,12 @@ function WorkspaceApp({
   const handleLaunchAgent = useCallback(
     async (agent: { name: string; command: string; args: string }) => {
       if (activeRemoteHostRef.current) return;
-      if (activeProjectRef.current.target?.kind === "ssh" && registeredProjectIdRef.current !== activeProjectRef.current.workspaceId) return;
+      if (
+        (activeProjectRef.current.target?.kind === "ssh" || activeProjectRef.current.target?.kind === "pairedDaemon") &&
+        registeredProjectIdRef.current !== activeProjectRef.current.workspaceId
+      ) {
+        return;
+      }
       try {
         const targetWorktree = activeWorktreeRef.current ?? stateRef.current.worktrees[0];
         if (!targetWorktree) return;
@@ -2294,7 +2318,12 @@ function WorkspaceApp({
     (tabId: string, leafId: string, direction: PaneDirection, options?: { position?: "first" | "second" }) => {
       if (activeRemoteHostRef.current) return;
       if (activeProjectRef.current.target?.kind === "pairedDaemon" && remoteHostStore.getState().machineFeaturesEnabled !== true) return;
-      if (activeProjectRef.current.target?.kind === "ssh" && registeredProjectIdRef.current !== activeProjectRef.current.workspaceId) return;
+      if (
+        (activeProjectRef.current.target?.kind === "ssh" || activeProjectRef.current.target?.kind === "pairedDaemon") &&
+        registeredProjectIdRef.current !== activeProjectRef.current.workspaceId
+      ) {
+        return;
+      }
       void splitPane(tabId, leafId, direction, options).catch(reportRuntimeError);
     },
     [reportRuntimeError, splitPane],
@@ -2884,7 +2913,7 @@ function WorkspaceApp({
             const owner = createTargetProject ?? activeProject;
             if (owner.workspaceId !== activeProject.workspaceId) {
               handleSelectProject(owner);
-              setPendingWorktreePath(worktree.path);
+              setPendingWorktree(worktree);
               return;
             }
             await refreshWorktrees();

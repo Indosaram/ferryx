@@ -8,6 +8,7 @@ export type WorktreeIdentity = {
 export type Worktree = {
   /** Explicit owner for SSH roots, whose paths can equal paths on other hosts. */
   workspaceId?: string;
+  identity?: WorktreeIdentity | null;
   hostLabel?: string;
   hostSummary?: string;
   path: string;
@@ -20,6 +21,9 @@ export type Worktree = {
 };
 
 export function worktreeIdentity(worktree: Worktree): WorktreeIdentity | null {
+  if (worktree.identity?.wsId && worktree.identity?.slug) {
+    return worktree.identity;
+  }
   const branch = worktree.branch?.replace(/^refs\/heads\//, "");
   const parts = branch?.split("/");
   if (!parts || parts.length < 3 || parts[0] !== "orca") return null;

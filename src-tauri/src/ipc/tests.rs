@@ -1216,3 +1216,79 @@ async fn remote_terminal_spawn_rejects_explicit_startup() {
 
     assert_eq!(err.code, IpcErrorCode::Unsupported);
 }
+
+#[test]
+fn paired_machine_worktree_spawn_target_resolution() {
+    use crate::ipc::terminal::{effective_paired_repo_root, infer_worktree_slug, resolve_paired_spawn_target};
+    use crate::worktree::WorktreeIdentity;
+    use std::path::Path;
+
+    let repo_root = Path::new("/srv/repo");
+    let wt_cwd = Path::new("/srv/repo/.orca-worktrees/wt-my-feature");
+    let sub_cwd = Path::new("/srv/repo/.orca-worktrees/wt-my-feature/src/lib");
+    let explicit_wt = WorktreeIdentity {
+        ws_id: "remote-ws".into(),
+        slug: "my-feature".into(),
+    };
+
+    // 1. Explicit worktree + worktree root cwd: cwd_relative MUST be None (never .orca-worktrees/wt-...)
+    let slug = infer_worktree_slug(Some(&explicit_wt), Some(wt_cwd));
+    assert_eq!(slug.as_deref(), Some("my-feature"));
+    let (ws, wt_ident, cwd_rel) = resolve_paired_spawn_target(
+        "remote-ws",
+        repo_root,
+        Some(wt_cwd),
+        slug.as_deref(),
+    );
+    assert_eq!(ws, "remote-ws");
+    assert_eq!(wt_ident.as_ref().map(|w| w.slug.as_str()), Some("my-feature"));
+    assert_eq!(cwd_rel, None, "cwd_relative must be None when cwd points to worktree root");
+
+    // 2. Explicit worktree + subdirectory cwd: cwd_relative is relative to the worktree root
+    let (ws, wt_ident, cwd_rel) = resolve_paired_spawn_target(
+        "remote-ws",
+        repo_root,
+        Some(sub_cwd),
+        slug.as_deref(),
+    );
+    assert_eq!(ws, "remote-ws");
+    assert_eq!(wt_ident.as_ref().map(|w| w.slug.as_str()), Some("my-feature"));
+    assert_eq!(cwd_rel.as_deref(), Some("src/lib"));
+
+    // 3. Inferred slug from cwd path when request.worktree is None
+    let inferred = infer_worktree_slug(None, Some(wt_cwd));
+    assert_eq!(inferred.as_deref(), Some("my-feature"));
+    let (_ws, wt_ident, cwd_rel) = resolve_paired_spawn_target(
+        "remote-ws",
+        repo_root,
+        Some(wt_cwd),
+        inferred.as_deref(),
+    );
+    assert_eq!(wt_ident.as_ref().map(|w| w.slug.as_str()), Some("my-feature"));
+    assert_eq!(cwd_rel, None);
+
+    // 4. Effective repo root inference when stored repo root was empty
+    let empty_root = Path::new("");
+    let recovered = effective_paired_repo_root(empty_root, Some(wt_cwd));
+    assert_eq!(recovered, Path::new("/srv/repo"));
+
+    // 5. Effective repo root recovery when stored repo root was corrupted with worktree path
+    let corrupted_root = Path::new("/srv/repo/.orca-worktrees/wt-old-worktree");
+    let recovered_corr = effective_paired_repo_root(corrupted_root, Some(wt_cwd));
+    assert_eq!(recovered_corr, Path::new("/srv/repo"));
+
+    // 6. Windows backslash path support
+    let win_cwd = Path::new(r"C:\Users\repo\.orca-worktrees\wt-win-feature\sub");
+    let win_root = Path::new(r"C:\Users\repo");
+    let win_slug = infer_worktree_slug(None, Some(win_cwd));
+    assert_eq!(win_slug.as_deref(), Some("win-feature"));
+    let (ws, wt_ident, cwd_rel) = resolve_paired_spawn_target(
+        "remote-ws",
+        win_root,
+        Some(win_cwd),
+        win_slug.as_deref(),
+    );
+    assert_eq!(ws, "remote-ws");
+    assert_eq!(wt_ident.as_ref().map(|w| w.slug.as_str()), Some("win-feature"));
+    assert_eq!(cwd_rel.as_deref(), Some("sub"));
+}

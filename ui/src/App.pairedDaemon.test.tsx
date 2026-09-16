@@ -11,9 +11,13 @@ vi.mock("./lib/pairedWorktreeActions", async (importOriginal) => ({
   ...await importOriginal<typeof import("./lib/pairedWorktreeActions")>(),
   createPairedWorktreeActions: deletion.createPairedWorktreeActions,
 }));
-vi.mock("./components/Sidebar", () => ({ Sidebar: ({ onDeleteWorktree }: {
+vi.mock("./components/Sidebar", () => ({ Sidebar: ({ onDeleteWorktree, onSelectWorktree }: {
   onDeleteWorktree: (row: import("./lib/types").Worktree) => void;
-}) => <button onClick={() => onDeleteWorktree(pairedWorktree)}>Delete paired fixture</button> }));
+  onSelectWorktree?: (row: import("./lib/types").Worktree) => void;
+}) => <div>
+  <button onClick={() => onDeleteWorktree(pairedWorktree)}>Delete paired fixture</button>
+  {onSelectWorktree ? <button onClick={() => onSelectWorktree(pairedWorktree)}>Select paired worktree</button> : null}
+</div> }));
 
 const native = vi.hoisted(() => ({
   registerProject: vi.fn(), registerRemoteProject: vi.fn(), listWorktrees: vi.fn(),
@@ -186,5 +190,71 @@ describe("App paired desktop shell", () => {
       fireEvent.keyDown(window, { key: "t", code: "KeyT", metaKey: isMacShortcutPlatform(), ctrlKey: !isMacShortcutPlatform() });
     });
     expect(native.spawnTerminal).toHaveBeenCalledTimes(4);
+  });
+
+  it("selects a worktree on a paired machine and requests terminal spawn with worktree path and identity", async () => {
+    remoteHostStore.setState(s => ({
+      ...s,
+      nativeStatus: "ready",
+      machineFeaturesEnabled: true,
+      hosts: {
+        "host-a": {
+          hostId: "host-a",
+          name: "Host A",
+          address: "127.0.0.1",
+          transport: "relay",
+          online: true,
+          authStatus: "paired",
+          grantScope: "machine",
+          generation: "1",
+          machineId: "m-1",
+        },
+      },
+    }));
+    seed([paired], paired.workspaceId);
+    await mount();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Select paired worktree" }));
+    });
+    expect(native.spawnTerminal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceId: paired.workspaceId,
+        worktree: { wsId: "remote-project", slug: "feature" },
+        cwd: pairedWorktree.path,
+      }),
+    );
+  });
+
+  it("switches to paired project and preserves pending worktree when selected from another project", async () => {
+    remoteHostStore.setState(s => ({
+      ...s,
+      nativeStatus: "ready",
+      machineFeaturesEnabled: true,
+      hosts: {
+        "host-a": {
+          hostId: "host-a",
+          name: "Host A",
+          address: "127.0.0.1",
+          transport: "relay",
+          online: true,
+          authStatus: "paired",
+          grantScope: "machine",
+          generation: "1",
+          machineId: "m-1",
+        },
+      },
+    }));
+    seed([{ workspaceId: "local", repoRoot: "/local", gitRoot: null }, paired], "local");
+    await mount();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Select paired worktree" }));
+    });
+    expect(native.spawnTerminal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceId: paired.workspaceId,
+        worktree: { wsId: "remote-project", slug: "feature" },
+        cwd: pairedWorktree.path,
+      }),
+    );
   });
 });

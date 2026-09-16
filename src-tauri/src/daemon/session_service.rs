@@ -1010,7 +1010,25 @@ impl DaemonSessionService {
                         let pid = parent.pid().ok_or("SESSION_EXPIRED".to_string())?;
                         Some(crate::ipc::terminal::process_cwd(pid).ok_or("CWD_UNAVAILABLE".to_string())?.to_str().ok_or("INVALID_PATH".to_string())?.to_owned())
                     } else {
-                        machine.request.cwd_relative.as_ref().map(|relative| default_cwd.join(relative).to_string_lossy().into_owned())
+                        machine.request.cwd_relative.as_ref().map(|relative| {
+                            let rel_norm = relative.replace('\\', "/");
+                            if let Some(ref w) = spawn_worktree {
+                                let expected_wt_rel = format!(".orca-worktrees/wt-{}", w.slug);
+                                if rel_norm == expected_wt_rel {
+                                    default_cwd.to_string_lossy().into_owned()
+                                } else if let Some(sub) = rel_norm.strip_prefix(&format!("{}/", expected_wt_rel)) {
+                                    default_cwd.join(sub).to_string_lossy().into_owned()
+                                } else if default_cwd.to_string_lossy().replace('\\', "/").ends_with(&rel_norm) {
+                                    default_cwd.to_string_lossy().into_owned()
+                                } else {
+                                    default_cwd.join(relative).to_string_lossy().into_owned()
+                                }
+                            } else if default_cwd.to_string_lossy().replace('\\', "/").ends_with(&rel_norm) {
+                                default_cwd.to_string_lossy().into_owned()
+                            } else {
+                                default_cwd.join(relative).to_string_lossy().into_owned()
+                            }
+                        })
                     }
                 } else { cwd };
                 let resume_cwd = if machine.is_some() {

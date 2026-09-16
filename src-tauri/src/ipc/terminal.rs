@@ -570,6 +570,126 @@ fn emit_terminal_exit<R: Runtime>(app: &AppHandle<R>, session_id: &str, exit_cod
     );
 }
 
+pub(crate) fn effective_paired_repo_root(
+    repo_root: &std::path::Path,
+    target_cwd: Option<&std::path::Path>,
+) -> std::path::PathBuf {
+    let repo_root_str = repo_root.to_string_lossy();
+    if !repo_root.as_os_str().is_empty() && !repo_root_str.contains(".orca-worktrees") {
+        repo_root.to_path_buf()
+    } else if let Some(cwd) = target_cwd {
+        let s = cwd.to_string_lossy();
+        if let Some(idx) = s.find("/.orca-worktrees") {
+            std::path::PathBuf::from(&s[..idx])
+        } else if let Some(idx) = s.find("\\.orca-worktrees") {
+            std::path::PathBuf::from(&s[..idx])
+        } else {
+            repo_root.to_path_buf()
+        }
+    } else {
+        repo_root.to_path_buf()
+    }
+}
+
+pub(crate) fn infer_worktree_slug(
+    request_worktree: Option<&WorktreeIdentity>,
+    target_cwd: Option<&std::path::Path>,
+) -> Option<String> {
+    request_worktree
+        .map(|w| w.slug.clone())
+        .or_else(|| {
+            target_cwd.and_then(|cwd| {
+                let s = cwd.to_string_lossy();
+                let marker_unix = ".orca-worktrees/wt-";
+                let marker_win = ".orca-worktrees\\wt-";
+                let start_idx = s
+                    .find(marker_unix)
+                    .map(|i| i + marker_unix.len())
+                    .or_else(|| s.find(marker_win).map(|i| i + marker_win.len()))?;
+                let rem = &s[start_idx..];
+                let end_idx = rem.find(['/', '\\']).unwrap_or(rem.len());
+                let slug = &rem[..end_idx];
+                if !slug.is_empty() {
+                    Some(slug.to_string())
+                } else {
+                    None
+                }
+            })
+        })
+}
+
+pub(crate) fn resolve_paired_spawn_target(
+    remote_workspace_id: &str,
+    effective_repo_root: &std::path::Path,
+    target_cwd: Option<&std::path::Path>,
+    worktree_slug: Option<&str>,
+) -> (
+    String,
+    Option<crate::remote::machine_protocol::WorktreeIdentity>,
+    Option<String>,
+) {
+    if let Some(slug) = worktree_slug {
+        let worktree_ident = crate::remote::machine_protocol::WorktreeIdentity {
+            ws_id: remote_workspace_id.to_string(),
+            slug: slug.to_string(),
+        };
+        // When worktree identity is provided, the remote daemon resolves default_cwd
+        // to the worktree root itself. cwd_relative must only carry subdirectories
+        // relative to the worktree root, NOT relative to repo_root.
+        let sub_rel = if let Some(cwd_path) = target_cwd {
+            let cwd_norm = cwd_path.to_string_lossy().replace('\\', "/");
+            let repo_norm = effective_repo_root.to_string_lossy().replace('\\', "/");
+            let expected_wt_rel = format!(".orca-worktrees/wt-{}", slug);
+
+            if !repo_norm.is_empty() && cwd_norm.starts_with(&repo_norm) {
+                let rel = cwd_norm[repo_norm.len()..].trim_start_matches('/');
+                if rel == expected_wt_rel {
+                    None
+                } else if let Some(sub) = rel.strip_prefix(&format!("{}/", expected_wt_rel)) {
+                    if !sub.is_empty() {
+                        Some(sub.to_string())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else if cwd_norm.ends_with(&expected_wt_rel) {
+                None
+            } else if let Some(idx) = cwd_norm.find(&format!("{}/", expected_wt_rel)) {
+                let sub = &cwd_norm[idx + expected_wt_rel.len() + 1..];
+                if !sub.is_empty() {
+                    Some(sub.to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        (remote_workspace_id.to_string(), Some(worktree_ident), sub_rel)
+    } else if let Some(cwd_path) = target_cwd {
+        let cwd_norm = cwd_path.to_string_lossy().replace('\\', "/");
+        let repo_norm = effective_repo_root.to_string_lossy().replace('\\', "/");
+        if !repo_norm.is_empty() && cwd_norm == repo_norm {
+            (remote_workspace_id.to_string(), None, None)
+        } else if !repo_norm.is_empty() && cwd_norm.starts_with(&repo_norm) {
+            let rel = cwd_norm[repo_norm.len()..].trim_start_matches('/');
+            if !rel.is_empty() && !rel.contains("..") {
+                (remote_workspace_id.to_string(), None, Some(rel.to_string()))
+            } else {
+                (remote_workspace_id.to_string(), None, None)
+            }
+        } else {
+            (remote_workspace_id.to_string(), None, None)
+        }
+    } else {
+        (remote_workspace_id.to_string(), None, None)
+    }
+}
+
 #[tauri::command]
 pub async fn cmd_terminal_spawn<R: Runtime>(
     app: AppHandle<R>,
@@ -672,7 +792,21 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         let target_cwd = request.cwd.as_deref();
-        let (target_workspace_id, cwd_relative): (String, Option<String>) = if let Some(cwd_path) = target_cwd {
+        let effective_repo_root = effective_paired_repo_root(&repo_root, target_cwd);
+        let worktree_slug = infer_worktree_slug(request.worktree.as_ref(), target_cwd);
+
+        let (target_workspace_id, create_worktree, cwd_relative): (
+            String,
+            Option<crate::remote::machine_protocol::WorktreeIdentity>,
+            Option<String>,
+        ) = if worktree_slug.is_some() {
+            resolve_paired_spawn_target(
+                &remote_workspace_id,
+                &effective_repo_root,
+                target_cwd,
+                worktree_slug.as_deref(),
+            )
+        } else if let Some(cwd_path) = target_cwd {
             let cwd_str = cwd_path.to_string_lossy();
             let is_absolute = cwd_path.is_absolute()
                 || cwd_str.starts_with('/')
@@ -681,19 +815,19 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                     && cwd_str.as_bytes()[1] == b':'
                     && matches!(cwd_str.as_bytes()[2], b'/' | b'\\'));
 
-            if !repo_root.as_os_str().is_empty() && cwd_path == repo_root {
-                (remote_workspace_id.clone(), None)
-            } else if !repo_root.as_os_str().is_empty() && cwd_path.starts_with(&repo_root) {
-                if let Ok(rel) = cwd_path.strip_prefix(&repo_root) {
+            if !effective_repo_root.as_os_str().is_empty() && cwd_path == effective_repo_root {
+                (remote_workspace_id.clone(), None, None)
+            } else if !effective_repo_root.as_os_str().is_empty() && cwd_path.starts_with(&effective_repo_root) {
+                if let Ok(rel) = cwd_path.strip_prefix(&effective_repo_root) {
                     if rel.components().all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir))
                         && !rel.as_os_str().is_empty()
                     {
-                        (remote_workspace_id.clone(), Some(rel.to_string_lossy().to_string()))
+                        (remote_workspace_id.clone(), None, Some(rel.to_string_lossy().to_string()))
                     } else {
-                        (remote_workspace_id.clone(), None)
+                        (remote_workspace_id.clone(), None, None)
                     }
                 } else {
-                    (remote_workspace_id.clone(), None)
+                    (remote_workspace_id.clone(), None, None)
                 }
             } else if is_absolute {
                 static REGISTERED_WORKTREES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
@@ -709,7 +843,7 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                         remote_ws = %cached_id,
                         "Using cached worktree workspace on paired host"
                     );
-                    (cached_id, None)
+                    (cached_id, None, None)
                 } else {
                     // External worktree or path outside repo_root:
                     // Register the worktree path on the paired machine so it can serve as a workspace target.
@@ -738,7 +872,7 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                                 "Registered worktree workspace on paired host"
                             );
                             cache_mutex.lock().unwrap().insert(cwd_str.to_string(), data.remote_workspace_id.clone());
-                            (data.remote_workspace_id, None)
+                            (data.remote_workspace_id, None, None)
                         }
                         Ok(other) => {
                             tracing::warn!(
@@ -746,7 +880,7 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                                 response = ?other,
                                 "Remote machine rejected registration for worktree path, falling back to base remote workspace"
                             );
-                            (remote_workspace_id.clone(), None)
+                            (remote_workspace_id.clone(), None, None)
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -754,14 +888,14 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                                 error = %e.code,
                                 "Failed to register remote worktree path, falling back to base remote workspace"
                             );
-                            (remote_workspace_id.clone(), None)
+                            (remote_workspace_id.clone(), None, None)
                         }
                     }
                 }
             } else if cwd_path.components().all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir))
                 && !cwd_path.as_os_str().is_empty()
             {
-                (remote_workspace_id.clone(), Some(cwd_str.to_string()))
+                (remote_workspace_id.clone(), None, Some(cwd_str.to_string()))
             } else {
                 return Err(IpcError::new(
                     crate::ipc::error::IpcErrorCode::InvalidPath,
@@ -772,18 +906,7 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                 ));
             }
         } else {
-            (remote_workspace_id.clone(), None)
-        };
-
-        let create_worktree = if target_workspace_id == remote_workspace_id {
-            request.worktree.as_ref().map(|w| {
-                crate::remote::machine_protocol::WorktreeIdentity {
-                    ws_id: target_workspace_id.clone(),
-                    slug: w.slug.clone(),
-                }
-            })
-        } else {
-            None
+            (remote_workspace_id.clone(), None, None)
         };
 
         let resolved_inherit = match &request.inherit_from_session_id {
@@ -865,10 +988,38 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
         };
 
         let (proxy_session_id, _gen) = match daemon_client
-            .paired_terminal_reattach(descriptor)
+            .paired_terminal_reattach(descriptor.clone())
             .await
         {
             Ok(result) => result,
+            Err(e) if matches!(e.code.as_str(), "TIMEOUT" | "HOST_UNAVAILABLE" | "PAIRED_PROXY_UNAVAILABLE") => {
+                tracing::warn!(
+                    error = %e.code,
+                    "Retrying paired terminal reattach once after transient error"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                match daemon_client.paired_terminal_reattach(descriptor).await {
+                    Ok(result) => result,
+                    Err(reattach_error) => {
+                        let _ = daemon_client
+                            .paired_host_operation(crate::paired_host::client::OperationRequest {
+                                host_id: host_id.clone(),
+                                generation: host.generation,
+                                operation:
+                                    crate::paired_host::client::Operation::CloseSession {
+                                        session_id: remote_session.target.session_id.clone(),
+                                        request:
+                                            crate::remote::machine_protocol::CloseSessionRequest {
+                                                request_id: uuid::Uuid::new_v4().to_string(),
+                                                daemon_epoch: remote_session.target.daemon_epoch.clone(),
+                                            },
+                                    },
+                            })
+                            .await;
+                        return Err(IpcError::internal(reattach_error.code));
+                    }
+                }
+            }
             Err(reattach_error) => {
                 // The remote PTY was already created above; a failed reattach must
                 // not leak an idle shell on the paired machine.
@@ -894,10 +1045,22 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
         // Durably store project info for future sessions
         {
             let dir = data_dir.clone();
+            let stored_repo_root = if !effective_repo_root.as_os_str().is_empty() {
+                effective_repo_root.to_string_lossy().to_string()
+            } else {
+                let s = &remote_session.cwd;
+                if let Some(idx) = s.find("/.orca-worktrees") {
+                    s[..idx].to_string()
+                } else if let Some(idx) = s.find("\\.orca-worktrees") {
+                    s[..idx].to_string()
+                } else {
+                    s.clone()
+                }
+            };
             let p = crate::paired_host::projects::Project {
                 metadata: crate::remote::machine_protocol::Project {
                     workspace_id: request.workspace_id.clone(),
-                    repo_root: remote_session.cwd.clone(),
+                    repo_root: stored_repo_root,
                     git_root: None,
                     git_common_dir: None,
                     git_remote: None,
