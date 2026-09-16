@@ -145,6 +145,7 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
             | DaemonRequest::ResetAgentState { .. }
             | DaemonRequest::LoadSession
             | DaemonRequest::RemoteSetActiveSelection { .. }
+            | DaemonRequest::PairedTerminalDescriptor { .. }
             | DaemonRequest::UpgradeBinary { .. }
     )
 }
@@ -185,6 +186,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::PairedHostList => "pairedHostList",
         DaemonRequest::PairedTerminalReattach { .. } => "pairedTerminalReattach",
         DaemonRequest::PairedTerminalDetach { .. } => "pairedTerminalDetach",
+        DaemonRequest::PairedTerminalDescriptor { .. } => "pairedTerminalDescriptor",
         DaemonRequest::PairedHostOperation { .. } => "pairedHostOperation",
         DaemonRequest::PairedHostRead { .. } => "pairedHostRead",
         DaemonRequest::PairedHostPair { .. } => "pairedHostPair",
@@ -351,12 +353,14 @@ pub fn should_request_upgrade(
 }
 
 pub(crate) fn parse_attach_error_response(message: String, session_id: &str) -> IpcError {
-    let prefix = "Session '";
-    let suffix = "' not found";
-    let is_session_not_found = message
-        .strip_prefix(prefix)
-        .and_then(|m| m.strip_suffix(suffix))
-        .is_some_and(|id| id == session_id);
+    let is_session_not_found = (message
+        .strip_prefix("Session '")
+        .and_then(|m| m.strip_suffix("' not found"))
+        .is_some_and(|id| id == session_id))
+        || (message
+            .strip_prefix("PTY session '")
+            .and_then(|m| m.strip_suffix("' not found"))
+            .is_some_and(|id| id == session_id));
 
     if is_session_not_found {
         IpcError::new(
@@ -459,6 +463,12 @@ impl DaemonClient {
         match self.paired_host_request(DaemonRequest::PairedTerminalDetach { session_id }).await? {
             DaemonResponse::CloseOk => Ok(()),
             _ => Err(crate::paired_host::service::ServiceError::unavailable()),
+        }
+    }
+    pub async fn paired_terminal_descriptor(&self, session_id: String) -> Result<Option<crate::terminal::paired_daemon::Descriptor>, crate::paired_host::client::ClientError> {
+        match self.paired_host_request(DaemonRequest::PairedTerminalDescriptor { session_id }).await.map_err(|e| crate::paired_host::client::ClientError::local(&e.code))? {
+            DaemonResponse::PairedTerminalDescriptorOk { descriptor } => Ok(descriptor),
+            _ => Ok(None),
         }
     }
     pub async fn paired_host_list(&self) -> crate::paired_host::service::Result<Vec<crate::paired_host::inventory::HostView>> {
@@ -2648,6 +2658,14 @@ mod tests {
         assert_eq!(details.get("source").and_then(|v| v.as_str()), Some("daemon_attach"));
         assert_eq!(details.get("kind").and_then(|v| v.as_str()), Some("session_not_found"));
         assert_eq!(details.get("sessionId").and_then(|v| v.as_str()), Some("test-id"));
+
+        let pty_err = parse_attach_error_response("PTY session 'test-id' not found".to_string(), "test-id");
+        assert_eq!(pty_err.code, IpcErrorCode::SessionNotFound);
+        assert_eq!(pty_err.message, "PTY session 'test-id' not found");
+        let pty_details = pty_err.details.expect("expected details");
+        assert_eq!(pty_details.get("source").and_then(|v| v.as_str()), Some("daemon_attach"));
+        assert_eq!(pty_details.get("kind").and_then(|v| v.as_str()), Some("session_not_found"));
+        assert_eq!(pty_details.get("sessionId").and_then(|v| v.as_str()), Some("test-id"));
     }
 
     #[test]

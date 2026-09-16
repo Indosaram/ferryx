@@ -283,7 +283,13 @@ impl TerminalService {
 
     pub async fn close_session(&self, session_id: &str) -> Result<(), PtyError> {
         if super::paired_runtime::Runtime::owns(session_id) {
-            return Err(PtyError::Other("Use paired CloseSession with a mutation request ID; detach does not close the remote PTY".into()));
+            self.paired
+                .detach(session_id)
+                .await
+                .map_err(PtyError::Other)?;
+            self.output_hub.remove_session(session_id);
+            self.lifecycle.lock().remove(session_id);
+            return Ok(());
         }
         if self.remote.contains(session_id) {
             return self

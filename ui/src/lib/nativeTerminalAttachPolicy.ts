@@ -73,7 +73,8 @@ export function classifyNativeTerminalAttachError(
       }
 
       const legacyExpectedMessage = `Session '${requestedSessionId}' not found`;
-      if (message === legacyExpectedMessage) {
+      const ptyExpectedMessage = `PTY session '${requestedSessionId}' not found`;
+      if (message === legacyExpectedMessage || message === ptyExpectedMessage) {
         return {
           status: "confirmed-missing",
           sessionId: requestedSessionId,
@@ -96,7 +97,8 @@ export function classifyNativeTerminalAttachError(
       }
 
       const legacyExpectedMessage = `Session '${requestedSessionId}' not found`;
-      if (message === legacyExpectedMessage) {
+      const ptyExpectedMessage = `PTY session '${requestedSessionId}' not found`;
+      if (message === legacyExpectedMessage || message === ptyExpectedMessage) {
         return {
           status: "confirmed-missing",
           sessionId: requestedSessionId,

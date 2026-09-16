@@ -98,7 +98,7 @@ import {
 import { safeRandomUUID } from "./lib/uuid";
 import { getCachedSshHosts } from "./lib/sshHosts";
 import { reconnectAgentSession } from "./lib/agentReconnect";
-import { isRemoteWorkspaceId, registerRemoteProject, toRegisteredProject } from "./lib/remoteProject";
+import { isPairedWorkspaceId, isRemoteWorkspaceId, registerRemoteProject, toRegisteredProject } from "./lib/remoteProject";
 import { hasValidProjectTarget, projectRootWorktree } from "./lib/projectIdentity";
 import { groupProjects } from "./lib/projectGrouping";
 import { scheduleAgentAutoResume } from "./lib/agentAutoResume";
@@ -2799,7 +2799,21 @@ function WorkspaceApp({
               reportRuntimeError(error);
               throw error;
             })}
-            onBackendSessionUnavailable={markBackendSessionUnavailable}
+            onBackendSessionUnavailable={(sessionId, backendSessionId, reason, bindingKey) => {
+              markBackendSessionUnavailable(sessionId, backendSessionId, reason, bindingKey);
+              const session = stateRef.current.sessions[sessionId];
+              if (
+                session &&
+                isPairedWorkspaceId(session.workspaceId) &&
+                !session.agentType &&
+                !session.providerSession
+              ) {
+                setPendingBackendRecovery({
+                  workspaceId: activeProjectRef.current.workspaceId,
+                  sessionIds: [sessionId],
+                });
+              }
+            }}
             leadingSpacer={isSidebarOpen ? 0 : isMacShortcutPlatform() ? 108 : 36}
           />
         ) : (

@@ -241,6 +241,8 @@ pub enum DaemonRequest {
     PairedHostList,
     PairedTerminalReattach { descriptor: crate::terminal::paired_daemon::Descriptor },
     PairedTerminalDetach { session_id: String },
+    #[serde(rename_all = "camelCase")]
+    PairedTerminalDescriptor { session_id: String },
     PairedHostOperation { request: crate::paired_host::client::OperationRequest },
     PairedHostRead { request: crate::paired_host::inventory::MigrationReceipt },
     PairedHostPair { request: crate::paired_host::service::PairRequest },
@@ -293,6 +295,8 @@ pub enum DaemonRequest {
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum DaemonResponse {
     PairedTerminalReattachOk { session_id: String, generation: crate::scoped_contracts::Epoch },
+    #[serde(rename_all = "camelCase")]
+    PairedTerminalDescriptorOk { descriptor: Option<crate::terminal::paired_daemon::Descriptor> },
     PairedHostOperationOk { response: crate::paired_host::client::OperationResponse },
     PairedHostOperationError { error: crate::paired_host::client::ClientError },
     PairedHostListOk { hosts: Vec<crate::paired_host::inventory::HostView> },

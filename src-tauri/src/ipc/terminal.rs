@@ -623,23 +623,28 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
             .app_data_dir()
             .map_err(|e| IpcError::internal(e.to_string()))?;
 
-        let (host_id, remote_workspace_id): (String, String) = match &request.startup {
+        let dir = data_dir.clone();
+        let ws_id = request.workspace_id.clone();
+        let stored_project = run_blocking(move || {
+            Ok::<_, IpcError>(crate::paired_host::projects::resolve_stored_project(&dir, &ws_id))
+        })
+        .await?;
+
+        let (host_id, remote_workspace_id, repo_root): (String, String, std::path::PathBuf) = match &request.startup {
             Some(TerminalStartup::PairedDaemon { host_id, remote_workspace_id }) => {
-                (host_id.clone(), remote_workspace_id.clone())
+                let repo_root = stored_project
+                    .as_ref()
+                    .map(|p| std::path::PathBuf::from(&p.metadata.repo_root))
+                    .unwrap_or_default();
+                (host_id.clone(), remote_workspace_id.clone(), repo_root)
             }
             _ => {
-                let dir = data_dir.clone();
-                let ws_id = request.workspace_id.clone();
-                let resolved = run_blocking(move || {
-                    Ok::<_, IpcError>(crate::paired_host::projects::resolve_stored_project(&dir, &ws_id))
-                })
-                .await?;
-                match resolved {
+                match stored_project {
                     Some(stored) => match stored.target {
                         crate::scoped_contracts::RunTarget::PairedDaemon { host_id } => {
-                            (host_id, stored.remote_workspace_id)
+                            (host_id, stored.remote_workspace_id, std::path::PathBuf::from(stored.metadata.repo_root))
                         }
-                        _ => (stored.remote_workspace_id.clone(), stored.remote_workspace_id),
+                        _ => (stored.remote_workspace_id.clone(), stored.remote_workspace_id, std::path::PathBuf::from(stored.metadata.repo_root)),
                     },
                     None => {
                         return Err(IpcError::new(
@@ -666,49 +671,165 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-        let cwd_relative = match &request.cwd {
-            Some(p) => {
-                let path = std::path::Path::new(p);
-                if path.is_relative()
-                    && !p.to_string_lossy().is_empty()
-                    && path.components().all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir))
-                {
-                    Some(p.to_string_lossy().to_string())
+        let target_cwd = request.cwd.as_deref();
+        let (target_workspace_id, cwd_relative): (String, Option<String>) = if let Some(cwd_path) = target_cwd {
+            let cwd_str = cwd_path.to_string_lossy();
+            let is_absolute = cwd_path.is_absolute()
+                || cwd_str.starts_with('/')
+                || cwd_str.starts_with("\\\\")
+                || (cwd_str.len() >= 3
+                    && cwd_str.as_bytes()[1] == b':'
+                    && matches!(cwd_str.as_bytes()[2], b'/' | b'\\'));
+
+            if !repo_root.as_os_str().is_empty() && cwd_path == repo_root {
+                (remote_workspace_id.clone(), None)
+            } else if !repo_root.as_os_str().is_empty() && cwd_path.starts_with(&repo_root) {
+                if let Ok(rel) = cwd_path.strip_prefix(&repo_root) {
+                    if rel.components().all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir))
+                        && !rel.as_os_str().is_empty()
+                    {
+                        (remote_workspace_id.clone(), Some(rel.to_string_lossy().to_string()))
+                    } else {
+                        (remote_workspace_id.clone(), None)
+                    }
                 } else {
-                    None
+                    (remote_workspace_id.clone(), None)
                 }
+            } else if is_absolute {
+                // External worktree or path outside repo_root:
+                // Register the worktree path on the paired machine so it can serve as a workspace target.
+                let reg_op = crate::paired_host::client::Operation::RegisterProject {
+                    request: crate::remote::machine_protocol::RegisterRequest {
+                        request_id: uuid::Uuid::new_v4().to_string(),
+                        repo_path: cwd_str.to_string(),
+                    },
+                };
+                match daemon_client
+                    .paired_host_operation(crate::paired_host::client::OperationRequest {
+                        host_id: host_id.clone(),
+                        generation: host.generation,
+                        operation: reg_op,
+                    })
+                    .await
+                {
+                    Ok(crate::paired_host::client::OperationResponse {
+                        result:
+                            crate::paired_host::client::OperationResult::RegisterProject(data),
+                        ..
+                    }) => {
+                        tracing::info!(
+                            path = %cwd_path.display(),
+                            remote_ws = %data.remote_workspace_id,
+                            "Registered worktree workspace on paired host"
+                        );
+                        (data.remote_workspace_id, None)
+                    }
+                    Ok(other) => {
+                        return Err(IpcError::internal(format!(
+                            "Remote machine rejected registration for worktree path '{}': {:?}",
+                            cwd_path.display(),
+                            other
+                        )));
+                    }
+                    Err(e) => {
+                        return Err(IpcError::internal(format!(
+                            "Failed to register remote worktree path '{}': {}",
+                            cwd_path.display(),
+                            e.code
+                        )));
+                    }
+                }
+            } else if cwd_path.components().all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir))
+                && !cwd_path.as_os_str().is_empty()
+            {
+                (remote_workspace_id.clone(), Some(cwd_str.to_string()))
+            } else {
+                return Err(IpcError::new(
+                    crate::ipc::error::IpcErrorCode::InvalidPath,
+                    format!(
+                        "Cannot resolve target working directory '{}' on paired workspace",
+                        cwd_path.display()
+                    ),
+                ));
             }
-            None => None,
+        } else {
+            (remote_workspace_id.clone(), None)
         };
 
-        let create_worktree = request.worktree.as_ref().map(|w| {
-            crate::remote::machine_protocol::WorktreeIdentity {
-                ws_id: remote_workspace_id.clone(),
-                slug: w.slug.clone(),
+        let create_worktree = if target_workspace_id == remote_workspace_id {
+            request.worktree.as_ref().map(|w| {
+                crate::remote::machine_protocol::WorktreeIdentity {
+                    ws_id: target_workspace_id.clone(),
+                    slug: w.slug.clone(),
+                }
+            })
+        } else {
+            None
+        };
+
+        let resolved_inherit = match &request.inherit_from_session_id {
+            Some(id) if id.starts_with("daemon-session:") => {
+                match daemon_client.paired_terminal_descriptor(id.clone()).await {
+                    Ok(Some(d)) => Some(d.target.session_id),
+                    _ => None,
+                }
             }
-        });
+            other => other.clone(),
+        };
+
+        let initial_cwd_relative = if resolved_inherit.is_some() {
+            None
+        } else {
+            cwd_relative.clone()
+        };
 
         let create_request = crate::remote::machine_protocol::CreateSessionRequest {
             request_id: client_request_id.clone(),
-            workspace_id: remote_workspace_id.clone(),
-            worktree: create_worktree,
+            workspace_id: target_workspace_id.clone(),
+            worktree: create_worktree.clone(),
             cols,
             rows,
-            inherit_from_session_id: request.inherit_from_session_id.clone(),
-            cwd_relative,
+            inherit_from_session_id: resolved_inherit.clone(),
+            cwd_relative: initial_cwd_relative,
             startup: crate::remote::machine_protocol::Startup::Shell,
         };
 
-        let op_resp = daemon_client
+        let mut op_resp = daemon_client
             .paired_host_operation(crate::paired_host::client::OperationRequest {
                 host_id: host_id.clone(),
                 generation: host.generation,
                 operation: crate::paired_host::client::Operation::CreateSession {
-                    request: create_request,
+                    request: create_request.clone(),
                 },
             })
-            .await
-            .map_err(|e| IpcError::internal(e.code))?;
+            .await;
+
+        if let Err(ref e) = op_resp {
+            if resolved_inherit.is_some() && matches!(e.code.as_str(), "SESSION_NOT_FOUND" | "PARENT_SESSION_MISMATCH" | "SESSION_EXPIRED") {
+                tracing::warn!(
+                    parent_sid = ?resolved_inherit,
+                    error = %e.code,
+                    "Retrying paired session spawn without parent session inheritance"
+                );
+                let fallback_request = crate::remote::machine_protocol::CreateSessionRequest {
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                    inherit_from_session_id: None,
+                    cwd_relative: cwd_relative.clone(),
+                    ..create_request
+                };
+                op_resp = daemon_client
+                    .paired_host_operation(crate::paired_host::client::OperationRequest {
+                        host_id: host_id.clone(),
+                        generation: host.generation,
+                        operation: crate::paired_host::client::Operation::CreateSession {
+                            request: fallback_request,
+                        },
+                    })
+                    .await;
+            }
+        }
+
+        let op_resp = op_resp.map_err(|e| IpcError::internal(e.code))?;
 
         let remote_session = match op_resp.result {
             crate::paired_host::client::OperationResult::CreateSession(session) => session,

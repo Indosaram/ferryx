@@ -1100,7 +1100,7 @@ describe("worktree tab and session isolation", () => {
     expect(services.spawnTerminal).not.toHaveBeenCalled();
   });
 
-  it("keeps active worktree tab visible without zero-tab flicker while unpopulated worktree spawn is pending", async () => {
+  it("immediately updates activeWorktreePath when ensureTabForWorktree switches to an unpopulated worktree while spawn is pending", async () => {
     let resolveDeferredSpawnB: (backendId: string) => void = () => {
       throw new Error("resolveDeferredSpawnB not initialized");
     };
@@ -1139,11 +1139,10 @@ describe("worktree tab and session isolation", () => {
     });
     if (!switchPromise) throw new Error("switchPromise was not created");
 
-    // While spawn is in-flight, A's tab and layout must remain visible and non-empty (no zero-tab intermediate frame)
-    expect(result.current.state.activeWorktreePath).toBe(worktree.path);
-    expect(result.current.state.layout.tabs).not.toHaveLength(0);
-    expect(result.current.state.layout.tabs.map((t) => t.id)).toEqual([tabA]);
-    expect(result.current.state.layout.activeTabId).toBe(tabA);
+    // While spawn is in-flight, activeWorktreePath is immediately updated to featureWorktree
+    // and outgoing worktree A's tabs are parked
+    expect(result.current.state.activeWorktreePath).toBe(featureWorktree.path);
+    expect(result.current.state.worktreeLayouts?.[worktree.path]?.tabs.map((t) => t.id)).toEqual([tabA]);
 
     // Resolve B's spawn
     let tabBId: string | null = null;
@@ -1158,6 +1157,56 @@ describe("worktree tab and session isolation", () => {
     expect(result.current.state.layout.tabs.map((t) => t.id)).toEqual([tabBId]);
     expect(result.current.state.layout.activeTabId).toBe(tabBId);
     expect(services.spawnTerminal).toHaveBeenCalledTimes(2);
+  });
+
+  it("dispatches SELECT_WORKTREE and adds worktree to worktrees list immediately when ensureTabForWorktree called for new worktree", async () => {
+    let resolveDeferredSpawn: (backendId: string) => void = () => {
+      throw new Error("resolveDeferredSpawn not initialized");
+    };
+    const deferredSpawnPromise = new Promise<string>((resolve) => {
+      resolveDeferredSpawn = resolve;
+    });
+
+    const newWorktree: Worktree = {
+      ...worktree,
+      path: "/repo/extra",
+      branch: "refs/heads/orca/ws-main/extra",
+    };
+
+    const { services } = createServices();
+    vi.mocked(services.spawnTerminal).mockImplementation(async (request) => {
+      if (request.cwd === newWorktree.path) {
+        return deferredSpawnPromise;
+      }
+      return "backend-1";
+    });
+
+    const { result } = renderHook(() =>
+      useWorkspaceStore({ initialWorktrees: [worktree], services }),
+    );
+
+    expect(result.current.state.activeWorktreePath).toBe(worktree.path);
+    expect(result.current.state.worktrees.map((w) => w.path)).toEqual([worktree.path]);
+
+    let switchPromise: Promise<string | null> | null = null;
+    act(() => {
+      switchPromise = result.current.ensureTabForWorktree(newWorktree);
+    });
+    if (!switchPromise) throw new Error("switchPromise was not created");
+
+    // Immediately updates activeWorktreePath and ensures newWorktree in worktrees list before terminal spawn finishes
+    expect(result.current.state.activeWorktreePath).toBe(newWorktree.path);
+    expect(result.current.state.worktrees.map((w) => w.path)).toContain(newWorktree.path);
+
+    // Resolve spawn
+    let newTabId: string | null = null;
+    await act(async () => {
+      resolveDeferredSpawn("backend-extra-1");
+      newTabId = await switchPromise;
+    });
+
+    expect(result.current.state.activeWorktreePath).toBe(newWorktree.path);
+    expect(result.current.state.layout.tabs.map((t) => t.id)).toEqual([newTabId]);
   });
 
   it("maintains independent tabs and sessions per worktree when switching between worktrees", async () => {
@@ -1494,6 +1543,7 @@ describe("worktree tab and session isolation", () => {
         ...initialTerminalState.sessions["session-target"],
         backendSessionId: "backend-new-123",
         lifecycle: "running",
+        processState: "running",
         reconnectLifecycle: "idle",
         reconnectError: null,
         reconnectRequestId: null,

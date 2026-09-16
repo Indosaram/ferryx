@@ -16,6 +16,7 @@ struct Owner {
     sender: mpsc::Sender<Command>,
     task: tokio::task::JoinHandle<()>,
     identity: Arc<()>,
+    descriptor: super::paired_daemon::Descriptor,
     #[cfg(test)]
     completed: tokio::sync::watch::Receiver<bool>,
 }
@@ -48,8 +49,19 @@ impl Runtime {
     pub fn owns(id: &str) -> bool { id.starts_with("daemon-session:") }
     pub fn contains(&self, id: &str) -> bool { self.owners.lock().get(id).is_some_and(|o| !o.task.is_finished()) }
     pub fn list(&self) -> Vec<String> { self.owners.lock().iter().filter(|(_, o)| !o.task.is_finished()).map(|(id, _)| id.clone()).collect() }
+    pub fn descriptor(&self, id: &str) -> Option<super::paired_daemon::Descriptor> {
+        let owners = self.owners.lock();
+        owners.get(id).and_then(|o| {
+            if o.task.is_finished() {
+                None
+            } else {
+                Some(o.descriptor.clone())
+            }
+        })
+    }
     pub fn install(&self, proxy: Proxy) -> Result<String, String> {
         let id = proxy.id().to_owned();
+        let descriptor = proxy.descriptor().clone();
         let mut owners = self.owners.lock();
         if owners.get(&id).is_some_and(|o| !o.task.is_finished()) { return Err("CONTROL_CONFLICT".into()); }
         owners.remove(&id);
@@ -101,7 +113,7 @@ impl Runtime {
             }
         });
         owners.insert(id.clone(), Owner {
-            sender, task, identity,
+            sender, task, identity, descriptor,
             #[cfg(test)]
             completed,
         });

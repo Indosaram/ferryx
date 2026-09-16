@@ -2070,6 +2070,10 @@ impl DaemonServer {
                     Ok(()) => DaemonResponse::CloseOk,
                     Err(message) => DaemonResponse::Error { message },
                 },
+                Ok(DaemonRequest::PairedTerminalDescriptor { session_id }) => {
+                    let descriptor = self.terminal_service.paired().descriptor(&session_id);
+                    DaemonResponse::PairedTerminalDescriptorOk { descriptor }
+                }
                 Ok(DaemonRequest::PairedHostOperation { request }) => match crate::paired_host::client::MachineClient::new().execute(&self.paired_hosts, request).await {
                     Ok(response) => DaemonResponse::PairedHostOperationOk { response },
                     Err(error) => DaemonResponse::PairedHostOperationError { error },

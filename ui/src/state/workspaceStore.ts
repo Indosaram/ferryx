@@ -809,6 +809,13 @@ export function useWorkspaceStore({
         return openTab(worktree);
       }
 
+      const selectWorktreeImmediately = () => {
+        if (!stateRef.current.worktrees.some((candidate) => candidate.path === worktree.path)) {
+          dispatch({ type: "SET_WORKTREES", worktrees: [...stateRef.current.worktrees, worktree] });
+        }
+        dispatch({ type: "SELECT_WORKTREE", path: worktree.path });
+      };
+
       const parkedLayout = snapshot.worktreeLayouts?.[worktree.path];
       if (parkedLayout && parkedLayout.tabs.length > 0) {
         switchDebug("worktree.ensure.restore-parked", {
@@ -817,7 +824,7 @@ export function useWorkspaceStore({
           parkedTabCount: parkedLayout.tabs.length,
           parkedActiveTabId: parkedLayout.activeTabId,
         });
-        dispatch({ type: "SELECT_WORKTREE", path: worktree.path });
+        selectWorktreeImmediately();
         const activeTabId = parkedLayout.activeTabId ?? parkedLayout.tabs[0]?.id;
         if (activeTabId) {
           dispatch({ type: "ACTIVATE_TAB", tabId: activeTabId });
@@ -835,7 +842,7 @@ export function useWorkspaceStore({
           worktreePath: worktree.path,
           tabId: existingInCurrent.id,
         });
-        dispatch({ type: "SELECT_WORKTREE", path: worktree.path });
+        selectWorktreeImmediately();
         dispatch({ type: "ACTIVATE_TAB", tabId: existingInCurrent.id });
         return existingInCurrent.id;
       }
@@ -846,6 +853,10 @@ export function useWorkspaceStore({
           worktreePath: worktree.path,
         });
         return null;
+      }
+
+      if (!isRestoring && snapshot.activeWorktreePath !== worktree.path) {
+        selectWorktreeImmediately();
       }
 
       switchDebug("worktree.ensure.create-new", {
@@ -911,10 +922,11 @@ export function useWorkspaceStore({
         if (services.spawnTerminalDetailed) {
           // CWD inheritance (M9): one IPC round trip — the daemon resolves the source
           // pane's live working directory server-side and returns it in the response.
+          const isPaired = isPairedWorkspaceId(sourceSession.workspaceId || workspaceId);
           const result = await spawnDetailedForLogicalAction(services, {
             workspaceId: sourceSession.workspaceId || workspaceId,
             worktree: sourceSession.worktree,
-            cwd: null,
+            cwd: isPaired ? sourceSession.cwd : null,
             inheritFromSessionId: sourceSession.backendSessionId,
           });
           backendSessionId = result.sessionId;
