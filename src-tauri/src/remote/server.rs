@@ -1811,28 +1811,14 @@ async fn handle_terminal_socket(
     });
 
     let has_active_selection = state.active_selection.read().is_some();
-    let mut active_session_rx = state.active_session_watch_rx();
+    let active_session_rx = state.active_session_watch_rx();
     let target_session_id = session_id.clone();
     let mut focus_watcher = std::pin::pin!(async move {
         if !has_active_selection {
             std::future::pending::<()>().await;
             return;
         }
-        // A selection with no focused session id is NOT "focus moved away". The upgrade
-        // gate admits that case, so treating it as a mismatch here closed the socket
-        // immediately after a successful HTTP upgrade -- the client saw a connected
-        // terminal that never received a frame and reconnect-looped. Exit only once the
-        // watch value names a DIFFERENT session.
-        if matches!(active_session_rx.borrow().as_deref(), Some(current) if current != target_session_id.as_str())
-        {
-            return;
-        }
-        while active_session_rx.changed().await.is_ok() {
-            let current = active_session_rx.borrow().clone();
-            if current.as_deref() != Some(target_session_id.as_str()) {
-                break;
-            }
-        }
+        watch_active_session_focus(active_session_rx, &target_session_id, || ()).await;
     });
 
     tokio::select! {
@@ -2211,28 +2197,14 @@ async fn handle_terminal_grid_socket(
     });
 
     let has_active_selection = state.active_selection.read().is_some();
-    let mut active_session_rx = state.active_session_watch_rx();
+    let active_session_rx = state.active_session_watch_rx();
     let target_session_id = session_id.clone();
     let mut focus_watcher = std::pin::pin!(async move {
         if !has_active_selection {
             std::future::pending::<()>().await;
             return;
         }
-        // A selection with no focused session id is NOT "focus moved away". The upgrade
-        // gate admits that case, so treating it as a mismatch here closed the socket
-        // immediately after a successful HTTP upgrade -- the client saw a connected
-        // terminal that never received a frame and reconnect-looped. Exit only once the
-        // watch value names a DIFFERENT session.
-        if matches!(active_session_rx.borrow().as_deref(), Some(current) if current != target_session_id.as_str())
-        {
-            return;
-        }
-        while active_session_rx.changed().await.is_ok() {
-            let current = active_session_rx.borrow().clone();
-            if current.as_deref() != Some(target_session_id.as_str()) {
-                break;
-            }
-        }
+        watch_active_session_focus(active_session_rx, &target_session_id, || ()).await;
     });
 
     drop(outbound_tx);
@@ -2243,6 +2215,32 @@ async fn handle_terminal_grid_socket(
         _ = &mut writer_task => {},
         _ = &mut status_task => {},
     };
+}
+
+pub(crate) async fn watch_active_session_focus<F>(
+    mut active_session_rx: tokio::sync::watch::Receiver<Option<String>>,
+    target_session_id: &str,
+    mut on_close: F,
+) where
+    F: FnMut(),
+{
+    // A selection with no focused session id is NOT "focus moved away". The upgrade
+    // gate admits that case, so treating it as a mismatch here closed the socket
+    // immediately after a successful HTTP upgrade -- the client saw a connected
+    // terminal that never received a frame and reconnect-looped. Exit only once the
+    // watch value names a DIFFERENT session.
+    if matches!(active_session_rx.borrow().as_deref(), Some(current) if current != target_session_id)
+    {
+        on_close();
+        return;
+    }
+    while active_session_rx.changed().await.is_ok() {
+        let current = active_session_rx.borrow().clone();
+        if matches!(current.as_deref(), Some(current) if current != target_session_id) {
+            on_close();
+            break;
+        }
+    }
 }
 
 pub(crate) fn resolve_dist_dir_from(
@@ -3461,5 +3459,42 @@ mod tests {
             .expect("spawn_shell succeeds");
         assert!(terminal_service.list_sessions().contains(&session_id));
         let _ = terminal_service.close_session(&session_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_active_session_focus_watcher_ignores_transient_none() {
+        let (tx, rx) = tokio::sync::watch::channel(Some("target-session".to_string()));
+        let (close_tx, mut close_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let watcher = tokio::spawn(async move {
+            watch_active_session_focus(rx, "target-session", move || {
+                let _ = close_tx.send(());
+            })
+            .await;
+        });
+
+        // (a) send None -> the close signal must NOT fire within the test window
+        tx.send(None).expect("send None");
+
+        let test_window = std::time::Duration::from_millis(50);
+        let fired = tokio::time::timeout(test_window, close_rx.recv()).await;
+        assert!(
+            fired.is_err(),
+            "close signal must NOT fire within the test window on transient None, but received: {:?}",
+            fired
+        );
+        assert!(!watcher.is_finished(), "watcher task should remain active on transient None");
+
+        // (b) send Some(other) -> close signal fires
+        tx.send(Some("other-session".to_string())).expect("send other session");
+
+        let fired = tokio::time::timeout(std::time::Duration::from_millis(500), close_rx.recv()).await;
+        assert_eq!(
+            fired,
+            Ok(Some(())),
+            "close signal must fire when focus changes to a different session"
+        );
+
+        let _ = watcher.await;
     }
 }
