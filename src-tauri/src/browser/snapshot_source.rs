@@ -14,6 +14,40 @@ use objc2::{class, msg_send, runtime::AnyObject};
 #[cfg(target_os = "macos")]
 use objc2_foundation::NSString;
 
+/// Maximum dimension on either edge for native snapshot capture.
+pub const MAX_CAPTURE_EDGE: u32 = 2048;
+/// Maximum pixel count for native snapshot capture (4 Megapixels).
+pub const MAX_CAPTURE_PIXELS: u64 = 4_000_000;
+
+/// Clamps or scales down snapshot dimensions so that neither edge exceeds `MAX_CAPTURE_EDGE`
+/// and total pixels do not exceed `MAX_CAPTURE_PIXELS`, preserving aspect ratio.
+pub fn clamp_capture_dimensions(width: u32, height: u32) -> (u32, u32) {
+    if width == 0 || height == 0 {
+        return (1, 1);
+    }
+    let mut w = width as f64;
+    let mut h = height as f64;
+
+    // First clamp edges to MAX_CAPTURE_EDGE while maintaining aspect ratio
+    if w > MAX_CAPTURE_EDGE as f64 || h > MAX_CAPTURE_EDGE as f64 {
+        let scale = (MAX_CAPTURE_EDGE as f64 / w).min(MAX_CAPTURE_EDGE as f64 / h);
+        w *= scale;
+        h *= scale;
+    }
+
+    // Next check total pixels <= MAX_CAPTURE_PIXELS
+    let pixels = w * h;
+    if pixels > MAX_CAPTURE_PIXELS as f64 {
+        let scale = (MAX_CAPTURE_PIXELS as f64 / pixels).sqrt();
+        w *= scale;
+        h *= scale;
+    }
+
+    let clamped_w = (w.round() as u32).clamp(1, MAX_CAPTURE_EDGE);
+    let clamped_h = (h.round() as u32).clamp(1, MAX_CAPTURE_EDGE);
+    (clamped_w, clamped_h)
+}
+
 /// The target image encoding for browser snapshots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnapshotFormat {
@@ -31,12 +65,16 @@ impl Default for SnapshotFormat {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SnapshotOptions {
     pub format: SnapshotFormat,
+    pub max_width: Option<u32>,
+    pub max_height: Option<u32>,
 }
 
 impl SnapshotOptions {
     pub fn png() -> Self {
         Self {
             format: SnapshotFormat::Png,
+            max_width: None,
+            max_height: None,
         }
     }
 
@@ -45,7 +83,16 @@ impl SnapshotOptions {
             format: SnapshotFormat::Jpeg {
                 quality: quality.min(100),
             },
+            max_width: None,
+            max_height: None,
         }
+    }
+
+    pub fn with_bounds(mut self, width: u32, height: u32) -> Self {
+        let (w, h) = clamp_capture_dimensions(width, height);
+        self.max_width = Some(w);
+        self.max_height = Some(h);
+        self
     }
 }
 
@@ -82,6 +129,14 @@ pub trait BrowserSnapshotSource: Send + Sync {
         webview_label: &'a str,
         options: SnapshotOptions,
     ) -> Pin<Box<dyn Future<Output = Result<BrowserSnapshot, IpcError>> + Send + 'a>>;
+
+    fn take_snapshot<'a>(
+        &'a self,
+        webview_label: &'a str,
+        options: SnapshotOptions,
+    ) -> Pin<Box<dyn Future<Output = Result<BrowserSnapshot, IpcError>> + Send + 'a>> {
+        self.capture_snapshot(webview_label, options)
+    }
 }
 
 /// Thread-safe coordinator for native snapshot callbacks.
@@ -90,10 +145,15 @@ pub trait BrowserSnapshotSource: Send + Sync {
 /// - Single-use delivery: only the first callback delivers the result.
 /// - Duplicate callback rejection: subsequent calls return false without panicking.
 /// - Late arrival safety: if the receiver timed out or was dropped, completion returns false without panicking.
+/// - Late callback quarantine: safely quarantine/discard late-arriving callbacks after timeout without leaking permits or corrupting state.
 #[derive(Clone)]
 pub struct SnapshotCallbackCoordinator {
     sender: Arc<Mutex<Option<tokio::sync::oneshot::Sender<Result<BrowserSnapshot, IpcError>>>>>,
     call_count: Arc<AtomicUsize>,
+    timed_out: Arc<std::sync::atomic::AtomicBool>,
+    quarantined: Arc<std::sync::atomic::AtomicBool>,
+    late_arrivals: Arc<AtomicUsize>,
+    permit_releaser: Arc<Mutex<Option<Box<dyn FnOnce() + Send + 'static>>>>,
 }
 
 impl SnapshotCallbackCoordinator {
@@ -103,20 +163,79 @@ impl SnapshotCallbackCoordinator {
             Self {
                 sender: Arc::new(Mutex::new(Some(tx))),
                 call_count: Arc::new(AtomicUsize::new(0)),
+                timed_out: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                quarantined: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                late_arrivals: Arc::new(AtomicUsize::new(0)),
+                permit_releaser: Arc::new(Mutex::new(None)),
             },
             rx,
         )
     }
 
+    /// Attaches an optional permit releaser that is guaranteed to run once on callback completion
+    /// or late arrival discard, preventing permit leaks even if the operation timed out.
+    pub fn set_permit_releaser<F: FnOnce() + Send + 'static>(&self, releaser: F) {
+        let mut guard = match self.permit_releaser.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        *guard = Some(Box::new(releaser));
+    }
+
+    pub fn mark_timed_out(&self) {
+        self.timed_out.store(true, Ordering::SeqCst);
+        self.quarantined.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_timed_out(&self) -> bool {
+        self.timed_out.load(Ordering::SeqCst)
+    }
+
+    pub fn is_quarantined(&self) -> bool {
+        self.quarantined.load(Ordering::SeqCst)
+    }
+
+    pub fn late_arrivals(&self) -> usize {
+        self.late_arrivals.load(Ordering::SeqCst)
+    }
+
+    fn release_permit(&self) {
+        let mut guard = match self.permit_releaser.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if let Some(releaser) = guard.take() {
+            releaser();
+        }
+    }
+
     pub fn complete(&self, result: Result<BrowserSnapshot, IpcError>) -> bool {
         self.call_count.fetch_add(1, Ordering::SeqCst);
+
+        // Always release permit regardless of whether delivery succeeds or is quarantined
+        self.release_permit();
+
+        if self.is_timed_out() {
+            // Safely quarantine and discard late callback without leaking permits or corrupting state
+            self.late_arrivals.fetch_add(1, Ordering::SeqCst);
+            self.quarantined.store(false, Ordering::SeqCst);
+            return false;
+        }
+
         let mut guard = match self.sender.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
         if let Some(tx) = guard.take() {
-            tx.send(result).is_ok()
+            if tx.send(result).is_ok() {
+                true
+            } else {
+                // Receiver was dropped before completion (e.g. caller cancelled or timed out)
+                self.late_arrivals.fetch_add(1, Ordering::SeqCst);
+                false
+            }
         } else {
+            // Duplicate callback
             false
         }
     }
@@ -142,6 +261,27 @@ pub async fn await_snapshot_completion(
             IpcErrorCode::BrowserScreenshotFailed,
             format!("screenshot timed out after {}ms", timeout.as_millis()),
         )),
+    }
+}
+
+pub async fn await_coordinator_completion(
+    coordinator: &SnapshotCallbackCoordinator,
+    rx: tokio::sync::oneshot::Receiver<Result<BrowserSnapshot, IpcError>>,
+    timeout: Duration,
+) -> Result<BrowserSnapshot, IpcError> {
+    match tokio::time::timeout(timeout, rx).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_closed)) => Err(IpcError::new(
+            IpcErrorCode::BrowserScreenshotFailed,
+            "snapshot task channel closed",
+        )),
+        Err(_elapsed) => {
+            coordinator.mark_timed_out();
+            Err(IpcError::new(
+                IpcErrorCode::BrowserScreenshotFailed,
+                format!("screenshot timed out after {}ms", timeout.as_millis()),
+            ))
+        }
     }
 }
 
@@ -216,6 +356,7 @@ pub async fn capture_webview_snapshot<R: tauri::Runtime>(
         .ok_or_else(|| BrowserError::WebviewNotFound(webview_label.to_string()))?;
 
     let (coordinator, rx) = SnapshotCallbackCoordinator::new();
+    let coordinator_clone = coordinator.clone();
 
     webview
         .with_webview(move |platform| unsafe {
@@ -226,9 +367,30 @@ pub async fn capture_webview_snapshot<R: tauri::Runtime>(
                 let _ = coordinator.complete(result);
             });
 
+            // Enforce MAX_CAPTURE_EDGE and MAX_CAPTURE_PIXELS before native capture
+            let (target_w, _target_h) = match (options.max_width, options.max_height) {
+                (Some(w), Some(h)) => {
+                    let (cw, ch) = clamp_capture_dimensions(w, h);
+                    (Some(cw), Some(ch))
+                }
+                (Some(w), None) => (Some(w.min(MAX_CAPTURE_EDGE)), None),
+                (None, Some(h)) => (None, Some(h.min(MAX_CAPTURE_EDGE))),
+                (None, None) => (None, None),
+            };
+
+            let config: Option<Retained<AnyObject>> = if let Some(tw) = target_w {
+                let conf: Retained<AnyObject> = msg_send![class!(WKSnapshotConfiguration), new];
+                let width_num: Retained<AnyObject> = msg_send![class!(NSNumber), numberWithDouble: tw as f64];
+                let _: () = msg_send![&*conf, setSnapshotWidth: &*width_num];
+                Some(conf)
+            } else {
+                None
+            };
+            let config_ptr = config.as_ref().map(|c| &**c as *const AnyObject).unwrap_or(std::ptr::null());
+
             let _: () = msg_send![
                 view,
-                takeSnapshotWithConfiguration: std::ptr::null::<AnyObject>(),
+                takeSnapshotWithConfiguration: config_ptr,
                 completionHandler: &*callback
             ];
         })
@@ -239,7 +401,7 @@ pub async fn capture_webview_snapshot<R: tauri::Runtime>(
             )
         })?;
 
-    await_snapshot_completion(rx, timeout).await
+    await_coordinator_completion(&coordinator_clone, rx, timeout).await
 }
 
 /// Parses the AppKit / WebKit snapshot completion objects strictly on the main thread.
@@ -439,11 +601,17 @@ impl BrowserSnapshotSource for FakeBrowserSnapshotSource {
             match behavior {
                 FakeSnapshotBehavior::Fixed(snapshot) => Ok(snapshot),
                 FakeSnapshotBehavior::Auto { width, height } => {
+                    let (w, h) = match (options.max_width, options.max_height) {
+                        (Some(tw), Some(th)) => clamp_capture_dimensions(tw, th),
+                        (Some(tw), None) => clamp_capture_dimensions(tw, height),
+                        (None, Some(th)) => clamp_capture_dimensions(width, th),
+                        (None, None) => clamp_capture_dimensions(width, height),
+                    };
                     let bytes = match options.format {
                         SnapshotFormat::Png => sample_valid_png_bytes(),
                         SnapshotFormat::Jpeg { .. } => sample_valid_jpeg_bytes(),
                     };
-                    Ok(BrowserSnapshot::new(bytes, options.format, width, height))
+                    Ok(BrowserSnapshot::new(bytes, options.format, w, h))
                 }
                 FakeSnapshotBehavior::WebviewNotFound => {
                     Err(BrowserError::WebviewNotFound(label).into())
@@ -472,16 +640,17 @@ impl BrowserSnapshotSource for FakeBrowserSnapshotSource {
                     "empty snapshot generated",
                 )),
                 FakeSnapshotBehavior::Timeout => {
-                    let (_coordinator, rx) = SnapshotCallbackCoordinator::new();
-                    await_snapshot_completion(rx, timeout).await
+                    let (coordinator, rx) = SnapshotCallbackCoordinator::new();
+                    await_coordinator_completion(&coordinator, rx, timeout).await
                 }
                 FakeSnapshotBehavior::Delayed { delay, result } => {
                     let (coordinator, rx) = SnapshotCallbackCoordinator::new();
+                    let coord_clone = coordinator.clone();
                     tokio::spawn(async move {
                         tokio::time::sleep(delay).await;
-                        let _ = coordinator.complete(result);
+                        let _ = coord_clone.complete(result);
                     });
-                    await_snapshot_completion(rx, timeout).await
+                    await_coordinator_completion(&coordinator, rx, timeout).await
                 }
                 FakeSnapshotBehavior::Duplicate { first, second } => {
                     let (coordinator, rx) = SnapshotCallbackCoordinator::new();

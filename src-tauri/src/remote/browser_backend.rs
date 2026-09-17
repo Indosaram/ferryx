@@ -102,6 +102,18 @@ pub trait RemoteBrowserBackend: Send + Sync {
         ctx: BrowserCommandContext,
     ) -> BoxFuture<'_, Result<BrowserCommandResult, RemoteBrowserError>>;
 
+    fn subscribe_frames<'a>(
+        &'a self,
+        browser_id: &'a str,
+    ) -> BoxFuture<'a, Result<tokio::sync::broadcast::Receiver<Vec<u8>>, RemoteBrowserError>> {
+        let _ = browser_id;
+        Box::pin(async move {
+            Err(RemoteBrowserError::Unavailable(
+                "Browser screencast frame subscription unavailable on this backend".into(),
+            ))
+        })
+    }
+
     fn capabilities(&self) -> BoxFuture<'_, BrowserCapabilities>;
 }
 
@@ -147,6 +159,17 @@ impl RemoteBrowserBackend for UnavailableBrowserBackend {
         &self,
         _ctx: BrowserCommandContext,
     ) -> BoxFuture<'_, Result<BrowserCommandResult, RemoteBrowserError>> {
+        Box::pin(async move {
+            Err(RemoteBrowserError::Unavailable(
+                "Browser screencast is unavailable without GUI session".into(),
+            ))
+        })
+    }
+
+    fn subscribe_frames<'a>(
+        &'a self,
+        _browser_id: &'a str,
+    ) -> BoxFuture<'a, Result<tokio::sync::broadcast::Receiver<Vec<u8>>, RemoteBrowserError>> {
         Box::pin(async move {
             Err(RemoteBrowserError::Unavailable(
                 "Browser screencast is unavailable without GUI session".into(),
@@ -275,6 +298,18 @@ impl RemoteBrowserBackend for LocalIpcBrowserBackend {
         })
     }
 
+    fn subscribe_frames<'a>(
+        &'a self,
+        _browser_id: &'a str,
+    ) -> BoxFuture<'a, Result<tokio::sync::broadcast::Receiver<Vec<u8>>, RemoteBrowserError>> {
+        Box::pin(async move {
+            if self.socket_path.is_empty() {
+                return Err(RemoteBrowserError::Unavailable("Local IPC socket path empty".into()));
+            }
+            Err(RemoteBrowserError::Unavailable("GUI process not running or socket unconnected".into()))
+        })
+    }
+
     fn capabilities(&self) -> BoxFuture<'_, BrowserCapabilities> {
         Box::pin(async move {
             BrowserCapabilities {
@@ -303,6 +338,7 @@ impl RemoteBrowserBackend for LocalIpcBrowserBackend {
 pub struct InProcessTestBackend {
     pub sessions: Mutex<Vec<RemoteBrowserSessionSummary>>,
     pub states: Mutex<HashMap<String, BrowserRemoteState>>,
+    pub frame_senders: Mutex<HashMap<String, tokio::sync::broadcast::Sender<Vec<u8>>>>,
 }
 
 impl InProcessTestBackend {
@@ -310,6 +346,7 @@ impl InProcessTestBackend {
         Self {
             sessions: Mutex::new(Vec::new()),
             states: Mutex::new(HashMap::new()),
+            frame_senders: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -357,6 +394,19 @@ impl RemoteBrowserBackend for InProcessTestBackend {
                 success: true,
                 value: None,
             })
+        })
+    }
+
+    fn subscribe_frames<'a>(
+        &'a self,
+        browser_id: &'a str,
+    ) -> BoxFuture<'a, Result<tokio::sync::broadcast::Receiver<Vec<u8>>, RemoteBrowserError>> {
+        Box::pin(async move {
+            let mut senders = self.frame_senders.lock().await;
+            let sender = senders
+                .entry(browser_id.to_string())
+                .or_insert_with(|| tokio::sync::broadcast::channel(16).0);
+            Ok(sender.subscribe())
         })
     }
 
@@ -439,5 +489,34 @@ pub mod tests {
         let identified = backend.identify_session(&scope).await.unwrap();
         assert!(identified.is_some());
         assert_eq!(identified.unwrap().browser_id, "b1");
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_frames_on_all_backends() {
+        // 1. UnavailableBrowserBackend returns typed Unavailable
+        let unavailable = UnavailableBrowserBackend;
+        let sub_unavail = unavailable.subscribe_frames("b1").await;
+        assert!(matches!(sub_unavail, Err(RemoteBrowserError::Unavailable(_))));
+
+        // 2. LocalIpcBrowserBackend with empty socket path returns typed Unavailable
+        let local_empty = LocalIpcBrowserBackend::new("".into(), None);
+        let sub_empty = local_empty.subscribe_frames("b1").await;
+        assert!(matches!(sub_empty, Err(RemoteBrowserError::Unavailable(msg)) if msg.contains("empty")));
+
+        // LocalIpcBrowserBackend with non-empty path but disconnected socket
+        let local_ipc = LocalIpcBrowserBackend::new("/tmp/test.sock".into(), None);
+        let sub_local = local_ipc.subscribe_frames("b1").await;
+        assert!(matches!(sub_local, Err(RemoteBrowserError::Unavailable(msg)) if msg.contains("not running")));
+
+        // 3. InProcessTestBackend returns live broadcast receiver
+        let test_backend = InProcessTestBackend::new();
+        let mut rx = test_backend.subscribe_frames("b1").await.unwrap();
+
+        // Broadcast a test frame
+        let sender = test_backend.frame_senders.lock().await.get("b1").unwrap().clone();
+        sender.send(vec![0xAA, 0xBB, 0xCC]).unwrap();
+
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received, vec![0xAA, 0xBB, 0xCC]);
     }
 }

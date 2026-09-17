@@ -217,3 +217,12 @@ fn test_request_deduplication_and_30s_cache_retention() {
     let ancient = dedup.check_or_record(0, t4);
     assert_eq!(ancient, Err(SecurityError::OutcomeUnknown));
 }
+
+#[test]
+fn test_boundary_payload_limits_constants() {
+    // Spec §6.3: Command name <= 64 KiB, script <= 32 KiB, fill <= 16 KiB
+    assert_eq!(MAX_REQUEST_WIRE_BYTES, 64 * 1024);
+    assert_eq!(MAX_SCRIPT_BYTES, 32 * 1024);
+    assert_eq!(MAX_FILL_BYTES, 16 * 1024);
+    assert_eq!(MAX_EVAL_RESULT_BYTES, 64 * 1024);
+}

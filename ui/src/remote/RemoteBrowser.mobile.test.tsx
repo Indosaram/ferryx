@@ -6,6 +6,7 @@ import {
   type BrowserFrameMetadata,
 } from "./browserProtocol";
 import { RemoteBrowser, type RemoteBrowserPointClickEvent } from "./RemoteBrowser";
+import { RemoteBrowserWorkspace } from "./RemoteBrowserWorkspace";
 
 // Mock WebSocket for RemoteBrowser tests
 class MockWebSocket {
@@ -604,6 +605,37 @@ describe("RemoteBrowser - Mobile Viewport & Touch Interaction (Phase 7B)", () =>
       fireEvent.compositionEnd(input, { data: "" });
 
       expect(emittedInputs).toHaveLength(0);
+    });
+
+    it("preserves preceding text on compositionend and only clears imeText after fill succeeds (P2-01)", async () => {
+      render(
+        <RemoteBrowserWorkspace
+          baseUrl="http://localhost:8080"
+          browserId="b-mobile"
+          deviceToken="token-mobile"
+          onBack={vi.fn()}
+        />
+      );
+
+      const ws = await waitForSocket(0);
+      await establishStreaming(ws);
+
+      // Open IME bar
+      fireEvent.click(screen.getByTestId("remote-browser-ime-toggle-btn"));
+      const imeInput = screen.getByTestId("remote-browser-ime-text-input");
+
+      // Type initial text
+      fireEvent.change(imeInput, { target: { value: "Preceding text " } });
+      expect(imeInput).toHaveValue("Preceding text ");
+
+      // Begin IME composition
+      fireEvent.compositionStart(imeInput);
+      fireEvent.compositionUpdate(imeInput, { data: "한" });
+      fireEvent.compositionUpdate(imeInput, { data: "한글" });
+
+      // End IME composition: should NOT wipe "Preceding text " with just "한글"
+      fireEvent.compositionEnd(imeInput, { data: "한글" });
+      expect(imeInput).toHaveValue("Preceding text 한글");
     });
   });
 });

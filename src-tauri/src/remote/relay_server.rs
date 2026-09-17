@@ -1428,6 +1428,27 @@ async fn terminal_preferences_handler(
     host_http_handler(state, AxumPath((machine, "terminal/preferences".into())), peer, request).await
 }
 
+// These literal HTTP endpoints must outrank /browser/{browser_id} so that
+// HTTP discovery requests are forwarded to HTTP endpoints rather than captured
+// by the WebSocket upgrade handler.
+async fn browser_sessions_http_handler(
+    state: State<RelayState>,
+    AxumPath(machine): AxumPath<String>,
+    peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
+    request: Request<Body>,
+) -> Result<Response, StatusCode> {
+    host_http_handler(state, AxumPath((machine, "browser/sessions".into())), peer, request).await
+}
+
+async fn browser_identify_http_handler(
+    state: State<RelayState>,
+    AxumPath(machine): AxumPath<String>,
+    peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
+    request: Request<Body>,
+) -> Result<Response, StatusCode> {
+    host_http_handler(state, AxumPath((machine, "browser/identify".into())), peer, request).await
+}
+
 fn allowed_http_route(method: &Method, path: &str) -> bool {
     let parts: Vec<_> = path.split('/').collect();
     if parts.iter().any(|part| part.is_empty() || matches!(*part, "." | "..")
@@ -1446,6 +1467,7 @@ fn allowed_http_route(method: &Method, path: &str) -> bool {
         | ("GET", ["workspace", "operations", _])
         | ("GET", ["workspace", "state"])
         | ("GET", ["terminal", "preferences"])
+        | ("GET", ["browser", "sessions" | "identify"])
         | ("POST", ["workspace", "select" | "selection"])
         | ("POST", ["pair", "exchange"])
         | ("POST", ["push", "subscribe" | "unsubscribe"])
@@ -1482,6 +1504,7 @@ fn validate_http_query(path: &str, query: Option<&str>) -> Result<(), StatusCode
     }
     let allowed: &[&str] = match path.split('/').collect::<Vec<_>>().as_slice() {
         ["fs", "directories"] => &["path", "includeHidden"],
+        ["browser", "sessions"] | ["browser", "identify"] => &["workspaceId", "worktreeSlug"],
         ["workspace", "worktrees"] => &["workspaceId"],
         ["workspace", "worktrees", "status"] => &["workspaceId", "wsId", "slug"],
         // Session listing is workspace-scoped; a single session is epoch-fenced.
@@ -1802,6 +1825,14 @@ pub fn relay_router(state: RelayState) -> Router {
         .route(
             "/host/{machine_id}/api/v1/terminal/{terminal_id}",
             get(browser_terminal_handler),
+        )
+        .route(
+            "/host/{machine_id}/api/v1/browser/sessions",
+            get(browser_sessions_http_handler),
+        )
+        .route(
+            "/host/{machine_id}/api/v1/browser/identify",
+            get(browser_identify_http_handler),
         )
         .route(
             "/host/{machine_id}/api/v1/browser/{browser_id}",
@@ -2322,6 +2353,31 @@ mod tests {
                 .get(format!("{}/host/offline/api/v1/terminal/preferences", base.replace("ws://", "http://")))
                 .send().await.unwrap();
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        })).await;
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        if let Err(panic) = outcome { std::panic::resume_unwind(panic); }
+    }
+
+    #[tokio::test]
+    async fn r4_browser_discovery_routes_not_intercepted_by_websocket() {
+        let (base, server) = spawn_test_relay().await;
+        let outcome = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {
+            let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(5)).build().unwrap();
+            let http_base = base.replace("ws://", "http://");
+
+            // GET /host/offline/api/v1/browser/sessions must reach host_http_handler and return NOT_FOUND (offline machine)
+            // rather than hitting browser_screencast_handler (which would return BAD_REQUEST or UNAUTHORIZED)
+            let resp_sessions = client
+                .get(format!("{http_base}/host/offline/api/v1/browser/sessions?workspaceId=ws1&worktreeSlug=main"))
+                .send().await.unwrap();
+            assert_eq!(resp_sessions.status(), StatusCode::NOT_FOUND);
+
+            // GET /host/offline/api/v1/browser/identify must also reach host_http_handler
+            let resp_identify = client
+                .get(format!("{http_base}/host/offline/api/v1/browser/identify?workspaceId=ws1&worktreeSlug=main"))
+                .send().await.unwrap();
+            assert_eq!(resp_identify.status(), StatusCode::NOT_FOUND);
         })).await;
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());

@@ -297,6 +297,16 @@ async fn test_browser_websocket_full_lifecycle_and_reconnection() {
     let reclaimed_lease = state.admission_controller.broker.reclaim_desktop();
     assert!(reclaimed_lease.is_some(), "Desktop owner reclaims lease");
 
+    // Immediate push: remote driver holding lease receives browserDriverRevoked
+    let revoked_reply = ws_stream
+        .next()
+        .await
+        .expect("Receive driver revoked message")
+        .expect("Valid frame");
+    let revoked_json: serde_json::Value =
+        serde_json::from_str(&revoked_reply.into_text().unwrap()).unwrap();
+    assert_eq!(revoked_json["type"], "browserDriverRevoked");
+
     // Subsequent command from remote driver must be rejected (driver notified)
     let cmd_after_reclaim = serde_json::json!({
         "type": "browserCommand",

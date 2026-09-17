@@ -1,6 +1,9 @@
 use crate::browser::manager::BrowserManager;
 use crate::browser::model::*;
 use crate::browser::security::BrowserError;
+use crate::browser::snapshot_source::{
+    BrowserSnapshotSource, SnapshotFormat, SnapshotOptions, UnsupportedSnapshotSource,
+};
 use super::remote_bridge_protocol::MAX_FRAME_PAYLOAD_BYTES;
 use super::remote_driver::*;
 use std::collections::HashMap;
@@ -67,6 +70,8 @@ pub struct BrowserRemoteService {
     stream_counter: Arc<AtomicU64>,
     desktop_epoch: Arc<AtomicU64>,
     service_epoch: u64,
+    frame_broadcaster: Arc<parking_lot::Mutex<HashMap<String, tokio::sync::broadcast::Sender<Vec<u8>>>>>,
+    snapshot_source: Arc<parking_lot::RwLock<Arc<dyn BrowserSnapshotSource>>>,
 }
 
 impl BrowserRemoteService {
@@ -80,7 +85,46 @@ impl BrowserRemoteService {
             stream_counter: Arc::new(AtomicU64::new(1)),
             desktop_epoch: Arc::new(AtomicU64::new(1)),
             service_epoch: 1,
+            frame_broadcaster: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            snapshot_source: Arc::new(parking_lot::RwLock::new(Arc::new(UnsupportedSnapshotSource))),
         }
+    }
+
+    pub fn with_snapshot_source(
+        manager: BrowserManager,
+        driver_broker: Arc<RemoteDriverBroker>,
+        snapshot_source: Arc<dyn BrowserSnapshotSource>,
+    ) -> Self {
+        Self {
+            manager,
+            driver_broker,
+            subscribers_per_browser: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            producer_active: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            captures_in_progress: Arc::new(AtomicUsize::new(0)),
+            stream_counter: Arc::new(AtomicU64::new(1)),
+            desktop_epoch: Arc::new(AtomicU64::new(1)),
+            service_epoch: 1,
+            frame_broadcaster: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            snapshot_source: Arc::new(parking_lot::RwLock::new(snapshot_source)),
+        }
+    }
+
+    pub fn set_snapshot_source(&self, snapshot_source: Arc<dyn BrowserSnapshotSource>) {
+        *self.snapshot_source.write() = snapshot_source;
+    }
+
+    pub fn frame_broadcaster(
+        &self,
+    ) -> &Arc<parking_lot::Mutex<HashMap<String, tokio::sync::broadcast::Sender<Vec<u8>>>>> {
+        &self.frame_broadcaster
+    }
+
+    pub fn subscribe_frames(&self, browser_id: &str) -> tokio::sync::broadcast::Receiver<Vec<u8>> {
+        let mut broadcasters = self.frame_broadcaster.lock();
+        let tx = broadcasters
+            .entry(browser_id.to_string())
+            .or_insert_with(|| tokio::sync::broadcast::channel(32).0);
+        tx.subscribe()
     }
 
     pub fn driver_broker(&self) -> &Arc<RemoteDriverBroker> {
@@ -116,6 +160,7 @@ impl BrowserRemoteService {
         let mut active_map = self.producer_active.lock();
 
         let browser_subs = subs_map.entry(browser_id.to_string()).or_default();
+        let was_empty = browser_subs.is_empty();
 
         // Check viewer limit per browser (max 2)
         if browser_subs.len() >= MAX_VIEWERS_PER_BROWSER {
@@ -153,6 +198,13 @@ impl BrowserRemoteService {
                 joined_at: Instant::now(),
             },
         );
+
+        drop(active_map);
+        drop(subs_map);
+
+        if was_empty {
+            self.spawn_capture_producer(browser_id.to_string());
+        }
 
         Ok(subscription_id)
     }
@@ -197,6 +249,123 @@ impl BrowserRemoteService {
     pub fn subscriber_count(&self, browser_id: &str) -> usize {
         let subs_map = self.subscribers_per_browser.lock();
         subs_map.get(browser_id).map(|s| s.len()).unwrap_or(0)
+    }
+
+    fn spawn_capture_producer(&self, browser_id: String) {
+        let handle = match tokio::runtime::Handle::try_current() {
+            Ok(h) => h,
+            Err(_) => return, // No Tokio runtime active (e.g. synchronous unit test), skip spawning capture loop
+        };
+
+        let tx = {
+            let mut broadcasters = self.frame_broadcaster.lock();
+            broadcasters
+                .entry(browser_id.clone())
+                .or_insert_with(|| tokio::sync::broadcast::channel(32).0)
+                .clone()
+        };
+
+        let subscribers_map = Arc::clone(&self.subscribers_per_browser);
+        let producer_active = Arc::clone(&self.producer_active);
+        let captures_in_progress = Arc::clone(&self.captures_in_progress);
+        let snapshot_source_holder = Arc::clone(&self.snapshot_source);
+        let manager = self.manager.clone();
+        let desktop_epoch = Arc::clone(&self.desktop_epoch);
+        let service_epoch = self.service_epoch;
+
+        handle.spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(80)); // Maintain ~10-15 FPS (12.5 FPS)
+            let mut seq: u32 = 0;
+
+            loop {
+                interval.tick().await;
+
+                // While active subscribers > 0
+                let has_active_subscribers = {
+                    let subs = subscribers_map.lock();
+                    subs.get(&browser_id).map(|s| !s.is_empty()).unwrap_or(false)
+                };
+
+                if !has_active_subscribers {
+                    let mut active_map = producer_active.lock();
+                    if let Some(active) = active_map.get_mut(&browser_id) {
+                        if *active {
+                            *active = false;
+                            captures_in_progress.fetch_sub(1, Ordering::SeqCst);
+                        }
+                    }
+                    break;
+                }
+
+                let state = match manager.get_state(&browser_id) {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+
+                if !state.visible {
+                    continue;
+                }
+
+                let source = snapshot_source_holder.read().clone();
+                let snapshot_res = source
+                    .take_snapshot(&state.webview_label, SnapshotOptions::jpeg(70))
+                    .await;
+
+                let snapshot = match snapshot_res {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+
+                seq = seq.wrapping_add(1);
+
+                let (bounds, zoom, viewport_rev) = manager
+                    .get_geometry(&browser_id)
+                    .unwrap_or((None, 1.0, 1));
+                let capture_rect = bounds.unwrap_or(LogicalRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: snapshot.width as f64,
+                    height: snapshot.height as f64,
+                });
+
+                let format_byte = match snapshot.format {
+                    SnapshotFormat::Jpeg { .. } => super::remote_bridge_protocol::FRAME_FORMAT_JPEG,
+                    SnapshotFormat::Png => super::remote_bridge_protocol::FRAME_FORMAT_PNG,
+                };
+
+                let metadata = super::remote_bridge_protocol::RemoteFrameMetadata {
+                    offset_top: 0.0,
+                    page_scale_factor: zoom,
+                    device_width: capture_rect.width,
+                    device_height: capture_rect.height,
+                    image_width: snapshot.width,
+                    image_height: snapshot.height,
+                    scroll_offset_x: 0.0,
+                    scroll_offset_y: 0.0,
+                    timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs_f64())
+                        .unwrap_or(0.0),
+                    stream_id: 1,
+                    browser_instance_id: manager.get_instance_id(&browser_id).unwrap_or_default(),
+                    browser_service_epoch: service_epoch.to_string(),
+                    desktop_epoch: desktop_epoch.load(Ordering::SeqCst).to_string(),
+                    document_generation: state.generation.to_string(),
+                    viewport_revision: viewport_rev,
+                    capture_rect,
+                    geometry_source: "wkSnapshot".to_string(),
+                };
+
+                if let Ok(frame_bytes) = super::remote_bridge_protocol::encode_frame(
+                    format_byte,
+                    seq,
+                    &metadata,
+                    &snapshot.bytes,
+                ) {
+                    let _ = tx.send(frame_bytes);
+                }
+            }
+        });
     }
 
     /// Latest-only frame admission logic.

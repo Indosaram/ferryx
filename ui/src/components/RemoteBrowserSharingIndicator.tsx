@@ -30,6 +30,7 @@ export const RemoteBrowserSharingIndicator: React.FC<RemoteBrowserSharingIndicat
 }) => {
   const [internalSharing, setInternalSharing] = useState(isSharing);
   const [internalDriverStatus, setInternalDriverStatus] = useState(driverStatus);
+  const [internalSessionsCount, setInternalSessionsCount] = useState(activeSessionsCount);
   const [reclaiming, setReclaiming] = useState(false);
   const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null);
 
@@ -42,7 +43,30 @@ export const RemoteBrowserSharingIndicator: React.FC<RemoteBrowserSharingIndicat
     setInternalDriverStatus(driverStatus);
   }, [driverStatus]);
 
-  const active = internalSharing || internalDriverStatus === "driving" || activeSessionsCount > 0;
+  React.useEffect(() => {
+    setInternalSessionsCount(activeSessionsCount);
+  }, [activeSessionsCount]);
+
+  React.useEffect(() => {
+    const handleSharingEvent = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail && typeof detail === "object") {
+        if ("isSharing" in detail) setInternalSharing(Boolean(detail.isSharing));
+        if ("driverStatus" in detail) setInternalDriverStatus(detail.driverStatus);
+        if ("activeSessionsCount" in detail) setInternalSessionsCount(Number(detail.activeSessionsCount) || 0);
+      } else if (typeof detail === "boolean") {
+        setInternalSharing(detail);
+      }
+    };
+    window.addEventListener("remote-browser-sharing", handleSharingEvent);
+    window.addEventListener("remote-browser-sharing-change", handleSharingEvent);
+    return () => {
+      window.removeEventListener("remote-browser-sharing", handleSharingEvent);
+      window.removeEventListener("remote-browser-sharing-change", handleSharingEvent);
+    };
+  }, []);
+
+  const active = internalSharing || internalDriverStatus === "driving" || internalSessionsCount > 0;
 
   if (!active && !feedbackMessage) {
     return null;
@@ -52,11 +76,11 @@ export const RemoteBrowserSharingIndicator: React.FC<RemoteBrowserSharingIndicat
     setReclaiming(true);
     setFeedbackMessage(null);
     try {
+      await browserRemoteReclaim();
       if (onReclaim) {
         await onReclaim();
-      } else {
-        await browserRemoteReclaim();
       }
+      setInternalSharing(false);
       setInternalDriverStatus("idle");
       setFeedbackMessage("Control reclaimed by desktop owner");
     } catch (err) {
@@ -70,10 +94,9 @@ export const RemoteBrowserSharingIndicator: React.FC<RemoteBrowserSharingIndicat
     setReclaiming(true);
     setFeedbackMessage(null);
     try {
+      await browserRemoteRevoke();
       if (onRevoke) {
         await onRevoke();
-      } else {
-        await browserRemoteRevoke();
       }
       setInternalDriverStatus("idle");
       setFeedbackMessage("Remote driver lease revoked");

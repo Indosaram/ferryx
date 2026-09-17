@@ -46,6 +46,7 @@ export interface UseRemoteBrowserResult {
   client: BrowserClient | null;
   reconnect: () => void;
   sendAck: (streamId: number, seq: number) => void;
+  confirmPresented: (streamId: number, seq: number) => void;
 }
 
 export function useRemoteBrowser({
@@ -105,16 +106,22 @@ export function useRemoteBrowser({
     setReconnectNonce((n) => n + 1);
   }, [clearFrameBuffer]);
 
-  const sendAck = useCallback((streamId: number, seq: number) => {
+  const confirmPresented = useCallback((streamId: number, seq: number) => {
     if (clientRef.current) {
-      clientRef.current.ackFrame(streamId, seq);
+      if (typeof (clientRef.current as unknown as { sendAck?: (s: number, q: number) => void }).sendAck === "function") {
+        (clientRef.current as unknown as { sendAck: (s: number, q: number) => void }).sendAck(streamId, seq);
+      } else {
+        clientRef.current.ackFrame(streamId, seq);
+      }
     }
   }, []);
 
-  // Handle background / visibility change: clear frame buffer when document is hidden (§4.3)
+  const sendAck = confirmPresented;
+
+  // Handle background / visibility change: pause active decoding and clear frame buffer when document is hidden (§4.3)
   useEffect(() => {
     const handleVisibilityChange = () => {
-      if (document.hidden) {
+      if (typeof document !== "undefined" && (document.visibilityState === "hidden" || document.hidden)) {
         clearFrameBuffer();
         setStatus((s) => (s === "streaming" ? "paused" : s));
       }
@@ -122,6 +129,13 @@ export function useRemoteBrowser({
     document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [clearFrameBuffer]);
+
+  // Unconditional frame reference cleanup and object URL revocation on unmount
+  useEffect(() => {
+    return () => {
+      clearFrameBuffer();
     };
   }, [clearFrameBuffer]);
 
@@ -173,6 +187,11 @@ export function useRemoteBrowser({
         client.onFrame((incomingFrame) => {
           if (cancelled) return;
 
+          // Background throttling: pause active frame decoding when document is hidden
+          if (typeof document !== "undefined" && (document.visibilityState === "hidden" || document.hidden)) {
+            return;
+          }
+
           // Verify stream ID matches active stream
           if (
             currentStreamIdRef.current !== null &&
@@ -202,9 +221,10 @@ export function useRemoteBrowser({
 
           setImageUrl(newUrl);
           setFrame(incomingFrame);
+          setStatus((prev) => (prev === "paused" ? "streaming" : prev));
 
-          // Confirm displayed frame with ACK
-          client.ackFrame(incomingFrame.metadata.streamId, incomingFrame.seq);
+          // Presentation-gated ACK: do NOT ACK immediately here on blob creation.
+          // ACK is confirmed by UI presentation layer via confirmPresented(streamId, seq).
         });
 
         // Wait for browserHello from server
@@ -272,5 +292,6 @@ export function useRemoteBrowser({
     client: clientRef.current,
     reconnect,
     sendAck,
+    confirmPresented,
   };
 }

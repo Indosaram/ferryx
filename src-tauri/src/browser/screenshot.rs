@@ -1,7 +1,4 @@
-#[path = "snapshot_source.rs"]
-pub mod snapshot_source;
-
-pub use snapshot_source::*;
+use crate::browser::snapshot_source::*;
 
 use crate::ipc::error::{IpcError, IpcErrorCode};
 use std::path::PathBuf;

@@ -14,6 +14,7 @@ import type {
 import {
   useRemoteBrowser,
   type RemoteBrowserStatus,
+  type UseRemoteBrowserResult,
 } from "./useRemoteBrowser";
 
 export interface RemoteBrowserPointClickEvent {
@@ -21,15 +22,18 @@ export interface RemoteBrowserPointClickEvent {
   v: number;
   streamId: number;
   seq: number;
+  sequenceNumber: number;
   documentGeneration: string;
   viewportRevision: string;
+  browserInstanceId: string;
 }
 
 export interface RemoteBrowserProps {
-  baseUrl: string;
-  browserId: string | null;
-  deviceToken: string;
+  baseUrl?: string;
+  browserId?: string | null;
+  deviceToken?: string;
   options?: BrowserSubscribeOptions;
+  session?: UseRemoteBrowserResult;
   controls?: React.ReactNode;
   className?: string;
   onFrame?: (frame: BrowserFrame) => void;
@@ -38,11 +42,26 @@ export interface RemoteBrowserProps {
   onPointClick?: (point: RemoteBrowserPointClickEvent) => void;
 }
 
-export const RemoteBrowser: React.FC<RemoteBrowserProps> = ({
-  baseUrl,
-  browserId,
-  deviceToken,
-  options,
+export const RemoteBrowser: React.FC<RemoteBrowserProps> = (props) => {
+  if (props.session) {
+    return <RemoteBrowserView {...props} session={props.session} />;
+  }
+  return <RemoteBrowserWithSelfSession {...props} />;
+};
+
+const RemoteBrowserWithSelfSession: React.FC<RemoteBrowserProps> = (props) => {
+  const session = useRemoteBrowser({
+    baseUrl: props.baseUrl ?? "",
+    browserId: props.browserId ?? null,
+    deviceToken: props.deviceToken ?? "",
+    options: props.options,
+  });
+
+  return <RemoteBrowserView {...props} session={session} />;
+};
+
+const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrowserResult }> = ({
+  session,
   controls,
   className = "",
   onFrame,
@@ -57,12 +76,9 @@ export const RemoteBrowser: React.FC<RemoteBrowserProps> = ({
     browserState,
     error,
     reconnect,
-  } = useRemoteBrowser({
-    baseUrl,
-    browserId,
-    deviceToken,
-    options,
-  });
+    confirmPresented,
+    sendAck,
+  } = session;
 
   const viewportRef = useRef<HTMLDivElement>(null);
 
@@ -92,8 +108,14 @@ export const RemoteBrowser: React.FC<RemoteBrowserProps> = ({
     const rect = viewportRef.current.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return;
 
-    const { imageWidth, imageHeight, streamId, documentGeneration, viewportRevision } =
-      frame.metadata;
+    const {
+      imageWidth,
+      imageHeight,
+      streamId,
+      documentGeneration,
+      viewportRevision,
+      browserInstanceId,
+    } = frame.metadata;
 
     if (imageWidth <= 0 || imageHeight <= 0) return;
 
@@ -139,9 +161,21 @@ export const RemoteBrowser: React.FC<RemoteBrowserProps> = ({
       v,
       streamId,
       seq: frame.seq,
+      sequenceNumber: frame.seq,
       documentGeneration,
       viewportRevision,
+      browserInstanceId,
     });
+  };
+
+  const handleImageLoad = () => {
+    if (frame) {
+      if (confirmPresented) {
+        confirmPresented(frame.metadata.streamId, frame.seq);
+      } else if (sendAck) {
+        sendAck(frame.metadata.streamId, frame.seq);
+      }
+    }
   };
 
   return (
@@ -168,6 +202,7 @@ export const RemoteBrowser: React.FC<RemoteBrowserProps> = ({
             alt="Remote browser stream"
             className="w-full h-full object-contain pointer-events-none"
             draggable={false}
+            onLoad={handleImageLoad}
           />
         ) : (
           <div className="flex flex-col items-center justify-center text-neutral-500 text-sm">

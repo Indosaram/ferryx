@@ -771,7 +771,7 @@ mod automation_tests {
     }
 }
 
-async fn eval_webview<R: tauri::Runtime>(
+pub(crate) async fn eval_webview<R: tauri::Runtime>(
     webview: tauri::Webview<R>,
     script: String,
 ) -> Result<String, BrowserError> {
@@ -1242,7 +1242,7 @@ pub async fn cmd_browser_navigate<R: tauri::Runtime>(
     navigate_browser_session(&app, manager.inner(), &browser_id, &url).await
 }
 
-fn history_navigation<R: tauri::Runtime>(
+pub(crate) fn history_navigation<R: tauri::Runtime>(
     app: &AppHandle<R>,
     manager: &Arc<BrowserManager>,
     browser_id: &str,
@@ -1353,7 +1353,7 @@ pub async fn cmd_browser_import_cookies<R: tauri::Runtime>(
         .map(cookie_from_imported)
         .collect::<Result<Vec<_>, _>>()?;
 
-    let mut targets = manager
+    let targets = manager
         .webview_labels_for_profile(&profile_id)
         .into_iter()
         .filter_map(|label| app.get_webview(&label))

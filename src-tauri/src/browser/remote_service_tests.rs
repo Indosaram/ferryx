@@ -3,9 +3,11 @@
 
 use super::manager::BrowserManager;
 use super::model::*;
-use super::remote_bridge_protocol::MAX_FRAME_PAYLOAD_BYTES;
+use super::remote_bridge_protocol::{decode_frame, FRAME_FORMAT_JPEG, MAX_FRAME_PAYLOAD_BYTES};
 use super::remote_driver::*;
 use super::remote_service::*;
+use super::snapshot_source::{FakeBrowserSnapshotSource, FakeSnapshotBehavior};
+use crate::ipc::browser_cli::RemoteBrowserOperation;
 use std::sync::Arc;
 
 fn setup_test_environment() -> (BrowserRemoteService, BrowserManager, String, String) {
@@ -370,4 +372,212 @@ fn test_dom_snapshot_map_revision_url_change_increments_revision() {
         .verify_snapshot_ref(&b1, &snap2_id, rev2, "first-result")
         .expect("New target should resolve");
     assert_eq!(new_selector, ".result-item:first-child");
+}
+
+#[tokio::test]
+async fn test_real_capture_producer_streaming_and_pause_on_zero_subscribers() {
+    let (service, _manager, b1, _) = setup_test_environment();
+
+    // Attach fake snapshot source
+    let fake_source = Arc::new(FakeBrowserSnapshotSource::new(FakeSnapshotBehavior::Auto {
+        width: 800,
+        height: 600,
+    }));
+    service.set_snapshot_source(fake_source.clone());
+
+    // Subscribe frames broadcast receiver BEFORE subscribing to capture stream
+    let mut frame_rx = service.subscribe_frames(&b1);
+
+    // Initial state: producer inactive
+    assert!(!service.is_producer_active(&b1));
+
+    // Transition subscriber count from 0 -> 1 spawns Tokio capture loop
+    let sub = service.subscribe(&b1, "dev-capture", "v-capture").unwrap();
+    assert!(service.is_producer_active(&b1));
+
+    // Await frame from the live capture producer
+    let frame_bytes = tokio::time::timeout(std::time::Duration::from_millis(500), frame_rx.recv())
+        .await
+        .expect("Capture loop must emit frame within timeout")
+        .expect("Frame channel must not be closed");
+
+    // Decode and verify 16-byte binary frame structure
+    let (header, metadata, img) = decode_frame(&frame_bytes).expect("Decoded frame must be valid");
+    assert_eq!(header.format, FRAME_FORMAT_JPEG);
+    assert_eq!(metadata.image_width, 800);
+    assert_eq!(metadata.image_height, 600);
+    assert_eq!(metadata.geometry_source, "wkSnapshot");
+    assert!(!img.is_empty(), "Image payload must not be empty");
+
+    // Capture count increments on fake source
+    assert!(fake_source.call_count() >= 1);
+
+    // Unsubscribe last viewer -> 0 subscribers -> producer pauses immediately
+    assert!(service.unsubscribe(&b1, &sub));
+    assert!(!service.is_producer_active(&b1));
+}
+
+#[test]
+fn test_remote_snapshot_reference_namespace_isolation() {
+    let manager = BrowserManager::new();
+    let b = manager
+        .register_session(CreateBrowserRequest {
+            browser_id: Some("browser-isolation".into()),
+            workspace_id: Some("ws-alpha".into()),
+            worktree_path: None,
+            url: "https://example.com/app".into(),
+            profile: None,
+            zoom_factor: None,
+            bounds: None,
+            visible: Some(true),
+        })
+        .unwrap();
+
+    let initial_gen = manager.get_state(&b.browser_id).unwrap().generation;
+
+    // 1. Record remote snapshot targets
+    let remote_targets = vec![
+        BrowserAutomationTarget {
+            reference: "btn-primary".into(),
+            selector: "#remote-button".into(),
+        },
+    ];
+    let (snap_id, map_rev) = manager
+        .record_remote_snapshot(&b.browser_id, initial_gen, remote_targets)
+        .unwrap();
+
+    // Verify remote target resolves
+    let remote_sel = manager
+        .verify_remote_target(&b.browser_id, &snap_id, map_rev, "btn-primary")
+        .unwrap();
+    assert_eq!(remote_sel, "#remote-button");
+
+    // 2. Perform a legacy DOM scan that writes into legacy automation_targets
+    let legacy_targets = vec![
+        BrowserAutomationTarget {
+            reference: "btn-primary".into(),
+            selector: "#legacy-button-overwritten".into(),
+        },
+    ];
+    manager
+        .record_automation_targets(&b.browser_id, initial_gen, legacy_targets)
+        .unwrap();
+
+    // Legacy lookup resolves the legacy selector
+    let legacy_sel = manager
+        .automation_target(&b.browser_id, initial_gen, "btn-primary")
+        .unwrap();
+    assert_eq!(legacy_sel, "#legacy-button-overwritten");
+
+    // CRITICAL: Remote target MUST remain isolated and NOT be overwritten by the legacy DOM scan
+    let remote_sel_after_legacy_scan = manager
+        .verify_remote_target(&b.browser_id, &snap_id, map_rev, "btn-primary")
+        .unwrap();
+    assert_eq!(
+        remote_sel_after_legacy_scan,
+        "#remote-button",
+        "Legacy DOM scan must not overwrite remote snapshot targets"
+    );
+}
+
+#[test]
+fn test_remote_browser_operation_validation_and_legacy_isolation() {
+    // 1. Valid operations pass validation
+    let nav_op = RemoteBrowserOperation::Navigate {
+        browser_id: "b1".into(),
+        url: "https://example.com".into(),
+    };
+    assert!(nav_op.validate().is_ok());
+
+    let click_ref_op = RemoteBrowserOperation::Click {
+        browser_id: "b1".into(),
+        reference: Some("btn-1".into()),
+        snapshot_id: Some("s1".into()),
+        map_revision: Some(1),
+        u: None,
+        v: None,
+    };
+    assert!(click_ref_op.validate().is_ok());
+
+    let click_point_op = RemoteBrowserOperation::Click {
+        browser_id: "b1".into(),
+        reference: None,
+        snapshot_id: None,
+        map_revision: None,
+        u: Some(0.5),
+        v: Some(0.5),
+    };
+    assert!(click_point_op.validate().is_ok());
+
+    // 2. Invalid inputs are rejected
+    // Click with out of bounds coordinates
+    let click_oob = RemoteBrowserOperation::Click {
+        browser_id: "b1".into(),
+        reference: None,
+        snapshot_id: None,
+        map_revision: None,
+        u: Some(1.5), // > 1.0
+        v: Some(0.5),
+    };
+    assert!(click_oob.validate().is_err());
+
+    // Click with NaN coordinate
+    let click_nan = RemoteBrowserOperation::Click {
+        browser_id: "b1".into(),
+        reference: None,
+        snapshot_id: None,
+        map_revision: None,
+        u: Some(f64::NAN),
+        v: Some(0.5),
+    };
+    assert!(click_nan.validate().is_err());
+
+    // Click with empty reference
+    let click_empty_ref = RemoteBrowserOperation::Click {
+        browser_id: "b1".into(),
+        reference: Some("   ".into()),
+        snapshot_id: None,
+        map_revision: None,
+        u: None,
+        v: None,
+    };
+    assert!(click_empty_ref.validate().is_err());
+
+    // Fill with oversized text (> 16 KiB)
+    let fill_oversized = RemoteBrowserOperation::Fill {
+        browser_id: "b1".into(),
+        reference: "input1".into(),
+        value: "a".repeat(20 * 1024),
+        snapshot_id: None,
+        map_revision: None,
+    };
+    assert!(fill_oversized.validate().is_err());
+
+    // Keypress with forbidden app-chrome shortcut
+    let key_forbidden = RemoteBrowserOperation::Keypress {
+        browser_id: "b1".into(),
+        key: "Cmd+Q".into(),
+    };
+    assert!(key_forbidden.validate().is_err());
+
+    // Eval without approval
+    let eval_unapproved = RemoteBrowserOperation::Eval {
+        browser_id: "b1".into(),
+        script: "window.location".into(),
+        has_approval: false,
+    };
+    assert!(eval_unapproved.validate().is_err());
+
+    // 3. Legacy CLI commands fail deserialization as RemoteBrowserOperation
+    let legacy_list_json = r#"{"command":"list"}"#;
+    let list_deser = serde_json::from_str::<RemoteBrowserOperation>(legacy_list_json);
+    assert!(list_deser.is_err(), "Legacy CLI List command must not deserialize into RemoteBrowserOperation");
+
+    let legacy_open_json = r#"{"command":"open","url":"https://example.com"}"#;
+    let open_deser = serde_json::from_str::<RemoteBrowserOperation>(legacy_open_json);
+    assert!(open_deser.is_err(), "Legacy CLI Open command must not deserialize into RemoteBrowserOperation");
+
+    let legacy_close_json = r#"{"command":"close","browserId":"b1"}"#;
+    let close_deser = serde_json::from_str::<RemoteBrowserOperation>(legacy_close_json);
+    assert!(close_deser.is_err(), "Legacy CLI Close command must not deserialize into RemoteBrowserOperation");
 }

@@ -49,14 +49,21 @@ pub struct DriverLease {
 pub struct DriverBroker {
     current_lease: Mutex<Option<DriverLease>>,
     epoch_counter: AtomicU64,
+    reclaim_tx: tokio::sync::broadcast::Sender<String>,
 }
 
 impl DriverBroker {
     pub fn new() -> Self {
+        let (reclaim_tx, _) = tokio::sync::broadcast::channel(64);
         Self {
             current_lease: Mutex::new(None),
             epoch_counter: AtomicU64::new(1),
+            reclaim_tx,
         }
+    }
+
+    pub fn subscribe_reclaim(&self) -> tokio::sync::broadcast::Receiver<String> {
+        self.reclaim_tx.subscribe()
     }
 
     pub fn claim_driver(
@@ -130,10 +137,21 @@ impl DriverBroker {
         false
     }
 
-    pub fn is_active_driver(&self, device_id: &str, lease_epoch: u64, now: Instant) -> bool {
+    pub fn is_active_driver(
+        &self,
+        device_id: &str,
+        connection_id: &str,
+        subscription_id: &str,
+        browser_id: &str,
+        lease_epoch: u64,
+        now: Instant,
+    ) -> bool {
         let guard = self.current_lease.lock();
         if let Some(existing) = guard.as_ref() {
             existing.device_id == device_id
+                && existing.connection_id == connection_id
+                && existing.subscription_id == subscription_id
+                && existing.browser_id == browser_id
                 && existing.lease_epoch == lease_epoch
                 && now < existing.expires_at
         } else {
@@ -143,7 +161,11 @@ impl DriverBroker {
 
     pub fn reclaim_desktop(&self) -> Option<DriverLease> {
         let mut guard = self.current_lease.lock();
-        guard.take()
+        let lease = guard.take();
+        if let Some(ref l) = lease {
+            let _ = self.reclaim_tx.send(l.browser_id.clone());
+        }
+        lease
     }
 }
 
@@ -382,6 +404,14 @@ impl AdmissionController {
             false
         }
     }
+
+    pub fn reclaim_desktop(&self) -> Option<DriverLease> {
+        self.broker.reclaim_desktop()
+    }
+
+    pub fn subscribe_reclaim(&self) -> tokio::sync::broadcast::Receiver<String> {
+        self.broker.subscribe_reclaim()
+    }
 }
 
 #[cfg(test)]
@@ -486,5 +516,40 @@ pub mod tests {
         assert!(limiter.check_eval(now));
         assert!(!limiter.check_eval(now));
         assert!(limiter.check_eval(now + Duration::from_secs(1)));
+    }
+
+    #[tokio::test]
+    async fn test_driver_tuple_binding_and_reclaim_broadcast() {
+        let broker = DriverBroker::new();
+        let mut reclaim_rx = broker.subscribe_reclaim();
+        let now = Instant::now();
+
+        let lease = broker.claim_driver("dev1", "conn1", "sub1", "b1", now).unwrap();
+        assert_eq!(lease.lease_epoch, 1);
+
+        // Exact tuple matches
+        assert!(broker.is_active_driver("dev1", "conn1", "sub1", "b1", 1, now));
+
+        // Mismatched device_id
+        assert!(!broker.is_active_driver("dev2", "conn1", "sub1", "b1", 1, now));
+        // Mismatched connection_id
+        assert!(!broker.is_active_driver("dev1", "conn2", "sub1", "b1", 1, now));
+        // Mismatched subscription_id
+        assert!(!broker.is_active_driver("dev1", "conn1", "sub2", "b1", 1, now));
+        // Mismatched browser_id
+        assert!(!broker.is_active_driver("dev1", "conn1", "sub1", "b2", 1, now));
+        // Mismatched epoch
+        assert!(!broker.is_active_driver("dev1", "conn1", "sub1", "b1", 2, now));
+
+        // Reclaim broadcasts the browser_id
+        let reclaimed = broker.reclaim_desktop();
+        assert!(reclaimed.is_some());
+        assert_eq!(reclaimed.unwrap().browser_id, "b1");
+
+        let broadcast_id = reclaim_rx.recv().await.unwrap();
+        assert_eq!(broadcast_id, "b1");
+
+        // After reclaim, driver is no longer active
+        assert!(!broker.is_active_driver("dev1", "conn1", "sub1", "b1", 1, now));
     }
 }

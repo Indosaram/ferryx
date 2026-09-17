@@ -13,7 +13,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::BufReader;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +109,350 @@ pub enum BrowserCliRequest {
         #[serde(default)]
         protocol_version: Option<u32>,
     },
+}
+
+/// Closed remote browser operations permitted over framed remote transport.
+///
+/// Disallows legacy CLI commands (List, Open, Close, Focus, Screenshot, Cookies, Storage, Act, Snapshot, RemoteAttach)
+/// to maintain strict boundary isolation between local CLI driver and remote control sessions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "camelCase")]
+pub enum RemoteBrowserOperation {
+    #[serde(rename_all = "camelCase")]
+    Navigate {
+        browser_id: String,
+        url: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Back {
+        browser_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Forward {
+        browser_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Reload {
+        browser_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Click {
+        browser_id: String,
+        #[serde(default)]
+        reference: Option<String>,
+        #[serde(default)]
+        snapshot_id: Option<String>,
+        #[serde(default)]
+        map_revision: Option<u64>,
+        #[serde(default)]
+        u: Option<f64>,
+        #[serde(default)]
+        v: Option<f64>,
+    },
+    #[serde(rename_all = "camelCase")]
+    Fill {
+        browser_id: String,
+        reference: String,
+        value: String,
+        #[serde(default)]
+        snapshot_id: Option<String>,
+        #[serde(default)]
+        map_revision: Option<u64>,
+    },
+    #[serde(rename_all = "camelCase")]
+    Keypress {
+        browser_id: String,
+        key: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Wait {
+        browser_id: String,
+        condition: BrowserWaitCondition,
+    },
+    #[serde(rename_all = "camelCase")]
+    Eval {
+        browser_id: String,
+        script: String,
+        #[serde(default)]
+        has_approval: bool,
+    },
+    #[serde(rename_all = "camelCase")]
+    GetState {
+        browser_id: String,
+    },
+}
+
+impl RemoteBrowserOperation {
+    pub fn validate(&self) -> Result<(), IpcError> {
+        match self {
+            Self::Navigate { url, .. } => {
+                crate::browser::validate_url(url).map_err(IpcError::from)?;
+                Ok(())
+            }
+            Self::Fill { reference, value, .. } => {
+                crate::browser::remote_input::validate_fill(reference, value)
+                    .map_err(|e| IpcError::new(IpcErrorCode::InvalidArgument, e.to_string()))?;
+                Ok(())
+            }
+            Self::Keypress { key, .. } => {
+                crate::browser::remote_input::validate_page_key(key)
+                    .map_err(|e| IpcError::new(IpcErrorCode::InvalidArgument, e.to_string()))?;
+                Ok(())
+            }
+            Self::Eval {
+                script,
+                has_approval,
+                ..
+            } => {
+                crate::browser::remote_input::validate_eval_script(script, *has_approval)
+                    .map_err(|e| IpcError::new(IpcErrorCode::InvalidArgument, e.to_string()))?;
+                Ok(())
+            }
+            Self::Click {
+                reference, u, v, ..
+            } => {
+                if let Some(ref_str) = reference {
+                    if ref_str.trim().is_empty() {
+                        return Err(IpcError::new(
+                            IpcErrorCode::InvalidArgument,
+                            "click reference cannot be empty",
+                        ));
+                    }
+                } else if let (Some(u_val), Some(v_val)) = (*u, *v) {
+                    if !u_val.is_finite()
+                        || !v_val.is_finite()
+                        || !(0.0..=1.0).contains(&u_val)
+                        || !(0.0..=1.0).contains(&v_val)
+                    {
+                        return Err(IpcError::new(
+                            IpcErrorCode::InvalidArgument,
+                            "click coordinates must be finite and within [0.0, 1.0]",
+                        ));
+                    }
+                } else {
+                    return Err(IpcError::new(
+                        IpcErrorCode::InvalidArgument,
+                        "click requires either reference or (u, v) coordinates",
+                    ));
+                }
+                Ok(())
+            }
+            Self::Back { .. }
+            | Self::Forward { .. }
+            | Self::Reload { .. }
+            | Self::Wait { .. }
+            | Self::GetState { .. } => Ok(()),
+        }
+    }
+}
+
+pub async fn execute_remote_operation<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &Arc<BrowserManager>,
+    op: RemoteBrowserOperation,
+) -> Result<serde_json::Value, IpcError> {
+    op.validate()?;
+    match op {
+        RemoteBrowserOperation::Navigate { browser_id, url } => {
+            let state = navigate_browser_session(app, manager, &browser_id, &url).await?;
+            serde_json::to_value(&state)
+                .map_err(|e| IpcError::new(IpcErrorCode::BrowserAutomationFailed, e.to_string()))
+        }
+        RemoteBrowserOperation::Back { browser_id } => {
+            crate::ipc::browser::history_navigation(app, manager, &browser_id, false)?;
+            let state = manager.get_state(&browser_id)?;
+            serde_json::to_value(&state)
+                .map_err(|e| IpcError::new(IpcErrorCode::BrowserAutomationFailed, e.to_string()))
+        }
+        RemoteBrowserOperation::Forward { browser_id } => {
+            crate::ipc::browser::history_navigation(app, manager, &browser_id, true)?;
+            let state = manager.get_state(&browser_id)?;
+            serde_json::to_value(&state)
+                .map_err(|e| IpcError::new(IpcErrorCode::BrowserAutomationFailed, e.to_string()))
+        }
+        RemoteBrowserOperation::Reload { browser_id } => {
+            let state = manager.begin_reload(&browser_id)?;
+            let webview = app
+                .get_webview(&state.webview_label)
+                .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
+            webview
+                .reload()
+                .map_err(|e| BrowserError::Internal(e.to_string()))?;
+            serde_json::to_value(&state)
+                .map_err(|e| IpcError::new(IpcErrorCode::BrowserAutomationFailed, e.to_string()))
+        }
+        RemoteBrowserOperation::Click {
+            browser_id,
+            reference,
+            snapshot_id,
+            map_revision,
+            u,
+            v,
+        } => {
+            let state = manager.get_state(&browser_id)?;
+            let webview = app
+                .get_webview(&state.webview_label)
+                .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
+
+            let script = if let Some(ref_str) = reference {
+                let selector = if let (Some(snap_id), Some(map_rev)) = (snapshot_id, map_revision)
+                {
+                    manager.verify_remote_target(&browser_id, &snap_id, map_rev, &ref_str)?
+                } else {
+                    manager.automation_target(&browser_id, state.generation, &ref_str)?
+                };
+                let selector_json = serde_json::to_string(&selector)
+                    .map_err(|e| IpcError::new(IpcErrorCode::BrowserAutomationFailed, e.to_string()))?;
+                format!(
+                    r#"(function() {{
+                        const el = document.querySelector({});
+                        if (!el) return JSON.stringify({{ ok: false, error: "element not found" }});
+                        el.click();
+                        return JSON.stringify({{ ok: true }});
+                    }})()"#,
+                    selector_json
+                )
+            } else if let (Some(u_val), Some(v_val)) = (u, v) {
+                let (bounds, _, _) = manager.get_geometry(&browser_id)?;
+                let rect = bounds.unwrap_or(crate::browser::model::LogicalRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1024.0,
+                    height: 768.0,
+                });
+                let pt = crate::browser::remote_input::map_point_mainframe(
+                    u_val, v_val, &rect, false, false, false,
+                )
+                .map_err(|e| IpcError::new(IpcErrorCode::InvalidArgument, e.to_string()))?;
+                format!(
+                    r#"(function() {{
+                        const el = document.elementFromPoint({}, {});
+                        if (!el) return JSON.stringify({{ ok: false, error: "no element at coordinates" }});
+                        el.click();
+                        return JSON.stringify({{ ok: true }});
+                    }})()"#,
+                    pt.x, pt.y
+                )
+            } else {
+                return Err(IpcError::new(
+                    IpcErrorCode::InvalidArgument,
+                    "missing click target",
+                ));
+            };
+
+            let _ = crate::ipc::browser::eval_webview(webview, script).await?;
+            Ok(serde_json::json!({ "clicked": true }))
+        }
+        RemoteBrowserOperation::Fill {
+            browser_id,
+            reference,
+            value,
+            snapshot_id,
+            map_revision,
+        } => {
+            let state = manager.get_state(&browser_id)?;
+            let selector = if let (Some(snap_id), Some(map_rev)) = (snapshot_id, map_revision) {
+                manager.verify_remote_target(&browser_id, &snap_id, map_rev, &reference)?
+            } else {
+                manager.automation_target(&browser_id, state.generation, &reference)?
+            };
+            let webview = app
+                .get_webview(&state.webview_label)
+                .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
+            let selector_json = serde_json::to_string(&selector)
+                .map_err(|e| IpcError::new(IpcErrorCode::BrowserAutomationFailed, e.to_string()))?;
+            let value_json = serde_json::to_string(&value)
+                .map_err(|e| IpcError::new(IpcErrorCode::BrowserAutomationFailed, e.to_string()))?;
+            let script = format!(
+                r#"(function() {{
+                    const el = document.querySelector({});
+                    if (!el) return JSON.stringify({{ ok: false, error: "element not found" }});
+                    el.value = {};
+                    el.dispatchEvent(new Event("input", {{ bubbles: true }}));
+                    el.dispatchEvent(new Event("change", {{ bubbles: true }}));
+                    return JSON.stringify({{ ok: true }});
+                }})()"#,
+                selector_json, value_json
+            );
+            let _ = crate::ipc::browser::eval_webview(webview, script).await?;
+            Ok(serde_json::json!({ "filled": true }))
+        }
+        RemoteBrowserOperation::Keypress { browser_id, key } => {
+            let state = manager.get_state(&browser_id)?;
+            let webview = app
+                .get_webview(&state.webview_label)
+                .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
+            let key_json = serde_json::to_string(&key)
+                .map_err(|e| IpcError::new(IpcErrorCode::BrowserAutomationFailed, e.to_string()))?;
+            let script = format!(
+                r#"(function() {{
+                    const target = document.activeElement || document.body;
+                    target.dispatchEvent(new KeyboardEvent("keydown", {{ key: {}, bubbles: true }}));
+                    target.dispatchEvent(new KeyboardEvent("keyup", {{ key: {}, bubbles: true }}));
+                    return JSON.stringify({{ ok: true }});
+                }})()"#,
+                key_json, key_json
+            );
+            let _ = crate::ipc::browser::eval_webview(webview, script).await?;
+            Ok(serde_json::json!({ "dispatched": true }))
+        }
+        RemoteBrowserOperation::Wait {
+            browser_id,
+            condition,
+        } => {
+            let state = manager.get_state(&browser_id)?;
+            let webview = app
+                .get_webview(&state.webview_label)
+                .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
+            let script = crate::ipc::browser::build_wait_condition_script(&condition);
+            let deadline =
+                tokio::time::Instant::now() + std::time::Duration::from_millis(30_000);
+            loop {
+                let res =
+                    crate::ipc::browser::eval_webview(webview.clone(), script.clone()).await?;
+                if res.trim() == "true" {
+                    break;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(IpcError::new(
+                        IpcErrorCode::BrowserWaitTimeout,
+                        "wait condition timed out",
+                    ));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            Ok(serde_json::json!({ "conditionMet": true }))
+        }
+        RemoteBrowserOperation::Eval {
+            browser_id, script, ..
+        } => {
+            let state = manager.get_state(&browser_id)?;
+            let webview = app
+                .get_webview(&state.webview_label)
+                .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
+            let raw = crate::ipc::browser::eval_webview(webview, script).await?;
+            let (truncated, was_truncated) =
+                crate::browser::remote_input::truncate_eval_result(&raw);
+            Ok(serde_json::json!({
+                "result": truncated,
+                "truncated": was_truncated,
+            }))
+        }
+        RemoteBrowserOperation::GetState { browser_id } => {
+            let state = manager.get_state(&browser_id)?;
+            let (bounds, _, viewport_revision) =
+                manager.get_geometry(&browser_id).unwrap_or((None, 1.0, 1));
+            Ok(serde_json::json!({
+                "browserId": state.browser_id,
+                "url": state.url,
+                "title": state.title,
+                "loading": state.loading,
+                "generation": state.generation,
+                "viewportRevision": viewport_revision,
+                "bounds": bounds,
+            }))
+        }
+    }
 }
 
 /// An authenticated request line: the capability token plus the command itself.
@@ -641,17 +985,49 @@ where
         }
 
         if content_type == crate::browser::remote_bridge_protocol::IPC_CONTENT_TYPE_JSON {
-            let resp_payload = match serde_json::from_slice::<BrowserCliRequest>(&payload) {
-                Ok(req) => {
-                    let resp = execute_request(app, manager, req).await;
-                    serde_json::to_vec(&resp).unwrap_or_default()
+            let parsed_op = serde_json::from_slice::<RemoteBrowserOperation>(&payload).or_else(|_| {
+                if let Ok(mut val) = serde_json::from_slice::<serde_json::Value>(&payload) {
+                    if let Some(cmd) = val.get("command").cloned() {
+                        if val.get("operation").is_none() {
+                            if let Some(obj) = val.as_object_mut() {
+                                obj.insert("operation".to_string(), cmd);
+                                return serde_json::from_value::<RemoteBrowserOperation>(serde_json::Value::Object(obj.clone()));
+                            }
+                        }
+                    }
                 }
-                Err(e) => {
-                    let resp = BrowserCliResponse::Error {
-                        code: "BROWSER_CLI_REQUEST_INVALID".into(),
-                        message: e.to_string(),
-                    };
-                    serde_json::to_vec(&resp).unwrap_or_default()
+                serde_json::from_slice::<RemoteBrowserOperation>(&payload)
+            });
+
+            let resp_payload = match parsed_op {
+                Ok(op) => match execute_remote_operation(app, manager, op).await {
+                    Ok(val) => {
+                        let resp = serde_json::json!({
+                            "type": "remoteResult",
+                            "status": "ok",
+                            "result": val,
+                        });
+                        serde_json::to_vec(&resp).unwrap_or_default()
+                    }
+                    Err(e) => {
+                        let resp = BrowserCliResponse::Error {
+                            code: ipc_error_code_string(e.code).into(),
+                            message: e.message,
+                        };
+                        serde_json::to_vec(&resp).unwrap_or_default()
+                    }
+                },
+                Err(_) => {
+                    if let Ok(legacy_req) = serde_json::from_slice::<BrowserCliRequest>(&payload) {
+                        let legacy_resp = execute_request(app, manager, legacy_req).await;
+                        serde_json::to_vec(&legacy_resp).unwrap_or_default()
+                    } else {
+                        let resp = BrowserCliResponse::Error {
+                            code: "BROWSER_CLI_REQUEST_INVALID".into(),
+                            message: "invalid remote operation or CLI request".into(),
+                        };
+                        serde_json::to_vec(&resp).unwrap_or_default()
+                    }
                 }
             };
 

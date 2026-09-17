@@ -243,3 +243,64 @@ async fn test_platform_unsupported_error_propagation() {
         err.message
     );
 }
+
+#[test]
+fn test_capture_dimension_clamping_and_pixel_limits() {
+    // 1. Normal dimensions within budget are unchanged
+    let (w1, h1) = clamp_capture_dimensions(1920, 1080);
+    assert_eq!((w1, h1), (1920, 1080));
+
+    // 2. Max edge cap (2048) enforced with aspect ratio preserved
+    let (w2, h2) = clamp_capture_dimensions(4096, 2048);
+    assert!(w2 <= MAX_CAPTURE_EDGE, "w2 ({w2}) must be <= {MAX_CAPTURE_EDGE}");
+    assert!(h2 <= MAX_CAPTURE_EDGE, "h2 ({h2}) must be <= {MAX_CAPTURE_EDGE}");
+    assert_eq!(w2, 2048);
+    assert_eq!(h2, 1024);
+
+    // 3. Max pixels cap (4,000,000) enforced: 2048x2048 = 4,194,304 > 4,000,000
+    let (w3, h3) = clamp_capture_dimensions(2048, 2048);
+    let total_pixels = (w3 as u64) * (h3 as u64);
+    assert!(
+        total_pixels <= MAX_CAPTURE_PIXELS,
+        "Total pixels {total_pixels} must be <= {MAX_CAPTURE_PIXELS}"
+    );
+    assert_eq!(w3, h3); // Preserved aspect ratio
+
+    // 4. Zero dimensions handled safely
+    let (w4, h4) = clamp_capture_dimensions(0, 0);
+    assert_eq!((w4, h4), (1, 1));
+}
+
+#[tokio::test]
+async fn test_coordinator_late_callback_quarantine_and_permit_release() {
+    let (coordinator, rx) = SnapshotCallbackCoordinator::new();
+
+    let permit_released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let permit_released_clone = std::sync::Arc::clone(&permit_released);
+
+    coordinator.set_permit_releaser(move || {
+        permit_released_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+
+    // Simulate timeout occurrence
+    let _timeout_err = await_coordinator_completion(&coordinator, rx, Duration::from_millis(10))
+        .await
+        .expect_err("Should time out");
+
+    assert!(coordinator.is_timed_out());
+    assert!(!permit_released.load(std::sync::atomic::Ordering::SeqCst), "Permit not released until callback arrives");
+
+    // Late arriving callback after timeout
+    let late_snapshot = BrowserSnapshot::new(sample_valid_png_bytes(), SnapshotFormat::Png, 800, 600);
+    let delivered = coordinator.complete(Ok(late_snapshot));
+
+    // Late delivery must be quarantined (returned false)
+    assert!(!delivered, "Late arrival must be quarantined/discarded");
+    assert_eq!(coordinator.late_arrivals(), 1);
+
+    // Permit releaser must be invoked without leaks
+    assert!(
+        permit_released.load(std::sync::atomic::Ordering::SeqCst),
+        "Permit must be released when quarantined late callback is discarded"
+    );
+}

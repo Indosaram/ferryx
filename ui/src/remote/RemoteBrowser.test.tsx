@@ -10,6 +10,9 @@ import {
 import { BrowserClient } from "./browserClient";
 import { useRemoteBrowser } from "./useRemoteBrowser";
 import { RemoteBrowser } from "./RemoteBrowser";
+import { RemoteBrowserWorkspace } from "./RemoteBrowserWorkspace";
+import { useRemoteBrowserDriver } from "./useRemoteBrowserDriver";
+import { RemoteBrowserSharingIndicator } from "../components/RemoteBrowserSharingIndicator";
 
 // Mock WebSocket
 class MockWebSocket {
@@ -105,6 +108,8 @@ beforeEach(() => {
   MockWebSocket.instances = [];
   createdObjectUrls = [];
   revokedObjectUrls = [];
+  Object.defineProperty(document, "hidden", { value: false, configurable: true });
+  Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true });
   vi.stubGlobal("WebSocket", MockWebSocket);
 
   const OriginalURL = globalThis.URL;
@@ -138,6 +143,8 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  Object.defineProperty(document, "hidden", { value: false, configurable: true });
+  Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true });
   vi.unstubAllGlobals();
   MockWebSocket.instances = [];
 });
@@ -374,6 +381,16 @@ describe("useRemoteBrowser", () => {
         <button data-testid="reconnect-btn" onClick={state.reconnect}>
           Reconnect
         </button>
+        <button
+          data-testid="ack-btn"
+          onClick={() => {
+            if (state.frame) {
+              state.confirmPresented(state.frame.metadata.streamId, state.frame.seq);
+            }
+          }}
+        >
+          Confirm ACK
+        </button>
       </div>
     );
   }
@@ -395,7 +412,7 @@ describe("useRemoteBrowser", () => {
 
     expect(screen.getByTestId("status").textContent).toBe("streaming");
 
-    // When frame arrives, image URL is created and frame ACK is sent
+    // When frame arrives, image URL is created. Frame ACK is NOT sent yet (presentation-gated ACK)
     const frame = makeTestFrame(1, 1);
     await act(async () => {
       ws.onmessage?.({ data: encodeFrame(frame).buffer });
@@ -403,6 +420,21 @@ describe("useRemoteBrowser", () => {
 
     expect(screen.getByTestId("seq").textContent).toBe("1");
     expect(createdObjectUrls.length).toBe(1);
+
+    // No premature ACK before presentation
+    const acksBeforeConfirm = ws.sentMessages.filter((m) => {
+      try {
+        return JSON.parse(m as string).type === "browserFrameAck";
+      } catch {
+        return false;
+      }
+    });
+    expect(acksBeforeConfirm.length).toBe(0);
+
+    // Presentation confirmed via confirmPresented
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("ack-btn"));
+    });
 
     // Frame ack sent
     const ackMsg = JSON.parse(ws.sentMessages[ws.sentMessages.length - 1] as string);
@@ -495,6 +527,10 @@ describe("useRemoteBrowser", () => {
     // Buffer cleared!
     expect(screen.getByTestId("imageUrl").textContent).toBe("none");
     expect(screen.getByTestId("status").textContent).toBe("paused");
+
+    // Reset document visibility back to visible
+    Object.defineProperty(document, "hidden", { value: false, configurable: true });
+    Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true });
   });
 
   it("reconnect requests a new ticket, creates a new subscription, and DOES NOT auto-replay mutations", async () => {
@@ -609,5 +645,218 @@ describe("RemoteBrowser component", () => {
     await act(async () => {
       unmount();
     });
+  });
+
+  it("does not create a duplicate client when session is passed (P1-09 dedup)", () => {
+    const mockSession = {
+      status: "streaming" as const,
+      frame: null,
+      imageUrl: null,
+      browserState: null,
+      hello: null,
+      error: null,
+      client: null,
+      reconnect: vi.fn(),
+      sendAck: vi.fn(),
+      confirmPresented: vi.fn(),
+    };
+
+    render(
+      <RemoteBrowser
+        baseUrl="http://localhost:8080"
+        browserId="b1"
+        deviceToken="mock-token"
+        session={mockSession}
+      />
+    );
+
+    // Exactly 0 WebSocket clients created by RemoteBrowser when session is passed
+    expect(MockWebSocket.instances.length).toBe(0);
+  });
+
+  it("triggers presentation-gated ACK when image onLoad fires (P1-10)", async () => {
+    const confirmPresented = vi.fn();
+    const testFrame = makeTestFrame(1, 1, 640, 400);
+    const mockSession = {
+      status: "streaming" as const,
+      frame: testFrame,
+      imageUrl: "blob:mock-url-1",
+      browserState: null,
+      hello: null,
+      error: null,
+      client: null,
+      reconnect: vi.fn(),
+      sendAck: vi.fn(),
+      confirmPresented,
+    };
+
+    render(
+      <RemoteBrowser
+        baseUrl="http://localhost:8080"
+        browserId="b1"
+        deviceToken="mock-token"
+        session={mockSession}
+      />
+    );
+
+    const img = screen.getByAltText("Remote browser stream");
+    expect(img).toBeDefined();
+    expect(confirmPresented).not.toHaveBeenCalled();
+
+    // Image load completes presentation
+    await act(async () => {
+      fireEvent.load(img);
+    });
+
+    expect(confirmPresented).toHaveBeenCalledWith(1, 1);
+  });
+
+  it("ensures RemoteBrowserWorkspace creates exactly ONE WebSocket connection (P1-09 dedup)", async () => {
+    await act(async () => {
+      render(
+        <RemoteBrowserWorkspace
+          baseUrl="http://localhost:8080"
+          browserId="b1"
+          deviceToken="mock-token"
+        />
+      );
+    });
+
+    const ws = await waitForSocket(0);
+    expect(ws).toBeDefined();
+    // Exactly 1 WebSocket client created (no duplicate client from RemoteBrowser inside Workspace)
+    expect(MockWebSocket.instances.length).toBe(1);
+  });
+
+  it("validates documentGeneration and viewportRevision in driver mutation commands (P1-10)", async () => {
+    const mockClient = {
+      sendCommand: vi.fn().mockResolvedValue({ ok: true }),
+      onDriverChanged: vi.fn(() => () => {}),
+      onError: vi.fn(() => () => {}),
+      onClose: vi.fn(() => () => {}),
+      heartbeat: vi.fn().mockResolvedValue({}),
+      claimDriver: vi.fn().mockResolvedValue({ leaseEpoch: "10" }),
+      releaseDriver: vi.fn().mockResolvedValue({}),
+    } as unknown as BrowserClient;
+
+    let capturedDriver!: ReturnType<typeof useRemoteBrowserDriver>;
+    function DriverTestComponent() {
+      const driver = useRemoteBrowserDriver({
+        client: mockClient,
+        browserId: "b1",
+        browserInstanceId: "bi1",
+        desktopEpoch: "1",
+        documentGeneration: "gen1",
+        viewportRevision: "vrev1",
+      });
+      capturedDriver = driver;
+
+      return <button data-testid="claim" onClick={() => driver.claim()} />;
+    }
+
+    render(<DriverTestComponent />);
+
+    // Claim driver first
+    await act(async () => {
+      await capturedDriver.claim();
+    });
+
+    // Valid guards pass through
+    await act(async () => {
+      await capturedDriver.click({
+        u: 0.5,
+        v: 0.5,
+        documentGeneration: "gen1",
+        viewportRevision: "vrev1",
+      });
+    });
+    expect(mockClient.sendCommand).toHaveBeenCalledTimes(1);
+
+    // Stale documentGeneration throws
+    await expect(
+      capturedDriver.click({
+        u: 0.5,
+        v: 0.5,
+        documentGeneration: "stale_gen",
+        viewportRevision: "vrev1",
+      })
+    ).rejects.toThrow(/stale documentGeneration/i);
+
+    // Stale viewportRevision throws
+    await expect(
+      capturedDriver.click({
+        u: 0.5,
+        v: 0.5,
+        documentGeneration: "gen1",
+        viewportRevision: "stale_vrev",
+      })
+    ).rejects.toThrow(/stale viewportRevision/i);
+  });
+
+  it("releases driving lease on unmount (P1-12)", async () => {
+    const releaseSpy = vi.fn().mockResolvedValue({});
+    const mockClient = {
+      sendCommand: vi.fn().mockResolvedValue({ ok: true }),
+      onDriverChanged: vi.fn(() => () => {}),
+      onError: vi.fn(() => () => {}),
+      onClose: vi.fn(() => () => {}),
+      heartbeat: vi.fn().mockResolvedValue({}),
+      claimDriver: vi.fn().mockResolvedValue({ leaseEpoch: "epoch-99" }),
+      releaseDriver: releaseSpy,
+    } as unknown as BrowserClient;
+
+    function DriverHarness() {
+      const driver = useRemoteBrowserDriver({
+        client: mockClient,
+        browserId: "b1",
+        browserInstanceId: "bi1",
+        desktopEpoch: "1",
+        documentGeneration: "1",
+      });
+
+      return <button data-testid="claim" onClick={() => driver.claim()} />;
+    }
+
+    let unmountFn: () => void = () => {};
+    await act(async () => {
+      const rendered = render(<DriverHarness />);
+      unmountFn = rendered.unmount;
+    });
+
+    // Claim driver
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("claim"));
+    });
+
+    expect(releaseSpy).not.toHaveBeenCalled();
+
+    // Unmount triggers releaseDriver
+    await act(async () => {
+      unmountFn();
+    });
+
+    expect(releaseSpy).toHaveBeenCalledWith("epoch-99");
+  });
+
+  it("invokes browserRemoteReclaim when clicking Reclaim Control (P1-03)", async () => {
+    const mockReclaim = vi.fn().mockResolvedValue(1);
+
+    render(
+      <RemoteBrowserSharingIndicator
+        isSharing={true}
+        onReclaim={mockReclaim}
+      />
+    );
+
+    const indicator = screen.getByTestId("remote-browser-sharing-indicator");
+    expect(indicator).toBeDefined();
+
+    const reclaimBtn = screen.getByTestId("reclaim-control-btn");
+    await act(async () => {
+      fireEvent.click(reclaimBtn);
+    });
+
+    expect(mockReclaim).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("reclaim-feedback-msg").textContent).toContain("Control reclaimed");
   });
 });

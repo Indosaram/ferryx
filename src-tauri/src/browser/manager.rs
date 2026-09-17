@@ -23,6 +23,7 @@ pub struct ManagedBrowserSession {
     pub visible: bool,
     pub bounds: Option<LogicalRect>,
     pub automation_targets: HashMap<String, String>,
+    pub remote_targets: HashMap<String, String>,
     pub instance_id: String,
     pub viewport_revision: u64,
     pub remote_snapshot_id: Option<String>,
@@ -156,6 +157,7 @@ impl BrowserManager {
             visible,
             bounds: req.bounds,
             automation_targets: HashMap::new(),
+            remote_targets: HashMap::new(),
             instance_id: uuid.clone(),
             viewport_revision: 1,
             remote_snapshot_id: None,
@@ -224,6 +226,8 @@ impl BrowserManager {
         }
         s.generation += 1;
         s.automation_targets.clear();
+        s.remote_targets.clear();
+        s.remote_snapshot_id = None;
         s.loading = true;
         s.load_error = None;
         Ok(valid_url)
@@ -236,6 +240,8 @@ impl BrowserManager {
             .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
         s.generation += 1;
         s.automation_targets.clear();
+        s.remote_targets.clear();
+        s.remote_snapshot_id = None;
         s.loading = true;
         s.load_error = None;
         sync_history_flags(s);
@@ -267,6 +273,8 @@ impl BrowserManager {
             // a URL change. Invalidate the snapshot when dispatch begins.
             s.generation += 1;
             s.automation_targets.clear();
+            s.remote_targets.clear();
+            s.remote_snapshot_id = None;
             s.loading = true;
             s.load_error = None;
             return Ok(browser_state(s));
@@ -288,6 +296,8 @@ impl BrowserManager {
         s.url = s.history[next_index].clone();
         s.generation += 1;
         s.automation_targets.clear();
+        s.remote_targets.clear();
+        s.remote_snapshot_id = None;
         s.loading = true;
         s.load_error = None;
         sync_history_flags(s);
@@ -421,7 +431,7 @@ impl BrowserManager {
         let fresh_snapshot_id = Uuid::new_v4().to_string();
         session.remote_snapshot_id = Some(fresh_snapshot_id.clone());
         session.map_revision += 1;
-        session.automation_targets = targets
+        session.remote_targets = targets
             .into_iter()
             .map(|target| (target.reference, target.selector))
             .collect();
@@ -445,7 +455,7 @@ impl BrowserManager {
             return Err(BrowserError::AutomationSnapshotStale);
         }
         session
-            .automation_targets
+            .remote_targets
             .get(reference)
             .cloned()
             .ok_or_else(|| BrowserError::AutomationTargetNotFound(reference.to_string()))
@@ -504,6 +514,7 @@ impl BrowserManager {
                 s.url = u;
                 s.generation += 1;
                 s.automation_targets.clear();
+                s.remote_targets.clear();
                 s.remote_snapshot_id = None;
                 s.map_revision += 1;
                 s.load_error = None;

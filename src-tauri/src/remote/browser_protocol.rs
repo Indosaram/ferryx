@@ -104,6 +104,8 @@ pub enum ProtocolCodecError {
     ImageEdgeExceeded { width: u32, height: u32 },
     #[error("Image pixels exceed 4MP: {pixels} pixels")]
     ImagePixelsExceeded { pixels: u64 },
+    #[error("Invalid decimal string for {0}: must be unsigned 64-bit integer")]
+    InvalidDecimalString(&'static str),
     #[error("Geometry source must be 'wkSnapshot', got '{0}'")]
     InvalidGeometrySource(String),
     #[error("Invalid image header: {0}")]
@@ -230,6 +232,30 @@ pub fn validate_metadata(meta: &BrowserFrameMetadata) -> Result<(), ProtocolCode
     let pixels = (meta.image_width as u64) * (meta.image_height as u64);
     if pixels > MAX_IMAGE_PIXELS {
         return Err(ProtocolCodecError::ImagePixelsExceeded { pixels });
+    }
+    if meta.browser_service_epoch.is_empty()
+        || !meta.browser_service_epoch.chars().all(|c| c.is_ascii_digit())
+        || meta.browser_service_epoch.parse::<u64>().is_err()
+    {
+        return Err(ProtocolCodecError::InvalidDecimalString("browser_service_epoch"));
+    }
+    if meta.desktop_epoch.is_empty()
+        || !meta.desktop_epoch.chars().all(|c| c.is_ascii_digit())
+        || meta.desktop_epoch.parse::<u64>().is_err()
+    {
+        return Err(ProtocolCodecError::InvalidDecimalString("desktop_epoch"));
+    }
+    if meta.document_generation.is_empty()
+        || !meta.document_generation.chars().all(|c| c.is_ascii_digit())
+        || meta.document_generation.parse::<u64>().is_err()
+    {
+        return Err(ProtocolCodecError::InvalidDecimalString("document_generation"));
+    }
+    if meta.viewport_revision.is_empty()
+        || !meta.viewport_revision.chars().all(|c| c.is_ascii_digit())
+        || meta.viewport_revision.parse::<u64>().is_err()
+    {
+        return Err(ProtocolCodecError::InvalidDecimalString("viewport_revision"));
     }
     if meta.geometry_source != "wkSnapshot" {
         return Err(ProtocolCodecError::InvalidGeometrySource(
@@ -515,6 +541,13 @@ pub enum ServerMessage {
     #[serde(rename_all = "camelCase")]
     BrowserDriverReleased {
         request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lease_epoch: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    BrowserDriverRevoked {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         lease_epoch: Option<String>,
     },

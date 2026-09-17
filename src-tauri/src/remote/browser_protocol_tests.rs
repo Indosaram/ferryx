@@ -244,6 +244,15 @@ fn test_decimal_string_u64_validation() {
 
     let vp_rev: u64 = meta.viewport_revision.parse().expect("viewport_revision is u64");
     assert_eq!(vp_rev, 3);
+
+    // Explicit test that non-decimal string viewport_revision is rejected during validation
+    let mut invalid_meta = valid_test_metadata();
+    invalid_meta.viewport_revision = "invalid_3.5".into();
+    let err = encode_binary_frame(BrowserImageFormat::Png, 1, &invalid_meta, sample_test_png()).unwrap_err();
+    assert_eq!(
+        err,
+        ProtocolCodecError::InvalidDecimalString("viewport_revision")
+    );
 }
 
 #[test]

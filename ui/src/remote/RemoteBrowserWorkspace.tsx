@@ -36,18 +36,20 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
   className = "",
 }) => {
   // 1. Screencast viewer stream
+  const session = useRemoteBrowser({
+    baseUrl,
+    browserId,
+    deviceToken,
+    options,
+  });
+
   const {
     frame,
     browserState,
     hello,
     error: browserError,
     client,
-  } = useRemoteBrowser({
-    baseUrl,
-    browserId,
-    deviceToken,
-    options,
-  });
+  } = session;
 
   // Extract browser identity guards for command dispatcher
   const browserInstanceId =
@@ -56,6 +58,7 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
     frame?.metadata.desktopEpoch ?? hello?.desktopEpoch ?? "1";
   const documentGeneration =
     frame?.metadata.documentGeneration ?? browserState?.documentGeneration ?? "1";
+  const viewportRevision = frame?.metadata.viewportRevision;
 
   // 2. Remote driver lifecycle hook
   const driver = useRemoteBrowserDriver({
@@ -64,6 +67,7 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
     browserInstanceId,
     desktopEpoch,
     documentGeneration,
+    viewportRevision,
   });
 
   // Capability check for mainframe point click
@@ -88,11 +92,16 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
     void driver.click({
       u: point.u,
       v: point.v,
+      streamId: point.streamId,
+      sequenceNumber: point.sequenceNumber ?? point.seq,
+      documentGeneration: point.documentGeneration,
+      viewportRevision: point.viewportRevision,
+      browserInstanceId: point.browserInstanceId,
     });
   };
 
   // Mobile IME submission: do NOT dispatch intermediate composition keystrokes; send confirmed text via fill
-  const handleImeSubmit = (e: React.FormEvent) => {
+  const handleImeSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isComposing) {
       // Do NOT send during composition
@@ -100,8 +109,12 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
     }
     if (!imeText.trim() || driver.driverState !== "driving") return;
 
-    void driver.fill(imeTargetRef || "active", imeText);
-    setImeText("");
+    try {
+      await driver.fill(imeTargetRef || "active", imeText);
+      setImeText("");
+    } catch {
+      // Keep imeText on failure so user does not lose typed text
+    }
   };
 
   const controls = (
@@ -177,7 +190,9 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
             onCompositionStart={() => setIsComposing(true)}
             onCompositionEnd={(e) => {
               setIsComposing(false);
-              setImeText(e.data);
+              if (e.data) {
+                setImeText((prev) => (prev.endsWith(e.data) ? prev : `${prev}${e.data}`));
+              }
             }}
             placeholder="Type confirmed text..."
             className="flex-1 px-2 py-0.5 rounded bg-neutral-900 border border-neutral-700 text-xs"
@@ -215,6 +230,7 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
         browserId={browserId}
         deviceToken={deviceToken}
         options={options}
+        session={session}
         controls={controls}
         onPointClick={handlePointClick}
       />

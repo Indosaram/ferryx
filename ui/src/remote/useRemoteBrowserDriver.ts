@@ -26,6 +26,22 @@ export interface UseRemoteBrowserDriverOptions {
   browserInstanceId?: string | null;
   desktopEpoch?: string | null;
   documentGeneration?: string | null;
+  viewportRevision?: string | null;
+}
+
+export interface RemoteBrowserMutationGuards {
+  documentGeneration?: string;
+  viewportRevision?: string;
+}
+
+export interface RemoteBrowserClickParams extends RemoteBrowserMutationGuards {
+  reference?: string;
+  u?: number;
+  v?: number;
+  snapshotId?: string;
+  streamId?: number;
+  sequenceNumber?: number;
+  browserInstanceId?: string;
 }
 
 export interface UseRemoteBrowserDriverResult {
@@ -35,15 +51,15 @@ export interface UseRemoteBrowserDriverResult {
   error: Error | null;
   claim: () => Promise<void>;
   release: () => Promise<void>;
-  navigate: (url: string) => Promise<unknown>;
-  back: () => Promise<unknown>;
-  forward: () => Promise<unknown>;
-  reload: () => Promise<unknown>;
-  click: (params: { reference?: string; u?: number; v?: number; snapshotId?: string }) => Promise<unknown>;
-  fill: (reference: string, value: string, snapshotId?: string) => Promise<unknown>;
-  keypress: (key: string) => Promise<unknown>;
-  wait: (params: { condition?: string; timeoutMs?: number }) => Promise<unknown>;
-  evalJs: (script: string) => Promise<unknown>;
+  navigate: (url: string, guards?: RemoteBrowserMutationGuards) => Promise<unknown>;
+  back: (guards?: RemoteBrowserMutationGuards) => Promise<unknown>;
+  forward: (guards?: RemoteBrowserMutationGuards) => Promise<unknown>;
+  reload: (guards?: RemoteBrowserMutationGuards) => Promise<unknown>;
+  click: (params: RemoteBrowserClickParams) => Promise<unknown>;
+  fill: (reference: string, value: string, snapshotId?: string, guards?: RemoteBrowserMutationGuards) => Promise<unknown>;
+  keypress: (key: string, guards?: RemoteBrowserMutationGuards) => Promise<unknown>;
+  wait: (params: { condition?: string; timeoutMs?: number }, guards?: RemoteBrowserMutationGuards) => Promise<unknown>;
+  evalJs: (script: string, guards?: RemoteBrowserMutationGuards) => Promise<unknown>;
 }
 
 export function useRemoteBrowserDriver({
@@ -53,6 +69,7 @@ export function useRemoteBrowserDriver({
   browserInstanceId,
   desktopEpoch,
   documentGeneration,
+  viewportRevision,
 }: UseRemoteBrowserDriverOptions): UseRemoteBrowserDriverResult {
   // Explicit claim ONLY: initial state is always 'viewing'
   const [driverState, setDriverState] = useState<RemoteDriverState>("viewing");
@@ -66,6 +83,7 @@ export function useRemoteBrowserDriver({
     browserInstanceId,
     desktopEpoch,
     documentGeneration,
+    viewportRevision,
     leaseEpoch,
     driverState,
     client,
@@ -76,6 +94,7 @@ export function useRemoteBrowserDriver({
     browserInstanceId,
     desktopEpoch,
     documentGeneration,
+    viewportRevision,
     leaseEpoch,
     driverState,
     client,
@@ -132,9 +151,15 @@ export function useRemoteBrowserDriver({
     };
   }, [client]);
 
+  const heartbeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   // Heartbeat loop: 15s TTL, emit heartbeat every 5s while in 'driving' state
   useEffect(() => {
     if (driverState !== "driving" || !client || !leaseEpoch) {
+      if (heartbeatTimerRef.current) {
+        clearInterval(heartbeatTimerRef.current);
+        heartbeatTimerRef.current = null;
+      }
       return;
     }
 
@@ -150,11 +175,27 @@ export function useRemoteBrowserDriver({
         setError(err instanceof Error ? err : new Error(String(err)));
       }
     }, 5000);
+    heartbeatTimerRef.current = intervalId;
 
     return () => {
       clearInterval(intervalId);
+      heartbeatTimerRef.current = null;
     };
   }, [driverState, client, leaseEpoch]);
+
+  // Unmount effect: clear heartbeat timers and release driving lease
+  useEffect(() => {
+    return () => {
+      if (heartbeatTimerRef.current) {
+        clearInterval(heartbeatTimerRef.current);
+        heartbeatTimerRef.current = null;
+      }
+      const { client: curClient, leaseEpoch: curEpoch, driverState: curState } = guardsRef.current;
+      if (curClient && curEpoch && curState === "driving") {
+        void curClient.releaseDriver(curEpoch).catch(() => {});
+      }
+    };
+  }, []);
 
   const claim = useCallback(async () => {
     if (!client || !browserId) {
@@ -212,13 +253,18 @@ export function useRemoteBrowserDriver({
 
   // Command dispatch with driving lease epoch and browser identity guards
   const dispatchCommand = useCallback(
-    async (command: string, params?: Record<string, unknown>): Promise<unknown> => {
+    async (
+      command: string,
+      params?: Record<string, unknown>,
+      explicitGuards?: RemoteBrowserMutationGuards
+    ): Promise<unknown> => {
       const {
         client: curClient,
         browserId: curBrowserId,
         browserInstanceId: curInstanceId,
         desktopEpoch: curDesktopEpoch,
         documentGeneration: curDocGen,
+        viewportRevision: curViewportRev,
         leaseEpoch: curLeaseEpoch,
         driverState: curDriverState,
       } = guardsRef.current;
@@ -240,8 +286,31 @@ export function useRemoteBrowserDriver({
       if (!curDesktopEpoch) {
         throw new Error(`Cannot execute command "${command}": desktopEpoch guard missing`);
       }
-      if (!curDocGen) {
+
+      // Check documentGeneration guard
+      const targetDocGen =
+        explicitGuards?.documentGeneration ??
+        (params?.documentGeneration as string | undefined) ??
+        curDocGen;
+
+      if (!targetDocGen) {
         throw new Error(`Cannot execute command "${command}": documentGeneration guard missing`);
+      }
+      if (curDocGen && targetDocGen !== curDocGen) {
+        throw new Error(
+          `Cannot execute command "${command}": stale documentGeneration (expected ${curDocGen}, got ${targetDocGen})`
+        );
+      }
+
+      // Check viewportRevision guard
+      const targetViewportRev =
+        explicitGuards?.viewportRevision ??
+        (params?.viewportRevision as string | undefined);
+
+      if (curViewportRev && targetViewportRev && targetViewportRev !== curViewportRev) {
+        throw new Error(
+          `Cannot execute command "${command}": stale viewportRevision (expected ${curViewportRev}, got ${targetViewportRev})`
+        );
       }
 
       // Single-shot command send: mutation replay prevention ensures dropped commands are not replayed
@@ -250,7 +319,7 @@ export function useRemoteBrowserDriver({
         leaseEpoch: curLeaseEpoch,
         browserInstanceId: curInstanceId,
         desktopEpoch: curDesktopEpoch,
-        documentGeneration: curDocGen,
+        documentGeneration: targetDocGen,
         command,
         params,
       });
@@ -259,43 +328,65 @@ export function useRemoteBrowserDriver({
   );
 
   const navigate = useCallback(
-    (url: string) => dispatchCommand("navigate", { url }),
+    (url: string, guards?: RemoteBrowserMutationGuards) =>
+      dispatchCommand("navigate", { url }, guards),
     [dispatchCommand]
   );
 
-  const back = useCallback(() => dispatchCommand("back"), [dispatchCommand]);
-  const forward = useCallback(() => dispatchCommand("forward"), [dispatchCommand]);
-  const reload = useCallback(() => dispatchCommand("reload"), [dispatchCommand]);
+  const back = useCallback(
+    (guards?: RemoteBrowserMutationGuards) =>
+      dispatchCommand("back", undefined, guards),
+    [dispatchCommand]
+  );
+  const forward = useCallback(
+    (guards?: RemoteBrowserMutationGuards) =>
+      dispatchCommand("forward", undefined, guards),
+    [dispatchCommand]
+  );
+  const reload = useCallback(
+    (guards?: RemoteBrowserMutationGuards) =>
+      dispatchCommand("reload", undefined, guards),
+    [dispatchCommand]
+  );
 
   const click = useCallback(
-    (params: { reference?: string; u?: number; v?: number; snapshotId?: string }) =>
-      dispatchCommand("click", params as Record<string, unknown>),
-    [dispatchCommand]
-  );
-
-  const fill = useCallback(
-    (reference: string, value: string, snapshotId?: string) =>
-      dispatchCommand("fill", {
-        reference,
-        value,
-        ...(snapshotId ? { snapshotId } : {}),
+    (params: RemoteBrowserClickParams) =>
+      dispatchCommand("click", params as Record<string, unknown>, {
+        documentGeneration: params.documentGeneration,
+        viewportRevision: params.viewportRevision,
       }),
     [dispatchCommand]
   );
 
+  const fill = useCallback(
+    (reference: string, value: string, snapshotId?: string, guards?: RemoteBrowserMutationGuards) =>
+      dispatchCommand(
+        "fill",
+        {
+          reference,
+          value,
+          ...(snapshotId ? { snapshotId } : {}),
+        },
+        guards
+      ),
+    [dispatchCommand]
+  );
+
   const keypress = useCallback(
-    (key: string) => dispatchCommand("keypress", { key }),
+    (key: string, guards?: RemoteBrowserMutationGuards) =>
+      dispatchCommand("keypress", { key }, guards),
     [dispatchCommand]
   );
 
   const wait = useCallback(
-    (params: { condition?: string; timeoutMs?: number }) =>
-      dispatchCommand("wait", params as Record<string, unknown>),
+    (params: { condition?: string; timeoutMs?: number }, guards?: RemoteBrowserMutationGuards) =>
+      dispatchCommand("wait", params as Record<string, unknown>, guards),
     [dispatchCommand]
   );
 
   const evalJs = useCallback(
-    (script: string) => dispatchCommand("eval", { script }),
+    (script: string, guards?: RemoteBrowserMutationGuards) =>
+      dispatchCommand("eval", { script }, guards),
     [dispatchCommand]
   );
 

@@ -5,6 +5,7 @@ use crate::remote::backend::{RecoveryStream, RemoteRecoveryStatus, RemoteSession
 use crate::remote::browser_admission::AdmissionController;
 use crate::remote::browser_backend::{DesktopScope, RemoteBrowserBackend, RemoteBrowserError};
 use crate::remote::browser_protocol::{ClientMessage, ServerMessage};
+use crate::remote::browser_security::sanitize_public_string;
 use crate::remote::browser_ws::BrowserWsSession;
 use crate::remote::mirror::RemoteTerminalMirror;
 use crate::remote::protocol::RemoteGridFrame;
@@ -2882,7 +2883,7 @@ async fn ws_browser_handler(
 }
 
 async fn run_browser_ws_session(
-    mut socket: WebSocket,
+    socket: WebSocket,
     browser_id: String,
     device: DeviceInfo,
     service_epoch: u64,
@@ -2919,90 +2920,146 @@ async fn run_browser_ws_session(
         capabilities: None,
     };
 
-    if let Ok(json) = serde_json::to_string(&hello) {
-        if socket.send(Message::Text(json.into())).await.is_err() {
-            session.teardown(&admission);
-            return;
+    let (mut ws_sink, mut ws_stream) = socket.split();
+    let (server_msg_tx, mut server_msg_rx) = mpsc::channel::<ServerMessage>(128);
+    let (raw_msg_tx, mut raw_msg_rx) = mpsc::channel::<Message>(32);
+
+    let writer_task = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                server_msg = server_msg_rx.recv() => {
+                    let Some(msg) = server_msg else { break; };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        if ws_sink.send(Message::Text(json.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                raw_msg = raw_msg_rx.recv() => {
+                    let Some(msg) = raw_msg else { break; };
+                    if ws_sink.send(msg).await.is_err() {
+                        break;
+                    }
+                }
+            }
         }
+    });
+
+    if server_msg_tx.send(hello).await.is_err() {
+        session.teardown(&admission);
+        return;
     }
 
-    while let Some(msg) = socket.recv().await {
-        match msg {
-            Ok(Message::Text(text)) => {
-                match serde_json::from_str::<ClientMessage>(&text) {
-                    Ok(client_msg) => {
-                        match session
-                            .handle_client_message(
-                                client_msg,
-                                &*backend,
-                                &admission,
+    let mut reclaim_rx = admission.subscribe_reclaim();
+
+    loop {
+        tokio::select! {
+            reclaim_res = reclaim_rx.recv() => {
+                match reclaim_res {
+                    Ok(reclaimed_browser_id) => {
+                        if reclaimed_browser_id == browser_id && session.is_driver {
+                            let revoked_epoch = session.lease_epoch.take();
+                            session.is_driver = false;
+                            let revoked_msg = ServerMessage::BrowserDriverRevoked {
+                                reason: Some("desktop_reclaim".into()),
+                                lease_epoch: revoked_epoch.map(|e| e.to_string()),
+                            };
+                            let _ = server_msg_tx.send(revoked_msg).await;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        if session.is_driver {
+                            let epoch = session.lease_epoch.unwrap_or(0);
+                            let sub_id = session.subscription_id.as_deref().unwrap_or("");
+                            if !admission.broker.is_active_driver(
+                                &session.device_id,
+                                &session.connection_id,
+                                sub_id,
+                                &session.browser_id,
+                                epoch,
                                 Instant::now(),
-                            )
-                            .await
-                        {
-                            Ok(Some(reply)) => {
-                                if let Ok(reply_json) = serde_json::to_string(&reply) {
-                                    if socket.send(Message::Text(reply_json.into())).await.is_err() {
-                                        break;
-                                    }
+                            ) {
+                                let revoked_epoch = session.lease_epoch.take();
+                                session.is_driver = false;
+                                let revoked_msg = ServerMessage::BrowserDriverRevoked {
+                                    reason: Some("desktop_reclaim".into()),
+                                    lease_epoch: revoked_epoch.map(|e| e.to_string()),
+                                };
+                                let _ = server_msg_tx.send(revoked_msg).await;
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {}
+                }
+            }
+            ws_msg = ws_stream.next() => {
+                let Some(msg) = ws_msg else { break; };
+                match msg {
+                    Ok(Message::Text(text)) => {
+                        match serde_json::from_str::<ClientMessage>(&text) {
+                            Ok(client_msg) => {
+                                if let Err(err) = session
+                                    .dispatch_client_message(
+                                        client_msg,
+                                        &backend,
+                                        &admission,
+                                        &server_msg_tx,
+                                        Instant::now(),
+                                    )
+                                    .await
+                                {
+                                    let err_reply = ServerMessage::BrowserError {
+                                        request_id: None,
+                                        code: "BROWSER_ERROR".into(),
+                                        message: sanitize_public_string(&err),
+                                        retryable: false,
+                                        retry_after_ms: None,
+                                    };
+                                    let _ = server_msg_tx.send(err_reply).await;
                                 }
                             }
-                            Ok(None) => {}
-                            Err(err) => {
+                            Err(e) => {
                                 let err_reply = ServerMessage::BrowserError {
                                     request_id: None,
-                                    code: "BROWSER_ERROR".into(),
-                                    message: err,
+                                    code: "BROWSER_INVALID_REQUEST".into(),
+                                    message: sanitize_public_string(&e.to_string()),
                                     retryable: false,
                                     retry_after_ms: None,
                                 };
-                                if let Ok(reply_json) = serde_json::to_string(&err_reply) {
-                                    let _ = socket.send(Message::Text(reply_json.into())).await;
-                                }
+                                let _ = server_msg_tx.send(err_reply).await;
                             }
                         }
                     }
-                    Err(e) => {
-                        let err_reply = ServerMessage::BrowserError {
-                            request_id: None,
-                            code: "BROWSER_INVALID_REQUEST".into(),
-                            message: e.to_string(),
-                            retryable: false,
-                            retry_after_ms: None,
-                        };
-                        if let Ok(reply_json) = serde_json::to_string(&err_reply) {
-                            let _ = socket.send(Message::Text(reply_json.into())).await;
+                    Ok(Message::Binary(bytes)) => {
+                        if let Err(e) = session.handle_client_binary(&bytes) {
+                            let err_reply = ServerMessage::BrowserError {
+                                request_id: None,
+                                code: "BROWSER_INVALID_REQUEST".into(),
+                                message: sanitize_public_string(&e),
+                                retryable: false,
+                                retry_after_ms: None,
+                            };
+                            let _ = server_msg_tx.send(err_reply).await;
                         }
                     }
-                }
-            }
-            Ok(Message::Binary(bytes)) => {
-                if let Err(e) = session.handle_client_binary(&bytes) {
-                    let err_reply = ServerMessage::BrowserError {
-                        request_id: None,
-                        code: "BROWSER_INVALID_REQUEST".into(),
-                        message: e,
-                        retryable: false,
-                        retry_after_ms: None,
-                    };
-                    if let Ok(reply_json) = serde_json::to_string(&err_reply) {
-                        let _ = socket.send(Message::Text(reply_json.into())).await;
+                    Ok(Message::Ping(p)) => {
+                        if raw_msg_tx.send(Message::Pong(p)).await.is_err() {
+                            break;
+                        }
                     }
+                    Ok(Message::Close(_)) | Err(_) => {
+                        break;
+                    }
+                    _ => {}
                 }
             }
-            Ok(Message::Ping(p)) => {
-                if socket.send(Message::Pong(p)).await.is_err() {
-                    break;
-                }
-            }
-            Ok(Message::Close(_)) | Err(_) => {
-                break;
-            }
-            _ => {}
         }
     }
 
     session.teardown(&admission);
+    drop(server_msg_tx);
+    drop(raw_msg_tx);
+    let _ = writer_task.await;
 }
 
 async fn remote_fallback(method: axum::http::Method, uri: axum::http::Uri) -> Response {
