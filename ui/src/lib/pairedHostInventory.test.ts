@@ -333,4 +333,46 @@ it("R3-N4: ignores stale revoke events with older generation than current store 
   expect(store.getState().hosts[hostId].online).toBe(false);
 });
 
+it("R3-N3: pair rejects revision mismatch if intervening change was a revoke even at matching generation", async () => {
+  const { inventory, store, commands } = fixture();
+  await inventory.refresh();
+  // Simulate command returning paired host with generation 10
+  vi.mocked(commands.pair).mockImplementation(async () => {
+    // Intervening event changes store to revoked at same generation 10
+    store.upsertHost({ ...store.getState().hosts[hostId], generation: "10", authStatus: "revoked", online: false });
+    // And increments revision
+    await inventory.handleNativeEvent({ type: "revoke", hostId, generation: "10" });
+    return { ...view, generation: "10" };
+  });
+
+  const res = await inventory.pair({ relayOrigin: view.relayOrigin, pin: "123456", displayLabel: "Fixture" });
+  expect(res.ok).toBe(false);
+  if (!res.ok) {
+    expect(res.error.code).toBe("STALE_HOST_GENERATION");
+  }
+});
+
+it("R4-N1: migrateLegacy cleans legacy storage when native migrate event arrives during the call", async () => {
+  legacy();
+  const { inventory, store, commands } = fixture();
+  // Simulate commands.migrate triggering native event before returning receipt
+  vi.mocked(commands.migrate).mockImplementation(async () => {
+    await inventory.handleNativeEvent({
+      type: "migrate",
+      hostId,
+      generation: "9",
+    });
+    return { hostId, generation: "9" };
+  });
+
+  await inventory.migrateLegacy();
+  // Legacy tokens cleaned from localStorage even though native event bumped revision
+  expect(localStorage.getItem(tokenKey)).toBeNull();
+  const raw = localStorage.getItem(REMOTE_HOST_STORAGE_KEY);
+  expect(raw).not.toBeNull();
+  expect(JSON.parse(raw!).hosts[hostId].deviceToken).toBeUndefined();
+  expect(store.getState().hosts[hostId].authStatus).toBe("paired");
+});
+
+
 

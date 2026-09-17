@@ -375,9 +375,12 @@ export function createPairedHostInventory(store: RemoteHostStore, commands = nat
       }
       if (started !== revision) {
         // R3-N3: native event arrival during the IPC round-trip increments revision;
-        // if the store already reflects this exact host and generation, accept it as self-applied.
+        // if the store already reflects this exact host, active paired auth, and generation, accept it.
         const current = store.getState().hosts[host.hostId];
-        const isSelfUpdate = current && current.generation === host.generation;
+        const isSelfUpdate = current &&
+          current.generation === host.generation &&
+          current.authStatus === "paired" &&
+          current.machineId === host.machineId;
         if (!isSelfUpdate) {
           return {
             ok: false,
@@ -450,9 +453,17 @@ export function createPairedHostInventory(store: RemoteHostStore, commands = nat
         const receipt = await commands.migrate({ relayOrigin, machineId: row.machineId,
           displayLabel: typeof row.displayName === "string" ? row.displayName : typeof row.name === "string" ? row.name : row.machineId,
           deviceToken: token });
-        if (started !== revision || receipt.hostId !== hostId || !validGeneration(receipt.generation)) throw new Error("MIGRATION_PENDING");
+        if (receipt.hostId !== hostId || !validGeneration(receipt.generation)) throw new Error("MIGRATION_PENDING");
+        // R4-N1: native migrate emits paired_host_inventory_changed before returning receipt,
+        // incrementing global revision. If store reflects this exact host and generation, accept it.
+        const hostAtReceipt = store.getState().hosts[hostId];
+        const selfMigrate = hostAtReceipt && hostAtReceipt.generation === receipt.generation && hostAtReceipt.hostId === hostId;
+        if (started !== revision && !selfMigrate) throw new Error("MIGRATION_PENDING");
         const verified = endpoint(await commands.read(receipt));
-        if (started !== revision || verified.hostId !== receipt.hostId || verified.generation !== receipt.generation) throw new Error("MIGRATION_PENDING");
+        if (verified.hostId !== receipt.hostId || verified.generation !== receipt.generation) throw new Error("MIGRATION_PENDING");
+        const hostAtVerified = store.getState().hosts[hostId];
+        const selfVerified = hostAtVerified && hostAtVerified.generation === receipt.generation && hostAtVerified.hostId === receipt.hostId;
+        if (started !== revision && !selfVerified) throw new Error("MIGRATION_PENDING");
         // No await between comparison and cleanup. Concurrent edits are left intact for retry.
         if (storage.getItem(REMOTE_HOST_STORAGE_KEY) !== expected || storage.getItem(tokenKey) !== keyedToken) throw new Error("MIGRATION_PENDING");
         const current = JSON.parse(expected);
@@ -464,7 +475,7 @@ export function createPairedHostInventory(store: RemoteHostStore, commands = nat
         if (keyedToken === token) storage.removeItem(tokenKey);
         store.upsertHost(verified);
       }
-      if (started === revision) store.setState(s => ({ ...s, migrationStatus: pending ? "pending" : "complete" }));
+      if (started === revision || (!pending && Object.keys(store.getState().hosts).length > 0)) store.setState(s => ({ ...s, migrationStatus: pending ? "pending" : "complete" }));
     } catch { store.setState(s => ({ ...s, migrationStatus: "pending" })); }
   }
   return {

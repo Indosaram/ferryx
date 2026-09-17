@@ -55,13 +55,14 @@ pub struct Proxy {
     transport: Option<Transport>,
     controller: Option<Epoch>,
     replay_pending: bool,
+    exited: bool,
 }
 impl Proxy {
     pub fn new(descriptor: Descriptor, hub: Arc<TerminalOutputHub>) -> Result<Self> {
         let id = m::proxy_backend_id(&descriptor.host_id, &descriptor.target).map_err(|_| error("INVALID_REQUEST"))?;
         if hub.has_session(&id) { return Err(error("CONTROL_CONFLICT")); }
         hub.register_session(&id);
-        Ok(Self { id, descriptor, hub, transport: None, controller: None, replay_pending: false })
+        Ok(Self { id, descriptor, hub, transport: None, controller: None, replay_pending: false, exited: false })
     }
     pub fn id(&self) -> &str { &self.id }
     pub fn descriptor(&self) -> &Descriptor { &self.descriptor }
@@ -138,7 +139,14 @@ impl Proxy {
                     let target: m::RemoteTerminalTarget = serde_json::from_value(target.clone()).map_err(|_| error("PAIRED_HOST_INVALID_RESPONSE"))?;
                     if target != self.descriptor.target { return Err(error("PAIRED_HOST_WRONG_MACHINE")); }
                 }
-                if matches!(value["type"].as_str(), Some("exit" | "status" | "error")) { self.controller = None; self.transport = None; }
+                if matches!(value["type"].as_str(), Some("exit")) {
+                    self.exited = true;
+                    self.controller = None;
+                    self.transport = None;
+                } else if matches!(value["type"].as_str(), Some("status" | "error")) {
+                    self.controller = None;
+                    self.transport = None;
+                }
                 Ok(Some(value))
             }
             Message::Ping(bytes) => {
@@ -151,5 +159,9 @@ impl Proxy {
     }
 }
 impl Drop for Proxy {
-    fn drop(&mut self) { self.hub.remove_session(&self.id); }
+    fn drop(&mut self) {
+        if self.exited {
+            self.hub.remove_session(&self.id);
+        }
+    }
 }

@@ -576,6 +576,10 @@ function parseBuildResult(stdout) {
 
 export function createLinuxBuildScript({ workspaceDir, plan, hostConfig }) {
   const pathPrefix = hostConfig.path ? `export PATH=${quoteSh(hostConfig.path)}:$PATH\n` : "";
+  const targetDir = hostConfig.root ? `${hostConfig.root}/cargo-target` : `"$workspace/cargo-target"`;
+  const targetDirCode = hostConfig.root
+    ? `export CARGO_TARGET_DIR=${quoteSh(targetDir)}\nmkdir -p "$CARGO_TARGET_DIR"`
+    : `export CARGO_TARGET_DIR="$workspace/cargo-target"`;
   return `set -euo pipefail
 umask 077
 ${pathPrefix}workspace=${quoteSh(workspaceDir)}
@@ -602,7 +606,7 @@ cp -R "$ghostty_dir" "$source_dir/src-tauri/vendor/ghostty"
 node "$source_dir/scripts/sync-version.mjs" --tag ${quoteSh(plan.tag)}
 bun install --cwd "$source_dir/ui" --frozen-lockfile
 mkdir "$out_dir"
-export CARGO_TARGET_DIR="$workspace/cargo-target"
+${targetDirCode}
 export SOURCE_DATE_EPOCH=${quoteSh(String(plan.sourceDateEpoch))}
 export NO_STRIP=true
 cd "$source_dir"
@@ -628,6 +632,9 @@ export function createWindowsBuildScript({ workspaceDir, plan, hostConfig }) {
   const pathPrefix = hostConfig.path
     ? `$env:PATH = ${quotePowerShell(`${hostConfig.path};`)} + $env:PATH\n`
     : "";
+  const targetDirCode = hostConfig.root
+    ? `$cargoTarget = Join-Path ${quotePowerShell(hostConfig.root)} 'cargo-target'\nif (-not (Test-Path $cargoTarget)) { New-Item -ItemType Directory -Path $cargoTarget -Force | Out-Null }\n$env:CARGO_TARGET_DIR = $cargoTarget`
+    : `$cargoTarget = Join-Path $workspace 'cargo-target'\n$env:CARGO_TARGET_DIR = $cargoTarget`;
   const nsisBuild = plan.channels.nsisMigration
     ? `bun tauri build --bundles nsis
 $nsis = @(Get-ChildItem -Path $cargoTarget -Filter '*-setup.exe' -File -Recurse)
@@ -661,8 +668,7 @@ Copy-Item -LiteralPath $ghosttyDir -Destination (Join-Path $sourceDir 'src-tauri
 node (Join-Path $sourceDir 'scripts/sync-version.mjs') --tag ${quotePowerShell(plan.tag)}; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 bun install --cwd (Join-Path $sourceDir 'ui') --frozen-lockfile; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 New-Item -ItemType Directory -Path $outDir | Out-Null
-$cargoTarget = Join-Path $workspace 'cargo-target'
-$env:CARGO_TARGET_DIR = $cargoTarget
+${targetDirCode}
 $env:SOURCE_DATE_EPOCH = ${quotePowerShell(String(plan.sourceDateEpoch))}
 Push-Location $sourceDir
 bun tauri build --no-bundle; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -851,9 +857,14 @@ export async function buildHost({
       });
 
       // Build Darwin universal
+      const cargoTargetDir = hostConfig.root
+        ? join(hostConfig.root, "cargo-target")
+        : join(workspaceDir, "cargo-target");
+      mkdirSync(cargoTargetDir, { recursive: true });
+
       const buildEnv = {
         ...process.env,
-        CARGO_TARGET_DIR: join(workspaceDir, "cargo-target"),
+        CARGO_TARGET_DIR: cargoTargetDir,
         SOURCE_DATE_EPOCH: String(plan.sourceDateEpoch),
       };
       if (hostConfig.signingIdentity) {
@@ -868,7 +879,6 @@ export async function buildHost({
       }
 
       // Build Darwin universal binaries first (skip bundle)
-      const cargoTargetDir = join(workspaceDir, "cargo-target");
       const aarch64Rel = join(cargoTargetDir, "aarch64-apple-darwin", "release");
       const x86Rel = join(cargoTargetDir, "x86_64-apple-darwin", "release");
       const universalRel = join(cargoTargetDir, "universal-apple-darwin", "release");
@@ -921,8 +931,7 @@ export async function buildHost({
 
       // Collect and verify macOS bundle artifacts
       const bundleDir = join(
-        workspaceDir,
-        "cargo-target",
+        cargoTargetDir,
         "universal-apple-darwin",
         "release",
         "bundle",

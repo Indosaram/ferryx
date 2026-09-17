@@ -231,7 +231,7 @@ fn probe_tailscale_cli(target: &std::net::Ipv4Addr) -> Option<bool> {
             .output();
         if let Ok(out) = output {
             if out.status.success() {
-                // Parse structured status JSON and verify exact target IP membership
+                // Parse structured status JSON and verify exact target IP membership on the local node
                 if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
                     if let Some(ips) = val
                         .get("Self")
@@ -247,22 +247,7 @@ fn probe_tailscale_cli(target: &std::net::Ipv4Addr) -> Option<bool> {
                             return Some(true);
                         }
                     }
-                }
-                // Tokenized exact match (prevents substring false-positives like 100.64.0.1 matching 100.64.0.10)
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let has_exact_token = stdout
-                    .split(|c: char| {
-                        c.is_whitespace()
-                            || c == '"'
-                            || c == ','
-                            || c == '['
-                            || c == ']'
-                            || c == '/'
-                            || c == '\''
-                    })
-                    .any(|token| token == target_str);
-                if has_exact_token {
-                    return Some(true);
+                    return Some(false);
                 }
             }
         }

@@ -459,10 +459,23 @@ impl MachineClient {
             };
             let status = resp.status();
             if status.is_success() {
+                if resp.content_length().is_some_and(|n| n > 64 * 1024) {
+                    return Err(ClientError::local("PAYLOAD_TOO_LARGE"));
+                }
+                let mut bytes = Vec::new();
+                let mut resp = resp;
+                while let Some(chunk) = resp.chunk().await.map_err(|_| ClientError::local("HOST_UNAVAILABLE"))? {
+                    if bytes.len() + chunk.len() > 64 * 1024 {
+                        return Err(ClientError::local("PAYLOAD_TOO_LARGE"));
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
                 #[derive(serde::Deserialize)]
                 struct TicketResp { ticket: String }
-                let bytes = resp.bytes().await.map_err(|_| ClientError::local("PAIRED_HOST_INVALID_RESPONSE"))?;
                 let tr = serde_json::from_slice::<TicketResp>(&bytes).map_err(|_| ClientError::local("PAIRED_HOST_INVALID_RESPONSE"))?;
+                if tr.ticket.is_empty() || tr.ticket.len() > 1024 {
+                    return Err(ClientError::local("PAIRED_HOST_INVALID_RESPONSE"));
+                }
                 Some(tr.ticket)
             } else {
                 // The Authorization-header fallback is allowed ONLY on the direct path
@@ -471,7 +484,14 @@ impl MachineClient {
                 if legacy_direct {
                     None
                 } else {
-                    let bytes = resp.bytes().await.unwrap_or_default();
+                    let mut bytes = Vec::new();
+                    let mut resp = resp;
+                    while let Ok(Some(chunk)) = resp.chunk().await {
+                        if bytes.len() + chunk.len() > 16 * 1024 {
+                            break;
+                        }
+                        bytes.extend_from_slice(&chunk);
+                    }
                     return Err(map_ticket_error(status, &bytes));
                 }
             }

@@ -80,8 +80,7 @@ fn load_descriptors(path: &Path) -> Result<HashMap<String, super::paired_daemon:
 static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static PERSIST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn save_descriptors(path: &Path, descriptors: &HashMap<String, super::paired_daemon::Descriptor>) -> Result<(), String> {
-    let _persist_guard = PERSIST_MUTEX.lock().map_err(|e| e.to_string())?;
+fn save_descriptors_locked(path: &Path, descriptors: &HashMap<String, super::paired_daemon::Descriptor>) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -111,6 +110,12 @@ fn save_descriptors(path: &Path, descriptors: &HashMap<String, super::paired_dae
         let _ = std::fs::File::open(path).and_then(|f| f.sync_all());
     }
     Ok(())
+}
+
+#[allow(dead_code)]
+fn save_descriptors(path: &Path, descriptors: &HashMap<String, super::paired_daemon::Descriptor>) -> Result<(), String> {
+    let _persist_guard = PERSIST_MUTEX.lock().map_err(|e| e.to_string())?;
+    save_descriptors_locked(path, descriptors)
 }
 
 type Reply = oneshot::Sender<Result<(), String>>;
@@ -196,6 +201,10 @@ impl Runtime {
                 return;
             }
             Ok(loaded) => {
+                let _persist_guard = match PERSIST_MUTEX.lock() {
+                    Ok(g) => g,
+                    Err(_) => return,
+                };
                 *self.store_path.lock() = Some(path.clone());
                 let current = {
                     let mut desc_guard = self.descriptors.lock();
@@ -204,7 +213,7 @@ impl Runtime {
                     }
                     desc_guard.clone()
                 };
-                if let Err(e) = save_descriptors(&path, &current) {
+                if let Err(e) = save_descriptors_locked(&path, &current) {
                     eprintln!("[paired_runtime] descriptor save failed after set_store_path: {e}");
                 }
             }
@@ -219,6 +228,10 @@ impl Runtime {
     }
     pub fn remove_descriptor(&self, id: &str) {
         let path = self.store_path.lock().clone();
+        let _persist_guard = match PERSIST_MUTEX.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
         let snapshot = {
             let mut descs = self.descriptors.lock();
             let existed = descs.remove(id).is_some();
@@ -228,7 +241,7 @@ impl Runtime {
             descs.clone()
         };
         if let Some(ref path) = path {
-            if let Err(e) = save_descriptors(path, &snapshot) {
+            if let Err(e) = save_descriptors_locked(path, &snapshot) {
                 eprintln!("[paired_runtime] descriptor save failed after remove: {e}");
             }
         }
@@ -240,17 +253,17 @@ impl Runtime {
         if owners.get(&id).is_some_and(|o| !o.task.is_finished()) { return Err("CONTROL_CONFLICT".into()); }
         owners.remove(&id);
 
-        // N1: store-path snapshot first, then the descriptors lock — never the
-        // reverse order. The map is cloned under the short lock and the disk
-        // save happens with NO runtime lock held.
+        // R3-N1: hold PERSIST_MUTEX while mutating descriptors and writing disk
+        // to prevent stale snapshots from overwriting newer updates.
         let path = self.store_path.lock().clone();
+        let _persist_guard = PERSIST_MUTEX.lock().map_err(|e| e.to_string())?;
         let (previous, snapshot) = {
             let mut descs = self.descriptors.lock();
             let previous = descs.insert(id.clone(), descriptor.clone());
             (previous, descs.clone())
         };
         if let Some(ref path) = path {
-            if let Err(e) = save_descriptors(path, &snapshot) {
+            if let Err(e) = save_descriptors_locked(path, &snapshot) {
                 // R2-N1: restore the PRIOR descriptor on rollback — deleting
                 // the entry would discard a retained descriptor from a
                 // previous install (exactly the reattach recovery case).
@@ -262,6 +275,7 @@ impl Runtime {
                 return Err(e);
             }
         }
+        drop(_persist_guard);
 
         let (sender, receiver) = mpsc::channel(32);
         let identity = Arc::new(());
@@ -298,19 +312,18 @@ impl Runtime {
                         Some(Command::Interrupt(g, reply)) => { let _ = reply.send(proxy.interrupt(Epoch(g)).await.map_err(|e| e.code)); }
                         Some(Command::Detach(reply)) => {
                             let result = proxy.detach().await.map_err(|e| e.code);
-                            // N1 (round 2): single lock order — store-path
-                            // snapshot before the descriptors lock; the map is
-                            // cloned under the short lock and persisted with no
-                            // runtime lock held.
+                            // R3-N1: acquire PERSIST_MUTEX before taking the snapshot
+                            // so disk writes strictly serialize with state updates.
                             let path = store_path.lock().clone();
+                            let _persist_guard = PERSIST_MUTEX.lock();
                             let snapshot = {
                                 let mut descs = descriptors.lock();
                                 descs.insert(task_id.clone(), proxy.descriptor().clone());
                                 descs.clone()
                             };
                             drop(proxy);
-                            if let Some(ref path) = path {
-                                if let Err(e) = save_descriptors(path, &snapshot) {
+                            if let (Some(ref path), Ok(_)) = (path, _persist_guard) {
+                                if let Err(e) = save_descriptors_locked(path, &snapshot) {
                                     eprintln!("[paired_runtime] descriptor save failed after detach: {e}");
                                 }
                             }
@@ -340,16 +353,16 @@ impl Runtime {
                             }
                         };
                         if changed {
-                            // N1 (round 2): single lock order — store-path
-                            // snapshot before the descriptors lock; persist the
-                            // cloned snapshot with no runtime lock held.
+                            // R3-N1: acquire PERSIST_MUTEX before taking the snapshot
+                            // so disk writes strictly serialize with state updates.
                             let path = store_path.lock().clone();
+                            let _persist_guard = PERSIST_MUTEX.lock();
                             let snapshot = {
                                 let descs = descriptors.lock();
                                 descs.clone()
                             };
-                            if let Some(ref path) = path {
-                                if let Err(e) = save_descriptors(path, &snapshot) {
+                            if let (Some(ref path), Ok(_)) = (path, _persist_guard) {
+                                if let Err(e) = save_descriptors_locked(path, &snapshot) {
                                     eprintln!("[paired_runtime] descriptor save failed after receive: {e}");
                                 }
                             }
@@ -450,16 +463,14 @@ impl Runtime {
             }
         };
         if changed {
-            // N1: same single lock order as production paths — take the store
-            // path snapshot first, mutate descriptors under the short lock,
-            // then persist the snapshot with no lock held.
             let path = self.store_path.lock().clone();
+            let _persist_guard = PERSIST_MUTEX.lock();
             let snapshot = {
                 let descs = self.descriptors.lock();
                 descs.clone()
             };
-            if let Some(ref path) = path {
-                let _ = save_descriptors(path, &snapshot);
+            if let (Some(ref path), Ok(_)) = (path, _persist_guard) {
+                let _ = save_descriptors_locked(path, &snapshot);
             }
         }
     }
