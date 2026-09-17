@@ -207,6 +207,11 @@ fn get_interface_name_for_ipv4(target: &std::net::Ipv4Addr) -> Option<String> {
     }
 }
 
+#[cfg(not(unix))]
+fn get_interface_name_for_ipv4(_target: &std::net::Ipv4Addr) -> Option<String> {
+    None
+}
+
 fn probe_tailscale_cli(target: &std::net::Ipv4Addr) -> Option<bool> {
     #[cfg(test)]
     if let Some(forced) = *TEST_CLI_PROBE_OVERRIDE.lock() {
@@ -226,8 +231,37 @@ fn probe_tailscale_cli(target: &std::net::Ipv4Addr) -> Option<bool> {
             .output();
         if let Ok(out) = output {
             if out.status.success() {
+                // Parse structured status JSON and verify exact target IP membership
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                    if let Some(ips) = val
+                        .get("Self")
+                        .and_then(|s| s.get("TailscaleIPs"))
+                        .and_then(|a| a.as_array())
+                    {
+                        if ips.iter().any(|ip| ip.as_str() == Some(&target_str)) {
+                            return Some(true);
+                        }
+                    }
+                    if let Some(ips) = val.get("TailscaleIPs").and_then(|a| a.as_array()) {
+                        if ips.iter().any(|ip| ip.as_str() == Some(&target_str)) {
+                            return Some(true);
+                        }
+                    }
+                }
+                // Tokenized exact match (prevents substring false-positives like 100.64.0.1 matching 100.64.0.10)
                 let stdout = String::from_utf8_lossy(&out.stdout);
-                if stdout.contains(&target_str) {
+                let has_exact_token = stdout
+                    .split(|c: char| {
+                        c.is_whitespace()
+                            || c == '"'
+                            || c == ','
+                            || c == '['
+                            || c == ']'
+                            || c == '/'
+                            || c == '\''
+                    })
+                    .any(|token| token == target_str);
+                if has_exact_token {
                     return Some(true);
                 }
             }
