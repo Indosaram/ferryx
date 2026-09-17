@@ -3,7 +3,7 @@ use super::helper::{read_frame, write_frame, Request, Runtime};
 use serde_json::{json, Value};
 use std::{io::{Read, Write}, path::{Path, PathBuf}, sync::Arc};
 
-pub const HELPER_VERSION: &str = "2026.908.1";
+pub const HELPER_VERSION: &str = "2026.917.1";
 
 pub fn run_with_io(args: impl IntoIterator<Item=String>, mut out: impl Write) -> Result<(), String> {
     let args: Vec<_> = args.into_iter().collect();
