@@ -562,6 +562,11 @@ pub struct HelperUpdateState {
     pub bundled_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bundled_path: Option<PathBuf>,
+    /// Backend-computed upgrade decision so the UI never re-implements version
+    /// comparison. `None` when no probe ran (runtime detection failed) or no
+    /// bundled version is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision: Option<crate::ssh::helper_setup::HelperUpgradeDecision>,
 }
 
 #[tauri::command]
@@ -588,6 +593,8 @@ pub async fn cmd_ssh_helper_update_state<R: Runtime>(
                 remote_version: None,
                 bundled_version: bundled_ver,
                 bundled_path: None,
+                // No probe ran: claim nothing actionable, matching the honest tri-state.
+                decision: None,
             });
         }
     };
@@ -606,10 +613,15 @@ pub async fn cmd_ssh_helper_update_state<R: Runtime>(
         Err(_) => None,
     };
 
+    let decision = bundled_ver
+        .as_deref()
+        .map(|bundled| crate::ssh::helper_setup::decide_helper_upgrade(installed, remote_version.as_deref(), bundled));
+
     Ok(HelperUpdateState {
         installed,
         remote_version,
         bundled_version: bundled_ver,
+        decision,
         bundled_path,
     })
 }

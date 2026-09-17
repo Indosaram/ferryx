@@ -1101,7 +1101,7 @@ fn helper_handshake_includes_helper_version() {
         params: json!({}),
     }).unwrap();
 
-    assert_eq!(resp["helperVersion"], "2026.908.1");
+    assert_eq!(resp["helperVersion"], super::super::process::HELPER_VERSION);
 }
 
 #[test]
@@ -1110,6 +1110,6 @@ fn helper_process_version_flag_prints_version() {
     let res = super::super::process::run_with_io(vec!["--version".to_string()], &mut out);
     assert!(res.is_ok());
     let text = String::from_utf8(out).unwrap();
-    assert_eq!(text.trim(), "2026.908.1");
+    assert_eq!(text.trim(), super::super::process::HELPER_VERSION);
 }
 

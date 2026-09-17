@@ -445,18 +445,40 @@ pub async fn installed_version(
     }
 }
 
+/// Parses a calver-style version like "2026.917.1" into comparable numeric parts.
+/// Returns None for anything that is not at least three all-numeric segments.
+pub fn parse_calver_version(version: &str) -> Option<(u64, u64, u64)> {
+    let parts: Vec<u64> = version
+        .split('.')
+        .map(|part| part.parse::<u64>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    if parts.len() < 3 {
+        return None;
+    }
+    Some((parts[0], parts[1], parts[2]))
+}
+
 pub fn decide_helper_upgrade(
     installed: bool,
     remote_version: Option<&str>,
     bundled_version: &str,
 ) -> HelperUpgradeDecision {
     if !installed {
-        HelperUpgradeDecision::Install
-    } else {
-        match remote_version {
-            Some(remote) if remote == bundled_version => HelperUpgradeDecision::NoOp,
-            _ => HelperUpgradeDecision::Upgrade,
+        return HelperUpgradeDecision::Install;
+    }
+    match remote_version {
+        Some(remote) if remote == bundled_version => HelperUpgradeDecision::NoOp,
+        Some(remote) => {
+            // Calver ordering: a remote already newer than (or equal to) the
+            // local bundle must never be offered a downgrade.
+            match (parse_calver_version(remote), parse_calver_version(bundled_version)) {
+                (Some(remote_cal), Some(bundled_cal)) if remote_cal >= bundled_cal => {
+                    HelperUpgradeDecision::NoOp
+                }
+                _ => HelperUpgradeDecision::Upgrade,
+            }
         }
+        None => HelperUpgradeDecision::Upgrade,
     }
 }
 
@@ -483,7 +505,11 @@ FERRYX_HELPER_PAYLOAD_EOF\n\
          chmod 700 \"$tmp\" && \
          if [ -f \"$root/endpoint.json\" ]; then \
              pid=$(tr -d ' \\t\\r\\n' < \"$root/endpoint.json\" 2>/dev/null | sed -n 's/.*\"pid\":\\([0-9]\\{{1,\\}}\\).*/\\1/p'); \
-             if [ -n \"$pid\" ] && [ \"$pid\" -gt 0 ] 2>/dev/null; then kill \"$pid\" 2>/dev/null || true; sleep 0.2; fi; \
+             if [ -n \"$pid\" ] && [ \"$pid\" -gt 0 ] 2>/dev/null; then \
+                 if ps -p \"$pid\" -o comm= 2>/dev/null | grep -Eq '(^|/)ferryx-remote-h(elper)?$'; then \
+                     kill \"$pid\" 2>/dev/null || true; sleep 0.2; \
+                 fi; \
+             fi; \
          fi; \
          mv -f \"$tmp\" \"$dest\" && printf 'FERRYX_INSTALL_OK\\n'",
         direct::quote_posix(&location.executable),
@@ -513,7 +539,12 @@ pub fn build_windows_upload_script(location: &HelperLocation, binary_bytes: &[u8
              if ([System.IO.File]::Exists($epPath)) {{ \
                  try {{ \
                      $ep = Get-Content -Raw $epPath | ConvertFrom-Json; \
-                     if ($ep.pid) {{ taskkill /PID $ep.pid /F /T 2>&1 | Out-Null; Start-Sleep -Milliseconds 200; }} \
+                     if ($ep.pid) {{ \
+                         $helperProc = Get-Process -Id $ep.pid -ErrorAction SilentlyContinue; \
+                         if ($helperProc -and $helperProc.ProcessName -eq 'ferryx-remote-helper') {{ \
+                             taskkill /PID $ep.pid /F /T 2>&1 | Out-Null; Start-Sleep -Milliseconds 200; \
+                         }} \
+                     }} \
                  }} catch {{}} \
              }}; \
              $old = \"$dest.old\"; \
@@ -523,6 +554,9 @@ pub fn build_windows_upload_script(location: &HelperLocation, binary_bytes: &[u8
              if ([System.IO.File]::Exists($old)) {{ try {{ [System.IO.File]::Delete($old); }} catch {{}} }}; \
              [Console]::WriteLine('FERRYX_INSTALL_OK'); \
          }} catch {{ \
+             if ($old -and -not [System.IO.File]::Exists($dest) -and [System.IO.File]::Exists($old)) {{ \
+                 try {{ [System.IO.File]::Move($old, $dest) | Out-Null; }} catch {{}} \
+             }}; \
              [Console]::Error.Write($_.Exception.Message); \
              exit 1; \
          }}",

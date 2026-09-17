@@ -930,6 +930,7 @@ describe("SshSection Settings Component", () => {
             remoteVersion: "2026.900.0",
             bundledVersion: "2026.908.1",
             bundledPath: "/test/resources/helpers/ferryx-remote-helper",
+            decision: "upgrade",
           };
         }
         if (command === "cmd_ssh_provision_helper") {
@@ -957,6 +958,36 @@ describe("SshSection Settings Component", () => {
       });
 
       expect(provisionCalls.length).toBe(1);
+    });
+
+    it("does not offer a downgrade when the remote helper is newer than the bundle", async () => {
+      const environment = { platform: "posix", executor: "sh", version: "test", home: "/home/test", temp: "/tmp", git: true };
+      invokeMock.mockImplementation(async (command: string) => {
+        if (command === "cmd_ssh_list_hosts") return [mockHost1];
+        if (command === "cmd_ssh_test_connection") return { host: mockHost1, reachable: true, checkedAt: 1, environment, helper: "installed" };
+        if (command === "cmd_ssh_read_system_config") return { path: "", exists: false, hosts: [], rawText: "" };
+        if (command === "cmd_ssh_helper_update_state") {
+          return {
+            installed: true,
+            remoteVersion: "2026.918.1",
+            bundledVersion: "2026.917.1",
+            bundledPath: "/test/resources/helpers/ferryx-remote-helper",
+            decision: "noOp",
+          };
+        }
+        throw new Error(`Unexpected command ${command}`);
+      });
+
+      await act(async () => {
+        render(<SshSection />);
+      });
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "Test connection to Dev Server" }));
+      });
+
+      expect(screen.getByText("Ready")).toBeInTheDocument();
+      expect(screen.queryByText(/업데이트 가능/)).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /Update helper|Install helper/ })).not.toBeInTheDocument();
     });
   });
 });

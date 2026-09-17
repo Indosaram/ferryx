@@ -1,7 +1,9 @@
 use super::*;
 use crate::ssh::runtime::{RemoteEnvironment, RemoteExecutor, RemotePlatform};
 use crate::ssh::{SshAuthMethod, SshHost, SshHostSource};
+use std::io::Write as _;
 use std::path::Path;
+use std::process::{Command, Stdio};
 
 fn sample_host(id: &str) -> SshHost {
     SshHost {
@@ -554,5 +556,114 @@ fn ssh_helper_setup_posix_upload_script_execution_test() {
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success(), "script stderr: {}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(std::fs::read(&exe_path).unwrap(), payload);
+}
+
+fn process_alive(pid: u32) -> bool {
+    Command::new("sh")
+        .args(["-c", &format!("kill -0 {pid}")])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+#[test]
+fn posix_upload_script_skips_kill_for_foreign_process() {
+    use std::process::{Command, Stdio};
+    let base = std::env::temp_dir().join(format!("ferryx-helper-test-{}-{}", std::process::id(), line!()));
+    std::fs::create_dir_all(base.join("bin")).unwrap();
+    std::fs::create_dir_all(base.join("helper")).unwrap();
+    let sleeper = Command::new("sleep")
+        .arg("30")
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = sleeper.id();
+    std::fs::write(
+        base.join("helper/endpoint.json"),
+        format!("{{\"pid\":{pid}}}"),
+    )
+    .unwrap();
+    let loc = HelperLocation {
+        executable: base.join("bin/ferryx-remote-helper").to_string_lossy().to_string(),
+        root: base.join("helper").to_string_lossy().to_string(),
+    };
+    let script = build_posix_upload_script(&loc, b"PAYLOAD");
+    let mut child = Command::new("sh").args(["-s"])
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        .spawn().unwrap();
+    child.stdin.take().unwrap().write_all(script.as_bytes()).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    // The identity check must refuse to kill an unrelated pid.
+    assert!(process_alive(pid), "foreign process was killed");
+    let _ = Command::new("sh").args(["-c", &format!("kill {pid}")]).status();
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn posix_upload_script_kills_only_helper_named_process() {
+    use std::process::{Command, Stdio};
+    let base = std::env::temp_dir().join(format!("ferryx-helper-test-{}-{}", std::process::id(), line!()));
+    std::fs::create_dir_all(base.join("bin")).unwrap();
+    std::fs::create_dir_all(base.join("helper")).unwrap();
+    // A binary named exactly like the helper (here: a copy of sleep) must be killed.
+    let fake_helper = base.join("bin/ferryx-remote-helper");
+    std::fs::copy("/bin/sleep", &fake_helper).unwrap();
+    let mut sleeper = Command::new(&fake_helper).arg("30")
+        .stdout(Stdio::null()).spawn().unwrap();
+    std::fs::write(
+        base.join("helper/endpoint.json"),
+        format!("{{\"pid\":{}}}", sleeper.id()),
+    )
+    .unwrap();
+    let loc = HelperLocation {
+        executable: fake_helper.to_string_lossy().to_string(),
+        root: base.join("helper").to_string_lossy().to_string(),
+    };
+    let script = build_posix_upload_script(&loc, b"PAYLOAD");
+    let mut child = Command::new("sh").args(["-s"])
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        .spawn().unwrap();
+    child.stdin.take().unwrap().write_all(script.as_bytes()).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let exited = sleeper.wait().map(|s| !s.success()).unwrap_or(true);
+    assert!(exited || !process_alive(sleeper.id()), "helper-named process survived");
+    assert_eq!(std::fs::read(&fake_helper).unwrap(), b"PAYLOAD");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn calver_parse_and_upgrade_decision_never_downgrades_newer_remote() {
+    assert_eq!(parse_calver_version("2026.917.1"), Some((2026, 917, 1)));
+    assert_eq!(parse_calver_version("x.1.2"), None);
+    assert_eq!(parse_calver_version("1.2"), None);
+    // Remote strictly newer than the bundle: no downgrade offer.
+    assert_eq!(
+        decide_helper_upgrade(true, Some("2026.918.1"), "2026.917.1"),
+        HelperUpgradeDecision::NoOp
+    );
+    // Bundle strictly newer than the remote: upgrade.
+    assert_eq!(
+        decide_helper_upgrade(true, Some("2026.917.0"), "2026.917.1"),
+        HelperUpgradeDecision::Upgrade
+    );
+    // Unparseable remote version keeps the conservative upgrade offer.
+    assert_eq!(
+        decide_helper_upgrade(true, Some("bogus"), "2026.917.1"),
+        HelperUpgradeDecision::Upgrade
+    );
+}
+
+#[test]
+fn windows_upload_script_verifies_identity_and_restores_on_failure() {
+    let loc = HelperLocation {
+        executable: "C:\\Users\\t\\.ferryx\\bin\\ferryx-remote-helper.exe".to_string(),
+        root: "C:\\Users\\t\\.ferryx\\helper\\h".to_string(),
+    };
+    let script = build_windows_upload_script(&loc, b"X");
+    assert!(script.contains("Get-Process -Id $ep.pid"));
+    assert!(script.contains("ProcessName -eq 'ferryx-remote-helper'"));
+    assert!(script.contains("[System.IO.File]::Move($old, $dest)"));
 }
 

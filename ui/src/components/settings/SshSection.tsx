@@ -83,6 +83,7 @@ interface TestState {
   remoteVersion?: string | null;
   bundledVersion?: string | null;
   bundledPath?: string | null;
+  decision?: "install" | "noOp" | "upgrade" | null;
   provisioning?: boolean;
 }
 
@@ -391,6 +392,7 @@ export function SshSection({ onOpenProject, searchQuery }: SshSectionProps) {
       let remoteVersion: string | null = null;
       let bundledVersion: string | null = null;
       let bundledPath: string | null = null;
+      let decision: "install" | "noOp" | "upgrade" | null = null;
       if (summary.reachable && isTauri()) {
         try {
           const updateState = await invoke<{
@@ -398,10 +400,12 @@ export function SshSection({ onOpenProject, searchQuery }: SshSectionProps) {
             remoteVersion?: string | null;
             bundledVersion?: string | null;
             bundledPath?: string | null;
+            decision?: "install" | "noOp" | "upgrade" | null;
           }>("cmd_ssh_helper_update_state", { host });
           remoteVersion = updateState.remoteVersion ?? null;
           bundledVersion = updateState.bundledVersion ?? null;
           bundledPath = updateState.bundledPath ?? null;
+          decision = updateState.decision ?? null;
         } catch {
           // Update state check is best-effort
         }
@@ -418,6 +422,7 @@ export function SshSection({ onOpenProject, searchQuery }: SshSectionProps) {
           remoteVersion,
           bundledVersion,
           bundledPath,
+          decision,
         },
       }));
     } catch (err) {
@@ -449,6 +454,7 @@ export function SshSection({ onOpenProject, searchQuery }: SshSectionProps) {
           remoteVersion?: string | null;
           bundledVersion?: string | null;
           bundledPath?: string | null;
+          decision?: "install" | "noOp" | "upgrade" | null;
         }>("cmd_ssh_helper_update_state", { host });
         setTestResults((prev) => ({
           ...prev,
@@ -458,6 +464,7 @@ export function SshSection({ onOpenProject, searchQuery }: SshSectionProps) {
             remoteVersion: updateState.remoteVersion ?? null,
             bundledVersion: updateState.bundledVersion ?? null,
             bundledPath: updateState.bundledPath ?? null,
+            decision: updateState.decision ?? null,
             provisioning: false,
           },
         }));
@@ -1079,23 +1086,23 @@ export function SshSection({ onOpenProject, searchQuery }: SshSectionProps) {
                           <div>
                             <span className="font-medium text-foreground">Terminal Helper: </span>
                             <span>{test.helper === "installed" ? "Ready" : test.helper === "missing" ? "Setup needed" : "Not verified"}</span>
-                            {test.remoteVersion && test.bundledVersion && test.remoteVersion !== test.bundledVersion ? (
+                            {test.remoteVersion && test.bundledVersion && test.decision === "upgrade" ? (
                               <span className="ml-1 text-amber-600 dark:text-amber-400">
                                 {" "}· 업데이트 가능 ({test.remoteVersion} → {test.bundledVersion})
                               </span>
                             ) : null}
                           </div>
                         </div>
-                        {test.remoteVersion && test.bundledVersion && test.remoteVersion !== test.bundledVersion && test.bundledPath ? (
+                        {test.decision && test.decision !== "noOp" && test.bundledPath ? (
                           <Button
                             type="button"
                             variant="outline"
                             size="sm"
                             disabled={isBusy || test.provisioning || !!host.disabled || isFormOpen}
                             onClick={() => handleProvisionHelper(host, test.bundledPath!)}
-                            aria-label={`Update helper on ${host.label}`}
+                            aria-label={test.decision === "install" ? `Install helper on ${host.label}` : `Update helper on ${host.label}`}
                           >
-                            {test.provisioning ? "업데이트 중…" : "업데이트 (Update helper)"}
+                            {test.provisioning ? (test.decision === "install" ? "설치 중…" : "업데이트 중…") : test.decision === "install" ? "설치 (Install helper)" : "업데이트 (Update helper)"}
                           </Button>
                         ) : null}
                         <Button
