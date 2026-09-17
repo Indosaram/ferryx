@@ -70,6 +70,7 @@ async fn test_browser_websocket_full_lifecycle_and_reconnection() {
         "b1".into(),
         BrowserRemoteState {
             browser_id: "b1".into(),
+            browser_instance_id: Some("bi1".into()),
             url: Some("https://example.com".into()),
             title: Some("Example Home".into()),
             document_generation: "1".into(),
@@ -636,6 +637,7 @@ async fn test_r3_cmd_browser_remote_reclaim_broadcasts_revoked_via_gateway_manag
         "b1".into(),
         BrowserRemoteState {
             browser_id: "b1".into(),
+            browser_instance_id: Some("bi1".into()),
             url: Some("https://example.com".into()),
             title: Some("Reclaim Test".into()),
             document_generation: "1".into(),

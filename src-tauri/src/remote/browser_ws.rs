@@ -235,6 +235,8 @@ pub struct BrowserWsSession {
     pub sent_frames: VecDeque<SentFrameRecord>,
     /// Authoritative sharing publisher for the desktop indicator (R4-5).
     pub sharing: Option<Arc<SharingRegistry>>,
+    /// Real identity negotiated at subscription time (R4-7).
+    pub negotiated_identity: Option<crate::remote::browser_backend::BrowserSubscribeIdentity>,
 }
 
 fn browser_error(
@@ -354,6 +356,7 @@ impl BrowserWsSession {
             last_acked_seq: None,
             sent_frames: VecDeque::new(),
             sharing: None,
+            negotiated_identity: None,
         }
     }
 
@@ -663,7 +666,7 @@ impl BrowserWsSession {
                 }
 
                 // Wire subscription ownership and reconcile stream identity with backend
-                let negotiated_options = match backend
+                let (negotiated_options, identity) = match backend
                     .subscribe_viewer(
                         &self.browser_id,
                         &self.device_id,
@@ -672,10 +675,11 @@ impl BrowserWsSession {
                     )
                     .await
                 {
-                    Ok((backend_sub, stream_id, negotiated)) => {
+                    Ok((backend_sub, stream_id, negotiated, ident)) => {
                         self.backend_subscription_id = Some(backend_sub);
                         self.stream_id = stream_id;
-                        negotiated
+                        self.negotiated_identity = Some(ident.clone());
+                        (negotiated, ident)
                     }
                     Err(e) => {
                         admission.unsubscribe(&self.browser_id, &sub_id);
@@ -706,10 +710,10 @@ impl BrowserWsSession {
                     subscription_id: sub_id,
                     stream_id: self.stream_id,
                     browser_id: self.browser_id.clone(),
-                    browser_instance_id: "bi1".into(),
-                    browser_service_epoch: "1".into(),
-                    desktop_epoch: "1".into(),
-                    document_generation: "1".into(),
+                    browser_instance_id: identity.browser_instance_id,
+                    browser_service_epoch: identity.browser_service_epoch,
+                    desktop_epoch: identity.desktop_epoch,
+                    document_generation: identity.document_generation,
                     options: negotiated_options,
                 };
                 let _ = out_tx.send(resp).await;
@@ -838,6 +842,15 @@ impl BrowserWsSession {
                     Ok(lease) => {
                         self.is_driver = true;
                         self.lease_epoch = Some(lease.lease_epoch);
+                        let _ = backend
+                            .claim_driver(
+                                &browser_id,
+                                &self.device_id,
+                                &self.connection_id,
+                                &subscription_id,
+                                lease.lease_epoch,
+                            )
+                            .await;
                         if let Some(registry) = self.sharing.as_ref() {
                             registry.driver_claimed(&self.connection_id, &self.device_id);
                         }
@@ -892,6 +905,7 @@ impl BrowserWsSession {
                 }
                 self.is_driver = false;
                 self.lease_epoch = None;
+                let _ = backend.release_driver(sub_id, epoch).await;
                 if let Some(registry) = self.sharing.as_ref() {
                     registry.driver_released(&self.connection_id);
                 }
@@ -908,8 +922,8 @@ impl BrowserWsSession {
                 request_seq,
                 browser_id,
                 lease_epoch,
-                browser_instance_id: _,
-                desktop_epoch: _,
+                browser_instance_id,
+                desktop_epoch,
                 document_generation,
                 command,
                 params,
@@ -920,6 +934,64 @@ impl BrowserWsSession {
                         Some(request_id),
                         "BROWSER_INVALID_REQUEST",
                         "Invalid browser or subscription binding",
+                        false,
+                        None,
+                    );
+                    let _ = out_tx.send(err).await;
+                    return Ok(());
+                }
+
+                // R4-7 Part B: Command identity fencing against negotiated session identity
+                let Some(ref negotiated) = self.negotiated_identity else {
+                    let err = browser_error(
+                        Some(request_id),
+                        "BROWSER_INVALID_REQUEST",
+                        "Command received without active negotiated subscription",
+                        false,
+                        None,
+                    );
+                    let _ = out_tx.send(err).await;
+                    return Ok(());
+                };
+
+                if browser_instance_id.trim().is_empty() || browser_instance_id != negotiated.browser_instance_id {
+                    let err = browser_error(
+                        Some(request_id),
+                        "BROWSER_STALE_IDENTITY",
+                        format!(
+                            "Browser instance ID mismatch: expected {}, got {}",
+                            negotiated.browser_instance_id, browser_instance_id
+                        ),
+                        false,
+                        None,
+                    );
+                    let _ = out_tx.send(err).await;
+                    return Ok(());
+                }
+
+                if desktop_epoch.trim().is_empty() || desktop_epoch != negotiated.desktop_epoch {
+                    let err = browser_error(
+                        Some(request_id),
+                        "BROWSER_STALE_IDENTITY",
+                        format!(
+                            "Desktop epoch mismatch: expected {}, got {}",
+                            negotiated.desktop_epoch, desktop_epoch
+                        ),
+                        false,
+                        None,
+                    );
+                    let _ = out_tx.send(err).await;
+                    return Ok(());
+                }
+
+                if document_generation.trim().is_empty() || document_generation != negotiated.document_generation {
+                    let err = browser_error(
+                        Some(request_id),
+                        "BROWSER_STALE_IDENTITY",
+                        format!(
+                            "Document generation mismatch: expected {}, got {}",
+                            negotiated.document_generation, document_generation
+                        ),
                         false,
                         None,
                     );
@@ -1111,6 +1183,11 @@ impl BrowserWsSession {
                     command,
                     params,
                     document_generation: Some(document_generation),
+                    browser_instance_id: Some(browser_instance_id),
+                    desktop_epoch: Some(desktop_epoch),
+                    lease_epoch: Some(lease_epoch),
+                    device_id: Some(self.device_id.clone()),
+                    connection_id: Some(self.connection_id.clone()),
                 };
                 let backend = Arc::clone(backend);
                 let out_tx = out_tx.clone();
@@ -1279,6 +1356,7 @@ impl BrowserWsSession {
                         command: "snapshot".into(),
                         params: None,
                         document_generation: None,
+                        ..Default::default()
                     })
                     .await;
 
@@ -1421,6 +1499,10 @@ impl BrowserWsSession {
     ) {
         if let Some(backend_sub) = self.backend_subscription_id.take() {
             let _ = backend.unsubscribe_viewer(&self.browser_id, &backend_sub).await;
+            if let Some(epoch) = self.lease_epoch {
+                let sub_id = self.subscription_id.clone().unwrap_or_default();
+                let _ = backend.release_driver(&sub_id, epoch).await;
+            }
         }
         self.teardown(admission);
     }
@@ -2556,6 +2638,24 @@ pub mod tests {
                 })
             })
         }
+        fn subscribe_viewer<'a>(
+            &'a self,
+            _browser_id: &'a str,
+            _device_id: &'a str,
+            _viewer_instance_id: &'a str,
+            options: Option<crate::remote::browser_protocol::BrowserSubscribeOptions>,
+        ) -> futures_util::future::BoxFuture<'a, Result<(String, u32, crate::remote::browser_protocol::BrowserSubscribeOptions, crate::remote::browser_backend::BrowserSubscribeIdentity), RemoteBrowserError>> {
+            Box::pin(async move {
+                let sub_id = format!("sub-{}", uuid::Uuid::new_v4());
+                let identity = crate::remote::browser_backend::BrowserSubscribeIdentity {
+                    browser_instance_id: "bi1".into(),
+                    browser_service_epoch: "1".into(),
+                    desktop_epoch: "1".into(),
+                    document_generation: "15".into(),
+                };
+                Ok((sub_id, 1, options.unwrap_or_default(), identity))
+            })
+        }
         fn capabilities(&self) -> futures_util::future::BoxFuture<'_, crate::remote::browser_backend::BrowserCapabilities> {
             Box::pin(async move {
                 crate::remote::browser_backend::BrowserCapabilities {
@@ -3138,5 +3238,402 @@ pub mod tests {
         let (resumed_browser, capturing) = capture_rx.recv().await.unwrap();
         assert_eq!(resumed_browser, "b1");
         assert!(capturing);
+    }
+
+    /// R4-7 Part A: WS subscribe response carries backend's actual identities (not hard-coded literals).
+    #[tokio::test]
+    async fn test_r4_7_part_a_real_identity_negotiation() {
+        use crate::browser::manager::BrowserManager;
+        use crate::browser::model::CreateBrowserRequest;
+        use crate::browser::remote_driver::RemoteDriverBroker;
+        use crate::browser::remote_service::BrowserRemoteService;
+        use crate::remote::browser_backend::InProcessBrowserServiceBackend;
+
+        let now = Instant::now();
+        let manager = Arc::new(BrowserManager::new());
+        let broker = Arc::new(RemoteDriverBroker::new());
+        let service = Arc::new(BrowserRemoteService::new((*manager).clone(), broker));
+        let backend: Arc<dyn RemoteBrowserBackend> = Arc::new(InProcessBrowserServiceBackend::new(
+            service.clone(),
+            manager.clone(),
+        ));
+
+        let created = manager
+            .register_session(CreateBrowserRequest {
+                browser_id: Some("b-real-1".into()),
+                workspace_id: Some("ws-real".into()),
+                worktree_path: None,
+                url: "https://example.com".into(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .unwrap();
+
+        let real_instance = manager.get_instance_id("b-real-1").unwrap();
+        assert_ne!(real_instance, "bi1", "Real instance ID must not be bi1 literal");
+
+        let admission = AdmissionController::new();
+        let mut session = BrowserWsSession::new(
+            "c-real".into(),
+            "d-real".into(),
+            "b-real-1".into(),
+            DevicePermission::Control,
+            now,
+        );
+
+        let sub_msg = ClientMessage::BrowserSubscribe {
+            request_id: "req-sub-real".into(),
+            viewer_instance_id: "v-real".into(),
+            options: BrowserSubscribeOptions::default(),
+        };
+
+        let resp = session
+            .handle_client_message(sub_msg, &backend, &admission, now)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let ServerMessage::BrowserSubscribed {
+            browser_instance_id,
+            browser_service_epoch,
+            desktop_epoch,
+            document_generation,
+            ..
+        } = resp else {
+            panic!("Expected BrowserSubscribed, got: {:?}", resp);
+        };
+
+        assert_eq!(
+            browser_instance_id, real_instance,
+            "browser_instance_id must match backend real instance, not hard-coded bi1"
+        );
+        assert_eq!(browser_service_epoch, service.service_epoch().to_string());
+        assert_eq!(desktop_epoch, service.desktop_epoch().to_string());
+        assert_eq!(document_generation, created.generation.to_string());
+
+        // A second configured browser has distinct identity that differs per browser
+        let _created2 = manager
+            .register_session(CreateBrowserRequest {
+                browser_id: Some("b-real-2".into()),
+                workspace_id: Some("ws-real".into()),
+                worktree_path: None,
+                url: "https://example.com/2".into(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .unwrap();
+        let real_instance2 = manager.get_instance_id("b-real-2").unwrap();
+        assert_ne!(real_instance, real_instance2);
+
+        // Teardown first session and its backend subscription so captured browser slot (max 1) is freed
+        session.teardown_with_backend(&admission, &backend).await;
+
+        let mut session2 = BrowserWsSession::new(
+            "c-real-2".into(),
+            "d-real-2".into(),
+            "b-real-2".into(),
+            DevicePermission::Control,
+            now,
+        );
+        let sub_msg2 = ClientMessage::BrowserSubscribe {
+            request_id: "req-sub-real-2".into(),
+            viewer_instance_id: "v-real-2".into(),
+            options: BrowserSubscribeOptions::default(),
+        };
+        let resp2 = session2
+            .handle_client_message(sub_msg2, &backend, &admission, now)
+            .await
+            .unwrap()
+            .unwrap();
+        let ServerMessage::BrowserSubscribed {
+            browser_instance_id: inst2,
+            ..
+        } = resp2 else {
+            panic!("Expected BrowserSubscribed");
+        };
+        assert_eq!(inst2, real_instance2);
+
+        // Subscribing to non-existent session fails with BROWSER_SUBSCRIPTION_FAILED and rolls back admission
+        let mut session_missing = BrowserWsSession::new(
+            "c-missing".into(),
+            "d-missing".into(),
+            "b-missing".into(),
+            DevicePermission::Control,
+            now,
+        );
+        let sub_missing = ClientMessage::BrowserSubscribe {
+            request_id: "req-sub-missing".into(),
+            viewer_instance_id: "v-missing".into(),
+            options: BrowserSubscribeOptions::default(),
+        };
+        let resp_missing = session_missing
+            .handle_client_message(sub_missing, &backend, &admission, now)
+            .await
+            .unwrap()
+            .unwrap();
+        match resp_missing {
+            ServerMessage::BrowserError { ref code, .. } => {
+                assert_eq!(code, "BROWSER_SUBSCRIPTION_FAILED");
+            }
+            other => panic!("Expected BROWSER_SUBSCRIPTION_FAILED, got: {:?}", other),
+        }
+        assert!(!admission.should_capture("b-missing"), "Admission must be rolled back on failed subscribe");
+    }
+
+    /// R4-7 Part B: Command identity fencing rejects stale instance/epoch/generation with BROWSER_STALE_IDENTITY.
+    #[tokio::test]
+    async fn test_r4_7_part_b_command_identity_fencing() {
+        let now = Instant::now();
+        let mut session = BrowserWsSession::new(
+            "c-fence".into(),
+            "d-fence".into(),
+            "b1".into(),
+            DevicePermission::Control,
+            now,
+        );
+        let backend: Arc<dyn RemoteBrowserBackend> = Arc::new(InProcessTestBackend::new());
+        let admission = AdmissionController::new();
+
+        // 1. Subscribe
+        let sub_msg = ClientMessage::BrowserSubscribe {
+            request_id: "r1".into(),
+            viewer_instance_id: "v1".into(),
+            options: BrowserSubscribeOptions::default(),
+        };
+        let _ = session
+            .handle_client_message(sub_msg, &backend, &admission, now)
+            .await
+            .unwrap();
+
+        // 2. Claim driver
+        let claim_msg = ClientMessage::BrowserDriverClaim {
+            request_id: "r2".into(),
+            subscription_id: session.subscription_id.clone().unwrap(),
+            browser_id: "b1".into(),
+        };
+        let _ = session
+            .handle_client_message(claim_msg, &backend, &admission, now)
+            .await
+            .unwrap();
+
+        let lease_str = session.lease_epoch.unwrap().to_string();
+
+        // 3. Stale instance ID rejected with BROWSER_STALE_IDENTITY
+        let cmd_stale_inst = ClientMessage::BrowserCommand {
+            request_id: "cmd-1".into(),
+            request_seq: "1".into(),
+            browser_id: "b1".into(),
+            lease_epoch: lease_str.clone(),
+            browser_instance_id: "stale-instance-xyz".into(),
+            desktop_epoch: "1".into(),
+            document_generation: "1".into(),
+            command: "click".into(),
+            params: None,
+        };
+        let resp = session
+            .handle_client_message(cmd_stale_inst, &backend, &admission, now)
+            .await
+            .unwrap()
+            .unwrap();
+        match resp {
+            ServerMessage::BrowserError { ref code, .. } => {
+                assert_eq!(code, "BROWSER_STALE_IDENTITY", "Stale instance must be rejected with BROWSER_STALE_IDENTITY");
+            }
+            other => panic!("Expected BROWSER_STALE_IDENTITY error, got: {:?}", other),
+        }
+
+        // 4. Stale desktop epoch rejected with BROWSER_STALE_IDENTITY
+        let cmd_stale_epoch = ClientMessage::BrowserCommand {
+            request_id: "cmd-2".into(),
+            request_seq: "2".into(),
+            browser_id: "b1".into(),
+            lease_epoch: lease_str.clone(),
+            browser_instance_id: "bi1".into(),
+            desktop_epoch: "999".into(),
+            document_generation: "1".into(),
+            command: "click".into(),
+            params: None,
+        };
+        let resp2 = session
+            .handle_client_message(cmd_stale_epoch, &backend, &admission, now)
+            .await
+            .unwrap()
+            .unwrap();
+        match resp2 {
+            ServerMessage::BrowserError { ref code, .. } => {
+                assert_eq!(code, "BROWSER_STALE_IDENTITY", "Stale desktop epoch must be rejected with BROWSER_STALE_IDENTITY");
+            }
+            other => panic!("Expected BROWSER_STALE_IDENTITY error, got: {:?}", other),
+        }
+
+        // 5. Mismatched document generation rejected with BROWSER_STALE_IDENTITY
+        let cmd_stale_gen = ClientMessage::BrowserCommand {
+            request_id: "cmd-3".into(),
+            request_seq: "3".into(),
+            browser_id: "b1".into(),
+            lease_epoch: lease_str.clone(),
+            browser_instance_id: "bi1".into(),
+            desktop_epoch: "1".into(),
+            document_generation: "999".into(),
+            command: "click".into(),
+            params: None,
+        };
+        let resp3 = session
+            .handle_client_message(cmd_stale_gen, &backend, &admission, now)
+            .await
+            .unwrap()
+            .unwrap();
+        match resp3 {
+            ServerMessage::BrowserError { ref code, .. } => {
+                assert_eq!(code, "BROWSER_STALE_IDENTITY", "Mismatched documentGeneration must be rejected with BROWSER_STALE_IDENTITY");
+            }
+            other => panic!("Expected BROWSER_STALE_IDENTITY error, got: {:?}", other),
+        }
+
+        // 6. Missing document generation (empty string) rejected with BROWSER_STALE_IDENTITY
+        let cmd_missing_gen = ClientMessage::BrowserCommand {
+            request_id: "cmd-4".into(),
+            request_seq: "4".into(),
+            browser_id: "b1".into(),
+            lease_epoch: lease_str.clone(),
+            browser_instance_id: "bi1".into(),
+            desktop_epoch: "1".into(),
+            document_generation: "".into(),
+            command: "click".into(),
+            params: None,
+        };
+        let resp4 = session
+            .handle_client_message(cmd_missing_gen, &backend, &admission, now)
+            .await
+            .unwrap()
+            .unwrap();
+        match resp4 {
+            ServerMessage::BrowserError { ref code, .. } => {
+                assert_eq!(code, "BROWSER_STALE_IDENTITY", "Missing documentGeneration must be rejected with BROWSER_STALE_IDENTITY");
+            }
+            other => panic!("Expected BROWSER_STALE_IDENTITY error, got: {:?}", other),
+        }
+
+        // 7. Valid tuple executes successfully
+        let cmd_valid = ClientMessage::BrowserCommand {
+            request_id: "cmd-5".into(),
+            request_seq: "5".into(),
+            browser_id: "b1".into(),
+            lease_epoch: lease_str,
+            browser_instance_id: "bi1".into(),
+            desktop_epoch: "1".into(),
+            document_generation: "1".into(),
+            command: "getState".into(),
+            params: None,
+        };
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(16);
+        session
+            .dispatch_client_message(cmd_valid, &backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
+        let valid_resp = out_rx.recv().await.unwrap();
+        assert!(matches!(valid_resp, ServerMessage::BrowserResult { .. }), "Valid tuple must execute successfully");
+    }
+
+    /// R4-7 Part B: InProcess backend executes through remote_service.execute_command_guard.
+    #[tokio::test]
+    async fn test_r4_7_part_b_in_process_backend_executes_through_service_guard() {
+        use crate::browser::manager::BrowserManager;
+        use crate::browser::model::CreateBrowserRequest;
+        use crate::browser::remote_driver::RemoteDriverBroker;
+        use crate::browser::remote_service::BrowserRemoteService;
+        use crate::remote::browser_backend::InProcessBrowserServiceBackend;
+
+        let manager = Arc::new(BrowserManager::new());
+        let broker = Arc::new(RemoteDriverBroker::new());
+        let service = Arc::new(BrowserRemoteService::new((*manager).clone(), Arc::clone(&broker)));
+        let backend = InProcessBrowserServiceBackend::new(
+            Arc::clone(&service),
+            Arc::clone(&manager),
+        );
+
+        manager
+            .register_session(CreateBrowserRequest {
+                browser_id: Some("b-guard-1".into()),
+                workspace_id: Some("ws-1".into()),
+                worktree_path: None,
+                url: "https://example.com".into(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .unwrap();
+
+        let real_instance = manager.get_instance_id("b-guard-1").unwrap();
+        let lease = broker.claim("dev-guard", "conn-guard", "sub-guard", "b-guard-1", true).unwrap();
+
+        // Stale instance rejected through guarded path
+        let stale_inst_res = backend
+            .execute_command(BrowserCommandContext {
+                browser_id: "b-guard-1".into(),
+                command: "getState".into(),
+                params: None,
+                document_generation: Some("1".into()),
+                browser_instance_id: Some("wrong-inst".into()),
+                desktop_epoch: Some(service.desktop_epoch().to_string()),
+                lease_epoch: Some(lease.lease_epoch.to_string()),
+                device_id: Some("dev-guard".into()),
+                connection_id: Some("conn-guard".into()),
+            })
+            .await;
+        assert!(stale_inst_res.is_err(), "Guarded path must reject stale instance");
+
+        // Stale epoch rejected through guarded path
+        let stale_epoch_res = backend
+            .execute_command(BrowserCommandContext {
+                browser_id: "b-guard-1".into(),
+                command: "getState".into(),
+                params: None,
+                document_generation: Some("1".into()),
+                browser_instance_id: Some(real_instance.clone()),
+                desktop_epoch: Some("9999".into()),
+                lease_epoch: Some(lease.lease_epoch.to_string()),
+                device_id: Some("dev-guard".into()),
+                connection_id: Some("conn-guard".into()),
+            })
+            .await;
+        assert!(stale_epoch_res.is_err(), "Guarded path must reject stale desktop epoch");
+
+        // Stale generation rejected through guarded path
+        let stale_gen_res = backend
+            .execute_command(BrowserCommandContext {
+                browser_id: "b-guard-1".into(),
+                command: "getState".into(),
+                params: None,
+                document_generation: Some("9999".into()),
+                browser_instance_id: Some(real_instance.clone()),
+                desktop_epoch: Some(service.desktop_epoch().to_string()),
+                lease_epoch: Some(lease.lease_epoch.to_string()),
+                device_id: Some("dev-guard".into()),
+                connection_id: Some("conn-guard".into()),
+            })
+            .await;
+        assert!(stale_gen_res.is_err(), "Guarded path must reject stale generation");
+
+        // Valid tuple succeeds through guarded path
+        let valid_res = backend
+            .execute_command(BrowserCommandContext {
+                browser_id: "b-guard-1".into(),
+                command: "getState".into(),
+                params: None,
+                document_generation: Some("1".into()),
+                browser_instance_id: Some(real_instance),
+                desktop_epoch: Some(service.desktop_epoch().to_string()),
+                lease_epoch: Some(lease.lease_epoch.to_string()),
+                device_id: Some("dev-guard".into()),
+                connection_id: Some("conn-guard".into()),
+            })
+            .await;
+        assert!(valid_res.is_ok(), "Guarded path must accept valid tuple: {:?}", valid_res);
     }
 }

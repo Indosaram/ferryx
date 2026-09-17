@@ -889,3 +889,86 @@ async fn test_r7_native_capture_permit_retention_across_producer_restart_on_time
 
     service.unsubscribe(&b1, &sub2);
 }
+
+#[tokio::test]
+async fn test_r4_7_producer_frame_sampled_before_generation_bump_is_dropped() {
+    let (service, manager, b1, _) = setup_test_environment();
+
+    let fake_source = Arc::new(
+        FakeBrowserSnapshotSource::new(FakeSnapshotBehavior::Delayed {
+            delay: std::time::Duration::from_millis(40),
+            result: Ok(crate::browser::snapshot_source::BrowserSnapshot::new(
+                crate::browser::snapshot_source::sample_valid_jpeg_bytes(),
+                crate::browser::snapshot_source::SnapshotFormat::Jpeg { quality: 80 },
+                800,
+                600,
+            )),
+        })
+        .with_timeout(std::time::Duration::from_millis(500)),
+    );
+    service.set_snapshot_source(fake_source.clone());
+
+    let mut frame_rx = service.subscribe_frames(&b1);
+    let sub = service.subscribe(&b1, "dev-c1", "v-c1").unwrap();
+
+    // Give loop time to tick, sample generation 1, and enter snapshot await
+    tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+
+    // Bump generation while snapshot is in-flight
+    manager.update_url(&b1, "https://example.com/bumped").unwrap();
+    let state_after_bump = manager.get_state(&b1).unwrap();
+    assert_eq!(state_after_bump.generation, 2);
+
+    // Frame received must NOT have the stale document_generation 1
+    let frame_bytes = tokio::time::timeout(std::time::Duration::from_millis(600), frame_rx.recv())
+        .await
+        .expect("Producer should eventually emit next fresh frame")
+        .expect("Frame channel must be open");
+
+    let (_, metadata, _) = decode_frame(&frame_bytes).expect("Valid frame");
+    assert_ne!(
+        metadata.document_generation, "1",
+        "Stale frame sampled before generation bump must be dropped!"
+    );
+    assert_eq!(metadata.document_generation, "2");
+
+    service.unsubscribe(&b1, &sub);
+}
+
+#[tokio::test]
+async fn test_r4_7_producer_visibility_loss_halts_publication() {
+    let (service, manager, b1, _) = setup_test_environment();
+
+    let fake_source = Arc::new(
+        FakeBrowserSnapshotSource::new(FakeSnapshotBehavior::Delayed {
+            delay: std::time::Duration::from_millis(40),
+            result: Ok(crate::browser::snapshot_source::BrowserSnapshot::new(
+                crate::browser::snapshot_source::sample_valid_jpeg_bytes(),
+                crate::browser::snapshot_source::SnapshotFormat::Jpeg { quality: 80 },
+                800,
+                600,
+            )),
+        })
+        .with_timeout(std::time::Duration::from_millis(500)),
+    );
+    service.set_snapshot_source(fake_source.clone());
+
+    let mut frame_rx = service.subscribe_frames(&b1);
+    let sub = service.subscribe(&b1, "dev-c2", "v-c2").unwrap();
+
+    // Give loop time to tick, sample visible=true, and enter snapshot await
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    // Hide browser while snapshot is in-flight
+    manager.set_visible(&b1, false).unwrap();
+
+    // Publication must halt: no frame emitted while hidden
+    let recv_res = tokio::time::timeout(std::time::Duration::from_millis(250), frame_rx.recv()).await;
+    assert!(
+        recv_res.is_err(),
+        "Frame must not be published after visibility loss"
+    );
+
+    service.unsubscribe(&b1, &sub);
+}
+

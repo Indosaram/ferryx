@@ -535,6 +535,24 @@ impl BrowserRemoteService {
                     Err(_) => continue,
                 };
 
+                // Revalidate current state immediately before publication (R4-7 Part C):
+                // State was sampled before the await; recheck document generation, visibility, and existence.
+                let current_state = match manager.get_state(&browser_id_clone) {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+
+                if !current_state.visible {
+                    // Visibility loss halts publication
+                    continue;
+                }
+
+                if current_state.generation != state.generation {
+                    // Drop frame sampled before a generation bump; advance seq to emit a resync sequence gap
+                    seq = seq.wrapping_add(1);
+                    continue;
+                }
+
                 seq = seq.wrapping_add(1);
 
                 let format_byte = match snapshot.format {
@@ -559,7 +577,7 @@ impl BrowserRemoteService {
                     browser_instance_id: manager.get_instance_id(&browser_id_clone).unwrap_or_default(),
                     browser_service_epoch: service_epoch.to_string(),
                     desktop_epoch: desktop_epoch.load(Ordering::SeqCst).to_string(),
-                    document_generation: state.generation.to_string(),
+                    document_generation: current_state.generation.to_string(),
                     viewport_revision: viewport_rev.to_string(),
                     capture_rect: crate::remote::browser_protocol::BrowserCaptureRect {
                         x: capture_rect.x,

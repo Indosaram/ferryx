@@ -3047,11 +3047,23 @@ async fn run_browser_ws_session(
     .with_sharing_registry(admission.sharing_registry());
 
     let backend_caps = backend.capabilities().await;
+    let desktop_epoch_str = state.daemon_epoch.load(std::sync::atomic::Ordering::SeqCst).to_string();
+    let default_scope = crate::remote::browser_backend::DesktopScope {
+        workspace_id: "".into(),
+        worktree_slug: "".into(),
+    };
+    let query_scope = admitted_scope.as_ref().unwrap_or(&default_scope);
+    let browser_inst = backend
+        .get_state(&browser_id, query_scope)
+        .await
+        .ok()
+        .and_then(|s| s.browser_instance_id)
+        .unwrap_or_else(|| format!("bi-{browser_id}"));
     let hello = ServerMessage::BrowserHello {
         browser_id: browser_id.clone(),
-        browser_instance_id: "bi1".into(),
+        browser_instance_id: browser_inst,
         browser_service_epoch: service_epoch.to_string(),
-        desktop_epoch: "1".into(),
+        desktop_epoch: desktop_epoch_str,
         protocol_version: 1,
         supported_commands: backend_caps.supported_commands.clone(),
         capabilities: Some(serde_json::to_value(&backend_caps).unwrap_or_default()),
@@ -4072,6 +4084,7 @@ mod tests {
                 self.seen_scopes.lock().unwrap().push(scope.clone());
                 Ok(crate::remote::browser_backend::BrowserRemoteState {
                     browser_id: browser_id.to_string(),
+                    browser_instance_id: None,
                     url: Some("https://example.com/page".into()),
                     title: Some(format!("title-{browser_id}")),
                     document_generation: "1".into(),
@@ -4125,6 +4138,7 @@ mod tests {
                     String,
                     u32,
                     crate::remote::browser_protocol::BrowserSubscribeOptions,
+                    crate::remote::browser_backend::BrowserSubscribeIdentity,
                 ),
                 RemoteBrowserError,
             >,
@@ -4132,10 +4146,17 @@ mod tests {
             Box::pin(async move {
                 self.viewer_subs
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let identity = crate::remote::browser_backend::BrowserSubscribeIdentity {
+                    browser_instance_id: "probe-instance".into(),
+                    browser_service_epoch: "1".into(),
+                    desktop_epoch: "1".into(),
+                    document_generation: "1".into(),
+                };
                 Ok((
                     format!("probe-sub-{}", uuid::Uuid::new_v4()),
                     1,
                     options.unwrap_or_default(),
+                    identity,
                 ))
             })
         }

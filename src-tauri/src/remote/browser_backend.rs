@@ -28,10 +28,21 @@ pub struct RemoteBrowserSessionSummary {
     pub visible: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserSubscribeIdentity {
+    pub browser_instance_id: String,
+    pub browser_service_epoch: String,
+    pub desktop_epoch: String,
+    pub document_generation: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowserRemoteState {
     pub browser_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_instance_id: Option<String>,
     pub url: Option<String>,
     pub title: Option<String>,
     pub document_generation: String,
@@ -67,13 +78,23 @@ pub enum RemoteBrowserError {
     ExecutionFailed(String),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowserCommandContext {
     pub browser_id: String,
     pub command: String,
     pub params: Option<serde_json::Value>,
     pub document_generation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_instance_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_epoch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_epoch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,11 +144,51 @@ pub trait RemoteBrowserBackend: Send + Sync {
         device_id: &'a str,
         viewer_instance_id: &'a str,
         options: Option<crate::remote::browser_protocol::BrowserSubscribeOptions>,
-    ) -> BoxFuture<'a, Result<(String, u32, crate::remote::browser_protocol::BrowserSubscribeOptions), RemoteBrowserError>> {
+    ) -> BoxFuture<
+        'a,
+        Result<
+            (
+                String,
+                u32,
+                crate::remote::browser_protocol::BrowserSubscribeOptions,
+                BrowserSubscribeIdentity,
+            ),
+            RemoteBrowserError,
+        >,
+    > {
         let _ = (browser_id, device_id, viewer_instance_id);
         Box::pin(async move {
-            Ok((format!("sub-{}", uuid::Uuid::new_v4()), 1, options.unwrap_or_default()))
+            Ok((
+                format!("sub-{}", uuid::Uuid::new_v4()),
+                1,
+                options.unwrap_or_default(),
+                BrowserSubscribeIdentity {
+                    browser_instance_id: "bi1".into(),
+                    browser_service_epoch: "1".into(),
+                    desktop_epoch: "1".into(),
+                    document_generation: "1".into(),
+                },
+            ))
         })
+    }
+
+    fn claim_driver<'a>(
+        &'a self,
+        _browser_id: &'a str,
+        _device_id: &'a str,
+        _connection_id: &'a str,
+        _subscription_id: &'a str,
+        _lease_epoch: u64,
+    ) -> BoxFuture<'a, Result<(), RemoteBrowserError>> {
+        Box::pin(async move { Ok(()) })
+    }
+
+    fn release_driver<'a>(
+        &'a self,
+        _subscription_id: &'a str,
+        _lease_epoch: u64,
+    ) -> BoxFuture<'a, Result<(), RemoteBrowserError>> {
+        Box::pin(async move { Ok(()) })
     }
 
     fn unsubscribe_viewer<'a>(
@@ -208,7 +269,18 @@ impl RemoteBrowserBackend for UnavailableBrowserBackend {
         _device_id: &'a str,
         _viewer_instance_id: &'a str,
         _options: Option<crate::remote::browser_protocol::BrowserSubscribeOptions>,
-    ) -> BoxFuture<'a, Result<(String, u32, crate::remote::browser_protocol::BrowserSubscribeOptions), RemoteBrowserError>> {
+    ) -> BoxFuture<
+        'a,
+        Result<
+            (
+                String,
+                u32,
+                crate::remote::browser_protocol::BrowserSubscribeOptions,
+                BrowserSubscribeIdentity,
+            ),
+            RemoteBrowserError,
+        >,
+    > {
         Box::pin(async move {
             Err(RemoteBrowserError::Unavailable(
                 "Browser screencast is unavailable without GUI session".into(),
@@ -502,8 +574,14 @@ impl RemoteBrowserBackend for LocalIpcBrowserBackend {
             if let Some(err) = data.get("error").and_then(|v| v.as_str()) {
                 return Err(RemoteBrowserError::NotFound(err.to_string()));
             }
+            let inst_id = data
+                .get("browserInstanceId")
+                .or_else(|| data.get("instanceId"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             Ok(BrowserRemoteState {
                 browser_id: data.get("browserId").and_then(|v| v.as_str()).unwrap_or(browser_id).to_string(),
+                browser_instance_id: inst_id,
                 url: data.get("url").and_then(|v| v.as_str()).map(|s| s.to_string()),
                 title: data.get("title").and_then(|v| v.as_str()).map(|s| s.to_string()),
                 document_generation: data.get("generation").or_else(|| data.get("documentGeneration")).and_then(|v| v.as_str()).unwrap_or("1").to_string(),
@@ -578,11 +656,22 @@ impl RemoteBrowserBackend for LocalIpcBrowserBackend {
 
     fn subscribe_viewer<'a>(
         &'a self,
-        _browser_id: &'a str,
+        browser_id: &'a str,
         _device_id: &'a str,
         _viewer_instance_id: &'a str,
         options: Option<crate::remote::browser_protocol::BrowserSubscribeOptions>,
-    ) -> BoxFuture<'a, Result<(String, u32, crate::remote::browser_protocol::BrowserSubscribeOptions), RemoteBrowserError>> {
+    ) -> BoxFuture<
+        'a,
+        Result<
+            (
+                String,
+                u32,
+                crate::remote::browser_protocol::BrowserSubscribeOptions,
+                BrowserSubscribeIdentity,
+            ),
+            RemoteBrowserError,
+        >,
+    > {
         Box::pin(async move {
             if self.socket_path.is_empty() {
                 return Err(RemoteBrowserError::Unavailable("Local IPC socket path empty".into()));
@@ -592,8 +681,27 @@ impl RemoteBrowserBackend for LocalIpcBrowserBackend {
                     "GUI process not running or socket unconnected".into(),
                 ));
             }
+
+            // Query bridge state for identity negotiation
+            let state = self
+                .get_state(
+                    browser_id,
+                    &DesktopScope {
+                        workspace_id: "".into(),
+                        worktree_slug: "".into(),
+                    },
+                )
+                .await?;
             let sub_id = format!("ipc-sub-{}", uuid::Uuid::new_v4());
-            Ok((sub_id, 1, options.unwrap_or_default()))
+            let identity = BrowserSubscribeIdentity {
+                browser_instance_id: state
+                    .browser_instance_id
+                    .unwrap_or_else(|| format!("bi-{browser_id}")),
+                browser_service_epoch: "1".into(),
+                desktop_epoch: "1".into(),
+                document_generation: state.document_generation,
+            };
+            Ok((sub_id, 1, options.unwrap_or_default(), identity))
         })
     }
 
@@ -640,6 +748,7 @@ pub struct InProcessTestBackend {
     pub states: Mutex<HashMap<String, BrowserRemoteState>>,
     pub frame_senders: Mutex<HashMap<String, tokio::sync::broadcast::Sender<Vec<u8>>>>,
     pub negotiated_options: Mutex<HashMap<String, crate::remote::browser_protocol::BrowserSubscribeOptions>>,
+    pub identities: Mutex<HashMap<String, BrowserSubscribeIdentity>>,
 }
 
 impl InProcessTestBackend {
@@ -649,6 +758,7 @@ impl InProcessTestBackend {
             states: Mutex::new(HashMap::new()),
             frame_senders: Mutex::new(HashMap::new()),
             negotiated_options: Mutex::new(HashMap::new()),
+            identities: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -718,7 +828,18 @@ impl RemoteBrowserBackend for InProcessTestBackend {
         _device_id: &'a str,
         _viewer_instance_id: &'a str,
         options: Option<crate::remote::browser_protocol::BrowserSubscribeOptions>,
-    ) -> BoxFuture<'a, Result<(String, u32, crate::remote::browser_protocol::BrowserSubscribeOptions), RemoteBrowserError>> {
+    ) -> BoxFuture<
+        'a,
+        Result<
+            (
+                String,
+                u32,
+                crate::remote::browser_protocol::BrowserSubscribeOptions,
+                BrowserSubscribeIdentity,
+            ),
+            RemoteBrowserError,
+        >,
+    > {
         Box::pin(async move {
             let mut opts = self.negotiated_options.lock().await;
             let negotiated = opts
@@ -726,7 +847,23 @@ impl RemoteBrowserBackend for InProcessTestBackend {
                 .or_insert_with(|| options.unwrap_or_default())
                 .clone();
             let sub_id = format!("sub-{}", uuid::Uuid::new_v4());
-            Ok((sub_id, 1, negotiated))
+            let idents = self.identities.lock().await;
+            let identity = if let Some(id) = idents.get(browser_id) {
+                id.clone()
+            } else {
+                let states = self.states.lock().await;
+                let (gen, inst) = states
+                    .get(browser_id)
+                    .map(|s| (s.document_generation.clone(), s.browser_instance_id.clone()))
+                    .unwrap_or_else(|| ("1".into(), None));
+                BrowserSubscribeIdentity {
+                    browser_instance_id: inst.unwrap_or_else(|| "bi1".into()),
+                    browser_service_epoch: "1".into(),
+                    desktop_epoch: "1".into(),
+                    document_generation: gen,
+                }
+            };
+            Ok((sub_id, 1, negotiated, identity))
         })
     }
 
@@ -838,12 +975,14 @@ impl RemoteBrowserBackend for InProcessBrowserServiceBackend {
                 }
                 other => RemoteBrowserError::ExecutionFailed(other.to_string()),
             })?;
+            let inst_id = self.manager.get_instance_id(browser_id).ok();
             let (_, _, vp_rev) = self
                 .manager
                 .get_geometry(browser_id)
                 .unwrap_or((None, 1.0, 1));
             Ok(BrowserRemoteState {
                 browser_id: state.browser_id,
+                browser_instance_id: inst_id,
                 url: Some(state.url),
                 title: state.title,
                 document_generation: state.generation.to_string(),
@@ -865,6 +1004,70 @@ impl RemoteBrowserBackend for InProcessBrowserServiceBackend {
     ) -> BoxFuture<'_, Result<BrowserCommandResult, RemoteBrowserError>> {
         Box::pin(async move {
             let executor = self.executor.read().clone();
+
+            // Fencing and standalone guard validation (remote_service.rs:686)
+            if let (Some(lease_str), Some(dev_id), Some(conn_id), Some(inst), Some(dt_ep), Some(doc_gen)) = (
+                &ctx.lease_epoch,
+                &ctx.device_id,
+                &ctx.connection_id,
+                &ctx.browser_instance_id,
+                &ctx.desktop_epoch,
+                &ctx.document_generation,
+            ) {
+                let lease_epoch = lease_str.parse::<u64>().unwrap_or(0);
+                let desktop_epoch = dt_ep.parse::<u64>().unwrap_or(0);
+                let generation = doc_gen.parse::<u64>().unwrap_or(0);
+                self.remote_service.execute_command_guard(
+                    &ctx.browser_id,
+                    lease_epoch,
+                    dev_id,
+                    conn_id,
+                    inst,
+                    desktop_epoch,
+                    generation,
+                ).map_err(|e| match e {
+                    crate::browser::remote_service::RemoteServiceError::BrowserNotFound(id) => RemoteBrowserError::NotFound(id),
+                    crate::browser::remote_service::RemoteServiceError::StaleLease
+                    | crate::browser::remote_service::RemoteServiceError::DesktopReclaimed => RemoteBrowserError::Forbidden(e.to_string()),
+                    crate::browser::remote_service::RemoteServiceError::StaleInstance
+                    | crate::browser::remote_service::RemoteServiceError::StaleGeneration => RemoteBrowserError::InvalidRequest(e.to_string()),
+                    other => RemoteBrowserError::ExecutionFailed(other.to_string()),
+                })?;
+            } else {
+                if let Some(inst) = &ctx.browser_instance_id {
+                    let actual_inst = self.manager.get_instance_id(&ctx.browser_id)
+                        .map_err(|e| match e {
+                            crate::browser::security::BrowserError::NotFound(id) => RemoteBrowserError::NotFound(id),
+                            other => RemoteBrowserError::ExecutionFailed(other.to_string()),
+                        })?;
+                    if inst != &actual_inst {
+                        return Err(RemoteBrowserError::InvalidRequest(format!(
+                            "Stale instance ID: expected {actual_inst}, got {inst}"
+                        )));
+                    }
+                }
+                if let Some(dt_ep) = &ctx.desktop_epoch {
+                    let actual_epoch = self.remote_service.desktop_epoch();
+                    if dt_ep.parse::<u64>().unwrap_or(0) != actual_epoch {
+                        return Err(RemoteBrowserError::Forbidden(format!(
+                            "Stale desktop epoch: expected {actual_epoch}, got {dt_ep}"
+                        )));
+                    }
+                }
+                if let Some(doc_gen) = &ctx.document_generation {
+                    let state = self.manager.get_state(&ctx.browser_id)
+                        .map_err(|e| match e {
+                            crate::browser::security::BrowserError::NotFound(id) => RemoteBrowserError::NotFound(id),
+                            other => RemoteBrowserError::ExecutionFailed(other.to_string()),
+                        })?;
+                    if doc_gen != &state.generation.to_string() {
+                        return Err(RemoteBrowserError::InvalidRequest(format!(
+                            "Stale document generation: expected {}, got {doc_gen}",
+                            state.generation
+                        )));
+                    }
+                }
+            }
 
             match ctx.command.as_str() {
                 "getState" => {
@@ -1071,8 +1274,38 @@ impl RemoteBrowserBackend for InProcessBrowserServiceBackend {
         device_id: &'a str,
         viewer_instance_id: &'a str,
         options: Option<crate::remote::browser_protocol::BrowserSubscribeOptions>,
-    ) -> BoxFuture<'a, Result<(String, u32, crate::remote::browser_protocol::BrowserSubscribeOptions), RemoteBrowserError>> {
+    ) -> BoxFuture<
+        'a,
+        Result<
+            (
+                String,
+                u32,
+                crate::remote::browser_protocol::BrowserSubscribeOptions,
+                BrowserSubscribeIdentity,
+            ),
+            RemoteBrowserError,
+        >,
+    > {
         Box::pin(async move {
+            let instance_id = self
+                .manager
+                .get_instance_id(browser_id)
+                .map_err(|e| match e {
+                    crate::browser::security::BrowserError::NotFound(id) => {
+                        RemoteBrowserError::NotFound(id)
+                    }
+                    other => RemoteBrowserError::ExecutionFailed(other.to_string()),
+                })?;
+            let state = self
+                .manager
+                .get_state(browser_id)
+                .map_err(|e| match e {
+                    crate::browser::security::BrowserError::NotFound(id) => {
+                        RemoteBrowserError::NotFound(id)
+                    }
+                    other => RemoteBrowserError::ExecutionFailed(other.to_string()),
+                })?;
+
             let requested_profile = options.as_ref().map(|opt| {
                 let format = match opt.format {
                     crate::remote::browser_protocol::BrowserImageFormat::Png => {
@@ -1121,8 +1354,47 @@ impl RemoteBrowserBackend for InProcessBrowserServiceBackend {
                 max_edge: Some(negotiated_prof.max_edge),
             };
 
-            Ok((sub_id, stream_id, negotiated_options))
+            let identity = BrowserSubscribeIdentity {
+                browser_instance_id: instance_id,
+                browser_service_epoch: self.remote_service.service_epoch().to_string(),
+                desktop_epoch: self.remote_service.desktop_epoch().to_string(),
+                document_generation: state.generation.to_string(),
+            };
+
+            Ok((sub_id, stream_id, negotiated_options, identity))
         })
+    }
+
+    fn claim_driver<'a>(
+        &'a self,
+        browser_id: &'a str,
+        device_id: &'a str,
+        connection_id: &'a str,
+        subscription_id: &'a str,
+        _lease_epoch: u64,
+    ) -> BoxFuture<'a, Result<(), RemoteBrowserError>> {
+        let res = self.remote_service.driver_broker().claim(
+            device_id,
+            connection_id,
+            subscription_id,
+            browser_id,
+            true,
+        );
+        Box::pin(async move {
+            match res {
+                Ok(_) => Ok(()),
+                Err(e) => Err(RemoteBrowserError::Forbidden(e.to_string())),
+            }
+        })
+    }
+
+    fn release_driver<'a>(
+        &'a self,
+        subscription_id: &'a str,
+        lease_epoch: u64,
+    ) -> BoxFuture<'a, Result<(), RemoteBrowserError>> {
+        let _ = self.remote_service.driver_broker().release(subscription_id, lease_epoch);
+        Box::pin(async move { Ok(()) })
     }
 
     fn unsubscribe_viewer<'a>(
@@ -1316,6 +1588,7 @@ pub mod tests {
                 command: "getState".into(),
                 params: None,
                 document_generation: Some("1".into()),
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1323,12 +1596,22 @@ pub mod tests {
 
         // 4. Wire subscription ownership: subscribe_viewer activates producer and reconciles stream_id
         assert!(!service.is_producer_active("b-prod-1"));
-        let (sub_id, stream_id, _) = backend
+        let (sub_id, stream_id, _, identity) = backend
             .subscribe_viewer("b-prod-1", "dev-backend-1", "viewer-1", None)
             .await
             .unwrap();
         assert!(service.is_producer_active("b-prod-1"));
         assert_eq!(stream_id, service.active_stream_id("b-prod-1").unwrap());
+        assert_eq!(
+            identity.browser_instance_id,
+            manager.get_instance_id("b-prod-1").unwrap()
+        );
+        assert_eq!(
+            identity.browser_service_epoch,
+            service.service_epoch().to_string()
+        );
+        assert_eq!(identity.desktop_epoch, service.desktop_epoch().to_string());
+        assert_eq!(identity.document_generation, "1");
 
         // 5. Wire teardown: unsubscribe_viewer calls unsubscribe and stops producer
         backend
@@ -1414,6 +1697,7 @@ pub mod tests {
                 command: "unsupportedCmd".into(),
                 params: None,
                 document_generation: None,
+                ..Default::default()
             })
             .await;
         assert!(
@@ -1429,6 +1713,7 @@ pub mod tests {
                 command: "click".into(),
                 params: Some(serde_json::json!({ "u": 0.5, "v": 0.5 })),
                 document_generation: None,
+                ..Default::default()
             })
             .await;
         assert!(
@@ -1444,6 +1729,7 @@ pub mod tests {
                 command: "fill".into(),
                 params: Some(serde_json::json!({ "value": "text" })),
                 document_generation: None,
+                ..Default::default()
             })
             .await;
         assert!(
@@ -1472,6 +1758,7 @@ pub mod tests {
                     "script": "1 + 1"
                 })),
                 document_generation: None,
+                ..Default::default()
             })
             .await;
         assert!(
@@ -1532,6 +1819,7 @@ pub mod tests {
                     "leaseEpoch": lease.lease_epoch
                 })),
                 document_generation: None,
+                ..Default::default()
             })
             .await
             .expect("eval with valid driver lease must succeed");
@@ -1548,6 +1836,7 @@ pub mod tests {
                     "leaseEpoch": lease.lease_epoch + 99
                 })),
                 document_generation: None,
+                ..Default::default()
             })
             .await;
         assert!(
@@ -1566,6 +1855,7 @@ pub mod tests {
                     "leaseEpoch": lease.lease_epoch + 99
                 })),
                 document_generation: None,
+                ..Default::default()
             })
             .await;
         assert!(
@@ -1581,6 +1871,7 @@ pub mod tests {
                 command: "click".into(),
                 params: Some(serde_json::json!({ "selector": "#nonexistent" })),
                 document_generation: None,
+                ..Default::default()
             })
             .await;
         assert!(

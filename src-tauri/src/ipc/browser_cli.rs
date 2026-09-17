@@ -668,10 +668,15 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
         }
         RemoteBrowserOperation::GetState { browser_id } => {
             let state = manager.get_state(&browser_id)?;
+            let instance_id = manager.get_instance_id(&browser_id).unwrap_or_default();
             let (bounds, _, viewport_revision) =
                 manager.get_geometry(&browser_id).unwrap_or((None, 1.0, 1));
             Ok(serde_json::json!({
                 "browserId": state.browser_id,
+                "browserInstanceId": instance_id,
+                "browserServiceEpoch": "1",
+                "desktopEpoch": "1",
+                "documentGeneration": state.generation.to_string(),
                 "url": state.url,
                 "title": state.title,
                 "loading": state.loading,
