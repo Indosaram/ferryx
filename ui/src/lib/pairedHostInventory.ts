@@ -300,6 +300,14 @@ export function createPairedHostInventory(store: RemoteHostStore, commands = nat
       if (event.hostId) {
         const existing = store.getState().hosts[event.hostId];
         if (existing) {
+          if (event.generation && existing.generation) {
+            try {
+              if (BigInt(event.generation) < BigInt(existing.generation)) {
+                // R3-N4: stale revoke event for an older generation; ignore
+                return;
+              }
+            } catch {}
+          }
           store.upsertHost({ ...existing, authStatus: "revoked", online: false });
         }
       }
@@ -355,7 +363,7 @@ export function createPairedHostInventory(store: RemoteHostStore, commands = nat
     try {
       const relayOrigin = origin(request.relayOrigin);
       const host = endpoint(await commands.pair({ ...request, relayOrigin }));
-      if (started !== revision || host.relayOrigin !== relayOrigin) {
+      if (host.relayOrigin !== relayOrigin) {
         return {
           ok: false,
           error: {
@@ -364,6 +372,22 @@ export function createPairedHostInventory(store: RemoteHostStore, commands = nat
             retryable: true,
           },
         };
+      }
+      if (started !== revision) {
+        // R3-N3: native event arrival during the IPC round-trip increments revision;
+        // if the store already reflects this exact host and generation, accept it as self-applied.
+        const current = store.getState().hosts[host.hostId];
+        const isSelfUpdate = current && current.generation === host.generation;
+        if (!isSelfUpdate) {
+          return {
+            ok: false,
+            error: {
+              code: "STALE_HOST_GENERATION",
+              message: "Credentials changed during this request. Refresh the inventory and retry.",
+              retryable: true,
+            },
+          };
+        }
       }
       fencedGenerations.set(host.hostId, BigInt(host.generation!));
       tombstones.delete(host.hostId);
@@ -388,7 +412,10 @@ export function createPairedHostInventory(store: RemoteHostStore, commands = nat
     const started = ++revision;
     try {
       await commands.forget({ hostId, generation: host.generation });
-      if (started !== revision || store.getState().hosts[hostId]?.generation !== host.generation) return false;
+      if (started !== revision) {
+        const current = store.getState().hosts[hostId];
+        if (current && current.generation !== host.generation) return false;
+      }
       const gen = BigInt(host.generation);
       fencedGenerations.set(hostId, gen);
       tombstones.set(hostId, gen);

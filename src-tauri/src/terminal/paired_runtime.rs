@@ -77,7 +77,11 @@ fn load_descriptors(path: &Path) -> Result<HashMap<String, super::paired_daemon:
     }
 }
 
+static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PERSIST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn save_descriptors(path: &Path, descriptors: &HashMap<String, super::paired_daemon::Descriptor>) -> Result<(), String> {
+    let _persist_guard = PERSIST_MUTEX.lock().map_err(|e| e.to_string())?;
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -85,10 +89,9 @@ fn save_descriptors(path: &Path, descriptors: &HashMap<String, super::paired_dae
         Ok(bytes) => bytes,
         Err(e) => return Err(format!("PAIRED_DESCRIPTOR_SERIALIZE: {e}")),
     };
-    // N2: write-then-atomic-replace WITHOUT removing the destination first.
-    // A failed temp write or failed rename must leave the previous good file
-    // intact and surface the error; the temp file is cleaned up on failure.
-    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    // N2 & R3-N1: unique temp file per write and global mutex serialize disk replacement
+    let tmp_seq = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("tmp.{}.{}", std::process::id(), tmp_seq));
     fs_write(&tmp, &bytes).map_err(|e| format!("PAIRED_DESCRIPTOR_TEMP_WRITE: {e}"))?;
     if let Ok(f) = std::fs::File::open(&tmp) {
         let _ = f.sync_all();
@@ -163,21 +166,21 @@ impl Default for Runtime {
 impl Runtime {
     pub fn new(store_path: Option<PathBuf>) -> Self {
         let store_path = store_path.or_else(default_descriptors_path);
-        let descriptors = if let Some(ref path) = store_path {
+        let (descriptors, effective_store_path) = if let Some(ref path) = store_path {
             match load_descriptors(path) {
-                Ok(map) => map,
+                Ok(map) => (map, store_path),
                 Err(e) => {
-                    eprintln!("[paired_runtime] descriptor store load failed; starting empty: {e}");
-                    HashMap::new()
+                    eprintln!("[paired_runtime] descriptor store load failed; disabling persistence to protect file: {e}");
+                    (HashMap::new(), None)
                 }
             }
         } else {
-            HashMap::new()
+            (HashMap::new(), None)
         };
         Self {
             owners: Arc::new(Mutex::new(HashMap::new())),
             descriptors: Arc::new(Mutex::new(descriptors)),
-            store_path: Arc::new(Mutex::new(store_path)),
+            store_path: Arc::new(Mutex::new(effective_store_path)),
         }
     }
 
@@ -645,6 +648,33 @@ mod tests {
             reloaded.descriptor(&id1).expect("disk still holds prior").generation,
             Epoch(1)
         );
+    }
+
+    #[tokio::test]
+    async fn test_r3n2_corrupt_store_initial_load_disables_persistence_to_prevent_clobber() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store_path = temp_dir.path().join("paired_descriptors.json");
+        std::fs::write(&store_path, b"{corrupt-json").unwrap();
+
+        let runtime = Runtime::new(Some(store_path.clone()));
+        assert!(runtime.store_path.lock().is_none());
+
+        let hub = Arc::new(TerminalOutputHub::new(32));
+        let desc = Descriptor {
+            host_id: "https://relay.example.com".into(),
+            generation: Epoch(1),
+            target: RemoteTerminalTarget {
+                machine_id: "test-machine".into(),
+                daemon_epoch: Epoch(1),
+                session_id: "s1".into(),
+            },
+            after_sequence: None,
+        };
+        let p = Proxy::new(desc, hub).unwrap();
+        let _ = runtime.install(p);
+
+        let disk = std::fs::read(&store_path).unwrap();
+        assert_eq!(disk, b"{corrupt-json");
     }
 
     #[tokio::test]

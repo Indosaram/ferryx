@@ -1137,7 +1137,7 @@ pub async fn reconcile_ambiguous_create(
             Err(e) if e.code == "OPERATION_NOT_FOUND" => {
                 return Err(map_client_error(&e, Some(host_id), Some(generation)));
             }
-            Err(e) if attempts < MAX_RECONCILE_ATTEMPTS => {
+            Err(_e) if attempts < MAX_RECONCILE_ATTEMPTS => {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
             }
@@ -1178,11 +1178,79 @@ pub struct CleanupRecord {
 static PENDING_CLEANUPS: Mutex<Vec<CleanupRecord>> = Mutex::new(Vec::new());
 static EXHAUSTED_CLEANUPS: Mutex<Vec<CleanupRecord>> = Mutex::new(Vec::new());
 
+#[cfg(not(test))]
+fn default_pending_cleanups_path() -> Option<std::path::PathBuf> {
+    if let Ok(dir) = std::env::var("FERRYX_PAIRED_PENDING_CLEANUPS_DIR") {
+        return Some(std::path::PathBuf::from(dir).join("paired_pending_cleanups.json"));
+    }
+    crate::remote::auth::canonical_remote_dir().map(|dir| dir.join("paired_pending_cleanups.json"))
+}
+#[cfg(test)]
+fn default_pending_cleanups_path() -> Option<std::path::PathBuf> {
+    None
+}
+
+fn ensure_pending_cleanups_loaded() {
+    static LOADED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if LOADED.set(()).is_err() {
+        return;
+    }
+    let Some(path) = default_pending_cleanups_path() else {
+        return;
+    };
+    if !path.exists() {
+        return;
+    }
+    let data = match std::fs::read(&path) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    #[derive(serde::Deserialize)]
+    struct SavedCleanups {
+        pending: Vec<CleanupRecord>,
+        exhausted: Vec<CleanupRecord>,
+    }
+    if let Ok(saved) = serde_json::from_slice::<SavedCleanups>(&data) {
+        PENDING_CLEANUPS.lock().extend(saved.pending);
+        EXHAUSTED_CLEANUPS.lock().extend(saved.exhausted);
+    } else {
+        eprintln!("[ipc::terminal] pending-cleanup store unreadable; starting empty");
+    }
+}
+
+fn persist_pending_cleanups() {
+    let Some(path) = default_pending_cleanups_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    #[derive(serde::Serialize)]
+    struct SavedCleanups<'a> {
+        pending: &'a Vec<CleanupRecord>,
+        exhausted: &'a Vec<CleanupRecord>,
+    }
+    let pending_guard = PENDING_CLEANUPS.lock();
+    let exhausted_guard = EXHAUSTED_CLEANUPS.lock();
+    let saved = SavedCleanups {
+        pending: &*pending_guard,
+        exhausted: &*exhausted_guard,
+    };
+    if let Ok(bytes) = serde_json::to_vec_pretty(&saved) {
+        let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+        if std::fs::write(&tmp, &bytes).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+}
+
 pub fn get_pending_cleanups() -> Vec<CleanupRecord> {
+    ensure_pending_cleanups_loaded();
     PENDING_CLEANUPS.lock().clone()
 }
 
 pub fn get_exhausted_cleanups() -> Vec<CleanupRecord> {
+    ensure_pending_cleanups_loaded();
     EXHAUSTED_CLEANUPS.lock().clone()
 }
 
@@ -1196,6 +1264,7 @@ pub fn clear_exhausted_cleanups_for_test() {
 }
 
 pub async fn start_cleanup_reaper(daemon_client: Arc<DaemonClient>) {
+    ensure_pending_cleanups_loaded();
     // P11: schedule the cleanup reaper from a real lifecycle. One reaper per
     // process; the first pass runs immediately so restart-time leftovers are
     // resolved without waiting for the tick interval.
@@ -1328,10 +1397,20 @@ pub async fn reap_cleanup_unknowns(daemon_client: &DaemonClient) -> usize {
         match daemon_client.paired_host_operation(journal_req).await {
             Ok(resp) => {
                 if let crate::paired_host::client::OperationResult::Operation(
-                    crate::remote::machine_protocol::Operation::Completed { .. },
+                    crate::remote::machine_protocol::Operation::Completed { outcome, .. },
                 ) = resp.result {
-                    resolved_count += 1;
-                    continue;
+                    match outcome {
+                        crate::remote::machine_protocol::OperationOutcome::Error { .. } => {
+                            item.resolved = true;
+                            EXHAUSTED_CLEANUPS.lock().push(item);
+                            resolved_count += 1;
+                            continue;
+                        }
+                        _ => {
+                            resolved_count += 1;
+                            continue;
+                        }
+                    }
                 }
             }
             Err(e) => {
@@ -1355,13 +1434,14 @@ pub async fn reap_cleanup_unknowns(daemon_client: &DaemonClient) -> usize {
                     }
                 }
             }
-            _ => {}
         }
         remaining.push(item);
     }
 
     let mut guard = PENDING_CLEANUPS.lock();
     guard.extend(remaining);
+    drop(guard);
+    persist_pending_cleanups();
     resolved_count
 }
 

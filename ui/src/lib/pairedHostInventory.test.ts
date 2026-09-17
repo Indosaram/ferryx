@@ -309,3 +309,28 @@ it("normalizes relay origin and extracts origin and pin from invite links with #
   expect(parsePairingInvite("")).toBeNull();
 });
 
+it("R3-N4: ignores stale revoke events with older generation than current store generation", async () => {
+  const { inventory, store } = fixture();
+  await inventory.refresh();
+  store.upsertHost({ ...store.getState().hosts[hostId], generation: "10", authStatus: "paired", online: true });
+
+  // Stale revoke event from generation 9 must be ignored
+  await inventory.handleNativeEvent({
+    type: "revoke",
+    hostId: hostId,
+    generation: "9",
+  });
+  expect(store.getState().hosts[hostId].authStatus).toBe("paired");
+  expect(store.getState().hosts[hostId].online).toBe(true);
+
+  // Authoritative revoke event for generation 10 must apply
+  await inventory.handleNativeEvent({
+    type: "revoke",
+    hostId: hostId,
+    generation: "10",
+  });
+  expect(store.getState().hosts[hostId].authStatus).toBe("revoked");
+  expect(store.getState().hosts[hostId].online).toBe(false);
+});
+
+

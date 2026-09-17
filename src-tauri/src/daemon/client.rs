@@ -545,16 +545,21 @@ impl DaemonClient {
     pub async fn paired_terminal_descriptor(&self, session_id: String) -> Result<Option<crate::terminal::paired_daemon::Descriptor>, crate::paired_host::client::ClientError> {
         match self.paired_host_request(DaemonRequest::PairedTerminalDescriptor { session_id: session_id.clone() }).await.map_err(|e| crate::paired_host::client::ClientError::local(&e.code))? {
             DaemonResponse::PairedTerminalDescriptorOk { descriptor } => Ok(descriptor),
-            // P12 (round 2): a daemon error response is NOT "no descriptor" —
-            // propagate it so close_terminal cannot silently skip the remote
-            // close on a lookup failure.
-            DaemonResponse::Error { message, code, .. } => Err(crate::paired_host::client::ClientError {
+            // P12 (round 2 & 3): daemon errors and unexpected response variants
+            // are NOT "no descriptor" — propagate them so close_terminal cannot
+            // silently skip the remote close on a lookup failure.
+            DaemonResponse::Error { message: _, code, .. } => Err(crate::paired_host::client::ClientError {
                 code: code.unwrap_or_else(|| "DESCRIPTOR_LOOKUP_FAILED".into()),
                 machine_error: None,
                 ambiguous: false,
                 request_id: Some(session_id),
             }),
-            _ => Ok(None),
+            _ => Err(crate::paired_host::client::ClientError {
+                code: "UNEXPECTED_DAEMON_RESPONSE".into(),
+                machine_error: None,
+                ambiguous: false,
+                request_id: Some(session_id),
+            }),
         }
     }
     pub async fn paired_host_list(&self) -> crate::paired_host::service::Result<Vec<crate::paired_host::inventory::HostView>> {
@@ -1683,11 +1688,19 @@ impl DaemonClient {
                             match self.paired_host_operation(journal_req).await {
                                 Ok(op_resp) => match op_resp.result {
                                     crate::paired_host::client::OperationResult::Operation(
-                                        crate::remote::machine_protocol::Operation::Completed { .. },
-                                    ) => {
-                                        determined = true;
-                                        break;
-                                    }
+                                        crate::remote::machine_protocol::Operation::Completed { outcome, .. },
+                                    ) => match outcome {
+                                        crate::remote::machine_protocol::OperationOutcome::Error { error } => {
+                                            return Err(IpcError::new(
+                                                IpcErrorCode::Custom("REMOTE_CLOSE_FAILED".to_string()),
+                                                format!("Remote session close failed: {}", error.message),
+                                            ));
+                                        }
+                                        _ => {
+                                            determined = true;
+                                            break;
+                                        }
+                                    },
                                     _ => {}
                                 },
                                 Err(journal_err) if journal_err.code == "SESSION_NOT_FOUND" => {
