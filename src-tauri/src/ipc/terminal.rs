@@ -910,7 +910,7 @@ async fn resolve_pending_create_terminal(
                     request_id: uuid::Uuid::new_v4().to_string(),
                     daemon_epoch: session.target.daemon_epoch.clone(),
                 };
-                let _ = client
+                let close_res = client
                     .paired_host_operation(crate::paired_host::client::OperationRequest {
                         host_id: host_id.clone(),
                         generation,
@@ -923,7 +923,11 @@ async fn resolve_pending_create_terminal(
                 {
                     let mut guard = PENDING_CREATES.lock();
                     if let Some(record) = guard.get_mut(&request_id) {
-                        record.status = PendingCreateStatus::Cancelled;
+                        if close_res.is_ok() {
+                            record.status = PendingCreateStatus::Cancelled;
+                        } else {
+                            record.session = Some(session);
+                        }
                     }
                 }
                 persist_pending_creates();
@@ -934,7 +938,7 @@ async fn resolve_pending_create_terminal(
                     target: session.target.clone(),
                     after_sequence: None,
                 };
-                let discovered_session_id = session.target.session_id.clone();
+                let _discovered_session_id = session.target.session_id.clone();
                 let reattach = client.paired_terminal_reattach(descriptor).await;
                 {
                     let mut guard = PENDING_CREATES.lock();
@@ -946,9 +950,6 @@ async fn resolve_pending_create_terminal(
                             }
                             Err(_) => {
                                 record.session = Some(session);
-                                record.status = PendingCreateStatus::Completed {
-                                    session_id: discovered_session_id,
-                                };
                             }
                         }
                     }
@@ -1142,6 +1143,8 @@ pub async fn reconcile_ambiguous_create(
                 continue;
             }
             Err(e) => {
+                register_pending_create(host_id, generation, request_id, cancelled);
+                spawn_background_create_reconciler(daemon_client, host_id, generation, request_id);
                 return Err(map_client_error(&e, Some(host_id), Some(generation)));
             }
         }
@@ -1319,7 +1322,10 @@ pub async fn execute_cleanup_close(
             match daemon_client.paired_host_operation(journal_req).await {
                 Ok(resp) => {
                     if let crate::paired_host::client::OperationResult::Operation(
-                        crate::remote::machine_protocol::Operation::Completed { .. },
+                        crate::remote::machine_protocol::Operation::Completed {
+                            outcome: crate::remote::machine_protocol::OperationOutcome::NoContent,
+                            ..
+                        },
                     ) = resp.result {
                         CleanupOutcome::Success
                     } else {
@@ -1333,6 +1339,8 @@ pub async fn execute_cleanup_close(
                             attempts: 1,
                             resolved: false,
                         });
+                        drop(guard);
+                        persist_pending_cleanups();
                         CleanupOutcome::Unknown {
                             host_id: host_id.to_string(),
                             generation,
@@ -1353,6 +1361,8 @@ pub async fn execute_cleanup_close(
                         attempts: 1,
                         resolved: false,
                     });
+                    drop(guard);
+                    persist_pending_cleanups();
                     CleanupOutcome::Unknown {
                         host_id: host_id.to_string(),
                         generation,
@@ -1382,6 +1392,7 @@ pub async fn reap_cleanup_unknowns(daemon_client: &DaemonClient) -> usize {
             // P11: exhausted cleanups must be retained, not silently dropped —
             // the uncertainty is still real and must stay observable/diagnosable.
             EXHAUSTED_CLEANUPS.lock().push(item);
+            persist_pending_cleanups();
             continue;
         }
         item.attempts += 1;
