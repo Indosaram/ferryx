@@ -1,13 +1,19 @@
 {
   "schemaVersion": 1,
-  "helperVersion": "2026.908.1",
+  "helperVersion": "2026.917.1",
   "protocolVersion": 1,
   "artifacts": [
     {
+      "target": "x86_64-unknown-linux-gnu",
+      "filename": "ferryx-remote-helper",
+      "sha256": "05a09d15ee24d4054eac4d2ca3a3acc0801c056e87aa102e7f0aceede6745c00",
+      "byteLength": 1280568
+    },
+    {
       "target": "x86_64-pc-windows-msvc",
       "filename": "ferryx-remote-helper.exe",
-      "sha256": "a16798950a2a6b54125c93ff6d5c27635c87b6b6fc9cd05fc77e63c5864f427b",
-      "byteLength": 2149064
+      "sha256": "7d171d960a8e98f0d9665b297e6bc825278670846280896444b6f1d4d70ea70b",
+      "byteLength": 823296
     }
   ]
 }
