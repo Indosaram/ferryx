@@ -333,6 +333,7 @@ it("preserves stale/offline hostSummary for pairedDaemon project through groupin
     repoRoot: "/srv/paired-repo",
     gitRoot: "/srv/paired-repo",
     target: { kind: "pairedDaemon", hostId: "host-alpha" },
+    remoteWorkspaceId: "daemon:paired-group",
   };
 
   const staleRow = {

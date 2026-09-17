@@ -24,7 +24,8 @@ it("loads paired owners without local registration and preserves rows on partial
   expect(services.listWorktrees).not.toHaveBeenCalled();
   expect(adapter.worktrees).toHaveBeenCalledWith("repo");
   expect(hook.result.current[project.workspaceId]).toEqual([{ ...row, workspaceId: project.workspaceId }]);
-  const retained = hook.result.current[project.workspaceId];
+  const retained: unknown = hook.result.current[project.workspaceId];
+  expect(retained).toBeTruthy();
   adapter.projects.mockResolvedValue({ completeness: "partial", unavailableWorkspaceIds: [project.workspaceId], projects: [] });
   await act(async () => { changed({ workspaceId: project.workspaceId, kind: "created", worktree: { wsId: "repo", slug: "feature" } }); });
   expect(hook.result.current[project.workspaceId]?.[0]?.path).toBe("/srv/repo/feature");
