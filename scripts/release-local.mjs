@@ -16,6 +16,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { assembleRelease } from "./build-latest-json.mjs";
+import { generateChangelog } from "./lib/release-changelog.mjs";
 import { parsePlan, parseReceipt } from "./lib/release-contract.mjs";
 import { loadHostConfig, redactProcessOutput } from "./lib/release-hosts.mjs";
 import { buildHost, preflightAll } from "./lib/release-platforms.mjs";
@@ -274,6 +275,17 @@ export function prepareRelease({
   writeFileSync(join(resolvedOutDir, "prepare-state.json"), JSON.stringify(prepareState, null, 2) + "\n");
   writeFileSync(join(resolvedOutDir, "source-inputs.json"), JSON.stringify(sourceInputs, null, 2) + "\n");
 
+  try {
+    const changelog = generateChangelog({
+      repo: config.repo,
+      tag,
+      commitSha,
+    });
+    writeFileSync(join(resolvedOutDir, "RELEASE_NOTES.md"), changelog);
+  } catch {
+    // Fail-open: changelog generation failure never aborts prepare
+  }
+
   return { plan, outDir: resolvedOutDir, planDigest, configDigest };
 }
 
@@ -523,21 +535,43 @@ export async function publishRelease({
     throw new Error(`Unable to establish that release '${plan.tag}' is absent: ${redactProcessOutput(viewOutput, env)}`);
   }
 
+  // 2.5 Resolve or generate release notes
+  const notesPath = join(resolvedRunDir, "RELEASE_NOTES.md");
+  if (!existsSync(notesPath)) {
+    try {
+      const generated = generateChangelog({
+        repo: plan.repo,
+        tag: plan.tag,
+        commitSha: plan.commitSha,
+        ghCommand,
+      });
+      writeFileSync(notesPath, generated, "utf8");
+    } catch {
+      // Fail-open: write basic fallback notes
+      writeFileSync(notesPath, `Ferryx release ${plan.tag}\n`, "utf8");
+    }
+  }
+
   // 3. Create Draft Release
+  const createArgs = [
+    "release",
+    "create",
+    plan.tag,
+    "--repo",
+    plan.repo,
+    "--draft",
+    "--title",
+    plan.tag,
+  ];
+  if (existsSync(notesPath)) {
+    createArgs.push("--notes-file", notesPath);
+  } else {
+    createArgs.push("--notes", `Ferryx release ${plan.tag}`);
+  }
+
   const createRes = spawnSync(
     ghCommand,
-    [
-      "release",
-      "create",
-      plan.tag,
-      "--repo",
-      plan.repo,
-      "--draft",
-      "--title",
-      plan.tag,
-      "--notes",
-      `Ferryx release ${plan.tag}`,
-    ],
+    createArgs,
     { encoding: "utf8" },
   );
   if (createRes.status !== 0) {
