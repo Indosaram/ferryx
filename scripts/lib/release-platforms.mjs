@@ -723,7 +723,7 @@ export async function buildHost({
   runDir,
   approveNotarization = false,
   runner = null,
-  timeoutMs = 1800000,
+  timeoutMs = Number(process.env.FERRYX_BUILD_TIMEOUT_MS) || 1800000,
 }) {
   if (!VALID_HOSTS.includes(hostName)) {
     throw new Error(`Unknown host: '${hostName}'. Valid hosts: ${VALID_HOSTS.join(", ")}`);
