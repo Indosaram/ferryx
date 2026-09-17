@@ -414,6 +414,7 @@ impl TestDaemonClient {
 /// Helper stream for attaching to a PTY session over the daemon protocol.
 struct TestAttachStream {
     reader: BufReader<tokio::net::unix::OwnedReadHalf>,
+    _writer: tokio::net::unix::OwnedWriteHalf,
     pub attach_resp: DaemonResponse,
 }
 
@@ -444,6 +445,7 @@ impl TestAttachStream {
 
         Ok(Self {
             reader,
+            _writer: write_half,
             attach_resp,
         })
     }

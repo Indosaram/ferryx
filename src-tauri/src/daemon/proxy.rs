@@ -16,7 +16,7 @@ use parking_lot::RwLock;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 #[cfg(not(unix))]
 use tokio::net::TcpStream as LegacyStream;
 #[cfg(unix)]
@@ -312,16 +312,18 @@ impl LegacyPeer {
         }
     }
 
-    pub(crate) async fn attach_and_stream<W>(
+    pub(crate) async fn attach_and_stream<W, R>(
         &self,
         session_id: &str,
         after_sequence: Option<u64>,
         client_writer: &mut W,
+        client_reader: &mut R,
         mut agent_states: AgentStateSubscription,
         agent_state_hub: Arc<AgentStateHub>,
     ) -> Result<(), String>
     where
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
     {
         let (mut reader, mut write_half) = self.connect_and_handshake().await?;
 
@@ -375,10 +377,22 @@ impl LegacyPeer {
                 .map_err(|error| error.to_string())?;
         }
 
+        let mut client_disconnect_buf = [0u8; 1];
         let mut lines = reader.lines();
         loop {
             tokio::select! {
                 biased;
+                disconnect = client_reader.read(&mut client_disconnect_buf) => {
+                    match disconnect {
+                        Ok(0) | Err(_) => {
+                            tracing::debug!(session_id, "Client disconnected from proxy attach stream");
+                        }
+                        Ok(_) => {
+                            tracing::debug!(session_id, "Unexpected client data on proxy attach stream");
+                        }
+                    }
+                    break;
+                }
                 // Drain a report produced by the previous predecessor frame before reading the
                 // next frame (especially Exit), preserving fast working -> idle transitions.
                 report = agent_states.receiver.recv() => match report {
@@ -509,7 +523,7 @@ impl LegacyPeer {
             let _keepalive = write_half;
             let mut line = String::new();
             while let Ok(n) = reader.read_line(&mut line).await {
-                if n == 0 {
+                if n == 0 || tx.receiver_count() == 0 {
                     break;
                 }
                 let trimmed = line.trim();
@@ -525,25 +539,32 @@ impl LegacyPeer {
                             metrics_read_unix_micros,
                             ..
                         } => {
-                            let _ = tx.send(OutputChunk {
+                            if tx.send(OutputChunk {
                                 sequence,
                                 bytes: data.into_owned().into(),
                                 metrics_read_unix_micros,
                                 replay_gap: None,
-                            });
+                            }).is_err() || tx.receiver_count() == 0 {
+                                break;
+                            }
                         }
                         DaemonStreamMessage::Gap { requested_after_sequence, available_from_sequence, .. } => {
-                            let _ = tx.send(OutputChunk {
+                            if tx.send(OutputChunk {
                                 sequence: available_from_sequence.saturating_sub(1),
                                 bytes: Vec::new().into(), metrics_read_unix_micros: None,
                                 replay_gap: Some(crate::terminal::output_hub::ReplayGap { requested_after_sequence, available_from_sequence }),
-                            });
+                            }).is_err() || tx.receiver_count() == 0 {
+                                break;
+                            }
                         }
                         DaemonStreamMessage::Exit { .. } => {
                             break;
                         }
                         _ => {}
                     }
+                }
+                if tx.receiver_count() == 0 {
+                    break;
                 }
                 line.clear();
             }

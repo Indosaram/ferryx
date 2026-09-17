@@ -1493,6 +1493,7 @@ impl DaemonClient {
 
                 let (tx, rx) = mpsc::channel(256);
                 let task = tokio::spawn(async move {
+                    let _keepalive = write_half;
                     let mut stream_line = String::new();
                     while let Ok(n) = reader.read_line(&mut stream_line).await {
                         if n == 0 {
@@ -3273,5 +3274,59 @@ mod tests {
         let guard = client.spawn_lock.try_lock();
         assert!(guard.is_ok(), "spawn_lock must be available on construction");
         drop(guard);
+    }
+
+    #[tokio::test]
+    async fn test_client_attach_retains_write_half_until_abort() {
+        use std::os::unix::fs::PermissionsExt;
+        use tokio::io::AsyncReadExt;
+        let dir = tempfile::Builder::new().prefix("fx-client").tempdir_in("/tmp").unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket_path = dir.path().join("client_attach.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+
+        let (server_done_tx, server_done_rx) = tokio::sync::oneshot::channel();
+        let (abort_signal_tx, abort_signal_rx) = tokio::sync::oneshot::channel();
+
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (mut read, mut write) = stream.into_split();
+            let mut line = String::new();
+            let mut reader = BufReader::new(&mut read);
+
+            // Handshake
+            reader.read_line(&mut line).await.unwrap();
+            assert!(line.contains("handshake"));
+            write.write_all(b"{\"type\":\"handshakeOk\",\"version\":4,\"pid\":1,\"epoch\":1}\n").await.unwrap();
+
+            // Attach
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+            assert!(line.contains("attach"));
+            write.write_all(b"{\"type\":\"attachOk\",\"epoch\":1,\"sessionId\":\"s1\",\"startSequence\":null,\"endSequence\":null,\"gap\":null,\"history\":\"\"}\n").await.unwrap();
+
+            // Wait for test to confirm attach() has returned
+            abort_signal_rx.await.unwrap();
+
+            // Now read from the client socket. It must observe EOF once stream_task is aborted.
+            let mut buf = [0u8; 1];
+            let n = read.read(&mut buf).await.unwrap();
+            assert_eq!(n, 0, "client socket write side must close when stream_task is aborted");
+            let _ = server_done_tx.send(());
+        });
+
+        let client = DaemonClient::new_with_socket(socket_path);
+        let attachment = client.attach("s1", None).await.expect("attach succeeds");
+
+        // Signal server that attach has completed and write_half should be retained in stream_task
+        abort_signal_tx.send(()).unwrap();
+
+        // Aborting the stream_task drops _keepalive (write_half)
+        attachment.stream_task.abort();
+
+        let res = tokio::time::timeout(Duration::from_secs(2), server_done_rx).await;
+        assert!(res.is_ok(), "server must observe EOF within timeout after stream_task.abort()");
+
+        server_task.await.unwrap();
     }
 }

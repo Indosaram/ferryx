@@ -28,7 +28,7 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 #[cfg(not(unix))]
 use tokio::net::TcpListener;
 #[cfg(unix)]
@@ -2016,6 +2016,7 @@ impl DaemonServer {
                                     hub,
                                     write_half,
                                     Some(agent_subscription),
+                                    Some(&mut reader),
                                 )
                                 .await;
                                 return;
@@ -2028,6 +2029,7 @@ impl DaemonServer {
                             &session_id,
                             after_sequence,
                             &mut write_half,
+                            &mut reader,
                             agent_subscription,
                             Arc::clone(&self.agent_states),
                         ).await {
@@ -2578,22 +2580,39 @@ impl DaemonServer {
     ) where
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
-        Self::pump_sequenced_stream_with_agent_state(session_id, rx, hub, writer, None).await
+        Self::pump_sequenced_stream_with_agent_state(
+            session_id,
+            rx,
+            hub,
+            writer,
+            None,
+            None::<tokio::io::Empty>,
+        )
+        .await
     }
 
-    async fn pump_session_stream<W>(
+    async fn pump_session_stream<W, R>(
         &self,
         session_id: String,
         rx: broadcast::Receiver<crate::terminal::output_hub::OutputChunk>,
         hub: Arc<TerminalOutputHub>,
         mut writer: W,
         agent_rx: Option<AgentStateSubscription>,
+        client_reader: Option<R>,
     ) where
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+        R: tokio::io::AsyncRead + Unpin + Send,
     {
         let Ok(mut updates) = self.terminal_service.remote().subscribe(&session_id) else {
-            Self::pump_sequenced_stream_with_agent_state(session_id, rx, hub, writer, agent_rx)
-                .await;
+            Self::pump_sequenced_stream_with_agent_state(
+                session_id,
+                rx,
+                hub,
+                writer,
+                agent_rx,
+                client_reader,
+            )
+            .await;
             return;
         };
         let (input, output) = tokio::io::duplex(64 * 1024);
@@ -2603,6 +2622,7 @@ impl DaemonServer {
             hub,
             output,
             agent_rx,
+            client_reader,
         );
         tokio::pin!(pump);
         let mut lines = BufReader::new(input).lines();
@@ -2635,14 +2655,16 @@ impl DaemonServer {
         }
     }
 
-    pub(crate) async fn pump_sequenced_stream_with_agent_state<W>(
+    pub(crate) async fn pump_sequenced_stream_with_agent_state<W, R>(
         session_id: String,
         mut rx: broadcast::Receiver<crate::terminal::output_hub::OutputChunk>,
         hub: Arc<TerminalOutputHub>,
         writer: W,
         mut agent_state_rx: Option<AgentStateSubscription>,
+        mut client_reader: Option<R>,
     ) where
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+        R: tokio::io::AsyncRead + Unpin + Send,
     {
         let mut writer = BufWriter::new(writer);
         if let Some(snapshot) = agent_state_rx
@@ -2674,13 +2696,38 @@ impl DaemonServer {
             Result<crate::terminal::output_hub::OutputChunk, broadcast::error::RecvError>,
         > = None;
 
+        let mut disconnect_buf = [0u8; 1];
+
         loop {
             let received = match pending.take() {
                 Some(received) => received,
-                None => match agent_state_rx.as_mut() {
-                    Some(subscription) => tokio::select! {
-                        output = rx.recv() => output,
-                        report = subscription.receiver.recv() => {
+                None => {
+                    tokio::select! {
+                        biased;
+                        disconnect = async {
+                            match client_reader.as_mut() {
+                                Some(r) => r.read(&mut disconnect_buf).await,
+                                None => std::future::pending().await,
+                            }
+                        } => {
+                            match disconnect {
+                                Ok(0) | Err(_) => {
+                                    tracing::debug!(session_id = %session_id, "Client disconnected from attach stream");
+                                    break;
+                                }
+                                Ok(_) => {
+                                    // Unexpected client data on output stream; terminate stream
+                                    tracing::debug!(session_id = %session_id, "Unexpected client data on attach stream");
+                                    break;
+                                }
+                            }
+                        }
+                        report = async {
+                            match agent_state_rx.as_mut() {
+                                Some(subscription) => subscription.receiver.recv().await,
+                                None => std::future::pending().await,
+                            }
+                        } => {
                             match report {
                                 Ok(report) if report.state.session_id == session_id => {
                                     let msg = DaemonStreamMessage::AgentState {
@@ -2705,28 +2752,30 @@ impl DaemonServer {
                                 }
                                 Ok(_) => {}
                                 Err(broadcast::error::RecvError::Lagged(_)) => {
-                                    if let Some(current) = subscription.resynchronize(&session_id) {
-                                        let msg = DaemonStreamMessage::AgentState {
-                                            session_id: Cow::Borrowed(&session_id),
-                                            state: Cow::Borrowed(&current.state),
-                                            agent: current.agent.as_deref().map(Cow::Borrowed),
-                                            provider_session: current.provider_session,
-                                            is_snapshot: true,
-                                            origin: current.origin,
-                                        };
-                                        frame_buf.clear();
-                                        if serde_json::to_writer(&mut frame_buf, &msg).is_err() { break; }
-                                        frame_buf.push(b'\n');
-                                        if writer.write_all(&frame_buf).await.is_err() || writer.flush().await.is_err() { break; }
+                                    if let Some(subscription) = agent_state_rx.as_mut() {
+                                        if let Some(current) = subscription.resynchronize(&session_id) {
+                                            let msg = DaemonStreamMessage::AgentState {
+                                                session_id: Cow::Borrowed(&session_id),
+                                                state: Cow::Borrowed(&current.state),
+                                                agent: current.agent.as_deref().map(Cow::Borrowed),
+                                                provider_session: current.provider_session,
+                                                is_snapshot: true,
+                                                origin: current.origin,
+                                            };
+                                            frame_buf.clear();
+                                            if serde_json::to_writer(&mut frame_buf, &msg).is_err() { break; }
+                                            frame_buf.push(b'\n');
+                                            if writer.write_all(&frame_buf).await.is_err() || writer.flush().await.is_err() { break; }
+                                        }
                                     }
                                 }
                                 Err(broadcast::error::RecvError::Closed) => break,
                             }
                             continue;
                         }
-                    },
-                    None => rx.recv().await,
-                },
+                        output = rx.recv() => output,
+                    }
+                }
             };
 
             match received {
@@ -4518,6 +4567,7 @@ mod tests {
             hub,
             client,
             Some(agent_rx),
+            None::<tokio::io::Empty>,
         ));
 
         // Send the foreign report FIRST, then this session's own report. The pump processes the
@@ -4956,5 +5006,206 @@ mod tests {
 
         drop(write_half);
         let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn test_idle_stream_client_disconnect_terminates_pump() {
+        let (client_read_side, server_write_side) = tokio::io::duplex(4096);
+        let (server_read_side, client_write_side) = tokio::io::duplex(4096);
+
+        let (_tx, rx) = broadcast::channel(16);
+        let hub = Arc::new(TerminalOutputHub::default());
+        let session_id = "test-idle-session".to_string();
+
+        let pump_handle = tokio::spawn(DaemonServer::pump_sequenced_stream_with_agent_state(
+            session_id,
+            rx,
+            hub,
+            server_write_side,
+            None,
+            Some(server_read_side),
+        ));
+
+        // Terminal is completely idle: no output sent.
+        // Client drops write and read ends of socket (e.g. GUI tab close or abort).
+        drop(client_write_side);
+        drop(client_read_side);
+
+        // Assert that the pump terminates within 2 seconds instead of hanging forever.
+        let result = tokio::time::timeout(Duration::from_secs(2), pump_handle).await;
+        assert!(result.is_ok(), "pump must terminate promptly when client disconnects on idle stream");
+    }
+
+    #[tokio::test]
+    async fn test_idle_stream_handle_client_attach_disconnect_terminates() {
+        let server = Arc::new(DaemonServer::new());
+        let repo = init_test_git_repo();
+        server
+            .handle_register_workspace("default", repo.path().to_str().unwrap())
+            .unwrap();
+
+        let session_id = server
+            .handle_spawn("req-idle-1", "default", None, None, 80, 24, None, None)
+            .await
+            .unwrap();
+
+        let (client_stream, server_stream) = tokio::io::duplex(4096);
+        let server_clone = Arc::clone(&server);
+        let server_task = tokio::spawn(async move {
+            server_clone.handle_client(server_stream).await;
+        });
+
+        let (read_half, mut write_half) = tokio::io::split(client_stream);
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+
+        let hs = DaemonRequest::Handshake { version: DAEMON_PROTOCOL_VERSION };
+        let mut hs_json = serde_json::to_string(&hs).unwrap();
+        hs_json.push('\n');
+        write_half.write_all(hs_json.as_bytes()).await.unwrap();
+        write_half.flush().await.unwrap();
+        reader.read_line(&mut line).await.unwrap();
+
+        let attach = DaemonRequest::Attach { session_id: session_id.clone(), after_sequence: None };
+        let mut attach_json = serde_json::to_string(&attach).unwrap();
+        attach_json.push('\n');
+        write_half.write_all(attach_json.as_bytes()).await.unwrap();
+        write_half.flush().await.unwrap();
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        let resp: DaemonResponse = serde_json::from_str(line.trim()).unwrap();
+        assert!(matches!(resp, DaemonResponse::AttachOk { .. }));
+
+        // Now session is idle (no output produced). Drop client stream.
+        drop(reader);
+        drop(write_half);
+
+        let result = tokio::time::timeout(Duration::from_secs(2), server_task).await;
+        assert!(result.is_ok(), "handle_client must terminate promptly when client disconnects from idle attach");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_legacy_peer_attach_and_stream_client_eof_drops_legacy_connection() {
+        use std::os::unix::fs::PermissionsExt;
+        use tokio::net::UnixListener;
+
+        let socket_dir = tempfile::Builder::new().prefix("fx-legacy").tempdir_in("/tmp").unwrap();
+        std::fs::set_permissions(socket_dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket_path = socket_dir.path().join("legacy.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+
+        let (legacy_closed_tx, legacy_closed_rx) = tokio::sync::oneshot::channel();
+        let legacy_daemon = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+
+            // Handshake
+            let line = lines.next_line().await.unwrap().unwrap();
+            assert!(line.contains("handshake"));
+            write.write_all(b"{\"type\":\"handshakeOk\",\"version\":3,\"pid\":1,\"epoch\":1}\n").await.unwrap();
+
+            // Attach
+            let line = lines.next_line().await.unwrap().unwrap();
+            assert!(line.contains("attach"));
+            write.write_all(b"{\"type\":\"attachOk\",\"epoch\":1,\"sessionId\":\"legacy-1\",\"startSequence\":null,\"endSequence\":null,\"gap\":null,\"history\":\"\"}\n").await.unwrap();
+
+            // The legacy daemon is now idle, waiting for commands or connection close.
+            // When LegacyPeer drops its socket, next_line() returns None (EOF).
+            let eof = lines.next_line().await.unwrap();
+            assert!(eof.is_none(), "legacy daemon must observe EOF when client disconnects");
+            let _ = legacy_closed_tx.send(());
+        });
+
+        let peer = Arc::new(crate::daemon::proxy::LegacyPeer::new(socket_path, vec!["legacy-1".into()]));
+        let agent_hub = Arc::new(AgentStateHub::default());
+        let agent_sub = agent_hub.subscribe("legacy-1");
+
+        let (client_writer_read, mut client_writer) = tokio::io::duplex(4096);
+        let (client_reader_write, mut client_reader) = tokio::io::duplex(4096);
+
+        let peer_clone = Arc::clone(&peer);
+        let stream_task = tokio::spawn(async move {
+            peer_clone.attach_and_stream(
+                "legacy-1",
+                None,
+                &mut client_writer,
+                &mut client_reader,
+                agent_sub,
+                agent_hub,
+            ).await
+        });
+
+        // Client reads the forwarded AttachOk frame
+        let mut client_lines = BufReader::new(client_writer_read).lines();
+        let first_line = client_lines.next_line().await.unwrap().unwrap();
+        assert!(first_line.contains("attachOk"));
+
+        // Now client disconnects (drops write end, sending EOF to client_reader)
+        drop(client_reader_write);
+
+        // attach_and_stream must terminate promptly
+        let stream_res = tokio::time::timeout(Duration::from_secs(2), stream_task).await;
+        assert!(stream_res.is_ok(), "attach_and_stream must terminate within timeout");
+        assert!(stream_res.unwrap().unwrap().is_ok());
+
+        // Legacy daemon must have observed EOF and closed its socket within timeout
+        let legacy_res = tokio::time::timeout(Duration::from_secs(2), legacy_closed_rx).await;
+        assert!(legacy_res.is_ok(), "upstream connection to legacy daemon must be closed promptly");
+
+        legacy_daemon.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_legacy_peer_attach_session_receiver_drop_terminates_reader() {
+        use std::os::unix::fs::PermissionsExt;
+        use tokio::net::UnixListener;
+
+        let socket_dir = tempfile::Builder::new().prefix("fx-legacy").tempdir_in("/tmp").unwrap();
+        std::fs::set_permissions(socket_dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket_path = socket_dir.path().join("legacy_session.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+
+        let (legacy_closed_tx, legacy_closed_rx) = tokio::sync::oneshot::channel();
+        let legacy_daemon = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+
+            let line = lines.next_line().await.unwrap().unwrap();
+            assert!(line.contains("handshake"));
+            write.write_all(b"{\"type\":\"handshakeOk\",\"version\":3,\"pid\":1,\"epoch\":1}\n").await.unwrap();
+
+            let line = lines.next_line().await.unwrap().unwrap();
+            assert!(line.contains("attach"));
+            write.write_all(b"{\"type\":\"attachOk\",\"epoch\":1,\"sessionId\":\"legacy-session-1\",\"startSequence\":1,\"endSequence\":1,\"gap\":null,\"history\":\"\"}\n").await.unwrap();
+
+            // Send output periodically until EOF
+            let eof = loop {
+                if write.write_all(b"{\"type\":\"output\",\"sessionId\":\"legacy-session-1\",\"sequence\":2,\"data\":\"aGVsbG8=\"}\n").await.is_err() {
+                    break true;
+                }
+                match lines.next_line().await {
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(_) => break true,
+                }
+            };
+            assert!(eof);
+            let _ = legacy_closed_tx.send(());
+        });
+
+        let peer = Arc::new(crate::daemon::proxy::LegacyPeer::new(socket_path, vec!["legacy-session-1".into()]));
+        let attachment = peer.attach_session("legacy-session-1", None).await.unwrap();
+
+        // Drop the receiver, making receiver_count() == 0
+        drop(attachment.receiver);
+
+        // Within 2 seconds, the legacy connection should be closed because reader task breaks
+        let legacy_res = tokio::time::timeout(Duration::from_secs(2), legacy_closed_rx).await;
+        assert!(legacy_res.is_ok(), "dropping receiver must cause legacy peer reader task to drop connection");
+
+        legacy_daemon.await.unwrap();
     }
 }
