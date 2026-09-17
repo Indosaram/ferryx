@@ -1837,6 +1837,18 @@ pub async fn cmd_terminal_spawn_batch<R: Runtime>(
     Ok(entries)
 }
 
+fn hub_attach_retry_deadline() -> std::time::Duration {
+    #[cfg(test)]
+    {
+        if let Ok(ms_str) = std::env::var("FERRYX_TEST_HUB_ATTACH_TIMEOUT_MS") {
+            if let Ok(ms) = ms_str.parse::<u64>() {
+                return std::time::Duration::from_millis(ms);
+            }
+        }
+    }
+    std::time::Duration::from_secs(10)
+}
+
 #[tauri::command]
 pub async fn cmd_terminal_attach<R: Runtime>(
     app: AppHandle<R>,
@@ -1844,8 +1856,69 @@ pub async fn cmd_terminal_attach<R: Runtime>(
     session_id: String,
     after_sequence: Option<String>,
 ) -> Result<AttachTerminalResponse, IpcError> {
-    let after_seq = after_sequence.and_then(|s| s.parse::<u64>().ok());
-    let attachment = daemon_client.attach(&session_id, after_seq).await?;
+    let after_seq = after_sequence.as_deref().and_then(|s| s.parse::<u64>().ok());
+
+    let (attachment, target_session_id) = if session_id.starts_with("daemon-session:") {
+        match daemon_client.paired_terminal_descriptor(session_id.clone()).await {
+            Ok(Some(mut descriptor)) => {
+                let host_id = descriptor.host_id.clone();
+                let generation = descriptor.generation;
+                if let Some(seq) = after_seq {
+                    descriptor.after_sequence = Some(crate::scoped_contracts::Epoch(seq));
+                }
+                let effective_after_seq = after_seq.or(descriptor.after_sequence.map(|e| e.0));
+
+                let (proxy_session_id, proxy_gen) = daemon_client
+                    .paired_terminal_reattach(descriptor)
+                    .await
+                    .map_err(|client_err| map_client_error(&client_err, Some(&host_id), Some(generation)))?;
+
+                let timeout_duration = hub_attach_retry_deadline();
+                let attach_deadline = tokio::time::Instant::now() + timeout_duration;
+                let mut poll_interval = std::time::Duration::from_millis(50);
+
+                loop {
+                    match daemon_client.attach(&proxy_session_id, effective_after_seq).await {
+                        Ok(att) => break (att, proxy_session_id),
+                        Err(err) if err.code == IpcErrorCode::SessionNotFound => {
+                            if tokio::time::Instant::now() >= attach_deadline {
+                                return Err(IpcError::new(
+                                    IpcErrorCode::OperationOutcomeUnknown,
+                                    format!("Local proxy attachment pending for paired session '{session_id}'"),
+                                )
+                                .with_details(serde_json::json!({
+                                    "pairedProxyPending": true,
+                                    "sessionId": session_id,
+                                    "proxySessionId": proxy_session_id,
+                                    "generation": proxy_gen,
+                                    "hostId": host_id,
+                                })));
+                            }
+                            tokio::time::sleep(poll_interval).await;
+                            if poll_interval < std::time::Duration::from_millis(250) {
+                                poll_interval = poll_interval.saturating_mul(2);
+                            }
+                        }
+                        Err(err) => return Err(err),
+                    }
+                }
+            }
+            Ok(None) => {
+                let att = daemon_client.attach(&session_id, after_seq).await?;
+                (att, session_id.clone())
+            }
+            Err(e) if e.ambiguous || matches!(e.code.as_str(), "TIMEOUT" | "OPERATION_OUTCOME_UNKNOWN") => {
+                return Err(map_client_error(&e, None, None));
+            }
+            Err(_) => {
+                let att = daemon_client.attach(&session_id, after_seq).await?;
+                (att, session_id.clone())
+            }
+        }
+    } else {
+        let att = daemon_client.attach(&session_id, after_seq).await?;
+        (att, session_id.clone())
+    };
 
     let resp = AttachTerminalResponse {
         session_id: attachment.session_id.clone(),
@@ -1859,7 +1932,10 @@ pub async fn cmd_terminal_attach<R: Runtime>(
         }),
     };
 
-    start_managed_pump(session_id, app, attachment);
+    if session_id != target_session_id {
+        stop_managed_pump(&session_id);
+    }
+    start_managed_pump(target_session_id, app, attachment);
 
     Ok(resp)
 }
@@ -2185,7 +2261,8 @@ pub(crate) fn map_client_error(
         }
     }
 
-    details.insert("ambiguous".to_string(), serde_json::Value::Bool(err.ambiguous));
+    let ambiguous = err.ambiguous || matches!(err.code.as_str(), "TIMEOUT" | "OPERATION_OUTCOME_UNKNOWN");
+    details.insert("ambiguous".to_string(), serde_json::Value::Bool(ambiguous));
 
     if let Some(ref me) = err.machine_error {
         if let Ok(val) = serde_json::to_value(me) {

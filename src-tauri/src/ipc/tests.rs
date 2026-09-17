@@ -2445,3 +2445,449 @@ async fn test_p12_close_ambiguous_remote_error_exhausts_and_aborts_local_close()
     server.abort();
 }
 
+#[tokio::test]
+async fn test_p13_attach_routes_through_descriptor_and_reinstalls_proxy() {
+    use crate::daemon::protocol::{
+        DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION,
+    };
+    use crate::remote::machine_protocol as m;
+    use crate::scoped_contracts::Epoch;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("p13_reattach.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+
+    let descriptor_queried = Arc::new(AtomicBool::new(false));
+    let reattach_called = Arc::new(AtomicBool::new(false));
+    let proxy_attached = Arc::new(AtomicBool::new(false));
+
+    let descriptor_clone = descriptor_queried.clone();
+    let reattach_clone = reattach_called.clone();
+    let proxy_attached_clone = proxy_attached.clone();
+
+    let server = tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => break,
+            };
+            let descriptor_queried = descriptor_clone.clone();
+            let reattach_called = reattach_clone.clone();
+            let proxy_attached = proxy_attached_clone.clone();
+
+            tokio::spawn(async move {
+                let (read, mut write) = stream.into_split();
+                let mut reader = BufReader::new(read);
+                let mut line = String::new();
+                while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                    let req: DaemonRequest = match serde_json::from_str(line.trim()) {
+                        Ok(r) => r,
+                        Err(_) => { line.clear(); continue; }
+                    };
+                    line.clear();
+                    let resp = match req {
+                        DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+                            version: DAEMON_PROTOCOL_VERSION,
+                            pid: std::process::id(),
+                            epoch: 1,
+                            binary_path: None,
+                            binary_mtime_ms: None,
+                            daemon_version: None,
+                        },
+                        DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
+                            capabilities: vec!["pairedHostInventoryV1".into()],
+                        },
+                        DaemonRequest::PairedTerminalDescriptor { session_id } => {
+                            if session_id == "daemon-session:orig-p13" {
+                                descriptor_queried.store(true, Ordering::SeqCst);
+                                DaemonResponse::PairedTerminalDescriptorOk {
+                                    descriptor: Some(crate::terminal::paired_daemon::Descriptor {
+                                        host_id: "host-p13".into(),
+                                        generation: Epoch(1),
+                                        target: m::RemoteTerminalTarget {
+                                            machine_id: "m-p13".into(),
+                                            daemon_epoch: Epoch(1),
+                                            session_id: "remote-pty-p13".into(),
+                                        },
+                                        after_sequence: None,
+                                    }),
+                                }
+                            } else {
+                                DaemonResponse::PairedTerminalDescriptorOk { descriptor: None }
+                            }
+                        }
+                        DaemonRequest::PairedTerminalReattach { descriptor } => {
+                            assert_eq!(descriptor.host_id, "host-p13");
+                            assert_eq!(descriptor.after_sequence, Some(Epoch(42)));
+                            reattach_called.store(true, Ordering::SeqCst);
+                            DaemonResponse::PairedTerminalReattachOk {
+                                session_id: "daemon-session:reinstalled-p13-proxy".into(),
+                                generation: Epoch(2),
+                            }
+                        }
+                        DaemonRequest::Attach { session_id, after_sequence } => {
+                            if session_id == "daemon-session:reinstalled-p13-proxy" {
+                                assert_eq!(after_sequence, Some(42));
+                                proxy_attached.store(true, Ordering::SeqCst);
+                                DaemonResponse::AttachOk {
+                                    epoch: 2,
+                                    session_id: "daemon-session:reinstalled-p13-proxy".into(),
+                                    start_sequence: Some(42),
+                                    end_sequence: Some(43),
+                                    gap: None,
+                                    history: b"p13 history line\n".to_vec(),
+                                    pty_cols: Some(80),
+                                    pty_rows: Some(24),
+                                    history_segments: vec![],
+                                    remote_generation: None,
+                                }
+                            } else {
+                                DaemonResponse::Error {
+                                    message: format!("Session '{session_id}' not found"),
+                                    code: Some("SESSION_NOT_FOUND".into()),
+                                    details: None,
+                                }
+                            }
+                        }
+                        _ => DaemonResponse::Error { message: "unexpected req".into(), code: None, details: None },
+                    };
+                    let bytes = serde_json::to_vec(&resp).unwrap();
+                    let _ = write.write_all(&bytes).await;
+                    let _ = write.write_all(b"\n").await;
+                    let _ = write.flush().await;
+                }
+            });
+        }
+    });
+
+    let client = Arc::new(DaemonClient::new_with_socket(socket));
+    let app = tauri::test::mock_builder()
+        .manage(client.clone())
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("mock app");
+    let client_state = app.state::<Arc<DaemonClient>>();
+
+    let attach_res = cmd_terminal_attach(
+        app.handle().clone(),
+        client_state,
+        "daemon-session:orig-p13".into(),
+        Some("42".into()),
+    )
+    .await
+    .expect("attach of paired session must succeed through reinstalled proxy");
+
+    assert_eq!(attach_res.session_id, "daemon-session:reinstalled-p13-proxy");
+    assert!(descriptor_queried.load(Ordering::SeqCst), "descriptor must be queried");
+    assert!(reattach_called.load(Ordering::SeqCst), "reattach must be called");
+    assert!(proxy_attached.load(Ordering::SeqCst), "proxy session must be attached");
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_p13_attach_preserves_ambiguous_reattach_failure() {
+    use crate::daemon::protocol::{
+        DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION,
+    };
+    use crate::ipc::IpcErrorCode;
+    use crate::paired_host::client::ClientError;
+    use crate::remote::machine_protocol as m;
+    use crate::scoped_contracts::Epoch;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("p13_amb.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+
+    let server = tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => break,
+            };
+            tokio::spawn(async move {
+                let (read, mut write) = stream.into_split();
+                let mut reader = BufReader::new(read);
+                let mut line = String::new();
+                while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                    let req: DaemonRequest = match serde_json::from_str(line.trim()) {
+                        Ok(r) => r,
+                        Err(_) => { line.clear(); continue; }
+                    };
+                    line.clear();
+                    let resp = match req {
+                        DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+                            version: DAEMON_PROTOCOL_VERSION,
+                            pid: std::process::id(),
+                            epoch: 1,
+                            binary_path: None,
+                            binary_mtime_ms: None,
+                            daemon_version: None,
+                        },
+                        DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
+                            capabilities: vec!["pairedHostInventoryV1".into()],
+                        },
+                        DaemonRequest::PairedTerminalDescriptor { session_id } => {
+                            if session_id == "daemon-session:orig-p13-amb" {
+                                DaemonResponse::PairedTerminalDescriptorOk {
+                                    descriptor: Some(crate::terminal::paired_daemon::Descriptor {
+                                        host_id: "host-p13".into(),
+                                        generation: Epoch(1),
+                                        target: m::RemoteTerminalTarget {
+                                            machine_id: "m-p13".into(),
+                                            daemon_epoch: Epoch(1),
+                                            session_id: "remote-pty-amb".into(),
+                                        },
+                                        after_sequence: None,
+                                    }),
+                                }
+                            } else {
+                                DaemonResponse::PairedTerminalDescriptorOk { descriptor: None }
+                            }
+                        }
+                        DaemonRequest::PairedTerminalReattach { .. } => {
+                            DaemonResponse::PairedHostOperationError {
+                                error: ClientError {
+                                    code: "TIMEOUT".into(),
+                                    machine_error: None,
+                                    request_id: Some("req-p13-amb".into()),
+                                    ambiguous: true,
+                                },
+                            }
+                        }
+                        DaemonRequest::Attach { session_id, .. } => {
+                            DaemonResponse::Error {
+                                message: format!("Session '{session_id}' not found"),
+                                code: Some("SESSION_NOT_FOUND".into()),
+                                details: None,
+                            }
+                        }
+                        _ => DaemonResponse::Error { message: "unexpected req".into(), code: None, details: None },
+                    };
+                    let bytes = serde_json::to_vec(&resp).unwrap();
+                    let _ = write.write_all(&bytes).await;
+                    let _ = write.write_all(b"\n").await;
+                    let _ = write.flush().await;
+                }
+            });
+        }
+    });
+
+    let client = Arc::new(DaemonClient::new_with_socket(socket));
+    let app = tauri::test::mock_builder()
+        .manage(client.clone())
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("mock app");
+    let client_state = app.state::<Arc<DaemonClient>>();
+
+    let err = cmd_terminal_attach(
+        app.handle().clone(),
+        client_state,
+        "daemon-session:orig-p13-amb".into(),
+        None,
+    )
+    .await
+    .expect_err("ambiguous reattach must fail");
+
+    assert_ne!(err.code, IpcErrorCode::SessionNotFound, "Ambiguous reattach must NOT report remote death (SESSION_NOT_FOUND)");
+    assert_eq!(err.code, IpcErrorCode::Timeout);
+    let details = err.details.expect("Structured error details must be present");
+    assert_eq!(details.get("ambiguous").and_then(|v| v.as_bool()), Some(true));
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_p13_attach_preserves_not_found_when_descriptor_none() {
+    use crate::daemon::protocol::{
+        DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION,
+    };
+    use crate::ipc::IpcErrorCode;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("p13_none.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+
+    let server = tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => break,
+            };
+            tokio::spawn(async move {
+                let (read, mut write) = stream.into_split();
+                let mut reader = BufReader::new(read);
+                let mut line = String::new();
+                while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                    let req: DaemonRequest = match serde_json::from_str(line.trim()) {
+                        Ok(r) => r,
+                        Err(_) => { line.clear(); continue; }
+                    };
+                    line.clear();
+                    let resp = match req {
+                        DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+                            version: DAEMON_PROTOCOL_VERSION,
+                            pid: std::process::id(),
+                            epoch: 1,
+                            binary_path: None,
+                            binary_mtime_ms: None,
+                            daemon_version: None,
+                        },
+                        DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
+                            capabilities: vec!["pairedHostInventoryV1".into()],
+                        },
+                        DaemonRequest::PairedTerminalDescriptor { .. } => {
+                            DaemonResponse::PairedTerminalDescriptorOk { descriptor: None }
+                        }
+                        DaemonRequest::Attach { session_id, .. } => {
+                            DaemonResponse::Error {
+                                message: format!("Session '{session_id}' not found"),
+                                code: Some("SESSION_NOT_FOUND".into()),
+                                details: None,
+                            }
+                        }
+                        _ => DaemonResponse::Error { message: "unexpected req".into(), code: None, details: None },
+                    };
+                    let bytes = serde_json::to_vec(&resp).unwrap();
+                    let _ = write.write_all(&bytes).await;
+                    let _ = write.write_all(b"\n").await;
+                    let _ = write.flush().await;
+                }
+            });
+        }
+    });
+
+    let client = Arc::new(DaemonClient::new_with_socket(socket));
+    let app = tauri::test::mock_builder()
+        .manage(client.clone())
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("mock app");
+    let client_state = app.state::<Arc<DaemonClient>>();
+
+    let err = cmd_terminal_attach(
+        app.handle().clone(),
+        client_state,
+        "daemon-session:unknown-p13".into(),
+        None,
+    )
+    .await
+    .expect_err("descriptor None must preserve not-found behavior");
+
+    assert_eq!(err.code, IpcErrorCode::SessionNotFound);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_p13_attach_hub_absence_returns_proxy_pending_unknown() {
+    use crate::daemon::protocol::{
+        DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION,
+    };
+    use crate::ipc::IpcErrorCode;
+    use crate::remote::machine_protocol as m;
+    use crate::scoped_contracts::Epoch;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("p13_hub_absent.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+
+    let server = tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => break,
+            };
+            tokio::spawn(async move {
+                let (read, mut write) = stream.into_split();
+                let mut reader = BufReader::new(read);
+                let mut line = String::new();
+                while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                    let req: DaemonRequest = match serde_json::from_str(line.trim()) {
+                        Ok(r) => r,
+                        Err(_) => { line.clear(); continue; }
+                    };
+                    line.clear();
+                    let resp = match req {
+                        DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+                            version: DAEMON_PROTOCOL_VERSION,
+                            pid: std::process::id(),
+                            epoch: 1,
+                            binary_path: None,
+                            binary_mtime_ms: None,
+                            daemon_version: None,
+                        },
+                        DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
+                            capabilities: vec!["pairedHostInventoryV1".into()],
+                        },
+                        DaemonRequest::PairedTerminalDescriptor { session_id } => {
+                            if session_id == "daemon-session:orig-hub-absent" {
+                                DaemonResponse::PairedTerminalDescriptorOk {
+                                    descriptor: Some(crate::terminal::paired_daemon::Descriptor {
+                                        host_id: "host-p13".into(),
+                                        generation: Epoch(1),
+                                        target: m::RemoteTerminalTarget {
+                                            machine_id: "m-p13".into(),
+                                            daemon_epoch: Epoch(1),
+                                            session_id: "remote-pty-hub-absent".into(),
+                                        },
+                                        after_sequence: None,
+                                    }),
+                                }
+                            } else {
+                                DaemonResponse::PairedTerminalDescriptorOk { descriptor: None }
+                            }
+                        }
+                        DaemonRequest::PairedTerminalReattach { .. } => {
+                            DaemonResponse::PairedTerminalReattachOk {
+                                session_id: "daemon-session:proxy-hub-absent".into(),
+                                generation: Epoch(1),
+                            }
+                        }
+                        DaemonRequest::Attach { session_id, .. } => {
+                            DaemonResponse::Error {
+                                message: format!("Session '{session_id}' not found"),
+                                code: Some("SESSION_NOT_FOUND".into()),
+                                details: None,
+                            }
+                        }
+                        _ => DaemonResponse::Error { message: "unexpected req".into(), code: None, details: None },
+                    };
+                    let bytes = serde_json::to_vec(&resp).unwrap();
+                    let _ = write.write_all(&bytes).await;
+                    let _ = write.write_all(b"\n").await;
+                    let _ = write.flush().await;
+                }
+            });
+        }
+    });
+
+    let client = Arc::new(DaemonClient::new_with_socket(socket));
+    let app = tauri::test::mock_builder()
+        .manage(client.clone())
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("mock app");
+    let client_state = app.state::<Arc<DaemonClient>>();
+
+    std::env::set_var("FERRYX_TEST_HUB_ATTACH_TIMEOUT_MS", "200");
+
+    let err = cmd_terminal_attach(
+        app.handle().clone(),
+        client_state,
+        "daemon-session:orig-hub-absent".into(),
+        None,
+    )
+    .await
+    .expect_err("hub absence must return non-terminal error");
+
+    assert_ne!(err.code, IpcErrorCode::SessionNotFound, "Hub absence must NOT return SESSION_NOT_FOUND");
+    let details = err.details.expect("Error details must be present");
+    assert_eq!(details.get("pairedProxyPending").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(details.get("sessionId").and_then(|v| v.as_str()), Some("daemon-session:orig-hub-absent"));
+
+    server.abort();
+}
+
