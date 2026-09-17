@@ -20,23 +20,23 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct AutomationSnapshotResult {
-    url: String,
-    title: String,
-    elements: Vec<AutomationSnapshotElement>,
+pub(crate) struct AutomationSnapshotResult {
+    pub(crate) url: String,
+    pub(crate) title: String,
+    pub(crate) elements: Vec<AutomationSnapshotElement>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct AutomationSnapshotElement {
-    reference: String,
-    selector: String,
-    role: String,
-    name: String,
-    tag_name: String,
+pub(crate) struct AutomationSnapshotElement {
+    pub(crate) reference: String,
+    pub(crate) selector: String,
+    pub(crate) role: String,
+    pub(crate) name: String,
+    pub(crate) tag_name: String,
 }
 
-const AUTOMATION_SNAPSHOT_SCRIPT: &str = r#"(() => {
+pub(crate) const AUTOMATION_SNAPSHOT_SCRIPT: &str = r#"(() => {
   const candidates = Array.from(document.querySelectorAll(
     'a[href], button, input, select, textarea, [role="button"], [role="link"], [contenteditable="true"]'
   ));
@@ -2306,23 +2306,40 @@ pub async fn wait_browser_session<R: tauri::Runtime>(
         .get_webview(&state.webview_label)
         .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
     let script = build_wait_condition_script(&condition);
-    let start = tokio::time::Instant::now();
     let timeout = std::time::Duration::from_secs(15);
+    let deadline = tokio::time::Instant::now() + timeout;
     let interval = std::time::Duration::from_millis(250);
 
     loop {
-        if let Ok(res) = eval_webview(webview.clone(), script.clone()).await {
-            if parse_eval_boolean(&res) {
-                return Ok(());
-            }
-        }
-        if start.elapsed() >= timeout {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
             return Err(IpcError::new(
                 IpcErrorCode::BrowserWaitTimeout,
                 "browser wait condition timed out after 15s",
             ));
         }
-        tokio::time::sleep(interval).await;
+
+        let remaining = deadline - now;
+        let eval_timeout = remaining.min(std::time::Duration::from_secs(5));
+        if let Ok(Ok(res)) =
+            tokio::time::timeout(eval_timeout, eval_webview(webview.clone(), script.clone())).await
+        {
+            if parse_eval_boolean(&res) {
+                return Ok(());
+            }
+        }
+
+        let now_after = tokio::time::Instant::now();
+        if now_after >= deadline {
+            return Err(IpcError::new(
+                IpcErrorCode::BrowserWaitTimeout,
+                "browser wait condition timed out after 15s",
+            ));
+        }
+
+        let remaining_after = deadline - now_after;
+        let sleep_duration = interval.min(remaining_after);
+        tokio::time::sleep(sleep_duration).await;
     }
 }
 
@@ -2404,6 +2421,20 @@ pub async fn cmd_browser_remote_reclaim<R: tauri::Runtime>(
     app: AppHandle<R>,
 ) -> Result<u64, IpcError> {
     use tauri::Manager;
+
+    let mut reclaimed = false;
+    if let Some(state) = app.try_state::<Arc<crate::remote::state::RemoteGatewayState>>() {
+        state.admission_controller.reclaim_desktop();
+        reclaimed = true;
+    }
+    if !reclaimed {
+        if let Some(mgr) = app.try_state::<Arc<crate::ipc::remote::RemoteGatewayManager>>() {
+            if let Some(state) = mgr.state() {
+                state.admission_controller.reclaim_desktop();
+            }
+        }
+    }
+
     if let Some(broker) = app.try_state::<Arc<crate::browser::remote_driver::RemoteDriverBroker>>() {
         Ok(broker.desktop_reclaim())
     } else {

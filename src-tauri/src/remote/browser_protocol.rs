@@ -440,6 +440,17 @@ pub struct BrowserSubscribeOptions {
     pub max_edge: Option<u32>,
 }
 
+impl Default for BrowserSubscribeOptions {
+    fn default() -> Self {
+        Self {
+            format: BrowserImageFormat::Jpeg,
+            quality: Some(70),
+            interval_ms: Some(250),
+            max_edge: Some(1280),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
 pub enum ClientMessage {
@@ -488,6 +499,20 @@ pub enum ClientMessage {
     BrowserUnsubscribe {
         request_id: String,
         subscription_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    BrowserPause {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subscription_id: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    BrowserResume {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subscription_id: Option<String>,
     },
 }
 

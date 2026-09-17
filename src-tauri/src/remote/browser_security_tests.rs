@@ -126,6 +126,54 @@ fn test_local_filesystem_path_redaction() {
     // 5. Safe strings without paths remain unchanged
     let safe_str = "Navigation completed successfully with status 200";
     assert_eq!(sanitize_public_string(safe_str), safe_str);
+
+    // 6. URLs containing /Users/, /home/, /private/, or C:\ are NOT corrupted
+    let https_users_url = "https://example.com/Users/test";
+    assert_eq!(sanitize_public_string(https_users_url), https_users_url);
+
+    let http_home_url = "http://localhost:3000/home/page";
+    assert_eq!(sanitize_public_string(http_home_url), http_home_url);
+
+    let github_users = "https://github.com/Users/octocat";
+    assert_eq!(sanitize_public_string(github_users), github_users);
+
+    // Raw paths are redacted
+    assert_eq!(sanitize_public_string("/Users/indo/file.txt"), "[redacted-path]");
+    assert_eq!(sanitize_public_string(r"C:\Users\foo"), "[redacted-path]");
+
+    // Mixed sentence: URL preserved, local path redacted
+    let mixed = "Loaded https://example.com/Users/test from /Users/indo/file.txt";
+    assert_eq!(
+        sanitize_public_string(mixed),
+        "Loaded https://example.com/Users/test from [redacted-path]"
+    );
+}
+
+#[test]
+fn test_r5_json_sanitization_preserves_urls_and_redacts_keys_and_paths() {
+    use crate::remote::browser_ws::sanitize_json_value;
+
+    let input = serde_json::json!({
+        "/Users/indo/config.json": "safe value",
+        "https://example.com/Users/test": "url key preserved",
+        "nested": {
+            "webUrl": "http://localhost:3000/home/page",
+            "winPath": r"C:\Users\foo",
+            "list": [
+                "https://example.com/Users/test",
+                "/home/user/secrets.env"
+            ]
+        }
+    });
+
+    let sanitized = sanitize_json_value(input);
+
+    assert_eq!(sanitized["[redacted-path]"], "safe value");
+    assert_eq!(sanitized["https://example.com/Users/test"], "url key preserved");
+    assert_eq!(sanitized["nested"]["webUrl"], "http://localhost:3000/home/page");
+    assert_eq!(sanitized["nested"]["winPath"], "[redacted-path]");
+    assert_eq!(sanitized["nested"]["list"][0], "https://example.com/Users/test");
+    assert_eq!(sanitized["nested"]["list"][1], "[redacted-path]");
 }
 
 #[test]

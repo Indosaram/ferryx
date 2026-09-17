@@ -928,6 +928,16 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         (*browser_manager).clone(),
         Arc::clone(&driver_broker),
     ));
+    let in_process_backend = Arc::new(
+        crate::remote::browser_backend::InProcessBrowserServiceBackend::new(
+            Arc::clone(&browser_remote_service),
+            Arc::clone(&browser_manager),
+        ),
+    );
+    if let Some(state) = remote_manager.state() {
+        state.set_browser_backend(Arc::clone(&in_process_backend) as Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>);
+    }
+    let in_process_backend_setup = Arc::clone(&in_process_backend);
     #[cfg(feature = "native-terminal")]
     let native_terminal_surface_host = NativeTerminalSurfaceHostState::default();
     let setup_activations = Arc::clone(&notification_activations);
@@ -1053,6 +1063,9 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                 app.handle().clone(),
                 worktree_rescan_registry,
             );
+            if let Some(remote_state) = app.try_state::<Arc<crate::remote::state::RemoteGatewayState>>() {
+                remote_state.set_browser_backend(Arc::clone(&in_process_backend_setup) as Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>);
+            }
             Ok(())
         })
         // Rust-side plugins only. The frontend uses rorca's own typed commands,
@@ -1068,7 +1081,9 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         .manage(notification_activations)
         .manage(driver_broker)
         .manage(browser_remote_service)
-        .manage(browser_manager);
+        .manage(browser_manager)
+        .manage(Arc::clone(&in_process_backend) as Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>)
+        .manage(in_process_backend);
 
     #[cfg(desktop)]
     let builder = if crate::ipc::updater::updater_managed_externally() {

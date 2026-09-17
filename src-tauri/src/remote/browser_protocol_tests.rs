@@ -383,6 +383,22 @@ fn test_json_dto_camel_case_and_deny_unknown_fields() {
     }"#;
     let cmd_msg: ClientMessage = serde_json::from_str(valid_cmd).expect("Valid command deserialization");
     assert!(matches!(cmd_msg, ClientMessage::BrowserCommand { .. }));
+
+    // 7. ClientMessage::BrowserPause valid camelCase and unknown field rejection
+    let valid_pause = r#"{ "type": "browserPause", "requestId": "p1", "subscriptionId": "sub1" }"#;
+    let pause_msg: ClientMessage = serde_json::from_str(valid_pause).expect("Valid pause deserialization");
+    assert!(matches!(pause_msg, ClientMessage::BrowserPause { .. }));
+
+    let bad_pause = r#"{ "type": "browserPause", "unknownExtra": 123 }"#;
+    assert!(serde_json::from_str::<ClientMessage>(bad_pause).is_err());
+
+    // 8. ClientMessage::BrowserResume valid camelCase and unknown field rejection
+    let valid_resume = r#"{ "type": "browserResume", "requestId": "r1" }"#;
+    let resume_msg: ClientMessage = serde_json::from_str(valid_resume).expect("Valid resume deserialization");
+    assert!(matches!(resume_msg, ClientMessage::BrowserResume { .. }));
+
+    let bad_resume = r#"{ "type": "browserResume", "unknownExtra": 456 }"#;
+    assert!(serde_json::from_str::<ClientMessage>(bad_resume).is_err());
 }
 
 // ---------------------------------------------------------------------------

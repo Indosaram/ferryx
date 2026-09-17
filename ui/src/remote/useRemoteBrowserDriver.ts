@@ -10,10 +10,12 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { BrowserClient } from "./browserClient";
-import type {
-  BrowserDriverChangedMessage,
-  BrowserErrorMessage,
-  ServerBrowserDriverRevoked,
+import {
+  reconcileMapRevision,
+  type BrowserDriverChangedMessage,
+  type BrowserErrorMessage,
+  type BrowserSnapshotServerMessage,
+  type ServerBrowserDriverRevoked,
 } from "./browserProtocol";
 
 export type RemoteDriverState =
@@ -63,8 +65,11 @@ export interface UseRemoteBrowserDriverResult {
   leaseEpoch: string | null;
   expiresAt: number | null;
   error: Error | null;
+  snapshotId: string | null;
+  mapRevision: string | null;
   claim: () => Promise<void>;
   release: () => Promise<void>;
+  takeSnapshot: () => Promise<BrowserSnapshotServerMessage>;
   navigate: (url: string, guards?: RemoteBrowserMutationGuards) => Promise<unknown>;
   back: (guards?: RemoteBrowserMutationGuards) => Promise<unknown>;
   forward: (guards?: RemoteBrowserMutationGuards) => Promise<unknown>;
@@ -84,6 +89,14 @@ export interface UseRemoteBrowserDriverResult {
   evalJs: (script: string, guards?: RemoteBrowserMutationGuards) => Promise<unknown>;
 }
 
+function needsSnapshotAcquisition(target: string | undefined): boolean {
+  if (!target) return false;
+  const trimmed = target.trim();
+  if (trimmed === "" || trimmed === "active") return false;
+  if (trimmed.startsWith("#") || trimmed.startsWith(".") || trimmed.startsWith("[")) return false;
+  return true;
+}
+
 export function useRemoteBrowserDriver({
   client,
   browserId,
@@ -100,6 +113,22 @@ export function useRemoteBrowserDriver({
   const [leaseEpoch, setLeaseEpoch] = useState<string | null>(null);
   const [expiresAt, setExpiresAt] = useState<number | null>(null);
   const [error, setError] = useState<Error | null>(null);
+  const [driverSnapshotId, setDriverSnapshotId] = useState<string | null>(snapshotId ?? null);
+  const [driverMapRevision, setDriverMapRevision] = useState<string | null>(
+    reconcileMapRevision(mapRevision) ?? null
+  );
+
+  useEffect(() => {
+    if (snapshotId !== undefined) {
+      setDriverSnapshotId(snapshotId ?? null);
+    }
+  }, [snapshotId]);
+
+  useEffect(() => {
+    if (mapRevision !== undefined) {
+      setDriverMapRevision(reconcileMapRevision(mapRevision) ?? null);
+    }
+  }, [mapRevision]);
 
   // Keep latest guards in ref for stable callbacks
   const guardsRef = useRef({
@@ -108,8 +137,8 @@ export function useRemoteBrowserDriver({
     desktopEpoch,
     documentGeneration,
     viewportRevision,
-    snapshotId,
-    mapRevision,
+    snapshotId: driverSnapshotId ?? snapshotId,
+    mapRevision: driverMapRevision ?? reconcileMapRevision(mapRevision),
     leaseEpoch,
     driverState,
     client,
@@ -121,8 +150,8 @@ export function useRemoteBrowserDriver({
     desktopEpoch,
     documentGeneration,
     viewportRevision,
-    snapshotId,
-    mapRevision,
+    snapshotId: driverSnapshotId ?? snapshotId,
+    mapRevision: driverMapRevision ?? reconcileMapRevision(mapRevision),
     leaseEpoch,
     driverState,
     client,
@@ -294,6 +323,23 @@ export function useRemoteBrowserDriver({
     }
   }, [client, leaseEpoch]);
 
+  const takeSnapshot = useCallback(async (): Promise<BrowserSnapshotServerMessage> => {
+    const { client: curClient, browserId: curBrowserId } = guardsRef.current;
+    if (!curClient || !curBrowserId) {
+      throw new Error("Cannot take snapshot: client or browserId missing");
+    }
+    const snap = await curClient.takeSnapshot(curBrowserId);
+    const reconciled = reconcileMapRevision(snap.mapRevision) ?? snap.mapRevision;
+    setDriverSnapshotId(snap.snapshotId);
+    setDriverMapRevision(reconciled);
+    guardsRef.current.snapshotId = snap.snapshotId;
+    guardsRef.current.mapRevision = reconciled;
+    return {
+      ...snap,
+      mapRevision: reconciled,
+    };
+  }, []);
+
   // Command dispatch with driving lease epoch and browser identity guards
   const dispatchCommand = useCallback(
     async (
@@ -393,12 +439,17 @@ export function useRemoteBrowserDriver({
   );
 
   const click = useCallback(
-    (
+    async (
       selectorOrParams: string | RemoteBrowserClickParams,
       options?: RemoteBrowserClickParams
     ) => {
       let params: Record<string, unknown>;
       let guards: RemoteBrowserMutationGuards | undefined;
+
+      const isPointClick =
+        typeof selectorOrParams === "object" &&
+        typeof selectorOrParams.u === "number" &&
+        typeof selectorOrParams.v === "number";
 
       if (typeof selectorOrParams === "string") {
         params = {
@@ -418,10 +469,31 @@ export function useRemoteBrowserDriver({
         };
       }
 
-      const effectiveSnapshotId =
+      let effectiveSnapshotId =
         (params.snapshotId as string | undefined) ?? guardsRef.current.snapshotId ?? undefined;
-      const effectiveMapRevision =
-        (params.mapRevision as string | undefined) ?? guardsRef.current.mapRevision ?? undefined;
+      let effectiveMapRevision =
+        reconcileMapRevision(params.mapRevision) ?? guardsRef.current.mapRevision ?? undefined;
+
+      const target = (params.reference as string | undefined) ?? (params.selector as string | undefined);
+      const needsSnapshot = Boolean(params.needsSnapshot || params.acquireSnapshot || needsSnapshotAcquisition(target));
+
+      // Acquire valid remote snapshot before click when needed (for snapshot element references)
+      if (!isPointClick && needsSnapshot && (!effectiveSnapshotId || !effectiveMapRevision)) {
+        const { client: curClient, browserId: curBrowserId } = guardsRef.current;
+        if (curClient && curBrowserId && typeof curClient.takeSnapshot === "function") {
+          try {
+            const snap = await curClient.takeSnapshot(curBrowserId);
+            effectiveSnapshotId = snap.snapshotId;
+            effectiveMapRevision = reconcileMapRevision(snap.mapRevision) ?? snap.mapRevision;
+            setDriverSnapshotId(effectiveSnapshotId);
+            setDriverMapRevision(effectiveMapRevision);
+            guardsRef.current.snapshotId = effectiveSnapshotId;
+            guardsRef.current.mapRevision = effectiveMapRevision;
+          } catch {
+            // Proceed to dispatchCommand and let error report downstream
+          }
+        }
+      }
 
       if (effectiveSnapshotId !== undefined) {
         params.snapshotId = effectiveSnapshotId;
@@ -436,7 +508,7 @@ export function useRemoteBrowserDriver({
   );
 
   const fill = useCallback(
-    (
+    async (
       selectorOrRef: string,
       textOrValue: string,
       snapshotIdOrOptions?: string | RemoteBrowserFillOptions,
@@ -454,10 +526,35 @@ export function useRemoteBrowserDriver({
         guards = snapshotIdOrOptions;
       }
 
-      const effectiveSnapshotId =
+      let effectiveSnapshotId =
         snapshotId ?? guardsRef.current.snapshotId ?? undefined;
-      const effectiveMapRevision =
-        mapRevision ?? guardsRef.current.mapRevision ?? undefined;
+      let effectiveMapRevision =
+        reconcileMapRevision(mapRevision) ?? guardsRef.current.mapRevision ?? undefined;
+
+      const target = selectorOrRef;
+      const needsSnapshot = Boolean(
+        (guards as Record<string, unknown> | undefined)?.needsSnapshot ||
+        (guards as Record<string, unknown> | undefined)?.acquireSnapshot ||
+        needsSnapshotAcquisition(target)
+      );
+
+      // Acquire valid remote snapshot before fill when needed
+      if (needsSnapshot && (!effectiveSnapshotId || !effectiveMapRevision)) {
+        const { client: curClient, browserId: curBrowserId } = guardsRef.current;
+        if (curClient && curBrowserId && typeof curClient.takeSnapshot === "function") {
+          try {
+            const snap = await curClient.takeSnapshot(curBrowserId);
+            effectiveSnapshotId = snap.snapshotId;
+            effectiveMapRevision = reconcileMapRevision(snap.mapRevision) ?? snap.mapRevision;
+            setDriverSnapshotId(effectiveSnapshotId);
+            setDriverMapRevision(effectiveMapRevision);
+            guardsRef.current.snapshotId = effectiveSnapshotId;
+            guardsRef.current.mapRevision = effectiveMapRevision;
+          } catch {
+            // Proceed to dispatchCommand and let error report downstream
+          }
+        }
+      }
 
       const params: Record<string, unknown> = {
         reference: selectorOrRef,
@@ -501,8 +598,11 @@ export function useRemoteBrowserDriver({
     leaseEpoch,
     expiresAt,
     error,
+    snapshotId: driverSnapshotId,
+    mapRevision: driverMapRevision,
     claim,
     release,
+    takeSnapshot,
     navigate,
     back,
     forward,

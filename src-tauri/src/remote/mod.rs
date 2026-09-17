@@ -31,8 +31,8 @@ pub use browser_admission::{
 };
 pub use browser_backend::{
     BoxFuture, BrowserCapabilities, BrowserCommandContext, BrowserCommandResult,
-    BrowserRemoteState, DesktopScope, InProcessTestBackend, LocalIpcBrowserBackend,
-    RemoteBrowserBackend, RemoteBrowserError, RemoteBrowserSessionSummary,
+    BrowserRemoteState, DesktopScope, InProcessBrowserServiceBackend, InProcessTestBackend,
+    LocalIpcBrowserBackend, RemoteBrowserBackend, RemoteBrowserError, RemoteBrowserSessionSummary,
     UnavailableBrowserBackend,
 };
 pub use browser_protocol::{

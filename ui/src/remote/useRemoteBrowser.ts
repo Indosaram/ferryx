@@ -107,6 +107,8 @@ export function useRemoteBrowser({
   }, [clearFrameBuffer]);
 
   const confirmPresented = useCallback((streamId: number, seq: number) => {
+    const isHidden = typeof document !== "undefined" && (document.visibilityState === "hidden" || document.hidden);
+    if (isHidden) return;
     if (clientRef.current) {
       if (typeof (clientRef.current as unknown as { sendAck?: (s: number, q: number) => void }).sendAck === "function") {
         (clientRef.current as unknown as { sendAck: (s: number, q: number) => void }).sendAck(streamId, seq);
@@ -118,20 +120,16 @@ export function useRemoteBrowser({
 
   const sendAck = confirmPresented;
 
-  // Handle background / visibility change: pause active decoding, clear frame buffer, and send pause/ack signal (§4.3, R10)
+  // Handle background / visibility change: pause active decoding, clear frame buffer, and send pause signal (§4.3, R10)
   useEffect(() => {
     const handleVisibilityChange = () => {
       const isHidden = typeof document !== "undefined" && (document.visibilityState === "hidden" || document.hidden);
       if (isHidden) {
         clearFrameBuffer();
         setStatus((s) => (s === "streaming" ? "paused" : s));
-        if (clientRef.current && currentStreamIdRef.current !== null) {
-          // Send client pause/ack signal to drop in-flight and clear unacknowledged queue
+        if (clientRef.current && currentStreamIdRef.current !== null && browserId) {
           try {
-            clientRef.current.ackFrame(
-              currentStreamIdRef.current,
-              lastDecodedSeqRef.current >= 0 ? lastDecodedSeqRef.current : 0
-            );
+            clientRef.current.pause(browserId, currentStreamIdRef.current);
           } catch {
             // Ignored if socket closed
           }
@@ -139,12 +137,9 @@ export function useRemoteBrowser({
       } else {
         // Returned to visible: cleanly request frame continuation without stranding unacknowledged frames or double-subscribing
         setStatus((s) => (s === "paused" ? "streaming" : s));
-        if (clientRef.current && currentStreamIdRef.current !== null) {
+        if (clientRef.current && currentStreamIdRef.current !== null && browserId) {
           try {
-            clientRef.current.ackFrame(
-              currentStreamIdRef.current,
-              lastDecodedSeqRef.current >= 0 ? lastDecodedSeqRef.current : 0
-            );
+            clientRef.current.resume(browserId, currentStreamIdRef.current);
           } catch {
             // Ignored if socket closed
           }
@@ -155,7 +150,7 @@ export function useRemoteBrowser({
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [clearFrameBuffer]);
+  }, [clearFrameBuffer, browserId]);
 
   // Unconditional frame reference cleanup and object URL revocation on unmount
   useEffect(() => {
@@ -212,13 +207,8 @@ export function useRemoteBrowser({
         client.onFrame((incomingFrame) => {
           if (cancelled) return;
 
-          // Background throttling: pause active frame decoding when document is hidden (§4.3, R10)
+          // Background throttling: pause active frame decoding and DO NOT send ACKs when document is hidden (§4.3, R10)
           if (typeof document !== "undefined" && (document.visibilityState === "hidden" || document.hidden)) {
-            try {
-              client.ackFrame(incomingFrame.metadata.streamId, incomingFrame.seq);
-            } catch {
-              // ignore
-            }
             return;
           }
 

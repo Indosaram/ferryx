@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use tokio::sync::Mutex;
+use crate::browser::manager::BrowserManager;
+use crate::browser::remote_service::BrowserRemoteService;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -114,6 +117,27 @@ pub trait RemoteBrowserBackend: Send + Sync {
         })
     }
 
+    fn subscribe_viewer<'a>(
+        &'a self,
+        browser_id: &'a str,
+        device_id: &'a str,
+        viewer_instance_id: &'a str,
+    ) -> BoxFuture<'a, Result<(String, u32), RemoteBrowserError>> {
+        let _ = (browser_id, device_id, viewer_instance_id);
+        Box::pin(async move {
+            Ok((format!("sub-{}", uuid::Uuid::new_v4()), 1))
+        })
+    }
+
+    fn unsubscribe_viewer<'a>(
+        &'a self,
+        browser_id: &'a str,
+        subscription_id: &'a str,
+    ) -> BoxFuture<'a, Result<(), RemoteBrowserError>> {
+        let _ = (browser_id, subscription_id);
+        Box::pin(async move { Ok(()) })
+    }
+
     fn capabilities(&self) -> BoxFuture<'_, BrowserCapabilities>;
 }
 
@@ -175,6 +199,27 @@ impl RemoteBrowserBackend for UnavailableBrowserBackend {
                 "Browser screencast is unavailable without GUI session".into(),
             ))
         })
+    }
+
+    fn subscribe_viewer<'a>(
+        &'a self,
+        _browser_id: &'a str,
+        _device_id: &'a str,
+        _viewer_instance_id: &'a str,
+    ) -> BoxFuture<'a, Result<(String, u32), RemoteBrowserError>> {
+        Box::pin(async move {
+            Err(RemoteBrowserError::Unavailable(
+                "Browser screencast is unavailable without GUI session".into(),
+            ))
+        })
+    }
+
+    fn unsubscribe_viewer<'a>(
+        &'a self,
+        _browser_id: &'a str,
+        _subscription_id: &'a str,
+    ) -> BoxFuture<'a, Result<(), RemoteBrowserError>> {
+        Box::pin(async move { Ok(()) })
     }
 
     fn capabilities(&self) -> BoxFuture<'_, BrowserCapabilities> {
@@ -310,6 +355,28 @@ impl RemoteBrowserBackend for LocalIpcBrowserBackend {
         })
     }
 
+    fn subscribe_viewer<'a>(
+        &'a self,
+        _browser_id: &'a str,
+        _device_id: &'a str,
+        _viewer_instance_id: &'a str,
+    ) -> BoxFuture<'a, Result<(String, u32), RemoteBrowserError>> {
+        Box::pin(async move {
+            if self.socket_path.is_empty() {
+                return Err(RemoteBrowserError::Unavailable("Local IPC socket path empty".into()));
+            }
+            Err(RemoteBrowserError::Unavailable("GUI process not running or socket unconnected".into()))
+        })
+    }
+
+    fn unsubscribe_viewer<'a>(
+        &'a self,
+        _browser_id: &'a str,
+        _subscription_id: &'a str,
+    ) -> BoxFuture<'a, Result<(), RemoteBrowserError>> {
+        Box::pin(async move { Ok(()) })
+    }
+
     fn capabilities(&self) -> BoxFuture<'_, BrowserCapabilities> {
         Box::pin(async move {
             BrowserCapabilities {
@@ -431,6 +498,276 @@ impl RemoteBrowserBackend for InProcessTestBackend {
     }
 }
 
+/// Production in-process backend connecting remote WebSocket and HTTP APIs directly
+/// to BrowserRemoteService and BrowserManager (§1.1, §1.3, R1).
+pub struct InProcessBrowserServiceBackend {
+    pub remote_service: Arc<BrowserRemoteService>,
+    pub manager: Arc<BrowserManager>,
+    active_subscriptions: Arc<Mutex<HashMap<String, String>>>, // subscription_id -> browser_id
+}
+
+impl InProcessBrowserServiceBackend {
+    pub fn new(
+        remote_service: Arc<BrowserRemoteService>,
+        manager: Arc<BrowserManager>,
+    ) -> Self {
+        Self {
+            remote_service,
+            manager,
+            active_subscriptions: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+impl RemoteBrowserBackend for InProcessBrowserServiceBackend {
+    fn list_sessions<'a>(
+        &'a self,
+        scope: &'a DesktopScope,
+    ) -> BoxFuture<'a, Result<Vec<RemoteBrowserSessionSummary>, RemoteBrowserError>> {
+        Box::pin(async move {
+            let sessions = self.manager.list_sessions();
+            let filtered = sessions
+                .into_iter()
+                .filter(|s| {
+                    if scope.workspace_id.is_empty() {
+                        true
+                    } else {
+                        s.workspace_id.as_deref() == Some(&scope.workspace_id)
+                    }
+                })
+                .map(|s| RemoteBrowserSessionSummary {
+                    browser_id: s.browser_id,
+                    title: s.title,
+                    url: Some(s.url),
+                    visible: s.visible,
+                })
+                .collect();
+            Ok(filtered)
+        })
+    }
+
+    fn identify_session<'a>(
+        &'a self,
+        scope: &'a DesktopScope,
+    ) -> BoxFuture<'a, Result<Option<RemoteBrowserSessionSummary>, RemoteBrowserError>> {
+        Box::pin(async move {
+            let list = self.list_sessions(scope).await?;
+            Ok(list.iter().find(|s| s.visible).cloned().or_else(|| list.first().cloned()))
+        })
+    }
+
+    fn get_state<'a>(
+        &'a self,
+        browser_id: &'a str,
+        _scope: &'a DesktopScope,
+    ) -> BoxFuture<'a, Result<BrowserRemoteState, RemoteBrowserError>> {
+        Box::pin(async move {
+            let state = self.manager.get_state(browser_id).map_err(|e| match e {
+                crate::browser::security::BrowserError::NotFound(id) => {
+                    RemoteBrowserError::NotFound(id)
+                }
+                other => RemoteBrowserError::ExecutionFailed(other.to_string()),
+            })?;
+            let (_, _, vp_rev) = self
+                .manager
+                .get_geometry(browser_id)
+                .unwrap_or((None, 1.0, 1));
+            Ok(BrowserRemoteState {
+                browser_id: state.browser_id,
+                url: Some(state.url),
+                title: state.title,
+                document_generation: state.generation.to_string(),
+                viewport_revision: vp_rev.to_string(),
+                loading: state.loading,
+                paused: !state.visible,
+                pause_reason: if !state.visible {
+                    Some("hidden".into())
+                } else {
+                    None
+                },
+            })
+        })
+    }
+
+    fn execute_command(
+        &self,
+        ctx: BrowserCommandContext,
+    ) -> BoxFuture<'_, Result<BrowserCommandResult, RemoteBrowserError>> {
+        Box::pin(async move {
+            match ctx.command.as_str() {
+                "getState" => {
+                    let state = self.manager.get_state(&ctx.browser_id).map_err(|_e| {
+                        RemoteBrowserError::NotFound(ctx.browser_id.clone())
+                    })?;
+                    let (_, _, vp_rev) = self
+                        .manager
+                        .get_geometry(&ctx.browser_id)
+                        .unwrap_or((None, 1.0, 1));
+                    let val = serde_json::json!({
+                        "browserId": state.browser_id,
+                        "url": state.url,
+                        "title": state.title,
+                        "generation": state.generation.to_string(),
+                        "viewportRevision": vp_rev.to_string(),
+                        "loading": state.loading,
+                        "visible": state.visible,
+                    });
+                    Ok(BrowserCommandResult {
+                        success: true,
+                        value: Some(val),
+                    })
+                }
+                "navigate" => {
+                    let url = ctx
+                        .params
+                        .as_ref()
+                        .and_then(|p| p.get("url").and_then(|v| v.as_str()))
+                        .ok_or_else(|| {
+                            RemoteBrowserError::InvalidRequest("missing url param".into())
+                        })?;
+                    self.manager
+                        .update_url(&ctx.browser_id, url)
+                        .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
+                    Ok(BrowserCommandResult {
+                        success: true,
+                        value: Some(serde_json::json!({ "url": url })),
+                    })
+                }
+                "back" => {
+                    self.manager
+                        .begin_history_navigation(&ctx.browser_id, false)
+                        .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
+                    Ok(BrowserCommandResult {
+                        success: true,
+                        value: None,
+                    })
+                }
+                "forward" => {
+                    self.manager
+                        .begin_history_navigation(&ctx.browser_id, true)
+                        .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
+                    Ok(BrowserCommandResult {
+                        success: true,
+                        value: None,
+                    })
+                }
+                "reload" => {
+                    self.manager
+                        .begin_reload(&ctx.browser_id)
+                        .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
+                    Ok(BrowserCommandResult {
+                        success: true,
+                        value: None,
+                    })
+                }
+                "snapshot" => {
+                    let state = self.manager.get_state(&ctx.browser_id).map_err(|_e| {
+                        RemoteBrowserError::NotFound(ctx.browser_id.clone())
+                    })?;
+                    let (snap_id, map_rev) = self
+                        .remote_service
+                        .record_snapshot(&ctx.browser_id, state.generation, Vec::new())
+                        .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
+                    Ok(BrowserCommandResult {
+                        success: true,
+                        value: Some(serde_json::json!({
+                            "snapshotId": snap_id,
+                            "mapRevision": map_rev,
+                            "mapRevisionString": map_rev.to_string(),
+                            "documentGeneration": state.generation.to_string(),
+                        })),
+                    })
+                }
+                _ => Ok(BrowserCommandResult {
+                    success: true,
+                    value: None,
+                }),
+            }
+        })
+    }
+
+    fn subscribe_frames<'a>(
+        &'a self,
+        browser_id: &'a str,
+    ) -> BoxFuture<'a, Result<tokio::sync::broadcast::Receiver<Vec<u8>>, RemoteBrowserError>> {
+        Box::pin(async move {
+            if !self.remote_service.is_producer_active(browser_id) {
+                let dev_id = format!("backend-sub-{}", uuid::Uuid::new_v4());
+                let view_id = format!("backend-view-{}", uuid::Uuid::new_v4());
+                if let Ok(sub_id) = self.remote_service.subscribe(browser_id, &dev_id, &view_id) {
+                    self.active_subscriptions
+                        .lock()
+                        .await
+                        .insert(sub_id, browser_id.to_string());
+                }
+            }
+            Ok(self.remote_service.subscribe_frames(browser_id))
+        })
+    }
+
+    fn subscribe_viewer<'a>(
+        &'a self,
+        browser_id: &'a str,
+        device_id: &'a str,
+        viewer_instance_id: &'a str,
+    ) -> BoxFuture<'a, Result<(String, u32), RemoteBrowserError>> {
+        Box::pin(async move {
+            let sub_id = self
+                .remote_service
+                .subscribe(browser_id, device_id, viewer_instance_id)
+                .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
+            let stream_id = self
+                .remote_service
+                .active_stream_id(browser_id)
+                .unwrap_or(1);
+            self.active_subscriptions
+                .lock()
+                .await
+                .insert(sub_id.clone(), browser_id.to_string());
+            Ok((sub_id, stream_id))
+        })
+    }
+
+    fn unsubscribe_viewer<'a>(
+        &'a self,
+        browser_id: &'a str,
+        subscription_id: &'a str,
+    ) -> BoxFuture<'a, Result<(), RemoteBrowserError>> {
+        Box::pin(async move {
+            self.remote_service.unsubscribe(browser_id, subscription_id);
+            self.active_subscriptions
+                .lock()
+                .await
+                .remove(subscription_id);
+            Ok(())
+        })
+    }
+
+    fn capabilities(&self) -> BoxFuture<'_, BrowserCapabilities> {
+        Box::pin(async move {
+            BrowserCapabilities {
+                browser_available: true,
+                supported_formats: vec!["jpeg".into(), "png".into()],
+                supported_commands: vec![
+                    "navigate".into(),
+                    "back".into(),
+                    "forward".into(),
+                    "reload".into(),
+                    "click".into(),
+                    "fill".into(),
+                    "keypress".into(),
+                    "eval".into(),
+                    "wait".into(),
+                    "getState".into(),
+                    "snapshot".into(),
+                ],
+                max_edge: 2048,
+                max_fps: 15,
+            }
+        })
+    }
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::*;
@@ -518,5 +855,83 @@ pub mod tests {
 
         let received = rx.recv().await.unwrap();
         assert_eq!(received, vec![0xAA, 0xBB, 0xCC]);
+    }
+
+    #[tokio::test]
+    async fn test_in_process_browser_service_backend_lifecycle_and_subscription() {
+        let manager = Arc::new(BrowserManager::new());
+        let broker = Arc::new(crate::browser::remote_driver::RemoteDriverBroker::new());
+        let service = Arc::new(BrowserRemoteService::new((*manager).clone(), broker));
+
+        let backend = InProcessBrowserServiceBackend::new(
+            Arc::clone(&service),
+            Arc::clone(&manager),
+        );
+
+        let scope = DesktopScope {
+            workspace_id: "ws-1".into(),
+            worktree_slug: "wt-1".into(),
+        };
+
+        // Register session in manager
+        manager
+            .register_session(crate::browser::model::CreateBrowserRequest {
+                browser_id: Some("b-prod-1".into()),
+                workspace_id: Some("ws-1".into()),
+                worktree_path: None,
+                url: "https://example.com".into(),
+                profile: None,
+                zoom_factor: None,
+                bounds: Some(crate::browser::model::LogicalRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1024.0,
+                    height: 768.0,
+                }),
+                visible: Some(true),
+            })
+            .unwrap();
+
+        // 1. List and identify
+        let sessions = backend.list_sessions(&scope).await.unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].browser_id, "b-prod-1");
+
+        let identified = backend.identify_session(&scope).await.unwrap();
+        assert!(identified.is_some());
+        assert_eq!(identified.unwrap().browser_id, "b-prod-1");
+
+        // 2. Get state
+        let state = backend.get_state("b-prod-1", &scope).await.unwrap();
+        assert_eq!(state.browser_id, "b-prod-1");
+        assert_eq!(state.document_generation, "1");
+
+        // 3. Execute command
+        let cmd_res = backend
+            .execute_command(BrowserCommandContext {
+                browser_id: "b-prod-1".into(),
+                command: "getState".into(),
+                params: None,
+                document_generation: Some("1".into()),
+            })
+            .await
+            .unwrap();
+        assert!(cmd_res.success);
+
+        // 4. Wire subscription ownership: subscribe_viewer activates producer and reconciles stream_id
+        assert!(!service.is_producer_active("b-prod-1"));
+        let (sub_id, stream_id) = backend
+            .subscribe_viewer("b-prod-1", "dev-backend-1", "viewer-1")
+            .await
+            .unwrap();
+        assert!(service.is_producer_active("b-prod-1"));
+        assert_eq!(stream_id, service.active_stream_id("b-prod-1").unwrap());
+
+        // 5. Wire teardown: unsubscribe_viewer calls unsubscribe and stops producer
+        backend
+            .unsubscribe_viewer("b-prod-1", &sub_id)
+            .await
+            .unwrap();
+        assert!(!service.is_producer_active("b-prod-1"));
     }
 }

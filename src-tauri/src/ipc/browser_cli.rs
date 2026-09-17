@@ -111,6 +111,78 @@ pub enum BrowserCliRequest {
     },
 }
 
+/// Custom serde deserializer that cleanly converts between a u64 integer or decimal string
+/// without falling back to legacy modes or non-numeric types.
+pub fn deserialize_u64_or_decimal_string<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct U64OrDecimalStringVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for U64OrDecimalStringVisitor {
+        type Value = Option<u64>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a u64 integer or a decimal string")
+        }
+
+        fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(v))
+        }
+
+        fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            if v >= 0 {
+                Ok(Some(v as u64))
+            } else {
+                Err(E::custom("expected non-negative integer for u64"))
+            }
+        }
+
+        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            trimmed
+                .parse::<u64>()
+                .map(Some)
+                .map_err(|_| E::custom(format!("invalid decimal string for u64: '{v}'")))
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_some<D2>(self, deserializer: D2) -> Result<Self::Value, D2::Error>
+        where
+            D2: serde::Deserializer<'de>,
+        {
+            deserializer.deserialize_any(self)
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(None)
+        }
+    }
+
+    deserializer.deserialize_option(U64OrDecimalStringVisitor)
+}
+
 /// Closed remote browser operations permitted over framed remote transport.
 ///
 /// Disallows legacy CLI commands (List, Open, Close, Focus, Screenshot, Cookies, Storage, Act, Snapshot, RemoteAttach)
@@ -142,12 +214,20 @@ pub enum RemoteBrowserOperation {
         reference: Option<String>,
         #[serde(default)]
         snapshot_id: Option<String>,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "deserialize_u64_or_decimal_string")]
         map_revision: Option<u64>,
         #[serde(default)]
         u: Option<f64>,
         #[serde(default)]
         v: Option<f64>,
+        #[serde(default)]
+        stream_id: Option<u32>,
+        #[serde(default)]
+        sequence_number: Option<u32>,
+        #[serde(default, deserialize_with = "deserialize_u64_or_decimal_string")]
+        document_generation: Option<u64>,
+        #[serde(default, deserialize_with = "deserialize_u64_or_decimal_string")]
+        viewport_revision: Option<u64>,
     },
     #[serde(rename_all = "camelCase")]
     Fill {
@@ -156,7 +236,7 @@ pub enum RemoteBrowserOperation {
         value: String,
         #[serde(default)]
         snapshot_id: Option<String>,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "deserialize_u64_or_decimal_string")]
         map_revision: Option<u64>,
     },
     #[serde(rename_all = "camelCase")]
@@ -168,6 +248,8 @@ pub enum RemoteBrowserOperation {
     Wait {
         browser_id: String,
         condition: BrowserWaitCondition,
+        #[serde(default)]
+        has_approval: bool,
     },
     #[serde(rename_all = "camelCase")]
     Eval {
@@ -178,6 +260,10 @@ pub enum RemoteBrowserOperation {
     },
     #[serde(rename_all = "camelCase")]
     GetState {
+        browser_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Snapshot {
         browser_id: String,
     },
 }
@@ -223,6 +309,17 @@ impl RemoteBrowserOperation {
                     .map_err(|e| IpcError::new(IpcErrorCode::InvalidArgument, e.to_string()))?;
                 Ok(())
             }
+            Self::Wait {
+                condition,
+                has_approval,
+                ..
+            } => {
+                if let BrowserWaitCondition::Function { script } = condition {
+                    crate::browser::remote_input::validate_eval_script(script, *has_approval)
+                        .map_err(|e| IpcError::new(IpcErrorCode::InvalidArgument, e.to_string()))?;
+                }
+                Ok(())
+            }
             Self::Click {
                 reference,
                 snapshot_id,
@@ -266,10 +363,18 @@ impl RemoteBrowserOperation {
                 }
                 Ok(())
             }
+            Self::Snapshot { browser_id } => {
+                if browser_id.trim().is_empty() {
+                    return Err(IpcError::new(
+                        IpcErrorCode::InvalidArgument,
+                        "browser_id cannot be empty",
+                    ));
+                }
+                Ok(())
+            }
             Self::Back { .. }
             | Self::Forward { .. }
             | Self::Reload { .. }
-            | Self::Wait { .. }
             | Self::GetState { .. } => Ok(()),
         }
     }
@@ -317,8 +422,38 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
             map_revision,
             u,
             v,
+            stream_id,
+            sequence_number,
+            document_generation,
+            viewport_revision,
         } => {
             let state = manager.get_state(&browser_id)?;
+
+            // Geometry and document generation fencing against referenced frame metadata:
+            if let Some(frame_gen) = document_generation {
+                if state.generation != frame_gen {
+                    return Err(IpcError::new(
+                        IpcErrorCode::Custom("BROWSER_STALE_GENERATION".into()),
+                        format!(
+                            "stale click document generation: referenced frame has generation {frame_gen}, but manager generation is {}",
+                            state.generation
+                        ),
+                    ));
+                }
+            }
+
+            let (bounds, _zoom, current_vp_rev) = manager.get_geometry(&browser_id)?;
+
+            if let Some(frame_vp_rev) = viewport_revision {
+                if current_vp_rev != frame_vp_rev {
+                    return Err(IpcError::new(
+                        IpcErrorCode::Custom("BROWSER_STALE_VIEWPORT".into()),
+                        format!(
+                            "stale click viewport revision: referenced frame has revision {frame_vp_rev}, but manager revision is {current_vp_rev}"
+                        ),
+                    ));
+                }
+            }
 
             let script = if let Some(ref_str) = reference {
                 let (snap_id, map_rev) = match (snapshot_id, map_revision) {
@@ -354,7 +489,6 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                     selector_json
                 )
             } else if let (Some(u_val), Some(v_val)) = (u, v) {
-                let (bounds, _, _) = manager.get_geometry(&browser_id)?;
                 let rect = bounds.unwrap_or(crate::browser::model::LogicalRect {
                     x: 0.0,
                     y: 0.0,
@@ -385,7 +519,13 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                 .get_webview(&state.webview_label)
                 .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
             let _ = crate::ipc::browser::eval_webview(webview, script).await?;
-            Ok(serde_json::json!({ "clicked": true }))
+            Ok(serde_json::json!({
+                "clicked": true,
+                "streamId": stream_id,
+                "sequenceNumber": sequence_number,
+                "documentGeneration": state.generation,
+                "viewportRevision": current_vp_rev,
+            }))
         }
         RemoteBrowserOperation::Fill {
             browser_id,
@@ -459,6 +599,7 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
         RemoteBrowserOperation::Wait {
             browser_id,
             condition,
+            ..
         } => {
             crate::ipc::browser::wait_browser_session(app, manager, &browser_id, condition).await?;
             Ok(serde_json::json!({ "conditionMet": true }))
@@ -490,6 +631,49 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                 "generation": state.generation,
                 "viewportRevision": viewport_revision,
                 "bounds": bounds,
+            }))
+        }
+        RemoteBrowserOperation::Snapshot { browser_id } => {
+            let state = manager.get_state(&browser_id)?;
+            let webview = app
+                .get_webview(&state.webview_label)
+                .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
+            let result = crate::ipc::browser::eval_webview(
+                webview,
+                crate::ipc::browser::AUTOMATION_SNAPSHOT_SCRIPT.to_string(),
+            )
+            .await?;
+            let snapshot_json: String = serde_json::from_str(&result).map_err(|error| {
+                BrowserError::AutomationFailed(format!("invalid snapshot callback result: {error}"))
+            })?;
+            let snapshot: crate::ipc::browser::AutomationSnapshotResult =
+                serde_json::from_str(&snapshot_json).map_err(|error| {
+                    BrowserError::AutomationFailed(format!("invalid snapshot response: {error}"))
+                })?;
+            let targets = snapshot
+                .elements
+                .iter()
+                .map(|element| crate::browser::model::BrowserAutomationTarget {
+                    reference: element.reference.clone(),
+                    selector: element.selector.clone(),
+                })
+                .collect();
+            let (snapshot_id, map_revision) = manager
+                .record_remote_snapshot(&browser_id, state.generation, targets)
+                .map_err(|e| match e {
+                    BrowserError::AutomationSnapshotStale => IpcError::new(
+                        IpcErrorCode::Custom("BROWSER_INVALID_SNAPSHOT".into()),
+                        "document generation changed during snapshot capture",
+                    ),
+                    other => IpcError::from(other),
+                })?;
+
+            Ok(serde_json::json!({
+                "snapshotId": snapshot_id,
+                "mapRevision": map_revision,
+                "mapRevisionString": map_revision.to_string(),
+                "documentGeneration": state.generation.to_string(),
+                "elementsCount": snapshot.elements.len(),
             }))
         }
     }
@@ -2798,6 +2982,10 @@ mod tests {
             map_revision: None,
             u: None,
             v: None,
+            stream_id: None,
+            sequence_number: None,
+            document_generation: None,
+            viewport_revision: None,
         };
         let err_click = click_no_snap.validate().unwrap_err();
         assert_eq!(ipc_error_code_string(err_click.code), "BROWSER_INVALID_SNAPSHOT");
@@ -2822,6 +3010,10 @@ mod tests {
             map_revision: Some(1),
             u: None,
             v: None,
+            stream_id: None,
+            sequence_number: None,
+            document_generation: None,
+            viewport_revision: None,
         };
         let exec_err = execute_remote_operation(&app.handle().clone(), &manager, click_fake_snap)
             .await
@@ -2839,5 +3031,225 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(ipc_error_code_string(exec_err2.code), "BROWSER_INVALID_SNAPSHOT");
+    }
+
+    #[tokio::test]
+    async fn test_r8_r9_click_frame_metadata_fencing_and_decimal_string_conversion() {
+        // 1. Verify JSON deserialization of decimal string vs u64 for map_revision, document_generation, viewport_revision
+        let json_decimal_str = serde_json::json!({
+            "operation": "click",
+            "browserId": "b1",
+            "reference": "btn-ok",
+            "snapshotId": "snap-123",
+            "mapRevision": "42",
+            "streamId": 10,
+            "sequenceNumber": 100,
+            "documentGeneration": "5",
+            "viewportRevision": "8"
+        });
+        let op_from_str: RemoteBrowserOperation = serde_json::from_value(json_decimal_str).unwrap();
+        match op_from_str {
+            RemoteBrowserOperation::Click {
+                map_revision,
+                stream_id,
+                sequence_number,
+                document_generation,
+                viewport_revision,
+                ..
+            } => {
+                assert_eq!(map_revision, Some(42));
+                assert_eq!(stream_id, Some(10));
+                assert_eq!(sequence_number, Some(100));
+                assert_eq!(document_generation, Some(5));
+                assert_eq!(viewport_revision, Some(8));
+            }
+            _ => panic!("Expected Click operation"),
+        }
+
+        let json_numbers = serde_json::json!({
+            "operation": "click",
+            "browserId": "b1",
+            "reference": "btn-ok",
+            "snapshotId": "snap-123",
+            "mapRevision": 42,
+            "streamId": 10,
+            "sequenceNumber": 100,
+            "documentGeneration": 5,
+            "viewportRevision": 8
+        });
+        let op_from_num: RemoteBrowserOperation = serde_json::from_value(json_numbers).unwrap();
+        match op_from_num {
+            RemoteBrowserOperation::Click {
+                map_revision,
+                document_generation,
+                viewport_revision,
+                ..
+            } => {
+                assert_eq!(map_revision, Some(42));
+                assert_eq!(document_generation, Some(5));
+                assert_eq!(viewport_revision, Some(8));
+            }
+            _ => panic!("Expected Click operation"),
+        }
+
+        // Fill with decimal string mapRevision
+        let fill_decimal = serde_json::json!({
+            "operation": "fill",
+            "browserId": "b1",
+            "reference": "txt-name",
+            "value": "Ferryx",
+            "snapshotId": "snap-123",
+            "mapRevision": "99"
+        });
+        let fill_op: RemoteBrowserOperation = serde_json::from_value(fill_decimal).unwrap();
+        match fill_op {
+            RemoteBrowserOperation::Fill { map_revision, .. } => {
+                assert_eq!(map_revision, Some(99));
+            }
+            _ => panic!("Expected Fill operation"),
+        }
+
+        // Invalid non-decimal string fails deserialization (no legacy fallback)
+        let bad_json = serde_json::json!({
+            "operation": "click",
+            "browserId": "b1",
+            "reference": "btn-ok",
+            "snapshotId": "snap-123",
+            "mapRevision": "invalid-non-number"
+        });
+        assert!(serde_json::from_value::<RemoteBrowserOperation>(bad_json).is_err());
+
+        // 2. Test geometry / generation fencing in Click execution
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(BrowserManager::new());
+        let b = manager
+            .register_session(crate::browser::model::CreateBrowserRequest {
+                browser_id: Some("fenced-b1".into()),
+                workspace_id: None,
+                worktree_path: None,
+                url: "https://example.com".into(),
+                profile: None,
+                zoom_factor: None,
+                bounds: Some(crate::browser::model::LogicalRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 800.0,
+                    height: 600.0,
+                }),
+                visible: Some(true),
+            })
+            .unwrap();
+
+        // Stale document generation must fail with BROWSER_STALE_GENERATION
+        let stale_gen_click = RemoteBrowserOperation::Click {
+            browser_id: b.browser_id.clone(),
+            reference: None,
+            snapshot_id: None,
+            map_revision: None,
+            u: Some(0.5),
+            v: Some(0.5),
+            stream_id: Some(1),
+            sequence_number: Some(1),
+            document_generation: Some(b.generation + 99), // Stale!
+            viewport_revision: Some(1),
+        };
+        let err_gen = execute_remote_operation(&app.handle().clone(), &manager, stale_gen_click)
+            .await
+            .unwrap_err();
+        assert_eq!(ipc_error_code_string(err_gen.code), "BROWSER_STALE_GENERATION");
+
+        // Stale viewport revision must fail with BROWSER_STALE_VIEWPORT
+        let stale_vp_click = RemoteBrowserOperation::Click {
+            browser_id: b.browser_id.clone(),
+            reference: None,
+            snapshot_id: None,
+            map_revision: None,
+            u: Some(0.5),
+            v: Some(0.5),
+            stream_id: Some(1),
+            sequence_number: Some(1),
+            document_generation: Some(b.generation),
+            viewport_revision: Some(999), // Stale!
+        };
+        let err_vp = execute_remote_operation(&app.handle().clone(), &manager, stale_vp_click)
+            .await
+            .unwrap_err();
+        assert_eq!(ipc_error_code_string(err_vp.code), "BROWSER_STALE_VIEWPORT");
+
+        // 3. RemoteBrowserOperation::Snapshot validation
+        let snap_empty = RemoteBrowserOperation::Snapshot {
+            browser_id: "  ".into(),
+        };
+        assert!(snap_empty.validate().is_err());
+
+        let snap_valid = RemoteBrowserOperation::Snapshot {
+            browser_id: "fenced-b1".into(),
+        };
+        assert!(snap_valid.validate().is_ok());
+    }
+
+    #[test]
+    fn test_secondary_wait_function_condition_consent_and_size_limit() {
+        use crate::browser::model::BrowserWaitCondition;
+
+        // 1. Function condition without approval must be rejected
+        let wait_no_approval = RemoteBrowserOperation::Wait {
+            browser_id: "b1".into(),
+            condition: BrowserWaitCondition::Function {
+                script: "() => true".into(),
+            },
+            has_approval: false,
+        };
+        let err_no_appr = wait_no_approval.validate().unwrap_err();
+        assert!(
+            err_no_appr.message.contains("approval")
+                || format!("{:?}", err_no_appr).contains("approval")
+        );
+
+        // 2. Function condition with script > 32 KiB must be rejected
+        let huge_script = "x".repeat(32 * 1024 + 1);
+        let wait_too_large = RemoteBrowserOperation::Wait {
+            browser_id: "b1".into(),
+            condition: BrowserWaitCondition::Function {
+                script: huge_script,
+            },
+            has_approval: true,
+        };
+        let err_too_large = wait_too_large.validate().unwrap_err();
+        assert!(
+            err_too_large.message.contains("large")
+                || format!("{:?}", err_too_large).contains("large")
+        );
+
+        // 3. Function condition with approval and script <= 32 KiB must succeed
+        let wait_valid = RemoteBrowserOperation::Wait {
+            browser_id: "b1".into(),
+            condition: BrowserWaitCondition::Function {
+                script: "document.title === 'Done'".into(),
+            },
+            has_approval: true,
+        };
+        assert!(wait_valid.validate().is_ok());
+
+        // 4. Non-function condition succeeds even with has_approval: false
+        let wait_selector = RemoteBrowserOperation::Wait {
+            browser_id: "b1".into(),
+            condition: BrowserWaitCondition::Selector {
+                selector: "#ready-btn".into(),
+            },
+            has_approval: false,
+        };
+        assert!(wait_selector.validate().is_ok());
+
+        let wait_text = RemoteBrowserOperation::Wait {
+            browser_id: "b1".into(),
+            condition: BrowserWaitCondition::Text {
+                text: "Success".into(),
+            },
+            has_approval: false,
+        };
+        assert!(wait_text.validate().is_ok());
     }
 }

@@ -5,10 +5,10 @@
  * and RemoteBrowser. Wires controls, mainframe point click, and mobile IME handling.
  */
 
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { RemoteBrowser, type RemoteBrowserPointClickEvent } from "./RemoteBrowser";
 import { RemoteBrowserControls } from "./RemoteBrowserControls";
-import type { BrowserSubscribeOptions } from "./browserProtocol";
+import { reconcileMapRevision, type BrowserSubscribeOptions } from "./browserProtocol";
 import { useRemoteBrowser } from "./useRemoteBrowser";
 import { useRemoteBrowserDriver } from "./useRemoteBrowserDriver";
 
@@ -59,8 +59,23 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
   const documentGeneration =
     frame?.metadata.documentGeneration ?? browserState?.documentGeneration ?? "1";
   const viewportRevision = frame?.metadata.viewportRevision;
-  const snapshotId = browserState?.snapshotId;
-  const mapRevision = browserState?.mapRevision;
+
+  // Track snapshotId and mapRevision (reconciled to decimal string)
+  const [workspaceSnapshotId, setWorkspaceSnapshotId] = useState<string | null>(
+    browserState?.snapshotId ?? null
+  );
+  const [workspaceMapRevision, setWorkspaceMapRevision] = useState<string | null>(
+    reconcileMapRevision(browserState?.mapRevision) ?? null
+  );
+
+  useEffect(() => {
+    if (browserState?.snapshotId) {
+      setWorkspaceSnapshotId(browserState.snapshotId);
+    }
+    if (browserState?.mapRevision !== undefined) {
+      setWorkspaceMapRevision(reconcileMapRevision(browserState.mapRevision) ?? null);
+    }
+  }, [browserState?.snapshotId, browserState?.mapRevision]);
 
   // 2. Remote driver lifecycle hook
   const driver = useRemoteBrowserDriver({
@@ -70,8 +85,8 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
     desktopEpoch,
     documentGeneration,
     viewportRevision,
-    snapshotId,
-    mapRevision,
+    snapshotId: workspaceSnapshotId ?? browserState?.snapshotId,
+    mapRevision: workspaceMapRevision ?? reconcileMapRevision(browserState?.mapRevision),
   });
 
   // Capability check for mainframe point click
@@ -87,6 +102,10 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
   const [isComposing, setIsComposing] = useState(false);
   const [imeTargetRef, setImeTargetRef] = useState("active");
   const [showImeBar, setShowImeBar] = useState(false);
+
+  // Revision-Keyed Submission Queue for IME
+  const imeSubmissionSeqRef = useRef<number>(0);
+  const pendingImeSubmissionsRef = useRef<Map<number, { submittedLength: number }>>(new Map());
 
   // Wire point click with normalized (u, v) coordinates when in driving mode
   const handlePointClick = (point: RemoteBrowserPointClickEvent) => {
@@ -105,30 +124,68 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
   };
 
   // Mobile IME submission: do NOT dispatch intermediate composition keystrokes; send confirmed text via fill
-  // IME Revision-based Clearing: track submitted text revision so newly typed characters during fill execution are NOT erased!
+  // Revision-Keyed Submission Queue: monotonic revision counter ensures newly typed characters while fill is in flight are NEVER lost
   const handleImeSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isComposing) {
       // Do NOT send during composition
       return;
     }
-    if (!imeText.trim() || driver.driverState !== "driving") return;
+    if (driver.driverState !== "driving") return;
 
-    const submittedText = imeText;
+    // Calculate characters currently in flight across pending submissions
+    let inFlightLength = 0;
+    for (const pending of pendingImeSubmissionsRef.current.values()) {
+      inFlightLength += pending.submittedLength;
+    }
+
+    const unsubmittedText = imeText.slice(inFlightLength);
+    if (!unsubmittedText.trim()) return;
+
+    // Monotonic submission revision counter
+    const submissionRev = ++imeSubmissionSeqRef.current;
+    const submittedLength = unsubmittedText.length;
+    pendingImeSubmissionsRef.current.set(submissionRev, { submittedLength });
+
+    // Acquire remote snapshot before fill when needed (for snapshot element references)
+    const isTargetRef = Boolean(
+      imeTargetRef &&
+      imeTargetRef !== "active" &&
+      !imeTargetRef.startsWith("#") &&
+      !imeTargetRef.startsWith(".")
+    );
+    let effectiveSnapId = workspaceSnapshotId ?? driver.snapshotId;
+    let effectiveMapRev = workspaceMapRevision ?? driver.mapRevision;
+    if (isTargetRef && (!effectiveSnapId || !effectiveMapRev) && client && typeof client.takeSnapshot === "function") {
+      try {
+        const snap = await client.takeSnapshot(browserId);
+        effectiveSnapId = snap.snapshotId;
+        effectiveMapRev = reconcileMapRevision(snap.mapRevision) ?? null;
+        setWorkspaceSnapshotId(effectiveSnapId);
+        setWorkspaceMapRevision(effectiveMapRev);
+      } catch {
+        // Fall through to driver.fill which handles/reports
+      }
+    }
+
     try {
-      await driver.fill(imeTargetRef || "active", submittedText);
-      // Only clear if the current buffer matches submittedText, or slice off submittedText if more was typed
-      setImeText((current) => {
-        if (current === submittedText) {
-          return "";
+      await driver.fill(
+        imeTargetRef || "active",
+        unsubmittedText,
+        {
+          snapshotId: effectiveSnapId ?? undefined,
+          mapRevision: effectiveMapRev ?? undefined,
         }
-        if (current.startsWith(submittedText)) {
-          return current.slice(submittedText.length);
-        }
-        return current;
-      });
+      );
+      // Revision-keyed completion: only clear/slice characters belonging to this exact revision
+      const pending = pendingImeSubmissionsRef.current.get(submissionRev);
+      if (pending) {
+        pendingImeSubmissionsRef.current.delete(submissionRev);
+        setImeText((current) => current.slice(Math.min(current.length, pending.submittedLength)));
+      }
     } catch {
-      // Keep imeText on failure so user does not lose typed text
+      // On failure, remove from queue and retain buffer so user does not lose typed text
+      pendingImeSubmissionsRef.current.delete(submissionRev);
     }
   };
 

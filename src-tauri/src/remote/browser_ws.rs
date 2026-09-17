@@ -4,6 +4,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 use crate::remote::auth::DevicePermission;
 use crate::remote::browser_admission::{AdmissionController, SubscriberQueue, CONTROL_QUEUE_MAX_COUNT};
 use crate::remote::browser_backend::{
@@ -15,51 +16,6 @@ use crate::remote::browser_security::{
     MAX_FILL_BYTES, MAX_REQUEST_WIRE_BYTES, MAX_SCRIPT_BYTES,
 };
 
-pub mod tokio_util {
-    pub mod sync {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
-        use tokio::sync::Notify;
-
-        #[derive(Clone, Debug)]
-        pub struct CancellationToken {
-            cancelled: Arc<AtomicBool>,
-            notify: Arc<Notify>,
-        }
-
-        impl CancellationToken {
-            pub fn new() -> Self {
-                Self {
-                    cancelled: Arc::new(AtomicBool::new(false)),
-                    notify: Arc::new(Notify::new()),
-                }
-            }
-
-            pub fn cancel(&self) {
-                self.cancelled.store(true, Ordering::SeqCst);
-                self.notify.notify_waiters();
-            }
-
-            pub fn is_cancelled(&self) -> bool {
-                self.cancelled.load(Ordering::SeqCst)
-            }
-
-            pub async fn cancelled(&self) {
-                if self.is_cancelled() {
-                    return;
-                }
-                self.notify.notified().await;
-            }
-        }
-
-        impl Default for CancellationToken {
-            fn default() -> Self {
-                Self::new()
-            }
-        }
-    }
-}
-
 pub fn sanitize_json_value(val: serde_json::Value) -> serde_json::Value {
     match val {
         serde_json::Value::String(s) => serde_json::Value::String(sanitize_public_string(&s)),
@@ -69,7 +25,7 @@ pub fn sanitize_json_value(val: serde_json::Value) -> serde_json::Value {
         serde_json::Value::Object(map) => {
             let mut new_map = serde_json::Map::with_capacity(map.len());
             for (k, v) in map {
-                new_map.insert(k, sanitize_json_value(v));
+                new_map.insert(sanitize_public_string(&k), sanitize_json_value(v));
             }
             serde_json::Value::Object(new_map)
         }
@@ -98,10 +54,11 @@ pub struct BrowserWsSession {
     pub subscription_id: Option<String>,
     pub stream_id: u32,
     pub queue: Option<SubscriberQueue>,
+    pub backend_subscription_id: Option<String>,
     pub dedup: Arc<RequestDeduplicator>,
     pub eval_semaphore: Arc<Semaphore>,
     pub command_semaphore: Arc<Semaphore>,
-    pub cancel_token: tokio_util::sync::CancellationToken,
+    pub cancel_token: CancellationToken,
     pub last_heartbeat: Instant,
     pub pending_promoted_frame: Option<Vec<u8>>,
 }
@@ -141,16 +98,20 @@ impl BrowserWsSession {
             subscription_id: None,
             stream_id: 1,
             queue: None,
+            backend_subscription_id: None,
             dedup: Arc::new(RequestDeduplicator::new()),
             eval_semaphore: Arc::new(Semaphore::new(1)),
             command_semaphore: Arc::new(Semaphore::new(CONTROL_QUEUE_MAX_COUNT)),
-            cancel_token: tokio_util::sync::CancellationToken::new(),
+            cancel_token: CancellationToken::new(),
             last_heartbeat: now,
             pending_promoted_frame: None,
         }
     }
 
     pub fn enqueue_frame(&mut self, frame_bytes: Vec<u8>, now: Instant) -> Option<Vec<u8>> {
+        if self.state == WsConnectionState::Paused {
+            return None;
+        }
         let queue = self.queue.as_mut()?;
         let seq = if frame_bytes.len() >= 8 {
             u32::from_le_bytes(frame_bytes[4..8].try_into().unwrap_or([0; 4]))
@@ -252,6 +213,29 @@ impl BrowserWsSession {
                     return Ok(());
                 }
 
+                // Wire subscription ownership and reconcile stream identity with backend
+                match backend
+                    .subscribe_viewer(&self.browser_id, &self.device_id, &viewer_instance_id)
+                    .await
+                {
+                    Ok((backend_sub, stream_id)) => {
+                        self.backend_subscription_id = Some(backend_sub);
+                        self.stream_id = stream_id;
+                    }
+                    Err(e) => {
+                        admission.unsubscribe(&self.browser_id, &sub_id);
+                        let err = browser_error(
+                            Some(request_id),
+                            "BROWSER_SUBSCRIPTION_FAILED",
+                            format!("Backend subscription failed: {e}"),
+                            false,
+                            None,
+                        );
+                        let _ = out_tx.send(err).await;
+                        return Ok(());
+                    }
+                }
+
                 let queue = SubscriberQueue::new(sub_id.clone(), self.stream_id);
                 self.queue = Some(queue);
                 self.subscription_id = Some(sub_id.clone());
@@ -273,9 +257,11 @@ impl BrowserWsSession {
             }
 
             ClientMessage::BrowserFrameAck { stream_id, seq } => {
-                if let Some(queue) = self.queue.as_mut() {
-                    if let Some((_promoted_seq, promoted_bytes)) = queue.acknowledge_frame(stream_id, seq, now) {
-                        self.pending_promoted_frame = Some(promoted_bytes);
+                if self.state != WsConnectionState::Paused {
+                    if let Some(queue) = self.queue.as_mut() {
+                        if let Some((_promoted_seq, promoted_bytes)) = queue.acknowledge_frame(stream_id, seq, now) {
+                            self.pending_promoted_frame = Some(promoted_bytes);
+                        }
                     }
                 }
                 Ok(())
@@ -755,12 +741,27 @@ impl BrowserWsSession {
                 request_id,
                 subscription_id,
             } => {
+                if let Some(backend_sub) = self.backend_subscription_id.take() {
+                    let _ = backend.unsubscribe_viewer(&self.browser_id, &backend_sub).await;
+                }
                 self.teardown(admission);
                 let resp = ServerMessage::BrowserUnsubscribed {
                     request_id,
                     subscription_id,
                 };
                 let _ = out_tx.send(resp).await;
+                Ok(())
+            }
+
+            ClientMessage::BrowserPause { .. } => {
+                self.state = WsConnectionState::Paused;
+                Ok(())
+            }
+
+            ClientMessage::BrowserResume { .. } => {
+                if self.subscription_id.is_some() {
+                    self.state = WsConnectionState::Streaming;
+                }
                 Ok(())
             }
         }
@@ -799,6 +800,17 @@ impl BrowserWsSession {
         }
         self.is_driver = false;
         self.state = WsConnectionState::Closed;
+    }
+
+    pub async fn teardown_with_backend(
+        &mut self,
+        admission: &AdmissionController,
+        backend: &Arc<dyn RemoteBrowserBackend>,
+    ) {
+        if let Some(backend_sub) = self.backend_subscription_id.take() {
+            let _ = backend.unsubscribe_viewer(&self.browser_id, &backend_sub).await;
+        }
+        self.teardown(admission);
     }
 }
 
@@ -1770,5 +1782,78 @@ pub mod tests {
         rt.block_on(session.dispatch_client_message(ack, &backend, &admission, &out_tx, now)).unwrap();
 
         assert_eq!(session.pending_promoted_frame, Some(f3));
+    }
+
+    #[tokio::test]
+    async fn test_ws_r10_pause_and_resume_protocol() {
+        let now = Instant::now();
+        let mut session = BrowserWsSession::new(
+            "c-pause".into(),
+            "d-pause".into(),
+            "b1".into(),
+            DevicePermission::Control,
+            now,
+        );
+
+        let admission = AdmissionController::new();
+        let backend: Arc<dyn RemoteBrowserBackend> = Arc::new(InProcessTestBackend::new());
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(16);
+
+        // 1. Subscribe to enter Streaming state
+        let sub = ClientMessage::BrowserSubscribe {
+            request_id: "r-sub".into(),
+            viewer_instance_id: "v1".into(),
+            options: Default::default(),
+        };
+        session.dispatch_client_message(sub, &backend, &admission, &out_tx, now).await.unwrap();
+        let _ = out_rx.recv().await.unwrap(); // BrowserSubscribed
+        assert_eq!(session.state, WsConnectionState::Streaming);
+
+        // Frame 1 admitted when streaming
+        let f1 = vec![0x62, 1, 1, 1, 1, 0, 0, 0, 10, 20];
+        assert_eq!(session.enqueue_frame(f1.clone(), now), Some(f1));
+
+        // Acknowledge frame 1 so queue has no unacked frame
+        let ack1 = ClientMessage::BrowserFrameAck { stream_id: 1, seq: 1 };
+        session.dispatch_client_message(ack1, &backend, &admission, &out_tx, now).await.unwrap();
+
+        // 2. Pause session via BrowserPause
+        let pause = ClientMessage::BrowserPause {
+            request_id: Some("p1".into()),
+            subscription_id: session.subscription_id.clone(),
+        };
+        session.dispatch_client_message(pause, &backend, &admission, &out_tx, now).await.unwrap();
+        assert_eq!(session.state, WsConnectionState::Paused);
+        assert!(session.subscription_id.is_some(), "Session not torn down on pause");
+
+        // While paused: frames are NOT forwarded (enqueue_frame returns None even without unacked frame)
+        let f2 = vec![0x62, 1, 1, 1, 2, 0, 0, 0, 30, 40];
+        assert_eq!(session.enqueue_frame(f2.clone(), now), None);
+
+        // While paused: ACKs are paused and do NOT promote frames
+        let ack2 = ClientMessage::BrowserFrameAck { stream_id: 1, seq: 2 };
+        session.dispatch_client_message(ack2, &backend, &admission, &out_tx, now).await.unwrap();
+        assert_eq!(session.pending_promoted_frame, None);
+
+        // 3. Resume session via BrowserResume
+        let resume = ClientMessage::BrowserResume {
+            request_id: Some("r1".into()),
+            subscription_id: session.subscription_id.clone(),
+        };
+        session.dispatch_client_message(resume, &backend, &admission, &out_tx, now).await.unwrap();
+        assert_eq!(session.state, WsConnectionState::Streaming);
+
+        // After resume: frame forwarding works again
+        let f3 = vec![0x62, 1, 1, 1, 3, 0, 0, 0, 50, 60];
+        assert_eq!(session.enqueue_frame(f3.clone(), now), Some(f3));
+
+        // Subsequent frame is backpressured until ACK
+        let f4 = vec![0x62, 1, 1, 1, 4, 0, 0, 0, 70, 80];
+        assert_eq!(session.enqueue_frame(f4.clone(), now), None);
+
+        // ACK for frame 3 promotes frame 4
+        let ack3 = ClientMessage::BrowserFrameAck { stream_id: 1, seq: 3 };
+        session.dispatch_client_message(ack3, &backend, &admission, &out_tx, now).await.unwrap();
+        assert_eq!(session.pending_promoted_frame, Some(f4));
     }
 }

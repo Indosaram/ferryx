@@ -65,12 +65,31 @@ pub fn sanitize_url(url_str: &str) -> Result<String, SecurityError> {
 
 pub fn sanitize_public_string(raw: &str) -> String {
     // Redact absolute paths matching Unix /Users/, /home/, /private/, Windows drives C:\, D:\, or UNC \\
+    // Preserves HTTP/HTTPS URLs even if they contain /Users/, /home/, /private/, or C:\ (e.g. in path or query).
     let mut out = String::with_capacity(raw.len());
     let mut chars = raw.char_indices().peekable();
 
     while let Some((idx, ch)) = chars.next() {
         let remainder = &raw[idx..];
-        if remainder.starts_with("/Users/")
+        if remainder.starts_with("http://") || remainder.starts_with("https://") {
+            out.push(ch);
+            while let Some(&(_, c)) = chars.peek() {
+                if c.is_whitespace()
+                    || c == '"'
+                    || c == '\''
+                    || c == '`'
+                    || c == '<'
+                    || c == '>'
+                    || c == ')'
+                    || c == '}'
+                    || c == ']'
+                {
+                    break;
+                }
+                let (_, next_ch) = chars.next().unwrap();
+                out.push(next_ch);
+            }
+        } else if remainder.starts_with("/Users/")
             || remainder.starts_with("/home/")
             || remainder.starts_with("/private/")
         {

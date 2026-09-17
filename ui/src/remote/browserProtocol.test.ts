@@ -3,6 +3,7 @@ import {
   decodeFrame,
   encodeFrame,
   parseServerMessage,
+  reconcileMapRevision,
   serializeClientMessage,
   type BrowserFrame,
   type BrowserFrameMetadata,
@@ -11,6 +12,10 @@ import {
   type BrowserCommandMessage,
   type BrowserStateMessage,
   type BrowserErrorMessage,
+  type BrowserSnapshotClientMessage,
+  type BrowserSnapshotServerMessage,
+  type BrowserPauseMessage,
+  type BrowserResumeMessage,
 } from "./browserProtocol";
 
 // Helpers to create valid test fixtures
@@ -825,6 +830,99 @@ describe("browserProtocol - Phase 7B edge cases (§7.1)", () => {
           }),
         ),
       ).toThrow(/unknown field/i);
+    });
+  });
+
+  describe("R9 & R10 Protocol Extensions (BrowserSnapshot, BrowserPause, BrowserResume)", () => {
+    it("parses valid browserSnapshot server message with string mapRevision", () => {
+      const snapMsg: BrowserSnapshotServerMessage = {
+        type: "browserSnapshot",
+        requestId: "req-snap-1",
+        snapshotId: "snap-123",
+        mapRevision: "42",
+        root: { tag: "BODY" },
+        elements: [{ id: "e1", tag: "BUTTON" }],
+      };
+
+      const parsed = parseServerMessage(JSON.stringify(snapMsg));
+      expect(parsed).toEqual(snapMsg);
+    });
+
+    it("parses browserSnapshot and reconciles integer mapRevision cleanly to decimal string", () => {
+      const raw = {
+        type: "browserSnapshot",
+        requestId: "req-snap-2",
+        snapshotId: "snap-456",
+        mapRevision: 108,
+        elements: [],
+      };
+
+      const parsed = parseServerMessage(JSON.stringify(raw)) as BrowserSnapshotServerMessage;
+      expect(parsed.mapRevision).toBe("108");
+      expect(typeof parsed.mapRevision).toBe("string");
+    });
+
+    it("rejects browserSnapshot with non-decimal-string and non-integer mapRevision", () => {
+      expect(() =>
+        parseServerMessage(
+          JSON.stringify({
+            type: "browserSnapshot",
+            requestId: "req-snap-3",
+            snapshotId: "snap-789",
+            mapRevision: "invalid_not_digits",
+          }),
+        ),
+      ).toThrow(/mapRevision must be a u64 decimal string/i);
+    });
+
+    it("rejects browserSnapshot with unknown fields", () => {
+      expect(() =>
+        parseServerMessage(
+          JSON.stringify({
+            type: "browserSnapshot",
+            requestId: "req-snap-4",
+            snapshotId: "snap-789",
+            mapRevision: "1",
+            unexpected: true,
+          }),
+        ),
+      ).toThrow(/unknown field/i);
+    });
+
+    it("serializes BrowserSnapshotClientMessage, BrowserPauseMessage, and BrowserResumeMessage cleanly", () => {
+      const snapReq: BrowserSnapshotClientMessage = {
+        type: "browserSnapshot",
+        requestId: "req-snap-client",
+        browserId: "b-test",
+      };
+      expect(JSON.parse(serializeClientMessage(snapReq))).toEqual(snapReq);
+
+      const pauseMsg: BrowserPauseMessage = {
+        type: "browserPause",
+        browserId: "b-test",
+        streamId: 3,
+      };
+      expect(JSON.parse(serializeClientMessage(pauseMsg))).toEqual(pauseMsg);
+
+      const resumeMsg: BrowserResumeMessage = {
+        type: "browserResume",
+        browserId: "b-test",
+        streamId: 3,
+      };
+      expect(JSON.parse(serializeClientMessage(resumeMsg))).toEqual(resumeMsg);
+    });
+
+    it("reconcileMapRevision handles decimal strings, integers, bigints, and invalid types cleanly without legacy fallback", () => {
+      expect(reconcileMapRevision("42")).toBe("42");
+      expect(reconcileMapRevision("   99   ")).toBe("99");
+      expect(reconcileMapRevision(100)).toBe("100");
+      expect(reconcileMapRevision(0)).toBe("0");
+      expect(reconcileMapRevision(123.45)).toBe("123");
+      expect(reconcileMapRevision(BigInt("9999999999999999"))).toBe("9999999999999999");
+      expect(reconcileMapRevision(undefined)).toBeUndefined();
+      expect(reconcileMapRevision(null)).toBeUndefined();
+      expect(reconcileMapRevision(-5)).toBeUndefined();
+      expect(reconcileMapRevision(true)).toBeUndefined();
     });
   });
 });

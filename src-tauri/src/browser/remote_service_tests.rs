@@ -498,6 +498,10 @@ fn test_remote_browser_operation_validation_and_legacy_isolation() {
         map_revision: Some(1),
         u: None,
         v: None,
+        stream_id: None,
+        sequence_number: None,
+        document_generation: None,
+        viewport_revision: None,
     };
     assert!(click_ref_op.validate().is_ok());
 
@@ -508,6 +512,10 @@ fn test_remote_browser_operation_validation_and_legacy_isolation() {
         map_revision: None,
         u: Some(0.5),
         v: Some(0.5),
+        stream_id: None,
+        sequence_number: None,
+        document_generation: None,
+        viewport_revision: None,
     };
     assert!(click_point_op.validate().is_ok());
 
@@ -520,6 +528,10 @@ fn test_remote_browser_operation_validation_and_legacy_isolation() {
         map_revision: None,
         u: Some(1.5), // > 1.0
         v: Some(0.5),
+        stream_id: None,
+        sequence_number: None,
+        document_generation: None,
+        viewport_revision: None,
     };
     assert!(click_oob.validate().is_err());
 
@@ -531,6 +543,10 @@ fn test_remote_browser_operation_validation_and_legacy_isolation() {
         map_revision: None,
         u: Some(f64::NAN),
         v: Some(0.5),
+        stream_id: None,
+        sequence_number: None,
+        document_generation: None,
+        viewport_revision: None,
     };
     assert!(click_nan.validate().is_err());
 
@@ -542,6 +558,10 @@ fn test_remote_browser_operation_validation_and_legacy_isolation() {
         map_revision: None,
         u: None,
         v: None,
+        stream_id: None,
+        sequence_number: None,
+        document_generation: None,
+        viewport_revision: None,
     };
     assert!(click_empty_ref.validate().is_err());
 
@@ -700,6 +720,10 @@ fn test_r9_remote_reference_operations_require_snapshot_and_revision() {
         map_revision: Some(1),
         u: None,
         v: None,
+        stream_id: None,
+        sequence_number: None,
+        document_generation: None,
+        viewport_revision: None,
     };
     assert!(click_valid.validate().is_ok());
 
@@ -710,6 +734,10 @@ fn test_r9_remote_reference_operations_require_snapshot_and_revision() {
         map_revision: Some(1),
         u: None,
         v: None,
+        stream_id: None,
+        sequence_number: None,
+        document_generation: None,
+        viewport_revision: None,
     };
     let err = click_missing_snap.validate().unwrap_err();
     assert_eq!(format!("{:?}", err.code), "Custom(\"BROWSER_INVALID_SNAPSHOT\")");
@@ -721,6 +749,10 @@ fn test_r9_remote_reference_operations_require_snapshot_and_revision() {
         map_revision: Some(1),
         u: None,
         v: None,
+        stream_id: None,
+        sequence_number: None,
+        document_generation: None,
+        viewport_revision: None,
     };
     let err2 = click_empty_snap.validate().unwrap_err();
     assert_eq!(format!("{:?}", err2.code), "Custom(\"BROWSER_INVALID_SNAPSHOT\")");
@@ -732,6 +764,10 @@ fn test_r9_remote_reference_operations_require_snapshot_and_revision() {
         map_revision: None,
         u: None,
         v: None,
+        stream_id: None,
+        sequence_number: None,
+        document_generation: None,
+        viewport_revision: None,
     };
     let err3 = click_missing_rev.validate().unwrap_err();
     assert_eq!(format!("{:?}", err3.code), "Custom(\"BROWSER_INVALID_SNAPSHOT\")");
@@ -744,6 +780,10 @@ fn test_r9_remote_reference_operations_require_snapshot_and_revision() {
         map_revision: None,
         u: Some(0.5),
         v: Some(0.5),
+        stream_id: None,
+        sequence_number: None,
+        document_generation: None,
+        viewport_revision: None,
     };
     assert!(click_coord.validate().is_ok());
 
@@ -766,4 +806,46 @@ fn test_r9_remote_reference_operations_require_snapshot_and_revision() {
     };
     let err4 = fill_missing_snap.validate().unwrap_err();
     assert_eq!(format!("{:?}", err4.code), "Custom(\"BROWSER_INVALID_SNAPSHOT\")");
+}
+
+#[tokio::test]
+async fn test_r7_native_capture_permit_retention_across_producer_restart_on_timeout() {
+    let (service, _manager, b1, _) = setup_test_environment();
+
+    // Source that times out initially
+    let fake_source = Arc::new(FakeBrowserSnapshotSource::new(
+        FakeSnapshotBehavior::Timeout,
+    ).with_timeout(std::time::Duration::from_millis(50)));
+    service.set_snapshot_source(fake_source.clone());
+
+    assert_eq!(service.native_capture_semaphore().available_permits(), 1);
+
+    // Subscribe viewer 1 -> producer starts
+    let sub1 = service.subscribe(&b1, "dev-timeout-1", "v1").unwrap();
+
+    // Wait until timeout occurs inside capture task
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    // Because timeout occurred and callback hasn't arrived, permit is retained!
+    assert!(
+        service.is_native_capture_active(),
+        "Native capture permit must be retained across timeout while callback is in-flight"
+    );
+    assert_eq!(service.native_capture_semaphore().available_permits(), 0);
+
+    // Unsubscribe viewer 1 (producer stops/aborted)
+    service.unsubscribe(&b1, &sub1);
+
+    // Producer restarted: new viewer subscribes
+    let sub2 = service.subscribe(&b1, "dev-timeout-2", "v2").unwrap();
+
+    // The permit remains retained so overlapping capture cannot run
+    assert_eq!(service.native_capture_semaphore().available_permits(), 0);
+
+    // Release quarantined permit (simulating late arrival or webview destruction)
+    service.release_quarantine(&b1);
+    assert_eq!(service.native_capture_semaphore().available_permits(), 1);
+    assert!(!service.is_native_capture_active());
+
+    service.unsubscribe(&b1, &sub2);
 }

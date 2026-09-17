@@ -269,6 +269,17 @@ fn test_capture_dimension_clamping_and_pixel_limits() {
     // 4. Zero dimensions handled safely
     let (w4, h4) = clamp_capture_dimensions(0, 0);
     assert_eq!((w4, h4), (1, 1));
+
+    // 5. Boundary case (2048, 1954): 2048 * 1954 = 4,001,792 > 4,000,000
+    // Explicit while loop ensures clamped_w * clamped_h <= 4_000_000 despite rounding
+    let (w5, h5) = clamp_capture_dimensions(2048, 1954);
+    let total_pixels_5 = (w5 as u64) * (h5 as u64);
+    assert!(
+        total_pixels_5 <= MAX_CAPTURE_PIXELS,
+        "Total pixels {total_pixels_5} must be <= {MAX_CAPTURE_PIXELS} for (2048, 1954)"
+    );
+    assert!(w5 <= 2048);
+    assert!(h5 <= 1954);
 }
 
 #[tokio::test]

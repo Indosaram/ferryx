@@ -732,5 +732,83 @@ describe("RemoteBrowser - Mobile Viewport & Touch Interaction (Phase 7B)", () =>
       // Since no new characters were typed, input is completely cleared
       expect(imeInput).toHaveValue("");
     });
+
+    it("handles multiple in-flight fill submissions cleanly without losing typed characters using monotonic revisions", async () => {
+      render(
+        <RemoteBrowserWorkspace
+          baseUrl="http://localhost:8080"
+          browserId="b-mobile-queue"
+          deviceToken="token-mobile-queue"
+          onBack={vi.fn()}
+        />,
+      );
+
+      const ws = await waitForSocket(0);
+      await establishStreaming(ws);
+
+      // Make driver active
+      await act(async () => {
+        ws.onmessage?.({
+          data: JSON.stringify({
+            type: "browserDriverChanged",
+            leaseEpoch: "epoch-ime-queue",
+            isDriver: true,
+          }),
+        });
+      });
+
+      // Open IME bar
+      fireEvent.click(screen.getByTestId("remote-browser-ime-toggle-btn"));
+      const imeInput = screen.getByTestId("remote-browser-ime-text-input");
+      const imeBar = screen.getByTestId("remote-browser-ime-bar");
+
+      // 1. User types "hello" and submits
+      fireEvent.change(imeInput, { target: { value: "hello" } });
+      const sentBefore1 = ws.sentMessages.length;
+      await act(async () => {
+        fireEvent.submit(imeBar);
+      });
+      const fill1 = JSON.parse(ws.sentMessages[sentBefore1] as string);
+      expect(fill1.command).toBe("fill");
+      expect(fill1.params.value).toBe("hello");
+
+      // 2. While fill 1 is in-flight, user types " world" and submits again
+      fireEvent.change(imeInput, { target: { value: "hello world" } });
+      const sentBefore2 = ws.sentMessages.length;
+      await act(async () => {
+        fireEvent.submit(imeBar);
+      });
+      const fill2 = JSON.parse(ws.sentMessages[sentBefore2] as string);
+      expect(fill2.command).toBe("fill");
+      expect(fill2.params.value).toBe(" world");
+
+      // 3. While both fills are in-flight, user types "!"
+      fireEvent.change(imeInput, { target: { value: "hello world!" } });
+
+      // 4. Fill 1 completes: only characters from fill 1 ("hello") are sliced
+      await act(async () => {
+        ws.onmessage?.({
+          data: JSON.stringify({
+            type: "browserResult",
+            requestId: fill1.requestId,
+            result: { ok: true },
+          }),
+        });
+      });
+      expect(imeInput).toHaveValue(" world!");
+
+      // 5. Fill 2 completes: only characters from fill 2 (" world") are sliced
+      await act(async () => {
+        ws.onmessage?.({
+          data: JSON.stringify({
+            type: "browserResult",
+            requestId: fill2.requestId,
+            result: { ok: true },
+          }),
+        });
+      });
+      // "!" typed while fills were in flight is completely preserved!
+      expect(imeInput).toHaveValue("!");
+    });
   });
 });

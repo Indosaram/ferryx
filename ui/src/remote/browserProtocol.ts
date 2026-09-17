@@ -565,6 +565,39 @@ export interface BrowserUnsubscribedMessage {
   subscriptionId: string;
 }
 
+export interface BrowserSnapshotClientMessage {
+  type: "browserSnapshot";
+  requestId: string;
+  browserId: string;
+}
+
+export interface BrowserSnapshotServerMessage {
+  type: "browserSnapshot";
+  requestId: string;
+  snapshotId: string;
+  mapRevision: string; // u64 decimal string
+  root?: unknown;
+  elements?: unknown[];
+}
+
+export interface BrowserPauseMessage {
+  type: "browserPause";
+  browserId: string;
+  streamId: number;
+}
+
+export interface BrowserResumeMessage {
+  type: "browserResume";
+  browserId: string;
+  streamId: number;
+}
+
+export type ClientBrowserSnapshot = BrowserSnapshotClientMessage;
+export type ServerBrowserSnapshot = BrowserSnapshotServerMessage;
+export type BrowserSnapshotMessage = BrowserSnapshotServerMessage;
+export type ClientBrowserPause = BrowserPauseMessage;
+export type ClientBrowserResume = BrowserResumeMessage;
+
 export type ServerMessage =
   | BrowserHelloMessage
   | BrowserSubscribedMessage
@@ -576,7 +609,8 @@ export type ServerMessage =
   | BrowserResultMessage
   | BrowserErrorMessage
   | BrowserStateMessage
-  | BrowserUnsubscribedMessage;
+  | BrowserUnsubscribedMessage
+  | BrowserSnapshotServerMessage;
 
 export type ClientMessage =
   | BrowserSubscribeMessage
@@ -585,7 +619,10 @@ export type ClientMessage =
   | BrowserDriverClaimMessage
   | BrowserDriverReleaseMessage
   | BrowserCommandMessage
-  | BrowserUnsubscribeMessage;
+  | BrowserUnsubscribeMessage
+  | BrowserSnapshotClientMessage
+  | BrowserPauseMessage
+  | BrowserResumeMessage;
 
 const SERVER_MESSAGE_ALLOWED_KEYS: Record<string, Set<string>> = {
   browserHello: new Set([
@@ -631,6 +668,14 @@ const SERVER_MESSAGE_ALLOWED_KEYS: Record<string, Set<string>> = {
     "mapRevision",
   ]),
   browserUnsubscribed: new Set(["type", "requestId", "subscriptionId"]),
+  browserSnapshot: new Set([
+    "type",
+    "requestId",
+    "snapshotId",
+    "mapRevision",
+    "root",
+    "elements",
+  ]),
 };
 
 const OPTIONS_ALLOWED_KEYS = new Set(["format", "quality", "intervalMs", "maxEdge"]);
@@ -795,9 +840,41 @@ export function parseServerMessage(jsonString: string): ServerMessage {
       if (typeof obj.subscriptionId !== "string") throw new Error("browserUnsubscribed: invalid subscriptionId");
       return obj as unknown as BrowserUnsubscribedMessage;
     }
+    case "browserSnapshot": {
+      if (typeof obj.requestId !== "string") throw new Error("browserSnapshot: invalid requestId");
+      if (typeof obj.snapshotId !== "string") throw new Error("browserSnapshot: invalid snapshotId");
+      if (typeof obj.mapRevision === "number" && Number.isFinite(obj.mapRevision) && obj.mapRevision >= 0) {
+        obj.mapRevision = Math.trunc(obj.mapRevision).toString();
+      }
+      if (!isU64DecimalString(obj.mapRevision)) {
+        throw new Error("browserSnapshot: mapRevision must be a u64 decimal string");
+      }
+      if (obj.elements !== undefined && !Array.isArray(obj.elements)) {
+        throw new Error("browserSnapshot: elements must be an array");
+      }
+      return obj as unknown as BrowserSnapshotServerMessage;
+    }
     default:
       throw new Error(`Unhandled message type: ${type}`);
   }
+}
+
+export function reconcileMapRevision(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (U64_DECIMAL_REGEX.test(trimmed)) {
+      return trimmed;
+    }
+    return trimmed;
+  }
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+    return Math.trunc(value).toString();
+  }
+  if (typeof value === "bigint" && value >= 0n) {
+    return value.toString();
+  }
+  return undefined;
 }
 
 export function serializeClientMessage(message: ClientMessage): string {

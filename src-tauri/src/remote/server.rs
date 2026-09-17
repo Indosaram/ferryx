@@ -2946,7 +2946,7 @@ async fn run_browser_ws_session(
     });
 
     if server_msg_tx.send(hello).await.is_err() {
-        session.teardown(&admission);
+        session.teardown_with_backend(&admission, &backend).await;
         return;
     }
 
@@ -2980,7 +2980,7 @@ async fn run_browser_ws_session(
                             let revoked_epoch = session.lease_epoch.take();
                             session.is_driver = false;
                             session.cancel_token.cancel();
-                            session.cancel_token = crate::remote::browser_ws::tokio_util::sync::CancellationToken::new();
+                            session.cancel_token = tokio_util::sync::CancellationToken::new();
                             let revoked_msg = ServerMessage::BrowserDriverRevoked {
                                 reason: Some("desktop_reclaim".into()),
                                 lease_epoch: revoked_epoch.map(|e| e.to_string()),
@@ -3003,7 +3003,7 @@ async fn run_browser_ws_session(
                                 let revoked_epoch = session.lease_epoch.take();
                                 session.is_driver = false;
                                 session.cancel_token.cancel();
-                                session.cancel_token = crate::remote::browser_ws::tokio_util::sync::CancellationToken::new();
+                                session.cancel_token = tokio_util::sync::CancellationToken::new();
                                 let revoked_msg = ServerMessage::BrowserDriverRevoked {
                                     reason: Some("desktop_reclaim".into()),
                                     lease_epoch: revoked_epoch.map(|e| e.to_string()),
@@ -3068,7 +3068,7 @@ async fn run_browser_ws_session(
         }
     }
 
-    session.teardown(&admission);
+    session.teardown_with_backend(&admission, &backend).await;
     drop(server_msg_tx);
     drop(raw_msg_tx);
     let _ = writer_task.await;

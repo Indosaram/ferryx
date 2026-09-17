@@ -74,6 +74,8 @@ pub struct BrowserRemoteService {
     service_epoch: u64,
     frame_broadcaster: Arc<parking_lot::Mutex<HashMap<String, tokio::sync::broadcast::Sender<Vec<u8>>>>>,
     snapshot_source: Arc<parking_lot::RwLock<Arc<dyn BrowserSnapshotSource>>>,
+    native_capture_semaphore: Arc<tokio::sync::Semaphore>,
+    quarantined_permits: Arc<parking_lot::Mutex<HashMap<String, crate::browser::snapshot_source::SnapshotCallbackCoordinator>>>,
 }
 
 impl BrowserRemoteService {
@@ -91,6 +93,8 @@ impl BrowserRemoteService {
             service_epoch: 1,
             frame_broadcaster: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             snapshot_source: Arc::new(parking_lot::RwLock::new(Arc::new(UnsupportedSnapshotSource))),
+            native_capture_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+            quarantined_permits: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         }
     }
 
@@ -112,6 +116,8 @@ impl BrowserRemoteService {
             service_epoch: 1,
             frame_broadcaster: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             snapshot_source: Arc::new(parking_lot::RwLock::new(snapshot_source)),
+            native_capture_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+            quarantined_permits: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         }
     }
 
@@ -123,6 +129,29 @@ impl BrowserRemoteService {
         &self,
     ) -> &Arc<parking_lot::Mutex<HashMap<String, tokio::sync::broadcast::Sender<Vec<u8>>>>> {
         &self.frame_broadcaster
+    }
+
+    pub fn active_stream_id(&self, browser_id: &str) -> Option<u32> {
+        let active_streams = self.active_stream_ids.lock();
+        active_streams.get(browser_id).copied()
+    }
+
+    pub fn native_capture_semaphore(&self) -> &Arc<tokio::sync::Semaphore> {
+        &self.native_capture_semaphore
+    }
+
+    pub fn is_native_capture_active(&self) -> bool {
+        self.native_capture_semaphore.available_permits() == 0
+    }
+
+    pub fn release_quarantine(&self, browser_id: &str) {
+        let coord_opt = self.quarantined_permits.lock().remove(browser_id);
+        if let Some(coord) = coord_opt {
+            let _ = coord.complete(Err(crate::browser::security::BrowserError::Internal(
+                "webview closed or quarantine reclaimed".into(),
+            )
+            .into()));
+        }
     }
 
     pub fn subscribe_frames(&self, browser_id: &str) -> tokio::sync::broadcast::Receiver<Vec<u8>> {
@@ -290,6 +319,8 @@ impl BrowserRemoteService {
         let active_stream_ids = Arc::clone(&self.active_stream_ids);
         let captures_in_progress = Arc::clone(&self.captures_in_progress);
         let snapshot_source_holder = Arc::clone(&self.snapshot_source);
+        let native_capture_semaphore = Arc::clone(&self.native_capture_semaphore);
+        let quarantined_permits = Arc::clone(&self.quarantined_permits);
         let manager = self.manager.clone();
         let desktop_epoch = Arc::clone(&self.desktop_epoch);
         let service_epoch = self.service_epoch;
@@ -352,10 +383,53 @@ impl BrowserRemoteService {
                     crate::browser::snapshot_source::clamp_capture_dimensions(raw_w, raw_h);
                 let snapshot_options = SnapshotOptions::jpeg(70).with_bounds(clamped_w, clamped_h);
 
+                // Acquire shared native-capture permit
+                let permit = match native_capture_semaphore.clone().try_acquire_owned() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        // Shared native-capture permit is already held by an in-flight capture or quarantined timeout.
+                        // Skip tick so overlapping captures cannot run across producer restarts or iterations.
+                        continue;
+                    }
+                };
+
+                let (coordinator, _rx) =
+                    crate::browser::snapshot_source::SnapshotCallbackCoordinator::new();
+                let permit_slot = Arc::new(parking_lot::Mutex::new(Some(permit)));
+                let ps = permit_slot.clone();
+                let qp = Arc::clone(&quarantined_permits);
+                let b_id = browser_id_clone.clone();
+                coordinator.set_permit_releaser(move || {
+                    let mut guard = ps.lock();
+                    if let Some(p) = guard.take() {
+                        drop(p);
+                    }
+                    qp.lock().remove(&b_id);
+                });
+
                 let source = snapshot_source_holder.read().clone();
                 let snapshot_res = source
-                    .take_snapshot(&state.webview_label, snapshot_options)
+                    .take_snapshot_coordinated(&state.webview_label, snapshot_options, coordinator.clone())
                     .await;
+
+                let is_timeout = match &snapshot_res {
+                    Err(e) => {
+                        e.message.contains("timed out")
+                            || e.code == crate::ipc::IpcErrorCode::BrowserWaitTimeout
+                    }
+                    _ => false,
+                };
+                if is_timeout {
+                    // Retain coordinator and permit in quarantined_permits until callback completion!
+                    quarantined_permits
+                        .lock()
+                        .insert(browser_id_clone.clone(), coordinator);
+                } else {
+                    let mut guard = permit_slot.lock();
+                    if let Some(p) = guard.take() {
+                        drop(p);
+                    }
+                }
 
                 let snapshot = match snapshot_res {
                     Ok(s) => s,

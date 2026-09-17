@@ -17,6 +17,7 @@ import {
   type BrowserFrame,
   type BrowserHelloMessage,
   type BrowserPongMessage,
+  type BrowserSnapshotServerMessage,
   type BrowserStateMessage,
   type BrowserSubscribedMessage,
   type BrowserSubscribeOptions,
@@ -238,6 +239,10 @@ export class BrowserClient {
         }
         case "browserUnsubscribed": {
           this.currentSubscription = null;
+          this.resolvePending(msg.requestId, msg);
+          break;
+        }
+        case "browserSnapshot": {
           this.resolvePending(msg.requestId, msg);
           break;
         }
@@ -521,6 +526,43 @@ export class BrowserClient {
       }),
       timeoutMs,
     );
+  }
+
+  takeSnapshot(browserId: string, timeoutMs = 10000): Promise<BrowserSnapshotServerMessage> {
+    return this.requestResponse<BrowserSnapshotServerMessage>(
+      (requestId) => ({
+        type: "browserSnapshot",
+        requestId,
+        browserId,
+      }),
+      timeoutMs,
+    );
+  }
+
+  pause(browserId: string, streamId: number): void {
+    if (!this.isSocketOpen() || this.isClosed) return;
+    try {
+      this.sendJson({
+        type: "browserPause",
+        browserId,
+        streamId,
+      });
+    } catch {
+      // Ignored if socket closed
+    }
+  }
+
+  resume(browserId: string, streamId: number): void {
+    if (!this.isSocketOpen() || this.isClosed) return;
+    try {
+      this.sendJson({
+        type: "browserResume",
+        browserId,
+        streamId,
+      });
+    } catch {
+      // Ignored if socket closed
+    }
   }
 
   close() {

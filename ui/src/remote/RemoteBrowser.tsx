@@ -83,18 +83,22 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
 
   const [displayedFrame, setDisplayedFrame] = useState<DecodedBrowserFrame | null>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
-  const uncommittedFrameRef = useRef<DecodedBrowserFrame | null>(null);
+  const displayedFrameRef = useRef<DecodedBrowserFrame | null>(null);
+  displayedFrameRef.current = displayedFrame;
+  const framesByUrlRef = useRef<Map<string, DecodedBrowserFrame>>(new Map());
 
-  // Track the latest incoming frame in ref so onLoad can commit it to displayedFrame
+  // Bind each incoming frame to its exact image URL identity
   useEffect(() => {
-    uncommittedFrameRef.current = frame;
-  }, [frame]);
+    if (imageUrl && frame) {
+      framesByUrlRef.current.set(imageUrl, frame);
+    }
+  }, [imageUrl, frame]);
 
-  // If imageUrl is cleared (e.g. backgrounded or disconnected), clear displayedFrame
+  // If imageUrl is cleared (e.g. backgrounded or disconnected), clear displayedFrame & URL cache
   useEffect(() => {
     if (!imageUrl) {
       setDisplayedFrame(null);
-      uncommittedFrameRef.current = null;
+      framesByUrlRef.current.clear();
     }
   }, [imageUrl]);
 
@@ -185,15 +189,21 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
     });
   };
 
-  const handleImageLoad = () => {
-    const frameToCommit = uncommittedFrameRef.current ?? frame;
-    if (frameToCommit) {
-      setDisplayedFrame(frameToCommit);
-      if (confirmPresented) {
-        confirmPresented(frameToCommit.metadata.streamId, frameToCommit.seq);
-      } else if (sendAck) {
-        sendAck(frameToCommit.metadata.streamId, frameToCommit.seq);
-      }
+  const handleImageLoad = (boundUrl: string, boundFrame: DecodedBrowserFrame | null) => {
+    // Resolve the exact frame corresponding to this image identity
+    const frameToCommit = (boundUrl ? framesByUrlRef.current.get(boundUrl) : null) ?? boundFrame;
+    if (!frameToCommit) return;
+
+    // Discard late-loading frames that arrive out of order
+    if (displayedFrameRef.current && frameToCommit.seq < displayedFrameRef.current.seq) {
+      return;
+    }
+
+    setDisplayedFrame(frameToCommit);
+    if (confirmPresented) {
+      confirmPresented(frameToCommit.metadata.streamId, frameToCommit.seq);
+    } else if (sendAck) {
+      sendAck(frameToCommit.metadata.streamId, frameToCommit.seq);
     }
   };
 
@@ -221,7 +231,7 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
             alt="Remote browser stream"
             className="w-full h-full object-contain pointer-events-none"
             draggable={false}
-            onLoad={handleImageLoad}
+            onLoad={() => handleImageLoad(imageUrl, frame)}
           />
         ) : (
           <div className="flex flex-col items-center justify-center text-neutral-500 text-sm">

@@ -43,8 +43,19 @@ pub fn clamp_capture_dimensions(width: u32, height: u32) -> (u32, u32) {
         h *= scale;
     }
 
-    let clamped_w = (w.round() as u32).clamp(1, MAX_CAPTURE_EDGE);
-    let clamped_h = (h.round() as u32).clamp(1, MAX_CAPTURE_EDGE);
+    let mut clamped_w = (w.round() as u32).clamp(1, MAX_CAPTURE_EDGE);
+    let mut clamped_h = (h.round() as u32).clamp(1, MAX_CAPTURE_EDGE);
+
+    while (clamped_w as u64) * (clamped_h as u64) > MAX_CAPTURE_PIXELS as u64 {
+        if clamped_w >= clamped_h && clamped_w > 1 {
+            clamped_w -= 1;
+        } else if clamped_h > 1 {
+            clamped_h -= 1;
+        } else {
+            break;
+        }
+    }
+
     (clamped_w, clamped_h)
 }
 
@@ -137,6 +148,16 @@ pub trait BrowserSnapshotSource: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<BrowserSnapshot, IpcError>> + Send + 'a>> {
         self.capture_snapshot(webview_label, options)
     }
+
+    fn take_snapshot_coordinated<'a>(
+        &'a self,
+        webview_label: &'a str,
+        options: SnapshotOptions,
+        coordinator: SnapshotCallbackCoordinator,
+    ) -> Pin<Box<dyn Future<Output = Result<BrowserSnapshot, IpcError>> + Send + 'a>> {
+        let _ = coordinator;
+        self.take_snapshot(webview_label, options)
+    }
 }
 
 /// Thread-safe coordinator for native snapshot callbacks.
@@ -170,6 +191,17 @@ impl SnapshotCallbackCoordinator {
             },
             rx,
         )
+    }
+
+    /// Attaches a fresh oneshot channel to this coordinator, returning the receiver.
+    pub fn attach_channel(&self) -> tokio::sync::oneshot::Receiver<Result<BrowserSnapshot, IpcError>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut guard = match self.sender.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        *guard = Some(tx);
+        rx
     }
 
     /// Attaches an optional permit releaser that is guaranteed to run once on callback completion
@@ -315,6 +347,24 @@ impl<R: tauri::Runtime> BrowserSnapshotSource for TauriBrowserSnapshotSource<R> 
             capture_webview_snapshot(&self.app, webview_label, options, self.timeout).await
         })
     }
+
+    fn take_snapshot_coordinated<'a>(
+        &'a self,
+        webview_label: &'a str,
+        options: SnapshotOptions,
+        coordinator: SnapshotCallbackCoordinator,
+    ) -> Pin<Box<dyn Future<Output = Result<BrowserSnapshot, IpcError>> + Send + 'a>> {
+        Box::pin(async move {
+            capture_webview_snapshot_with_coordinator(
+                &self.app,
+                webview_label,
+                options,
+                self.timeout,
+                Some(coordinator),
+            )
+            .await
+        })
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -351,11 +401,28 @@ pub async fn capture_webview_snapshot<R: tauri::Runtime>(
     options: SnapshotOptions,
     timeout: Duration,
 ) -> Result<BrowserSnapshot, IpcError> {
+    capture_webview_snapshot_with_coordinator(app, webview_label, options, timeout, None).await
+}
+
+#[cfg(target_os = "macos")]
+pub async fn capture_webview_snapshot_with_coordinator<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    webview_label: &str,
+    options: SnapshotOptions,
+    timeout: Duration,
+    coordinator_opt: Option<SnapshotCallbackCoordinator>,
+) -> Result<BrowserSnapshot, IpcError> {
     let webview = app
         .get_webview(webview_label)
         .ok_or_else(|| BrowserError::WebviewNotFound(webview_label.to_string()))?;
 
-    let (coordinator, rx) = SnapshotCallbackCoordinator::new();
+    let (coordinator, rx) = match coordinator_opt {
+        Some(c) => {
+            let rx = c.attach_channel();
+            (c, rx)
+        }
+        None => SnapshotCallbackCoordinator::new(),
+    };
     let coordinator_clone = coordinator.clone();
 
     webview
@@ -663,6 +730,130 @@ impl BrowserSnapshotSource for FakeBrowserSnapshotSource {
                     "screenshots are unavailable on this platform",
                 )),
                 FakeSnapshotBehavior::Error(err) => Err(err),
+            }
+        })
+    }
+
+    fn take_snapshot_coordinated<'a>(
+        &'a self,
+        webview_label: &'a str,
+        options: SnapshotOptions,
+        coordinator: SnapshotCallbackCoordinator,
+    ) -> Pin<Box<dyn Future<Output = Result<BrowserSnapshot, IpcError>> + Send + 'a>> {
+        self.call_count.fetch_add(1, Ordering::SeqCst);
+        *self.last_requested_format.lock().unwrap() = Some(options.format);
+
+        let behavior = self
+            .behaviors
+            .lock()
+            .unwrap()
+            .get(webview_label)
+            .cloned()
+            .unwrap_or_else(|| self.default_behavior.lock().unwrap().clone());
+
+        let timeout = self.timeout;
+        let label = webview_label.to_string();
+
+        Box::pin(async move {
+            match behavior {
+                FakeSnapshotBehavior::Timeout => {
+                    let rx = coordinator.attach_channel();
+                    await_coordinator_completion(&coordinator, rx, timeout).await
+                }
+                FakeSnapshotBehavior::Delayed { delay, result } => {
+                    let rx = coordinator.attach_channel();
+                    let coord_clone = coordinator.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(delay).await;
+                        let _ = coord_clone.complete(result);
+                    });
+                    await_coordinator_completion(&coordinator, rx, timeout).await
+                }
+                FakeSnapshotBehavior::Fixed(snapshot) => {
+                    let _ = coordinator.complete(Ok(snapshot.clone()));
+                    Ok(snapshot)
+                }
+                FakeSnapshotBehavior::Auto { width, height } => {
+                    let (w, h) = match (options.max_width, options.max_height) {
+                        (Some(tw), Some(th)) => clamp_capture_dimensions(tw, th),
+                        (Some(tw), None) => clamp_capture_dimensions(tw, height),
+                        (None, Some(th)) => clamp_capture_dimensions(width, th),
+                        (None, None) => clamp_capture_dimensions(width, height),
+                    };
+                    let bytes = match options.format {
+                        SnapshotFormat::Png => sample_valid_png_bytes(),
+                        SnapshotFormat::Jpeg { .. } => sample_valid_jpeg_bytes(),
+                    };
+                    let snap = BrowserSnapshot::new(bytes, options.format, w, h);
+                    let _ = coordinator.complete(Ok(snap.clone()));
+                    Ok(snap)
+                }
+                FakeSnapshotBehavior::WebviewNotFound => {
+                    let err = BrowserError::WebviewNotFound(label).into();
+                    let _ = coordinator.complete(Err(err));
+                    Err(BrowserError::WebviewNotFound(webview_label.to_string()).into())
+                }
+                FakeSnapshotBehavior::NativeError(msg) => {
+                    let err = IpcError::new(
+                        IpcErrorCode::BrowserScreenshotFailed,
+                        format!("WKWebView snapshot failed: {msg}"),
+                    );
+                    let _ = coordinator.complete(Err(err.clone()));
+                    Err(err)
+                }
+                FakeSnapshotBehavior::NullImage => {
+                    let err = IpcError::new(
+                        IpcErrorCode::BrowserScreenshotFailed,
+                        "WKWebView snapshot failed: null image",
+                    );
+                    let _ = coordinator.complete(Err(err.clone()));
+                    Err(err)
+                }
+                FakeSnapshotBehavior::BitmapDecodeError => {
+                    let err = IpcError::new(
+                        IpcErrorCode::BrowserScreenshotFailed,
+                        "cannot decode snapshot bitmap image",
+                    );
+                    let _ = coordinator.complete(Err(err.clone()));
+                    Err(err)
+                }
+                FakeSnapshotBehavior::EncodeError => {
+                    let err = IpcError::new(
+                        IpcErrorCode::BrowserScreenshotFailed,
+                        match options.format {
+                            SnapshotFormat::Png => "cannot encode snapshot to PNG",
+                            SnapshotFormat::Jpeg { .. } => "cannot encode snapshot to JPEG",
+                        },
+                    );
+                    let _ = coordinator.complete(Err(err.clone()));
+                    Err(err)
+                }
+                FakeSnapshotBehavior::EmptyImageData => {
+                    let err = IpcError::new(
+                        IpcErrorCode::BrowserScreenshotFailed,
+                        "empty snapshot generated",
+                    );
+                    let _ = coordinator.complete(Err(err.clone()));
+                    Err(err)
+                }
+                FakeSnapshotBehavior::Duplicate { first, second } => {
+                    let rx = coordinator.attach_channel();
+                    let _ = coordinator.complete(first);
+                    let _ = coordinator.complete(second);
+                    await_snapshot_completion(rx, timeout).await
+                }
+                FakeSnapshotBehavior::Unsupported => {
+                    let err = IpcError::new(
+                        IpcErrorCode::Unsupported,
+                        "screenshots are unavailable on this platform",
+                    );
+                    let _ = coordinator.complete(Err(err.clone()));
+                    Err(err)
+                }
+                FakeSnapshotBehavior::Error(err) => {
+                    let _ = coordinator.complete(Err(err.clone()));
+                    Err(err)
+                }
             }
         })
     }

@@ -45,6 +45,12 @@ async fn test_browser_websocket_full_lifecycle_and_reconnection() {
     let registry = WorkspaceRegistry::new();
     let state = Arc::new(RemoteGatewayState::new(terminal_service, registry));
 
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("mock app");
+    use tauri::Manager;
+    app.manage(Arc::clone(&state));
+
     let pin = state
         .auth_manager
         .create_pairing_code(DevicePermission::Control);
@@ -323,8 +329,8 @@ async fn test_browser_websocket_full_lifecycle_and_reconnection() {
     assert_eq!(cmd_json["requestId"], "req-cmd-1");
 
     // 10. Desktop reclaim revoking remote driver lease -> driver notified
-    let reclaimed_lease = state.admission_controller.broker.reclaim_desktop();
-    assert!(reclaimed_lease.is_some(), "Desktop owner reclaims lease");
+    let reclaim_res = crate::ipc::browser::cmd_browser_remote_reclaim(app.handle().clone()).await;
+    assert!(reclaim_res.is_ok(), "cmd_browser_remote_reclaim succeeded");
 
     // Immediate push: remote driver holding lease receives browserDriverRevoked
     let revoked_reply = ws_stream
@@ -577,6 +583,126 @@ async fn test_view_only_device_driver_claim_rejected_with_typed_error() {
         .as_str()
         .unwrap()
         .contains("Control permission required"));
+
+    let _ = ws.close(None).await;
+    let _ = shutdown_tx.send(());
+    let _ = server_task.await;
+}
+
+async fn start_test_gateway_server(
+    state: Arc<RemoteGatewayState>,
+    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = create_remote_router(state);
+    let task = tokio::spawn(async move {
+        let _ = axum::serve(listener, router)
+            .with_graceful_shutdown(async { let _ = shutdown_rx.await; })
+            .await;
+    });
+    (addr, task)
+}
+
+#[tokio::test]
+async fn test_r3_cmd_browser_remote_reclaim_broadcasts_revoked_via_gateway_manager() {
+    let terminal_service = Arc::new(TerminalService::default());
+    let registry = WorkspaceRegistry::new();
+    let state = Arc::new(RemoteGatewayState::new(terminal_service, registry));
+
+    let mgr = Arc::new(crate::ipc::remote::RemoteGatewayManager::new(Arc::clone(&state)));
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("mock app");
+    use tauri::Manager;
+    app.manage(mgr);
+
+    let pin = state
+        .auth_manager
+        .create_pairing_code(DevicePermission::Control);
+    let (control_token, _) = state
+        .auth_manager
+        .exchange_pairing_code(&pin, "control-device-mgr")
+        .expect("Exchange pairing code");
+
+    let test_backend = Arc::new(InProcessTestBackend::new());
+    test_backend.sessions.lock().await.push(RemoteBrowserSessionSummary {
+        browser_id: "b1".into(),
+        title: Some("Reclaim Test".into()),
+        url: Some("https://example.com".into()),
+        visible: true,
+    });
+    test_backend.states.lock().await.insert(
+        "b1".into(),
+        BrowserRemoteState {
+            browser_id: "b1".into(),
+            url: Some("https://example.com".into()),
+            title: Some("Reclaim Test".into()),
+            document_generation: "1".into(),
+            viewport_revision: "1".into(),
+            loading: false,
+            paused: false,
+            pause_reason: None,
+        },
+    );
+    *state.browser_backend.write() = test_backend;
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let (addr, server_task) = start_test_gateway_server(Arc::clone(&state), shutdown_rx).await;
+
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let ticket_payload = serde_json::json!({ "target": "/api/v1/browser/b1" });
+    let ticket_resp = client
+        .post(format!("http://{addr}/api/v1/socket-ticket"))
+        .header("Authorization", format!("Bearer {control_token}"))
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&ticket_payload).unwrap())
+        .send()
+        .await
+        .unwrap();
+    let ticket_text = ticket_resp.text().await.unwrap();
+    let ticket: serde_json::Value = serde_json::from_str(&ticket_text).unwrap();
+    let ticket_str = ticket["ticket"].as_str().unwrap();
+
+    let ws_url = format!("ws://{addr}/api/v1/browser/b1?ticket={ticket_str}");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+
+    // 1. Hello
+    let _ = ws.next().await.unwrap().unwrap();
+
+    // 2. Subscribe
+    let sub_req = serde_json::json!({
+        "type": "browserSubscribe",
+        "requestId": "r-mgr-sub",
+        "viewerInstanceId": "v1",
+        "options": { "format": "jpeg" }
+    });
+    ws.send(Message::Text(sub_req.to_string().into())).await.unwrap();
+    let sub_reply = ws.next().await.unwrap().unwrap().into_text().unwrap();
+    let sub_json: serde_json::Value = serde_json::from_str(&sub_reply).unwrap();
+    let sub_id = sub_json["subscriptionId"].as_str().unwrap();
+
+    // 3. Claim driver lease
+    let claim_req = serde_json::json!({
+        "type": "browserDriverClaim",
+        "requestId": "r-mgr-claim",
+        "subscriptionId": sub_id,
+        "browserId": "b1"
+    });
+    ws.send(Message::Text(claim_req.to_string().into())).await.unwrap();
+    let claim_reply = ws.next().await.unwrap().unwrap().into_text().unwrap();
+    let claim_json: serde_json::Value = serde_json::from_str(&claim_reply).unwrap();
+    assert_eq!(claim_json["type"], "browserDriverClaimed");
+
+    // 4. Call cmd_browser_remote_reclaim directly through Tauri AppHandle
+    let reclaim_res = crate::ipc::browser::cmd_browser_remote_reclaim(app.handle().clone()).await;
+    assert!(reclaim_res.is_ok(), "cmd_browser_remote_reclaim must succeed");
+
+    // 5. Active WebSocket session receives ServerMessage::BrowserDriverRevoked
+    let revoked_reply = ws.next().await.unwrap().unwrap().into_text().unwrap();
+    let revoked_json: serde_json::Value = serde_json::from_str(&revoked_reply).unwrap();
+    assert_eq!(revoked_json["type"], "browserDriverRevoked");
+    assert_eq!(revoked_json["reason"], "desktop_reclaim");
 
     let _ = ws.close(None).await;
     let _ = shutdown_tx.send(());
