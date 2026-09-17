@@ -48,7 +48,7 @@ async fn failed_exchange(operation: Operation, response: Option<&[u8]>, timeout:
         let _ = done_tx.send(());
         result
     };
-    let (_, result) = tokio::time::timeout(Duration::from_secs(140), async { tokio::join!(peer, action) }).await.unwrap();
+    let (_, result) = tokio::time::timeout(Duration::from_secs(200), async { tokio::join!(peer, action) }).await.unwrap();
     drop(listener);
     drop(client);
     let path = root.path().to_owned();

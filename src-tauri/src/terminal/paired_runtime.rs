@@ -65,13 +65,16 @@ fn fs_rename(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::rename(from, to)
 }
 
-fn load_descriptors(path: &Path) -> HashMap<String, super::paired_daemon::Descriptor> {
-    if let Ok(data) = std::fs::read(path) {
-        if let Ok(map) = serde_json::from_slice::<HashMap<String, super::paired_daemon::Descriptor>>(&data) {
-            return map;
-        }
+fn load_descriptors(path: &Path) -> Result<HashMap<String, super::paired_daemon::Descriptor>, String> {
+    // N2 (round 2): fail closed on load. A read or parse failure must NOT be
+    // silently converted into an empty map — that would let a later save
+    // clobber a corrupt-but-recoverable store with only the live memory.
+    match std::fs::read(path) {
+        Ok(data) => serde_json::from_slice(&data)
+            .map_err(|e| format!("PAIRED_DESCRIPTOR_PARSE: {e}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(HashMap::new()),
+        Err(e) => Err(format!("PAIRED_DESCRIPTOR_READ: {e}")),
     }
-    HashMap::new()
 }
 
 fn save_descriptors(path: &Path, descriptors: &HashMap<String, super::paired_daemon::Descriptor>) -> Result<(), String> {
@@ -161,7 +164,13 @@ impl Runtime {
     pub fn new(store_path: Option<PathBuf>) -> Self {
         let store_path = store_path.or_else(default_descriptors_path);
         let descriptors = if let Some(ref path) = store_path {
-            load_descriptors(path)
+            match load_descriptors(path) {
+                Ok(map) => map,
+                Err(e) => {
+                    eprintln!("[paired_runtime] descriptor store load failed; starting empty: {e}");
+                    HashMap::new()
+                }
+            }
         } else {
             HashMap::new()
         };
@@ -176,17 +185,26 @@ impl Runtime {
         // N1: single lock order — the store-path snapshot is taken BEFORE the
         // descriptors lock is ever acquired; no site may acquire store_path
         // while holding descriptors.
-        let loaded = load_descriptors(&path);
-        *self.store_path.lock() = Some(path.clone());
-        let current = {
-            let mut desc_guard = self.descriptors.lock();
-            for (k, v) in loaded {
-                desc_guard.entry(k).or_insert(v);
+        match load_descriptors(&path) {
+            Err(e) => {
+                // N2 (round 2): a failed load must not let the subsequent save
+                // clobber a corrupt-but-recoverable store with live memory.
+                eprintln!("[paired_runtime] descriptor store load failed; leaving file untouched: {e}");
+                return;
             }
-            desc_guard.clone()
-        };
-        if let Err(e) = save_descriptors(&path, &current) {
-            eprintln!("[paired_runtime] descriptor save failed after set_store_path: {e}");
+            Ok(loaded) => {
+                *self.store_path.lock() = Some(path.clone());
+                let current = {
+                    let mut desc_guard = self.descriptors.lock();
+                    for (k, v) in loaded {
+                        desc_guard.entry(k).or_insert(v);
+                    }
+                    desc_guard.clone()
+                };
+                if let Err(e) = save_descriptors(&path, &current) {
+                    eprintln!("[paired_runtime] descriptor save failed after set_store_path: {e}");
+                }
+            }
         }
     }
 
@@ -223,16 +241,21 @@ impl Runtime {
         // reverse order. The map is cloned under the short lock and the disk
         // save happens with NO runtime lock held.
         let path = self.store_path.lock().clone();
-        let snapshot = {
+        let (previous, snapshot) = {
             let mut descs = self.descriptors.lock();
-            descs.insert(id.clone(), descriptor.clone());
-            descs.clone()
+            let previous = descs.insert(id.clone(), descriptor.clone());
+            (previous, descs.clone())
         };
         if let Some(ref path) = path {
             if let Err(e) = save_descriptors(path, &snapshot) {
-                // Roll back the in-memory insert so memory and disk stay
-                // consistent: install did not persist, so it did not happen.
-                self.descriptors.lock().remove(&id);
+                // R2-N1: restore the PRIOR descriptor on rollback — deleting
+                // the entry would discard a retained descriptor from a
+                // previous install (exactly the reattach recovery case).
+                let mut descs = self.descriptors.lock();
+                match previous {
+                    Some(old) => { descs.insert(id.clone(), old); }
+                    None => { descs.remove(&id); }
+                }
                 return Err(e);
             }
         }
@@ -272,14 +295,22 @@ impl Runtime {
                         Some(Command::Interrupt(g, reply)) => { let _ = reply.send(proxy.interrupt(Epoch(g)).await.map_err(|e| e.code)); }
                         Some(Command::Detach(reply)) => {
                             let result = proxy.detach().await.map_err(|e| e.code);
-                            {
+                            // N1 (round 2): single lock order — store-path
+                            // snapshot before the descriptors lock; the map is
+                            // cloned under the short lock and persisted with no
+                            // runtime lock held.
+                            let path = store_path.lock().clone();
+                            let snapshot = {
                                 let mut descs = descriptors.lock();
                                 descs.insert(task_id.clone(), proxy.descriptor().clone());
-                                if let Some(ref path) = *store_path.lock() {
-                                    save_descriptors(path, &descs);
+                                descs.clone()
+                            };
+                            drop(proxy);
+                            if let Some(ref path) = path {
+                                if let Err(e) = save_descriptors(path, &snapshot) {
+                                    eprintln!("[paired_runtime] descriptor save failed after detach: {e}");
                                 }
                             }
-                            drop(proxy);
                             let _ = reply.send(result);
                             return;
                         }
@@ -306,9 +337,18 @@ impl Runtime {
                             }
                         };
                         if changed {
-                            if let Some(ref path) = *store_path.lock() {
+                            // N1 (round 2): single lock order — store-path
+                            // snapshot before the descriptors lock; persist the
+                            // cloned snapshot with no runtime lock held.
+                            let path = store_path.lock().clone();
+                            let snapshot = {
                                 let descs = descriptors.lock();
-                                save_descriptors(path, &descs);
+                                descs.clone()
+                            };
+                            if let Some(ref path) = path {
+                                if let Err(e) = save_descriptors(path, &snapshot) {
+                                    eprintln!("[paired_runtime] descriptor save failed after receive: {e}");
+                                }
                             }
                         }
                     }
@@ -321,6 +361,12 @@ impl Runtime {
             completed,
         });
         Ok(id)
+    }
+    #[cfg(test)]
+    pub(crate) fn force_reap_owner(&self, id: &str) {
+        // Simulates a dead actor whose descriptor is retained — the reattach
+        // recovery scenario the reinstall path must never regress.
+        self.owners.lock().remove(id);
     }
     #[cfg(test)]
     pub(crate) fn completion_probe(&self, id: &str, pending: super::remote::RemoteOperation) -> impl std::future::Future<Output = ()> + '_ {
@@ -423,6 +469,8 @@ mod tests {
     use crate::terminal::paired_daemon::Descriptor;
     use crate::remote::machine_protocol::RemoteTerminalTarget;
 
+    static FAULT_SERIALIZER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[tokio::test]
     async fn test_p13_descriptor_survives_actor_termination() {
         let runtime = Runtime::default();
@@ -504,7 +552,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_n2_save_failure_temp_write_propagates_error() {
-        static FAULT_SERIALIZER: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _fault_guard = FAULT_SERIALIZER.lock();
         let temp_dir = tempfile::tempdir().unwrap();
         let store_path = temp_dir.path().join("paired_descriptors.json");
@@ -547,8 +594,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_r2n1_save_failure_restores_previous_descriptor() {
+        let _fault_guard = FAULT_SERIALIZER.lock();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store_path = temp_dir.path().join("paired_descriptors.json");
+        let hub = Arc::new(TerminalOutputHub::new(32));
+
+        let desc1 = Descriptor {
+            host_id: "https://relay.example.com".into(),
+            generation: Epoch(1),
+            target: RemoteTerminalTarget {
+                machine_id: "test-machine".into(),
+                daemon_epoch: Epoch(1),
+                session_id: "s1".into(),
+            },
+            after_sequence: None,
+        };
+        let runtime = Runtime::new(Some(store_path.clone()));
+        let p1 = Proxy::new(desc1, hub.clone()).unwrap();
+        let id1 = runtime.install(p1).expect("initial install should succeed");
+        // Reattach scenario: the prior actor is gone but its descriptor is
+        // retained in the map (and on disk).
+        runtime.force_reap_owner(&id1);
+        assert!(runtime.descriptor(&id1).is_some());
+
+        FsFault::set(FsFault::FailTempWrite);
+        let desc2 = Descriptor {
+            host_id: "https://relay.example.com".into(),
+            generation: Epoch(2),
+            target: RemoteTerminalTarget {
+                machine_id: "test-machine".into(),
+                daemon_epoch: Epoch(2),
+                session_id: "s1".into(),
+            },
+            after_sequence: None,
+        };
+        let p2 = Proxy::new(desc2, hub.clone()).unwrap();
+        let res = runtime.install(p2);
+        FsFault::set(FsFault::None);
+
+        assert!(res.is_err(), "reinstall must fail when persistence fails");
+        // R2-N1: the retained PRIOR descriptor must be restored, not deleted.
+        let kept = runtime
+            .descriptor(&id1)
+            .expect("previous descriptor must survive a failed reinstall");
+        assert_eq!(kept.generation, Epoch(1));
+        assert_eq!(kept.target.daemon_epoch, Epoch(1));
+        let reloaded = Runtime::new(Some(store_path.clone()));
+        assert_eq!(
+            reloaded.descriptor(&id1).expect("disk still holds prior").generation,
+            Epoch(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_r2n2_corrupt_store_not_clobbered_by_set_store_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store_path = temp_dir.path().join("paired_descriptors.json");
+        std::fs::write(&store_path, b"{not-json").unwrap();
+
+        let runtime = Runtime::new(Some(store_path.clone()));
+        assert!(runtime.descriptor("daemon-session:s1").is_none(), "corrupt store loads empty");
+        runtime.set_store_path(store_path.clone());
+        // The failed load must not let the follow-up save overwrite the
+        // corrupt-but-recoverable file with live memory.
+        let after = std::fs::read(&store_path).unwrap();
+        assert_eq!(after, b"{not-json", "corrupt store must be left untouched");
+    }
+
+    #[tokio::test]
     async fn test_n2_save_failure_rename_preserves_existing_file() {
-        static FAULT_SERIALIZER: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _fault_guard = FAULT_SERIALIZER.lock();
         let temp_dir = tempfile::tempdir().unwrap();
         let store_path = temp_dir.path().join("paired_descriptors.json");

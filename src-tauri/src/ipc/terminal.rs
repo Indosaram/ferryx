@@ -715,21 +715,85 @@ pub struct PendingCreateRecord {
     pub session: Option<crate::remote::machine_protocol::Session>,
 }
 
+
+
 static PENDING_CREATES: std::sync::LazyLock<Mutex<std::collections::HashMap<String, PendingCreateRecord>>> =
     std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
 pub fn get_pending_creates() -> std::collections::HashMap<String, PendingCreateRecord> {
+    ensure_pending_creates_loaded();
     PENDING_CREATES.lock().clone()
 }
 
 pub fn get_pending_create(request_id: &str) -> Option<PendingCreateRecord> {
+    ensure_pending_creates_loaded();
     PENDING_CREATES.lock().get(request_id).cloned()
 }
 
 pub fn cancel_pending_create(request_id: &str) {
-    let mut guard = PENDING_CREATES.lock();
-    if let Some(record) = guard.get_mut(request_id) {
-        record.cancelled = true;
+    ensure_pending_creates_loaded();
+    {
+        let mut guard = PENDING_CREATES.lock();
+        if let Some(record) = guard.get_mut(request_id) {
+            record.cancelled = true;
+        }
+    }
+    persist_pending_creates();
+}
+
+// P10 (round 2): pending creates survive process restarts. The paired host's
+// operation journal is the durable record; the local file keeps the logical
+// intent (adopt-or-cancel) so the reaper revisits records after a restart.
+static PENDING_CREATES_STORE_LOADED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+#[cfg(not(test))]
+fn default_pending_creates_path() -> Option<std::path::PathBuf> {
+    if let Ok(dir) = std::env::var("FERRYX_PAIRED_PENDING_CREATES_DIR") {
+        return Some(std::path::PathBuf::from(dir).join("paired_pending_creates.json"));
+    }
+    crate::remote::auth::canonical_remote_dir().map(|dir| dir.join("paired_pending_creates.json"))
+}
+#[cfg(test)]
+fn default_pending_creates_path() -> Option<std::path::PathBuf> {
+    None
+}
+
+fn ensure_pending_creates_loaded() {
+    if PENDING_CREATES_STORE_LOADED.set(()).is_err() {
+        return;
+    }
+    let Some(path) = default_pending_creates_path() else {
+        return;
+    };
+    let Ok(data) = std::fs::read(&path) else {
+        return;
+    };
+    if let Ok(map) = serde_json::from_slice::<std::collections::HashMap<String, PendingCreateRecord>>(&data) {
+        PENDING_CREATES.lock().extend(map);
+    } else {
+        eprintln!("[ipc::terminal] pending-create store unreadable; starting empty");
+    }
+}
+
+fn persist_pending_creates() {
+    let Some(path) = default_pending_creates_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let guard = PENDING_CREATES.lock();
+    // Only still-reconcilable records belong on disk; terminal records are
+    // dropped so the file never grows unboundedly.
+    let live: std::collections::HashMap<&String, &PendingCreateRecord> = guard
+        .iter()
+        .filter(|(_, r)| matches!(r.status, PendingCreateStatus::Pending))
+        .collect();
+    if let Ok(bytes) = serde_json::to_vec_pretty(&live) {
+        let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+        if std::fs::write(&tmp, &bytes).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
     }
 }
 
@@ -743,24 +807,28 @@ const PENDING_CREATE_BACKGROUND_POLL_MS: u64 = 250;
 /// P10: a create whose journal outcome stayed unknown after the inline burst is
 /// NOT abandoned — the logical intent is retained and a bounded background
 /// reconciler keeps polling until the remote journal becomes terminal.
-fn register_pending_create(
+pub(crate) fn register_pending_create(
     host_id: &str,
     generation: crate::scoped_contracts::Epoch,
     request_id: &str,
     cancelled: bool,
 ) {
-    PENDING_CREATES.lock().insert(
-        request_id.to_string(),
-        PendingCreateRecord {
-            request_id: request_id.to_string(),
-            host_id: host_id.to_string(),
-            generation,
-            workspace_id: None,
-            cancelled,
-            status: PendingCreateStatus::Pending,
-            session: None,
-        },
-    );
+    ensure_pending_creates_loaded();
+    {
+        PENDING_CREATES.lock().insert(
+            request_id.to_string(),
+            PendingCreateRecord {
+                request_id: request_id.to_string(),
+                host_id: host_id.to_string(),
+                generation,
+                workspace_id: None,
+                cancelled,
+                status: PendingCreateStatus::Pending,
+                session: None,
+            },
+        );
+    }
+    persist_pending_creates();
 }
 
 fn spawn_background_create_reconciler(
@@ -810,63 +878,150 @@ fn spawn_background_create_reconciler(
                 _ => None,
             };
             let Some(outcome) = terminal else { continue };
-            match outcome {
-                crate::remote::machine_protocol::OperationOutcome::Session { session } => {
-                    if cancelled {
-                        let close_req = crate::remote::machine_protocol::CloseSessionRequest {
-                            request_id: uuid::Uuid::new_v4().to_string(),
-                            daemon_epoch: session.target.daemon_epoch.clone(),
-                        };
-                        let _ = client
-                            .paired_host_operation(crate::paired_host::client::OperationRequest {
-                                host_id: host_id.clone(),
-                                generation,
-                                operation: crate::paired_host::client::Operation::CloseSession {
-                                    session_id: session.target.session_id.clone(),
-                                    request: close_req,
-                                },
-                            })
-                            .await;
-                        let mut guard = PENDING_CREATES.lock();
-                        if let Some(record) = guard.get_mut(&request_id) {
-                            record.status = PendingCreateStatus::Cancelled;
-                        }
-                    } else {
-                        let descriptor = crate::terminal::paired_daemon::Descriptor {
-                            host_id: host_id.clone(),
-                            generation,
-                            target: session.target.clone(),
-                            after_sequence: None,
-                        };
-                        let discovered_session_id = session.target.session_id.clone();
-                        let reattach = client.paired_terminal_reattach(descriptor).await;
-                        let mut guard = PENDING_CREATES.lock();
-                        if let Some(record) = guard.get_mut(&request_id) {
-                            match reattach {
-                                Ok((proxy_session_id, _)) => {
-                                    record.session = Some(session);
-                                    record.status = PendingCreateStatus::Adopted { proxy_session_id };
-                                }
-                                Err(_) => {
-                                    record.session = Some(session);
-                                    record.status = PendingCreateStatus::Completed {
-                                        session_id: discovered_session_id,
-                                    };
-                                }
+            resolve_pending_create_terminal(
+                client.clone(),
+                host_id.clone(),
+                generation,
+                request_id.clone(),
+                cancelled,
+                outcome,
+            )
+            .await;
+            return;
+        }
+    });
+}
+
+/// P10: shared terminal resolution for a pending create whose journal outcome
+/// became known. Used by the bounded background reconciler and the long-lived
+/// pending-create reaper so both adopt/close identically.
+async fn resolve_pending_create_terminal(
+    client: DaemonClient,
+    host_id: String,
+    generation: crate::scoped_contracts::Epoch,
+    request_id: String,
+    cancelled: bool,
+    outcome: crate::remote::machine_protocol::OperationOutcome,
+) {
+    match outcome {
+        crate::remote::machine_protocol::OperationOutcome::Session { session } => {
+            if cancelled {
+                let close_req = crate::remote::machine_protocol::CloseSessionRequest {
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                    daemon_epoch: session.target.daemon_epoch.clone(),
+                };
+                let _ = client
+                    .paired_host_operation(crate::paired_host::client::OperationRequest {
+                        host_id: host_id.clone(),
+                        generation,
+                        operation: crate::paired_host::client::Operation::CloseSession {
+                            session_id: session.target.session_id.clone(),
+                            request: close_req,
+                        },
+                    })
+                    .await;
+                {
+                    let mut guard = PENDING_CREATES.lock();
+                    if let Some(record) = guard.get_mut(&request_id) {
+                        record.status = PendingCreateStatus::Cancelled;
+                    }
+                }
+                persist_pending_creates();
+            } else {
+                let descriptor = crate::terminal::paired_daemon::Descriptor {
+                    host_id: host_id.clone(),
+                    generation,
+                    target: session.target.clone(),
+                    after_sequence: None,
+                };
+                let discovered_session_id = session.target.session_id.clone();
+                let reattach = client.paired_terminal_reattach(descriptor).await;
+                {
+                    let mut guard = PENDING_CREATES.lock();
+                    if let Some(record) = guard.get_mut(&request_id) {
+                        match reattach {
+                            Ok((proxy_session_id, _)) => {
+                                record.session = Some(session);
+                                record.status = PendingCreateStatus::Adopted { proxy_session_id };
+                            }
+                            Err(_) => {
+                                record.session = Some(session);
+                                record.status = PendingCreateStatus::Completed {
+                                    session_id: discovered_session_id,
+                                };
                             }
                         }
                     }
-                    return;
                 }
-                crate::remote::machine_protocol::OperationOutcome::Error { error } => {
-                    let mut guard = PENDING_CREATES.lock();
-                    if let Some(record) = guard.get_mut(&request_id) {
-                        record.status = PendingCreateStatus::Failed { error: error.message.clone() };
-                    }
-                    return;
-                }
-                _ => {}
+                persist_pending_creates();
             }
+        }
+        crate::remote::machine_protocol::OperationOutcome::Error { error } => {
+            {
+                let mut guard = PENDING_CREATES.lock();
+                if let Some(record) = guard.get_mut(&request_id) {
+                    record.status = PendingCreateStatus::Failed { error: error.message.clone() };
+                }
+            }
+            persist_pending_creates();
+        }
+        _ => {}
+    }
+}
+
+const PENDING_CREATE_REAPER_INTERVAL_SECS: u64 = 60;
+
+/// P10 (round 2): production scanner for still-pending creates. The bounded
+/// background reconciler only covers the spawn window; this reaper keeps
+/// revisiting records that stayed Pending — including ones loaded from disk
+/// after a restart — so a late terminal journal outcome is adopted or closed
+/// instead of leaking a live remote session.
+pub async fn start_pending_create_reaper(daemon_client: Arc<DaemonClient>) {
+    static REAPER_STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if REAPER_STARTED.set(()).is_err() {
+        return;
+    }
+    tokio::spawn(async move {
+        loop {
+            let pending: Vec<PendingCreateRecord> = {
+                ensure_pending_creates_loaded();
+                let guard = PENDING_CREATES.lock();
+                guard
+                    .values()
+                    .filter(|r| matches!(r.status, PendingCreateStatus::Pending))
+                    .cloned()
+                    .collect()
+            };
+            for record in pending {
+                let journal_req = crate::paired_host::client::OperationRequest {
+                    host_id: record.host_id.clone(),
+                    generation: record.generation,
+                    operation: crate::paired_host::client::Operation::Operation {
+                        request_id: record.request_id.clone(),
+                    },
+                };
+                let terminal = match daemon_client.paired_host_operation(journal_req).await {
+                    Ok(resp) => match resp.result {
+                        crate::paired_host::client::OperationResult::Operation(
+                            crate::remote::machine_protocol::Operation::Completed { outcome, .. },
+                        ) => Some(outcome),
+                        _ => None,
+                    },
+                    Err(_) => None,
+                };
+                if let Some(outcome) = terminal {
+                    resolve_pending_create_terminal(
+                        (*daemon_client).clone(),
+                        record.host_id.clone(),
+                        record.generation,
+                        record.request_id.clone(),
+                        record.cancelled,
+                        outcome,
+                    )
+                    .await;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(PENDING_CREATE_REAPER_INTERVAL_SECS)).await;
         }
     });
 }

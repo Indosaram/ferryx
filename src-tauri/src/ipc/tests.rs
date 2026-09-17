@@ -2100,6 +2100,150 @@ async fn test_p11_reaper_retains_exhausted_records_in_dead_letter_list() {
 }
 
 #[tokio::test]
+async fn test_p10_pending_create_reaper_resolves_still_pending_records() {
+    // P10 (round 2): the long-lived reaper must revisit still-Pending records
+    // after the bounded background reconciler gives up (including records
+    // loaded from disk after a restart) and adopt/close a late terminal
+    // journal outcome.
+    use crate::daemon::protocol::{
+        DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION,
+    };
+    use crate::ipc::terminal::{
+        clear_pending_creates_for_test, get_pending_create, register_pending_create,
+        start_pending_create_reaper, PendingCreateStatus,
+    };
+    use crate::paired_host::client::{Operation, OperationResponse, OperationResult};
+    use crate::remote::machine_protocol as m;
+    use crate::scoped_contracts::Epoch;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    clear_pending_creates_for_test();
+
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("p10_reaper.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+
+    let fixture_session = m::Session {
+        title: None,
+        agent_type: None,
+        provider_session: None,
+        workspace_id: "ws-p10-reaper".into(),
+        worktree: None,
+        target: m::RemoteTerminalTarget {
+            machine_id: "m-1".into(),
+            session_id: "remote-p10-reaper".into(),
+            daemon_epoch: Epoch(1),
+        },
+        cols: 80,
+        rows: 24,
+        running: true,
+        start_sequence: Epoch(0),
+        end_sequence: Epoch(0),
+        cwd: "/remote/dir".into(),
+    };
+
+    let server = tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => break,
+            };
+            let fixture = fixture_session.clone();
+            tokio::spawn(async move {
+                let (read, mut write) = stream.into_split();
+                let mut reader = BufReader::new(read);
+                let mut line = String::new();
+                while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                    let req: DaemonRequest = match serde_json::from_str(line.trim()) {
+                        Ok(r) => r,
+                        Err(_) => { line.clear(); continue; }
+                    };
+                    line.clear();
+                    let resp = match req {
+                        DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+                            version: DAEMON_PROTOCOL_VERSION,
+                            pid: std::process::id(),
+                            epoch: 1,
+                            binary_path: None,
+                            binary_mtime_ms: None,
+                            daemon_version: None,
+                        },
+                        DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
+                            capabilities: vec!["pairedHostInventoryV1".into()],
+                        },
+                        DaemonRequest::PairedHostOperation { request } => {
+                            match request.operation {
+                                Operation::Operation { request_id } => {
+                                    DaemonResponse::PairedHostOperationOk {
+                                        response: OperationResponse {
+                                            host_id: "host-1".into(),
+                                            generation: Epoch(1),
+                                            result: OperationResult::Operation(m::Operation::Completed {
+                                                request_id,
+                                                outcome: m::OperationOutcome::Session {
+                                                    session: fixture.clone(),
+                                                },
+                                            }),
+                                        },
+                                    }
+                                }
+                                _ => DaemonResponse::Error { message: "unexpected op".into(), code: None, details: None },
+                            }
+                        }
+                        DaemonRequest::PairedTerminalReattach { .. } => {
+                            DaemonResponse::PairedTerminalReattachOk {
+                                session_id: "proxy-p10-reaper".into(),
+                                generation: Epoch(1),
+                            }
+                        }
+                        _ => DaemonResponse::Error { message: "unexpected req".into(), code: None, details: None },
+                    };
+                    let bytes = serde_json::to_vec(&resp).unwrap();
+                    let _ = write.write_all(&bytes).await;
+                    let _ = write.write_all(b"\n").await;
+                    let _ = write.flush().await;
+                }
+            });
+        }
+    });
+
+    let client = DaemonClient::new_with_socket(socket);
+    // Operation journal request ids are hyphenated UUIDs on the wire.
+    let reaper_request_id = uuid::Uuid::new_v4().to_string();
+    register_pending_create("host-1", Epoch(1), &reaper_request_id, false);
+    assert_eq!(
+        get_pending_create(&reaper_request_id).map(|r| r.status),
+        Some(PendingCreateStatus::Pending)
+    );
+
+    // Production lifecycle entry point: first pass runs immediately.
+    start_pending_create_reaper(std::sync::Arc::new(client.clone())).await;
+
+    let mut adopted = false;
+    for _ in 0..50 {
+        // The PENDING_CREATES static is shared with parallel p10/p11 tests that
+        // clear it; re-register if another test wiped the record so the
+        // assertion tests reaper behavior, not static-clear race timing.
+        if let Some(record) = get_pending_create(&reaper_request_id) {
+            if !matches!(record.status, PendingCreateStatus::Pending) {
+                adopted = matches!(record.status, PendingCreateStatus::Adopted { .. });
+                break;
+            }
+        } else {
+            register_pending_create("host-1", Epoch(1), &reaper_request_id, false);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        adopted,
+        "Reaper must adopt a late terminal session outcome; final={:?}",
+        get_pending_create(&reaper_request_id)
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
 async fn test_p11_start_cleanup_reaper_schedules_background_resolution() {
     use crate::daemon::protocol::{
         DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION,
@@ -2321,6 +2465,210 @@ async fn test_p12_close_definitive_remote_error_aborts_local_close() {
     assert_eq!(details.get("hostId").and_then(|v| v.as_str()), Some("host-p12"));
     assert_eq!(details.get("remoteSessionId").and_then(|v| v.as_str()), Some("remote-pty-def"));
     assert!(!local_close_called.load(Ordering::SeqCst), "Local close must NOT proceed on definitive remote close failure");
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_p12_close_descriptor_lookup_failure_is_uncertain() {
+    use crate::daemon::protocol::{
+        DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION,
+    };
+    use crate::ipc::IpcErrorCode;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("p12_lookup.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+
+    let local_close_called = Arc::new(AtomicBool::new(false));
+    let local_close_clone = local_close_called.clone();
+
+    let server = tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => break,
+            };
+            let local_close = local_close_clone.clone();
+            tokio::spawn(async move {
+                let (read, mut write) = stream.into_split();
+                let mut reader = BufReader::new(read);
+                let mut line = String::new();
+                while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                    let req: DaemonRequest = match serde_json::from_str(line.trim()) {
+                        Ok(r) => r,
+                        Err(_) => { line.clear(); continue; }
+                    };
+                    line.clear();
+                    let resp = match req {
+                        DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+                            version: DAEMON_PROTOCOL_VERSION,
+                            pid: std::process::id(),
+                            epoch: 1,
+                            binary_path: None,
+                            binary_mtime_ms: None,
+                            daemon_version: None,
+                        },
+                        DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
+                            capabilities: vec!["pairedHostInventoryV1".into()],
+                        },
+                        // P12 (round 2): a failing descriptor lookup must NOT
+                        // silently skip the remote close.
+                        DaemonRequest::PairedTerminalDescriptor { .. } => {
+                            DaemonResponse::Error {
+                                message: "descriptor store unavailable".into(),
+                                code: Some("DESCRIPTOR_IO".into()),
+                                details: None,
+                            }
+                        }
+                        DaemonRequest::Close { .. } => {
+                            local_close.store(true, Ordering::SeqCst);
+                            DaemonResponse::CloseOk
+                        }
+                        _ => DaemonResponse::Error { message: "unexpected req".into(), code: None, details: None },
+                    };
+                    let bytes = serde_json::to_vec(&resp).unwrap();
+                    let _ = write.write_all(&bytes).await;
+                    let _ = write.write_all(b"\n").await;
+                    let _ = write.flush().await;
+                }
+            });
+        }
+    });
+
+    let client = DaemonClient::new_with_socket(socket);
+    let err = client
+        .close_terminal("daemon-session:paired-p12-lookup")
+        .await
+        .expect_err("Descriptor lookup failure must surface uncertainty");
+
+    assert_eq!(err.code, IpcErrorCode::from_code_str("REMOTE_CLOSE_UNCERTAIN"));
+    let details = err.details.expect("details present");
+    assert_eq!(details.get("cause").and_then(|v| v.as_str()), Some("DESCRIPTOR_IO"));
+    assert_eq!(details.get("remoteCloseUnknown"), Some(&serde_json::json!(true)));
+    assert!(!local_close_called.load(Ordering::SeqCst), "Local close must NOT be acknowledged after an unprovable remote close");
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_p12_close_operation_not_found_journal_stays_uncertain() {
+    use crate::daemon::protocol::{
+        DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION,
+    };
+    use crate::ipc::IpcErrorCode;
+    use crate::paired_host::client::{ClientError, Operation};
+    use crate::remote::machine_protocol as m;
+    use crate::scoped_contracts::Epoch;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("p12_onf.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+
+    let local_close_called = Arc::new(AtomicBool::new(false));
+    let local_close_clone = local_close_called.clone();
+
+    let server = tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => break,
+            };
+            let local_close = local_close_clone.clone();
+            tokio::spawn(async move {
+                let (read, mut write) = stream.into_split();
+                let mut reader = BufReader::new(read);
+                let mut line = String::new();
+                while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                    let req: DaemonRequest = match serde_json::from_str(line.trim()) {
+                        Ok(r) => r,
+                        Err(_) => { line.clear(); continue; }
+                    };
+                    line.clear();
+                    let resp = match req {
+                        DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+                            version: DAEMON_PROTOCOL_VERSION,
+                            pid: std::process::id(),
+                            epoch: 1,
+                            binary_path: None,
+                            binary_mtime_ms: None,
+                            daemon_version: None,
+                        },
+                        DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
+                            capabilities: vec!["pairedHostInventoryV1".into()],
+                        },
+                        DaemonRequest::PairedTerminalDescriptor { .. } => {
+                            DaemonResponse::PairedTerminalDescriptorOk {
+                                descriptor: Some(crate::terminal::paired_daemon::Descriptor {
+                                    host_id: "host-p12-onf".into(),
+                                    generation: Epoch(1),
+                                    target: m::RemoteTerminalTarget {
+                                        machine_id: "m-1".into(),
+                                        daemon_epoch: Epoch(1),
+                                        session_id: "remote-pty-onf".into(),
+                                    },
+                                    after_sequence: None,
+                                }),
+                            }
+                        }
+                        DaemonRequest::PairedHostOperation { request } => {
+                            match request.operation {
+                                // Ambiguous close: journal must be consulted.
+                                Operation::CloseSession { .. } => {
+                                    DaemonResponse::PairedHostOperationError {
+                                        error: ClientError {
+                                            code: "TIMEOUT".into(),
+                                            machine_error: None,
+                                            ambiguous: true,
+                                            request_id: Some("req-p12-onf".into()),
+                                        },
+                                    }
+                                }
+                                // P12 (round 2): journal OPERATION_NOT_FOUND means the
+                                // close request never committed remotely — the remote
+                                // session may still be running. NOT proof of closure.
+                                Operation::Operation { .. } => {
+                                    DaemonResponse::PairedHostOperationError {
+                                        error: ClientError {
+                                            code: "OPERATION_NOT_FOUND".into(),
+                                            machine_error: None,
+                                            ambiguous: false,
+                                            request_id: Some("req-p12-onf".into()),
+                                        },
+                                    }
+                                }
+                                _ => DaemonResponse::Error { message: "unexpected op".into(), code: None, details: None },
+                            }
+                        }
+                        DaemonRequest::Close { .. } => {
+                            local_close.store(true, Ordering::SeqCst);
+                            DaemonResponse::CloseOk
+                        }
+                        _ => DaemonResponse::Error { message: "unexpected req".into(), code: None, details: None },
+                    };
+                    let bytes = serde_json::to_vec(&resp).unwrap();
+                    let _ = write.write_all(&bytes).await;
+                    let _ = write.write_all(b"\n").await;
+                    let _ = write.flush().await;
+                }
+            });
+        }
+    });
+
+    let client = DaemonClient::new_with_socket(socket);
+    let err = client
+        .close_terminal("daemon-session:paired-p12-onf")
+        .await
+        .expect_err("An uncommitted close must stay uncertain");
+
+    assert_eq!(err.code, IpcErrorCode::from_code_str("REMOTE_CLOSE_UNCERTAIN"));
+    let details = err.details.expect("details present");
+    assert_eq!(details.get("remoteSessionId").and_then(|v| v.as_str()), Some("remote-pty-onf"));
+    assert!(!local_close_called.load(Ordering::SeqCst), "Journal OPERATION_NOT_FOUND must not mask a possibly-live remote PTY");
 
     server.abort();
 }

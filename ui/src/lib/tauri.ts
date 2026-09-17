@@ -868,6 +868,12 @@ export async function resetAgentState(sessionId: string): Promise<void> {
 
 export type RemoteNetworkMode = "off" | "localNetwork" | "tailscale" | "relay";
 
+export type RemoteGatewayGateStatus =
+  | "loopbackOnly"
+  | { overlaySecure: { address: string } }
+  | { insecureLanAllowed: { address: string } }
+  | { insecureLanGated: { address: string; reason: string } };
+
 export type RemoteGatewayStatus = {
   enabled: boolean;
   mode: RemoteNetworkMode;
@@ -875,6 +881,10 @@ export type RemoteGatewayStatus = {
   boundAddress: string | null;
   localIp: string | null;
   relayUrl: string | null;
+  // N5 (round 2): direct-gateway gate projection — lets the UI distinguish a
+  // gated LAN listener from ordinary running status.
+  gateStatus?: RemoteGatewayGateStatus | null;
+  gateReason?: string | null;
 };
 
 export type DeviceInfo = {

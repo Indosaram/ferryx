@@ -927,6 +927,10 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
     let native_terminal_surface_host = NativeTerminalSurfaceHostState::default();
     let setup_activations = Arc::clone(&notification_activations);
     let scroll_daemon_client = Arc::clone(&daemon_client);
+    // P10/P11: the cleanup + pending-create reapers must run from a real
+    // process lifecycle, not only from tests.
+    let cleanup_reaper_client = Arc::clone(&daemon_client);
+    let pending_create_reaper_client = Arc::clone(&daemon_client);
     // Consumed by the setup hook below, which spawns the periodic worktree
     // rescan task; kept as a separate clone so `.manage(workspace_registry)`
     // below still owns the managed instance.
@@ -1043,6 +1047,15 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             )?;
             ipc::native_menu::register_menu_event_forwarder(app.handle());
             start_remote_event_bridge(app.handle().clone(), Arc::clone(&bridge_daemon_client));
+            // P10/P11: schedule the ambiguous-close and pending-create reapers
+            // for the whole app lifetime. Both run their first pass immediately
+            // so restart-time leftovers are resolved without waiting a tick.
+            tauri::async_runtime::spawn(async move {
+                ipc::terminal::start_cleanup_reaper(cleanup_reaper_client).await;
+            });
+            tauri::async_runtime::spawn(async move {
+                ipc::terminal::start_pending_create_reaper(pending_create_reaper_client).await;
+            });
             install_notification_activation_routing(app, Arc::clone(&setup_activations))?;
             crate::worktree::spawn_worktree_rescan_task(
                 app.handle().clone(),

@@ -748,3 +748,137 @@ fn test_map_ticket_error_structured_and_plain() {
     assert!(!me5.retryable);
 }
 
+#[tokio::test]
+async fn test_p05_response_body_mapping_table() {
+    let cases = vec![
+        (axum::http::StatusCode::NOT_FOUND, json!({"error": "PIN not found"}), "PIN_NOT_FOUND"),
+        (axum::http::StatusCode::TOO_MANY_REQUESTS, json!({"code": "RATE_LIMITED", "message": "Too many attempts"}), "RATE_LIMITED"),
+        (axum::http::StatusCode::SERVICE_UNAVAILABLE, json!({"message": "Gateway temporarily down"}), "SERVICE_UNAVAILABLE"),
+        (axum::http::StatusCode::UNAUTHORIZED, json!({"code": "PIN_EXPIRED", "message": "The PIN has expired"}), "PIN_EXPIRED"),
+    ];
+
+    for (status, body, expected_code) in cases {
+        let root = crate::ipc::run_blocking(|| Ok(tempfile::tempdir().unwrap())).await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let body_val = body.clone();
+        let router = Router::new().route(
+            "/api/v1/pair/exchange",
+            post(move || async move { (status, Json(body_val.clone())) }),
+        );
+        let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let service = PairedHostService::open_test_loopback(root.path().join("data"));
+        let err = service.pair(PairRequest {
+            relay_origin: origin,
+            pin: Secret("123456".into()),
+            display_label: "fixture".into(),
+        }).await.unwrap_err();
+        task.abort();
+        assert_eq!(err.code, expected_code, "status {status} body {body:?} should produce code {expected_code}, got {}", err.code);
+    }
+
+    // Malformed response (200 OK with non-JSON body)
+    {
+        let root = crate::ipc::run_blocking(|| Ok(tempfile::tempdir().unwrap())).await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let router = Router::new().route(
+            "/api/v1/pair/exchange",
+            post(|| async { (axum::http::StatusCode::OK, "not-valid-json") }),
+        );
+        let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let service = PairedHostService::open_test_loopback(root.path().join("data"));
+        let err = service.pair(PairRequest {
+            relay_origin: origin,
+            pin: Secret("123456".into()),
+            display_label: "fixture".into(),
+        }).await.unwrap_err();
+        task.abort();
+        assert_eq!(err.code, "MALFORMED_RESPONSE", "malformed response body must map to MALFORMED_RESPONSE, got {}", err.code);
+    }
+
+    // Transport failure (connection refused)
+    {
+        let root = crate::ipc::run_blocking(|| Ok(tempfile::tempdir().unwrap())).await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener); // Close listener immediately
+        let service = PairedHostService::open_test_loopback(root.path().join("data"));
+        let err = service.pair(PairRequest {
+            relay_origin: format!("http://{addr}"),
+            pin: Secret("123456".into()),
+            display_label: "fixture".into(),
+        }).await.unwrap_err();
+        assert_eq!(err.code, "TRANSPORT", "transport failure must map to TRANSPORT, got {}", err.code);
+    }
+}
+
+#[tokio::test]
+async fn test_p14_inventory_mutation_emits_inventory_changed_event() {
+    let root = crate::ipc::run_blocking(|| Ok(tempfile::tempdir().unwrap())).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let router = Router::new().route(
+        "/api/v1/pair/exchange",
+        post(|| async {
+            Json(json!({
+                "token": "fixture-secret",
+                "machineId": "a",
+                "device": {
+                    "id": "d",
+                    "name": "d",
+                    "permission": "control",
+                    "accessScope": "machine",
+                    "createdAt": 1,
+                    "lastSeenAt": 1
+                }
+            }))
+        }),
+    ).route(
+        "/host/a/api/v1/capabilities",
+        get(|| async { Json(caps("a")) }),
+    );
+    let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let mut service = PairedHostService::open_test_loopback(root.path().join("data"));
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    service.set_event_sink(std::sync::Arc::new(move |event| {
+        let _ = tx.send(event);
+    }));
+
+    // 1. Pair mutation
+    let host = service.pair(PairRequest {
+        relay_origin: origin,
+        pin: Secret("fixture".into()),
+        display_label: "fixture".into(),
+    }).await.unwrap();
+
+    let pair_event = rx.try_recv().expect("pair mutation must emit inventory changed event");
+    assert_eq!(pair_event.r#type, "pair");
+    assert_eq!(pair_event.host_id.as_deref(), Some(host.host_id.as_str()));
+    assert_eq!(pair_event.generation.as_deref(), Some(host.generation.0.to_string().as_str()));
+    let event_host = pair_event.host.as_ref().expect("pair event must include host view");
+    assert_eq!(event_host.host_id, host.host_id);
+    assert_eq!(event_host.generation, host.generation);
+    assert!(event_host.online);
+
+    // Verify wire serialization conforms to ui/src/lib/pairedHostInventory.ts contract
+    let json_val = serde_json::to_value(&pair_event).unwrap();
+    assert_eq!(json_val["type"], "pair");
+    assert_eq!(json_val["hostId"], host.host_id);
+    assert_eq!(json_val["generation"], host.generation.0.to_string());
+    assert_eq!(json_val["host"]["hostId"], host.host_id);
+    assert_eq!(json_val["host"]["generation"], host.generation.0.to_string());
+    assert_eq!(json_val["host"]["online"], true);
+
+    // 2. Forget mutation
+    service.forget(host.host_id.clone(), host.generation).await.unwrap();
+    let forget_event = rx.try_recv().expect("forget mutation must emit inventory changed event");
+    assert_eq!(forget_event.r#type, "forget");
+    assert_eq!(forget_event.host_id.as_deref(), Some(host.host_id.as_str()));
+    assert_eq!(forget_event.generation.as_deref(), Some(host.generation.0.to_string().as_str()));
+
+    task.abort();
+}
+
+

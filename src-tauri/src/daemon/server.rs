@@ -1164,6 +1164,26 @@ impl DaemonServer {
             });
         }));
 
+        // P14: inventory transitions that originate inside the daemon-owned
+        // PairedHostService (not just renderer-driven pair/migrate/forget)
+        // must reach the desktop. The sink feeds the daemon's remote-event
+        // broadcast; the GUI's remote event bridge (lib.rs
+        // start_remote_event_bridge) re-emits it under the same
+        // paired_host_inventory_changed Tauri event name the renderer already
+        // listens for.
+        let mut paired_hosts = paired_hosts;
+        {
+            let inventory_sink_tx = remote_event_tx.clone();
+            paired_hosts.set_event_sink(Arc::new(move |event| {
+                let payload = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
+                let _ = inventory_sink_tx.send(DaemonRemoteEvent {
+                    event: crate::ipc::paired_host::PAIRED_HOST_INVENTORY_CHANGED_EVENT
+                        .to_string(),
+                    payload,
+                });
+            }));
+        }
+
         let remote_handle_for_handover: Arc<
             Mutex<Option<crate::remote::server::RemoteServerHandle>>,
         > = Arc::new(Mutex::new(None));
@@ -2978,6 +2998,19 @@ mod tests {
             .current_dir(dir.path())
             .output();
         dir
+    }
+
+    #[tokio::test]
+    async fn test_p14_daemon_wires_paired_host_inventory_event_sink() {
+        // P14: inventory transitions that originate inside the daemon-owned
+        // PairedHostService must reach the desktop through the remote-event
+        // broadcast (lib.rs's bridge re-emits paired_host_inventory_changed).
+        // The constructor must therefore install the sink in production.
+        let server = DaemonServer::new_with_paths(None, None);
+        assert!(
+            server.paired_hosts.has_event_sink(),
+            "daemon-owned PairedHostService must have a production event sink wired"
+        );
     }
 
     #[tokio::test]

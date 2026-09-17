@@ -253,6 +253,11 @@ export function RemoteAccessSection({ detailsOnly = false }: { detailsOnly?: boo
       <dt>Local endpoint / port</dt><dd>{status?.boundAddress ?? status?.localIp ?? "Unavailable"} / {status?.port ?? "Unavailable"}</dd>
       <dt>Listener</dt><dd>{status?.enabled ? "Running" : "Stopped"}</dd>
       <dt>Relay / control channel</dt><dd>{String(status?.relayConnected ?? false)} / {String(status?.controlChannelConnected ?? false)}</dd></dl>
+    {status?.gateStatus && typeof status.gateStatus === "object" && "insecureLanGated" in status.gateStatus ? (
+      <p data-testid="gateway-gate-warning" role="note">
+        Direct LAN access is gated: {status.gateStatus.insecureLanGated.reason}. Only loopback and trusted-overlay connections are accepted.
+      </p>
+    ) : null}
     {status && (status.relayUrl ? status.relayUrl !== DEFAULT_RELAY_ORIGIN : status.mode !== "off") ? <p data-testid="legacy-gateway">Legacy configuration. The existing connection is preserved; no automatic migration is performed.</p> : null}
   </section>;
 

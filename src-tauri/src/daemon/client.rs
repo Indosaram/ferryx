@@ -543,8 +543,17 @@ impl DaemonClient {
         }
     }
     pub async fn paired_terminal_descriptor(&self, session_id: String) -> Result<Option<crate::terminal::paired_daemon::Descriptor>, crate::paired_host::client::ClientError> {
-        match self.paired_host_request(DaemonRequest::PairedTerminalDescriptor { session_id }).await.map_err(|e| crate::paired_host::client::ClientError::local(&e.code))? {
+        match self.paired_host_request(DaemonRequest::PairedTerminalDescriptor { session_id: session_id.clone() }).await.map_err(|e| crate::paired_host::client::ClientError::local(&e.code))? {
             DaemonResponse::PairedTerminalDescriptorOk { descriptor } => Ok(descriptor),
+            // P12 (round 2): a daemon error response is NOT "no descriptor" —
+            // propagate it so close_terminal cannot silently skip the remote
+            // close on a lookup failure.
+            DaemonResponse::Error { message, code, .. } => Err(crate::paired_host::client::ClientError {
+                code: code.unwrap_or_else(|| "DESCRIPTOR_LOOKUP_FAILED".into()),
+                machine_error: None,
+                ambiguous: false,
+                request_id: Some(session_id),
+            }),
             _ => Ok(None),
         }
     }
@@ -1638,7 +1647,11 @@ impl DaemonClient {
 
     pub async fn close_terminal(&self, session_id: &str) -> Result<(), IpcError> {
         if session_id.starts_with("daemon-session:") {
-            if let Ok(Some(descriptor)) = self.paired_terminal_descriptor(session_id.to_string()).await {
+            // P12 (round 2): a failed descriptor lookup must not silently skip
+            // the remote close — local close is then not proof that the remote
+            // PTY terminated, so surface uncertainty instead of masking it.
+            match self.paired_terminal_descriptor(session_id.to_string()).await {
+                Ok(Some(descriptor)) => {
                 let cleanup_req_id = uuid::Uuid::new_v4().to_string();
                 let close_op = crate::paired_host::client::OperationRequest {
                     host_id: descriptor.host_id.clone(),
@@ -1677,14 +1690,16 @@ impl DaemonClient {
                                     }
                                     _ => {}
                                 },
-                                Err(journal_err)
-                                    if journal_err.code == "OPERATION_NOT_FOUND"
-                                        || journal_err.code == "SESSION_NOT_FOUND" =>
-                                {
-                                    // The request never committed remotely: treat as closed.
+                                Err(journal_err) if journal_err.code == "SESSION_NOT_FOUND" => {
+                                    // The paired host does not know the host/session at all:
+                                    // the remote session is gone.
                                     determined = true;
                                     break;
                                 }
+                                // P12 (round 2): OPERATION_NOT_FOUND means the close
+                                // request never committed remotely — i.e. the remote
+                                // session may still be running. It is NOT proof of a
+                                // closed session, so stay unresolved.
                                 Err(_) => {}
                             }
                             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -1717,6 +1732,22 @@ impl DaemonClient {
                             "cause": e.code,
                         })));
                     },
+                }
+                }
+                Ok(None) => {}
+                Err(descriptor_err) => {
+                    return Err(IpcError::new(
+                        IpcErrorCode::Custom("REMOTE_CLOSE_UNCERTAIN".to_string()),
+                        format!(
+                            "Paired descriptor lookup failed while closing; the remote session may still be running: {}",
+                            descriptor_err.code
+                        ),
+                    )
+                    .with_details(serde_json::json!({
+                        "sessionId": session_id,
+                        "cause": descriptor_err.code,
+                        "remoteCloseUnknown": true,
+                    })));
                 }
             }
         }

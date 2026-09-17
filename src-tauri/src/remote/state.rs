@@ -119,6 +119,11 @@ type TestOverlayFn = Box<dyn Fn(&std::net::Ipv4Addr) -> Option<bool> + Send + Sy
 static TEST_OVERLAY_OVERRIDE: parking_lot::Mutex<Option<TestOverlayFn>> =
     parking_lot::Mutex::new(None);
 
+/// P19 (round 2) test hook: forces the Tailscale CLI probe outcome. `Some(b)`
+/// = CLI present with verdict `b`; `None` = CLI unavailable (no proof).
+#[cfg(test)]
+static TEST_CLI_PROBE_OVERRIDE: parking_lot::Mutex<Option<bool>> = parking_lot::Mutex::new(None);
+
 #[cfg(test)]
 pub fn set_test_overlay_proof_override<F>(f: Option<F>)
 where
@@ -203,6 +208,10 @@ fn get_interface_name_for_ipv4(target: &std::net::Ipv4Addr) -> Option<String> {
 }
 
 fn probe_tailscale_cli(target: &std::net::Ipv4Addr) -> Option<bool> {
+    #[cfg(test)]
+    if let Some(forced) = *TEST_CLI_PROBE_OVERRIDE.lock() {
+        return Some(forced);
+    }
     let target_str = target.to_string();
     let candidates = [
         "tailscale",
@@ -228,9 +237,14 @@ fn probe_tailscale_cli(target: &std::net::Ipv4Addr) -> Option<bool> {
 }
 
 fn verify_overlay_authoritative(addr: &std::net::Ipv4Addr) -> bool {
+    let iface_name = get_interface_name_for_ipv4(addr);
+    verify_overlay_with_interface(iface_name.as_deref(), addr)
+}
+
+fn verify_overlay_with_interface(iface_name: Option<&str>, addr: &std::net::Ipv4Addr) -> bool {
     #[cfg(target_os = "macos")]
     {
-        let iface_name = match get_interface_name_for_ipv4(addr) {
+        let iface_name = match iface_name {
             Some(n) => n,
             None => return false,
         };
@@ -241,12 +255,15 @@ fn verify_overlay_authoritative(addr: &std::net::Ipv4Addr) -> bool {
         if let Some(cli_result) = probe_tailscale_cli(addr) {
             return cli_result;
         }
-        true
+        // P19 (round 2): fail closed — an interface-name heuristic alone is
+        // NOT authoritative overlay proof. Without positive Tailscale CLI
+        // confirmation the CGNAT address stays gated.
+        false
     }
 
     #[cfg(target_os = "linux")]
     {
-        let iface_name = match get_interface_name_for_ipv4(addr) {
+        let iface_name = match iface_name {
             Some(n) => n,
             None => return false,
         };
@@ -259,11 +276,14 @@ fn verify_overlay_authoritative(addr: &std::net::Ipv4Addr) -> bool {
         if let Some(cli_result) = probe_tailscale_cli(addr) {
             return cli_result;
         }
-        true
+        // P19 (round 2): fail closed on Linux as well — tun/utun naming is not
+        // authoritative proof of a trusted overlay.
+        false
     }
 
     #[cfg(target_os = "windows")]
     {
+        let _ = iface_name;
         let target_str = addr.to_string();
         if let Ok(output) = std::process::Command::new("ipconfig").args(["/all"]).output() {
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -279,7 +299,7 @@ fn verify_overlay_authoritative(addr: &std::net::Ipv4Addr) -> bool {
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
-        let _ = addr;
+        let _ = (iface_name, addr);
         false
     }
 }
@@ -1153,6 +1173,44 @@ fn remote_data_dir() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    /// P19 (round 2): the trusted-overlay proof must FAIL CLOSED. An interface
+    /// name alone (utun/tun/tailscale) is not authoritative — without positive
+    /// Tailscale CLI confirmation the CGNAT address stays gated, and a CLI that
+    /// explicitly denies the address also stays gated.
+    #[test]
+    fn p19_overlay_proof_fails_closed_without_authoritative_cli_confirmation() {
+        let addr = std::net::Ipv4Addr::new(100, 100, 1, 1);
+
+        // CLI unavailable (probe returns None): utun interface must NOT be exempt.
+        *TEST_CLI_PROBE_OVERRIDE.lock() = None;
+        assert!(
+            !verify_overlay_with_interface(Some("utun5"), &addr),
+            "utun interface without CLI proof must fail closed"
+        );
+        assert!(
+            !verify_overlay_with_interface(Some("tailscale0"), &addr),
+            "tailscale-named interface without CLI proof must fail closed"
+        );
+
+        // CLI present but denies the address: still gated.
+        *TEST_CLI_PROBE_OVERRIDE.lock() = Some(false);
+        assert!(!verify_overlay_with_interface(Some("utun5"), &addr));
+
+        // Positive CLI confirmation is the only way through.
+        *TEST_CLI_PROBE_OVERRIDE.lock() = Some(true);
+        assert!(verify_overlay_with_interface(Some("utun5"), &addr));
+
+        // Non-tunnel interfaces are never exempt regardless of CLI.
+        *TEST_CLI_PROBE_OVERRIDE.lock() = Some(true);
+        assert!(!verify_overlay_with_interface(Some("en0"), &addr));
+
+        // Missing interface: fail closed.
+        *TEST_CLI_PROBE_OVERRIDE.lock() = None;
+        assert!(!verify_overlay_with_interface(None, &addr));
+
+        *TEST_CLI_PROBE_OVERRIDE.lock() = None;
+    }
+
     /// A pairing requested as View must not redeem into a Control device. The relay
     /// capability carries the permission that `exchange_pairing_code` copies onto the
     /// issued device, so dropping it silently escalates the recipient.

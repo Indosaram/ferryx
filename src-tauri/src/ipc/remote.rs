@@ -112,6 +112,12 @@ pub struct RemoteGatewayStatusResponse {
     pub relay_connected: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_channel_connected: Option<bool>,
+    // N5 (round 2): surface the direct-gateway gate projection to the renderer
+    // so the UI can distinguish a gated LAN listener from ordinary status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_status: Option<crate::remote::server::DirectGatewayGateStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -158,9 +164,11 @@ pub async fn cmd_remote_status(
                 machine_id: status.machine_id,
                 relay_connected: status.relay_connected,
                 control_channel_connected: status.control_channel_connected,
+                gate_status: status.gate_status,
+                gate_reason: status.gate_reason,
             })
         }
-        RemoteGatewayManagerInner::State { state, .. } => {
+        RemoteGatewayManagerInner::State { state, server_handle, .. } => {
             let config = state.config.read().clone();
             let is_running = *state.is_running.read();
             let bound_address = state.bound_address.read().clone();
@@ -185,6 +193,17 @@ pub async fn cmd_remote_status(
                 machine_id,
                 relay_connected,
                 control_channel_connected,
+                gate_status: {
+                    let handle_guard = server_handle.lock();
+                    handle_guard.as_ref().map(|h| h.gate_status())
+                },
+                gate_reason: {
+                    let handle_guard = server_handle.lock();
+                    handle_guard.as_ref().and_then(|h| match h.gate_status() {
+                        crate::remote::server::DirectGatewayGateStatus::InsecureLanGated { reason, .. } => Some(reason),
+                        _ => None,
+                    })
+                },
             })
         }
     }

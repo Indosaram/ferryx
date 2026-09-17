@@ -223,6 +223,10 @@ impl PairedHostService {
     pub fn set_event_sink(&mut self, sink: InventoryEventSink) {
         self.event_sink = Some(sink);
     }
+    /// Test/audit hook: whether a production event sink was installed.
+    pub fn has_event_sink(&self) -> bool {
+        self.event_sink.is_some()
+    }
     #[cfg(test)]
     pub(crate) fn open_test_loopback(directory: PathBuf) -> Self {
         let mut service = Self::open(directory.clone());
