@@ -198,6 +198,82 @@ pub async fn dag_get_run(
     .await
 }
 
+#[tauri::command]
+pub async fn dag_read_node_artifact(
+    project_path: String,
+    relative_path: String,
+) -> Result<String, IpcError> {
+    run_blocking(move || {
+        let trimmed = relative_path.trim();
+        if trimmed.is_empty() {
+            return Err(IpcError::new(
+                IpcErrorCode::InvalidArgument,
+                "artifact relative path cannot be empty",
+            ));
+        }
+
+        let rel = Path::new(trimmed);
+        if rel.is_absolute() {
+            return Err(IpcError::new(
+                IpcErrorCode::InvalidArgument,
+                "artifact path must be relative, not absolute",
+            ));
+        }
+
+        for comp in rel.components() {
+            if matches!(comp, std::path::Component::ParentDir) {
+                return Err(IpcError::new(
+                    IpcErrorCode::PermissionDenied,
+                    "parent directory traversal ('..') is strictly forbidden",
+                ));
+            }
+        }
+
+        let canonical_project = std::fs::canonicalize(&project_path).map_err(|e| {
+            IpcError::new(
+                IpcErrorCode::NotFound,
+                format!("failed to canonicalize project path: {e}"),
+            )
+        })?;
+
+        let candidate = canonical_project.join(rel);
+        let candidate_nested = canonical_project.join(".omo/senpi-task").join(rel);
+
+        let target_path = if candidate.is_file() {
+            candidate
+        } else if candidate_nested.is_file() {
+            candidate_nested
+        } else {
+            return Err(IpcError::new(
+                IpcErrorCode::NotFound,
+                format!("artifact file not found at: {trimmed}"),
+            ));
+        };
+
+        let canonical_target = std::fs::canonicalize(&target_path).map_err(|e| {
+            IpcError::new(
+                IpcErrorCode::IoError,
+                format!("failed to canonicalize artifact path: {e}"),
+            )
+        })?;
+
+        if !canonical_target.starts_with(&canonical_project) {
+            return Err(IpcError::new(
+                IpcErrorCode::PermissionDenied,
+                "artifact path escapes project root boundary",
+            ));
+        }
+
+        std::fs::read_to_string(&canonical_target).map_err(|e| {
+            IpcError::new(
+                IpcErrorCode::IoError,
+                format!("failed to read artifact file: {e}"),
+            )
+        })
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,6 +383,68 @@ mod tests {
             .await
             .expect("get missing run");
         assert!(missing.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_dag_read_node_artifact_security_and_success() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_str = temp.path().to_string_lossy().to_string();
+
+        let artifact_dir = temp.path().join(".omo/senpi-task/dag/results/dag_123");
+        std::fs::create_dir_all(&artifact_dir).expect("create artifact dir");
+        let artifact_file = artifact_dir.join("step_1.txt");
+        std::fs::write(&artifact_file, "Hello from deliverable artifact!").expect("write artifact");
+
+        // 1. Successful read
+        let content = dag_read_node_artifact(
+            project_str.clone(),
+            ".omo/senpi-task/dag/results/dag_123/step_1.txt".into(),
+        )
+        .await
+        .expect("read artifact");
+        assert_eq!(content, "Hello from deliverable artifact!");
+
+        // 2. Successful read via nested fallback
+        let content_nested = dag_read_node_artifact(
+            project_str.clone(),
+            "dag/results/dag_123/step_1.txt".into(),
+        )
+        .await
+        .expect("read artifact nested");
+        assert_eq!(content_nested, "Hello from deliverable artifact!");
+
+        // 3. Reject empty
+        let err_empty = dag_read_node_artifact(project_str.clone(), "".into())
+            .await
+            .unwrap_err();
+        assert_eq!(err_empty.code, IpcErrorCode::InvalidArgument);
+
+        // 4. Reject parent directory traversal
+        let err_traversal = dag_read_node_artifact(
+            project_str.clone(),
+            "../secret.txt".into(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err_traversal.code, IpcErrorCode::PermissionDenied);
+
+        // 5. Reject absolute path
+        let err_abs = dag_read_node_artifact(
+            project_str.clone(),
+            "/etc/passwd".into(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err_abs.code, IpcErrorCode::InvalidArgument);
+
+        // 6. NotFound for nonexistent file
+        let err_missing = dag_read_node_artifact(
+            project_str,
+            "dag/results/dag_123/nonexistent.txt".into(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err_missing.code, IpcErrorCode::NotFound);
     }
 
     #[tokio::test]

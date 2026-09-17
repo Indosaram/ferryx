@@ -187,4 +187,66 @@ describe("DagRunSnapshot validator", () => {
     expect(snapshot).not.toBeNull();
     expect(snapshot?.nodes[0]?.route).toEqual({ kind: "unknown" });
   });
+
+  it("parses prompt, runStats, resultArtifact, amendHistory, and diagnostics cleanly", () => {
+    const rawWithFullInfo = {
+      ...sampleJson,
+      amendHistory: [
+        {
+          at: "2026-09-17T10:02:00.000Z",
+          previousFingerprint: "prev_fp",
+          fingerprint: "curr_fp",
+          changedNodeIds: ["extract"],
+          addedNodeIds: [],
+          invalidatedNodeIds: ["extract", "render"],
+        },
+      ],
+      diagnostics: [{ type: "warning", message: "diagnostic alert" }],
+      nodes: [
+        {
+          ...(sampleJson.nodes[0] as Record<string, unknown>),
+          prompt: "TASK: Extract. DELIVERABLE: out.txt. SCOPE: src. VERIFY: ok. STOP WHEN: done.",
+          runStats: {
+            runtimeMs: 45000,
+            turns: 3,
+            toolCalls: 2,
+            inputTokens: 8500,
+            outputTokens: 250,
+            totalTokens: 8750,
+            generationMs: 200,
+            tokensPerSecond: 640.2,
+            costUsd: 0.0018,
+            cacheReadTokens: 5000,
+            cacheWriteTokens: 500,
+          },
+          resultArtifact: {
+            relativePath: "dag/results/dag_123/extract.txt",
+            sha256: "hash123",
+            bytes: 1024,
+          },
+        },
+        ...sampleJson.nodes.slice(1),
+      ],
+    };
+
+    const snapshot = parseDagRunSnapshot(rawWithFullInfo);
+    expect(snapshot).not.toBeNull();
+    if (!snapshot) return;
+
+    expect(snapshot.amendHistory).toHaveLength(1);
+    expect(snapshot.amendHistory?.[0].changedNodeIds).toEqual(["extract"]);
+    expect(snapshot.amendHistory?.[0].invalidatedNodeIds).toEqual(["extract", "render"]);
+    expect(snapshot.diagnostics).toHaveLength(1);
+
+    const firstNode = snapshot.nodes[0];
+    expect(firstNode.prompt).toBe("TASK: Extract. DELIVERABLE: out.txt. SCOPE: src. VERIFY: ok. STOP WHEN: done.");
+    expect(firstNode.runStats?.runtimeMs).toBe(45000);
+    expect(firstNode.runStats?.turns).toBe(3);
+    expect(firstNode.runStats?.toolCalls).toBe(2);
+    expect(firstNode.runStats?.totalTokens).toBe(8750);
+    expect(firstNode.runStats?.costUsd).toBe(0.0018);
+    expect(firstNode.resultArtifact?.relativePath).toBe("dag/results/dag_123/extract.txt");
+    expect(firstNode.resultArtifact?.sha256).toBe("hash123");
+    expect(firstNode.resultArtifact?.bytes).toBe(1024);
+  });
 });

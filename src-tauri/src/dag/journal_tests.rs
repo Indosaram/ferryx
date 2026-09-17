@@ -144,3 +144,98 @@ fn test_list_run_summaries_from_testdata_dir() {
         );
     }
 }
+
+#[test]
+fn test_parse_run_checkpoint_full_information_fields() {
+    let json = r#"{
+        "runId": "dag_sample_123",
+        "runKey": "sample-key",
+        "name": "Full Information DAG",
+        "status": "completed",
+        "startedAt": "2026-09-17T10:00:00.000Z",
+        "completedAt": "2026-09-17T10:05:00.000Z",
+        "amendCount": 1,
+        "amendHistory": [
+            {
+                "at": "2026-09-17T10:02:00.000Z",
+                "previousFingerprint": "prev_fp",
+                "fingerprint": "curr_fp",
+                "changedNodeIds": ["step_1"],
+                "addedNodeIds": [],
+                "invalidatedNodeIds": ["step_1", "step_2"]
+            }
+        ],
+        "diagnostics": [{"type": "warning", "message": "High memory usage"}],
+        "nodes": [
+            {
+                "id": "step_1",
+                "label": "First Step",
+                "prompt": "TASK: Execute command. DELIVERABLE: result.txt. SCOPE: /tmp. VERIFY: check. STOP WHEN: done.",
+                "state": "completed",
+                "dependsOn": [],
+                "attempt": 1,
+                "route": {"kind": "category", "category": "quick"},
+                "startedAt": "2026-09-17T10:00:01.000Z",
+                "completedAt": "2026-09-17T10:02:00.000Z",
+                "taskId": "st_01a0sample",
+                "runStats": {
+                    "runtimeMs": 119000,
+                    "turns": 4,
+                    "toolCalls": 3,
+                    "inputTokens": 12000,
+                    "outputTokens": 450,
+                    "totalTokens": 12450,
+                    "generationMs": 350,
+                    "tokensPerSecond": 720.5,
+                    "costUsd": 0.0025,
+                    "cacheReadTokens": 8000,
+                    "cacheWriteTokens": 1000
+                },
+                "resultArtifact": {
+                    "relativePath": "dag/results/dag_sample_123/step_1.txt",
+                    "sha256": "abcdef123456",
+                    "bytes": 2048
+                }
+            }
+        ],
+        "edges": [],
+        "waves": [{"index": 0, "nodeIds": ["step_1"]}],
+        "criticalPath": ["step_1"],
+        "bottlenecks": []
+    }"#;
+
+    let snapshot = parse_run_checkpoint(json).expect("parse full checkpoint");
+    assert_eq!(snapshot.run_id, "dag_sample_123");
+    assert_eq!(snapshot.amend_count, 1);
+
+    let amend_history = snapshot.amend_history.as_ref().expect("amend history present");
+    assert_eq!(amend_history.len(), 1);
+    assert_eq!(amend_history[0].changed_node_ids, vec!["step_1"]);
+    assert_eq!(amend_history[0].invalidated_node_ids, vec!["step_1", "step_2"]);
+
+    let diagnostics = snapshot.diagnostics.as_ref().expect("diagnostics present");
+    assert_eq!(diagnostics.len(), 1);
+
+    let node = &snapshot.nodes[0];
+    assert_eq!(
+        node.prompt.as_deref(),
+        Some("TASK: Execute command. DELIVERABLE: result.txt. SCOPE: /tmp. VERIFY: check. STOP WHEN: done.")
+    );
+    assert_eq!(node.task_id.as_deref(), Some("st_01a0sample"));
+
+    let stats = node.run_stats.as_ref().expect("runStats present");
+    assert_eq!(stats.runtime_ms, Some(119000));
+    assert_eq!(stats.turns, Some(4));
+    assert_eq!(stats.tool_calls, Some(3));
+    assert_eq!(stats.input_tokens, Some(12000));
+    assert_eq!(stats.output_tokens, Some(450));
+    assert_eq!(stats.total_tokens, Some(12450));
+    assert_eq!(stats.tokens_per_second, Some(720.5));
+    assert_eq!(stats.cost_usd, Some(0.0025));
+    assert_eq!(stats.cache_read_tokens, Some(8000));
+
+    let artifact = node.result_artifact.as_ref().expect("resultArtifact present");
+    assert_eq!(artifact.relative_path, "dag/results/dag_sample_123/step_1.txt");
+    assert_eq!(artifact.sha256.as_deref(), Some("abcdef123456"));
+    assert_eq!(artifact.bytes, Some(2048));
+}

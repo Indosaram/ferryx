@@ -1184,3 +1184,13 @@ export async function watchDagProject(projectPath: string): Promise<DagWatchProj
   if (!isTauri()) return { projectPath, runs: [] };
   return invokeCommand<DagWatchProjectResult>("dag_watch_project", { projectPath });
 }
+
+export async function dagReadNodeArtifact(
+  projectPath: string,
+  relativePath: string,
+): Promise<string> {
+  if (!isTauri()) {
+    throw new Error("DAG artifact reading is available only in the desktop app");
+  }
+  return invokeCommand<string>("dag_read_node_artifact", { projectPath, relativePath });
+}

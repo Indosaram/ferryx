@@ -70,6 +70,43 @@ describe("DagPaneBadge", () => {
     expect(screen.queryByTestId("dag-pane-badge")).not.toBeInTheDocument();
   });
 
+  it("retains completed and failed runs when retainSettled is true", () => {
+    const completedRun: DagRunSnapshot = {
+      ...baseSnapshot,
+      runId: "run-settled-1",
+      status: "completed",
+    };
+    dagStore.applySnapshot("/repo/my-project", completedRun);
+
+    const { unmount } = render(
+      <DagPaneBadge
+        providerSessionId="provider-a"
+        projectPath="/repo/my-project"
+        paneId="pane-a"
+        retainSettled={true}
+      />,
+    );
+    expect(screen.getByTestId("dag-pane-badge")).toBeInTheDocument();
+    unmount();
+
+    const failedRun: DagRunSnapshot = {
+      ...baseSnapshot,
+      runId: "run-settled-2",
+      status: "failed",
+    };
+    dagStore.applySnapshot("/repo/my-project", failedRun);
+
+    render(
+      <DagPaneBadge
+        providerSessionId="provider-a"
+        projectPath="/repo/my-project"
+        paneId="pane-a"
+        retainSettled={true}
+      />,
+    );
+    expect(screen.getByTestId("dag-pane-badge")).toBeInTheDocument();
+  });
+
   it("live matching-project icon with pulse/glow: renders floating bottom-right icon with active animation", () => {
     const runningRun: DagRunSnapshot = {
       ...baseSnapshot,

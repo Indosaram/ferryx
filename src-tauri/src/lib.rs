@@ -1224,6 +1224,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_open_file_path,
         dag_list_runs,
         dag_get_run,
+        dag_read_node_artifact,
         dag_watch_project,
     ])
 }

@@ -1,12 +1,14 @@
 import React from "react";
 import type { DagNodeSnapshot, DagNodeState } from "../../lib/dagTypes";
-import { formatRouteText, getNodeStateGlyph } from "./dagViewUtils";
+import { formatDurationMs, formatRouteText, getNodeStateGlyph } from "./dagViewUtils";
 
 export type DagNodeCardProps = {
   readonly node: DagNodeSnapshot;
   readonly isCriticalPath: boolean;
   readonly blockedCount: number;
   readonly style?: React.CSSProperties;
+  readonly isSelected?: boolean;
+  readonly onClick?: () => void;
 };
 
 type StateAppearance = {
@@ -73,6 +75,8 @@ export function DagNodeCard({
   isCriticalPath,
   blockedCount,
   style,
+  isSelected = false,
+  onClick,
 }: DagNodeCardProps): JSX.Element {
   const appearance = STATE_APPEARANCE[node.state];
   const glyph = getNodeStateGlyph(node.state);
@@ -81,6 +85,12 @@ export function DagNodeCard({
   const criticalPathClass = isCriticalPath
     ? "outline outline-1 -outline-offset-1 outline-primary/70"
     : "";
+  const selectedClass = isSelected
+    ? "ring-2 ring-indigo-500/90 border-indigo-500/60"
+    : "";
+  const durationText = node.runStats?.runtimeMs
+    ? formatDurationMs(node.runStats.runtimeMs)
+    : null;
 
   return (
     <div
@@ -88,8 +98,19 @@ export function DagNodeCard({
       data-node-id={node.id}
       data-node-state={node.state}
       data-critical-path={isCriticalPath ? "true" : "false"}
+      role={onClick ? "button" : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onClick={onClick}
+      onKeyDown={(e) => {
+        if (onClick && (e.key === "Enter" || e.key === " ")) {
+          e.preventDefault();
+          onClick();
+        }
+      }}
       style={style}
-      className={`group relative flex flex-col justify-between overflow-hidden rounded-lg border p-2 text-xs select-none ${appearance.card} ${criticalPathClass}`}
+      className={`group relative flex flex-col justify-between overflow-hidden rounded-lg border p-2 text-xs select-none ${
+        onClick ? "cursor-pointer hover:border-foreground/40 hover:shadow-sm" : ""
+      } ${appearance.card} ${criticalPathClass} ${selectedClass}`}
     >
       <div className="flex items-center justify-between gap-1.5 min-w-0">
         <div className="flex items-center gap-1.5 min-w-0 flex-1">
@@ -103,11 +124,22 @@ export function DagNodeCard({
             {displayLabel}
           </span>
         </div>
-        {node.attempt > 1 && (
-          <span className="shrink-0 font-mono text-[10px] text-muted-foreground px-1 py-0.5 rounded bg-muted/60">
-            x{node.attempt}
-          </span>
-        )}
+        <div className="flex items-center gap-1 shrink-0">
+          {node.attempt > 1 && (
+            <span className="shrink-0 font-mono text-[10px] text-muted-foreground px-1 py-0.5 rounded bg-muted/60">
+              x{node.attempt}
+            </span>
+          )}
+          {node.taskId && (
+            <span
+              data-testid="dag-node-task-id"
+              className="shrink-0 font-mono text-[9px] text-muted-foreground/80 px-1 py-0.5 rounded bg-muted/50"
+              title={node.taskId}
+            >
+              {node.taskId.slice(0, 7)}
+            </span>
+          )}
+        </div>
       </div>
 
       <div className="mt-1 flex items-center justify-between gap-1 text-[11px]">
@@ -120,14 +152,25 @@ export function DagNodeCard({
         >
           {routeText}
         </span>
-        {blockedCount > 1 && (
+        {blockedCount > 1 ? (
           <span
             className="shrink-0 inline-flex items-center rounded-full border border-amber-500/40 bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-600"
             data-testid="dag-bottleneck-badge"
           >
             blocks {blockedCount}
           </span>
-        )}
+        ) : node.error ? (
+          <span
+            className="shrink-0 inline-flex items-center rounded border border-rose-500/40 bg-rose-500/15 px-1 py-0.5 text-[9px] font-medium text-rose-500"
+            title={node.error.message}
+          >
+            error
+          </span>
+        ) : durationText ? (
+          <span className="shrink-0 font-mono text-[10px] text-muted-foreground/70">
+            {durationText}
+          </span>
+        ) : null}
       </div>
     </div>
   );

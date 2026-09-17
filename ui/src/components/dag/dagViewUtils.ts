@@ -206,4 +206,22 @@ export function normalizeWheelDeltaPixels(
   return deltaY;
 }
 
+export function formatDurationMs(ms?: number | null): string {
+  if (ms === undefined || ms === null || !Number.isFinite(ms)) return "-";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  const remSec = sec % 60;
+  return remSec > 0 ? `${min}m ${remSec}s` : `${min}m`;
+}
+
+export function formatTokenCount(num?: number | null): string {
+  if (num === undefined || num === null || !Number.isFinite(num)) return "-";
+  if (num < 1000) return `${num}`;
+  if (num < 1000000) return `${(num / 1000).toFixed(1)}k`;
+  return `${(num / 1000000).toFixed(2)}m`;
+}
+
+
 

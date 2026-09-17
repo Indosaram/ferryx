@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, fireEvent } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import dagRunSampleJson from "../../state/__fixtures__/dagRunSample.json";
@@ -282,5 +282,21 @@ describe("Dag pane tree integration", () => {
     const waveColumns = screen.getAllByTestId("dag-wave-column");
     expect(waveColumns).toHaveLength(1);
     expect(screen.getByTestId("dag-node-extract")).toBeInTheDocument();
+  });
+
+  it("opens node inspector drawer upon clicking a node card", () => {
+    render(<DagGraphView snapshot={sampleSnapshot} />);
+
+    expect(screen.queryByTestId("dag-node-inspector")).not.toBeInTheDocument();
+
+    const extractCard = screen.getByTestId("dag-node-extract");
+    fireEvent.click(extractCard);
+
+    expect(screen.getByTestId("dag-node-inspector")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "SGR attribute extraction" })).toBeInTheDocument();
+
+    const closeBtn = screen.getByRole("button", { name: /close inspector/i });
+    fireEvent.click(closeBtn);
+    expect(screen.queryByTestId("dag-node-inspector")).not.toBeInTheDocument();
   });
 });

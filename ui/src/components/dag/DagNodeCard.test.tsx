@@ -73,4 +73,63 @@ describe("DagNodeCard", () => {
     expect(badge).toHaveTextContent("blocks 3");
     expect(badge.className).toContain("text-amber-600");
   });
+
+  it("renders taskId, duration, and error badge when present", () => {
+    const customNode: DagNodeSnapshot = {
+      ...node("completed"),
+      taskId: "st_01a04db8",
+      runStats: {
+        runtimeMs: 75000,
+        totalTokens: 12000,
+      },
+    };
+
+    const { unmount } = render(
+      <DagNodeCard node={customNode} isCriticalPath={false} blockedCount={0} />,
+    );
+    expect(screen.getByTestId("dag-node-task-id")).toHaveTextContent("st_01a0");
+    expect(screen.getByText("1m 15s")).toBeInTheDocument();
+    unmount();
+
+    const failedNode: DagNodeSnapshot = {
+      ...node("failed"),
+      error: {
+        code: "task_error",
+        message: "something went wrong",
+      },
+    };
+
+    render(<DagNodeCard node={failedNode} isCriticalPath={false} blockedCount={0} />);
+    expect(screen.getByText("error")).toBeInTheDocument();
+  });
+
+  it("handles selection and click interactions", () => {
+    let clicked = false;
+    const { rerender } = render(
+      <DagNodeCard
+        node={node("running")}
+        isCriticalPath={false}
+        blockedCount={0}
+        isSelected={false}
+        onClick={() => {
+          clicked = true;
+        }}
+      />,
+    );
+
+    const card = screen.getByTestId("dag-node-node-running");
+    expect(card.className).toContain("cursor-pointer");
+    card.click();
+    expect(clicked).toBe(true);
+
+    rerender(
+      <DagNodeCard
+        node={node("running")}
+        isCriticalPath={false}
+        blockedCount={0}
+        isSelected={true}
+      />,
+    );
+    expect(card.className).toContain("ring-2 ring-indigo-500/90");
+  });
 });

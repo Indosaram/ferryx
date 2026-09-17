@@ -66,12 +66,68 @@ pub struct DagNodeError {
     pub at: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DagNodeRunStats {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turns: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_per_second: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DagResultArtifact {
+    pub relative_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DagAmendRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+    #[serde(default)]
+    pub changed_node_ids: Vec<String>,
+    #[serde(default)]
+    pub added_node_ids: Vec<String>,
+    #[serde(default)]
+    pub invalidated_node_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DagNodeSnapshot {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
     pub state: DagNodeState,
     #[serde(default)]
     pub depends_on: Vec<String>,
@@ -86,6 +142,10 @@ pub struct DagNodeSnapshot {
     pub error: Option<DagNodeError>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_stats: Option<DagNodeRunStats>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_artifact: Option<DagResultArtifact>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,7 +182,7 @@ pub struct DagRunCounts {
 
 pub type Counts = DagRunCounts;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DagRunSnapshot {
     pub run_id: String,
@@ -136,6 +196,10 @@ pub struct DagRunSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
     pub amend_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amend_history: Option<Vec<DagAmendRecord>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<Vec<serde_json::Value>>,
     pub nodes: Vec<DagNodeSnapshot>,
     pub edges: Vec<DagEdge>,
     pub waves: Vec<DagWave>,
@@ -225,7 +289,9 @@ struct RawCheckpoint {
     #[serde(default)]
     amend_count: Option<usize>,
     #[serde(default)]
-    amend_history: Option<Vec<serde_json::Value>>,
+    amend_history: Option<Vec<DagAmendRecord>>,
+    #[serde(default)]
+    diagnostics: Option<Vec<serde_json::Value>>,
     #[serde(default)]
     nodes: Vec<DagNodeSnapshot>,
     #[serde(default)]
@@ -280,6 +346,8 @@ pub fn parse_run_checkpoint(json: &str) -> Result<DagRunSnapshot, DagJournalErro
         amend_count: raw
             .amend_count
             .unwrap_or_else(|| raw.amend_history.as_ref().map_or(0, |h| h.len())),
+        amend_history: raw.amend_history,
+        diagnostics: raw.diagnostics,
         run_id: raw.run_id,
         run_key: raw.run_key,
         name: raw.name,

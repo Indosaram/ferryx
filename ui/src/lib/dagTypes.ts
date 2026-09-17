@@ -24,9 +24,39 @@ export type DagNodeError = {
   readonly at?: string;
 };
 
+export type DagNodeRunStats = {
+  readonly runtimeMs?: number | null;
+  readonly turns?: number | null;
+  readonly toolCalls?: number | null;
+  readonly outputTokens?: number | null;
+  readonly inputTokens?: number | null;
+  readonly totalTokens?: number | null;
+  readonly generationMs?: number | null;
+  readonly tokensPerSecond?: number | null;
+  readonly costUsd?: number | null;
+  readonly cacheReadTokens?: number | null;
+  readonly cacheWriteTokens?: number | null;
+};
+
+export type DagResultArtifact = {
+  readonly relativePath: string;
+  readonly sha256?: string | null;
+  readonly bytes?: number | null;
+};
+
+export type DagAmendRecord = {
+  readonly at?: string | null;
+  readonly previousFingerprint?: string | null;
+  readonly fingerprint?: string | null;
+  readonly changedNodeIds: readonly string[];
+  readonly addedNodeIds: readonly string[];
+  readonly invalidatedNodeIds: readonly string[];
+};
+
 export type DagNodeSnapshot = {
   readonly id: string;
   readonly label: string | null;
+  readonly prompt?: string | null;
   readonly state: DagNodeState;
   readonly dependsOn: readonly string[];
   readonly attempt: number;
@@ -35,6 +65,8 @@ export type DagNodeSnapshot = {
   readonly completedAt: string | null;
   readonly error: DagNodeError | null;
   readonly taskId: string | null;
+  readonly runStats?: DagNodeRunStats | null;
+  readonly resultArtifact?: DagResultArtifact | null;
 };
 
 export type DagEdge = { readonly from: string; readonly to: string };
@@ -60,6 +92,8 @@ export type DagRunSnapshot = {
   readonly completedAt: string | null;
   readonly updatedAt: string | null;
   readonly amendCount: number;
+  readonly amendHistory?: readonly DagAmendRecord[] | null;
+  readonly diagnostics?: readonly unknown[] | null;
   readonly nodes: readonly DagNodeSnapshot[];
   readonly edges: readonly DagEdge[];
   readonly waves: readonly DagWave[];
@@ -156,9 +190,58 @@ function parseArrayOf<T>(val: unknown, itemParser: (item: unknown) => T | null):
   return res;
 }
 
+function parseNumOrNull(val: unknown): number | null | undefined {
+  if (val === null || val === undefined) return null;
+  return typeof val === "number" && Number.isFinite(val) ? val : undefined;
+}
+
+function parseRunStats(val: unknown): DagNodeRunStats | null | undefined {
+  if (val === null || val === undefined) return null;
+  if (!isRecord(val)) return undefined;
+  return {
+    runtimeMs: parseNumOrNull(val["runtimeMs"]),
+    turns: parseNumOrNull(val["turns"]),
+    toolCalls: parseNumOrNull(val["toolCalls"]),
+    outputTokens: parseNumOrNull(val["outputTokens"]),
+    inputTokens: parseNumOrNull(val["inputTokens"]),
+    totalTokens: parseNumOrNull(val["totalTokens"]),
+    generationMs: parseNumOrNull(val["generationMs"]),
+    tokensPerSecond: parseNumOrNull(val["tokensPerSecond"]),
+    costUsd: parseNumOrNull(val["costUsd"]),
+    cacheReadTokens: parseNumOrNull(val["cacheReadTokens"]),
+    cacheWriteTokens: parseNumOrNull(val["cacheWriteTokens"]),
+  };
+}
+
+function parseResultArtifact(val: unknown): DagResultArtifact | null | undefined {
+  if (val === null || val === undefined) return null;
+  if (!isRecord(val) || typeof val["relativePath"] !== "string") return undefined;
+  return {
+    relativePath: val["relativePath"],
+    sha256: parseStrOrNull(val["sha256"]),
+    bytes: parseNumOrNull(val["bytes"]),
+  };
+}
+
+function parseAmendRecord(val: unknown): DagAmendRecord | null {
+  if (!isRecord(val)) return null;
+  const changedNodeIds = parseStringArray(val["changedNodeIds"]) ?? [];
+  const addedNodeIds = parseStringArray(val["addedNodeIds"]) ?? [];
+  const invalidatedNodeIds = parseStringArray(val["invalidatedNodeIds"]) ?? [];
+  return {
+    at: parseStrOrNull(val["at"]),
+    previousFingerprint: parseStrOrNull(val["previousFingerprint"]),
+    fingerprint: parseStrOrNull(val["fingerprint"]),
+    changedNodeIds,
+    addedNodeIds,
+    invalidatedNodeIds,
+  };
+}
+
 function parseNode(val: unknown): DagNodeSnapshot | null {
   if (!isRecord(val) || typeof val["id"] !== "string") return null;
   const label = parseStrOrNull(val["label"]);
+  const prompt = parseStrOrNull(val["prompt"]);
   const stateStr = val["state"];
   if (label === undefined || typeof stateStr !== "string" || !VALID_NODE_STATES.has(stateStr)) return null;
 
@@ -169,11 +252,27 @@ function parseNode(val: unknown): DagNodeSnapshot | null {
   const completedAt = parseStrOrNull(val["completedAt"]);
   const error = parseNodeError(val["error"]);
   const taskId = parseStrOrNull(val["taskId"]);
+  const runStats = parseRunStats(val["runStats"]);
+  const resultArtifact = parseResultArtifact(val["resultArtifact"]);
 
   if (!dependsOn || attempt === null || !route || startedAt === undefined || completedAt === undefined || error === undefined || taskId === undefined) {
     return null;
   }
-  return { id: val["id"], label, state: stateStr as DagNodeState, dependsOn, attempt, route, startedAt, completedAt, error, taskId };
+  return {
+    id: val["id"],
+    label,
+    prompt: prompt ?? undefined,
+    state: stateStr as DagNodeState,
+    dependsOn,
+    attempt,
+    route,
+    startedAt,
+    completedAt,
+    error,
+    taskId,
+    runStats: runStats ?? undefined,
+    resultArtifact: resultArtifact ?? undefined,
+  };
 }
 
 export function parseDagRunSnapshot(raw: unknown): DagRunSnapshot | null {
@@ -190,13 +289,20 @@ export function parseDagRunSnapshot(raw: unknown): DagRunSnapshot | null {
   if (startedAt === undefined || completedAt === undefined || updatedAt === undefined) return null;
 
   let amendCount = 0;
+  let amendHistory: readonly DagAmendRecord[] | undefined = undefined;
+  if (Array.isArray(raw["amendHistory"])) {
+    amendHistory = parseArrayOf(raw["amendHistory"], parseAmendRecord) ?? undefined;
+  }
+
   if (typeof raw["amendCount"] === "number") {
     amendCount = raw["amendCount"];
   } else if (raw["amendCount"] === undefined) {
-    if (Array.isArray(raw["amendHistory"])) amendCount = raw["amendHistory"].length;
+    if (amendHistory) amendCount = amendHistory.length;
   } else {
     return null;
   }
+
+  const diagnostics = Array.isArray(raw["diagnostics"]) ? raw["diagnostics"] : undefined;
 
   if (!Array.isArray(raw["nodes"])) return null;
   const nodes = parseArrayOf(raw["nodes"], parseNode);
@@ -221,6 +327,8 @@ export function parseDagRunSnapshot(raw: unknown): DagRunSnapshot | null {
     completedAt,
     updatedAt,
     amendCount,
+    amendHistory,
+    diagnostics,
     nodes,
     edges,
     waves,

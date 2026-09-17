@@ -13,6 +13,7 @@ import { deriveDagRunCounts } from "../../lib/dagTypes";
 import { dagStore } from "../../state/dagStore";
 import { DagEdgeLayer } from "./DagEdgeLayer";
 import { DagNodeCard } from "./DagNodeCard";
+import { DagNodeInspector } from "./DagNodeInspector";
 import {
   CARD_HEIGHT,
   CARD_WIDTH,
@@ -21,12 +22,15 @@ import {
   calculateNodePosition,
   calculateZoomAtAnchor,
   clampScaleWithRecovery,
+  formatDurationMs,
+  formatTokenCount,
   GAP_X,
   GAP_Y,
   MAX_SCALE,
   normalizeWheelDeltaPixels,
   PAD_X,
   PAD_Y,
+  WAVE_LABEL_HEIGHT,
 } from "./dagViewUtils";
 import type { Camera } from "./dagViewUtils";
 
@@ -227,6 +231,55 @@ export function DagGraphView({
   }, [viewportDimensions, contentWidth, contentHeight]);
 
   const effectiveMinScale = calculateEffectiveMinScale(fitScale);
+
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+
+  const selectedNode = useMemo(
+    () =>
+      selectedNodeId && activeRun
+        ? activeRun.nodes.find((n) => n.id === selectedNodeId) ?? null
+        : null,
+    [selectedNodeId, activeRun],
+  );
+
+  useEffect(() => {
+    if (!selectedNodeId) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        setSelectedNodeId(null);
+      }
+    };
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
+  }, [selectedNodeId]);
+
+  const totalStats = useMemo(() => {
+    if (!activeRun?.nodes) return null;
+    let totalTokens = 0;
+    let hasStats = false;
+    for (const node of activeRun.nodes) {
+      if (node.runStats?.totalTokens) {
+        totalTokens += node.runStats.totalTokens;
+        hasStats = true;
+      }
+    }
+    return hasStats ? { totalTokens } : null;
+  }, [activeRun?.nodes]);
+
+  const runDurationText = useMemo(() => {
+    if (!activeRun?.startedAt) return null;
+    const start = Date.parse(activeRun.startedAt);
+    const end = activeRun.completedAt
+      ? Date.parse(activeRun.completedAt)
+      : activeRun.updatedAt
+        ? Date.parse(activeRun.updatedAt)
+        : Date.now();
+    if (Number.isFinite(start) && Number.isFinite(end) && end >= start) {
+      return formatDurationMs(end - start);
+    }
+    return null;
+  }, [activeRun?.startedAt, activeRun?.completedAt, activeRun?.updatedAt]);
 
   // Run switch vs same-run update effect
   useEffect(() => {
@@ -720,6 +773,13 @@ export function DagGraphView({
             <span className="inline-flex flex-wrap items-center gap-x-1 font-mono text-muted-foreground">
               <span>{counts.completed}/{counts.total} done, </span>
               <span>{counts.running} running</span>
+              {runDurationText && <span>• {runDurationText}</span>}
+              {totalStats && <span>• {formatTokenCount(totalStats.totalTokens)} tok</span>}
+              {activeRun.amendCount > 0 && (
+                <span className="rounded bg-amber-500/15 text-amber-500 px-1 py-0.2 text-[10px] ml-0.5">
+                  amend x{activeRun.amendCount}
+                </span>
+              )}
             </span>
           </div>
           <div
@@ -817,7 +877,13 @@ export function DagGraphView({
               <div
                 data-testid="dag-wave-column"
                 data-wave-index={wave.index}
-                className="sr-only"
+                style={{
+                  position: "absolute",
+                  left: calculateNodePosition(colIndex, 0).x,
+                  top: PAD_Y - WAVE_LABEL_HEIGHT - 6,
+                  width: CARD_WIDTH,
+                }}
+                className="font-mono text-[10px] font-medium text-muted-foreground/70 uppercase tracking-wider select-none truncate"
               >
                 wave {colIndex + 1}
               </div>
@@ -831,6 +897,8 @@ export function DagGraphView({
                     node={node}
                     isCriticalPath={criticalPathSet.has(node.id)}
                     blockedCount={bottleneckMap.get(node.id) ?? 0}
+                    isSelected={node.id === selectedNodeId}
+                    onClick={() => setSelectedNodeId(node.id)}
                     style={{
                       position: "absolute",
                       left: position.x,
@@ -845,6 +913,14 @@ export function DagGraphView({
           ))}
         </div>
       </div>
+
+      <DagNodeInspector
+        node={selectedNode}
+        projectPath={projectPath}
+        allNodes={activeRun.nodes}
+        onClose={() => setSelectedNodeId(null)}
+        onSelectNode={(id) => setSelectedNodeId(id)}
+      />
     </div>
   );
 }

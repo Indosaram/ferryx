@@ -13,6 +13,7 @@ export type DagPaneBadgeProps = {
   readonly sessions?: Readonly<Record<string, TerminalSession>> | readonly TerminalSession[];
   readonly agentPresent?: boolean;
   readonly agentWorking?: boolean;
+  readonly retainSettled?: boolean;
 };
 
 function cleanPath(p: string): string {
@@ -82,6 +83,7 @@ function GraphGlyph(): JSX.Element {
 export function DagPaneBadge({
   projectPath,
   providerSessionId,
+  retainSettled = false,
 }: DagPaneBadgeProps): JSX.Element | null {
   const storeState = useSyncExternalStore(dagStore.subscribe, () => dagStore.getState());
   const [open, setOpen] = useState(false);
@@ -91,22 +93,21 @@ export function DagPaneBadge({
     () => resolveProjectRuns(storeState, projectPath),
     [storeState, projectPath],
   );
-  const runningRuns = useMemo(
+  const eligibleRuns = useMemo(
     () =>
       runs
-        .filter((run) => run.status === "running")
+        .filter((run) => (retainSettled ? true : run.status === "running"))
         .sort((a, b) => runUpdatedAt(b) - runUpdatedAt(a)),
-    [runs],
+    [runs, retainSettled],
   );
 
-  // A shared project path or agent activity cannot establish run ownership.
   const paneRuns = useMemo(
-    () => runningRuns.filter((candidate) =>
+    () => eligibleRuns.filter((candidate) =>
       typeof candidate.rootSessionId === "string" &&
       candidate.rootSessionId.trim() !== "" &&
       candidate.rootSessionId === providerSessionId,
     ),
-    [runningRuns, providerSessionId],
+    [eligibleRuns, providerSessionId],
   );
 
   const run = paneRuns.length > 0 ? paneRuns[0] : null;
@@ -257,7 +258,13 @@ export function DagPaneBadge({
                     className="min-h-0 flex-1 overflow-hidden"
                     data-testid={`dag-pane-run-${activeRun?.runId}`}
                   >
-                    {activeRun && <DagGraphView snapshot={activeRun} showRunName={false} />}
+                    {activeRun && (
+                      <DagGraphView
+                        snapshot={activeRun}
+                        showRunName={false}
+                        projectPath={projectPath}
+                      />
+                    )}
                   </div>
                 </div>
               </div>
