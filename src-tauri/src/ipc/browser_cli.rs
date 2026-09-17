@@ -189,9 +189,24 @@ impl RemoteBrowserOperation {
                 crate::browser::validate_url(url).map_err(IpcError::from)?;
                 Ok(())
             }
-            Self::Fill { reference, value, .. } => {
+            Self::Fill {
+                reference,
+                value,
+                snapshot_id,
+                map_revision,
+                ..
+            } => {
                 crate::browser::remote_input::validate_fill(reference, value)
                     .map_err(|e| IpcError::new(IpcErrorCode::InvalidArgument, e.to_string()))?;
+                match (snapshot_id, map_revision) {
+                    (Some(sid), Some(_)) if !sid.trim().is_empty() => {}
+                    _ => {
+                        return Err(IpcError::new(
+                            IpcErrorCode::Custom("BROWSER_INVALID_SNAPSHOT".into()),
+                            "remote fill requires valid snapshot_id and map_revision",
+                        ));
+                    }
+                }
                 Ok(())
             }
             Self::Keypress { key, .. } => {
@@ -209,7 +224,12 @@ impl RemoteBrowserOperation {
                 Ok(())
             }
             Self::Click {
-                reference, u, v, ..
+                reference,
+                snapshot_id,
+                map_revision,
+                u,
+                v,
+                ..
             } => {
                 if let Some(ref_str) = reference {
                     if ref_str.trim().is_empty() {
@@ -217,6 +237,15 @@ impl RemoteBrowserOperation {
                             IpcErrorCode::InvalidArgument,
                             "click reference cannot be empty",
                         ));
+                    }
+                    match (snapshot_id, map_revision) {
+                        (Some(sid), Some(_)) if !sid.trim().is_empty() => {}
+                        _ => {
+                            return Err(IpcError::new(
+                                IpcErrorCode::Custom("BROWSER_INVALID_SNAPSHOT".into()),
+                                "remote reference click requires valid snapshot_id and map_revision",
+                            ));
+                        }
                     }
                 } else if let (Some(u_val), Some(v_val)) = (*u, *v) {
                     if !u_val.is_finite()
@@ -290,17 +319,29 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
             v,
         } => {
             let state = manager.get_state(&browser_id)?;
-            let webview = app
-                .get_webview(&state.webview_label)
-                .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
 
             let script = if let Some(ref_str) = reference {
-                let selector = if let (Some(snap_id), Some(map_rev)) = (snapshot_id, map_revision)
-                {
-                    manager.verify_remote_target(&browser_id, &snap_id, map_rev, &ref_str)?
-                } else {
-                    manager.automation_target(&browser_id, state.generation, &ref_str)?
+                let (snap_id, map_rev) = match (snapshot_id, map_revision) {
+                    (Some(sid), Some(rev)) if !sid.trim().is_empty() => (sid, rev),
+                    _ => {
+                        return Err(IpcError::new(
+                            IpcErrorCode::Custom("BROWSER_INVALID_SNAPSHOT".into()),
+                            "remote reference click requires valid snapshot_id and map_revision",
+                        ));
+                    }
                 };
+                let selector = manager
+                    .verify_remote_target(&browser_id, &snap_id, map_rev, &ref_str)
+                    .map_err(|e| match e {
+                        BrowserError::AutomationSnapshotStale
+                        | BrowserError::AutomationTargetNotFound(_) => {
+                            IpcError::new(
+                                IpcErrorCode::Custom("BROWSER_INVALID_SNAPSHOT".into()),
+                                "remote snapshot reference missing, stale, or target not found",
+                            )
+                        }
+                        other => IpcError::from(other),
+                    })?;
                 let selector_json = serde_json::to_string(&selector)
                     .map_err(|e| IpcError::new(IpcErrorCode::BrowserAutomationFailed, e.to_string()))?;
                 format!(
@@ -340,6 +381,9 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                 ));
             };
 
+            let webview = app
+                .get_webview(&state.webview_label)
+                .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
             let _ = crate::ipc::browser::eval_webview(webview, script).await?;
             Ok(serde_json::json!({ "clicked": true }))
         }
@@ -351,11 +395,27 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
             map_revision,
         } => {
             let state = manager.get_state(&browser_id)?;
-            let selector = if let (Some(snap_id), Some(map_rev)) = (snapshot_id, map_revision) {
-                manager.verify_remote_target(&browser_id, &snap_id, map_rev, &reference)?
-            } else {
-                manager.automation_target(&browser_id, state.generation, &reference)?
+            let (snap_id, map_rev) = match (snapshot_id, map_revision) {
+                (Some(sid), Some(rev)) if !sid.trim().is_empty() => (sid, rev),
+                _ => {
+                    return Err(IpcError::new(
+                        IpcErrorCode::Custom("BROWSER_INVALID_SNAPSHOT".into()),
+                        "remote fill requires valid snapshot_id and map_revision",
+                    ));
+                }
             };
+            let selector = manager
+                .verify_remote_target(&browser_id, &snap_id, map_rev, &reference)
+                .map_err(|e| match e {
+                    BrowserError::AutomationSnapshotStale
+                    | BrowserError::AutomationTargetNotFound(_) => {
+                        IpcError::new(
+                            IpcErrorCode::Custom("BROWSER_INVALID_SNAPSHOT".into()),
+                            "remote snapshot reference missing, stale, or target not found",
+                        )
+                    }
+                    other => IpcError::from(other),
+                })?;
             let webview = app
                 .get_webview(&state.webview_label)
                 .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
@@ -400,27 +460,7 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
             browser_id,
             condition,
         } => {
-            let state = manager.get_state(&browser_id)?;
-            let webview = app
-                .get_webview(&state.webview_label)
-                .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
-            let script = crate::ipc::browser::build_wait_condition_script(&condition);
-            let deadline =
-                tokio::time::Instant::now() + std::time::Duration::from_millis(30_000);
-            loop {
-                let res =
-                    crate::ipc::browser::eval_webview(webview.clone(), script.clone()).await?;
-                if res.trim() == "true" {
-                    break;
-                }
-                if tokio::time::Instant::now() >= deadline {
-                    return Err(IpcError::new(
-                        IpcErrorCode::BrowserWaitTimeout,
-                        "wait condition timed out",
-                    ));
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
+            crate::ipc::browser::wait_browser_session(app, manager, &browser_id, condition).await?;
             Ok(serde_json::json!({ "conditionMet": true }))
         }
         RemoteBrowserOperation::Eval {
@@ -1010,24 +1050,23 @@ where
                         serde_json::to_vec(&resp).unwrap_or_default()
                     }
                     Err(e) => {
+                        let code_str = match e.code {
+                            IpcErrorCode::InvalidArgument => "BROWSER_CLI_REQUEST_INVALID".to_string(),
+                            other => ipc_error_code_string(other),
+                        };
                         let resp = BrowserCliResponse::Error {
-                            code: ipc_error_code_string(e.code).into(),
+                            code: code_str,
                             message: e.message,
                         };
                         serde_json::to_vec(&resp).unwrap_or_default()
                     }
                 },
-                Err(_) => {
-                    if let Ok(legacy_req) = serde_json::from_slice::<BrowserCliRequest>(&payload) {
-                        let legacy_resp = execute_request(app, manager, legacy_req).await;
-                        serde_json::to_vec(&legacy_resp).unwrap_or_default()
-                    } else {
-                        let resp = BrowserCliResponse::Error {
-                            code: "BROWSER_CLI_REQUEST_INVALID".into(),
-                            message: "invalid remote operation or CLI request".into(),
-                        };
-                        serde_json::to_vec(&resp).unwrap_or_default()
-                    }
+                Err(e) => {
+                    let resp = BrowserCliResponse::Error {
+                        code: "BROWSER_CLI_REQUEST_INVALID".into(),
+                        message: format!("invalid remote operation: {e}"),
+                    };
+                    serde_json::to_vec(&resp).unwrap_or_default()
                 }
             };
 
@@ -2483,6 +2522,18 @@ mod tests {
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .expect("mock app");
         let manager = Arc::new(BrowserManager::new());
+        let registered = manager
+            .register_session(CreateBrowserRequest {
+                browser_id: Some("b1".into()),
+                workspace_id: None,
+                worktree_path: None,
+                url: "https://example.com".into(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .expect("register session");
         let token = "test-token";
 
         // 1. Successful handshake -> framed mode round-trip
@@ -2510,7 +2561,7 @@ mod tests {
         assert_eq!(resp_json["type"], "remoteAttached", "handshake must respond with remoteAttached");
         assert_eq!(resp_json["protocolVersion"], 1);
 
-        // Now connection is in framed mode! Send framed BrowserCliRequest::List
+        // Under R4: legacy BrowserCliRequest::List over framed IPC must be rejected with BROWSER_CLI_REQUEST_INVALID!
         let list_req_bytes = serde_json::to_vec(&BrowserCliRequest::List).unwrap();
         let framed_req = crate::browser::remote_bridge_protocol::encode_ipc_frame(
             crate::browser::remote_bridge_protocol::IPC_CONTENT_TYPE_JSON,
@@ -2530,7 +2581,34 @@ mod tests {
         let mut resp_payload = vec![0u8; resp_payload_len];
         buf_reader.read_exact(&mut resp_payload).await.expect("read framed payload");
         let framed_resp: BrowserCliResponse = serde_json::from_slice(&resp_payload).expect("parse framed response");
-        assert!(matches!(framed_resp, BrowserCliResponse::List { .. }));
+        assert!(matches!(
+            framed_resp,
+            BrowserCliResponse::Error {
+                ref code,
+                ..
+            } if code == "BROWSER_CLI_REQUEST_INVALID"
+        ));
+
+        // And valid RemoteBrowserOperation (e.g. GetState) succeeds over framed IPC
+        let get_state_bytes = serde_json::to_vec(&RemoteBrowserOperation::GetState {
+            browser_id: registered.browser_id.clone(),
+        })
+        .unwrap();
+        let framed_get_state = crate::browser::remote_bridge_protocol::encode_ipc_frame(
+            crate::browser::remote_bridge_protocol::IPC_CONTENT_TYPE_JSON,
+            &get_state_bytes,
+        )
+        .unwrap();
+        client_writer.write_all(&framed_get_state).await.unwrap();
+        client_writer.flush().await.unwrap();
+
+        buf_reader.read_exact(&mut resp_header).await.unwrap();
+        let len = u32::from_le_bytes([resp_header[0], resp_header[1], resp_header[2], resp_header[3]]) as usize;
+        let mut resp_buf = vec![0u8; len];
+        buf_reader.read_exact(&mut resp_buf).await.unwrap();
+        let resp_val: serde_json::Value = serde_json::from_slice(&resp_buf).unwrap();
+        assert_eq!(resp_val["type"], "remoteResult");
+        assert_eq!(resp_val["status"], "ok");
 
         // 2. Unauthenticated handshake rejected before framed mode
         let (bad_client_stream, bad_server_stream) = tokio::io::duplex(4096);
@@ -2602,5 +2680,164 @@ mod tests {
             err,
             crate::browser::remote_driver::RemoteDriverError::DesktopReclaimed
         );
+    }
+
+    #[tokio::test]
+    async fn test_r4_framed_ipc_eliminates_legacy_fallback_and_rejects_legacy_commands() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(BrowserManager::new());
+        let (mut client_io, server_io) = tokio::io::duplex(4096);
+
+        let app_handle = app.handle().clone();
+        let mgr_clone = Arc::clone(&manager);
+        let loop_handle = tokio::spawn(async move {
+            let (mut reader, mut writer) = tokio::io::split(server_io);
+            run_framed_ipc_loop(&mut reader, &mut writer, &app_handle, &mgr_clone).await
+        });
+
+        // 1. Send legacy "list" command in framed IPC mode
+        let legacy_list = br#"{"command":"list"}"#;
+        let frame = crate::browser::remote_bridge_protocol::encode_ipc_frame(
+            crate::browser::remote_bridge_protocol::IPC_CONTENT_TYPE_JSON,
+            legacy_list,
+        )
+        .unwrap();
+        client_io.write_all(&frame).await.unwrap();
+
+        // Read framed response
+        let mut header = [0u8; 5];
+        client_io.read_exact(&mut header).await.unwrap();
+        let payload_len = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
+        let mut resp_payload = vec![0u8; payload_len];
+        client_io.read_exact(&mut resp_payload).await.unwrap();
+        let resp: serde_json::Value = serde_json::from_slice(&resp_payload).unwrap();
+
+        // MUST be error BROWSER_CLI_REQUEST_INVALID, NOT legacy list output!
+        assert_eq!(resp["type"], "error");
+        assert_eq!(resp["code"], "BROWSER_CLI_REQUEST_INVALID");
+
+        // 2. Send legacy "close" command in framed IPC mode
+        let legacy_close = br#"{"command":"close","browserId":"b1"}"#;
+        let frame2 = crate::browser::remote_bridge_protocol::encode_ipc_frame(
+            crate::browser::remote_bridge_protocol::IPC_CONTENT_TYPE_JSON,
+            legacy_close,
+        )
+        .unwrap();
+        client_io.write_all(&frame2).await.unwrap();
+
+        client_io.read_exact(&mut header).await.unwrap();
+        let payload_len2 = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
+        let mut resp_payload2 = vec![0u8; payload_len2];
+        client_io.read_exact(&mut resp_payload2).await.unwrap();
+        let resp2: serde_json::Value = serde_json::from_slice(&resp_payload2).unwrap();
+
+        assert_eq!(resp2["type"], "error");
+        assert_eq!(resp2["code"], "BROWSER_CLI_REQUEST_INVALID");
+
+        // 3. Send invalid / unparseable payload
+        let bad_payload = b"not-json-at-all";
+        let frame3 = crate::browser::remote_bridge_protocol::encode_ipc_frame(
+            crate::browser::remote_bridge_protocol::IPC_CONTENT_TYPE_JSON,
+            bad_payload,
+        )
+        .unwrap();
+        client_io.write_all(&frame3).await.unwrap();
+
+        client_io.read_exact(&mut header).await.unwrap();
+        let payload_len3 = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
+        let mut resp_payload3 = vec![0u8; payload_len3];
+        client_io.read_exact(&mut resp_payload3).await.unwrap();
+        let resp3: serde_json::Value = serde_json::from_slice(&resp_payload3).unwrap();
+
+        assert_eq!(resp3["type"], "error");
+        assert_eq!(resp3["code"], "BROWSER_CLI_REQUEST_INVALID");
+
+        drop(client_io);
+        let _ = loop_handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_r9_remote_reference_requires_valid_snapshot_and_rejects_legacy_targets() {
+        use crate::browser::BrowserAutomationTarget;
+
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(BrowserManager::new());
+        let b = manager
+            .register_session(CreateBrowserRequest {
+                browser_id: Some("b-r9".into()),
+                workspace_id: None,
+                worktree_path: None,
+                url: "https://example.com".into(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .expect("register session");
+
+        // Record a legacy automation target
+        let legacy_targets = vec![BrowserAutomationTarget {
+            reference: "btn-submit".into(),
+            selector: "#legacy-btn".into(),
+        }];
+        manager
+            .record_automation_targets(&b.browser_id, b.generation, legacy_targets)
+            .unwrap();
+
+        // 1. Click with reference but missing snapshot_id -> validation returns BROWSER_INVALID_SNAPSHOT
+        let click_no_snap = RemoteBrowserOperation::Click {
+            browser_id: b.browser_id.clone(),
+            reference: Some("btn-submit".into()),
+            snapshot_id: None,
+            map_revision: None,
+            u: None,
+            v: None,
+        };
+        let err_click = click_no_snap.validate().unwrap_err();
+        assert_eq!(ipc_error_code_string(err_click.code), "BROWSER_INVALID_SNAPSHOT");
+
+        // 2. Fill with missing snapshot_id -> validation returns BROWSER_INVALID_SNAPSHOT
+        let fill_no_snap = RemoteBrowserOperation::Fill {
+            browser_id: b.browser_id.clone(),
+            reference: "btn-submit".into(),
+            value: "test".into(),
+            snapshot_id: None,
+            map_revision: None,
+        };
+        let err_fill = fill_no_snap.validate().unwrap_err();
+        assert_eq!(ipc_error_code_string(err_fill.code), "BROWSER_INVALID_SNAPSHOT");
+
+        // 3. Execution of Click or Fill with reference pointing to legacy target (not in remote_targets)
+        // must fail with BROWSER_INVALID_SNAPSHOT (NEVER falling back to legacy automation_targets)
+        let click_fake_snap = RemoteBrowserOperation::Click {
+            browser_id: b.browser_id.clone(),
+            reference: Some("btn-submit".into()),
+            snapshot_id: Some("fake-snap-id".into()),
+            map_revision: Some(1),
+            u: None,
+            v: None,
+        };
+        let exec_err = execute_remote_operation(&app.handle().clone(), &manager, click_fake_snap)
+            .await
+            .unwrap_err();
+        assert_eq!(ipc_error_code_string(exec_err.code), "BROWSER_INVALID_SNAPSHOT");
+
+        let fill_fake_snap = RemoteBrowserOperation::Fill {
+            browser_id: b.browser_id.clone(),
+            reference: "btn-submit".into(),
+            value: "test".into(),
+            snapshot_id: Some("fake-snap-id".into()),
+            map_revision: Some(1),
+        };
+        let exec_err2 = execute_remote_operation(&app.handle().clone(), &manager, fill_fake_snap)
+            .await
+            .unwrap_err();
+        assert_eq!(ipc_error_code_string(exec_err2.code), "BROWSER_INVALID_SNAPSHOT");
     }
 }

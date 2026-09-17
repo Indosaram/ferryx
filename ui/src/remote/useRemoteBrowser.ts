@@ -118,12 +118,37 @@ export function useRemoteBrowser({
 
   const sendAck = confirmPresented;
 
-  // Handle background / visibility change: pause active decoding and clear frame buffer when document is hidden (§4.3)
+  // Handle background / visibility change: pause active decoding, clear frame buffer, and send pause/ack signal (§4.3, R10)
   useEffect(() => {
     const handleVisibilityChange = () => {
-      if (typeof document !== "undefined" && (document.visibilityState === "hidden" || document.hidden)) {
+      const isHidden = typeof document !== "undefined" && (document.visibilityState === "hidden" || document.hidden);
+      if (isHidden) {
         clearFrameBuffer();
         setStatus((s) => (s === "streaming" ? "paused" : s));
+        if (clientRef.current && currentStreamIdRef.current !== null) {
+          // Send client pause/ack signal to drop in-flight and clear unacknowledged queue
+          try {
+            clientRef.current.ackFrame(
+              currentStreamIdRef.current,
+              lastDecodedSeqRef.current >= 0 ? lastDecodedSeqRef.current : 0
+            );
+          } catch {
+            // Ignored if socket closed
+          }
+        }
+      } else {
+        // Returned to visible: cleanly request frame continuation without stranding unacknowledged frames or double-subscribing
+        setStatus((s) => (s === "paused" ? "streaming" : s));
+        if (clientRef.current && currentStreamIdRef.current !== null) {
+          try {
+            clientRef.current.ackFrame(
+              currentStreamIdRef.current,
+              lastDecodedSeqRef.current >= 0 ? lastDecodedSeqRef.current : 0
+            );
+          } catch {
+            // Ignored if socket closed
+          }
+        }
       }
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);
@@ -187,8 +212,13 @@ export function useRemoteBrowser({
         client.onFrame((incomingFrame) => {
           if (cancelled) return;
 
-          // Background throttling: pause active frame decoding when document is hidden
+          // Background throttling: pause active frame decoding when document is hidden (§4.3, R10)
           if (typeof document !== "undefined" && (document.visibilityState === "hidden" || document.hidden)) {
+            try {
+              client.ackFrame(incomingFrame.metadata.streamId, incomingFrame.seq);
+            } catch {
+              // ignore
+            }
             return;
           }
 

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Semaphore;
 use crate::remote::auth::DevicePermission;
-use crate::remote::browser_admission::{AdmissionController, SubscriberQueue};
+use crate::remote::browser_admission::{AdmissionController, SubscriberQueue, CONTROL_QUEUE_MAX_COUNT};
 use crate::remote::browser_backend::{
     BrowserCommandContext, RemoteBrowserBackend, RemoteBrowserError,
 };
@@ -14,6 +14,68 @@ use crate::remote::browser_security::{
     require_permission, sanitize_public_string, sanitize_url, RequestDeduplicator,
     MAX_FILL_BYTES, MAX_REQUEST_WIRE_BYTES, MAX_SCRIPT_BYTES,
 };
+
+pub mod tokio_util {
+    pub mod sync {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use tokio::sync::Notify;
+
+        #[derive(Clone, Debug)]
+        pub struct CancellationToken {
+            cancelled: Arc<AtomicBool>,
+            notify: Arc<Notify>,
+        }
+
+        impl CancellationToken {
+            pub fn new() -> Self {
+                Self {
+                    cancelled: Arc::new(AtomicBool::new(false)),
+                    notify: Arc::new(Notify::new()),
+                }
+            }
+
+            pub fn cancel(&self) {
+                self.cancelled.store(true, Ordering::SeqCst);
+                self.notify.notify_waiters();
+            }
+
+            pub fn is_cancelled(&self) -> bool {
+                self.cancelled.load(Ordering::SeqCst)
+            }
+
+            pub async fn cancelled(&self) {
+                if self.is_cancelled() {
+                    return;
+                }
+                self.notify.notified().await;
+            }
+        }
+
+        impl Default for CancellationToken {
+            fn default() -> Self {
+                Self::new()
+            }
+        }
+    }
+}
+
+pub fn sanitize_json_value(val: serde_json::Value) -> serde_json::Value {
+    match val {
+        serde_json::Value::String(s) => serde_json::Value::String(sanitize_public_string(&s)),
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.into_iter().map(sanitize_json_value).collect())
+        }
+        serde_json::Value::Object(map) => {
+            let mut new_map = serde_json::Map::with_capacity(map.len());
+            for (k, v) in map {
+                new_map.insert(k, sanitize_json_value(v));
+            }
+            serde_json::Value::Object(new_map)
+        }
+        other => other,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WsConnectionState {
@@ -38,7 +100,10 @@ pub struct BrowserWsSession {
     pub queue: Option<SubscriberQueue>,
     pub dedup: Arc<RequestDeduplicator>,
     pub eval_semaphore: Arc<Semaphore>,
+    pub command_semaphore: Arc<Semaphore>,
+    pub cancel_token: tokio_util::sync::CancellationToken,
     pub last_heartbeat: Instant,
+    pub pending_promoted_frame: Option<Vec<u8>>,
 }
 
 fn browser_error(
@@ -78,8 +143,74 @@ impl BrowserWsSession {
             queue: None,
             dedup: Arc::new(RequestDeduplicator::new()),
             eval_semaphore: Arc::new(Semaphore::new(1)),
+            command_semaphore: Arc::new(Semaphore::new(CONTROL_QUEUE_MAX_COUNT)),
+            cancel_token: tokio_util::sync::CancellationToken::new(),
             last_heartbeat: now,
+            pending_promoted_frame: None,
         }
+    }
+
+    pub fn enqueue_frame(&mut self, frame_bytes: Vec<u8>, now: Instant) -> Option<Vec<u8>> {
+        let queue = self.queue.as_mut()?;
+        let seq = if frame_bytes.len() >= 8 {
+            u32::from_le_bytes(frame_bytes[4..8].try_into().unwrap_or([0; 4]))
+        } else {
+            0
+        };
+        match queue.enqueue_frame(seq, frame_bytes.clone(), now) {
+            crate::remote::browser_admission::AdmissionOutcome::Admit => Some(frame_bytes),
+            _ => None,
+        }
+    }
+
+    pub async fn dispatch_raw_text(
+        &mut self,
+        text: &str,
+        backend: &Arc<dyn RemoteBrowserBackend>,
+        admission: &AdmissionController,
+        out_tx: &tokio::sync::mpsc::Sender<ServerMessage>,
+        now: Instant,
+    ) -> Result<(), String> {
+        if text.len() > MAX_REQUEST_WIRE_BYTES {
+            let err = browser_error(
+                None,
+                "BROWSER_INVALID_REQUEST",
+                "Raw WebSocket message exceeds wire size limit of 64 KiB",
+                false,
+                None,
+            );
+            let _ = out_tx.send(err).await;
+            return Ok(());
+        }
+
+        match serde_json::from_str::<ClientMessage>(text) {
+            Ok(client_msg) => {
+                self.dispatch_client_message(client_msg, backend, admission, out_tx, now).await
+            }
+            Err(e) => {
+                let err = browser_error(
+                    None,
+                    "BROWSER_INVALID_REQUEST",
+                    format!("Invalid JSON request: {}", e),
+                    false,
+                    None,
+                );
+                let _ = out_tx.send(err).await;
+                Ok(())
+            }
+        }
+    }
+
+    pub async fn handle_raw_text(
+        &mut self,
+        text: &str,
+        backend: &Arc<dyn RemoteBrowserBackend>,
+        admission: &AdmissionController,
+        now: Instant,
+    ) -> Result<Option<ServerMessage>, String> {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        self.dispatch_raw_text(text, backend, admission, &tx, now).await?;
+        Ok(rx.recv().await)
     }
 
     pub fn handle_client_binary(&mut self, _bytes: &[u8]) -> Result<(), String> {
@@ -143,7 +274,9 @@ impl BrowserWsSession {
 
             ClientMessage::BrowserFrameAck { stream_id, seq } => {
                 if let Some(queue) = self.queue.as_mut() {
-                    let _promoted = queue.acknowledge_frame(stream_id, seq, now);
+                    if let Some((_promoted_seq, promoted_bytes)) = queue.acknowledge_frame(stream_id, seq, now) {
+                        self.pending_promoted_frame = Some(promoted_bytes);
+                    }
                 }
                 Ok(())
             }
@@ -151,12 +284,38 @@ impl BrowserWsSession {
             ClientMessage::BrowserHeartbeat {
                 request_id,
                 lease_epoch,
-                subscription_id: _,
+                subscription_id,
             } => {
                 self.last_heartbeat = now;
-                if let Some(epoch_str) = lease_epoch {
-                    if let Ok(epoch) = epoch_str.parse::<u64>() {
-                        let _ = admission.broker.refresh_lease(&self.device_id, epoch, now);
+                if let Some(ref epoch_str) = lease_epoch {
+                    let sub_id = self.subscription_id.as_deref().unwrap_or("");
+                    let epoch = epoch_str.parse::<u64>().unwrap_or(0);
+                    let sub_matches = subscription_id.as_deref() == Some(sub_id);
+                    let epoch_matches = self.lease_epoch == Some(epoch);
+                    if !self.is_driver
+                        || !sub_matches
+                        || !epoch_matches
+                        || admission
+                            .broker
+                            .refresh_lease(
+                                &self.device_id,
+                                &self.connection_id,
+                                sub_id,
+                                &self.browser_id,
+                                epoch,
+                                now,
+                            )
+                            .is_err()
+                    {
+                        let err = browser_error(
+                            request_id,
+                            "BROWSER_INVALID_REQUEST",
+                            "Driver lease 5-tuple mismatch or lease expired",
+                            false,
+                            None,
+                        );
+                        let _ = out_tx.send(err).await;
+                        return Ok(());
                     }
                 }
                 let resp = ServerMessage::BrowserPong {
@@ -250,7 +409,28 @@ impl BrowserWsSession {
                 lease_epoch,
             } => {
                 let epoch = lease_epoch.parse::<u64>().unwrap_or(0);
-                admission.broker.release_driver(&self.device_id, epoch);
+                let sub_id = self.subscription_id.as_deref().unwrap_or("");
+                let epoch_matches = self.lease_epoch == Some(epoch);
+                if !self.is_driver
+                    || !epoch_matches
+                    || !admission.broker.release_driver(
+                        &self.device_id,
+                        &self.connection_id,
+                        sub_id,
+                        &self.browser_id,
+                        epoch,
+                    )
+                {
+                    let err = browser_error(
+                        Some(request_id),
+                        "BROWSER_INVALID_REQUEST",
+                        "Driver lease 5-tuple mismatch or not active driver",
+                        false,
+                        None,
+                    );
+                    let _ = out_tx.send(err).await;
+                    return Ok(());
+                }
                 self.is_driver = false;
                 self.lease_epoch = None;
                 let resp = ServerMessage::BrowserDriverReleased {
@@ -431,11 +611,26 @@ impl BrowserWsSession {
                     return Ok(());
                 }
 
+                let cmd_permit = match self.command_semaphore.clone().try_acquire_owned() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        let err = browser_error(
+                            Some(request_id),
+                            "BROWSER_RATE_LIMITED",
+                            "Command queue limit exceeded",
+                            true,
+                            Some(250),
+                        );
+                        let _ = out_tx.send(err).await;
+                        return Ok(());
+                    }
+                };
+
                 // P1-07: TypeSafe-approved spawned_command_tasks pattern:
                 // Spawn command execution onto an async task with results returned to out_tx.
                 // Reader loop is NOT blocked!
                 let ctx = BrowserCommandContext {
-                    browser_id,
+                    browser_id: browser_id.clone(),
                     command,
                     params,
                     document_generation: Some(document_generation),
@@ -444,33 +639,83 @@ impl BrowserWsSession {
                 let out_tx = out_tx.clone();
                 let dedup = Arc::clone(&self.dedup);
                 let eval_semaphore = Arc::clone(&self.eval_semaphore);
+                let cancel_token = self.cancel_token.clone();
+                let broker = Arc::clone(&admission.broker);
+                let device_id = self.device_id.clone();
+                let connection_id = self.connection_id.clone();
+                let sub_id_str = sub_id.to_string();
+                let browser_id_str = self.browser_id.clone();
 
                 tokio::spawn(async move {
-                    let res = if is_eval {
-                        let permit = match eval_semaphore.acquire().await {
-                            Ok(p) => p,
-                            Err(_) => {
-                                let err_reply = browser_error(
-                                    Some(request_id),
-                                    "BROWSER_EXECUTION_FAILED",
-                                    "Eval dispatcher closed",
-                                    false,
-                                    None,
-                                );
-                                let _ = out_tx.send(err_reply).await;
-                                return;
+                    let _held_cmd_permit = cmd_permit;
+
+                    if cancel_token.is_cancelled() {
+                        return;
+                    }
+
+                    let eval_permit = if is_eval {
+                        let p = tokio::select! {
+                            _ = cancel_token.cancelled() => return,
+                            res = eval_semaphore.acquire() => {
+                                match res {
+                                    Ok(permit) => permit,
+                                    Err(_) => {
+                                        let err_reply = browser_error(
+                                            Some(request_id),
+                                            "BROWSER_EXECUTION_FAILED",
+                                            "Eval dispatcher closed",
+                                            false,
+                                            None,
+                                        );
+                                        let _ = out_tx.send(err_reply).await;
+                                        return;
+                                    }
+                                }
                             }
                         };
-                        let r = backend.execute_command(ctx).await;
-                        drop(permit);
-                        r
+                        Some(p)
                     } else {
-                        backend.execute_command(ctx).await
+                        None
+                    };
+
+                    // Execution-time lease revalidation: RE-VALIDATE that the driver lease is still valid
+                    // and has not expired or been revoked before executing! If lease expired while waiting
+                    // for permit, abort with BROWSER_FORBIDDEN.
+                    let now_exec = Instant::now();
+                    if !broker.is_active_driver(
+                        &device_id,
+                        &connection_id,
+                        &sub_id_str,
+                        &browser_id_str,
+                        epoch,
+                        now_exec,
+                    ) {
+                        drop(eval_permit);
+                        let err_reply = browser_error(
+                            Some(request_id),
+                            "BROWSER_FORBIDDEN",
+                            "Driver lease expired or revoked before execution",
+                            false,
+                            None,
+                        );
+                        let _ = out_tx.send(err_reply).await;
+                        return;
+                    }
+
+                    let res = tokio::select! {
+                        _ = cancel_token.cancelled() => {
+                            drop(eval_permit);
+                            return;
+                        }
+                        r = backend.execute_command(ctx) => {
+                            drop(eval_permit);
+                            r
+                        }
                     };
 
                     let reply = match res {
                         Ok(result) => {
-                            let json_val = result.value.clone();
+                            let json_val = result.value.map(sanitize_json_value);
                             if let Some(ref v) = json_val {
                                 if let Ok(bytes) = serde_json::to_vec(v) {
                                     dedup.record_result(seq_num, bytes, Instant::now());
@@ -534,11 +779,20 @@ impl BrowserWsSession {
     }
 
     pub fn teardown(&mut self, admission: &AdmissionController) {
-        if let Some(sub_id) = self.subscription_id.take() {
-            admission.unsubscribe(&self.browser_id, &sub_id);
+        self.cancel_token.cancel();
+        let sub_id = self.subscription_id.take();
+        if let Some(ref sub) = sub_id {
+            admission.unsubscribe(&self.browser_id, sub);
         }
         if let Some(epoch) = self.lease_epoch.take() {
-            admission.broker.release_driver(&self.device_id, epoch);
+            let s_id = sub_id.as_deref().unwrap_or("");
+            admission.broker.release_driver(
+                &self.device_id,
+                &self.connection_id,
+                s_id,
+                &self.browser_id,
+                epoch,
+            );
         }
         if let Some(queue) = self.queue.as_mut() {
             queue.close();
@@ -1193,5 +1447,328 @@ pub mod tests {
         // The command result arrives on out_rx
         let cmd_resp = out_rx.recv().await.unwrap();
         assert!(matches!(cmd_resp, ServerMessage::BrowserResult { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_ws_raw_wire_pre_parse_limit() {
+        let now = Instant::now();
+        let mut session = BrowserWsSession::new(
+            "c-raw".into(),
+            "d-raw".into(),
+            "b1".into(),
+            DevicePermission::Control,
+            now,
+        );
+        let backend: Arc<dyn RemoteBrowserBackend> = Arc::new(InProcessTestBackend::new());
+        let admission = AdmissionController::new();
+
+        // Raw payload over 64 KiB
+        let oversized = "X".repeat(65 * 1024);
+        let resp = session.handle_raw_text(&oversized, &backend, &admission, now).await.unwrap().unwrap();
+        match resp {
+            ServerMessage::BrowserError { code, message, .. } => {
+                assert_eq!(code, "BROWSER_INVALID_REQUEST");
+                assert!(message.contains("64 KiB"));
+            }
+            _ => panic!("Expected BROWSER_INVALID_REQUEST for oversized raw text"),
+        }
+    }
+
+    struct LeakingBackend;
+    impl RemoteBrowserBackend for LeakingBackend {
+        fn list_sessions<'a>(
+            &'a self,
+            _scope: &'a crate::remote::browser_backend::DesktopScope,
+        ) -> futures_util::future::BoxFuture<'a, Result<Vec<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>> {
+            Box::pin(async move { Ok(vec![]) })
+        }
+        fn identify_session<'a>(
+            &'a self,
+            _scope: &'a crate::remote::browser_backend::DesktopScope,
+        ) -> futures_util::future::BoxFuture<'a, Result<Option<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>> {
+            Box::pin(async move { Ok(None) })
+        }
+        fn get_state<'a>(
+            &'a self,
+            _browser_id: &'a str,
+            _scope: &'a crate::remote::browser_backend::DesktopScope,
+        ) -> futures_util::future::BoxFuture<'a, Result<crate::remote::browser_backend::BrowserRemoteState, RemoteBrowserError>> {
+            Box::pin(async move { Err(RemoteBrowserError::NotFound("b1".into())) })
+        }
+        fn execute_command(
+            &self,
+            _ctx: BrowserCommandContext,
+        ) -> futures_util::future::BoxFuture<'_, Result<BrowserCommandResult, RemoteBrowserError>> {
+            Box::pin(async move {
+                Ok(BrowserCommandResult {
+                    success: true,
+                    value: Some(serde_json::json!({
+                        "userPath": "/Users/alice/private/secret.txt",
+                        "winPath": "C:\\Windows\\System32\\cmd.exe",
+                        "uncPath": "\\\\nas\\share\\data.csv",
+                        "safe": "normal value"
+                    })),
+                })
+            })
+        }
+        fn capabilities(&self) -> futures_util::future::BoxFuture<'_, crate::remote::browser_backend::BrowserCapabilities> {
+            Box::pin(async move {
+                crate::remote::browser_backend::BrowserCapabilities {
+                    browser_available: true,
+                    supported_formats: vec![],
+                    supported_commands: vec![],
+                    max_edge: 2048,
+                    max_fps: 8,
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ws_success_response_path_sanitization() {
+        let now = Instant::now();
+        let mut session = BrowserWsSession::new(
+            "c-leak".into(),
+            "d-leak".into(),
+            "b1".into(),
+            DevicePermission::Control,
+            now,
+        );
+        let backend: Arc<dyn RemoteBrowserBackend> = Arc::new(LeakingBackend);
+        let admission = AdmissionController::new();
+
+        let sub = ClientMessage::BrowserSubscribe {
+            request_id: "r1".into(),
+            viewer_instance_id: "v1".into(),
+            options: BrowserSubscribeOptions {
+                format: crate::remote::browser_protocol::BrowserImageFormat::Jpeg,
+                quality: None,
+                interval_ms: None,
+                max_edge: None,
+            },
+        };
+        session.handle_client_message(sub, &backend, &admission, now).await.unwrap();
+
+        let claim = ClientMessage::BrowserDriverClaim {
+            request_id: "r2".into(),
+            subscription_id: session.subscription_id.clone().unwrap(),
+            browser_id: "b1".into(),
+        };
+        session.handle_client_message(claim, &backend, &admission, now).await.unwrap();
+
+        let cmd = ClientMessage::BrowserCommand {
+            request_id: "r3".into(),
+            request_seq: "1".into(),
+            browser_id: "b1".into(),
+            lease_epoch: session.lease_epoch.unwrap().to_string(),
+            browser_instance_id: "bi1".into(),
+            desktop_epoch: "1".into(),
+            document_generation: "1".into(),
+            command: "getState".into(),
+            params: None,
+        };
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(16);
+        session.dispatch_client_message(cmd, &backend, &admission, &out_tx, now).await.unwrap();
+        let res = out_rx.recv().await.unwrap();
+
+        match res {
+            ServerMessage::BrowserResult { result, .. } => {
+                let json_str = serde_json::to_string(&result.unwrap()).unwrap();
+                assert!(!json_str.contains("/Users/"), "Must redact /Users/");
+                assert!(!json_str.contains("C:\\"), "Must redact C:\\");
+                assert!(!json_str.contains("\\\\nas"), "Must redact UNC path");
+                assert!(json_str.contains("[redacted-path]"));
+                assert!(json_str.contains("normal value"));
+            }
+            _ => panic!("Expected BrowserResult"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ws_execution_time_lease_revalidation_aborts_forbidden() {
+        let now = Instant::now();
+        let mut session = BrowserWsSession::new(
+            "c-reval".into(),
+            "d-reval".into(),
+            "b1".into(),
+            DevicePermission::Control,
+            now,
+        );
+        let backend: Arc<dyn RemoteBrowserBackend> = Arc::new(InProcessTestBackend::new());
+        let admission = AdmissionController::new();
+
+        // Subscribe & claim
+        let sub = ClientMessage::BrowserSubscribe {
+            request_id: "r1".into(),
+            viewer_instance_id: "v1".into(),
+            options: BrowserSubscribeOptions {
+                format: crate::remote::browser_protocol::BrowserImageFormat::Jpeg,
+                quality: None,
+                interval_ms: None,
+                max_edge: None,
+            },
+        };
+        session.handle_client_message(sub, &backend, &admission, now).await.unwrap();
+
+        let claim = ClientMessage::BrowserDriverClaim {
+            request_id: "r2".into(),
+            subscription_id: session.subscription_id.clone().unwrap(),
+            browser_id: "b1".into(),
+        };
+        session.handle_client_message(claim, &backend, &admission, now).await.unwrap();
+        let epoch = session.lease_epoch.unwrap();
+
+        // Hold the eval semaphore so spawned eval command waits
+        let held_permit = session.eval_semaphore.clone().acquire_owned().await.unwrap();
+
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(16);
+        let cmd = ClientMessage::BrowserCommand {
+            request_id: "r-eval-wait".into(),
+            request_seq: "1".into(),
+            browser_id: "b1".into(),
+            lease_epoch: epoch.to_string(),
+            browser_instance_id: "bi1".into(),
+            desktop_epoch: "1".into(),
+            document_generation: "1".into(),
+            command: "eval".into(),
+            params: Some(serde_json::json!({ "script": "1+1" })),
+        };
+        session.dispatch_client_message(cmd, &backend, &admission, &out_tx, now).await.unwrap();
+
+        // Now revoke driver lease via desktop reclaim while task is waiting for permit!
+        admission.broker.reclaim_desktop();
+
+        // Release the held permit, allowing the task to acquire it
+        drop(held_permit);
+
+        // Task acquires permit, re-validates lease, notices it was revoked, and aborts with BROWSER_FORBIDDEN!
+        let reply = out_rx.recv().await.unwrap();
+        match reply {
+            ServerMessage::BrowserError { code, message, .. } => {
+                assert_eq!(code, "BROWSER_FORBIDDEN");
+                assert!(message.contains("expired or revoked"));
+            }
+            _ => panic!("Expected BROWSER_FORBIDDEN error on lease expiration"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ws_heartbeat_and_release_5tuple_consistency() {
+        let now = Instant::now();
+        let mut session = BrowserWsSession::new(
+            "c-5t".into(),
+            "d-5t".into(),
+            "b1".into(),
+            DevicePermission::Control,
+            now,
+        );
+        let backend: Arc<dyn RemoteBrowserBackend> = Arc::new(InProcessTestBackend::new());
+        let admission = AdmissionController::new();
+
+        // Subscribe & claim
+        let sub = ClientMessage::BrowserSubscribe {
+            request_id: "r1".into(),
+            viewer_instance_id: "v1".into(),
+            options: BrowserSubscribeOptions {
+                format: crate::remote::browser_protocol::BrowserImageFormat::Jpeg,
+                quality: None,
+                interval_ms: None,
+                max_edge: None,
+            },
+        };
+        session.handle_client_message(sub, &backend, &admission, now).await.unwrap();
+
+        let claim = ClientMessage::BrowserDriverClaim {
+            request_id: "r2".into(),
+            subscription_id: session.subscription_id.clone().unwrap(),
+            browser_id: "b1".into(),
+        };
+        session.handle_client_message(claim, &backend, &admission, now).await.unwrap();
+        let epoch = session.lease_epoch.unwrap();
+
+        // 1. Heartbeat with wrong subscription_id -> BROWSER_INVALID_REQUEST
+        let bad_sub_hb = ClientMessage::BrowserHeartbeat {
+            request_id: Some("hb-bad-sub".into()),
+            lease_epoch: Some(epoch.to_string()),
+            subscription_id: Some("sub-wrong".into()),
+        };
+        let bad_hb_resp = session.handle_client_message(bad_sub_hb, &backend, &admission, now).await.unwrap().unwrap();
+        assert!(matches!(bad_hb_resp, ServerMessage::BrowserError { ref code, .. } if code == "BROWSER_INVALID_REQUEST"));
+
+        // 2. Heartbeat with wrong lease_epoch -> BROWSER_INVALID_REQUEST
+        let bad_epoch_hb = ClientMessage::BrowserHeartbeat {
+            request_id: Some("hb-bad-epoch".into()),
+            lease_epoch: Some("99999".into()),
+            subscription_id: session.subscription_id.clone(),
+        };
+        let bad_epoch_resp = session.handle_client_message(bad_epoch_hb, &backend, &admission, now).await.unwrap().unwrap();
+        assert!(matches!(bad_epoch_resp, ServerMessage::BrowserError { ref code, .. } if code == "BROWSER_INVALID_REQUEST"));
+
+        // 3. Heartbeat with correct 5-tuple -> BrowserPong
+        let good_hb = ClientMessage::BrowserHeartbeat {
+            request_id: Some("hb-good".into()),
+            lease_epoch: Some(epoch.to_string()),
+            subscription_id: session.subscription_id.clone(),
+        };
+        let good_hb_resp = session.handle_client_message(good_hb, &backend, &admission, now).await.unwrap().unwrap();
+        assert!(matches!(good_hb_resp, ServerMessage::BrowserPong { .. }));
+
+        // 4. Release with wrong lease_epoch -> BROWSER_INVALID_REQUEST
+        let bad_rel = ClientMessage::BrowserDriverRelease {
+            request_id: "rel-bad".into(),
+            lease_epoch: "99999".into(),
+        };
+        let bad_rel_resp = session.handle_client_message(bad_rel, &backend, &admission, now).await.unwrap().unwrap();
+        assert!(matches!(bad_rel_resp, ServerMessage::BrowserError { ref code, .. } if code == "BROWSER_INVALID_REQUEST"));
+
+        // 5. Release with correct 5-tuple -> BrowserDriverReleased
+        let good_rel = ClientMessage::BrowserDriverRelease {
+            request_id: "rel-good".into(),
+            lease_epoch: epoch.to_string(),
+        };
+        let good_rel_resp = session.handle_client_message(good_rel, &backend, &admission, now).await.unwrap().unwrap();
+        assert!(matches!(good_rel_resp, ServerMessage::BrowserDriverReleased { .. }));
+        assert!(!session.is_driver);
+    }
+
+    #[test]
+    fn test_ws_frame_enqueuing_and_ack_flow_control() {
+        let now = Instant::now();
+        let mut session = BrowserWsSession::new(
+            "c-flow".into(),
+            "d-flow".into(),
+            "b1".into(),
+            DevicePermission::Control,
+            now,
+        );
+
+        // Before subscribing: frames are dropped
+        assert!(session.enqueue_frame(vec![0x62, 1, 1, 1, 1, 0, 0, 0], now).is_none());
+
+        // Setup queue (as if subscribed)
+        session.queue = Some(SubscriberQueue::new("sub-flow".into(), 1));
+
+        // Frame 1: admitted immediately
+        let f1 = vec![0x62, 1, 1, 1, 1, 0, 0, 0, 10, 20];
+        let res1 = session.enqueue_frame(f1.clone(), now);
+        assert_eq!(res1, Some(f1));
+
+        // Frame 2: unacked frame exists -> backpressured into pending slot
+        let f2 = vec![0x62, 1, 1, 1, 2, 0, 0, 0, 30, 40];
+        assert!(session.enqueue_frame(f2.clone(), now).is_none());
+
+        // Frame 3: overwrites pending slot (latest-only!)
+        let f3 = vec![0x62, 1, 1, 1, 3, 0, 0, 0, 50, 60];
+        assert!(session.enqueue_frame(f3.clone(), now).is_none());
+
+        // ACK arrives for frame 1: frame 3 is promoted and stored in pending_promoted_frame
+        let ack = ClientMessage::BrowserFrameAck { stream_id: 1, seq: 1 };
+        let admission = AdmissionController::new();
+        let backend: Arc<dyn RemoteBrowserBackend> = Arc::new(InProcessTestBackend::new());
+        let (out_tx, _) = tokio::sync::mpsc::channel(16);
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        rt.block_on(session.dispatch_client_message(ack, &backend, &admission, &out_tx, now)).unwrap();
+
+        assert_eq!(session.pending_promoted_frame, Some(f3));
     }
 }

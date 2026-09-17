@@ -1,4 +1,3 @@
-use crate::browser::model::LogicalRect;
 use serde::{Deserialize, Serialize};
 
 pub const FRAME_ENVELOPE_KIND: u8 = 0x62;
@@ -11,7 +10,7 @@ pub const MAX_METADATA_BYTES: usize = 4096; // 4 KiB
 pub const MAX_FRAME_PAYLOAD_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
 pub const MAX_JSON_PAYLOAD_BYTES: usize = 512 * 1024; // 512 KiB
 pub const MAX_IMAGE_EDGE: u32 = 2048;
-pub const MAX_IMAGE_PIXELS: u64 = 4 * 1024 * 1024; // 4 MP
+pub const MAX_IMAGE_PIXELS: u64 = 4_000_000; // 4 MP cap
 
 pub const IPC_CONTENT_TYPE_JSON: u8 = 0x01;
 pub const IPC_CONTENT_TYPE_IMAGE: u8 = 0x02;
@@ -80,97 +79,113 @@ pub struct FrameHeader {
     pub reserved: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RemoteFrameMetadata {
-    pub offset_top: f64,
-    pub page_scale_factor: f64,
-    pub device_width: f64,
-    pub device_height: f64,
-    pub image_width: u32,
-    pub image_height: u32,
-    pub scroll_offset_x: f64,
-    pub scroll_offset_y: f64,
-    pub timestamp: f64,
-    // Ferryx required extensions
-    pub stream_id: u64,
-    pub browser_instance_id: String,
-    pub browser_service_epoch: String,
-    pub desktop_epoch: String,
-    pub document_generation: String,
-    pub viewport_revision: u64,
-    pub capture_rect: LogicalRect,
-    pub geometry_source: String,
+pub use crate::remote::browser_protocol::{
+    BrowserCaptureRect, BrowserFrameMetadata, BrowserImageFormat,
+};
+pub type RemoteFrameMetadata = BrowserFrameMetadata;
+
+impl From<crate::remote::browser_protocol::ProtocolCodecError> for RemoteProtocolError {
+    fn from(err: crate::remote::browser_protocol::ProtocolCodecError) -> Self {
+        use crate::remote::browser_protocol::ProtocolCodecError;
+        match err {
+            ProtocolCodecError::BufferTooShort { actual, .. } => Self::HeaderTooShort { actual },
+            ProtocolCodecError::BufferTooLarge { actual, max } => Self::FrameTooLarge { actual, max },
+            ProtocolCodecError::InvalidKind(k) => Self::InvalidKind { actual: k },
+            ProtocolCodecError::InvalidVersion(v) => Self::InvalidVersion { actual: v },
+            ProtocolCodecError::InvalidOpcode(o) => Self::InvalidOpcode { actual: o },
+            ProtocolCodecError::InvalidFormat(f) => Self::InvalidFormat { actual: f },
+            ProtocolCodecError::ReservedNonZero(r) => Self::ReservedNonZero { actual: r },
+            ProtocolCodecError::MetadataTooLarge { actual, max } => Self::MetadataTooLarge { actual, max },
+            ProtocolCodecError::TruncatedFrame { actual, .. } => Self::IpcFrameIncomplete { expected: 0, available: actual },
+            ProtocolCodecError::EmptyImagePayload => Self::EmptyImagePayload,
+            ProtocolCodecError::InvalidMetadataJson(m) => Self::InvalidJsonMetadata(m),
+            ProtocolCodecError::NonFiniteNumeric(f) => Self::NonFiniteCoordinate(f),
+            ProtocolCodecError::ImageEdgeExceeded { width, height } => Self::ImageDimensionsTooLarge { width, height },
+            ProtocolCodecError::ImagePixelsExceeded { pixels } => Self::ImagePixelsTooLarge { pixels, max: crate::remote::browser_protocol::MAX_IMAGE_PIXELS },
+            ProtocolCodecError::InvalidDecimalString(s) => Self::MissingRequiredExtension(s),
+            ProtocolCodecError::InvalidGeometrySource(_) => Self::MissingRequiredExtension("geometrySource"),
+            other => Self::InvalidJsonMetadata(other.to_string()),
+        }
+    }
 }
 
-impl RemoteFrameMetadata {
-    pub fn validate(&self) -> Result<(), RemoteProtocolError> {
-        if !self.offset_top.is_finite() {
-            return Err(RemoteProtocolError::NonFiniteCoordinate("offsetTop"));
-        }
-        if !self.page_scale_factor.is_finite() || self.page_scale_factor <= 0.0 {
-            return Err(RemoteProtocolError::NonFiniteCoordinate("pageScaleFactor"));
-        }
-        if !self.device_width.is_finite() || self.device_width < 0.0 {
-            return Err(RemoteProtocolError::NonFiniteCoordinate("deviceWidth"));
-        }
-        if !self.device_height.is_finite() || self.device_height < 0.0 {
-            return Err(RemoteProtocolError::NonFiniteCoordinate("deviceHeight"));
-        }
-        if !self.scroll_offset_x.is_finite() {
-            return Err(RemoteProtocolError::NonFiniteCoordinate("scrollOffsetX"));
-        }
-        if !self.scroll_offset_y.is_finite() {
-            return Err(RemoteProtocolError::NonFiniteCoordinate("scrollOffsetY"));
-        }
-        if !self.timestamp.is_finite() || self.timestamp < 0.0 {
-            return Err(RemoteProtocolError::NonFiniteCoordinate("timestamp"));
-        }
-
-        if self.image_width == 0 || self.image_height == 0 {
-            return Err(RemoteProtocolError::EmptyImagePayload);
-        }
-        if self.image_width > MAX_IMAGE_EDGE || self.image_height > MAX_IMAGE_EDGE {
-            return Err(RemoteProtocolError::ImageDimensionsTooLarge {
-                width: self.image_width,
-                height: self.image_height,
-            });
-        }
-        let pixels = (self.image_width as u64) * (self.image_height as u64);
-        if pixels > MAX_IMAGE_PIXELS {
-            return Err(RemoteProtocolError::ImagePixelsTooLarge {
-                pixels,
-                max: MAX_IMAGE_PIXELS,
-            });
-        }
-
-        if self.browser_instance_id.trim().is_empty() {
-            return Err(RemoteProtocolError::MissingRequiredExtension("browserInstanceId"));
-        }
-        if self.browser_service_epoch.trim().is_empty() {
-            return Err(RemoteProtocolError::MissingRequiredExtension("browserServiceEpoch"));
-        }
-        if self.desktop_epoch.trim().is_empty() {
-            return Err(RemoteProtocolError::MissingRequiredExtension("desktopEpoch"));
-        }
-        if self.document_generation.trim().is_empty() {
-            return Err(RemoteProtocolError::MissingRequiredExtension("documentGeneration"));
-        }
-        if self.geometry_source.trim().is_empty() {
-            return Err(RemoteProtocolError::MissingRequiredExtension("geometrySource"));
-        }
-        if !self.capture_rect.is_valid() {
-            return Err(RemoteProtocolError::InvalidCaptureRect);
-        }
-
-        Ok(())
+pub fn validate_frame_metadata(meta: &BrowserFrameMetadata) -> Result<(), RemoteProtocolError> {
+    if !meta.offset_top.is_finite() {
+        return Err(RemoteProtocolError::NonFiniteCoordinate("offsetTop"));
     }
+    if !meta.page_scale_factor.is_finite() || meta.page_scale_factor <= 0.0 {
+        return Err(RemoteProtocolError::NonFiniteCoordinate("pageScaleFactor"));
+    }
+    if !meta.device_width.is_finite() || meta.device_width <= 0.0 {
+        return Err(RemoteProtocolError::NonFiniteCoordinate("deviceWidth"));
+    }
+    if !meta.device_height.is_finite() || meta.device_height <= 0.0 {
+        return Err(RemoteProtocolError::NonFiniteCoordinate("deviceHeight"));
+    }
+    if !meta.scroll_offset_x.is_finite() {
+        return Err(RemoteProtocolError::NonFiniteCoordinate("scrollOffsetX"));
+    }
+    if !meta.scroll_offset_y.is_finite() {
+        return Err(RemoteProtocolError::NonFiniteCoordinate("scrollOffsetY"));
+    }
+    if !meta.timestamp.is_finite() || meta.timestamp < 0.0 {
+        return Err(RemoteProtocolError::NonFiniteCoordinate("timestamp"));
+    }
+
+    if meta.image_width == 0 || meta.image_height == 0 {
+        return Err(RemoteProtocolError::EmptyImagePayload);
+    }
+    if meta.image_width > MAX_IMAGE_EDGE || meta.image_height > MAX_IMAGE_EDGE {
+        return Err(RemoteProtocolError::ImageDimensionsTooLarge {
+            width: meta.image_width,
+            height: meta.image_height,
+        });
+    }
+    let pixels = (meta.image_width as u64) * (meta.image_height as u64);
+    if pixels > MAX_IMAGE_PIXELS {
+        return Err(RemoteProtocolError::ImagePixelsTooLarge {
+            pixels,
+            max: MAX_IMAGE_PIXELS,
+        });
+    }
+
+    if meta.browser_instance_id.trim().is_empty() {
+        return Err(RemoteProtocolError::MissingRequiredExtension("browserInstanceId"));
+    }
+    if meta.browser_service_epoch.trim().is_empty() {
+        return Err(RemoteProtocolError::MissingRequiredExtension("browserServiceEpoch"));
+    }
+    if meta.desktop_epoch.trim().is_empty() {
+        return Err(RemoteProtocolError::MissingRequiredExtension("desktopEpoch"));
+    }
+    if meta.document_generation.trim().is_empty() {
+        return Err(RemoteProtocolError::MissingRequiredExtension("documentGeneration"));
+    }
+    if meta.viewport_revision.trim().is_empty() {
+        return Err(RemoteProtocolError::MissingRequiredExtension("viewportRevision"));
+    }
+    if meta.geometry_source.trim().is_empty() {
+        return Err(RemoteProtocolError::MissingRequiredExtension("geometrySource"));
+    }
+    if !meta.capture_rect.x.is_finite()
+        || !meta.capture_rect.y.is_finite()
+        || !meta.capture_rect.width.is_finite()
+        || !meta.capture_rect.height.is_finite()
+        || meta.capture_rect.width <= 0.0
+        || meta.capture_rect.height <= 0.0
+    {
+        return Err(RemoteProtocolError::InvalidCaptureRect);
+    }
+
+    crate::remote::browser_protocol::validate_metadata(meta)?;
+
+    Ok(())
 }
 
 pub fn encode_frame(
     format: u8,
     seq: u32,
-    metadata: &RemoteFrameMetadata,
+    metadata: &BrowserFrameMetadata,
     image_bytes: &[u8],
 ) -> Result<Vec<u8>, RemoteProtocolError> {
     if format != FRAME_FORMAT_JPEG && format != FRAME_FORMAT_PNG {
@@ -179,7 +194,7 @@ pub fn encode_frame(
     if image_bytes.is_empty() {
         return Err(RemoteProtocolError::EmptyImagePayload);
     }
-    metadata.validate()?;
+    validate_frame_metadata(metadata)?;
 
     let metadata_bytes = serde_json::to_vec(metadata)
         .map_err(|e| RemoteProtocolError::InvalidJsonMetadata(e.to_string()))?;
@@ -220,7 +235,7 @@ pub fn encode_frame(
 
 pub fn decode_frame(
     bytes: &[u8],
-) -> Result<(FrameHeader, RemoteFrameMetadata, Vec<u8>), RemoteProtocolError> {
+) -> Result<(FrameHeader, BrowserFrameMetadata, Vec<u8>), RemoteProtocolError> {
     if bytes.len() < HEADER_BYTE_LENGTH {
         return Err(RemoteProtocolError::HeaderTooShort { actual: bytes.len() });
     }
@@ -274,9 +289,9 @@ pub fn decode_frame(
     }
 
     let metadata_bytes = &bytes[HEADER_BYTE_LENGTH..HEADER_BYTE_LENGTH + metadata_len];
-    let metadata: RemoteFrameMetadata = serde_json::from_slice(metadata_bytes)
+    let metadata: BrowserFrameMetadata = serde_json::from_slice(metadata_bytes)
         .map_err(|e| RemoteProtocolError::InvalidJsonMetadata(e.to_string()))?;
-    metadata.validate()?;
+    validate_frame_metadata(&metadata)?;
 
     let image_bytes = bytes[HEADER_BYTE_LENGTH + metadata_len..].to_vec();
     if image_bytes.is_empty() {
@@ -393,7 +408,7 @@ pub struct BrowserSubscribed {
     pub r#type: String, // "browserSubscribed"
     pub request_id: String,
     pub subscription_id: String,
-    pub stream_id: u64,
+    pub stream_id: u32,
     pub browser_id: String,
     pub browser_instance_id: String,
     pub browser_service_epoch: String,
@@ -407,7 +422,7 @@ pub struct BrowserSubscribed {
 pub struct BrowserFrameAck {
     pub r#type: String, // "browserFrameAck"
     pub subscription_id: String,
-    pub stream_id: u64,
+    pub stream_id: u32,
     pub seq: u32,
 }
 
@@ -500,8 +515,8 @@ pub struct BrowserErrorPayload {
 mod tests {
     use super::*;
 
-    fn sample_metadata() -> RemoteFrameMetadata {
-        RemoteFrameMetadata {
+    fn sample_metadata() -> BrowserFrameMetadata {
+        BrowserFrameMetadata {
             offset_top: 0.0,
             page_scale_factor: 2.0,
             device_width: 800.0,
@@ -516,8 +531,8 @@ mod tests {
             browser_service_epoch: "3".to_string(),
             desktop_epoch: "7".to_string(),
             document_generation: "12".to_string(),
-            viewport_revision: 5,
-            capture_rect: LogicalRect {
+            viewport_revision: "5".to_string(),
+            capture_rect: BrowserCaptureRect {
                 x: 0.0,
                 y: 0.0,
                 width: 800.0,

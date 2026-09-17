@@ -599,6 +599,9 @@ describe("RemoteBrowser component", () => {
     await act(async () => {
       ws.onmessage?.({ data: encodeFrame(testFrame).buffer });
     });
+    await act(async () => {
+      fireEvent.load(screen.getByAltText("Remote browser stream"));
+    });
 
     const viewport = screen.getByTestId("remote-browser-viewport");
     expect(viewport).toBeDefined();
@@ -858,5 +861,336 @@ describe("RemoteBrowser component", () => {
 
     expect(mockReclaim).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId("reclaim-feedback-msg").textContent).toContain("Control reclaimed");
+  });
+
+  it("supports browserDriverRevoked: updates client state to viewing and transitions driver to revoked (R3)", async () => {
+    const client = new BrowserClient("ws://localhost:8080/remote");
+    const ws = await waitForSocket(0);
+
+    // Initial driver state is viewing
+    expect(client.driverState).toBe("viewing");
+
+    // Driver claims
+    const claimPromise = client.claimDriver("b1", "sub1");
+    const claimReq = JSON.parse(ws.sentMessages[0] as string);
+    ws.onmessage?.({
+      data: JSON.stringify({
+        type: "browserDriverClaimed",
+        requestId: claimReq.requestId,
+        leaseEpoch: "epoch-100",
+        expiresAt: Date.now() + 15000,
+      }),
+    });
+    await claimPromise;
+    expect(client.driverState).toBe("driving");
+
+    // Hook listening to driver state
+    let capturedDriver!: ReturnType<typeof useRemoteBrowserDriver>;
+    function DriverComponent() {
+      const d = useRemoteBrowserDriver({
+        client,
+        browserId: "b1",
+        browserInstanceId: "bi1",
+        desktopEpoch: "1",
+        documentGeneration: "1",
+      });
+      capturedDriver = d;
+      return null;
+    }
+    render(<DriverComponent />);
+
+    const revokedListener = vi.fn();
+    client.onDriverRevoked(revokedListener);
+
+    // Server sends browserDriverRevoked
+    await act(async () => {
+      ws.onmessage?.({
+        data: JSON.stringify({
+          type: "browserDriverRevoked",
+          reason: "Desktop owner reclaimed lease",
+          leaseEpoch: "epoch-100",
+        }),
+      });
+    });
+
+    expect(revokedListener).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "browserDriverRevoked",
+        reason: "Desktop owner reclaimed lease",
+        leaseEpoch: "epoch-100",
+      }),
+    );
+    expect(client.driverState).toBe("viewing");
+    expect(capturedDriver.driverState).toBe("revoked");
+    expect(capturedDriver.leaseEpoch).toBeNull();
+  });
+
+  it("strictly derives point click metadata from displayedFrame committed via img onLoad (R8)", async () => {
+    const handlePointClick = vi.fn();
+    const frame1 = makeTestFrame(1, 1, 640, 400);
+    frame1.metadata.documentGeneration = "101";
+    frame1.metadata.viewportRevision = "201";
+    const frame2 = makeTestFrame(2, 1, 640, 400);
+    frame2.metadata.documentGeneration = "102";
+    frame2.metadata.viewportRevision = "202";
+
+    render(
+      <RemoteBrowser
+        baseUrl="http://localhost:8080"
+        browserId="b1"
+        deviceToken="tok-1"
+        onPointClick={handlePointClick}
+      />,
+    );
+
+    const ws = await waitForSocket(0);
+    await establishStreaming(ws);
+
+    const viewport = screen.getByTestId("remote-browser-viewport");
+    vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue({
+      left: 0,
+      top: 0,
+      right: 640,
+      bottom: 400,
+      width: 640,
+      height: 400,
+      x: 0,
+      y: 0,
+      toJSON: () => {},
+    });
+
+    // Frame 1 arrives over network
+    await act(async () => {
+      ws.onmessage?.({ data: encodeFrame(frame1).buffer });
+    });
+
+    const img = screen.getByAltText("Remote browser stream");
+
+    // Click BEFORE onLoad fires: should NOT invoke onPointClick because displayedFrame is not yet committed!
+    await act(async () => {
+      fireEvent.click(viewport, { clientX: 320, clientY: 200 });
+    });
+    expect(handlePointClick).not.toHaveBeenCalled();
+
+    // Now image onLoad fires for Frame 1
+    await act(async () => {
+      fireEvent.load(img);
+    });
+
+    // Click AFTER onLoad: now derived from frame 1
+    await act(async () => {
+      fireEvent.click(viewport, { clientX: 320, clientY: 200 });
+    });
+    expect(handlePointClick).toHaveBeenCalledTimes(1);
+    expect(handlePointClick.mock.calls[0][0].seq).toBe(1);
+    expect(handlePointClick.mock.calls[0][0].documentGeneration).toBe("101");
+    expect(handlePointClick.mock.calls[0][0].viewportRevision).toBe("201");
+
+    // Frame 2 arrives over network, but has NOT yet loaded
+    handlePointClick.mockClear();
+    await act(async () => {
+      ws.onmessage?.({ data: encodeFrame(frame2).buffer });
+    });
+
+    // Click before frame 2's onLoad: MUST strictly use displayedFrame (frame 1), NOT uncommitted network frame 2!
+    await act(async () => {
+      fireEvent.click(viewport, { clientX: 320, clientY: 200 });
+    });
+    expect(handlePointClick).toHaveBeenCalledTimes(1);
+    expect(handlePointClick.mock.calls[0][0].seq).toBe(1);
+    expect(handlePointClick.mock.calls[0][0].documentGeneration).toBe("101");
+    expect(handlePointClick.mock.calls[0][0].viewportRevision).toBe("201");
+
+    // Now onLoad fires for frame 2
+    await act(async () => {
+      fireEvent.load(img);
+    });
+
+    // Click now uses frame 2
+    handlePointClick.mockClear();
+    await act(async () => {
+      fireEvent.click(viewport, { clientX: 320, clientY: 200 });
+    });
+    expect(handlePointClick).toHaveBeenCalledTimes(1);
+    expect(handlePointClick.mock.calls[0][0].seq).toBe(2);
+    expect(handlePointClick.mock.calls[0][0].documentGeneration).toBe("102");
+    expect(handlePointClick.mock.calls[0][0].viewportRevision).toBe("202");
+  });
+
+  it("carries snapshotId and mapRevision on fill and click (R9)", async () => {
+    const mockClient = {
+      sendCommand: vi.fn().mockResolvedValue({ ok: true }),
+      onDriverChanged: vi.fn(() => () => {}),
+      onDriverRevoked: vi.fn(() => () => {}),
+      onError: vi.fn(() => () => {}),
+      onClose: vi.fn(() => () => {}),
+      heartbeat: vi.fn().mockResolvedValue({}),
+      claimDriver: vi.fn().mockResolvedValue({ leaseEpoch: "10" }),
+      releaseDriver: vi.fn().mockResolvedValue({}),
+    } as unknown as BrowserClient;
+
+    let capturedDriver!: ReturnType<typeof useRemoteBrowserDriver>;
+    function DriverTest() {
+      const driver = useRemoteBrowserDriver({
+        client: mockClient,
+        browserId: "b1",
+        browserInstanceId: "bi1",
+        desktopEpoch: "1",
+        documentGeneration: "1",
+        snapshotId: "state-snapshot-42",
+        mapRevision: "state-map-7",
+      });
+      capturedDriver = driver;
+      return <button data-testid="claim" onClick={() => driver.claim()} />;
+    }
+
+    render(<DriverTest />);
+    await act(async () => {
+      await capturedDriver.claim();
+    });
+
+    // 1. click using driver's default snapshotId and mapRevision
+    await act(async () => {
+      await capturedDriver.click({ reference: "btn-1" });
+    });
+    expect(mockClient.sendCommand).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        command: "click",
+        params: expect.objectContaining({
+          reference: "btn-1",
+          snapshotId: "state-snapshot-42",
+          mapRevision: "state-map-7",
+        }),
+      }),
+    );
+
+    // 2. click with explicit override of snapshotId and mapRevision
+    await act(async () => {
+      await capturedDriver.click("btn-2", {
+        snapshotId: "explicit-snap-99",
+        mapRevision: "explicit-map-88",
+      });
+    });
+    expect(mockClient.sendCommand).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        command: "click",
+        params: expect.objectContaining({
+          selector: "btn-2",
+          snapshotId: "explicit-snap-99",
+          mapRevision: "explicit-map-88",
+        }),
+      }),
+    );
+
+    // 3. fill using driver's default snapshotId and mapRevision
+    await act(async () => {
+      await capturedDriver.fill("input-1", "hello");
+    });
+    expect(mockClient.sendCommand).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        command: "fill",
+        params: expect.objectContaining({
+          selector: "input-1",
+          value: "hello",
+          snapshotId: "state-snapshot-42",
+          mapRevision: "state-map-7",
+        }),
+      }),
+    );
+
+    // 4. fill with options carrying snapshotId and mapRevision
+    await act(async () => {
+      await capturedDriver.fill("input-2", "world", {
+        snapshotId: "snap-custom",
+        mapRevision: "map-custom",
+      });
+    });
+    expect(mockClient.sendCommand).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        command: "fill",
+        params: expect.objectContaining({
+          selector: "input-2",
+          value: "world",
+          snapshotId: "snap-custom",
+          mapRevision: "map-custom",
+        }),
+      }),
+    );
+  });
+
+  it("drops unrendered frames, sends ack/pause in background, and resumes cleanly (R10)", async () => {
+    function BackgroundResumeHarness() {
+      const state = useRemoteBrowser({
+        baseUrl: "http://localhost:8080",
+        browserId: "b1",
+        deviceToken: "mock-token",
+      });
+      return (
+        <div>
+          <div data-testid="status">{state.status}</div>
+          <div data-testid="imageUrl">{state.imageUrl ?? "none"}</div>
+        </div>
+      );
+    }
+
+    render(<BackgroundResumeHarness />);
+    const ws = await waitForSocket(0);
+    await establishStreaming(ws);
+
+    // Frame 1 arrives and is acknowledged
+    await act(async () => {
+      ws.onmessage?.({ data: encodeFrame(makeTestFrame(1, 1)).buffer });
+    });
+    expect(screen.getByTestId("imageUrl").textContent).not.toBe("none");
+
+    const sentBefore = ws.sentMessages.length;
+
+    // Document becomes hidden (background)
+    Object.defineProperty(document, "hidden", { value: true, configurable: true });
+    Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true });
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+
+    // Buffer cleared and status paused
+    expect(screen.getByTestId("imageUrl").textContent).toBe("none");
+    expect(screen.getByTestId("status").textContent).toBe("paused");
+
+    // Pause/ack signal sent
+    const acksWhileBackgrounding = ws.sentMessages.slice(sentBefore).map((m) => JSON.parse(m as string));
+    expect(acksWhileBackgrounding).toContainEqual(
+      expect.objectContaining({ type: "browserFrameAck", streamId: 1 }),
+    );
+
+    // Unrendered frame arrives while hidden: should be dropped and acked
+    const sentBeforeDrop = ws.sentMessages.length;
+    await act(async () => {
+      ws.onmessage?.({ data: encodeFrame(makeTestFrame(2, 1)).buffer });
+    });
+    // Still empty buffer
+    expect(screen.getByTestId("imageUrl").textContent).toBe("none");
+    const acksForDropped = ws.sentMessages.slice(sentBeforeDrop).map((m) => JSON.parse(m as string));
+    expect(acksForDropped).toContainEqual(
+      expect.objectContaining({ type: "browserFrameAck", streamId: 1, seq: 2 }),
+    );
+
+    // Document returns to visible
+    Object.defineProperty(document, "hidden", { value: false, configurable: true });
+    Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true });
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+
+    // Cleanly resumes to streaming without duplicate subscribe
+    expect(screen.getByTestId("status").textContent).toBe("streaming");
+    const subscribes = ws.sentMessages.filter((m) => {
+      try {
+        return JSON.parse(m as string).type === "browserSubscribe";
+      } catch {
+        return false;
+      }
+    });
+    // Only original subscribe, no double subscribe!
+    expect(subscribes.length).toBe(1);
   });
 });

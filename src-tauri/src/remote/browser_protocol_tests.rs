@@ -246,13 +246,32 @@ fn test_decimal_string_u64_validation() {
     assert_eq!(vp_rev, 3);
 
     // Explicit test that non-decimal string viewport_revision is rejected during validation
-    let mut invalid_meta = valid_test_metadata();
-    invalid_meta.viewport_revision = "invalid_3.5".into();
-    let err = encode_binary_frame(BrowserImageFormat::Png, 1, &invalid_meta, sample_test_png()).unwrap_err();
-    assert_eq!(
-        err,
-        ProtocolCodecError::InvalidDecimalString("viewport_revision")
-    );
+    for bad_vp in ["", "invalid_3.5", "-1", "0x10", "12a", " ", "1.0"] {
+        let mut invalid_meta = valid_test_metadata();
+        invalid_meta.viewport_revision = bad_vp.into();
+        let err = encode_binary_frame(BrowserImageFormat::Png, 1, &invalid_meta, sample_test_png()).unwrap_err();
+        assert_eq!(
+            err,
+            ProtocolCodecError::InvalidDecimalString("viewport_revision"),
+            "Expected InvalidDecimalString for viewport_revision '{bad_vp}'"
+        );
+    }
+}
+
+#[test]
+fn test_max_image_pixels_boundary() {
+    assert_eq!(MAX_IMAGE_PIXELS, 4_000_000, "MAX_IMAGE_PIXELS must equal 4 MP exactly");
+
+    // 2000 x 2000 = 4,000,000 pixels (within limit)
+    let mut boundary_meta = valid_test_metadata();
+    boundary_meta.image_width = 2000;
+    boundary_meta.image_height = 2000;
+    assert!(validate_metadata(&boundary_meta).is_ok());
+
+    // 2000 x 2001 = 4,002,000 pixels (> 4,000,000 cap) -> ImagePixelsExceeded
+    boundary_meta.image_height = 2001;
+    let err = validate_metadata(&boundary_meta).unwrap_err();
+    assert_eq!(err, ProtocolCodecError::ImagePixelsExceeded { pixels: 4_002_000 });
 }
 
 #[test]

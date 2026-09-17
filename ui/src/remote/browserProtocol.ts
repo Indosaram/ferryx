@@ -51,6 +51,8 @@ export interface BrowserFrame {
   imageBytes: Uint8Array;
 }
 
+export type DecodedBrowserFrame = BrowserFrame;
+
 const ALLOWED_METADATA_KEYS = new Set([
   "offsetTop",
   "pageScaleFactor",
@@ -488,6 +490,14 @@ export interface BrowserDriverReleasedMessage {
   leaseEpoch?: string;
 }
 
+export interface ServerBrowserDriverRevoked {
+  type: "browserDriverRevoked";
+  reason?: string;
+  leaseEpoch: string;
+}
+
+export type BrowserDriverRevokedMessage = ServerBrowserDriverRevoked;
+
 export type BrowserCommandName =
   | "navigate"
   | "back"
@@ -539,6 +549,8 @@ export interface BrowserStateMessage {
   loading: boolean;
   paused: boolean;
   pauseReason?: string | null;
+  snapshotId?: string;
+  mapRevision?: string;
 }
 
 export interface BrowserUnsubscribeMessage {
@@ -560,6 +572,7 @@ export type ServerMessage =
   | BrowserDriverClaimedMessage
   | BrowserDriverChangedMessage
   | BrowserDriverReleasedMessage
+  | ServerBrowserDriverRevoked
   | BrowserResultMessage
   | BrowserErrorMessage
   | BrowserStateMessage
@@ -601,6 +614,7 @@ const SERVER_MESSAGE_ALLOWED_KEYS: Record<string, Set<string>> = {
   browserDriverClaimed: new Set(["type", "requestId", "leaseEpoch", "expiresAt"]),
   browserDriverChanged: new Set(["type", "leaseEpoch", "isDriver"]),
   browserDriverReleased: new Set(["type", "requestId", "leaseEpoch"]),
+  browserDriverRevoked: new Set(["type", "reason", "leaseEpoch"]),
   browserResult: new Set(["type", "requestId", "result"]),
   browserError: new Set(["type", "requestId", "code", "message", "retryable", "retryAfterMs"]),
   browserState: new Set([
@@ -613,6 +627,8 @@ const SERVER_MESSAGE_ALLOWED_KEYS: Record<string, Set<string>> = {
     "loading",
     "paused",
     "pauseReason",
+    "snapshotId",
+    "mapRevision",
   ]),
   browserUnsubscribed: new Set(["type", "requestId", "subscriptionId"]),
 };
@@ -739,6 +755,13 @@ export function parseServerMessage(jsonString: string): ServerMessage {
       if (typeof obj.requestId !== "string") throw new Error("browserDriverReleased: invalid requestId");
       return obj as unknown as BrowserDriverReleasedMessage;
     }
+    case "browserDriverRevoked": {
+      if (typeof obj.leaseEpoch !== "string") throw new Error("browserDriverRevoked: invalid leaseEpoch");
+      if (obj.reason !== undefined && typeof obj.reason !== "string") {
+        throw new Error("browserDriverRevoked: reason must be a string");
+      }
+      return obj as unknown as ServerBrowserDriverRevoked;
+    }
     case "browserResult": {
       if (typeof obj.requestId !== "string") throw new Error("browserResult: invalid requestId");
       return obj as unknown as BrowserResultMessage;
@@ -759,6 +782,12 @@ export function parseServerMessage(jsonString: string): ServerMessage {
       }
       if (typeof obj.loading !== "boolean") throw new Error("browserState: loading must be boolean");
       if (typeof obj.paused !== "boolean") throw new Error("browserState: paused must be boolean");
+      if (obj.snapshotId !== undefined && typeof obj.snapshotId !== "string") {
+        throw new Error("browserState: snapshotId must be a string");
+      }
+      if (obj.mapRevision !== undefined && typeof obj.mapRevision !== "string") {
+        throw new Error("browserState: mapRevision must be a string");
+      }
       return obj as unknown as BrowserStateMessage;
     }
     case "browserUnsubscribed": {

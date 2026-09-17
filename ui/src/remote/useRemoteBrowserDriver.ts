@@ -10,7 +10,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { BrowserClient } from "./browserClient";
-import type { BrowserDriverChangedMessage, BrowserErrorMessage } from "./browserProtocol";
+import type {
+  BrowserDriverChangedMessage,
+  BrowserErrorMessage,
+  ServerBrowserDriverRevoked,
+} from "./browserProtocol";
 
 export type RemoteDriverState =
   | "viewing"
@@ -27,6 +31,8 @@ export interface UseRemoteBrowserDriverOptions {
   desktopEpoch?: string | null;
   documentGeneration?: string | null;
   viewportRevision?: string | null;
+  snapshotId?: string | null;
+  mapRevision?: string | null;
 }
 
 export interface RemoteBrowserMutationGuards {
@@ -36,12 +42,20 @@ export interface RemoteBrowserMutationGuards {
 
 export interface RemoteBrowserClickParams extends RemoteBrowserMutationGuards {
   reference?: string;
+  selector?: string;
   u?: number;
   v?: number;
   snapshotId?: string;
+  mapRevision?: string;
   streamId?: number;
   sequenceNumber?: number;
   browserInstanceId?: string;
+  [key: string]: unknown;
+}
+
+export interface RemoteBrowserFillOptions extends RemoteBrowserMutationGuards {
+  snapshotId?: string;
+  mapRevision?: string;
 }
 
 export interface UseRemoteBrowserDriverResult {
@@ -55,8 +69,16 @@ export interface UseRemoteBrowserDriverResult {
   back: (guards?: RemoteBrowserMutationGuards) => Promise<unknown>;
   forward: (guards?: RemoteBrowserMutationGuards) => Promise<unknown>;
   reload: (guards?: RemoteBrowserMutationGuards) => Promise<unknown>;
-  click: (params: RemoteBrowserClickParams) => Promise<unknown>;
-  fill: (reference: string, value: string, snapshotId?: string, guards?: RemoteBrowserMutationGuards) => Promise<unknown>;
+  click: (
+    selectorOrParams: string | RemoteBrowserClickParams,
+    options?: RemoteBrowserClickParams
+  ) => Promise<unknown>;
+  fill: (
+    selector: string,
+    text: string,
+    snapshotIdOrOptions?: string | RemoteBrowserFillOptions,
+    guards?: RemoteBrowserMutationGuards
+  ) => Promise<unknown>;
   keypress: (key: string, guards?: RemoteBrowserMutationGuards) => Promise<unknown>;
   wait: (params: { condition?: string; timeoutMs?: number }, guards?: RemoteBrowserMutationGuards) => Promise<unknown>;
   evalJs: (script: string, guards?: RemoteBrowserMutationGuards) => Promise<unknown>;
@@ -70,6 +92,8 @@ export function useRemoteBrowserDriver({
   desktopEpoch,
   documentGeneration,
   viewportRevision,
+  snapshotId,
+  mapRevision,
 }: UseRemoteBrowserDriverOptions): UseRemoteBrowserDriverResult {
   // Explicit claim ONLY: initial state is always 'viewing'
   const [driverState, setDriverState] = useState<RemoteDriverState>("viewing");
@@ -84,6 +108,8 @@ export function useRemoteBrowserDriver({
     desktopEpoch,
     documentGeneration,
     viewportRevision,
+    snapshotId,
+    mapRevision,
     leaseEpoch,
     driverState,
     client,
@@ -95,6 +121,8 @@ export function useRemoteBrowserDriver({
     desktopEpoch,
     documentGeneration,
     viewportRevision,
+    snapshotId,
+    mapRevision,
     leaseEpoch,
     driverState,
     client,
@@ -126,6 +154,20 @@ export function useRemoteBrowserDriver({
       }
     });
 
+    const unsubRevoked = client.onDriverRevoked
+      ? client.onDriverRevoked((_msg: ServerBrowserDriverRevoked) => {
+          setDriverState("revoked");
+          setLeaseEpoch(null);
+          setExpiresAt(null);
+        })
+      : typeof (client as any).on === "function"
+      ? (client as any).on("driverRevoked", (_msg: any) => {
+          setDriverState("revoked");
+          setLeaseEpoch(null);
+          setExpiresAt(null);
+        })
+      : () => {};
+
     const unsubError = client.onError((err: Error | BrowserErrorMessage) => {
       const code = "code" in err ? err.code : undefined;
       if (code === "BROWSER_DRIVER_BUSY") {
@@ -146,6 +188,7 @@ export function useRemoteBrowserDriver({
 
     return () => {
       unsubDriver();
+      unsubRevoked();
       unsubError();
       unsubClose();
     };
@@ -350,25 +393,88 @@ export function useRemoteBrowserDriver({
   );
 
   const click = useCallback(
-    (params: RemoteBrowserClickParams) =>
-      dispatchCommand("click", params as Record<string, unknown>, {
-        documentGeneration: params.documentGeneration,
-        viewportRevision: params.viewportRevision,
-      }),
+    (
+      selectorOrParams: string | RemoteBrowserClickParams,
+      options?: RemoteBrowserClickParams
+    ) => {
+      let params: Record<string, unknown>;
+      let guards: RemoteBrowserMutationGuards | undefined;
+
+      if (typeof selectorOrParams === "string") {
+        params = {
+          selector: selectorOrParams,
+          reference: selectorOrParams,
+          ...options,
+        };
+        guards = options;
+      } else {
+        params = { ...selectorOrParams };
+        if (selectorOrParams.reference && !params.selector) {
+          params.selector = selectorOrParams.reference;
+        }
+        guards = {
+          documentGeneration: selectorOrParams.documentGeneration,
+          viewportRevision: selectorOrParams.viewportRevision,
+        };
+      }
+
+      const effectiveSnapshotId =
+        (params.snapshotId as string | undefined) ?? guardsRef.current.snapshotId ?? undefined;
+      const effectiveMapRevision =
+        (params.mapRevision as string | undefined) ?? guardsRef.current.mapRevision ?? undefined;
+
+      if (effectiveSnapshotId !== undefined) {
+        params.snapshotId = effectiveSnapshotId;
+      }
+      if (effectiveMapRevision !== undefined) {
+        params.mapRevision = effectiveMapRevision;
+      }
+
+      return dispatchCommand("click", params, guards);
+    },
     [dispatchCommand]
   );
 
   const fill = useCallback(
-    (reference: string, value: string, snapshotId?: string, guards?: RemoteBrowserMutationGuards) =>
-      dispatchCommand(
-        "fill",
-        {
-          reference,
-          value,
-          ...(snapshotId ? { snapshotId } : {}),
-        },
-        guards
-      ),
+    (
+      selectorOrRef: string,
+      textOrValue: string,
+      snapshotIdOrOptions?: string | RemoteBrowserFillOptions,
+      explicitGuards?: RemoteBrowserMutationGuards
+    ) => {
+      let snapshotId: string | undefined;
+      let mapRevision: string | undefined;
+      let guards: RemoteBrowserMutationGuards | undefined = explicitGuards;
+
+      if (typeof snapshotIdOrOptions === "string") {
+        snapshotId = snapshotIdOrOptions;
+      } else if (snapshotIdOrOptions && typeof snapshotIdOrOptions === "object") {
+        snapshotId = snapshotIdOrOptions.snapshotId;
+        mapRevision = snapshotIdOrOptions.mapRevision;
+        guards = snapshotIdOrOptions;
+      }
+
+      const effectiveSnapshotId =
+        snapshotId ?? guardsRef.current.snapshotId ?? undefined;
+      const effectiveMapRevision =
+        mapRevision ?? guardsRef.current.mapRevision ?? undefined;
+
+      const params: Record<string, unknown> = {
+        reference: selectorOrRef,
+        selector: selectorOrRef,
+        value: textOrValue,
+        text: textOrValue,
+      };
+
+      if (effectiveSnapshotId !== undefined) {
+        params.snapshotId = effectiveSnapshotId;
+      }
+      if (effectiveMapRevision !== undefined) {
+        params.mapRevision = effectiveMapRevision;
+      }
+
+      return dispatchCommand("fill", params, guards);
+    },
     [dispatchCommand]
   );
 

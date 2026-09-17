@@ -404,9 +404,11 @@ async fn test_real_capture_producer_streaming_and_pause_on_zero_subscribers() {
     // Decode and verify 16-byte binary frame structure
     let (header, metadata, img) = decode_frame(&frame_bytes).expect("Decoded frame must be valid");
     assert_eq!(header.format, FRAME_FORMAT_JPEG);
-    assert_eq!(metadata.image_width, 800);
-    assert_eq!(metadata.image_height, 600);
+    assert_eq!(metadata.image_width, 1024);
+    assert_eq!(metadata.image_height, 768);
     assert_eq!(metadata.geometry_source, "wkSnapshot");
+    assert_eq!(metadata.stream_id, 1);
+    assert_eq!(metadata.viewport_revision, "1");
     assert!(!img.is_empty(), "Image payload must not be empty");
 
     // Capture count increments on fake source
@@ -580,4 +582,188 @@ fn test_remote_browser_operation_validation_and_legacy_isolation() {
     let legacy_close_json = r#"{"command":"close","browserId":"b1"}"#;
     let close_deser = serde_json::from_str::<RemoteBrowserOperation>(legacy_close_json);
     assert!(close_deser.is_err(), "Legacy CLI Close command must not deserialize into RemoteBrowserOperation");
+}
+
+#[tokio::test]
+async fn test_r1_r2_codec_unification_and_public_protocol_acceptance() {
+    let (service, manager, _, _) = setup_test_environment();
+
+    // Register browser session with 1x1 bounds to match sample_valid_jpeg_bytes dimensions
+    let b_1x1 = manager
+        .register_session(CreateBrowserRequest {
+            browser_id: Some("browser-1x1".into()),
+            workspace_id: Some("ws-alpha".into()),
+            worktree_path: None,
+            url: "https://example.com/1x1".into(),
+            profile: None,
+            zoom_factor: None,
+            bounds: Some(LogicalRect {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            }),
+            visible: Some(true),
+        })
+        .expect("Create 1x1 browser session");
+
+    // Attach fake snapshot source
+    let fake_source = Arc::new(FakeBrowserSnapshotSource::new(FakeSnapshotBehavior::Auto {
+        width: 1,
+        height: 1,
+    }));
+    service.set_snapshot_source(fake_source.clone());
+
+    let mut frame_rx = service.subscribe_frames(&b_1x1.browser_id);
+    let sub = service.subscribe(&b_1x1.browser_id, "dev-codec", "v-codec").unwrap();
+
+    let frame_bytes = tokio::time::timeout(std::time::Duration::from_millis(500), frame_rx.recv())
+        .await
+        .expect("Receive frame within timeout")
+        .expect("Frame channel open");
+
+    // 1. Decode with crate::remote::browser_protocol::decode_binary_frame (authoritative wire decoder)
+    let decoded = crate::remote::browser_protocol::decode_binary_frame(&frame_bytes)
+        .expect("Frame output produced by BrowserRemoteService must be 100% accepted by public protocol decoder");
+
+    // 2. Assert wire types match public TypeScript contract:
+    // stream_id is u32 bound to negotiated stream
+    assert_eq!(decoded.metadata.stream_id, 1);
+    // viewport_revision is decimal string
+    assert_eq!(decoded.metadata.viewport_revision, "1");
+    // capture rect logical coordinates
+    assert_eq!(decoded.metadata.capture_rect.width, 1.0);
+    assert_eq!(decoded.metadata.capture_rect.height, 1.0);
+    assert_eq!(decoded.metadata.image_width, 1);
+    assert_eq!(decoded.metadata.image_height, 1);
+    assert_eq!(decoded.metadata.geometry_source, "wkSnapshot");
+
+    // 3. Verify serialization contains decimal string viewportRevision
+    let json_meta = serde_json::to_string(&decoded.metadata).unwrap();
+    assert!(json_meta.contains(r#""viewportRevision":"1""#));
+    assert!(json_meta.contains(r#""streamId":1"#));
+
+    // 4. Verify MAX_IMAGE_PIXELS is 4_000_000
+    assert_eq!(crate::remote::browser_protocol::MAX_IMAGE_PIXELS, 4_000_000);
+    assert_eq!(super::remote_bridge_protocol::MAX_IMAGE_PIXELS, 4_000_000);
+
+    service.unsubscribe(&b_1x1.browser_id, &sub);
+}
+
+#[tokio::test]
+async fn test_r7_producer_abort_handle_cancellation_and_resubscription() {
+    let (service, _manager, b1, _) = setup_test_environment();
+
+    let fake_source = Arc::new(FakeBrowserSnapshotSource::new(FakeSnapshotBehavior::Auto {
+        width: 800,
+        height: 600,
+    }));
+    service.set_snapshot_source(fake_source.clone());
+
+    // 1. Initial state: 0 active
+    assert_eq!(service.active_capture_count(), 0);
+    assert!(!service.is_producer_active(&b1));
+
+    // 2. Subscribe -> producer spawns
+    let sub1 = service.subscribe(&b1, "dev-abort-1", "v1").unwrap();
+    assert_eq!(service.active_capture_count(), 1);
+    assert!(service.is_producer_active(&b1));
+
+    // Wait a tick so task runs
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // 3. Unsubscribe -> 0 subscribers -> producer aborted immediately
+    assert!(service.unsubscribe(&b1, &sub1));
+    assert_eq!(service.active_capture_count(), 0);
+    assert!(!service.is_producer_active(&b1));
+
+    // 4. Rapid resubscription: subscribe immediately without delay
+    let sub2 = service.subscribe(&b1, "dev-abort-2", "v2").unwrap();
+    assert_eq!(service.active_capture_count(), 1);
+    assert!(service.is_producer_active(&b1));
+
+    // Wait a tick: new producer task is running cleanly
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(service.active_capture_count(), 1);
+
+    assert!(service.unsubscribe(&b1, &sub2));
+    assert_eq!(service.active_capture_count(), 0);
+}
+
+#[test]
+fn test_r9_remote_reference_operations_require_snapshot_and_revision() {
+    // 1. Reference click requires snapshot_id and map_revision
+    let click_valid = RemoteBrowserOperation::Click {
+        browser_id: "b1".into(),
+        reference: Some("btn-1".into()),
+        snapshot_id: Some("snap-1".into()),
+        map_revision: Some(1),
+        u: None,
+        v: None,
+    };
+    assert!(click_valid.validate().is_ok());
+
+    let click_missing_snap = RemoteBrowserOperation::Click {
+        browser_id: "b1".into(),
+        reference: Some("btn-1".into()),
+        snapshot_id: None,
+        map_revision: Some(1),
+        u: None,
+        v: None,
+    };
+    let err = click_missing_snap.validate().unwrap_err();
+    assert_eq!(format!("{:?}", err.code), "Custom(\"BROWSER_INVALID_SNAPSHOT\")");
+
+    let click_empty_snap = RemoteBrowserOperation::Click {
+        browser_id: "b1".into(),
+        reference: Some("btn-1".into()),
+        snapshot_id: Some("   ".into()),
+        map_revision: Some(1),
+        u: None,
+        v: None,
+    };
+    let err2 = click_empty_snap.validate().unwrap_err();
+    assert_eq!(format!("{:?}", err2.code), "Custom(\"BROWSER_INVALID_SNAPSHOT\")");
+
+    let click_missing_rev = RemoteBrowserOperation::Click {
+        browser_id: "b1".into(),
+        reference: Some("btn-1".into()),
+        snapshot_id: Some("snap-1".into()),
+        map_revision: None,
+        u: None,
+        v: None,
+    };
+    let err3 = click_missing_rev.validate().unwrap_err();
+    assert_eq!(format!("{:?}", err3.code), "Custom(\"BROWSER_INVALID_SNAPSHOT\")");
+
+    // 2. Coordinate click does NOT require snapshot_id
+    let click_coord = RemoteBrowserOperation::Click {
+        browser_id: "b1".into(),
+        reference: None,
+        snapshot_id: None,
+        map_revision: None,
+        u: Some(0.5),
+        v: Some(0.5),
+    };
+    assert!(click_coord.validate().is_ok());
+
+    // 3. Fill requires snapshot_id and map_revision
+    let fill_valid = RemoteBrowserOperation::Fill {
+        browser_id: "b1".into(),
+        reference: "field1".into(),
+        value: "hello".into(),
+        snapshot_id: Some("snap-1".into()),
+        map_revision: Some(1),
+    };
+    assert!(fill_valid.validate().is_ok());
+
+    let fill_missing_snap = RemoteBrowserOperation::Fill {
+        browser_id: "b1".into(),
+        reference: "field1".into(),
+        value: "hello".into(),
+        snapshot_id: None,
+        map_revision: Some(1),
+    };
+    let err4 = fill_missing_snap.validate().unwrap_err();
+    assert_eq!(format!("{:?}", err4.code), "Custom(\"BROWSER_INVALID_SNAPSHOT\")");
 }

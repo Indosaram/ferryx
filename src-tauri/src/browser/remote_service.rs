@@ -55,7 +55,7 @@ pub struct ViewerInfo {
     pub subscription_id: String,
     pub device_id: String,
     pub viewer_instance_id: String,
-    pub stream_id: u64,
+    pub stream_id: u32,
     pub unacked_seq: Option<u32>,
     pub pending_frame: Option<Vec<u8>>,
     pub joined_at: Instant,
@@ -66,6 +66,8 @@ pub struct BrowserRemoteService {
     driver_broker: Arc<RemoteDriverBroker>,
     subscribers_per_browser: Arc<parking_lot::Mutex<HashMap<String, HashMap<String, ViewerInfo>>>>,
     producer_active: Arc<parking_lot::Mutex<HashMap<String, bool>>>,
+    producer_handles: Arc<parking_lot::Mutex<HashMap<String, tokio::task::AbortHandle>>>,
+    active_stream_ids: Arc<parking_lot::Mutex<HashMap<String, u32>>>,
     captures_in_progress: Arc<AtomicUsize>,
     stream_counter: Arc<AtomicU64>,
     desktop_epoch: Arc<AtomicU64>,
@@ -81,6 +83,8 @@ impl BrowserRemoteService {
             driver_broker,
             subscribers_per_browser: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             producer_active: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            producer_handles: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            active_stream_ids: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             captures_in_progress: Arc::new(AtomicUsize::new(0)),
             stream_counter: Arc::new(AtomicU64::new(1)),
             desktop_epoch: Arc::new(AtomicU64::new(1)),
@@ -100,6 +104,8 @@ impl BrowserRemoteService {
             driver_broker,
             subscribers_per_browser: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             producer_active: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            producer_handles: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            active_stream_ids: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             captures_in_progress: Arc::new(AtomicUsize::new(0)),
             stream_counter: Arc::new(AtomicU64::new(1)),
             desktop_epoch: Arc::new(AtomicU64::new(1)),
@@ -184,7 +190,12 @@ impl BrowserRemoteService {
         }
 
         let subscription_id = format!("sub_{}", Uuid::new_v4());
-        let stream_id = self.stream_counter.fetch_add(1, Ordering::SeqCst);
+        let stream_id = {
+            let mut active_streams = self.active_stream_ids.lock();
+            *active_streams
+                .entry(browser_id.to_string())
+                .or_insert_with(|| self.stream_counter.fetch_add(1, Ordering::SeqCst) as u32)
+        };
 
         browser_subs.insert(
             subscription_id.clone(),
@@ -203,7 +214,7 @@ impl BrowserRemoteService {
         drop(subs_map);
 
         if was_empty {
-            self.spawn_capture_producer(browser_id.to_string());
+            self.spawn_capture_producer(browser_id.to_string(), stream_id);
         }
 
         Ok(subscription_id)
@@ -231,6 +242,10 @@ impl BrowserRemoteService {
                         self.captures_in_progress.fetch_sub(1, Ordering::SeqCst);
                     }
                 }
+                self.active_stream_ids.lock().remove(browser_id);
+                if let Some(handle) = self.producer_handles.lock().remove(browser_id) {
+                    handle.abort();
+                }
             }
         }
 
@@ -251,7 +266,11 @@ impl BrowserRemoteService {
         subs_map.get(browser_id).map(|s| s.len()).unwrap_or(0)
     }
 
-    fn spawn_capture_producer(&self, browser_id: String) {
+    fn spawn_capture_producer(&self, browser_id: String, stream_id: u32) {
+        if let Some(existing) = self.producer_handles.lock().remove(&browser_id) {
+            existing.abort();
+        }
+
         let handle = match tokio::runtime::Handle::try_current() {
             Ok(h) => h,
             Err(_) => return, // No Tokio runtime active (e.g. synchronous unit test), skip spawning capture loop
@@ -267,13 +286,16 @@ impl BrowserRemoteService {
 
         let subscribers_map = Arc::clone(&self.subscribers_per_browser);
         let producer_active = Arc::clone(&self.producer_active);
+        let producer_handles = Arc::clone(&self.producer_handles);
+        let active_stream_ids = Arc::clone(&self.active_stream_ids);
         let captures_in_progress = Arc::clone(&self.captures_in_progress);
         let snapshot_source_holder = Arc::clone(&self.snapshot_source);
         let manager = self.manager.clone();
         let desktop_epoch = Arc::clone(&self.desktop_epoch);
         let service_epoch = self.service_epoch;
+        let browser_id_clone = browser_id.clone();
 
-        handle.spawn(async move {
+        let join_handle = handle.spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(80)); // Maintain ~10-15 FPS (12.5 FPS)
             let mut seq: u32 = 0;
 
@@ -283,21 +305,23 @@ impl BrowserRemoteService {
                 // While active subscribers > 0
                 let has_active_subscribers = {
                     let subs = subscribers_map.lock();
-                    subs.get(&browser_id).map(|s| !s.is_empty()).unwrap_or(false)
+                    subs.get(&browser_id_clone).map(|s| !s.is_empty()).unwrap_or(false)
                 };
 
                 if !has_active_subscribers {
                     let mut active_map = producer_active.lock();
-                    if let Some(active) = active_map.get_mut(&browser_id) {
+                    if let Some(active) = active_map.get_mut(&browser_id_clone) {
                         if *active {
                             *active = false;
                             captures_in_progress.fetch_sub(1, Ordering::SeqCst);
                         }
                     }
+                    active_stream_ids.lock().remove(&browser_id_clone);
+                    producer_handles.lock().remove(&browser_id_clone);
                     break;
                 }
 
-                let state = match manager.get_state(&browser_id) {
+                let state = match manager.get_state(&browser_id_clone) {
                     Ok(s) => s,
                     Err(_) => break,
                 };
@@ -306,9 +330,31 @@ impl BrowserRemoteService {
                     continue;
                 }
 
+                let (bounds, zoom, viewport_rev) = manager
+                    .get_geometry(&browser_id_clone)
+                    .unwrap_or((None, 1.0, 1));
+                let capture_rect = bounds.unwrap_or(LogicalRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1024.0,
+                    height: 768.0,
+                });
+
+                let (raw_w, raw_h) = if capture_rect.width > 0.0 && capture_rect.height > 0.0 {
+                    (
+                        (capture_rect.width * zoom.max(1.0)).round() as u32,
+                        (capture_rect.height * zoom.max(1.0)).round() as u32,
+                    )
+                } else {
+                    (1024, 768)
+                };
+                let (clamped_w, clamped_h) =
+                    crate::browser::snapshot_source::clamp_capture_dimensions(raw_w, raw_h);
+                let snapshot_options = SnapshotOptions::jpeg(70).with_bounds(clamped_w, clamped_h);
+
                 let source = snapshot_source_holder.read().clone();
                 let snapshot_res = source
-                    .take_snapshot(&state.webview_label, SnapshotOptions::jpeg(70))
+                    .take_snapshot(&state.webview_label, snapshot_options)
                     .await;
 
                 let snapshot = match snapshot_res {
@@ -318,22 +364,12 @@ impl BrowserRemoteService {
 
                 seq = seq.wrapping_add(1);
 
-                let (bounds, zoom, viewport_rev) = manager
-                    .get_geometry(&browser_id)
-                    .unwrap_or((None, 1.0, 1));
-                let capture_rect = bounds.unwrap_or(LogicalRect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: snapshot.width as f64,
-                    height: snapshot.height as f64,
-                });
-
                 let format_byte = match snapshot.format {
                     SnapshotFormat::Jpeg { .. } => super::remote_bridge_protocol::FRAME_FORMAT_JPEG,
                     SnapshotFormat::Png => super::remote_bridge_protocol::FRAME_FORMAT_PNG,
                 };
 
-                let metadata = super::remote_bridge_protocol::RemoteFrameMetadata {
+                let metadata = crate::remote::browser_protocol::BrowserFrameMetadata {
                     offset_top: 0.0,
                     page_scale_factor: zoom,
                     device_width: capture_rect.width,
@@ -346,13 +382,18 @@ impl BrowserRemoteService {
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs_f64())
                         .unwrap_or(0.0),
-                    stream_id: 1,
-                    browser_instance_id: manager.get_instance_id(&browser_id).unwrap_or_default(),
+                    stream_id,
+                    browser_instance_id: manager.get_instance_id(&browser_id_clone).unwrap_or_default(),
                     browser_service_epoch: service_epoch.to_string(),
                     desktop_epoch: desktop_epoch.load(Ordering::SeqCst).to_string(),
                     document_generation: state.generation.to_string(),
-                    viewport_revision: viewport_rev,
-                    capture_rect,
+                    viewport_revision: viewport_rev.to_string(),
+                    capture_rect: crate::remote::browser_protocol::BrowserCaptureRect {
+                        x: capture_rect.x,
+                        y: capture_rect.y,
+                        width: capture_rect.width,
+                        height: capture_rect.height,
+                    },
                     geometry_source: "wkSnapshot".to_string(),
                 };
 
@@ -366,6 +407,10 @@ impl BrowserRemoteService {
                 }
             }
         });
+
+        self.producer_handles
+            .lock()
+            .insert(browser_id, join_handle.abort_handle());
     }
 
     /// Latest-only frame admission logic.

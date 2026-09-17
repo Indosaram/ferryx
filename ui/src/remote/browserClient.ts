@@ -22,6 +22,7 @@ import {
   type BrowserSubscribeOptions,
   type BrowserUnsubscribedMessage,
   type ClientMessage,
+  type ServerBrowserDriverRevoked,
   type ServerMessage,
 } from "./browserProtocol";
 
@@ -51,12 +52,18 @@ export class BrowserClient {
   private helloListeners = new Set<(hello: BrowserHelloMessage) => void>();
   private stateListeners = new Set<(state: BrowserStateMessage) => void>();
   private driverChangedListeners = new Set<(msg: BrowserDriverChangedMessage) => void>();
+  private driverRevokedListeners = new Set<(msg: ServerBrowserDriverRevoked) => void>();
   private errorListeners = new Set<(err: Error | BrowserErrorMessage) => void>();
   private closeListeners = new Set<() => void>();
 
   private cachedHello: BrowserHelloMessage | null = null;
   private currentSubscription: BrowserSubscribedMessage | null = null;
+  private currentDriverState: "viewing" | "driving" = "viewing";
   private isClosed = false;
+
+  get driverState(): "viewing" | "driving" {
+    return this.currentDriverState;
+  }
 
   constructor(readonly url: string) {
     this.ws = new WebSocket(url);
@@ -75,6 +82,7 @@ export class BrowserClient {
 
     this.ws.onclose = () => {
       this.isClosed = true;
+      this.currentDriverState = "viewing";
       this.rejectAllPending(new Error("WebSocket closed"));
       for (const listener of this.closeListeners) {
         listener();
@@ -177,17 +185,27 @@ export class BrowserClient {
           break;
         }
         case "browserDriverClaimed": {
+          this.currentDriverState = "driving";
           this.resolvePending(msg.requestId, msg);
           break;
         }
         case "browserDriverChanged": {
+          this.currentDriverState = msg.isDriver ? "driving" : "viewing";
           for (const listener of this.driverChangedListeners) {
             listener(msg);
           }
           break;
         }
         case "browserDriverReleased": {
+          this.currentDriverState = "viewing";
           this.resolvePending(msg.requestId, msg);
+          break;
+        }
+        case "browserDriverRevoked": {
+          this.currentDriverState = "viewing";
+          for (const listener of this.driverRevokedListeners) {
+            listener(msg);
+          }
           break;
         }
         case "browserResult": {
@@ -331,6 +349,49 @@ export class BrowserClient {
   onDriverChanged(callback: (msg: BrowserDriverChangedMessage) => void): () => void {
     this.driverChangedListeners.add(callback);
     return () => this.driverChangedListeners.delete(callback);
+  }
+
+  onDriverRevoked(callback: (msg: ServerBrowserDriverRevoked) => void): () => void {
+    this.driverRevokedListeners.add(callback);
+    return () => this.driverRevokedListeners.delete(callback);
+  }
+
+  on(event: "driverRevoked", callback: (msg: ServerBrowserDriverRevoked) => void): () => void;
+  on(event: "driverChanged", callback: (msg: BrowserDriverChangedMessage) => void): () => void;
+  on(event: "frame", callback: (frame: BrowserFrame) => void): () => void;
+  on(event: "state", callback: (state: BrowserStateMessage) => void): () => void;
+  on(event: "hello", callback: (hello: BrowserHelloMessage) => void): () => void;
+  on(event: "error", callback: (err: Error | BrowserErrorMessage) => void): () => void;
+  on(event: "close", callback: () => void): () => void;
+  on(event: string, callback: (...args: any[]) => void): () => void {
+    switch (event) {
+      case "driverRevoked":
+        return this.onDriverRevoked(callback as (msg: ServerBrowserDriverRevoked) => void);
+      case "driverChanged":
+        return this.onDriverChanged(callback as (msg: BrowserDriverChangedMessage) => void);
+      case "frame":
+        return this.onFrame(callback as (frame: BrowserFrame) => void);
+      case "state":
+        return this.onState(callback as (state: BrowserStateMessage) => void);
+      case "hello":
+        return this.onHello(callback as (hello: BrowserHelloMessage) => void);
+      case "error":
+        return this.onError(callback as (err: Error | BrowserErrorMessage) => void);
+      case "close":
+        return this.onClose(callback as () => void);
+      default:
+        return () => {};
+    }
+  }
+
+  emit(event: "driverRevoked", msg: ServerBrowserDriverRevoked): void;
+  emit(event: string, ...args: any[]): void {
+    if (event === "driverRevoked") {
+      this.currentDriverState = "viewing";
+      for (const listener of this.driverRevokedListeners) {
+        listener(args[0]);
+      }
+    }
   }
 
   onError(callback: (err: Error | BrowserErrorMessage) => void): () => void {

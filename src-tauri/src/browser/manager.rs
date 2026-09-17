@@ -449,7 +449,8 @@ impl BrowserManager {
         let session = guard
             .get(browser_id)
             .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
-        if session.remote_snapshot_id.as_deref() != Some(snapshot_id)
+        if snapshot_id.trim().is_empty()
+            || session.remote_snapshot_id.as_deref() != Some(snapshot_id)
             || session.map_revision != map_revision
         {
             return Err(BrowserError::AutomationSnapshotStale);

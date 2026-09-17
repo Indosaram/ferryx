@@ -5,11 +5,12 @@
  * and a dedicated controls slot for Phase 6 composition.
  */
 
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import type {
   BrowserFrame,
   BrowserStateMessage,
   BrowserSubscribeOptions,
+  DecodedBrowserFrame,
 } from "./browserProtocol";
 import {
   useRemoteBrowser,
@@ -80,7 +81,22 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
     sendAck,
   } = session;
 
+  const [displayedFrame, setDisplayedFrame] = useState<DecodedBrowserFrame | null>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
+  const uncommittedFrameRef = useRef<DecodedBrowserFrame | null>(null);
+
+  // Track the latest incoming frame in ref so onLoad can commit it to displayedFrame
+  useEffect(() => {
+    uncommittedFrameRef.current = frame;
+  }, [frame]);
+
+  // If imageUrl is cleared (e.g. backgrounded or disconnected), clear displayedFrame
+  useEffect(() => {
+    if (!imageUrl) {
+      setDisplayedFrame(null);
+      uncommittedFrameRef.current = null;
+    }
+  }, [imageUrl]);
 
   useEffect(() => {
     if (frame && onFrame) {
@@ -101,7 +117,8 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
   }, [status, onStatusChange]);
 
   const handleViewportClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!frame || !imageUrl || !viewportRef.current || !onPointClick) {
+    // Strictly use displayedFrame - only clicks on committed, rendered frames are valid!
+    if (!displayedFrame || !imageUrl || !viewportRef.current || !onPointClick) {
       return;
     }
 
@@ -115,7 +132,7 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
       documentGeneration,
       viewportRevision,
       browserInstanceId,
-    } = frame.metadata;
+    } = displayedFrame.metadata;
 
     if (imageWidth <= 0 || imageHeight <= 0) return;
 
@@ -160,8 +177,8 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
       u,
       v,
       streamId,
-      seq: frame.seq,
-      sequenceNumber: frame.seq,
+      seq: displayedFrame.seq,
+      sequenceNumber: displayedFrame.seq,
       documentGeneration,
       viewportRevision,
       browserInstanceId,
@@ -169,11 +186,13 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
   };
 
   const handleImageLoad = () => {
-    if (frame) {
+    const frameToCommit = uncommittedFrameRef.current ?? frame;
+    if (frameToCommit) {
+      setDisplayedFrame(frameToCommit);
       if (confirmPresented) {
-        confirmPresented(frame.metadata.streamId, frame.seq);
+        confirmPresented(frameToCommit.metadata.streamId, frameToCommit.seq);
       } else if (sendAck) {
-        sendAck(frame.metadata.streamId, frame.seq);
+        sendAck(frameToCommit.metadata.streamId, frameToCommit.seq);
       }
     }
   };

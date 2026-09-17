@@ -59,6 +59,8 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
   const documentGeneration =
     frame?.metadata.documentGeneration ?? browserState?.documentGeneration ?? "1";
   const viewportRevision = frame?.metadata.viewportRevision;
+  const snapshotId = browserState?.snapshotId;
+  const mapRevision = browserState?.mapRevision;
 
   // 2. Remote driver lifecycle hook
   const driver = useRemoteBrowserDriver({
@@ -68,6 +70,8 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
     desktopEpoch,
     documentGeneration,
     viewportRevision,
+    snapshotId,
+    mapRevision,
   });
 
   // Capability check for mainframe point click
@@ -101,6 +105,7 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
   };
 
   // Mobile IME submission: do NOT dispatch intermediate composition keystrokes; send confirmed text via fill
+  // IME Revision-based Clearing: track submitted text revision so newly typed characters during fill execution are NOT erased!
   const handleImeSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isComposing) {
@@ -109,9 +114,19 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
     }
     if (!imeText.trim() || driver.driverState !== "driving") return;
 
+    const submittedText = imeText;
     try {
-      await driver.fill(imeTargetRef || "active", imeText);
-      setImeText("");
+      await driver.fill(imeTargetRef || "active", submittedText);
+      // Only clear if the current buffer matches submittedText, or slice off submittedText if more was typed
+      setImeText((current) => {
+        if (current === submittedText) {
+          return "";
+        }
+        if (current.startsWith(submittedText)) {
+          return current.slice(submittedText.length);
+        }
+        return current;
+      });
     } catch {
       // Keep imeText on failure so user does not lose typed text
     }

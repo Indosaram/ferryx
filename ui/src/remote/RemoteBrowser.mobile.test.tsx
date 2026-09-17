@@ -189,6 +189,9 @@ describe("RemoteBrowser - Mobile Viewport & Touch Interaction (Phase 7B)", () =>
       await act(async () => {
         ws.onmessage?.({ data: encodeFrame(frame).buffer as ArrayBuffer });
       });
+      await act(async () => {
+        fireEvent.load(screen.getByAltText("Remote browser stream"));
+      });
 
       const viewport = screen.getByTestId("remote-browser-viewport");
 
@@ -252,6 +255,9 @@ describe("RemoteBrowser - Mobile Viewport & Touch Interaction (Phase 7B)", () =>
       await act(async () => {
         ws.onmessage?.({ data: encodeFrame(frame).buffer as ArrayBuffer });
       });
+      await act(async () => {
+        fireEvent.load(screen.getByAltText("Remote browser stream"));
+      });
 
       const viewport = screen.getByTestId("remote-browser-viewport");
 
@@ -313,6 +319,9 @@ describe("RemoteBrowser - Mobile Viewport & Touch Interaction (Phase 7B)", () =>
       await act(async () => {
         ws.onmessage?.({ data: encodeFrame(frame).buffer as ArrayBuffer });
       });
+      await act(async () => {
+        fireEvent.load(screen.getByAltText("Remote browser stream"));
+      });
 
       const viewport = screen.getByTestId("remote-browser-viewport");
       // Container 400x400 (square) -> exact fit, offsetLeft=0, offsetTop=0
@@ -365,6 +374,9 @@ describe("RemoteBrowser - Mobile Viewport & Touch Interaction (Phase 7B)", () =>
       const frame = makeTestFrame(1, 1, 1280, 720);
       await act(async () => {
         ws.onmessage?.({ data: encodeFrame(frame).buffer as ArrayBuffer });
+      });
+      await act(async () => {
+        fireEvent.load(screen.getByAltText("Remote browser stream"));
       });
 
       const viewport = screen.getByTestId("remote-browser-viewport");
@@ -636,6 +648,89 @@ describe("RemoteBrowser - Mobile Viewport & Touch Interaction (Phase 7B)", () =>
       // End IME composition: should NOT wipe "Preceding text " with just "한글"
       fireEvent.compositionEnd(imeInput, { data: "한글" });
       expect(imeInput).toHaveValue("Preceding text 한글");
+    });
+
+    it("preserves newly typed characters during fill execution using revision-based clearing", async () => {
+      render(
+        <RemoteBrowserWorkspace
+          baseUrl="http://localhost:8080"
+          browserId="b-mobile"
+          deviceToken="token-mobile"
+          onBack={vi.fn()}
+        />,
+      );
+
+      const ws = await waitForSocket(0);
+      await establishStreaming(ws);
+
+      // Make driver active
+      await act(async () => {
+        ws.onmessage?.({
+          data: JSON.stringify({
+            type: "browserDriverChanged",
+            leaseEpoch: "epoch-ime-1",
+            isDriver: true,
+          }),
+        });
+      });
+
+      // Open IME bar
+      fireEvent.click(screen.getByTestId("remote-browser-ime-toggle-btn"));
+      const imeInput = screen.getByTestId("remote-browser-ime-text-input");
+      const imeBar = screen.getByTestId("remote-browser-ime-bar");
+
+      // 1. Submit text and type additional characters while fill is in flight
+      fireEvent.change(imeInput, { target: { value: "first part" } });
+      const sentCountBefore = ws.sentMessages.length;
+
+      // Submit fill
+      await act(async () => {
+        fireEvent.submit(imeBar);
+      });
+
+      // Find the fill command message sent to WebSocket
+      const fillMsg = JSON.parse(ws.sentMessages[sentCountBefore] as string);
+      expect(fillMsg.command).toBe("fill");
+
+      // While fill is in-flight, user types more characters into input
+      fireEvent.change(imeInput, { target: { value: "first part + newly typed" } });
+
+      // Now server responds with success
+      await act(async () => {
+        ws.onmessage?.({
+          data: JSON.stringify({
+            type: "browserResult",
+            requestId: fillMsg.requestId,
+            result: { ok: true },
+          }),
+        });
+      });
+
+      // Newly typed text must be preserved, NOT wiped!
+      expect(imeInput).toHaveValue(" + newly typed");
+
+      // 2. Submit remaining text without typing anything more during fill
+      const sentCountBefore2 = ws.sentMessages.length;
+      await act(async () => {
+        fireEvent.submit(imeBar);
+      });
+
+      const fillMsg2 = JSON.parse(ws.sentMessages[sentCountBefore2] as string);
+      expect(fillMsg2.command).toBe("fill");
+
+      // Server responds with success
+      await act(async () => {
+        ws.onmessage?.({
+          data: JSON.stringify({
+            type: "browserResult",
+            requestId: fillMsg2.requestId,
+            result: { ok: true },
+          }),
+        });
+      });
+
+      // Since no new characters were typed, input is completely cleared
+      expect(imeInput).toHaveValue("");
     });
   });
 });

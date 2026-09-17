@@ -766,5 +766,65 @@ describe("browserProtocol - Phase 7B edge cases (§7.1)", () => {
         paused: false,
       }))).toThrow(/loading must be boolean/i);
     });
+
+    it("parses valid browserDriverRevoked and rejects invalid fields (R3)", () => {
+      const validWithReason = parseServerMessage(
+        JSON.stringify({
+          type: "browserDriverRevoked",
+          reason: "Desktop owner reclaimed control",
+          leaseEpoch: "42",
+        }),
+      );
+      expect(validWithReason).toEqual({
+        type: "browserDriverRevoked",
+        reason: "Desktop owner reclaimed control",
+        leaseEpoch: "42",
+      });
+
+      const validWithoutReason = parseServerMessage(
+        JSON.stringify({
+          type: "browserDriverRevoked",
+          leaseEpoch: "43",
+        }),
+      );
+      expect(validWithoutReason).toEqual({
+        type: "browserDriverRevoked",
+        leaseEpoch: "43",
+      });
+
+      // Missing leaseEpoch
+      expect(() =>
+        parseServerMessage(JSON.stringify({ type: "browserDriverRevoked" })),
+      ).toThrow(/leaseEpoch/i);
+
+      // Non-string leaseEpoch
+      expect(() =>
+        parseServerMessage(
+          JSON.stringify({ type: "browserDriverRevoked", leaseEpoch: 42 }),
+        ),
+      ).toThrow(/leaseEpoch/i);
+
+      // Non-string reason
+      expect(() =>
+        parseServerMessage(
+          JSON.stringify({
+            type: "browserDriverRevoked",
+            leaseEpoch: "42",
+            reason: 123,
+          }),
+        ),
+      ).toThrow(/reason must be a string/i);
+
+      // Unknown fields rejected
+      expect(() =>
+        parseServerMessage(
+          JSON.stringify({
+            type: "browserDriverRevoked",
+            leaseEpoch: "42",
+            extraField: true,
+          }),
+        ),
+      ).toThrow(/unknown field/i);
+    });
   });
 });

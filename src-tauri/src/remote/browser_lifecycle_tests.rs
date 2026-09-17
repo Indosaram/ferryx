@@ -202,6 +202,35 @@ async fn test_browser_websocket_full_lifecycle_and_reconnection() {
     assert_eq!(decoded_initial.format, BrowserImageFormat::Jpeg);
     assert_eq!(decoded_initial.metadata.browser_instance_id, "bi1");
 
+    // Real WebSocket binary frame forwarding verification: backend emits frame -> client receives it over WS
+    if let Some(sender) = test_backend.frame_senders.lock().await.get("b1").cloned() {
+        let _ = sender.send(initial_frame_bytes.clone());
+        let frame_msg = ws_stream
+            .next()
+            .await
+            .expect("Receive binary frame from WS")
+            .expect("Valid frame");
+        match frame_msg {
+            Message::Binary(bytes) => {
+                let decoded = decode_binary_frame(&bytes).expect("Decode forwarded frame");
+                assert_eq!(decoded.seq, 1);
+                assert_eq!(decoded.format, BrowserImageFormat::Jpeg);
+            }
+            other => panic!("Expected Binary frame, got: {:?}", other),
+        }
+
+        // Send FrameAck for frame 1
+        let ack_msg = serde_json::json!({
+            "type": "browserFrameAck",
+            "streamId": 1,
+            "seq": 1
+        });
+        ws_stream
+            .send(Message::Text(ack_msg.to_string().into()))
+            .await
+            .expect("Send FrameAck");
+    }
+
     // Client-to-server binary frame must be rejected by server
     ws_stream
         .send(Message::Binary(vec![0x62, 1, 1, 1].into()))

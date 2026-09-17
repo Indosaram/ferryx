@@ -4,7 +4,7 @@ use crate::remote::auth::{AuthError, DeviceAccessScope, DeviceInfo, DevicePermis
 use crate::remote::backend::{RecoveryStream, RemoteRecoveryStatus, RemoteSessionBackend};
 use crate::remote::browser_admission::AdmissionController;
 use crate::remote::browser_backend::{DesktopScope, RemoteBrowserBackend, RemoteBrowserError};
-use crate::remote::browser_protocol::{ClientMessage, ServerMessage};
+use crate::remote::browser_protocol::ServerMessage;
 use crate::remote::browser_security::sanitize_public_string;
 use crate::remote::browser_ws::BrowserWsSession;
 use crate::remote::mirror::RemoteTerminalMirror;
@@ -2951,15 +2951,36 @@ async fn run_browser_ws_session(
     }
 
     let mut reclaim_rx = admission.subscribe_reclaim();
+    let mut frame_rx_opt = backend.subscribe_frames(&browser_id).await.ok();
 
     loop {
         tokio::select! {
+            frame_res = async {
+                match frame_rx_opt.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match frame_res {
+                    Ok(frame_bytes) => {
+                        if let Some(admitted) = session.enqueue_frame(frame_bytes, Instant::now()) {
+                            let _ = raw_msg_tx.send(Message::Binary(admitted.into())).await;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => {
+                        frame_rx_opt = None;
+                    }
+                }
+            }
             reclaim_res = reclaim_rx.recv() => {
                 match reclaim_res {
                     Ok(reclaimed_browser_id) => {
                         if reclaimed_browser_id == browser_id && session.is_driver {
                             let revoked_epoch = session.lease_epoch.take();
                             session.is_driver = false;
+                            session.cancel_token.cancel();
+                            session.cancel_token = crate::remote::browser_ws::tokio_util::sync::CancellationToken::new();
                             let revoked_msg = ServerMessage::BrowserDriverRevoked {
                                 reason: Some("desktop_reclaim".into()),
                                 lease_epoch: revoked_epoch.map(|e| e.to_string()),
@@ -2981,6 +3002,8 @@ async fn run_browser_ws_session(
                             ) {
                                 let revoked_epoch = session.lease_epoch.take();
                                 session.is_driver = false;
+                                session.cancel_token.cancel();
+                                session.cancel_token = crate::remote::browser_ws::tokio_util::sync::CancellationToken::new();
                                 let revoked_msg = ServerMessage::BrowserDriverRevoked {
                                     reason: Some("desktop_reclaim".into()),
                                     lease_epoch: revoked_epoch.map(|e| e.to_string()),
@@ -2996,38 +3019,27 @@ async fn run_browser_ws_session(
                 let Some(msg) = ws_msg else { break; };
                 match msg {
                     Ok(Message::Text(text)) => {
-                        match serde_json::from_str::<ClientMessage>(&text) {
-                            Ok(client_msg) => {
-                                if let Err(err) = session
-                                    .dispatch_client_message(
-                                        client_msg,
-                                        &backend,
-                                        &admission,
-                                        &server_msg_tx,
-                                        Instant::now(),
-                                    )
-                                    .await
-                                {
-                                    let err_reply = ServerMessage::BrowserError {
-                                        request_id: None,
-                                        code: "BROWSER_ERROR".into(),
-                                        message: sanitize_public_string(&err),
-                                        retryable: false,
-                                        retry_after_ms: None,
-                                    };
-                                    let _ = server_msg_tx.send(err_reply).await;
-                                }
-                            }
-                            Err(e) => {
-                                let err_reply = ServerMessage::BrowserError {
-                                    request_id: None,
-                                    code: "BROWSER_INVALID_REQUEST".into(),
-                                    message: sanitize_public_string(&e.to_string()),
-                                    retryable: false,
-                                    retry_after_ms: None,
-                                };
-                                let _ = server_msg_tx.send(err_reply).await;
-                            }
+                        if let Err(err) = session
+                            .dispatch_raw_text(
+                                &text,
+                                &backend,
+                                &admission,
+                                &server_msg_tx,
+                                Instant::now(),
+                            )
+                            .await
+                        {
+                            let err_reply = ServerMessage::BrowserError {
+                                request_id: None,
+                                code: "BROWSER_ERROR".into(),
+                                message: sanitize_public_string(&err),
+                                retryable: false,
+                                retry_after_ms: None,
+                            };
+                            let _ = server_msg_tx.send(err_reply).await;
+                        }
+                        if let Some(promoted) = session.pending_promoted_frame.take() {
+                            let _ = raw_msg_tx.send(Message::Binary(promoted.into())).await;
                         }
                     }
                     Ok(Message::Binary(bytes)) => {

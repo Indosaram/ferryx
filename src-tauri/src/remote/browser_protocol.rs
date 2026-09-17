@@ -194,6 +194,10 @@ fn parse_png_dimensions(bytes: &[u8]) -> Result<(u32, u32), ProtocolCodecError> 
     Ok((width, height))
 }
 
+pub fn is_decimal_u64_string(val: &str) -> bool {
+    !val.is_empty() && val.chars().all(|c| c.is_ascii_digit()) && val.parse::<u64>().is_ok()
+}
+
 pub fn validate_metadata(meta: &BrowserFrameMetadata) -> Result<(), ProtocolCodecError> {
     if !meta.offset_top.is_finite() {
         return Err(ProtocolCodecError::NonFiniteNumeric("offset_top"));
@@ -223,7 +227,7 @@ pub fn validate_metadata(meta: &BrowserFrameMetadata) -> Result<(), ProtocolCode
     {
         return Err(ProtocolCodecError::NonFiniteNumeric("capture_rect"));
     }
-    if meta.image_width > MAX_IMAGE_EDGE || meta.image_height > MAX_IMAGE_EDGE {
+    if meta.image_width == 0 || meta.image_height == 0 || meta.image_width > MAX_IMAGE_EDGE || meta.image_height > MAX_IMAGE_EDGE {
         return Err(ProtocolCodecError::ImageEdgeExceeded {
             width: meta.image_width,
             height: meta.image_height,
@@ -233,28 +237,22 @@ pub fn validate_metadata(meta: &BrowserFrameMetadata) -> Result<(), ProtocolCode
     if pixels > MAX_IMAGE_PIXELS {
         return Err(ProtocolCodecError::ImagePixelsExceeded { pixels });
     }
-    if meta.browser_service_epoch.is_empty()
-        || !meta.browser_service_epoch.chars().all(|c| c.is_ascii_digit())
-        || meta.browser_service_epoch.parse::<u64>().is_err()
-    {
+    if meta.stream_id == 0 {
+        return Err(ProtocolCodecError::NonFiniteNumeric("stream_id"));
+    }
+    if meta.browser_instance_id.is_empty() {
+        return Err(ProtocolCodecError::InvalidDecimalString("browser_instance_id"));
+    }
+    if !is_decimal_u64_string(&meta.browser_service_epoch) {
         return Err(ProtocolCodecError::InvalidDecimalString("browser_service_epoch"));
     }
-    if meta.desktop_epoch.is_empty()
-        || !meta.desktop_epoch.chars().all(|c| c.is_ascii_digit())
-        || meta.desktop_epoch.parse::<u64>().is_err()
-    {
+    if !is_decimal_u64_string(&meta.desktop_epoch) {
         return Err(ProtocolCodecError::InvalidDecimalString("desktop_epoch"));
     }
-    if meta.document_generation.is_empty()
-        || !meta.document_generation.chars().all(|c| c.is_ascii_digit())
-        || meta.document_generation.parse::<u64>().is_err()
-    {
+    if !is_decimal_u64_string(&meta.document_generation) {
         return Err(ProtocolCodecError::InvalidDecimalString("document_generation"));
     }
-    if meta.viewport_revision.is_empty()
-        || !meta.viewport_revision.chars().all(|c| c.is_ascii_digit())
-        || meta.viewport_revision.parse::<u64>().is_err()
-    {
+    if !is_decimal_u64_string(&meta.viewport_revision) {
         return Err(ProtocolCodecError::InvalidDecimalString("viewport_revision"));
     }
     if meta.geometry_source != "wkSnapshot" {

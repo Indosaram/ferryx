@@ -109,12 +109,18 @@ impl DriverBroker {
     pub fn refresh_lease(
         &self,
         device_id: &str,
+        connection_id: &str,
+        subscription_id: &str,
+        browser_id: &str,
         lease_epoch: u64,
         now: Instant,
     ) -> Result<Instant, String> {
         let mut guard = self.current_lease.lock();
         if let Some(existing) = guard.as_mut() {
             if existing.device_id == device_id
+                && existing.connection_id == connection_id
+                && existing.subscription_id == subscription_id
+                && existing.browser_id == browser_id
                 && existing.lease_epoch == lease_epoch
                 && now < existing.expires_at
             {
@@ -126,10 +132,22 @@ impl DriverBroker {
         Err("Driver lease expired or invalid".to_string())
     }
 
-    pub fn release_driver(&self, device_id: &str, lease_epoch: u64) -> bool {
+    pub fn release_driver(
+        &self,
+        device_id: &str,
+        connection_id: &str,
+        subscription_id: &str,
+        browser_id: &str,
+        lease_epoch: u64,
+    ) -> bool {
         let mut guard = self.current_lease.lock();
         if let Some(existing) = guard.as_ref() {
-            if existing.device_id == device_id && existing.lease_epoch == lease_epoch {
+            if existing.device_id == device_id
+                && existing.connection_id == connection_id
+                && existing.subscription_id == subscription_id
+                && existing.browser_id == browser_id
+                && existing.lease_epoch == lease_epoch
+            {
                 *guard = None;
                 return true;
             }
