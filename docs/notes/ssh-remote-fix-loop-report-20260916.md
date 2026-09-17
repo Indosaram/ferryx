@@ -57,3 +57,13 @@ Verification at merged HEAD 55fe1851: ui vitest 5025/5025 (254 files); scoped ss
 1. Settings → SSH: maho-win/omaki rows should show installed helper with "업데이트 가능" (no version → Upgrade).
 2. Trigger the update/provision action; expect the remote helper to become 2026.917.1 and the row to settle at installed + current.
 3. Open a terminal on a remote workspace: cwd must be the exact project/worktree path.
+
+## 2026-09-17 review verdict (typesafe-judge) and hardening
+
+Full review of 1f369e5f + 010428f1 with typesafe-judge (jev-1.13.0), plus manual code reading:
+
+- Gate 1 (provisioning diff): fulfills 77% YES, risk 1.08 moderate, clean 0.32 fail. Gate 2 (hardening diff): fulfills 81%, risk 0.97, clean 0.26 — the clean metric contradicts the judge's own explicit scope probe ("none out of scope" 75%, conf 0.67), so it was treated as a conservative false positive and documented rather than ripening code to satisfy it.
+- Confirmed findings, all fixed in 3095c1a5: (a) kill-by-pid from endpoint.json had no process-identity check (noul P(safe)=6%) — both platform scripts now verify the pid is ferryx-remote-helper before taskkill/kill, with live POSIX child-process tests; (b) the Windows installer restores the previous binary if the atomic move fails midway; (c) version comparison was equality-only and could offer a downgrade for a newer remote — decide_helper_upgrade now parses calver (parse_calver_version) and never downgrades; the decision moved to the backend (HelperUpdateState.decision) and SshSection consumes it, including a new Install button for missing helpers; (d) helper_core_tests pinned "2026.908.1" and broke on the bump — they now assert the shared const.
+- User decision (upgrade policy): unconditionally stop the daemon and kill sessions during upgrade (reconnect restores terminals) — current behavior retained, no session check added.
+- Real-hardware evidence: the actual generated Windows install script executed on maho-win against a stale 489c63be daemon — FERRYX_INSTALL_OK, identity-checked kill, replaced binary reports 2026.917.1. POSIX script execution is covered by real `sh -s` tests.
+- Remaining known main-tree test failures are not ssh scope: paired_host::native_ambiguity_tests::native_35s_deadline (deterministic virtual-time bug introduced by the concurrent paired-host session) and a03_owner_cli (requires ferryx-cli prebuilt).
