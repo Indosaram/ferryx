@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildPointClickParams,
   decodeFrame,
+  emitSharingState,
+  parseSharingState,
+  REMOTE_BROWSER_SHARING_EVENT,
   encodeFrame,
   parseServerMessage,
   reconcileMapRevision,
@@ -923,6 +927,130 @@ describe("browserProtocol - Phase 7B edge cases (§7.1)", () => {
       expect(reconcileMapRevision(null)).toBeUndefined();
       expect(reconcileMapRevision(-5)).toBeUndefined();
       expect(reconcileMapRevision(true)).toBeUndefined();
+    });
+  });
+
+  describe("R4-5 sharing-state publication contract", () => {
+    it("normalizes authoritative daemon sharing payloads", () => {
+      expect(
+        parseSharingState({
+          isSharing: true,
+          activeSessionsCount: 2,
+          driverStatus: "driving",
+          driverDeviceId: "dev-1",
+        }),
+      ).toEqual({
+        isSharing: true,
+        activeSessionsCount: 2,
+        driverStatus: "driving",
+        driverDeviceId: "dev-1",
+      });
+
+      // Missing/inconsistent fields normalize to an inactive, idle state
+      expect(parseSharingState({})).toEqual({
+        isSharing: false,
+        activeSessionsCount: 0,
+        driverStatus: "idle",
+        driverDeviceId: null,
+      });
+      expect(parseSharingState({ isSharing: true })).toEqual({
+        isSharing: true,
+        activeSessionsCount: 0,
+        driverStatus: "viewing",
+        driverDeviceId: null,
+      });
+      expect(parseSharingState({ active: true, driverStatus: "bogus" })).toEqual({
+        isSharing: true,
+        activeSessionsCount: 0,
+        driverStatus: "viewing",
+        driverDeviceId: null,
+      });
+      expect(parseSharingState(null)).toBeNull();
+      expect(parseSharingState(true)).toEqual({
+        isSharing: true,
+        activeSessionsCount: 0,
+        driverStatus: "viewing",
+        driverDeviceId: null,
+      });
+    });
+
+    it("emits normalized sharing state on the shared window event channel", () => {
+      const win = typeof window !== "undefined" ? window : (globalThis as any).window;
+      if (!win) return;
+      const received: unknown[] = [];
+      const handler = (e: Event) => received.push((e as CustomEvent).detail);
+      win.addEventListener(REMOTE_BROWSER_SHARING_EVENT, handler);
+      try {
+        emitSharingState({
+          isSharing: false,
+          activeSessionsCount: 0,
+          driverStatus: "idle",
+          driverDeviceId: null,
+        });
+      } finally {
+        win.removeEventListener(REMOTE_BROWSER_SHARING_EVENT, handler);
+      }
+
+      expect(received).toEqual([
+        {
+          isSharing: false,
+          activeSessionsCount: 0,
+          driverStatus: "idle",
+          driverDeviceId: null,
+        },
+      ]);
+    });
+  });
+
+  describe("R4-8 point-click fence contract", () => {
+    it("builds fenced point-click params from a required displayed frame", () => {
+      const params = buildPointClickParams({
+        u: 0.5,
+        v: 0.25,
+        frame: {
+          seq: 12,
+          metadata: validMetadata,
+        },
+        lastAckedSeq: 12,
+      });
+
+      expect(params).toEqual({
+        u: 0.5,
+        v: 0.25,
+        streamId: validMetadata.streamId,
+        sequenceNumber: 12,
+        documentGeneration: validMetadata.documentGeneration,
+        viewportRevision: validMetadata.viewportRevision,
+        browserInstanceId: validMetadata.browserInstanceId,
+        captureRect: validMetadata.captureRect,
+        geometrySource: "wkSnapshot",
+        x: validMetadata.captureRect.x + 0.5 * validMetadata.captureRect.width,
+        y: validMetadata.captureRect.y + 0.25 * validMetadata.captureRect.height,
+      });
+    });
+
+    it("rejects clicks with no displayed frame, stale frames, and out-of-range coordinates", () => {
+      expect(() =>
+        buildPointClickParams({ u: 0.5, v: 0.5, frame: null, lastAckedSeq: 3 }),
+      ).toThrow(/displayed frame/i);
+
+      expect(() =>
+        buildPointClickParams({
+          u: 0.5,
+          v: 0.5,
+          frame: { seq: 2, metadata: validMetadata },
+          lastAckedSeq: 5,
+        }),
+      ).toThrow(/stale/i);
+
+      expect(() =>
+        buildPointClickParams({
+          u: 1.4,
+          v: 0.5,
+          frame: { seq: 5, metadata: validMetadata },
+          lastAckedSeq: 5,
+        }),
+      ).toThrow(/coordinates/i);
     });
   });
 });

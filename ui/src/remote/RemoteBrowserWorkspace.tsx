@@ -103,9 +103,16 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
   const [imeTargetRef, setImeTargetRef] = useState("active");
   const [showImeBar, setShowImeBar] = useState(false);
 
-  // Revision-Keyed Submission Queue for IME
+  // Revision-Keyed Submission Queue for IME (R4-12)
+  interface ImeSubmissionRecord {
+    revision: number;
+    submittedChunk: string;
+    fullValue: string;
+    targetRef: string;
+    completed: boolean;
+  }
   const imeSubmissionSeqRef = useRef<number>(0);
-  const pendingImeSubmissionsRef = useRef<Map<number, { submittedLength: number }>>(new Map());
+  const pendingImeSubmissionsRef = useRef<ImeSubmissionRecord[]>([]);
 
   // Wire point click with normalized (u, v) coordinates when in driving mode
   const handlePointClick = (point: RemoteBrowserPointClickEvent) => {
@@ -113,6 +120,7 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
       return;
     }
     void driver.click({
+      ...point,
       u: point.u,
       v: point.v,
       streamId: point.streamId,
@@ -124,7 +132,7 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
   };
 
   // Mobile IME submission: do NOT dispatch intermediate composition keystrokes; send confirmed text via fill
-  // Revision-Keyed Submission Queue: monotonic revision counter ensures newly typed characters while fill is in flight are NEVER lost
+  // Revision-Keyed Submission Queue: monotonic revision counter, ordered completion, and coherent full-value replacement (R4-12)
   const handleImeSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isComposing) {
@@ -135,8 +143,10 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
 
     // Calculate characters currently in flight across pending submissions
     let inFlightLength = 0;
-    for (const pending of pendingImeSubmissionsRef.current.values()) {
-      inFlightLength += pending.submittedLength;
+    for (const record of pendingImeSubmissionsRef.current) {
+      if (!record.completed) {
+        inFlightLength += record.submittedChunk.length;
+      }
     }
 
     const unsubmittedText = imeText.slice(inFlightLength);
@@ -144,8 +154,15 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
 
     // Monotonic submission revision counter
     const submissionRev = ++imeSubmissionSeqRef.current;
-    const submittedLength = unsubmittedText.length;
-    pendingImeSubmissionsRef.current.set(submissionRev, { submittedLength });
+    const fullValue = imeText; // Coherent full-value replacement prevents suffix overwriting earlier text
+    const record: ImeSubmissionRecord = {
+      revision: submissionRev,
+      submittedChunk: unsubmittedText,
+      fullValue,
+      targetRef: imeTargetRef || "active",
+      completed: false,
+    };
+    pendingImeSubmissionsRef.current.push(record);
 
     // Acquire remote snapshot before fill when needed (for snapshot element references)
     const isTargetRef = Boolean(
@@ -170,22 +187,36 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
 
     try {
       await driver.fill(
-        imeTargetRef || "active",
-        unsubmittedText,
+        record.targetRef,
+        record.fullValue,
         {
           snapshotId: effectiveSnapId ?? undefined,
           mapRevision: effectiveMapRev ?? undefined,
         }
       );
-      // Revision-keyed completion: only clear/slice characters belonging to this exact revision
-      const pending = pendingImeSubmissionsRef.current.get(submissionRev);
-      if (pending) {
-        pendingImeSubmissionsRef.current.delete(submissionRev);
-        setImeText((current) => current.slice(Math.min(current.length, pending.submittedLength)));
+      // Mark this submission record completed
+      record.completed = true;
+
+      // Ordered completion: retire completed submissions from the queue head in strict FIFO order
+      while (
+        pendingImeSubmissionsRef.current.length > 0 &&
+        pendingImeSubmissionsRef.current[0].completed
+      ) {
+        const head = pendingImeSubmissionsRef.current.shift()!;
+        setImeText((current) => {
+          // Only slice if current buffer starts with this chunk, preserving unrelated edits
+          if (current.startsWith(head.submittedChunk)) {
+            return current.slice(head.submittedChunk.length);
+          }
+          return current;
+        });
       }
     } catch {
-      // On failure, remove from queue and retain buffer so user does not lose typed text
-      pendingImeSubmissionsRef.current.delete(submissionRev);
+      // On failure, remove from queue without slicing so user does not lose typed text
+      const idx = pendingImeSubmissionsRef.current.indexOf(record);
+      if (idx !== -1) {
+        pendingImeSubmissionsRef.current.splice(idx, 1);
+      }
     }
   };
 

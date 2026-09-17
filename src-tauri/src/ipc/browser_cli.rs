@@ -228,6 +228,14 @@ pub enum RemoteBrowserOperation {
         document_generation: Option<u64>,
         #[serde(default, deserialize_with = "deserialize_u64_or_decimal_string")]
         viewport_revision: Option<u64>,
+        #[serde(default)]
+        capture_rect: Option<crate::browser::model::LogicalRect>,
+        #[serde(default)]
+        geometry_source: Option<String>,
+        #[serde(default)]
+        x: Option<f64>,
+        #[serde(default)]
+        y: Option<f64>,
     },
     #[serde(rename_all = "camelCase")]
     Fill {
@@ -426,6 +434,10 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
             sequence_number,
             document_generation,
             viewport_revision,
+            capture_rect,
+            geometry_source,
+            x,
+            y,
         } => {
             let state = manager.get_state(&browser_id)?;
 
@@ -455,7 +467,7 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                 }
             }
 
-            let script = if let Some(ref_str) = reference {
+            let (script, click_x, click_y) = if let Some(ref_str) = reference {
                 let (snap_id, map_rev) = match (snapshot_id, map_revision) {
                     (Some(sid), Some(rev)) if !sid.trim().is_empty() => (sid, rev),
                     _ => {
@@ -479,17 +491,35 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                     })?;
                 let selector_json = serde_json::to_string(&selector)
                     .map_err(|e| IpcError::new(IpcErrorCode::BrowserAutomationFailed, e.to_string()))?;
-                format!(
-                    r#"(function() {{
-                        const el = document.querySelector({});
-                        if (!el) return JSON.stringify({{ ok: false, error: "element not found" }});
-                        el.click();
-                        return JSON.stringify({{ ok: true }});
-                    }})()"#,
-                    selector_json
+                (
+                    format!(
+                        r#"(function() {{
+                            const el = document.querySelector({});
+                            if (!el) return JSON.stringify({{ ok: false, error: "element not found" }});
+                            el.click();
+                            return JSON.stringify({{ ok: true }});
+                        }})()"#,
+                        selector_json
+                    ),
+                    None,
+                    None,
+                )
+            } else if let (Some(px), Some(py)) = (x, y) {
+                (
+                    format!(
+                        r#"(function() {{
+                            const el = document.elementFromPoint({}, {});
+                            if (!el) return JSON.stringify({{ ok: false, error: "no element at coordinates" }});
+                            el.click();
+                            return JSON.stringify({{ ok: true }});
+                        }})()"#,
+                        px, py
+                    ),
+                    Some(px),
+                    Some(py),
                 )
             } else if let (Some(u_val), Some(v_val)) = (u, v) {
-                let rect = bounds.unwrap_or(crate::browser::model::LogicalRect {
+                let rect = capture_rect.or(bounds).unwrap_or(crate::browser::model::LogicalRect {
                     x: 0.0,
                     y: 0.0,
                     width: 1024.0,
@@ -499,14 +529,18 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                     u_val, v_val, &rect, false, false, false,
                 )
                 .map_err(|e| IpcError::new(IpcErrorCode::InvalidArgument, e.to_string()))?;
-                format!(
-                    r#"(function() {{
-                        const el = document.elementFromPoint({}, {});
-                        if (!el) return JSON.stringify({{ ok: false, error: "no element at coordinates" }});
-                        el.click();
-                        return JSON.stringify({{ ok: true }});
-                    }})()"#,
-                    pt.x, pt.y
+                (
+                    format!(
+                        r#"(function() {{
+                            const el = document.elementFromPoint({}, {});
+                            if (!el) return JSON.stringify({{ ok: false, error: "no element at coordinates" }});
+                            el.click();
+                            return JSON.stringify({{ ok: true }});
+                        }})()"#,
+                        pt.x, pt.y
+                    ),
+                    Some(pt.x),
+                    Some(pt.y),
                 )
             } else {
                 return Err(IpcError::new(
@@ -519,13 +553,26 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                 .get_webview(&state.webview_label)
                 .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
             let _ = crate::ipc::browser::eval_webview(webview, script).await?;
-            Ok(serde_json::json!({
-                "clicked": true,
-                "streamId": stream_id,
-                "sequenceNumber": sequence_number,
-                "documentGeneration": state.generation,
-                "viewportRevision": current_vp_rev,
-            }))
+            let mut res_map = serde_json::Map::new();
+            res_map.insert("clicked".into(), serde_json::json!(true));
+            if let Some(sid) = stream_id {
+                res_map.insert("streamId".into(), serde_json::json!(sid));
+            }
+            if let Some(seq) = sequence_number {
+                res_map.insert("sequenceNumber".into(), serde_json::json!(seq));
+            }
+            res_map.insert("documentGeneration".into(), serde_json::json!(state.generation));
+            res_map.insert("viewportRevision".into(), serde_json::json!(current_vp_rev));
+            if let Some(gs) = geometry_source {
+                res_map.insert("geometrySource".into(), serde_json::Value::String(gs));
+            }
+            if let Some(cx) = click_x {
+                res_map.insert("x".into(), serde_json::json!(cx));
+            }
+            if let Some(cy) = click_y {
+                res_map.insert("y".into(), serde_json::json!(cy));
+            }
+            Ok(serde_json::Value::Object(res_map))
         }
         RemoteBrowserOperation::Fill {
             browser_id,
@@ -668,12 +715,26 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                     other => IpcError::from(other),
                 })?;
 
+            let elements_catalogue: Vec<serde_json::Value> = snapshot
+                .elements
+                .iter()
+                .map(|element| {
+                    serde_json::json!({
+                        "ref": element.reference,
+                        "role": element.role,
+                        "name": element.name,
+                        "tagName": element.tag_name,
+                    })
+                })
+                .collect();
+
             Ok(serde_json::json!({
                 "snapshotId": snapshot_id,
                 "mapRevision": map_revision,
                 "mapRevisionString": map_revision.to_string(),
                 "documentGeneration": state.generation.to_string(),
-                "elementsCount": snapshot.elements.len(),
+                "elementsCount": elements_catalogue.len(),
+                "elements": elements_catalogue,
             }))
         }
     }
@@ -2986,6 +3047,10 @@ mod tests {
             sequence_number: None,
             document_generation: None,
             viewport_revision: None,
+            capture_rect: None,
+            geometry_source: None,
+            x: None,
+            y: None,
         };
         let err_click = click_no_snap.validate().unwrap_err();
         assert_eq!(ipc_error_code_string(err_click.code), "BROWSER_INVALID_SNAPSHOT");
@@ -3014,6 +3079,10 @@ mod tests {
             sequence_number: None,
             document_generation: None,
             viewport_revision: None,
+            capture_rect: None,
+            geometry_source: None,
+            x: None,
+            y: None,
         };
         let exec_err = execute_remote_operation(&app.handle().clone(), &manager, click_fake_snap)
             .await
@@ -3154,6 +3223,10 @@ mod tests {
             sequence_number: Some(1),
             document_generation: Some(b.generation + 99), // Stale!
             viewport_revision: Some(1),
+            capture_rect: None,
+            geometry_source: None,
+            x: None,
+            y: None,
         };
         let err_gen = execute_remote_operation(&app.handle().clone(), &manager, stale_gen_click)
             .await
@@ -3172,6 +3245,10 @@ mod tests {
             sequence_number: Some(1),
             document_generation: Some(b.generation),
             viewport_revision: Some(999), // Stale!
+            capture_rect: None,
+            geometry_source: None,
+            x: None,
+            y: None,
         };
         let err_vp = execute_remote_operation(&app.handle().clone(), &manager, stale_vp_click)
             .await
@@ -3251,5 +3328,81 @@ mod tests {
             has_approval: false,
         };
         assert!(wait_text.validate().is_ok());
+    }
+
+    #[test]
+    fn test_r4_click_consumes_authoritative_geometry_and_snapshot_returns_catalogue() {
+        // 1. Click consumes WS-provided authoritative geometry (captureRect, geometrySource, x, y)
+        let click_json = serde_json::json!({
+            "operation": "click",
+            "browserId": "b1",
+            "u": 0.5,
+            "v": 0.5,
+            "streamId": 1,
+            "sequenceNumber": 4,
+            "documentGeneration": "1",
+            "viewportRevision": "1",
+            "captureRect": { "x": 10.0, "y": 20.0, "width": 640.0, "height": 480.0 },
+            "geometrySource": "wkSnapshot",
+            "x": 330.0,
+            "y": 260.0,
+        });
+        let click_op: RemoteBrowserOperation = serde_json::from_value(click_json).unwrap();
+        match &click_op {
+            RemoteBrowserOperation::Click {
+                capture_rect,
+                geometry_source,
+                x,
+                y,
+                ..
+            } => {
+                assert_eq!(
+                    capture_rect.as_ref().map(|r| (r.x, r.y, r.width, r.height)),
+                    Some((10.0, 20.0, 640.0, 480.0))
+                );
+                assert_eq!(geometry_source.as_deref(), Some("wkSnapshot"));
+                assert_eq!(*x, Some(330.0));
+                assert_eq!(*y, Some(260.0));
+            }
+            _ => panic!("Expected Click operation"),
+        }
+
+        // 2. Snapshot catalogue extraction requires elements array, not just elementsCount
+        let legacy_snap = serde_json::json!({
+            "snapshotId": "s1",
+            "mapRevision": "1",
+            "documentGeneration": "1",
+            "elementsCount": 5,
+        });
+        let legacy_res = crate::remote::browser_ws::snapshot_catalogue_from_backend(&legacy_snap);
+        assert!(
+            legacy_res.is_err(),
+            "Legacy count-only snapshot payload must be rejected by catalogue parser"
+        );
+
+        let full_snap = serde_json::json!({
+            "snapshotId": "s1",
+            "mapRevision": "1",
+            "documentGeneration": "1",
+            "elementsCount": 1,
+            "elements": [
+                {
+                    "ref": "btn-1",
+                    "role": "button",
+                    "name": "Submit",
+                    "tagName": "button",
+                }
+            ]
+        });
+        let res = crate::remote::browser_ws::snapshot_catalogue_from_backend(&full_snap);
+        assert!(
+            res.is_ok(),
+            "Snapshot backend payload with elements catalogue must succeed"
+        );
+        let (snap_id, map_rev, _, elements) = res.unwrap();
+        assert_eq!(snap_id, "s1");
+        assert_eq!(map_rev, "1");
+        assert_eq!(elements.len(), 1);
+        assert_eq!(elements[0]["ref"], "btn-1");
     }
 }

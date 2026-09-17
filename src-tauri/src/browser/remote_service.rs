@@ -50,6 +50,25 @@ impl std::fmt::Display for RemoteServiceError {
 
 impl std::error::Error for RemoteServiceError {}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NegotiatedCaptureProfile {
+    pub format: SnapshotFormat,
+    pub quality: u8,
+    pub interval_ms: u64,
+    pub max_edge: u32,
+}
+
+impl Default for NegotiatedCaptureProfile {
+    fn default() -> Self {
+        Self {
+            format: SnapshotFormat::Jpeg { quality: 70 },
+            quality: 70,
+            interval_ms: 80,
+            max_edge: 2048,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ViewerInfo {
     pub subscription_id: String,
@@ -59,6 +78,8 @@ pub struct ViewerInfo {
     pub unacked_seq: Option<u32>,
     pub pending_frame: Option<Vec<u8>>,
     pub joined_at: Instant,
+    pub paused: bool,
+    pub stalled: bool,
 }
 
 pub struct BrowserRemoteService {
@@ -68,6 +89,7 @@ pub struct BrowserRemoteService {
     producer_active: Arc<parking_lot::Mutex<HashMap<String, bool>>>,
     producer_handles: Arc<parking_lot::Mutex<HashMap<String, tokio::task::AbortHandle>>>,
     active_stream_ids: Arc<parking_lot::Mutex<HashMap<String, u32>>>,
+    negotiated_profiles: Arc<parking_lot::Mutex<HashMap<String, NegotiatedCaptureProfile>>>,
     captures_in_progress: Arc<AtomicUsize>,
     stream_counter: Arc<AtomicU64>,
     desktop_epoch: Arc<AtomicU64>,
@@ -87,6 +109,7 @@ impl BrowserRemoteService {
             producer_active: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             producer_handles: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             active_stream_ids: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            negotiated_profiles: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             captures_in_progress: Arc::new(AtomicUsize::new(0)),
             stream_counter: Arc::new(AtomicU64::new(1)),
             desktop_epoch: Arc::new(AtomicU64::new(1)),
@@ -110,6 +133,7 @@ impl BrowserRemoteService {
             producer_active: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             producer_handles: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             active_stream_ids: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            negotiated_profiles: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             captures_in_progress: Arc::new(AtomicUsize::new(0)),
             stream_counter: Arc::new(AtomicU64::new(1)),
             desktop_epoch: Arc::new(AtomicU64::new(1)),
@@ -178,6 +202,32 @@ impl BrowserRemoteService {
         self.desktop_epoch.fetch_add(1, Ordering::SeqCst) + 1
     }
 
+    pub fn is_snapshot_supported(&self) -> bool {
+        self.snapshot_source.read().is_supported()
+    }
+
+    pub fn snapshot_source(&self) -> Arc<dyn BrowserSnapshotSource> {
+        self.snapshot_source.read().clone()
+    }
+
+    pub fn set_viewer_paused(&self, browser_id: &str, subscription_id: &str, paused: bool) {
+        let mut subs = self.subscribers_per_browser.lock();
+        if let Some(browser_subs) = subs.get_mut(browser_id) {
+            if let Some(viewer) = browser_subs.get_mut(subscription_id) {
+                viewer.paused = paused;
+            }
+        }
+    }
+
+    pub fn set_viewer_stalled(&self, browser_id: &str, subscription_id: &str, stalled: bool) {
+        let mut subs = self.subscribers_per_browser.lock();
+        if let Some(browser_subs) = subs.get_mut(browser_id) {
+            if let Some(viewer) = browser_subs.get_mut(subscription_id) {
+                viewer.stalled = stalled;
+            }
+        }
+    }
+
     /// Subscribes a viewer to a browser's shared screencast producer.
     /// Enforces budget: max 2 viewers per browser, max 1 concurrently-captured browser.
     pub fn subscribe(
@@ -186,6 +236,17 @@ impl BrowserRemoteService {
         device_id: &str,
         viewer_instance_id: &str,
     ) -> Result<String, RemoteServiceError> {
+        self.subscribe_with_profile(browser_id, device_id, viewer_instance_id, None)
+            .map(|(sub_id, _)| sub_id)
+    }
+
+    pub fn subscribe_with_profile(
+        &self,
+        browser_id: &str,
+        device_id: &str,
+        viewer_instance_id: &str,
+        requested_profile: Option<NegotiatedCaptureProfile>,
+    ) -> Result<(String, NegotiatedCaptureProfile), RemoteServiceError> {
         // Ensure browser exists and is visible
         if !self.manager.is_visible(browser_id).map_err(|e| RemoteServiceError::BrowserNotFound(e.to_string()))? {
             return Err(RemoteServiceError::Unsupported("browser is not visible; screencast requires visible session"));
@@ -226,6 +287,20 @@ impl BrowserRemoteService {
                 .or_insert_with(|| self.stream_counter.fetch_add(1, Ordering::SeqCst) as u32)
         };
 
+        let negotiated = if was_empty {
+            let prof = requested_profile.unwrap_or_default();
+            self.negotiated_profiles
+                .lock()
+                .insert(browser_id.to_string(), prof.clone());
+            prof
+        } else {
+            self.negotiated_profiles
+                .lock()
+                .get(browser_id)
+                .cloned()
+                .unwrap_or_default()
+        };
+
         browser_subs.insert(
             subscription_id.clone(),
             ViewerInfo {
@@ -236,6 +311,8 @@ impl BrowserRemoteService {
                 unacked_seq: None,
                 pending_frame: None,
                 joined_at: Instant::now(),
+                paused: false,
+                stalled: false,
             },
         );
 
@@ -243,10 +320,10 @@ impl BrowserRemoteService {
         drop(subs_map);
 
         if was_empty {
-            self.spawn_capture_producer(browser_id.to_string(), stream_id);
+            self.spawn_capture_producer(browser_id.to_string(), stream_id, negotiated.clone());
         }
 
-        Ok(subscription_id)
+        Ok((subscription_id, negotiated))
     }
 
     /// Unsubscribes a viewer.
@@ -272,6 +349,7 @@ impl BrowserRemoteService {
                     }
                 }
                 self.active_stream_ids.lock().remove(browser_id);
+                self.negotiated_profiles.lock().remove(browser_id);
                 if let Some(handle) = self.producer_handles.lock().remove(browser_id) {
                     handle.abort();
                 }
@@ -295,7 +373,7 @@ impl BrowserRemoteService {
         subs_map.get(browser_id).map(|s| s.len()).unwrap_or(0)
     }
 
-    fn spawn_capture_producer(&self, browser_id: String, stream_id: u32) {
+    fn spawn_capture_producer(&self, browser_id: String, stream_id: u32, profile: NegotiatedCaptureProfile) {
         if let Some(existing) = self.producer_handles.lock().remove(&browser_id) {
             existing.abort();
         }
@@ -327,16 +405,24 @@ impl BrowserRemoteService {
         let browser_id_clone = browser_id.clone();
 
         let join_handle = handle.spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(80)); // Maintain ~10-15 FPS (12.5 FPS)
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(
+                profile.interval_ms.clamp(50, 5000),
+            ));
             let mut seq: u32 = 0;
 
             loop {
                 interval.tick().await;
 
                 // While active subscribers > 0
-                let has_active_subscribers = {
+                let (has_active_subscribers, has_eligible_subscribers) = {
                     let subs = subscribers_map.lock();
-                    subs.get(&browser_id_clone).map(|s| !s.is_empty()).unwrap_or(false)
+                    if let Some(s) = subs.get(&browser_id_clone) {
+                        let active = !s.is_empty();
+                        let eligible = s.values().any(|v| !v.paused && !v.stalled);
+                        (active, eligible)
+                    } else {
+                        (false, false)
+                    }
                 };
 
                 if !has_active_subscribers {
@@ -350,6 +436,11 @@ impl BrowserRemoteService {
                     active_stream_ids.lock().remove(&browser_id_clone);
                     producer_handles.lock().remove(&browser_id_clone);
                     break;
+                }
+
+                if !has_eligible_subscribers {
+                    // Capture only for eligible consumers/credit: skip capture tick when all viewers are paused or stalled
+                    continue;
                 }
 
                 let state = match manager.get_state(&browser_id_clone) {
@@ -380,8 +471,16 @@ impl BrowserRemoteService {
                     (1024, 768)
                 };
                 let (clamped_w, clamped_h) =
-                    crate::browser::snapshot_source::clamp_capture_dimensions(raw_w, raw_h);
-                let snapshot_options = SnapshotOptions::jpeg(70).with_bounds(clamped_w, clamped_h);
+                    crate::browser::snapshot_source::clamp_capture_dimensions(
+                        raw_w.min(profile.max_edge),
+                        raw_h.min(profile.max_edge),
+                    );
+                let snapshot_options = match profile.format {
+                    SnapshotFormat::Png => SnapshotOptions::png().with_bounds(clamped_w, clamped_h),
+                    SnapshotFormat::Jpeg { quality } => {
+                        SnapshotOptions::jpeg(quality).with_bounds(clamped_w, clamped_h)
+                    }
+                };
 
                 // Acquire shared native-capture permit
                 let permit = match native_capture_semaphore.clone().try_acquire_owned() {

@@ -511,6 +511,78 @@ pub struct BrowserErrorPayload {
     pub retry_after_ms: Option<u64>,
 }
 
+/// A single public element reference in a snapshot catalogue (R4-9).
+///
+/// The catalogue is what the GUI needs to map a remote `reference` back to a DOM
+/// target; an element *count* carries no such mapping and is not a catalogue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserSnapshotElement {
+    pub r#ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// Snapshot response carried from the GUI back to the daemon (R4-9).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserSnapshotResult {
+    pub r#type: String, // "browserSnapshot"
+    pub request_id: String,
+    pub snapshot_id: String,
+    /// u64 decimal string on the wire; integers are rejected by the public codec.
+    pub map_revision: String,
+    pub document_generation: String,
+    pub elements: Vec<BrowserSnapshotElement>,
+}
+
+/// Driver status of the shared browser as observed by the daemon (R4-5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BrowserSharingDriverStatus {
+    Idle,
+    Viewing,
+    Driving,
+}
+
+/// Authoritative sharing state pushed from the daemon to the desktop GUI so the
+/// sharing indicator reflects real admission/revocation instead of guessing (R4-5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserSharingState {
+    pub r#type: String, // "browserSharingState"
+    pub is_sharing: bool,
+    pub active_sessions_count: u32,
+    pub driver_status: BrowserSharingDriverStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_device_id: Option<String>,
+}
+
+impl BrowserSharingState {
+    pub const TYPE: &'static str = "browserSharingState";
+
+    pub fn new(
+        is_sharing: bool,
+        active_sessions_count: u32,
+        driver_status: BrowserSharingDriverStatus,
+        driver_device_id: Option<String>,
+    ) -> Self {
+        Self {
+            r#type: Self::TYPE.to_string(),
+            is_sharing,
+            active_sessions_count,
+            driver_status,
+            driver_device_id,
+        }
+    }
+
+    pub fn idle() -> Self {
+        Self::new(false, 0, BrowserSharingDriverStatus::Idle, None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -680,5 +752,64 @@ mod tests {
             encode_ipc_frame(IPC_CONTENT_TYPE_JSON, &huge_json),
             Err(RemoteProtocolError::IpcPayloadTooLarge { .. })
         ));
+    }
+
+    /// R4-9: the bridge snapshot DTO carries a reference catalogue with a decimal
+    /// map revision, not an element count.
+    #[test]
+    fn test_r4_9_bridge_snapshot_catalogue_dto() {
+        let json = r#"{
+            "type": "browserSnapshot",
+            "requestId": "r1",
+            "snapshotId": "snap-1",
+            "mapRevision": "12",
+            "documentGeneration": "15",
+            "elements": [{ "ref": "e1", "role": "button", "name": "Send" }]
+        }"#;
+        let parsed: BrowserSnapshotResult = serde_json::from_str(json).expect("snapshot DTO parses");
+        assert_eq!(parsed.map_revision, "12");
+        assert_eq!(parsed.elements.len(), 1);
+        assert_eq!(parsed.elements[0].r#ref, "e1");
+
+        let roundtrip = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(roundtrip["elements"][0]["ref"], "e1");
+        assert_eq!(roundtrip["mapRevision"], "12");
+
+        // An element count alone cannot satisfy the catalogue contract.
+        let counts_only = r#"{
+            "type": "browserSnapshot",
+            "requestId": "r1",
+            "snapshotId": "snap-1",
+            "mapRevision": "12",
+            "documentGeneration": "15",
+            "elementsCount": 7
+        }"#;
+        assert!(serde_json::from_str::<BrowserSnapshotResult>(counts_only).is_err());
+    }
+
+    /// R4-5: sharing state is a typed daemon -> GUI publication.
+    #[test]
+    fn test_r4_5_bridge_sharing_state_dto() {
+        let driving = BrowserSharingState::new(
+            true,
+            2,
+            BrowserSharingDriverStatus::Driving,
+            Some("dev-1".into()),
+        );
+        let json = serde_json::to_value(&driving).unwrap();
+        assert_eq!(json["type"], BrowserSharingState::TYPE);
+        assert_eq!(json["isSharing"], true);
+        assert_eq!(json["activeSessionsCount"], 2);
+        assert_eq!(json["driverStatus"], "driving");
+        assert_eq!(json["driverDeviceId"], "dev-1");
+
+        let idle = BrowserSharingState::idle();
+        let idle_json = serde_json::to_value(&idle).unwrap();
+        assert_eq!(idle_json["driverStatus"], "idle");
+        assert_eq!(idle_json["isSharing"], false);
+        assert!(idle_json.get("driverDeviceId").is_none());
+
+        let parsed: BrowserSharingState = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, driving);
     }
 }

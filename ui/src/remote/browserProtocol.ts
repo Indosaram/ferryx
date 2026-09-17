@@ -884,3 +884,156 @@ export function serializeClientMessage(message: ClientMessage): string {
   }
   return JSON.stringify(message);
 }
+
+// ---------------------------------------------------------------------------
+// R4-8: point-click fence (§4.5)
+// ---------------------------------------------------------------------------
+
+/** The exact frame currently painted in the viewport. Point clicks require one. */
+export interface DisplayedFrameRef {
+  seq: number;
+  metadata: BrowserFrameMetadata;
+}
+
+export interface PointClickInput {
+  u: number;
+  v: number;
+  frame: DisplayedFrameRef | null | undefined;
+  /** Highest frame sequence already confirmed as presented on this stream. */
+  lastAckedSeq?: number | null;
+}
+
+export interface PointClickParams {
+  u: number;
+  v: number;
+  streamId: number;
+  sequenceNumber: number;
+  documentGeneration: string;
+  viewportRevision: string;
+  browserInstanceId: string;
+  captureRect: BrowserCaptureRect;
+  geometrySource: "wkSnapshot";
+  x: number;
+  y: number;
+}
+
+/**
+ * Builds fenced point-click params from the committed displayed frame.
+ *
+ * The displayed-frame metadata is REQUIRED: without it the daemon cannot tell
+ * which pixels the user actually clicked. Frames older than the last frame the
+ * viewer acknowledged are rejected, and the click point is derived from the real
+ * captureRect geometry rather than a guessed viewport.
+ */
+export function buildPointClickParams(input: PointClickInput): PointClickParams {
+  const { u, v, frame } = input;
+  if (!frame || !frame.metadata) {
+    throw new Error("Point click requires a committed displayed frame");
+  }
+  if (!isFiniteNumber(u) || !isFiniteNumber(v) || u < 0 || u > 1 || v < 0 || v > 1) {
+    throw new Error("Point click coordinates must be finite and within [0, 1]");
+  }
+  if (!isFiniteNumber(frame.seq) || !Number.isInteger(frame.seq) || frame.seq < 0) {
+    throw new Error("Point click requires a displayed frame with an integer sequence");
+  }
+
+  const lastAckedSeq = input.lastAckedSeq;
+  if (isFiniteNumber(lastAckedSeq) && frame.seq < lastAckedSeq) {
+    throw new Error(
+      `Point click references a stale frame: seq ${frame.seq} precedes acknowledged seq ${lastAckedSeq}`,
+    );
+  }
+
+  const meta = frame.metadata;
+  const rect = meta.captureRect;
+  if (!rect || rect.width <= 0 || rect.height <= 0) {
+    throw new Error("Point click requires displayed frame capture geometry");
+  }
+
+  return {
+    u,
+    v,
+    streamId: meta.streamId,
+    sequenceNumber: frame.seq,
+    documentGeneration: meta.documentGeneration,
+    viewportRevision: meta.viewportRevision,
+    browserInstanceId: meta.browserInstanceId,
+    captureRect: rect,
+    geometrySource: "wkSnapshot",
+    x: rect.x + u * rect.width,
+    y: rect.y + v * rect.height,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// R4-5: authoritative sharing-state publication (§6.1)
+// ---------------------------------------------------------------------------
+
+/** Window event channel carrying authoritative daemon sharing state. */
+export const REMOTE_BROWSER_SHARING_EVENT = "remote-browser-sharing";
+/** Tauri event name emitted by the desktop shell for the same state. */
+export const REMOTE_BROWSER_SHARING_TAURI_EVENT = "browser-remote-sharing";
+
+export type SharingDriverStatus = "idle" | "viewing" | "driving";
+
+export interface RemoteBrowserSharingState {
+  isSharing: boolean;
+  activeSessionsCount: number;
+  driverStatus: SharingDriverStatus;
+  driverDeviceId: string | null;
+}
+
+function isSharingDriverStatus(value: unknown): value is SharingDriverStatus {
+  return value === "idle" || value === "viewing" || value === "driving";
+}
+
+/**
+ * Normalizes an authoritative sharing payload from the daemon/desktop shell.
+ * Returns `null` for payloads that carry no sharing signal at all.
+ */
+export function parseSharingState(raw: unknown): RemoteBrowserSharingState | null {
+  if (typeof raw === "boolean") {
+    return {
+      isSharing: raw,
+      activeSessionsCount: 0,
+      driverStatus: raw ? "viewing" : "idle",
+      driverDeviceId: null,
+    };
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return null;
+  }
+
+  const obj = raw as Record<string, unknown>;
+  const activeSessionsCount =
+    isFiniteNumber(obj.activeSessionsCount) && obj.activeSessionsCount >= 0
+      ? Math.trunc(obj.activeSessionsCount)
+      : 0;
+  const isSharing =
+    typeof obj.isSharing === "boolean"
+      ? obj.isSharing
+      : typeof obj.active === "boolean"
+        ? obj.active
+        : activeSessionsCount > 0;
+
+  const driverStatus: SharingDriverStatus = isSharingDriverStatus(obj.driverStatus)
+    ? obj.driverStatus
+    : isSharing
+      ? "viewing"
+      : "idle";
+
+  return {
+    isSharing,
+    activeSessionsCount,
+    driverStatus,
+    driverDeviceId: typeof obj.driverDeviceId === "string" ? obj.driverDeviceId : null,
+  };
+}
+
+/** Publishes authoritative sharing state to every in-page listener. */
+export function emitSharingState(state: RemoteBrowserSharingState): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(
+    new CustomEvent(REMOTE_BROWSER_SHARING_EVENT, { detail: { ...state } }),
+  );
+}

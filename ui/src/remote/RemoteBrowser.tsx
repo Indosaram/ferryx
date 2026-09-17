@@ -6,11 +6,14 @@
  */
 
 import React, { useEffect, useRef, useState } from "react";
-import type {
-  BrowserFrame,
-  BrowserStateMessage,
-  BrowserSubscribeOptions,
-  DecodedBrowserFrame,
+import {
+  buildPointClickParams,
+  type BrowserCaptureRect,
+  type BrowserFrame,
+  type BrowserFrameMetadata,
+  type BrowserStateMessage,
+  type BrowserSubscribeOptions,
+  type DecodedBrowserFrame,
 } from "./browserProtocol";
 import {
   useRemoteBrowser,
@@ -27,6 +30,71 @@ export interface RemoteBrowserPointClickEvent {
   documentGeneration: string;
   viewportRevision: string;
   browserInstanceId: string;
+  captureRect?: BrowserCaptureRect;
+  geometrySource?: "wkSnapshot";
+  x?: number;
+  y?: number;
+}
+
+export function resolveViewportClickParams(
+  clickX: number,
+  clickY: number,
+  containerWidth: number,
+  containerHeight: number,
+  displayedFrame: { seq: number; metadata: BrowserFrameMetadata } | null,
+  lastAckedSeq?: number | null,
+): RemoteBrowserPointClickEvent | null {
+  if (!displayedFrame || !displayedFrame.metadata) return null;
+  if (containerWidth <= 0 || containerHeight <= 0) return null;
+
+  const { imageWidth, imageHeight } = displayedFrame.metadata;
+  if (imageWidth <= 0 || imageHeight <= 0) return null;
+
+  const containerAspect = containerWidth / containerHeight;
+  const imageAspect = imageWidth / imageHeight;
+
+  let renderedWidth: number;
+  let renderedHeight: number;
+  let offsetLeft = 0;
+  let offsetTop = 0;
+
+  if (containerAspect > imageAspect) {
+    // Letterboxed horizontally (pillarbox)
+    renderedHeight = containerHeight;
+    renderedWidth = containerHeight * imageAspect;
+    offsetLeft = (containerWidth - renderedWidth) / 2;
+  } else {
+    // Letterboxed vertically
+    renderedWidth = containerWidth;
+    renderedHeight = containerWidth / imageAspect;
+    offsetTop = (containerHeight - renderedHeight) / 2;
+  }
+
+  // Discard clicks in letterbox margins (§4.5)
+  if (
+    clickX < offsetLeft ||
+    clickX > offsetLeft + renderedWidth ||
+    clickY < offsetTop ||
+    clickY > offsetTop + renderedHeight
+  ) {
+    return null;
+  }
+
+  // Normalized coordinates (u, v) in [0, 1] relative to the actual image
+  const u = Math.min(Math.max((clickX - offsetLeft) / renderedWidth, 0), 1);
+  const v = Math.min(Math.max((clickY - offsetTop) / renderedHeight, 0), 1);
+
+  const params = buildPointClickParams({
+    u,
+    v,
+    frame: displayedFrame,
+    lastAckedSeq,
+  });
+
+  return {
+    ...params,
+    seq: displayedFrame.seq,
+  };
 }
 
 export interface RemoteBrowserProps {
@@ -86,11 +154,41 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
   const displayedFrameRef = useRef<DecodedBrowserFrame | null>(null);
   displayedFrameRef.current = displayedFrame;
   const framesByUrlRef = useRef<Map<string, DecodedBrowserFrame>>(new Map());
+  const activeStreamIdRef = useRef<number | null>(null);
 
-  // Bind each incoming frame to its exact image URL identity
+  // Bind each incoming frame to its exact image URL identity and evict stale/cancelled entries (R4-11)
   useEffect(() => {
     if (imageUrl && frame) {
+      // Clear cache on stream or instance identity change
+      const streamId = frame.metadata.streamId;
+      if (activeStreamIdRef.current !== null && activeStreamIdRef.current !== streamId) {
+        framesByUrlRef.current.clear();
+      }
+      activeStreamIdRef.current = streamId;
+
       framesByUrlRef.current.set(imageUrl, frame);
+
+      // Evict superseded / cancelled frames: retain at most displayed and loading frames
+      const displayedSeq = displayedFrameRef.current?.seq ?? -1;
+      for (const [url, cachedFrame] of framesByUrlRef.current.entries()) {
+        if (url !== imageUrl) {
+          // If frame is older than displayed or older than current pending frame when cache exceeds cap
+          if (cachedFrame.seq < displayedSeq || (cachedFrame.seq < frame.seq && framesByUrlRef.current.size > 2)) {
+            framesByUrlRef.current.delete(url);
+          }
+        }
+      }
+
+      // Hard cap to at most 2 retained frames (1 displayed + 1 pending loading)
+      if (framesByUrlRef.current.size > 2) {
+        const sorted = Array.from(framesByUrlRef.current.entries()).sort((a, b) => a[1].seq - b[1].seq);
+        while (sorted.length > 2) {
+          const oldest = sorted.shift();
+          if (oldest && oldest[0] !== imageUrl) {
+            framesByUrlRef.current.delete(oldest[0]);
+          }
+        }
+      }
     }
   }, [imageUrl, frame]);
 
@@ -99,8 +197,17 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
     if (!imageUrl) {
       setDisplayedFrame(null);
       framesByUrlRef.current.clear();
+      activeStreamIdRef.current = null;
     }
   }, [imageUrl]);
+
+  // Clear URL frame cache on unmount or disconnect
+  useEffect(() => {
+    return () => {
+      framesByUrlRef.current.clear();
+      activeStreamIdRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     if (frame && onFrame) {
@@ -129,64 +236,20 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
     const rect = viewportRef.current.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return;
 
-    const {
-      imageWidth,
-      imageHeight,
-      streamId,
-      documentGeneration,
-      viewportRevision,
-      browserInstanceId,
-    } = displayedFrame.metadata;
-
-    if (imageWidth <= 0 || imageHeight <= 0) return;
-
-    const containerAspect = rect.width / rect.height;
-    const imageAspect = imageWidth / imageHeight;
-
-    let renderedWidth: number;
-    let renderedHeight: number;
-    let offsetLeft = 0;
-    let offsetTop = 0;
-
-    if (containerAspect > imageAspect) {
-      // Letterboxed horizontally (pillarbox)
-      renderedHeight = rect.height;
-      renderedWidth = rect.height * imageAspect;
-      offsetLeft = (rect.width - renderedWidth) / 2;
-    } else {
-      // Letterboxed vertically
-      renderedWidth = rect.width;
-      renderedHeight = rect.width / imageAspect;
-      offsetTop = (rect.height - renderedHeight) / 2;
-    }
-
     const clickX = e.clientX - rect.left;
     const clickY = e.clientY - rect.top;
 
-    // Discard clicks in letterbox margins (§4.5)
-    if (
-      clickX < offsetLeft ||
-      clickX > offsetLeft + renderedWidth ||
-      clickY < offsetTop ||
-      clickY > offsetTop + renderedHeight
-    ) {
-      return;
-    }
+    const point = resolveViewportClickParams(
+      clickX,
+      clickY,
+      rect.width,
+      rect.height,
+      displayedFrame,
+      displayedFrame.seq,
+    );
+    if (!point) return;
 
-    // Normalized coordinates (u, v) in [0, 1] relative to the actual image
-    const u = Math.min(Math.max((clickX - offsetLeft) / renderedWidth, 0), 1);
-    const v = Math.min(Math.max((clickY - offsetTop) / renderedHeight, 0), 1);
-
-    onPointClick({
-      u,
-      v,
-      streamId,
-      seq: displayedFrame.seq,
-      sequenceNumber: displayedFrame.seq,
-      documentGeneration,
-      viewportRevision,
-      browserInstanceId,
-    });
+    onPointClick(point);
   };
 
   const handleImageLoad = (boundUrl: string, boundFrame: DecodedBrowserFrame | null) => {
@@ -200,6 +263,14 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
     }
 
     setDisplayedFrame(frameToCommit);
+
+    // Evict any frames older than the newly committed displayed frame (R4-11)
+    for (const [url, cachedFrame] of framesByUrlRef.current.entries()) {
+      if (cachedFrame.seq < frameToCommit.seq) {
+        framesByUrlRef.current.delete(url);
+      }
+    }
+
     if (confirmPresented) {
       confirmPresented(frameToCommit.metadata.streamId, frameToCommit.seq);
     } else if (sendAck) {
@@ -222,6 +293,7 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
       <div
         ref={viewportRef}
         data-testid="remote-browser-viewport"
+        data-retained-frames={framesByUrlRef.current.size}
         className="relative flex-1 w-full h-full flex items-center justify-center overflow-hidden cursor-crosshair"
         onClick={handleViewportClick}
       >

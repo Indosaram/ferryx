@@ -7,7 +7,14 @@
  */
 
 import React, { useState } from "react";
-import { browserRemoteReclaim, browserRemoteRevoke } from "../lib/tauri";
+import { browserRemoteReclaim, browserRemoteRevoke, isTauriRuntime } from "../lib/tauri";
+import {
+  emitSharingState,
+  parseSharingState,
+  REMOTE_BROWSER_SHARING_EVENT,
+  REMOTE_BROWSER_SHARING_TAURI_EVENT,
+  type RemoteBrowserSharingState,
+} from "../remote/browserProtocol";
 
 export interface RemoteBrowserSharingIndicatorProps {
   isSharing?: boolean;
@@ -31,8 +38,16 @@ export const RemoteBrowserSharingIndicator: React.FC<RemoteBrowserSharingIndicat
   const [internalSharing, setInternalSharing] = useState(isSharing);
   const [internalDriverStatus, setInternalDriverStatus] = useState(driverStatus);
   const [internalSessionsCount, setInternalSessionsCount] = useState(activeSessionsCount);
+  const [internalDriverDeviceId, setInternalDriverDeviceId] = useState(driverDeviceId);
   const [reclaiming, setReclaiming] = useState(false);
   const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null);
+
+  const applySharingState = React.useCallback((state: RemoteBrowserSharingState) => {
+    setInternalSharing(state.isSharing);
+    setInternalDriverStatus(state.driverStatus);
+    setInternalSessionsCount(state.activeSessionsCount);
+    setInternalDriverDeviceId(state.driverDeviceId);
+  }, []);
 
   // Sync props to internal state if props change
   React.useEffect(() => {
@@ -48,23 +63,52 @@ export const RemoteBrowserSharingIndicator: React.FC<RemoteBrowserSharingIndicat
   }, [activeSessionsCount]);
 
   React.useEffect(() => {
+    setInternalDriverDeviceId(driverDeviceId);
+  }, [driverDeviceId]);
+
+  // Authoritative sharing state published by the daemon/desktop shell (R4-5).
+  React.useEffect(() => {
     const handleSharingEvent = (e: Event) => {
-      const detail = (e as CustomEvent).detail;
-      if (detail && typeof detail === "object") {
-        if ("isSharing" in detail) setInternalSharing(Boolean(detail.isSharing));
-        if ("driverStatus" in detail) setInternalDriverStatus(detail.driverStatus);
-        if ("activeSessionsCount" in detail) setInternalSessionsCount(Number(detail.activeSessionsCount) || 0);
-      } else if (typeof detail === "boolean") {
-        setInternalSharing(detail);
-      }
+      const state = parseSharingState((e as CustomEvent).detail);
+      if (state) applySharingState(state);
     };
-    window.addEventListener("remote-browser-sharing", handleSharingEvent);
+    window.addEventListener(REMOTE_BROWSER_SHARING_EVENT, handleSharingEvent);
     window.addEventListener("remote-browser-sharing-change", handleSharingEvent);
     return () => {
-      window.removeEventListener("remote-browser-sharing", handleSharingEvent);
+      window.removeEventListener(REMOTE_BROWSER_SHARING_EVENT, handleSharingEvent);
       window.removeEventListener("remote-browser-sharing-change", handleSharingEvent);
     };
-  }, []);
+  }, [applySharingState]);
+
+  // Desktop shell bridge: daemon admission/revocation broadcasts arrive as Tauri events
+  // and are republished on the window channel so every listener converges (R4-5).
+  React.useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void import("@tauri-apps/api/event")
+      .then(({ listen }) =>
+        listen<unknown>(REMOTE_BROWSER_SHARING_TAURI_EVENT, (event) => {
+          const state = parseSharingState(event.payload);
+          if (!state) return;
+          applySharingState(state);
+          emitSharingState(state);
+        }),
+      )
+      .then((cleanup) => {
+        if (disposed) cleanup();
+        else unlisten = cleanup;
+      })
+      .catch(() => {
+        // Desktop event bridge unavailable; window-channel updates still apply.
+      });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [applySharingState]);
 
   const active = internalSharing || internalDriverStatus === "driving" || internalSessionsCount > 0;
 
@@ -80,8 +124,15 @@ export const RemoteBrowserSharingIndicator: React.FC<RemoteBrowserSharingIndicat
       if (onReclaim) {
         await onReclaim();
       }
-      setInternalSharing(false);
-      setInternalDriverStatus("idle");
+      // Publish the reclaimed state so every listener stops showing remote control.
+      const reclaimed: RemoteBrowserSharingState = {
+        isSharing: false,
+        activeSessionsCount: 0,
+        driverStatus: "idle",
+        driverDeviceId: null,
+      };
+      applySharingState(reclaimed);
+      emitSharingState(reclaimed);
       setFeedbackMessage("Control reclaimed by desktop owner");
     } catch (err) {
       setFeedbackMessage(`Reclaim error: ${err instanceof Error ? err.message : String(err)}`);
@@ -98,7 +149,15 @@ export const RemoteBrowserSharingIndicator: React.FC<RemoteBrowserSharingIndicat
       if (onRevoke) {
         await onRevoke();
       }
-      setInternalDriverStatus("idle");
+      // The lease is gone, but viewers may remain: publish viewing, not idle.
+      const revoked: RemoteBrowserSharingState = {
+        isSharing: internalSharing,
+        activeSessionsCount: internalSessionsCount,
+        driverStatus: internalSharing || internalSessionsCount > 0 ? "viewing" : "idle",
+        driverDeviceId: null,
+      };
+      applySharingState(revoked);
+      emitSharingState(revoked);
       setFeedbackMessage("Remote driver lease revoked");
     } catch (err) {
       setFeedbackMessage(`Revoke error: ${err instanceof Error ? err.message : String(err)}`);
@@ -118,14 +177,14 @@ export const RemoteBrowserSharingIndicator: React.FC<RemoteBrowserSharingIndicat
         <span className="inline-block size-2 rounded-full bg-amber-400 animate-pulse" />
         <span className="font-medium text-[11px]">
           Remote Browser Screencast Active
-          {activeSessionsCount > 0 ? ` (${activeSessionsCount} active)` : ""}
+          {internalSessionsCount > 0 ? ` (${internalSessionsCount} active)` : ""}
         </span>
         {internalDriverStatus === "driving" && (
           <span
             data-testid="remote-driver-badge"
             className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-mono text-[10px] border border-amber-500/40"
           >
-            Driver Active{driverDeviceId ? `: ${driverDeviceId}` : ""}
+            Driver Active{internalDriverDeviceId ? `: ${internalDriverDeviceId}` : ""}
           </span>
         )}
         {feedbackMessage && (

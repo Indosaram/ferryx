@@ -500,20 +500,19 @@ pub enum ClientMessage {
         request_id: String,
         subscription_id: String,
     },
+    /// §4.1 R4-9: View-accessible snapshot request. The response is
+    /// `ServerMessage::BrowserSnapshot` carrying a public reference catalogue.
     #[serde(rename_all = "camelCase")]
-    BrowserPause {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        request_id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        subscription_id: Option<String>,
+    BrowserSnapshot {
+        request_id: String,
+        browser_id: String,
     },
+    /// §4.3 R4-10: pause/resume are stream-scoped and carry the same identity
+    /// pair the client sends (`browserId` / `streamId`).
     #[serde(rename_all = "camelCase")]
-    BrowserResume {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        request_id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        subscription_id: Option<String>,
-    },
+    BrowserPause { browser_id: String, stream_id: u32 },
+    #[serde(rename_all = "camelCase")]
+    BrowserResume { browser_id: String, stream_id: u32 },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -608,6 +607,18 @@ pub enum ServerMessage {
     BrowserUnsubscribed {
         request_id: String,
         subscription_id: String,
+    },
+    /// §4.1 R4-9: snapshot response. `map_revision` is a u64 decimal string and
+    /// `elements` is the public reference catalogue (never a bare count).
+    #[serde(rename_all = "camelCase")]
+    BrowserSnapshot {
+        request_id: String,
+        snapshot_id: String,
+        map_revision: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<serde_json::Value>,
+        #[serde(default)]
+        elements: Vec<serde_json::Value>,
     },
 }
 
@@ -830,5 +841,63 @@ pub mod tests {
             }
             _ => panic!("Expected BrowserHello"),
         }
+    }
+
+    // R4-10: pause/resume wire schema must match the client (browserId/streamId).
+    #[test]
+    fn test_r4_10_pause_resume_wire_schema_matches_client() {
+        let pause: ClientMessage =
+            serde_json::from_str(r#"{"type":"browserPause","browserId":"b1","streamId":7}"#)
+                .expect("browserPause with browserId/streamId must parse");
+        assert_eq!(
+            serde_json::to_value(&pause).unwrap(),
+            serde_json::json!({ "type": "browserPause", "browserId": "b1", "streamId": 7 })
+        );
+
+        let resume: ClientMessage =
+            serde_json::from_str(r#"{"type":"browserResume","browserId":"b1","streamId":7}"#)
+                .expect("browserResume with browserId/streamId must parse");
+        assert_eq!(
+            serde_json::to_value(&resume).unwrap(),
+            serde_json::json!({ "type": "browserResume", "browserId": "b1", "streamId": 7 })
+        );
+
+        // Legacy requestId/subscriptionId shape is no longer part of the contract
+        assert!(serde_json::from_str::<ClientMessage>(
+            r#"{"type":"browserPause","requestId":"p1","subscriptionId":"sub1"}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<ClientMessage>(
+            r#"{"type":"browserResume","browserId":"b1","streamId":7,"extra":1}"#
+        )
+        .is_err());
+    }
+
+    // R4-9: browserSnapshot must exist on both directions of the Rust wire contract.
+    #[test]
+    fn test_r4_9_browser_snapshot_wire_variants() {
+        let client: ClientMessage = serde_json::from_str(
+            r#"{"type":"browserSnapshot","requestId":"r1","browserId":"b1"}"#,
+        )
+        .expect("browserSnapshot client message must parse");
+        assert_eq!(
+            serde_json::to_value(&client).unwrap(),
+            serde_json::json!({ "type": "browserSnapshot", "requestId": "r1", "browserId": "b1" })
+        );
+
+        let server: ServerMessage = serde_json::from_str(
+            r#"{"type":"browserSnapshot","requestId":"r1","snapshotId":"snap-1","mapRevision":"12","elements":[{"ref":"e1"}]}"#,
+        )
+        .expect("browserSnapshot server message must parse");
+        assert_eq!(
+            serde_json::to_value(&server).unwrap(),
+            serde_json::json!({
+                "type": "browserSnapshot",
+                "requestId": "r1",
+                "snapshotId": "snap-1",
+                "mapRevision": "12",
+                "elements": [{ "ref": "e1" }]
+            })
+        );
     }
 }

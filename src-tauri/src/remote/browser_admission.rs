@@ -330,21 +330,46 @@ struct ViewerKey {
     viewer_instance_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ViewerEntry {
+    key: ViewerKey,
+    paused: bool,
+    stalled: bool,
+}
+
 pub struct AdmissionController {
     pub broker: Arc<DriverBroker>,
-    viewers: Mutex<HashMap<String, HashMap<String, ViewerKey>>>, // browser_id -> (subscription_id -> ViewerKey)
+    viewers: Mutex<HashMap<String, HashMap<String, ViewerEntry>>>, // browser_id -> (subscription_id -> ViewerEntry)
     captured_browsers: Mutex<HashSet<String>>,
     limiters: Mutex<HashMap<String, Arc<DeviceRateLimiter>>>,
+    /// Broadcasts `(browser_id, capturing)` whenever the owned-viewer count for a
+    /// browser crosses zero, so capture never outlives its last accepted viewer (R4-6).
+    capture_tx: tokio::sync::broadcast::Sender<(String, bool)>,
+    /// Authoritative sharing publisher shared by every socket on this gateway (R4-5).
+    sharing: Arc<crate::remote::browser_ws::SharingRegistry>,
 }
 
 impl AdmissionController {
     pub fn new() -> Self {
+        let (capture_tx, _) = tokio::sync::broadcast::channel(64);
         Self {
             broker: Arc::new(DriverBroker::new()),
             viewers: Mutex::new(HashMap::new()),
             captured_browsers: Mutex::new(HashSet::new()),
             limiters: Mutex::new(HashMap::new()),
+            capture_tx,
+            sharing: Arc::new(crate::remote::browser_ws::SharingRegistry::new()),
         }
+    }
+
+    /// The gateway-wide sharing publisher every browser socket reports through (R4-5).
+    pub fn sharing_registry(&self) -> Arc<crate::remote::browser_ws::SharingRegistry> {
+        Arc::clone(&self.sharing)
+    }
+
+    /// Subscribes to capture-lifecycle transitions (R4-6).
+    pub fn subscribe_capture(&self) -> tokio::sync::broadcast::Receiver<(String, bool)> {
+        self.capture_tx.subscribe()
     }
 
     pub fn get_device_limiter(&self, device_id: &str, now: Instant) -> Arc<DeviceRateLimiter> {
@@ -382,8 +407,8 @@ impl AdmissionController {
 
         // Same (device_id, viewer_instance_id) replaces previous viewer on this browser
         let mut to_replace = None;
-        for (sub_id, existing_key) in browser_viewers.iter() {
-            if existing_key == &key {
+        for (sub_id, existing_entry) in browser_viewers.iter() {
+            if existing_entry.key == key {
                 to_replace = Some(sub_id.clone());
                 break;
             }
@@ -397,7 +422,21 @@ impl AdmissionController {
             ));
         }
 
-        browser_viewers.insert(subscription_id.to_string(), key);
+        let was_capturing = browser_viewers.values().any(|v| !v.paused && !v.stalled);
+        browser_viewers.insert(
+            subscription_id.to_string(),
+            ViewerEntry {
+                key,
+                paused: false,
+                stalled: false,
+            },
+        );
+        let now_capturing = browser_viewers.values().any(|v| !v.paused && !v.stalled);
+        drop(viewers_map);
+        drop(captured);
+        if !was_capturing && now_capturing {
+            let _ = self.capture_tx.send((browser_id.to_string(), true));
+        }
         Ok(())
     }
 
@@ -405,26 +444,77 @@ impl AdmissionController {
         let mut captured = self.captured_browsers.lock();
         let mut viewers_map = self.viewers.lock();
 
+        let mut halted = false;
         if let Some(browser_viewers) = viewers_map.get_mut(browser_id) {
+            let was_capturing = browser_viewers.values().any(|v| !v.paused && !v.stalled);
             browser_viewers.remove(subscription_id);
             if browser_viewers.is_empty() {
                 viewers_map.remove(browser_id);
                 captured.remove(browser_id);
+                if was_capturing {
+                    halted = true;
+                }
+            } else {
+                let now_capturing = browser_viewers.values().any(|v| !v.paused && !v.stalled);
+                if was_capturing && !now_capturing {
+                    halted = true;
+                }
             }
+        }
+        drop(viewers_map);
+        drop(captured);
+        // The last owned viewer leaving halts capture: a producer must never keep
+        // running with zero viewers (R4-6).
+        if halted {
+            let _ = self.capture_tx.send((browser_id.to_string(), false));
         }
     }
 
     pub fn should_capture(&self, browser_id: &str) -> bool {
         let viewers_map = self.viewers.lock();
         if let Some(browser_viewers) = viewers_map.get(browser_id) {
-            !browser_viewers.is_empty()
+            browser_viewers.values().any(|v| !v.paused && !v.stalled)
         } else {
             false
         }
     }
 
+    pub fn set_viewer_paused(&self, browser_id: &str, subscription_id: &str, paused: bool) {
+        let mut viewers_map = self.viewers.lock();
+        if let Some(browser_viewers) = viewers_map.get_mut(browser_id) {
+            let was_capturing = browser_viewers.values().any(|v| !v.paused && !v.stalled);
+            if let Some(entry) = browser_viewers.get_mut(subscription_id) {
+                entry.paused = paused;
+            }
+            let now_capturing = browser_viewers.values().any(|v| !v.paused && !v.stalled);
+            drop(viewers_map);
+            if was_capturing != now_capturing {
+                let _ = self.capture_tx.send((browser_id.to_string(), now_capturing));
+            }
+        }
+    }
+
+    pub fn set_viewer_stalled(&self, browser_id: &str, subscription_id: &str, stalled: bool) {
+        let mut viewers_map = self.viewers.lock();
+        if let Some(browser_viewers) = viewers_map.get_mut(browser_id) {
+            let was_capturing = browser_viewers.values().any(|v| !v.paused && !v.stalled);
+            if let Some(entry) = browser_viewers.get_mut(subscription_id) {
+                entry.stalled = stalled;
+            }
+            let now_capturing = browser_viewers.values().any(|v| !v.paused && !v.stalled);
+            drop(viewers_map);
+            if was_capturing != now_capturing {
+                let _ = self.capture_tx.send((browser_id.to_string(), now_capturing));
+            }
+        }
+    }
+
     pub fn reclaim_desktop(&self) -> Option<DriverLease> {
-        self.broker.reclaim_desktop()
+        let lease = self.broker.reclaim_desktop();
+        if let Some(ref l) = lease {
+            self.sharing.driver_released(&l.connection_id);
+        }
+        lease
     }
 
     pub fn subscribe_reclaim(&self) -> tokio::sync::broadcast::Receiver<String> {
@@ -534,6 +624,43 @@ pub mod tests {
         assert!(limiter.check_eval(now));
         assert!(!limiter.check_eval(now));
         assert!(limiter.check_eval(now + Duration::from_secs(1)));
+    }
+
+    /// R4-6: capture ownership follows owned viewer subscriptions exactly. The last
+    /// teardown halts capture; a producer must never run with zero viewers.
+    #[tokio::test]
+    async fn test_r4_6_capture_lifecycle_follows_owned_viewers_only() {
+        let ctrl = AdmissionController::new();
+        let mut capture_rx = ctrl.subscribe_capture();
+
+        // No subscription yet: nothing is captured, so attaching a receiver alone
+        // can never pin a viewer slot.
+        assert!(!ctrl.should_capture("b1"));
+
+        ctrl.try_subscribe("b1", "sub1", "dev1", "v1").unwrap();
+        assert_eq!(capture_rx.recv().await.unwrap(), ("b1".to_string(), true));
+        assert!(ctrl.should_capture("b1"));
+
+        // A second viewer does not re-signal: capture is already running.
+        ctrl.try_subscribe("b1", "sub2", "dev2", "v2").unwrap();
+        ctrl.unsubscribe("b1", "sub2");
+        assert!(
+            ctrl.should_capture("b1"),
+            "capture continues while an owned viewer remains"
+        );
+
+        // The last owned viewer leaving halts capture and frees the browser slot.
+        ctrl.unsubscribe("b1", "sub1");
+        assert_eq!(capture_rx.recv().await.unwrap(), ("b1".to_string(), false));
+        assert!(
+            !ctrl.should_capture("b1"),
+            "capture must halt when the last viewer tears down"
+        );
+
+        // The freed capture slot is reusable: no leaked ownership from the old socket.
+        ctrl.try_subscribe("b2", "sub3", "dev3", "v3").unwrap();
+        assert_eq!(capture_rx.recv().await.unwrap(), ("b2".to_string(), true));
+        assert!(ctrl.should_capture("b2"));
     }
 
     #[tokio::test]

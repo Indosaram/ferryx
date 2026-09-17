@@ -52,6 +52,21 @@ impl RemoteGatewayManager {
         }
     }
 
+    pub fn set_browser_backend(
+        &self,
+        backend: Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>,
+    ) {
+        match &self.inner {
+            RemoteGatewayManagerInner::State { state, .. } => {
+                state.set_browser_backend(backend);
+            }
+            RemoteGatewayManagerInner::Daemon(_) => {
+                // In daemon mode, the daemon's RemoteGatewayState is configured to route
+                // via LocalIpcBrowserBackend to the GUI's browser CLI UDS endpoint.
+            }
+        }
+    }
+
     pub async fn restore_persisted_listener(&self) -> Result<bool, String> {
         match &self.inner {
             RemoteGatewayManagerInner::Daemon(client) => {

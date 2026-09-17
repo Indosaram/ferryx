@@ -780,7 +780,7 @@ describe("RemoteBrowser - Mobile Viewport & Touch Interaction (Phase 7B)", () =>
       });
       const fill2 = JSON.parse(ws.sentMessages[sentBefore2] as string);
       expect(fill2.command).toBe("fill");
-      expect(fill2.params.value).toBe(" world");
+      expect(fill2.params.value).toBe("hello world");
 
       // 3. While both fills are in-flight, user types "!"
       fireEvent.change(imeInput, { target: { value: "hello world!" } });
@@ -809,6 +809,106 @@ describe("RemoteBrowser - Mobile Viewport & Touch Interaction (Phase 7B)", () =>
       });
       // "!" typed while fills were in flight is completely preserved!
       expect(imeInput).toHaveValue("!");
+    });
+
+    it("preserves unrelated user edits during in-flight submission and handles out-of-order completion (R4-12)", async () => {
+      render(
+        <RemoteBrowserWorkspace
+          baseUrl="http://localhost:8080"
+          browserId="b-mobile-unrelated"
+          deviceToken="token-mobile-unrelated"
+          onBack={vi.fn()}
+        />,
+      );
+
+      const ws = await waitForSocket(0);
+      await establishStreaming(ws);
+
+      await act(async () => {
+        ws.onmessage?.({
+          data: JSON.stringify({
+            type: "browserDriverChanged",
+            leaseEpoch: "epoch-ime-unrelated",
+            isDriver: true,
+          }),
+        });
+      });
+
+      // Open IME bar
+      fireEvent.click(screen.getByTestId("remote-browser-ime-toggle-btn"));
+      const imeInput = screen.getByTestId("remote-browser-ime-text-input");
+      const imeBar = screen.getByTestId("remote-browser-ime-bar");
+
+      // 1. User submits "abc"
+      fireEvent.change(imeInput, { target: { value: "abc" } });
+      const sentBefore = ws.sentMessages.length;
+      await act(async () => {
+        fireEvent.submit(imeBar);
+      });
+      const fillMsg = JSON.parse(ws.sentMessages[sentBefore] as string);
+      expect(fillMsg.command).toBe("fill");
+
+      // 2. While fill is in-flight, user replaces the editable input with "new"
+      fireEvent.change(imeInput, { target: { value: "new" } });
+
+      // 3. Fill "abc" succeeds
+      await act(async () => {
+        ws.onmessage?.({
+          data: JSON.stringify({
+            type: "browserResult",
+            requestId: fillMsg.requestId,
+            result: { ok: true },
+          }),
+        });
+      });
+
+      // Prior to R4-12 fix, queue IDs only tracked length (3), so completion removed all 3 characters of "new"!
+      // With R4-12 fix, "new" is preserved!
+      expect(imeInput).toHaveValue("new");
+
+      // 4. Out-of-order completion test:
+      // Clear input and submit "partA" then "partB"
+      fireEvent.change(imeInput, { target: { value: "partA" } });
+      const sentBeforeA = ws.sentMessages.length;
+      await act(async () => {
+        fireEvent.submit(imeBar);
+      });
+      const fillA = JSON.parse(ws.sentMessages[sentBeforeA] as string);
+
+      fireEvent.change(imeInput, { target: { value: "partApartB" } });
+      const sentBeforeB = ws.sentMessages.length;
+      await act(async () => {
+        fireEvent.submit(imeBar);
+      });
+      const fillB = JSON.parse(ws.sentMessages[sentBeforeB] as string);
+
+      // User types additional characters while both are in-flight
+      fireEvent.change(imeInput, { target: { value: "partApartBkept" } });
+
+      // Out-of-order: fillB finishes BEFORE fillA
+      await act(async () => {
+        ws.onmessage?.({
+          data: JSON.stringify({
+            type: "browserResult",
+            requestId: fillB.requestId,
+            result: { ok: true },
+          }),
+        });
+      });
+      // Out-of-order completion does NOT retire head out of sequence; entire buffer preserved until fillA completes
+      expect(imeInput).toHaveValue("partApartBkept");
+
+      // Now fillA finishes: both retire in order, leaving only "kept"
+      await act(async () => {
+        ws.onmessage?.({
+          data: JSON.stringify({
+            type: "browserResult",
+            requestId: fillA.requestId,
+            result: { ok: true },
+          }),
+        });
+      });
+      expect(imeInput).toHaveValue("kept");
     });
   });
 });

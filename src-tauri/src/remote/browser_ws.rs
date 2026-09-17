@@ -1,20 +1,188 @@
 //! Remote Browser WebSocket Per-Connection Lifetime, Actors & Dispatcher
 //! Authoritative Spec: docs/plans/REMOTE_BROWSER_SCREENCAST_PLAN_2026-09-17.md (§4.3, §4.4, §5, §6.2)
 
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
+use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
+use crate::browser::model::LogicalRect;
+use crate::browser::remote_input::{map_point_mainframe, validate_point_timing_and_viewport};
 use crate::remote::auth::DevicePermission;
 use crate::remote::browser_admission::{AdmissionController, SubscriberQueue, CONTROL_QUEUE_MAX_COUNT};
 use crate::remote::browser_backend::{
     BrowserCommandContext, RemoteBrowserBackend, RemoteBrowserError,
 };
-use crate::remote::browser_protocol::{ClientMessage, ServerMessage};
+use crate::remote::browser_protocol::{
+    is_decimal_u64_string, BrowserFrameMetadata, ClientMessage, ServerMessage, HEADER_BYTE_LENGTH,
+    MAX_METADATA_BYTES,
+};
 use crate::remote::browser_security::{
     require_permission, sanitize_public_string, sanitize_url, RequestDeduplicator,
     MAX_FILL_BYTES, MAX_REQUEST_WIRE_BYTES, MAX_SCRIPT_BYTES,
 };
+
+/// Number of most recently sent frames retained for point-click fencing (§4.5, R4-8).
+pub const MAX_SENT_FRAME_RECORDS: usize = 16;
+
+/// A frame this connection actually put on the wire. Point clicks may only
+/// reference one of these records, never client-asserted geometry.
+#[derive(Debug, Clone)]
+pub struct SentFrameRecord {
+    pub stream_id: u32,
+    pub seq: u32,
+    pub sent_at: Instant,
+    pub metadata: BrowserFrameMetadata,
+}
+
+/// Authoritative desktop sharing status published to the GUI indicator (§6.1, R4-5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SharingDriverStatus {
+    Idle,
+    Viewing,
+    Driving,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharingState {
+    pub is_sharing: bool,
+    pub active_sessions_count: usize,
+    pub driver_status: SharingDriverStatus,
+    pub driver_device_id: Option<String>,
+}
+
+#[derive(Default)]
+struct SharingInner {
+    /// connection_id -> device_id for every admitted viewer socket
+    viewers: HashMap<String, String>,
+    /// (connection_id, device_id) of the current remote driver
+    driver: Option<(String, String)>,
+    last_published: Option<SharingState>,
+}
+
+impl SharingInner {
+    fn snapshot(&self) -> SharingState {
+        let driver_device_id = self.driver.as_ref().map(|(_, dev)| dev.clone());
+        let driver_status = if driver_device_id.is_some() {
+            SharingDriverStatus::Driving
+        } else if self.viewers.is_empty() {
+            SharingDriverStatus::Idle
+        } else {
+            SharingDriverStatus::Viewing
+        };
+        SharingState {
+            is_sharing: !self.viewers.is_empty(),
+            active_sessions_count: self.viewers.len(),
+            driver_status,
+            driver_device_id,
+        }
+    }
+}
+
+/// Publishes authoritative remote-browser sharing state so the desktop indicator
+/// reflects live daemon admission and revocation instead of guessing (R4-5).
+pub struct SharingRegistry {
+    inner: Mutex<SharingInner>,
+    tx: tokio::sync::broadcast::Sender<SharingState>,
+}
+
+impl SharingRegistry {
+    pub fn new() -> Self {
+        let (tx, _) = tokio::sync::broadcast::channel(64);
+        Self {
+            inner: Mutex::new(SharingInner::default()),
+            tx,
+        }
+    }
+
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<SharingState> {
+        self.tx.subscribe()
+    }
+
+    pub fn current(&self) -> SharingState {
+        self.inner.lock().snapshot()
+    }
+
+    fn publish(&self) {
+        let mut guard = self.inner.lock();
+        let state = guard.snapshot();
+        if guard.last_published.as_ref() == Some(&state) {
+            return;
+        }
+        guard.last_published = Some(state.clone());
+        drop(guard);
+        let _ = self.tx.send(state);
+    }
+
+    pub fn viewer_admitted(&self, connection_id: &str, device_id: &str) {
+        self.inner
+            .lock()
+            .viewers
+            .insert(connection_id.to_string(), device_id.to_string());
+        self.publish();
+    }
+
+    pub fn viewer_removed(&self, connection_id: &str) {
+        {
+            let mut guard = self.inner.lock();
+            guard.viewers.remove(connection_id);
+            if guard
+                .driver
+                .as_ref()
+                .is_some_and(|(conn, _)| conn == connection_id)
+            {
+                guard.driver = None;
+            }
+        }
+        self.publish();
+    }
+
+    pub fn driver_claimed(&self, connection_id: &str, device_id: &str) {
+        self.inner.lock().driver = Some((connection_id.to_string(), device_id.to_string()));
+        self.publish();
+    }
+
+    pub fn driver_released(&self, connection_id: &str) {
+        {
+            let mut guard = self.inner.lock();
+            if guard
+                .driver
+                .as_ref()
+                .is_some_and(|(conn, _)| conn == connection_id)
+            {
+                guard.driver = None;
+            }
+        }
+        self.publish();
+    }
+}
+
+impl Default for SharingRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Reads the metadata block of an outbound browser frame without re-validating
+/// the image payload. Returns `None` for buffers that are not complete frames.
+pub fn parse_frame_metadata(bytes: &[u8]) -> Option<BrowserFrameMetadata> {
+    if bytes.len() < HEADER_BYTE_LENGTH {
+        return None;
+    }
+    let metadata_len = u32::from_le_bytes(bytes[8..12].try_into().ok()?) as usize;
+    if metadata_len == 0 || metadata_len > MAX_METADATA_BYTES {
+        return None;
+    }
+    let end = HEADER_BYTE_LENGTH.checked_add(metadata_len)?;
+    if bytes.len() < end {
+        return None;
+    }
+    serde_json::from_slice(&bytes[HEADER_BYTE_LENGTH..end]).ok()
+}
 
 pub fn sanitize_json_value(val: serde_json::Value) -> serde_json::Value {
     match val {
@@ -61,6 +229,12 @@ pub struct BrowserWsSession {
     pub cancel_token: CancellationToken,
     pub last_heartbeat: Instant,
     pub pending_promoted_frame: Option<Vec<u8>>,
+    /// Highest frame sequence this viewer confirmed as presented.
+    pub last_acked_seq: Option<u32>,
+    /// Bounded ledger of frames actually sent on this socket (R4-8 click fence).
+    pub sent_frames: VecDeque<SentFrameRecord>,
+    /// Authoritative sharing publisher for the desktop indicator (R4-5).
+    pub sharing: Option<Arc<SharingRegistry>>,
 }
 
 fn browser_error(
@@ -77,6 +251,78 @@ fn browser_error(
         retryable,
         retry_after_ms,
     }
+}
+
+/// Accepts either a u64 decimal string or a non-negative integer and returns the
+/// canonical decimal-string form required on the public wire (R4-9).
+pub fn normalize_decimal_u64(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            is_decimal_u64_string(trimmed).then(|| trimmed.to_string())
+        }
+        serde_json::Value::Number(n) => n.as_u64().map(|v| v.to_string()),
+        _ => None,
+    }
+}
+
+/// Converts a backend snapshot payload into the public reference catalogue.
+/// Counts-only payloads are rejected: a click/fill reference cannot be mapped
+/// from a number (R4-9).
+pub fn snapshot_catalogue_from_backend(
+    value: &serde_json::Value,
+) -> Result<(String, String, Option<serde_json::Value>, Vec<serde_json::Value>), String> {
+    let obj = value
+        .as_object()
+        .ok_or_else(|| "snapshot response is not an object".to_string())?;
+
+    let snapshot_id = obj
+        .get("snapshotId")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| "snapshot response is missing snapshotId".to_string())?
+        .to_string();
+
+    let map_revision = obj
+        .get("mapRevision")
+        .and_then(normalize_decimal_u64)
+        .ok_or_else(|| "snapshot response mapRevision is not a u64 decimal".to_string())?;
+
+    let raw_elements = obj
+        .get("elements")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| {
+            "snapshot response has no element reference catalogue (element counts are not a catalogue)"
+                .to_string()
+        })?;
+
+    let mut elements = Vec::with_capacity(raw_elements.len());
+    for element in raw_elements {
+        let element_obj = element
+            .as_object()
+            .ok_or_else(|| "snapshot element is not an object".to_string())?;
+        let reference = element_obj
+            .get("ref")
+            .or_else(|| element_obj.get("reference"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| "snapshot element is missing a public reference".to_string())?
+            .to_string();
+
+        let mut public = serde_json::Map::new();
+        public.insert("ref".into(), serde_json::Value::String(reference));
+        for (key, val) in element_obj {
+            // `selector` is desktop-internal DOM detail and never crosses the public wire.
+            if key == "ref" || key == "reference" || key == "selector" {
+                continue;
+            }
+            public.insert(key.clone(), sanitize_json_value(val.clone()));
+        }
+        elements.push(serde_json::Value::Object(public));
+    }
+
+    let root = obj.get("root").cloned().map(sanitize_json_value);
+    Ok((snapshot_id, map_revision, root, elements))
 }
 
 impl BrowserWsSession {
@@ -105,7 +351,207 @@ impl BrowserWsSession {
             cancel_token: CancellationToken::new(),
             last_heartbeat: now,
             pending_promoted_frame: None,
+            last_acked_seq: None,
+            sent_frames: VecDeque::new(),
+            sharing: None,
         }
+    }
+
+    /// Binds this socket to the authoritative sharing publisher (R4-5).
+    pub fn with_sharing_registry(mut self, registry: Arc<SharingRegistry>) -> Self {
+        self.sharing = Some(registry);
+        self
+    }
+
+    fn record_sent_frame(&mut self, frame_bytes: &[u8], seq: u32, now: Instant) {
+        let Some(metadata) = parse_frame_metadata(frame_bytes) else {
+            return;
+        };
+        self.sent_frames.push_back(SentFrameRecord {
+            stream_id: metadata.stream_id,
+            seq,
+            sent_at: now,
+            metadata,
+        });
+        while self.sent_frames.len() > MAX_SENT_FRAME_RECORDS {
+            self.sent_frames.pop_front();
+        }
+    }
+
+    /// Drops stranded ACK credit so a resumed or restarted stream can deliver a
+    /// fresh frame instead of waiting forever on a frame the viewer never saw (R4-10).
+    fn reset_frame_credit(&mut self) {
+        if let Some(queue) = self.queue.as_mut() {
+            queue.unacked_seq = None;
+            queue.unacked_sent_at = None;
+            queue.pending_frame = None;
+        }
+        self.pending_promoted_frame = None;
+        self.sent_frames.clear();
+        self.last_acked_seq = None;
+    }
+
+    /// Marks the remote driver lease as revoked and republishes sharing state (R4-5).
+    pub fn mark_driver_revoked(&mut self, _reason: &str) -> Option<u64> {
+        let epoch = self.lease_epoch.take();
+        self.is_driver = false;
+        if let Some(registry) = self.sharing.as_ref() {
+            registry.driver_released(&self.connection_id);
+        }
+        epoch
+    }
+
+    /// Resolves and fences a point click against the frames this socket actually
+    /// sent, then rewrites the params with the real displayed geometry (R4-8).
+    ///
+    /// Returns `Err((code, message))` for every unfenceable click; reference-based
+    /// clicks are passed through untouched.
+    fn fence_point_click(
+        &self,
+        params: Option<serde_json::Value>,
+    ) -> Result<Option<serde_json::Value>, (&'static str, String)> {
+        let Some(serde_json::Value::Object(mut map)) = params else {
+            return Err((
+                "BROWSER_INVALID_REQUEST",
+                "click requires either a snapshot reference or fenced point coordinates".into(),
+            ));
+        };
+
+        // Reference clicks are fenced by the snapshot contract, not the frame ledger.
+        if map.get("reference").and_then(|v| v.as_str()).is_some_and(|s| !s.trim().is_empty())
+            || map.get("selector").and_then(|v| v.as_str()).is_some_and(|s| !s.trim().is_empty())
+        {
+            return Ok(Some(serde_json::Value::Object(map)));
+        }
+
+        let (Some(u), Some(v)) = (
+            map.get("u").and_then(|v| v.as_f64()),
+            map.get("v").and_then(|v| v.as_f64()),
+        ) else {
+            return Err((
+                "BROWSER_INVALID_REQUEST",
+                "click requires either a snapshot reference or (u, v) coordinates".into(),
+            ));
+        };
+
+        // Displayed-frame identity is REQUIRED for point clicks; it is never optional.
+        let stream_id = map
+            .get("streamId")
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u32::try_from(v).ok());
+        let seq = map
+            .get("sequenceNumber")
+            .or_else(|| map.get("seq"))
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u32::try_from(v).ok());
+        let doc_gen = map.get("documentGeneration").and_then(normalize_decimal_u64);
+        let viewport_rev = map.get("viewportRevision").and_then(normalize_decimal_u64);
+        let instance_id = map
+            .get("browserInstanceId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let (Some(stream_id), Some(seq), Some(doc_gen), Some(viewport_rev), Some(instance_id)) =
+            (stream_id, seq, doc_gen, viewport_rev, instance_id)
+        else {
+            return Err((
+                "BROWSER_INVALID_REQUEST",
+                "point click requires displayed-frame metadata (streamId, sequenceNumber, documentGeneration, viewportRevision, browserInstanceId)"
+                    .into(),
+            ));
+        };
+
+        // A click may only reference a frame this connection actually sent.
+        let record = self
+            .sent_frames
+            .iter()
+            .rev()
+            .find(|rec| rec.stream_id == stream_id && rec.seq == seq)
+            .ok_or((
+                "BROWSER_STALE_FRAME",
+                "point click references a frame that was never sent on this stream".to_string(),
+            ))?;
+
+        // Frames older than the last frame the viewer acknowledged are superseded.
+        if self.last_acked_seq.is_some_and(|acked| seq < acked) {
+            return Err((
+                "BROWSER_STALE_FRAME",
+                "point click references a frame older than the last acknowledged frame".to_string(),
+            ));
+        }
+
+        if record.metadata.browser_instance_id != instance_id
+            || record.metadata.document_generation != doc_gen
+            || record.metadata.viewport_revision != viewport_rev
+        {
+            return Err((
+                "BROWSER_STALE_FRAME",
+                "point click identity does not match the referenced sent frame".to_string(),
+            ));
+        }
+
+        let frame_gen = record
+            .metadata
+            .document_generation
+            .parse::<u64>()
+            .map_err(|_| {
+                (
+                    "BROWSER_STALE_FRAME",
+                    "sent frame has an invalid document generation".to_string(),
+                )
+            })?;
+        let frame_vp = record
+            .metadata
+            .viewport_revision
+            .parse::<u64>()
+            .map_err(|_| {
+                (
+                    "BROWSER_STALE_FRAME",
+                    "sent frame has an invalid viewport revision".to_string(),
+                )
+            })?;
+
+        // Age fence: clicks on frames older than MAX_FRAME_AGE are rejected.
+        validate_point_timing_and_viewport(record.sent_at, frame_vp, frame_vp, frame_gen, frame_gen)
+            .map_err(|e| ("BROWSER_STALE_FRAME", e.to_string()))?;
+
+        // Real displayed geometry from the sent frame, never a guessed viewport.
+        let rect = LogicalRect {
+            x: record.metadata.capture_rect.x,
+            y: record.metadata.capture_rect.y,
+            width: record.metadata.capture_rect.width,
+            height: record.metadata.capture_rect.height,
+        };
+        let point = map_point_mainframe(u, v, &rect, false, false, false)
+            .map_err(|e| ("BROWSER_INVALID_REQUEST", e.to_string()))?;
+
+        map.insert(
+            "captureRect".into(),
+            serde_json::json!({
+                "x": rect.x,
+                "y": rect.y,
+                "width": rect.width,
+                "height": rect.height,
+            }),
+        );
+        map.insert("x".into(), serde_json::json!(point.x));
+        map.insert("y".into(), serde_json::json!(point.y));
+        map.insert(
+            "geometrySource".into(),
+            serde_json::Value::String(record.metadata.geometry_source.clone()),
+        );
+        map.insert("streamId".into(), serde_json::json!(stream_id));
+        map.insert("sequenceNumber".into(), serde_json::json!(seq));
+        map.insert(
+            "documentGeneration".into(),
+            serde_json::Value::String(doc_gen),
+        );
+        map.insert(
+            "viewportRevision".into(),
+            serde_json::Value::String(viewport_rev),
+        );
+
+        Ok(Some(serde_json::Value::Object(map)))
     }
 
     pub fn enqueue_frame(&mut self, frame_bytes: Vec<u8>, now: Instant) -> Option<Vec<u8>> {
@@ -119,7 +565,10 @@ impl BrowserWsSession {
             0
         };
         match queue.enqueue_frame(seq, frame_bytes.clone(), now) {
-            crate::remote::browser_admission::AdmissionOutcome::Admit => Some(frame_bytes),
+            crate::remote::browser_admission::AdmissionOutcome::Admit => {
+                self.record_sent_frame(&frame_bytes, seq, now);
+                Some(frame_bytes)
+            }
             _ => None,
         }
     }
@@ -214,13 +663,19 @@ impl BrowserWsSession {
                 }
 
                 // Wire subscription ownership and reconcile stream identity with backend
-                match backend
-                    .subscribe_viewer(&self.browser_id, &self.device_id, &viewer_instance_id)
+                let negotiated_options = match backend
+                    .subscribe_viewer(
+                        &self.browser_id,
+                        &self.device_id,
+                        &viewer_instance_id,
+                        Some(options.clone()),
+                    )
                     .await
                 {
-                    Ok((backend_sub, stream_id)) => {
+                    Ok((backend_sub, stream_id, negotiated)) => {
                         self.backend_subscription_id = Some(backend_sub);
                         self.stream_id = stream_id;
+                        negotiated
                     }
                     Err(e) => {
                         admission.unsubscribe(&self.browser_id, &sub_id);
@@ -234,12 +689,17 @@ impl BrowserWsSession {
                         let _ = out_tx.send(err).await;
                         return Ok(());
                     }
-                }
+                };
 
                 let queue = SubscriberQueue::new(sub_id.clone(), self.stream_id);
                 self.queue = Some(queue);
                 self.subscription_id = Some(sub_id.clone());
                 self.state = WsConnectionState::Streaming;
+                self.last_acked_seq = None;
+                self.sent_frames.clear();
+                if let Some(registry) = self.sharing.as_ref() {
+                    registry.viewer_admitted(&self.connection_id, &self.device_id);
+                }
 
                 let resp = ServerMessage::BrowserSubscribed {
                     request_id,
@@ -250,7 +710,7 @@ impl BrowserWsSession {
                     browser_service_epoch: "1".into(),
                     desktop_epoch: "1".into(),
                     document_generation: "1".into(),
-                    options,
+                    options: negotiated_options,
                 };
                 let _ = out_tx.send(resp).await;
                 Ok(())
@@ -258,8 +718,18 @@ impl BrowserWsSession {
 
             ClientMessage::BrowserFrameAck { stream_id, seq } => {
                 if self.state != WsConnectionState::Paused {
+                    if stream_id == self.stream_id {
+                        self.last_acked_seq = Some(match self.last_acked_seq {
+                            Some(prev) if prev > seq => prev,
+                            _ => seq,
+                        });
+                        if let Some(sub_id) = &self.subscription_id {
+                            admission.set_viewer_stalled(&self.browser_id, sub_id, false);
+                        }
+                    }
                     if let Some(queue) = self.queue.as_mut() {
-                        if let Some((_promoted_seq, promoted_bytes)) = queue.acknowledge_frame(stream_id, seq, now) {
+                        if let Some((promoted_seq, promoted_bytes)) = queue.acknowledge_frame(stream_id, seq, now) {
+                            self.record_sent_frame(&promoted_bytes, promoted_seq, now);
                             self.pending_promoted_frame = Some(promoted_bytes);
                         }
                     }
@@ -368,6 +838,9 @@ impl BrowserWsSession {
                     Ok(lease) => {
                         self.is_driver = true;
                         self.lease_epoch = Some(lease.lease_epoch);
+                        if let Some(registry) = self.sharing.as_ref() {
+                            registry.driver_claimed(&self.connection_id, &self.device_id);
+                        }
                         let resp = ServerMessage::BrowserDriverClaimed {
                             request_id,
                             lease_epoch: lease.lease_epoch.to_string(),
@@ -419,6 +892,9 @@ impl BrowserWsSession {
                 }
                 self.is_driver = false;
                 self.lease_epoch = None;
+                if let Some(registry) = self.sharing.as_ref() {
+                    registry.driver_released(&self.connection_id);
+                }
                 let resp = ServerMessage::BrowserDriverReleased {
                     request_id,
                     lease_epoch: Some(lease_epoch),
@@ -597,6 +1073,21 @@ impl BrowserWsSession {
                     return Ok(());
                 }
 
+                // R4-8: point clicks are fenced against frames this socket actually sent
+                // and rewritten with the real displayed geometry before execution.
+                let params = if command == "click" {
+                    match self.fence_point_click(params) {
+                        Ok(p) => p,
+                        Err((code, message)) => {
+                            let err = browser_error(Some(request_id), code, message, false, None);
+                            let _ = out_tx.send(err).await;
+                            return Ok(());
+                        }
+                    }
+                } else {
+                    params
+                };
+
                 let cmd_permit = match self.command_semaphore.clone().try_acquire_owned() {
                     Ok(p) => p,
                     Err(_) => {
@@ -753,14 +1244,130 @@ impl BrowserWsSession {
                 Ok(())
             }
 
-            ClientMessage::BrowserPause { .. } => {
-                self.state = WsConnectionState::Paused;
+            ClientMessage::BrowserSnapshot {
+                request_id,
+                browser_id,
+            } => {
+                // R4-9: snapshots are View-accessible; they read page structure only.
+                if browser_id != self.browser_id || self.subscription_id.is_none() {
+                    let err = browser_error(
+                        Some(request_id),
+                        "BROWSER_INVALID_REQUEST",
+                        "Invalid browser or subscription binding",
+                        false,
+                        None,
+                    );
+                    let _ = out_tx.send(err).await;
+                    return Ok(());
+                }
+
+                if !limiter.check_command(now) {
+                    let err = browser_error(
+                        Some(request_id),
+                        "BROWSER_RATE_LIMITED",
+                        "Command rate limit exceeded",
+                        true,
+                        Some(250),
+                    );
+                    let _ = out_tx.send(err).await;
+                    return Ok(());
+                }
+
+                let res = backend
+                    .execute_command(BrowserCommandContext {
+                        browser_id: self.browser_id.clone(),
+                        command: "snapshot".into(),
+                        params: None,
+                        document_generation: None,
+                    })
+                    .await;
+
+                let reply = match res {
+                    Ok(result) => match result.value.as_ref().map(snapshot_catalogue_from_backend) {
+                        Some(Ok((snapshot_id, map_revision, root, elements))) => {
+                            ServerMessage::BrowserSnapshot {
+                                request_id,
+                                snapshot_id,
+                                map_revision,
+                                root,
+                                elements,
+                            }
+                        }
+                        Some(Err(e)) => browser_error(
+                            Some(request_id),
+                            "BROWSER_EXECUTION_FAILED",
+                            e,
+                            false,
+                            None,
+                        ),
+                        None => browser_error(
+                            Some(request_id),
+                            "BROWSER_EXECUTION_FAILED",
+                            "snapshot returned no result",
+                            false,
+                            None,
+                        ),
+                    },
+                    Err(e) => {
+                        let (code, retryable, retry_after_ms) = match &e {
+                            RemoteBrowserError::WaitTimeout => ("BROWSER_TIMEOUT", true, Some(1000)),
+                            RemoteBrowserError::Forbidden(_) => ("BROWSER_FORBIDDEN", false, None),
+                            RemoteBrowserError::Unavailable(_) => ("BROWSER_UNAVAILABLE", true, Some(2000)),
+                            RemoteBrowserError::NotFound(_) => ("BROWSER_NOT_FOUND", false, None),
+                            RemoteBrowserError::InvalidRequest(_) => ("BROWSER_INVALID_REQUEST", false, None),
+                            RemoteBrowserError::ExecutionFailed(_) => ("BROWSER_EXECUTION_FAILED", false, None),
+                        };
+                        browser_error(Some(request_id), code, e.to_string(), retryable, retry_after_ms)
+                    }
+                };
+                let _ = out_tx.send(reply).await;
                 Ok(())
             }
 
-            ClientMessage::BrowserResume { .. } => {
-                if self.subscription_id.is_some() {
+            ClientMessage::BrowserPause {
+                browser_id,
+                stream_id,
+            } => {
+                // R4-10: pause/resume are bound to (browserId, streamId) exactly as sent.
+                if browser_id != self.browser_id || stream_id != self.stream_id {
+                    let err = browser_error(
+                        None,
+                        "BROWSER_INVALID_REQUEST",
+                        "Pause does not match the active browser/stream binding",
+                        false,
+                        None,
+                    );
+                    let _ = out_tx.send(err).await;
+                    return Ok(());
+                }
+                self.state = WsConnectionState::Paused;
+                if let Some(sub_id) = &self.subscription_id {
+                    admission.set_viewer_paused(&self.browser_id, sub_id, true);
+                }
+                Ok(())
+            }
+
+            ClientMessage::BrowserResume {
+                browser_id,
+                stream_id,
+            } => {
+                if browser_id != self.browser_id || stream_id != self.stream_id {
+                    let err = browser_error(
+                        None,
+                        "BROWSER_INVALID_REQUEST",
+                        "Resume does not match the active browser/stream binding",
+                        false,
+                        None,
+                    );
+                    let _ = out_tx.send(err).await;
+                    return Ok(());
+                }
+                if let Some(sub_id) = self.subscription_id.clone() {
+                    // A frame dropped while paused would otherwise stay unacked forever and
+                    // stall every later frame; drop stale credit and take a fresh frame.
+                    self.reset_frame_credit();
                     self.state = WsConnectionState::Streaming;
+                    admission.set_viewer_paused(&self.browser_id, &sub_id, false);
                 }
                 Ok(())
             }
@@ -799,7 +1406,12 @@ impl BrowserWsSession {
             queue.close();
         }
         self.is_driver = false;
+        self.sent_frames.clear();
+        self.last_acked_seq = None;
         self.state = WsConnectionState::Closed;
+        if let Some(registry) = self.sharing.as_ref() {
+            registry.viewer_removed(&self.connection_id);
+        }
     }
 
     pub async fn teardown_with_backend(
@@ -1794,7 +2406,6 @@ pub mod tests {
             DevicePermission::Control,
             now,
         );
-
         let admission = AdmissionController::new();
         let backend: Arc<dyn RemoteBrowserBackend> = Arc::new(InProcessTestBackend::new());
         let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(16);
@@ -1819,8 +2430,8 @@ pub mod tests {
 
         // 2. Pause session via BrowserPause
         let pause = ClientMessage::BrowserPause {
-            request_id: Some("p1".into()),
-            subscription_id: session.subscription_id.clone(),
+            browser_id: "b1".into(),
+            stream_id: session.stream_id,
         };
         session.dispatch_client_message(pause, &backend, &admission, &out_tx, now).await.unwrap();
         assert_eq!(session.state, WsConnectionState::Paused);
@@ -1837,8 +2448,8 @@ pub mod tests {
 
         // 3. Resume session via BrowserResume
         let resume = ClientMessage::BrowserResume {
-            request_id: Some("r1".into()),
-            subscription_id: session.subscription_id.clone(),
+            browser_id: "b1".into(),
+            stream_id: session.stream_id,
         };
         session.dispatch_client_message(resume, &backend, &admission, &out_tx, now).await.unwrap();
         assert_eq!(session.state, WsConnectionState::Streaming);
@@ -1855,5 +2466,677 @@ pub mod tests {
         let ack3 = ClientMessage::BrowserFrameAck { stream_id: 1, seq: 3 };
         session.dispatch_client_message(ack3, &backend, &admission, &out_tx, now).await.unwrap();
         assert_eq!(session.pending_promoted_frame, Some(f4));
+    }
+
+    // -----------------------------------------------------------------------
+    // R4-5 / R4-8 / R4-9 / R4-10 regression coverage
+    // -----------------------------------------------------------------------
+
+    struct SnapshotBackend {
+        value: serde_json::Value,
+    }
+    impl RemoteBrowserBackend for SnapshotBackend {
+        fn list_sessions<'a>(
+            &'a self,
+            _scope: &'a crate::remote::browser_backend::DesktopScope,
+        ) -> futures_util::future::BoxFuture<'a, Result<Vec<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>> {
+            Box::pin(async move { Ok(vec![]) })
+        }
+        fn identify_session<'a>(
+            &'a self,
+            _scope: &'a crate::remote::browser_backend::DesktopScope,
+        ) -> futures_util::future::BoxFuture<'a, Result<Option<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>> {
+            Box::pin(async move { Ok(None) })
+        }
+        fn get_state<'a>(
+            &'a self,
+            _browser_id: &'a str,
+            _scope: &'a crate::remote::browser_backend::DesktopScope,
+        ) -> futures_util::future::BoxFuture<'a, Result<crate::remote::browser_backend::BrowserRemoteState, RemoteBrowserError>> {
+            Box::pin(async move { Err(RemoteBrowserError::NotFound("b1".into())) })
+        }
+        fn execute_command(
+            &self,
+            ctx: BrowserCommandContext,
+        ) -> futures_util::future::BoxFuture<'_, Result<BrowserCommandResult, RemoteBrowserError>> {
+            let value = self.value.clone();
+            Box::pin(async move {
+                assert_eq!(ctx.command, "snapshot");
+                Ok(BrowserCommandResult {
+                    success: true,
+                    value: Some(value),
+                })
+            })
+        }
+        fn capabilities(&self) -> futures_util::future::BoxFuture<'_, crate::remote::browser_backend::BrowserCapabilities> {
+            Box::pin(async move {
+                crate::remote::browser_backend::BrowserCapabilities {
+                    browser_available: true,
+                    supported_formats: vec![],
+                    supported_commands: vec!["snapshot".into()],
+                    max_edge: 2048,
+                    max_fps: 8,
+                }
+            })
+        }
+    }
+
+    struct CapturingBackend {
+        last_ctx: std::sync::Mutex<Option<BrowserCommandContext>>,
+    }
+    impl RemoteBrowserBackend for CapturingBackend {
+        fn list_sessions<'a>(
+            &'a self,
+            _scope: &'a crate::remote::browser_backend::DesktopScope,
+        ) -> futures_util::future::BoxFuture<'a, Result<Vec<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>> {
+            Box::pin(async move { Ok(vec![]) })
+        }
+        fn identify_session<'a>(
+            &'a self,
+            _scope: &'a crate::remote::browser_backend::DesktopScope,
+        ) -> futures_util::future::BoxFuture<'a, Result<Option<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>> {
+            Box::pin(async move { Ok(None) })
+        }
+        fn get_state<'a>(
+            &'a self,
+            _browser_id: &'a str,
+            _scope: &'a crate::remote::browser_backend::DesktopScope,
+        ) -> futures_util::future::BoxFuture<'a, Result<crate::remote::browser_backend::BrowserRemoteState, RemoteBrowserError>> {
+            Box::pin(async move { Err(RemoteBrowserError::NotFound("b1".into())) })
+        }
+        fn execute_command(
+            &self,
+            ctx: BrowserCommandContext,
+        ) -> futures_util::future::BoxFuture<'_, Result<BrowserCommandResult, RemoteBrowserError>> {
+            Box::pin(async move {
+                *self.last_ctx.lock().unwrap() = Some(ctx);
+                Ok(BrowserCommandResult {
+                    success: true,
+                    value: Some(serde_json::json!({ "clicked": true })),
+                })
+            })
+        }
+        fn capabilities(&self) -> futures_util::future::BoxFuture<'_, crate::remote::browser_backend::BrowserCapabilities> {
+            Box::pin(async move {
+                crate::remote::browser_backend::BrowserCapabilities {
+                    browser_available: true,
+                    supported_formats: vec![],
+                    supported_commands: vec!["click".into()],
+                    max_edge: 2048,
+                    max_fps: 8,
+                }
+            })
+        }
+    }
+
+    fn click_test_metadata(seq_stream_id: u32) -> crate::remote::browser_protocol::BrowserFrameMetadata {
+        crate::remote::browser_protocol::BrowserFrameMetadata {
+            offset_top: 0.0,
+            page_scale_factor: 1.0,
+            device_width: 1280.0,
+            device_height: 800.0,
+            image_width: 1,
+            image_height: 1,
+            scroll_offset_x: 0.0,
+            scroll_offset_y: 0.0,
+            timestamp: 1726560000.0,
+            stream_id: seq_stream_id,
+            browser_instance_id: "bi1".into(),
+            browser_service_epoch: "1".into(),
+            desktop_epoch: "1".into(),
+            document_generation: "15".into(),
+            viewport_revision: "3".into(),
+            capture_rect: crate::remote::browser_protocol::BrowserCaptureRect {
+                x: 0.0,
+                y: 0.0,
+                width: 1280.0,
+                height: 800.0,
+            },
+            geometry_source: "wkSnapshot".into(),
+        }
+    }
+
+    fn sample_click_frame(seq: u32, stream_id: u32) -> Vec<u8> {
+        let png: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        crate::remote::browser_protocol::encode_binary_frame(
+            crate::remote::browser_protocol::BrowserImageFormat::Png,
+            seq,
+            &click_test_metadata(stream_id),
+            png,
+        )
+        .expect("encode click test frame")
+    }
+
+    async fn subscribe_and_claim(
+        session: &mut BrowserWsSession,
+        backend: &Arc<dyn RemoteBrowserBackend>,
+        admission: &AdmissionController,
+        out_tx: &tokio::sync::mpsc::Sender<ServerMessage>,
+        out_rx: &mut tokio::sync::mpsc::Receiver<ServerMessage>,
+        now: Instant,
+    ) {
+        let sub = ClientMessage::BrowserSubscribe {
+            request_id: "r-sub".into(),
+            viewer_instance_id: "v1".into(),
+            options: Default::default(),
+        };
+        session.dispatch_client_message(sub, backend, admission, out_tx, now).await.unwrap();
+        let _ = out_rx.recv().await.unwrap();
+
+        let claim = ClientMessage::BrowserDriverClaim {
+            request_id: "r-claim".into(),
+            subscription_id: session.subscription_id.clone().unwrap(),
+            browser_id: "b1".into(),
+        };
+        session.dispatch_client_message(claim, backend, admission, out_tx, now).await.unwrap();
+        let _ = out_rx.recv().await.unwrap();
+    }
+
+    /// R4-10: a frame dropped while hidden must not strand ACK credit across resume.
+    #[tokio::test]
+    async fn test_r4_10_resume_resets_stranded_ack_credit() {
+        let now = Instant::now();
+        let mut session = BrowserWsSession::new(
+            "c-credit".into(),
+            "d-credit".into(),
+            "b1".into(),
+            DevicePermission::Control,
+            now,
+        );
+        let admission = AdmissionController::new();
+        let backend: Arc<dyn RemoteBrowserBackend> = Arc::new(InProcessTestBackend::new());
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(16);
+
+        let sub = ClientMessage::BrowserSubscribe {
+            request_id: "r-sub".into(),
+            viewer_instance_id: "v1".into(),
+            options: Default::default(),
+        };
+        session.dispatch_client_message(sub, &backend, &admission, &out_tx, now).await.unwrap();
+        let _ = out_rx.recv().await.unwrap();
+
+        // Frame 1 is sent but the viewer goes hidden before acknowledging it.
+        let f1 = vec![0x62, 1, 1, 1, 1, 0, 0, 0, 10, 20];
+        assert_eq!(session.enqueue_frame(f1.clone(), now), Some(f1));
+
+        let pause = ClientMessage::BrowserPause {
+            browser_id: "b1".into(),
+            stream_id: session.stream_id,
+        };
+        session.dispatch_client_message(pause, &backend, &admission, &out_tx, now).await.unwrap();
+        assert_eq!(session.state, WsConnectionState::Paused);
+
+        let resume = ClientMessage::BrowserResume {
+            browser_id: "b1".into(),
+            stream_id: session.stream_id,
+        };
+        session.dispatch_client_message(resume, &backend, &admission, &out_tx, now).await.unwrap();
+        assert_eq!(session.state, WsConnectionState::Streaming);
+
+        // Credit must have been reset: the next frame flows without an ACK for the stranded frame 1.
+        let f2 = vec![0x62, 1, 1, 1, 2, 0, 0, 0, 30, 40];
+        assert_eq!(
+            session.enqueue_frame(f2.clone(), now),
+            Some(f2),
+            "resume must reset ACK credit and request a fresh frame"
+        );
+
+        // Pause/resume bound to a foreign stream id must be rejected.
+        let bad_pause = ClientMessage::BrowserPause {
+            browser_id: "b1".into(),
+            stream_id: session.stream_id + 99,
+        };
+        session.dispatch_client_message(bad_pause, &backend, &admission, &out_tx, now).await.unwrap();
+        assert_eq!(session.state, WsConnectionState::Streaming);
+        match out_rx.recv().await.unwrap() {
+            ServerMessage::BrowserError { code, .. } => assert_eq!(code, "BROWSER_INVALID_REQUEST"),
+            other => panic!("Expected BROWSER_INVALID_REQUEST, got {other:?}"),
+        }
+    }
+
+    /// R4-9: browserSnapshot must be a View-accessible wire request returning a real reference catalogue.
+    #[tokio::test]
+    async fn test_r4_9_browser_snapshot_returns_reference_catalogue() {
+        let now = Instant::now();
+        let admission = AdmissionController::new();
+        let mut session = BrowserWsSession::new(
+            "c-snap".into(),
+            "d-snap".into(),
+            "b1".into(),
+            DevicePermission::View, // View-only device must be able to snapshot
+            now,
+        );
+        let backend: Arc<dyn RemoteBrowserBackend> = Arc::new(SnapshotBackend {
+            value: serde_json::json!({
+                "snapshotId": "snap-1",
+                "mapRevision": 12,
+                "documentGeneration": "15",
+                "elements": [
+                    { "ref": "e1", "role": "button", "name": "Send" },
+                    { "ref": "e2", "role": "textbox", "name": "Message" }
+                ]
+            }),
+        });
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(16);
+
+        let sub = ClientMessage::BrowserSubscribe {
+            request_id: "r-sub".into(),
+            viewer_instance_id: "v1".into(),
+            options: Default::default(),
+        };
+        session.dispatch_client_message(sub, &backend, &admission, &out_tx, now).await.unwrap();
+        let _ = out_rx.recv().await.unwrap();
+
+        let snap = ClientMessage::BrowserSnapshot {
+            request_id: "r-snap".into(),
+            browser_id: "b1".into(),
+        };
+        session.dispatch_client_message(snap, &backend, &admission, &out_tx, now).await.unwrap();
+
+        match out_rx.recv().await.unwrap() {
+            ServerMessage::BrowserSnapshot {
+                request_id,
+                snapshot_id,
+                map_revision,
+                elements,
+                ..
+            } => {
+                assert_eq!(request_id, "r-snap");
+                assert_eq!(snapshot_id, "snap-1");
+                assert_eq!(map_revision, "12", "mapRevision must be a decimal string");
+                assert_eq!(elements.len(), 2, "catalogue must carry public references");
+                assert_eq!(elements[0].get("ref").and_then(|v| v.as_str()), Some("e1"));
+            }
+            other => panic!("Expected BrowserSnapshot, got {other:?}"),
+        }
+
+        // Counts-only responses are not a reference catalogue and must be rejected.
+        let counts_backend: Arc<dyn RemoteBrowserBackend> = Arc::new(SnapshotBackend {
+            value: serde_json::json!({
+                "snapshotId": "snap-2",
+                "mapRevision": "13",
+                "elementsCount": 7
+            }),
+        });
+        let snap2 = ClientMessage::BrowserSnapshot {
+            request_id: "r-snap-2".into(),
+            browser_id: "b1".into(),
+        };
+        session
+            .dispatch_client_message(snap2, &counts_backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
+        match out_rx.recv().await.unwrap() {
+            ServerMessage::BrowserError { code, .. } => {
+                assert_eq!(code, "BROWSER_EXECUTION_FAILED");
+            }
+            other => panic!("Expected BROWSER_EXECUTION_FAILED for counts-only snapshot, got {other:?}"),
+        }
+    }
+
+    /// R4-8: point clicks are fenced by owned sent-frame records and use the real displayed geometry.
+    #[tokio::test]
+    async fn test_r4_8_point_click_sent_frame_fence_and_real_geometry() {
+        let now = Instant::now();
+        let admission = AdmissionController::new();
+        let mut session = BrowserWsSession::new(
+            "c-click".into(),
+            "d-click".into(),
+            "b1".into(),
+            DevicePermission::Control,
+            now,
+        );
+        let capturing = Arc::new(CapturingBackend {
+            last_ctx: std::sync::Mutex::new(None),
+        });
+        let backend: Arc<dyn RemoteBrowserBackend> = capturing.clone();
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(16);
+
+        subscribe_and_claim(&mut session, &backend, &admission, &out_tx, &mut out_rx, now).await;
+        let epoch = session.lease_epoch.unwrap().to_string();
+        let stream_id = session.stream_id;
+
+        // 1. Point click without displayed-frame metadata is rejected (metadata is required).
+        let bare_click = ClientMessage::BrowserCommand {
+            request_id: "c-bare".into(),
+            request_seq: "1".into(),
+            browser_id: "b1".into(),
+            lease_epoch: epoch.clone(),
+            browser_instance_id: "bi1".into(),
+            desktop_epoch: "1".into(),
+            document_generation: "15".into(),
+            command: "click".into(),
+            params: Some(serde_json::json!({ "u": 0.5, "v": 0.25 })),
+        };
+        session.dispatch_client_message(bare_click, &backend, &admission, &out_tx, now).await.unwrap();
+        match out_rx.recv().await.unwrap() {
+            ServerMessage::BrowserError { code, .. } => assert_eq!(code, "BROWSER_INVALID_REQUEST"),
+            other => panic!("Expected BROWSER_INVALID_REQUEST for click without frame metadata, got {other:?}"),
+        }
+
+        // Send and acknowledge two real frames.
+        let f1 = sample_click_frame(1, stream_id);
+        assert!(session.enqueue_frame(f1, now).is_some());
+        let ack1 = ClientMessage::BrowserFrameAck { stream_id, seq: 1 };
+        session.dispatch_client_message(ack1, &backend, &admission, &out_tx, now).await.unwrap();
+        let f2 = sample_click_frame(2, stream_id);
+        assert!(session.enqueue_frame(f2, now).is_some());
+        let ack2 = ClientMessage::BrowserFrameAck { stream_id, seq: 2 };
+        session.dispatch_client_message(ack2, &backend, &admission, &out_tx, now).await.unwrap();
+
+        // 2. Click referencing a frame older than the last acked frame is rejected.
+        let stale_click = ClientMessage::BrowserCommand {
+            request_id: "c-stale".into(),
+            request_seq: "2".into(),
+            browser_id: "b1".into(),
+            lease_epoch: epoch.clone(),
+            browser_instance_id: "bi1".into(),
+            desktop_epoch: "1".into(),
+            document_generation: "15".into(),
+            command: "click".into(),
+            params: Some(serde_json::json!({
+                "u": 0.5,
+                "v": 0.25,
+                "streamId": stream_id,
+                "sequenceNumber": 1,
+                "documentGeneration": "15",
+                "viewportRevision": "3",
+                "browserInstanceId": "bi1"
+            })),
+        };
+        session.dispatch_client_message(stale_click, &backend, &admission, &out_tx, now).await.unwrap();
+        match out_rx.recv().await.unwrap() {
+            ServerMessage::BrowserError { code, .. } => assert_eq!(code, "BROWSER_STALE_FRAME"),
+            other => panic!("Expected BROWSER_STALE_FRAME for superseded frame, got {other:?}"),
+        }
+
+        // 3. Click on the current frame succeeds and carries the real displayed geometry.
+        let good_click = ClientMessage::BrowserCommand {
+            request_id: "c-good".into(),
+            request_seq: "3".into(),
+            browser_id: "b1".into(),
+            lease_epoch: epoch,
+            browser_instance_id: "bi1".into(),
+            desktop_epoch: "1".into(),
+            document_generation: "15".into(),
+            command: "click".into(),
+            params: Some(serde_json::json!({
+                "u": 0.5,
+                "v": 0.25,
+                "streamId": stream_id,
+                "sequenceNumber": 2,
+                "documentGeneration": "15",
+                "viewportRevision": "3",
+                "browserInstanceId": "bi1"
+            })),
+        };
+        session.dispatch_client_message(good_click, &backend, &admission, &out_tx, now).await.unwrap();
+        match out_rx.recv().await.unwrap() {
+            ServerMessage::BrowserResult { request_id, .. } => assert_eq!(request_id, "c-good"),
+            other => panic!("Expected BrowserResult for fenced click, got {other:?}"),
+        }
+
+        let ctx = capturing.last_ctx.lock().unwrap().clone().expect("click reached backend");
+        let params = ctx.params.expect("click params");
+        assert_eq!(
+            params.get("captureRect"),
+            Some(&serde_json::json!({ "x": 0.0, "y": 0.0, "width": 1280.0, "height": 800.0 })),
+            "click must carry the real displayed capture rect"
+        );
+        assert_eq!(params.get("x").and_then(|v| v.as_f64()), Some(640.0));
+        assert_eq!(params.get("y").and_then(|v| v.as_f64()), Some(200.0));
+        assert_eq!(
+            params.get("geometrySource").and_then(|v| v.as_str()),
+            Some("wkSnapshot")
+        );
+    }
+
+    /// R4-5: admission/revocation transitions publish authoritative sharing state for the desktop indicator.
+    #[tokio::test]
+    async fn test_r4_5_sharing_state_published_on_admission_and_revocation() {
+        let now = Instant::now();
+        let admission = AdmissionController::new();
+        let registry = Arc::new(SharingRegistry::new());
+        let mut sharing_rx = registry.subscribe();
+        let mut session = BrowserWsSession::new(
+            "c-share".into(),
+            "d-share".into(),
+            "b1".into(),
+            DevicePermission::Control,
+            now,
+        )
+        .with_sharing_registry(Arc::clone(&registry));
+        let backend: Arc<dyn RemoteBrowserBackend> = Arc::new(InProcessTestBackend::new());
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(16);
+
+        subscribe_and_claim(&mut session, &backend, &admission, &out_tx, &mut out_rx, now).await;
+
+        // Viewer admission publishes sharing state
+        let viewing = sharing_rx.recv().await.unwrap();
+        assert!(viewing.is_sharing);
+        assert_eq!(viewing.active_sessions_count, 1);
+        assert_eq!(viewing.driver_status, SharingDriverStatus::Viewing);
+
+        // Driver claim publishes driving state with the owning device
+        let driving = sharing_rx.recv().await.unwrap();
+        assert!(driving.is_sharing);
+        assert_eq!(driving.driver_status, SharingDriverStatus::Driving);
+        assert_eq!(driving.driver_device_id.as_deref(), Some("d-share"));
+
+        // Desktop reclaim revocation publishes the loss of remote control
+        session.mark_driver_revoked("desktop_reclaim");
+        let revoked = sharing_rx.recv().await.unwrap();
+        assert_eq!(revoked.driver_status, SharingDriverStatus::Viewing);
+        assert!(revoked.is_sharing);
+
+        // Teardown publishes the inactive state
+        session.teardown(&admission);
+        let idle = sharing_rx.recv().await.unwrap();
+        assert!(!idle.is_sharing);
+        assert_eq!(idle.active_sessions_count, 0);
+        assert_eq!(idle.driver_status, SharingDriverStatus::Idle);
+    }
+
+    /// R4-15: Capabilities advertisement derives from installed runtime support (querying snapshot source).
+    #[tokio::test]
+    async fn test_r4_15_capabilities_derived_from_installed_snapshot_source() {
+        use crate::browser::manager::BrowserManager;
+        use crate::browser::remote_driver::RemoteDriverBroker;
+        use crate::browser::remote_service::BrowserRemoteService;
+        use crate::browser::snapshot_source::UnsupportedSnapshotSource;
+        use crate::remote::browser_backend::InProcessBrowserServiceBackend;
+
+        let manager = Arc::new(BrowserManager::new());
+        let broker = Arc::new(RemoteDriverBroker::new());
+        let remote_service = Arc::new(BrowserRemoteService::with_snapshot_source(
+            (*manager).clone(),
+            broker,
+            Arc::new(UnsupportedSnapshotSource),
+        ));
+        let backend = InProcessBrowserServiceBackend::new(remote_service, manager);
+        let caps = backend.capabilities().await;
+
+        assert!(
+            caps.supported_formats.is_empty(),
+            "When snapshot source is unsupported, supported_formats must be empty"
+        );
+        assert_eq!(caps.max_edge, 0);
+        assert_eq!(caps.max_fps, 0);
+        assert!(
+            !caps.supported_commands.contains(&"snapshot".to_string()),
+            "Unsupported screencast platform must not advertise snapshot command"
+        );
+    }
+
+    /// R4-15: Negotiated capture profile (format / interval / max_edge) threads from WS subscription
+    /// and the first negotiated profile is enforced and reported to subsequent subscribers.
+    #[tokio::test]
+    async fn test_r4_15_first_negotiated_profile_enforced_and_reported() {
+        use crate::remote::browser_protocol::BrowserImageFormat;
+
+        let now = Instant::now();
+        let admission = AdmissionController::new();
+        let backend: Arc<dyn RemoteBrowserBackend> = Arc::new(InProcessTestBackend::new());
+
+        let mut session1 = BrowserWsSession::new(
+            "conn-p1".into(),
+            "dev-p1".into(),
+            "b1".into(),
+            DevicePermission::Control,
+            now,
+        );
+        let (tx1, mut rx1) = tokio::sync::mpsc::channel(16);
+
+        // Client 1 negotiates PNG profile with interval 120ms and max_edge 1024
+        let sub1 = ClientMessage::BrowserSubscribe {
+            request_id: "r-sub-1".into(),
+            viewer_instance_id: "v1".into(),
+            options: BrowserSubscribeOptions {
+                format: BrowserImageFormat::Png,
+                quality: None,
+                interval_ms: Some(120),
+                max_edge: Some(1024),
+            },
+        };
+        session1
+            .dispatch_client_message(sub1, &backend, &admission, &tx1, now)
+            .await
+            .unwrap();
+
+        let resp1 = rx1.recv().await.unwrap();
+        match resp1 {
+            ServerMessage::BrowserSubscribed { options, .. } => {
+                assert_eq!(options.format, BrowserImageFormat::Png);
+                assert_eq!(options.interval_ms, Some(120));
+                assert_eq!(options.max_edge, Some(1024));
+            }
+            other => panic!("Expected BrowserSubscribed for sub 1, got {other:?}"),
+        }
+
+        // Client 2 subscribes with different options (JPEG, 500ms, 800)
+        let mut session2 = BrowserWsSession::new(
+            "conn-p2".into(),
+            "dev-p2".into(),
+            "b1".into(),
+            DevicePermission::View,
+            now,
+        );
+        let (tx2, mut rx2) = tokio::sync::mpsc::channel(16);
+
+        let sub2 = ClientMessage::BrowserSubscribe {
+            request_id: "r-sub-2".into(),
+            viewer_instance_id: "v2".into(),
+            options: BrowserSubscribeOptions {
+                format: BrowserImageFormat::Jpeg,
+                quality: Some(50),
+                interval_ms: Some(500),
+                max_edge: Some(800),
+            },
+        };
+        session2
+            .dispatch_client_message(sub2, &backend, &admission, &tx2, now)
+            .await
+            .unwrap();
+
+        let resp2 = rx2.recv().await.unwrap();
+        match resp2 {
+            ServerMessage::BrowserSubscribed { options, .. } => {
+                // Must ENFORCE and REPORT the first negotiated profile (PNG, 120ms, 1024)
+                assert_eq!(
+                    options.format,
+                    BrowserImageFormat::Png,
+                    "Second subscriber must be bound to the first negotiated profile format"
+                );
+                assert_eq!(
+                    options.interval_ms,
+                    Some(120),
+                    "Second subscriber must be bound to the first negotiated interval"
+                );
+                assert_eq!(
+                    options.max_edge,
+                    Some(1024),
+                    "Second subscriber must be bound to the first negotiated maxEdge"
+                );
+            }
+            other => panic!("Expected BrowserSubscribed for sub 2, got {other:?}"),
+        }
+    }
+
+    /// R4-15: Paused and stalled viewers are not capture-eligible; capture halts when no viewers are eligible.
+    #[tokio::test]
+    async fn test_r4_15_paused_and_stalled_viewers_not_capture_eligible() {
+        let now = Instant::now();
+        let admission = AdmissionController::new();
+        let mut capture_rx = admission.subscribe_capture();
+        let backend: Arc<dyn RemoteBrowserBackend> = Arc::new(InProcessTestBackend::new());
+
+        let mut session = BrowserWsSession::new(
+            "conn-pause".into(),
+            "dev-pause".into(),
+            "b1".into(),
+            DevicePermission::Control,
+            now,
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+
+        let sub = ClientMessage::BrowserSubscribe {
+            request_id: "r-sub".into(),
+            viewer_instance_id: "v1".into(),
+            options: BrowserSubscribeOptions::default(),
+        };
+        session
+            .dispatch_client_message(sub, &backend, &admission, &tx, now)
+            .await
+            .unwrap();
+        let _ = rx.recv().await.unwrap();
+
+        // Initially capturing is active
+        assert!(admission.should_capture("b1"));
+        let (init_browser, init_capturing) = capture_rx.recv().await.unwrap();
+        assert_eq!(init_browser, "b1");
+        assert!(init_capturing);
+
+        // Viewer pauses: admission must NOT treat paused viewer as capture-eligible
+        let pause = ClientMessage::BrowserPause {
+            browser_id: "b1".into(),
+            stream_id: session.stream_id,
+        };
+        session
+            .dispatch_client_message(pause, &backend, &admission, &tx, now)
+            .await
+            .unwrap();
+
+        assert!(
+            !admission.should_capture("b1"),
+            "Paused viewer must not be capture-eligible"
+        );
+        // Capture broadcast must signal halt (b1, false)
+        let (halted_browser, capturing) = capture_rx.recv().await.unwrap();
+        assert_eq!(halted_browser, "b1");
+        assert!(!capturing);
+
+        // Viewer resumes: capture eligibility is restored
+        let resume = ClientMessage::BrowserResume {
+            browser_id: "b1".into(),
+            stream_id: session.stream_id,
+        };
+        session
+            .dispatch_client_message(resume, &backend, &admission, &tx, now)
+            .await
+            .unwrap();
+
+        assert!(
+            admission.should_capture("b1"),
+            "Resumed viewer must restore capture eligibility"
+        );
+        let (resumed_browser, capturing) = capture_rx.recv().await.unwrap();
+        assert_eq!(resumed_browser, "b1");
+        assert!(capturing);
     }
 }

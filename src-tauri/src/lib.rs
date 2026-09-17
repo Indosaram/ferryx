@@ -934,10 +934,9 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             Arc::clone(&browser_manager),
         ),
     );
-    if let Some(state) = remote_manager.state() {
-        state.set_browser_backend(Arc::clone(&in_process_backend) as Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>);
-    }
+    remote_manager.set_browser_backend(Arc::clone(&in_process_backend) as Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>);
     let in_process_backend_setup = Arc::clone(&in_process_backend);
+    let browser_remote_service_setup = Arc::clone(&browser_remote_service);
     #[cfg(feature = "native-terminal")]
     let native_terminal_surface_host = NativeTerminalSurfaceHostState::default();
     let setup_activations = Arc::clone(&notification_activations);
@@ -1063,8 +1062,19 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                 app.handle().clone(),
                 worktree_rescan_registry,
             );
+            browser_remote_service_setup.set_snapshot_source(Arc::new(
+                crate::browser::snapshot_source::TauriBrowserSnapshotSource::new(app.handle().clone()),
+            ));
+            let gui_executor = Arc::new(crate::ipc::browser::GuiBrowserCommandExecutor::new(
+                app.handle().clone(),
+                Arc::clone(&browser_cli_manager),
+            ));
+            in_process_backend_setup.set_executor(gui_executor);
             if let Some(remote_state) = app.try_state::<Arc<crate::remote::state::RemoteGatewayState>>() {
                 remote_state.set_browser_backend(Arc::clone(&in_process_backend_setup) as Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>);
+            }
+            if let Some(remote_mgr) = app.try_state::<Arc<ipc::remote::RemoteGatewayManager>>() {
+                remote_mgr.set_browser_backend(Arc::clone(&in_process_backend_setup) as Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>);
             }
             Ok(())
         })

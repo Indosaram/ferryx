@@ -71,6 +71,7 @@ export function useRemoteBrowser({
   const currentStreamIdRef = useRef<number | null>(null);
   const lastDecodedSeqRef = useRef<number>(-1);
   const currentUrlRef = useRef<string | null>(null);
+  const unconfirmedFrameTimeRef = useRef<number | null>(null);
 
   // Decompose options to prevent infinite useEffect triggers from object identity
   const format = options?.format ?? "jpeg";
@@ -107,6 +108,7 @@ export function useRemoteBrowser({
   }, [clearFrameBuffer]);
 
   const confirmPresented = useCallback((streamId: number, seq: number) => {
+    unconfirmedFrameTimeRef.current = null;
     const isHidden = typeof document !== "undefined" && (document.visibilityState === "hidden" || document.hidden);
     if (isHidden) return;
     if (clientRef.current) {
@@ -241,6 +243,7 @@ export function useRemoteBrowser({
 
           setImageUrl(newUrl);
           setFrame(incomingFrame);
+          unconfirmedFrameTimeRef.current = Date.now();
           setStatus((prev) => (prev === "paused" ? "streaming" : prev));
 
           // Presentation-gated ACK: do NOT ACK immediately here on blob creation.
@@ -301,6 +304,68 @@ export function useRemoteBrowser({
     reconnectNonce,
     clearFrameBuffer,
   ]);
+
+  // Viewer heartbeat loop: emit heartbeats independently of driver ownership while connected (R4-13)
+  useEffect(() => {
+    if (!clientRef.current || (status !== "streaming" && status !== "ready" && status !== "paused")) {
+      return;
+    }
+
+    const timer = setInterval(async () => {
+      if (clientRef.current) {
+        try {
+          await clientRef.current.heartbeat();
+        } catch {
+          // If viewer heartbeat fails, teardown socket
+          if (clientRef.current) {
+            clientRef.current.close();
+          }
+        }
+      }
+    }, 5000);
+
+    return () => clearInterval(timer);
+  }, [status]);
+
+  // Live readiness deadline timer: tears down stalled connection if status does not reach streaming (R4-13)
+  useEffect(() => {
+    if (status !== "opening" && status !== "ready") {
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      setError(new Error("Readiness deadline expired: screencast did not reach streaming state"));
+      if (clientRef.current) {
+        clientRef.current.close();
+      }
+      setStatus("closed");
+    }, 10000);
+
+    return () => clearTimeout(timer);
+  }, [status]);
+
+  // Live ACK deadline sweeper: enforces ACK window expiry even without new drive events (R4-13)
+  useEffect(() => {
+    if (status !== "streaming") {
+      unconfirmedFrameTimeRef.current = null;
+      return;
+    }
+
+    const checkInterval = setInterval(() => {
+      if (
+        unconfirmedFrameTimeRef.current !== null &&
+        Date.now() - unconfirmedFrameTimeRef.current > 10000
+      ) {
+        setError(new Error("ACK deadline expired: unconfirmed frame presentation stalled"));
+        if (clientRef.current) {
+          clientRef.current.close();
+        }
+        setStatus("closed");
+      }
+    }, 1000);
+
+    return () => clearInterval(checkInterval);
+  }, [status]);
 
   return {
     status,

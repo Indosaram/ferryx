@@ -695,8 +695,21 @@ async fn test_r3_cmd_browser_remote_reclaim_broadcasts_revoked_via_gateway_manag
     assert_eq!(claim_json["type"], "browserDriverClaimed");
 
     // 4. Call cmd_browser_remote_reclaim directly through Tauri AppHandle
+    use tauri::Listener;
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(1);
+    app.listen("browser-remote-sharing", move |event| {
+        let _ = event_tx.try_send(event.payload().to_string());
+    });
+
     let reclaim_res = crate::ipc::browser::cmd_browser_remote_reclaim(app.handle().clone()).await;
     assert!(reclaim_res.is_ok(), "cmd_browser_remote_reclaim must succeed");
+
+    let event_payload = tokio::time::timeout(std::time::Duration::from_millis(50), event_rx.recv())
+        .await
+        .expect("must emit browser-remote-sharing event on reclaim")
+        .expect("payload from event");
+    let state_dto: serde_json::Value = serde_json::from_str(&event_payload).unwrap();
+    assert_eq!(state_dto["driverStatus"], "viewing");
 
     // 5. Active WebSocket session receives ServerMessage::BrowserDriverRevoked
     let revoked_reply = ws.next().await.unwrap().unwrap().into_text().unwrap();

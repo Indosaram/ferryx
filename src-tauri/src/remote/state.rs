@@ -1,7 +1,7 @@
 use crate::remote::auth::{write_private_json, AuthManager};
 use crate::remote::backend::RemoteSessionBackend;
 use crate::remote::browser_admission::AdmissionController;
-use crate::remote::browser_backend::{RemoteBrowserBackend, UnavailableBrowserBackend};
+use crate::remote::browser_backend::RemoteBrowserBackend;
 use crate::remote::protocol::{RemoteActiveDesktopSelection, RemoteEventMessage};
 use crate::terminal::TerminalService;
 use crate::worktree::WorkspaceRegistry;
@@ -911,7 +911,15 @@ impl RemoteGatewayState {
             desktop_event_sink: RwLock::new(None),
             relay_pairing: RwLock::new(None),
             socket_tickets: parking_lot::Mutex::new(std::collections::HashMap::new()),
-            browser_backend: parking_lot::RwLock::new(Arc::new(UnavailableBrowserBackend)),
+            browser_backend: parking_lot::RwLock::new(Arc::new(
+                crate::remote::browser_backend::LocalIpcBrowserBackend::new(
+                    crate::daemon::server::get_runtime_dir()
+                        .join("browser.sock")
+                        .to_string_lossy()
+                        .to_string(),
+                    None,
+                ),
+            )),
             admission_controller: Arc::new(AdmissionController::new()),
             browser_service_epoch: AtomicU64::new(1),
             snapshot_cache: RwLock::new(None),

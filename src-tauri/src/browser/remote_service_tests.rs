@@ -502,6 +502,10 @@ fn test_remote_browser_operation_validation_and_legacy_isolation() {
         sequence_number: None,
         document_generation: None,
         viewport_revision: None,
+        capture_rect: None,
+        geometry_source: None,
+        x: None,
+        y: None,
     };
     assert!(click_ref_op.validate().is_ok());
 
@@ -516,6 +520,10 @@ fn test_remote_browser_operation_validation_and_legacy_isolation() {
         sequence_number: None,
         document_generation: None,
         viewport_revision: None,
+        capture_rect: None,
+        geometry_source: None,
+        x: None,
+        y: None,
     };
     assert!(click_point_op.validate().is_ok());
 
@@ -532,6 +540,10 @@ fn test_remote_browser_operation_validation_and_legacy_isolation() {
         sequence_number: None,
         document_generation: None,
         viewport_revision: None,
+        capture_rect: None,
+        geometry_source: None,
+        x: None,
+        y: None,
     };
     assert!(click_oob.validate().is_err());
 
@@ -547,6 +559,10 @@ fn test_remote_browser_operation_validation_and_legacy_isolation() {
         sequence_number: None,
         document_generation: None,
         viewport_revision: None,
+        capture_rect: None,
+        geometry_source: None,
+        x: None,
+        y: None,
     };
     assert!(click_nan.validate().is_err());
 
@@ -562,6 +578,10 @@ fn test_remote_browser_operation_validation_and_legacy_isolation() {
         sequence_number: None,
         document_generation: None,
         viewport_revision: None,
+        capture_rect: None,
+        geometry_source: None,
+        x: None,
+        y: None,
     };
     assert!(click_empty_ref.validate().is_err());
 
@@ -724,6 +744,10 @@ fn test_r9_remote_reference_operations_require_snapshot_and_revision() {
         sequence_number: None,
         document_generation: None,
         viewport_revision: None,
+        capture_rect: None,
+        geometry_source: None,
+        x: None,
+        y: None,
     };
     assert!(click_valid.validate().is_ok());
 
@@ -738,6 +762,10 @@ fn test_r9_remote_reference_operations_require_snapshot_and_revision() {
         sequence_number: None,
         document_generation: None,
         viewport_revision: None,
+        capture_rect: None,
+        geometry_source: None,
+        x: None,
+        y: None,
     };
     let err = click_missing_snap.validate().unwrap_err();
     assert_eq!(format!("{:?}", err.code), "Custom(\"BROWSER_INVALID_SNAPSHOT\")");
@@ -753,6 +781,10 @@ fn test_r9_remote_reference_operations_require_snapshot_and_revision() {
         sequence_number: None,
         document_generation: None,
         viewport_revision: None,
+        capture_rect: None,
+        geometry_source: None,
+        x: None,
+        y: None,
     };
     let err2 = click_empty_snap.validate().unwrap_err();
     assert_eq!(format!("{:?}", err2.code), "Custom(\"BROWSER_INVALID_SNAPSHOT\")");
@@ -768,6 +800,10 @@ fn test_r9_remote_reference_operations_require_snapshot_and_revision() {
         sequence_number: None,
         document_generation: None,
         viewport_revision: None,
+        capture_rect: None,
+        geometry_source: None,
+        x: None,
+        y: None,
     };
     let err3 = click_missing_rev.validate().unwrap_err();
     assert_eq!(format!("{:?}", err3.code), "Custom(\"BROWSER_INVALID_SNAPSHOT\")");
@@ -784,6 +820,10 @@ fn test_r9_remote_reference_operations_require_snapshot_and_revision() {
         sequence_number: None,
         document_generation: None,
         viewport_revision: None,
+        capture_rect: None,
+        geometry_source: None,
+        x: None,
+        y: None,
     };
     assert!(click_coord.validate().is_ok());
 

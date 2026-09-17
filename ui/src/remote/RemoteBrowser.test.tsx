@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -9,7 +10,7 @@ import {
 } from "./browserProtocol";
 import { BrowserClient } from "./browserClient";
 import { useRemoteBrowser } from "./useRemoteBrowser";
-import { RemoteBrowser } from "./RemoteBrowser";
+import { RemoteBrowser, resolveViewportClickParams } from "./RemoteBrowser";
 import { RemoteBrowserWorkspace } from "./RemoteBrowserWorkspace";
 import { useRemoteBrowserDriver } from "./useRemoteBrowserDriver";
 import { RemoteBrowserSharingIndicator } from "../components/RemoteBrowserSharingIndicator";
@@ -355,6 +356,128 @@ describe("BrowserClient", () => {
       expect(typeof msg).toBe("string");
     }
   });
+
+  it("enforces subscribed-barrier and control priority: holds commands behind browserSubscribed confirmation while prioritizing controls (R4-14)", async () => {
+    const client = new BrowserClient("ws://localhost:9000/browser/b1");
+    const ws = MockWebSocket.instances[0];
+    await drainAsync();
+
+    // 1. Issue subscription (in-flight, not yet confirmed by server)
+    const subPromise = client.subscribe({ format: "jpeg" });
+    const subSent = JSON.parse(ws.sentMessages[0] as string);
+    expect(subSent.type).toBe("browserSubscribe");
+
+    // 2. Dispatch command while subscription is in flight
+    const cmdPromise = client.sendCommand({
+      browserId: "b1",
+      leaseEpoch: "ep1",
+      browserInstanceId: "bi1",
+      desktopEpoch: "1",
+      documentGeneration: "1",
+      command: "navigate",
+      params: { url: "https://example.com" },
+    });
+
+    // Verify command was NOT sent over socket yet because subscription barrier is active!
+    const commandsSentBefore = ws.sentMessages.filter((m) => {
+      try { return JSON.parse(m as string).type === "browserCommand"; } catch { return false; }
+    });
+    expect(commandsSentBefore).toHaveLength(0);
+
+    // 3. Control-message priority: send heartbeat while command is waiting behind barrier
+    // Heartbeat is dispatched immediately ahead of queued command!
+    const hbPromise = client.heartbeat("ep1");
+    const hbSent = JSON.parse(ws.sentMessages[ws.sentMessages.length - 1] as string);
+    expect(hbSent.type).toBe("browserHeartbeat");
+
+    // Server responds to heartbeat
+    ws.onmessage?.({
+      data: JSON.stringify({
+        type: "browserPong",
+        requestId: hbSent.requestId,
+      }),
+    });
+    await hbPromise;
+
+    // Command is STILL held behind subscription barrier!
+    const commandsStillHeld = ws.sentMessages.filter((m) => {
+      try { return JSON.parse(m as string).type === "browserCommand"; } catch { return false; }
+    });
+    expect(commandsStillHeld).toHaveLength(0);
+
+    // 4. Subscription confirms -> barrier resolves -> queued command is dispatched
+    ws.onmessage?.({
+      data: JSON.stringify({
+        type: "browserSubscribed",
+        requestId: subSent.requestId,
+        subscriptionId: "sub-barrier",
+        streamId: 1,
+        browserId: "b1",
+        browserInstanceId: "bi1",
+        browserServiceEpoch: "1",
+        desktopEpoch: "1",
+        documentGeneration: "1",
+        options: { format: "jpeg", quality: 70 },
+      }),
+    });
+    await subPromise;
+
+    const commandsSentAfter = ws.sentMessages.filter((m) => {
+      try { return JSON.parse(m as string).type === "browserCommand"; } catch { return false; }
+    });
+    expect(commandsSentAfter).toHaveLength(1);
+
+    // Resolve command
+    const cmdMsg = JSON.parse(commandsSentAfter[0] as string);
+    ws.onmessage?.({
+      data: JSON.stringify({
+        type: "browserResult",
+        requestId: cmdMsg.requestId,
+        result: { ok: true },
+      }),
+    });
+    await cmdPromise;
+  });
+
+  it("enforces bounded queue capacity and rejects with backpressure error on overflow (R4-14)", async () => {
+    const client = new BrowserClient("ws://localhost:9000/browser/b1");
+    await drainAsync();
+
+    // Enqueue messages beyond queue capacity before subscription barrier
+    const promises: Promise<any>[] = [];
+    for (let i = 0; i < 70; i++) {
+      promises.push(
+        client.sendCommand(
+          {
+            browserId: "b1",
+            leaseEpoch: "ep1",
+            browserInstanceId: "bi1",
+            desktopEpoch: "1",
+            documentGeneration: "1",
+            command: "navigate",
+          },
+          100
+        ).catch((err) => err)
+      );
+    }
+
+    const results = await Promise.all(promises);
+    const hasBackpressureError = results.some(
+      (r) => r instanceof Error && /backpressure/i.test(r.message)
+    );
+    expect(hasBackpressureError).toBe(true);
+  });
+
+  it("executes bounded shutdown/join within specified timeout (R4-14)", async () => {
+    const client = new BrowserClient("ws://localhost:9000/browser/b1");
+    const ws = MockWebSocket.instances[0];
+    await drainAsync();
+
+    const closePromise = client.close(100);
+    expect(closePromise).toBeInstanceOf(Promise);
+    await closePromise;
+    expect(ws.readyState).toBe(MockWebSocket.CLOSED);
+  });
 });
 
 describe("useRemoteBrowser", () => {
@@ -635,6 +758,10 @@ describe("RemoteBrowser component", () => {
     expect(clickData.v).toBeCloseTo(0.5, 2);
     expect(clickData.streamId).toBe(1);
     expect(clickData.seq).toBe(1);
+    expect(clickData.geometrySource).toBe("wkSnapshot");
+    expect(clickData.captureRect).toBeDefined();
+    expect(clickData.x).toBeDefined();
+    expect(clickData.y).toBeDefined();
 
     // Click inside the top letterbox (e.g. at x=400, y=20):
     // y=20 is before the image begins (top margin is 50).
@@ -1409,5 +1536,353 @@ describe("RemoteBrowser component", () => {
     expect(handlePointClick.mock.calls[0][0].seq).toBe(2);
     expect(handlePointClick.mock.calls[0][0].documentGeneration).toBe("102");
     expect(handlePointClick.mock.calls[0][0].viewportRevision).toBe("202");
+  });
+
+  it("enforces bounded renderer frame retention with eviction on streaming and load (R4-11)", async () => {
+    let updateSession!: (s: any) => void;
+    function Wrapper() {
+      const [session, setSession] = useState<any>({
+        status: "streaming",
+        frame: makeTestFrame(1, 1),
+        imageUrl: "blob:frame-1",
+        browserState: null,
+        hello: null,
+        error: null,
+        client: null,
+        reconnect: vi.fn(),
+        sendAck: vi.fn(),
+        confirmPresented: vi.fn(),
+      });
+      updateSession = setSession;
+      return <RemoteBrowser session={session} />;
+    }
+
+    render(<Wrapper />);
+    const viewport = screen.getByTestId("remote-browser-viewport");
+
+    // Stream frames 2 through 6 without calling onLoad on each
+    for (let i = 2; i <= 6; i++) {
+      await act(async () => {
+        updateSession({
+          status: "streaming",
+          frame: makeTestFrame(i, 1),
+          imageUrl: `blob:frame-${i}`,
+          browserState: null,
+          hello: null,
+          error: null,
+          client: null,
+          reconnect: vi.fn(),
+          sendAck: vi.fn(),
+          confirmPresented: vi.fn(),
+        });
+      });
+    }
+
+    // Prior to R4-11 fix, framesByUrlRef retained all 6 frames indefinitely!
+    // With R4-11 fix, retained frames are bounded (<= 2)
+    const retained = Number(viewport.getAttribute("data-retained-frames"));
+    expect(retained).toBeLessThanOrEqual(2);
+
+    // Image load on frame 6 commits it and evicts older frames
+    const img = screen.getByAltText("Remote browser stream");
+    await act(async () => {
+      fireEvent.load(img);
+    });
+    expect(Number(viewport.getAttribute("data-retained-frames"))).toBeLessThanOrEqual(2);
+
+    // When imageUrl is cleared (e.g. backgrounded or disconnected), retained frames are fully cleared
+    await act(async () => {
+      updateSession({
+        status: "closed",
+        frame: null,
+        imageUrl: null,
+        browserState: null,
+        hello: null,
+        error: null,
+        client: null,
+        reconnect: vi.fn(),
+        sendAck: vi.fn(),
+        confirmPresented: vi.fn(),
+      });
+    });
+    expect(Number(viewport.getAttribute("data-retained-frames"))).toBe(0);
+  });
+
+  it("enforces driver lease expiry via live sweeper without drive events (R4-13)", async () => {
+    vi.useFakeTimers();
+    try {
+      const mockClient = {
+        sendCommand: vi.fn().mockResolvedValue({ ok: true }),
+        onDriverChanged: vi.fn(() => () => {}),
+        onError: vi.fn(() => () => {}),
+        onClose: vi.fn(() => () => {}),
+        heartbeat: vi.fn().mockReturnValue(new Promise(() => {})), // Hang heartbeat so lease is not refreshed
+        claimDriver: vi.fn().mockResolvedValue({ leaseEpoch: "epoch-sweeper" }),
+        releaseDriver: vi.fn().mockResolvedValue({}),
+      } as unknown as BrowserClient;
+
+      let capturedDriver!: ReturnType<typeof useRemoteBrowserDriver>;
+      function DriverHarness() {
+        const driver = useRemoteBrowserDriver({
+          client: mockClient,
+          browserId: "b1",
+          browserInstanceId: "bi1",
+          desktopEpoch: "1",
+          documentGeneration: "1",
+        });
+        capturedDriver = driver;
+        return <button data-testid="claim" onClick={() => driver.claim()} />;
+      }
+
+      render(<DriverHarness />);
+      await act(async () => {
+        await capturedDriver.claim();
+      });
+
+      expect(capturedDriver.driverState).toBe("driving");
+      expect(capturedDriver.leaseEpoch).toBe("epoch-sweeper");
+
+      // Advance time past 15s lease TTL without any new drive events
+      await act(async () => {
+        vi.advanceTimersByTime(16000);
+      });
+
+      // Prior to R4-13 fix, driverState remained "driving" indefinitely because no sweeper checked expiresAt!
+      // With R4-13 fix, live sweeper transitions to revoked and clears epoch
+      expect(capturedDriver.driverState).toBe("revoked");
+      expect(capturedDriver.leaseEpoch).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("emits viewer heartbeats independently of driver ownership while streaming (R4-13)", async () => {
+    vi.useFakeTimers();
+    try {
+      render(
+        <RemoteBrowser
+          baseUrl="http://localhost:8080"
+          browserId="b-viewer-hb"
+          deviceToken="tok"
+        />
+      );
+
+      // Advance timers for ticket fetch and socket creation
+      while (MockWebSocket.instances.length === 0) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(20);
+        });
+      }
+      const ws = MockWebSocket.instances[0];
+
+      // Send browserHello
+      await act(async () => {
+        ws.onmessage?.({
+          data: JSON.stringify({
+            type: "browserHello",
+            browserId: "b-viewer-hb",
+            browserInstanceId: "bi-1",
+            browserServiceEpoch: "1",
+            desktopEpoch: "1",
+            protocolVersion: 1,
+            supportedCommands: ["navigate"],
+          }),
+        });
+        await vi.advanceTimersByTimeAsync(20);
+      });
+
+      // Send browserSubscribed
+      const subSent = JSON.parse(ws.sentMessages[ws.sentMessages.length - 1] as string);
+      await act(async () => {
+        ws.onmessage?.({
+          data: JSON.stringify({
+            type: "browserSubscribed",
+            requestId: subSent.requestId,
+            subscriptionId: "sub-1",
+            streamId: 1,
+            browserId: "b-viewer-hb",
+            browserInstanceId: "bi-1",
+            browserServiceEpoch: "1",
+            desktopEpoch: "1",
+            documentGeneration: "1",
+            options: { format: "jpeg", quality: 70 },
+          }),
+        });
+        await vi.advanceTimersByTimeAsync(20);
+      });
+
+      const beforeCount = ws.sentMessages.filter((m) => {
+        try { return JSON.parse(m as string).type === "browserHeartbeat"; } catch { return false; }
+      }).length;
+
+      // Advance 5.5 seconds
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5500);
+      });
+
+      const afterCount = ws.sentMessages.filter((m) => {
+        try { return JSON.parse(m as string).type === "browserHeartbeat"; } catch { return false; }
+      }).length;
+
+      // Prior to R4-13 fix, viewer sends 0 heartbeats when not driving!
+      // With R4-13 fix, viewer heartbeat is emitted
+      expect(afterCount).toBeGreaterThan(beforeCount);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("enforces readiness deadline with teardown if connection stalls in ready/opening (R4-13)", async () => {
+    vi.useFakeTimers();
+    try {
+      render(
+        <RemoteBrowser
+          baseUrl="http://localhost:8080"
+          browserId="b-readiness-stall"
+          deviceToken="tok"
+        />
+      );
+
+      // Advance timers to allow socket ticket & connection opening
+      while (MockWebSocket.instances.length === 0) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(20);
+        });
+      }
+      const ws = MockWebSocket.instances[0];
+
+      // Server sends hello so status enters "ready", but subscription stalls
+      await act(async () => {
+        ws.onmessage?.({
+          data: JSON.stringify({
+            type: "browserHello",
+            browserId: "b-readiness-stall",
+            browserInstanceId: "bi-1",
+            browserServiceEpoch: "1",
+            desktopEpoch: "1",
+            protocolVersion: 1,
+            supportedCommands: ["navigate"],
+          }),
+        });
+        await vi.advanceTimersByTimeAsync(20);
+      });
+
+      // Advance past 10s readiness deadline without subscription confirmation
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(11000);
+      });
+
+      // Readiness deadline fires and tears down socket
+      expect(ws.readyState).toBe(MockWebSocket.CLOSED);
+      expect(screen.getByText(/Readiness deadline expired/i)).toBeDefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("enforces ACK deadline sweeper when frame presentation stalls without drive events (R4-13)", async () => {
+    vi.useFakeTimers();
+    try {
+      render(
+        <RemoteBrowser
+          baseUrl="http://localhost:8080"
+          browserId="b-ack-stall"
+          deviceToken="tok"
+        />
+      );
+
+      while (MockWebSocket.instances.length === 0) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(20);
+        });
+      }
+      const ws = MockWebSocket.instances[0];
+
+      // Establish stream
+      await act(async () => {
+        ws.onmessage?.({
+          data: JSON.stringify({
+            type: "browserHello",
+            browserId: "b-ack-stall",
+            browserInstanceId: "bi-1",
+            browserServiceEpoch: "1",
+            desktopEpoch: "1",
+            protocolVersion: 1,
+            supportedCommands: ["navigate"],
+          }),
+        });
+        await vi.advanceTimersByTimeAsync(20);
+      });
+
+      const subSent = JSON.parse(ws.sentMessages[ws.sentMessages.length - 1] as string);
+      await act(async () => {
+        ws.onmessage?.({
+          data: JSON.stringify({
+            type: "browserSubscribed",
+            requestId: subSent.requestId,
+            subscriptionId: "sub-1",
+            streamId: 1,
+            browserId: "b-ack-stall",
+            browserInstanceId: "bi-1",
+            browserServiceEpoch: "1",
+            desktopEpoch: "1",
+            documentGeneration: "1",
+            options: { format: "jpeg", quality: 70 },
+          }),
+        });
+        await vi.advanceTimersByTimeAsync(20);
+      });
+
+      // Frame arrives over network but img onLoad is NEVER triggered (stalled presentation)
+      const testFrame = makeTestFrame(1, 1);
+      await act(async () => {
+        ws.onmessage?.({ data: encodeFrame(testFrame).buffer });
+        await vi.advanceTimersByTimeAsync(20);
+      });
+
+      // Advance past 10s ACK deadline without presentation confirmation
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(11000);
+      });
+
+      // ACK sweeper fires, tearing down stalled client
+      expect(ws.readyState).toBe(MockWebSocket.CLOSED);
+      expect(screen.getByText(/ACK deadline expired/i)).toBeDefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("resolves viewport clicks with authoritative geometry via buildPointClickParams and rejects letterbox clicks", () => {
+    const frame = makeTestFrame(10, 1);
+    // Container: 1000x500. Image: 800x600 (aspect 4:3).
+    // containerAspect = 2.0 > imageAspect (1.333) -> letterboxed horizontally
+    // renderedHeight = 500, renderedWidth = 500 * (4/3) = 666.67, offsetLeft = (1000 - 666.67)/2 = 166.67.
+
+    // 1. Click in left pillarbox margin (x = 50, y = 250) -> null
+    const leftMargin = resolveViewportClickParams(50, 250, 1000, 500, frame, 10);
+    expect(leftMargin).toBeNull();
+
+    // 2. Click in right pillarbox margin (x = 950, y = 250) -> null
+    const rightMargin = resolveViewportClickParams(950, 250, 1000, 500, frame, 10);
+    expect(rightMargin).toBeNull();
+
+    // 3. Click in image center (x = 500, y = 250) -> valid fenced click
+    const centerClick = resolveViewportClickParams(500, 250, 1000, 500, frame, 10);
+    expect(centerClick).not.toBeNull();
+    expect(centerClick!.u).toBeCloseTo(0.5, 2);
+    expect(centerClick!.v).toBeCloseTo(0.5, 2);
+    expect(centerClick!.geometrySource).toBe("wkSnapshot");
+    expect(centerClick!.captureRect).toEqual(frame.metadata.captureRect);
+    expect(centerClick!.sequenceNumber).toBe(10);
+    expect(centerClick!.seq).toBe(10);
+    expect(centerClick!.documentGeneration).toBe(frame.metadata.documentGeneration);
+    expect(centerClick!.viewportRevision).toBe(frame.metadata.viewportRevision);
+
+    // 4. Stale frame (seq 5 with lastAckedSeq 10) -> throws stale frame error
+    const staleFrame = makeTestFrame(5, 1);
+    expect(() =>
+      resolveViewportClickParams(500, 250, 1000, 500, staleFrame, 10),
+    ).toThrow(/stale/i);
   });
 });

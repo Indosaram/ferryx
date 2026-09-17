@@ -135,6 +135,18 @@ impl BrowserSnapshot {
 
 /// Trait abstracting the memory snapshot capture of a browser webview.
 pub trait BrowserSnapshotSource: Send + Sync {
+    fn is_supported(&self) -> bool {
+        true
+    }
+
+    fn supported_formats(&self) -> Vec<String> {
+        if self.is_supported() {
+            vec!["jpeg".into(), "png".into()]
+        } else {
+            vec![]
+        }
+    }
+
     fn capture_snapshot<'a>(
         &'a self,
         webview_label: &'a str,
@@ -369,6 +381,14 @@ impl<R: tauri::Runtime> BrowserSnapshotSource for TauriBrowserSnapshotSource<R> 
 
 #[cfg(not(target_os = "macos"))]
 impl<R: tauri::Runtime> BrowserSnapshotSource for TauriBrowserSnapshotSource<R> {
+    fn is_supported(&self) -> bool {
+        false
+    }
+
+    fn supported_formats(&self) -> Vec<String> {
+        vec![]
+    }
+
     fn capture_snapshot<'a>(
         &'a self,
         _webview_label: &'a str,
@@ -565,6 +585,14 @@ pub unsafe fn parse_native_snapshot_result(
 pub struct UnsupportedSnapshotSource;
 
 impl BrowserSnapshotSource for UnsupportedSnapshotSource {
+    fn is_supported(&self) -> bool {
+        false
+    }
+
+    fn supported_formats(&self) -> Vec<String> {
+        vec![]
+    }
+
     fn capture_snapshot<'a>(
         &'a self,
         _webview_label: &'a str,
@@ -645,6 +673,21 @@ impl FakeBrowserSnapshotSource {
 }
 
 impl BrowserSnapshotSource for FakeBrowserSnapshotSource {
+    fn is_supported(&self) -> bool {
+        !matches!(
+            *self.default_behavior.lock().unwrap(),
+            FakeSnapshotBehavior::Unsupported
+        )
+    }
+
+    fn supported_formats(&self) -> Vec<String> {
+        if self.is_supported() {
+            vec!["jpeg".into(), "png".into()]
+        } else {
+            vec![]
+        }
+    }
+
     fn capture_snapshot<'a>(
         &'a self,
         webview_label: &'a str,

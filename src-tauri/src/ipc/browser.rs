@@ -2301,12 +2301,22 @@ pub async fn wait_browser_session<R: tauri::Runtime>(
     browser_id: &str,
     condition: crate::browser::model::BrowserWaitCondition,
 ) -> Result<(), IpcError> {
+    wait_browser_session_with_timeout(app, manager, browser_id, condition, None).await
+}
+
+pub async fn wait_browser_session_with_timeout<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &BrowserManager,
+    browser_id: &str,
+    condition: crate::browser::model::BrowserWaitCondition,
+    timeout: Option<std::time::Duration>,
+) -> Result<(), IpcError> {
     let state = manager.get_state(browser_id)?;
     let webview = app
         .get_webview(&state.webview_label)
         .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
     let script = build_wait_condition_script(&condition);
-    let timeout = std::time::Duration::from_secs(15);
+    let timeout = timeout.unwrap_or_else(|| std::time::Duration::from_secs(15));
     let deadline = tokio::time::Instant::now() + timeout;
     let interval = std::time::Duration::from_millis(250);
 
@@ -2315,7 +2325,7 @@ pub async fn wait_browser_session<R: tauri::Runtime>(
         if now >= deadline {
             return Err(IpcError::new(
                 IpcErrorCode::BrowserWaitTimeout,
-                "browser wait condition timed out after 15s",
+                "browser wait condition timed out",
             ));
         }
 
@@ -2333,7 +2343,7 @@ pub async fn wait_browser_session<R: tauri::Runtime>(
         if now_after >= deadline {
             return Err(IpcError::new(
                 IpcErrorCode::BrowserWaitTimeout,
-                "browser wait condition timed out after 15s",
+                "browser wait condition timed out",
             ));
         }
 
@@ -2420,26 +2430,39 @@ pub async fn storage_browser_session<R: tauri::Runtime>(
 pub async fn cmd_browser_remote_reclaim<R: tauri::Runtime>(
     app: AppHandle<R>,
 ) -> Result<u64, IpcError> {
-    use tauri::Manager;
+    use tauri::{Emitter, Manager};
 
     let mut reclaimed = false;
+    let mut sharing_state = None;
     if let Some(state) = app.try_state::<Arc<crate::remote::state::RemoteGatewayState>>() {
         state.admission_controller.reclaim_desktop();
+        sharing_state = Some(state.admission_controller.sharing_registry().current());
         reclaimed = true;
     }
     if !reclaimed {
         if let Some(mgr) = app.try_state::<Arc<crate::ipc::remote::RemoteGatewayManager>>() {
             if let Some(state) = mgr.state() {
                 state.admission_controller.reclaim_desktop();
+                sharing_state = Some(state.admission_controller.sharing_registry().current());
             }
         }
     }
 
-    if let Some(broker) = app.try_state::<Arc<crate::browser::remote_driver::RemoteDriverBroker>>() {
-        Ok(broker.desktop_reclaim())
+    let epoch = if let Some(broker) = app.try_state::<Arc<crate::browser::remote_driver::RemoteDriverBroker>>() {
+        broker.desktop_reclaim()
     } else {
-        Ok(1)
-    }
+        1
+    };
+
+    let state_payload = sharing_state.unwrap_or(crate::remote::browser_ws::SharingState {
+        is_sharing: false,
+        active_sessions_count: 0,
+        driver_status: crate::remote::browser_ws::SharingDriverStatus::Idle,
+        driver_device_id: None,
+    });
+    let _ = app.emit("browser-remote-sharing", state_payload);
+
+    Ok(epoch)
 }
 
 #[tauri::command]
@@ -2447,5 +2470,271 @@ pub async fn cmd_browser_remote_revoke<R: tauri::Runtime>(
     app: AppHandle<R>,
 ) -> Result<u64, IpcError> {
     cmd_browser_remote_reclaim(app).await
+}
+
+pub struct GuiBrowserCommandExecutor<R: tauri::Runtime> {
+    app: AppHandle<R>,
+    manager: Arc<BrowserManager>,
+}
+
+impl<R: tauri::Runtime> GuiBrowserCommandExecutor<R> {
+    pub fn new(app: AppHandle<R>, manager: Arc<BrowserManager>) -> Self {
+        Self { app, manager }
+    }
+}
+
+impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor for GuiBrowserCommandExecutor<R> {
+    fn execute<'a>(
+        &'a self,
+        ctx: crate::remote::browser_backend::BrowserCommandContext,
+    ) -> crate::remote::browser_backend::BoxFuture<'a, Result<crate::remote::browser_backend::BrowserCommandResult, crate::remote::browser_backend::RemoteBrowserError>> {
+        Box::pin(async move {
+            use crate::remote::browser_backend::{BrowserCommandResult, RemoteBrowserError};
+
+            if let Some(ref exp_gen) = ctx.document_generation {
+                if let Ok(expected) = exp_gen.parse::<u64>() {
+                    let st = self.manager.get_state(&ctx.browser_id)
+                        .map_err(|_| RemoteBrowserError::NotFound(ctx.browser_id.clone()))?;
+                    if st.generation != expected {
+                        return Err(RemoteBrowserError::Forbidden(format!(
+                            "Document generation fencing failed: expected {expected}, current {}",
+                            st.generation
+                        )));
+                    }
+                }
+            }
+
+            match ctx.command.as_str() {
+                "navigate" => {
+                    let url = ctx.params.as_ref()
+                        .and_then(|p| p.get("url").and_then(|v| v.as_str()))
+                        .ok_or_else(|| RemoteBrowserError::InvalidRequest("missing url param".into()))?;
+                    navigate_browser_session(&self.app, &self.manager, &ctx.browser_id, url)
+                        .await
+                        .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
+                    let state = self.manager.get_state(&ctx.browser_id)
+                        .map_err(|_| RemoteBrowserError::NotFound(ctx.browser_id.clone()))?;
+                    Ok(BrowserCommandResult {
+                        success: true,
+                        value: Some(serde_json::json!({
+                            "browserId": state.browser_id,
+                            "url": state.url,
+                            "generation": state.generation.to_string(),
+                        })),
+                    })
+                }
+                "back" => {
+                    history_navigation(&self.app, &self.manager, &ctx.browser_id, false)
+                        .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
+                    Ok(BrowserCommandResult {
+                        success: true,
+                        value: None,
+                    })
+                }
+                "forward" => {
+                    history_navigation(&self.app, &self.manager, &ctx.browser_id, true)
+                        .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
+                    Ok(BrowserCommandResult {
+                        success: true,
+                        value: None,
+                    })
+                }
+                "reload" => {
+                    let state = self.manager.begin_reload(&ctx.browser_id)
+                        .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
+                    let webview = self.app.get_webview(&state.webview_label)
+                        .ok_or_else(|| RemoteBrowserError::NotFound(state.webview_label.clone()))?;
+                    webview.reload()
+                        .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
+                    Ok(BrowserCommandResult {
+                        success: true,
+                        value: None,
+                    })
+                }
+                "click" => {
+                    let state = self.manager.get_state(&ctx.browser_id)
+                        .map_err(|_| RemoteBrowserError::NotFound(ctx.browser_id.clone()))?;
+                    let webview = self.app.get_webview(&state.webview_label)
+                        .ok_or_else(|| RemoteBrowserError::NotFound(state.webview_label.clone()))?;
+                    let p = ctx.params.as_ref().ok_or_else(|| {
+                        RemoteBrowserError::InvalidRequest("click requires params".into())
+                    })?;
+
+                    let script = if let Some(selector) = p.get("selector").and_then(|v| v.as_str()) {
+                        let sel_json = serde_json::to_string(selector).unwrap_or_default();
+                        format!(
+                            r#"(function() {{
+                                const el = document.querySelector({});
+                                if (!el) return JSON.stringify({{ ok: false, error: "element not found" }});
+                                el.click();
+                                return JSON.stringify({{ ok: true }});
+                            }})()"#,
+                            sel_json
+                        )
+                    } else if let (Some(u), Some(v)) = (p.get("u").and_then(|n| n.as_f64()), p.get("v").and_then(|n| n.as_f64())) {
+                        let (bounds, _, _) = self.manager.get_geometry(&ctx.browser_id).unwrap_or((None, 1.0, 1));
+                        let rect = bounds.unwrap_or(LogicalRect { x: 0.0, y: 0.0, width: 1024.0, height: 768.0 });
+                        let pt = crate::browser::remote_input::map_point_mainframe(u, v, &rect, false, false, false)
+                            .map_err(|e| RemoteBrowserError::InvalidRequest(e.to_string()))?;
+                        format!(
+                            r#"(function() {{
+                                const el = document.elementFromPoint({}, {});
+                                if (!el) return JSON.stringify({{ ok: false, error: "no element at coordinates" }});
+                                el.click();
+                                return JSON.stringify({{ ok: true }});
+                            }})()"#,
+                            pt.x, pt.y
+                        )
+                    } else {
+                        return Err(RemoteBrowserError::InvalidRequest("missing click target".into()));
+                    };
+
+                    let res_str = eval_webview(webview, script).await
+                        .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&res_str) {
+                        if parsed.get("ok").and_then(|v| v.as_bool()) == Some(false) {
+                            let err_msg = parsed.get("error").and_then(|v| v.as_str()).unwrap_or("click failed");
+                            return Err(RemoteBrowserError::ExecutionFailed(err_msg.to_string()));
+                        }
+                    }
+                    Ok(BrowserCommandResult {
+                        success: true,
+                        value: Some(serde_json::json!({ "clicked": true })),
+                    })
+                }
+                "fill" => {
+                    let state = self.manager.get_state(&ctx.browser_id)
+                        .map_err(|_| RemoteBrowserError::NotFound(ctx.browser_id.clone()))?;
+                    let webview = self.app.get_webview(&state.webview_label)
+                        .ok_or_else(|| RemoteBrowserError::NotFound(state.webview_label.clone()))?;
+                    let p = ctx.params.as_ref().ok_or_else(|| {
+                        RemoteBrowserError::InvalidRequest("fill requires params".into())
+                    })?;
+                    let value = p.get("value").and_then(|v| v.as_str()).unwrap_or("");
+                    let script = if let Some(selector) = p.get("selector").and_then(|v| v.as_str()) {
+                        let sel_json = serde_json::to_string(selector).unwrap_or_default();
+                        let val_json = serde_json::to_string(value).unwrap_or_default();
+                        format!(
+                            r#"(function() {{
+                                const el = document.querySelector({});
+                                if (!el) return JSON.stringify({{ ok: false, error: "element not found" }});
+                                el.value = {};
+                                el.dispatchEvent(new Event("input", {{ bubbles: true }}));
+                                el.dispatchEvent(new Event("change", {{ bubbles: true }}));
+                                return JSON.stringify({{ ok: true }});
+                            }})()"#,
+                            sel_json, val_json
+                        )
+                    } else {
+                        let val_json = serde_json::to_string(value).unwrap_or_default();
+                        format!(
+                            r#"(function() {{
+                                const el = document.activeElement;
+                                if (!el || el === document.body) return JSON.stringify({{ ok: false, error: "no active element to fill" }});
+                                el.value = {};
+                                el.dispatchEvent(new Event("input", {{ bubbles: true }}));
+                                el.dispatchEvent(new Event("change", {{ bubbles: true }}));
+                                return JSON.stringify({{ ok: true }});
+                            }})()"#,
+                            val_json
+                        )
+                    };
+                    let res_str = eval_webview(webview, script).await
+                        .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&res_str) {
+                        if parsed.get("ok").and_then(|v| v.as_bool()) == Some(false) {
+                            let err_msg = parsed.get("error").and_then(|v| v.as_str()).unwrap_or("fill failed");
+                            return Err(RemoteBrowserError::ExecutionFailed(err_msg.to_string()));
+                        }
+                    }
+                    Ok(BrowserCommandResult {
+                        success: true,
+                        value: Some(serde_json::json!({ "filled": true })),
+                    })
+                }
+                "keypress" => {
+                    let state = self.manager.get_state(&ctx.browser_id)
+                        .map_err(|_| RemoteBrowserError::NotFound(ctx.browser_id.clone()))?;
+                    let webview = self.app.get_webview(&state.webview_label)
+                        .ok_or_else(|| RemoteBrowserError::NotFound(state.webview_label.clone()))?;
+                    let p = ctx.params.as_ref().ok_or_else(|| {
+                        RemoteBrowserError::InvalidRequest("keypress requires params".into())
+                    })?;
+                    let key = p.get("key").and_then(|v| v.as_str()).unwrap_or("");
+                    let key_json = serde_json::to_string(key).unwrap_or_default();
+                    let script = format!(
+                        r#"(function() {{
+                            const target = document.activeElement || document.body;
+                            target.dispatchEvent(new KeyboardEvent("keydown", {{ key: {}, bubbles: true }}));
+                            target.dispatchEvent(new KeyboardEvent("keyup", {{ key: {}, bubbles: true }}));
+                            return JSON.stringify({{ ok: true }});
+                        }})()"#,
+                        key_json, key_json
+                    );
+                    let _ = eval_webview(webview, script).await
+                        .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
+                    Ok(BrowserCommandResult {
+                        success: true,
+                        value: Some(serde_json::json!({ "dispatched": true })),
+                    })
+                }
+                "eval" => {
+                    let p = ctx.params.as_ref().ok_or_else(|| {
+                        RemoteBrowserError::InvalidRequest("eval requires params".into())
+                    })?;
+                    let script = p.get("script").and_then(|v| v.as_str()).ok_or_else(|| {
+                        RemoteBrowserError::InvalidRequest("missing script in eval".into())
+                    })?;
+                    let (eval_res, truncated) = eval_browser_session(&self.app, &self.manager, &ctx.browser_id, script)
+                        .await
+                        .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
+                    Ok(BrowserCommandResult {
+                        success: true,
+                        value: Some(serde_json::json!({
+                            "result": eval_res,
+                            "truncated": truncated,
+                        })),
+                    })
+                }
+                "wait" => {
+                    let p = ctx.params.as_ref().ok_or_else(|| {
+                        RemoteBrowserError::InvalidRequest("wait requires params".into())
+                    })?;
+                    let (condition, timeout) = crate::remote::browser_backend::normalize_wait_params(p)?;
+                    wait_browser_session_with_timeout(&self.app, &self.manager, &ctx.browser_id, condition, timeout)
+                        .await
+                        .map_err(|e| match e.code {
+                            IpcErrorCode::BrowserWaitTimeout => RemoteBrowserError::WaitTimeout,
+                            _ => RemoteBrowserError::ExecutionFailed(e.to_string()),
+                        })?;
+                    Ok(BrowserCommandResult {
+                        success: true,
+                        value: None,
+                    })
+                }
+                "getState" => {
+                    let state = self.manager.get_state(&ctx.browser_id)
+                        .map_err(|_| RemoteBrowserError::NotFound(ctx.browser_id.clone()))?;
+                    let (_, _, vp_rev) = self.manager.get_geometry(&ctx.browser_id).unwrap_or((None, 1.0, 1));
+                    Ok(BrowserCommandResult {
+                        success: true,
+                        value: Some(serde_json::json!({
+                            "browserId": state.browser_id,
+                            "url": state.url,
+                            "title": state.title,
+                            "generation": state.generation.to_string(),
+                            "viewportRevision": vp_rev.to_string(),
+                            "loading": state.loading,
+                            "visible": state.visible,
+                        })),
+                    })
+                }
+                _ => Err(RemoteBrowserError::InvalidRequest(format!(
+                    "Unsupported command: '{}'",
+                    ctx.command
+                ))),
+            }
+        })
+    }
 }
 
