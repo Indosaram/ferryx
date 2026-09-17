@@ -11,7 +11,6 @@ use crate::browser::{
     BROWSER_SHORTCUT_REQUESTED_EVENT,
 };
 use crate::ipc::error::{IpcError, IpcErrorCode};
-#[cfg(target_os = "macos")]
 use parking_lot::Mutex;
 use serde::Deserialize;
 use std::sync::Arc;
