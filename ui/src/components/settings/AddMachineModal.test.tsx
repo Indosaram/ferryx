@@ -58,6 +58,7 @@ describe("AddMachineModal - P05 structured per-status error UX", () => {
         onClose={() => {}}
         inventory={mockInventory as any}
         store={store}
+        onSuccess={() => {}}
       />
     );
 
@@ -96,6 +97,7 @@ describe("AddMachineModal - P05 structured per-status error UX", () => {
         onClose={() => {}}
         inventory={mockInventory as any}
         store={store}
+        onSuccess={() => {}}
       />
     );
 
@@ -131,6 +133,7 @@ describe("AddMachineModal - P05 structured per-status error UX", () => {
         onClose={() => {}}
         inventory={mockInventory as any}
         store={store}
+        onSuccess={() => {}}
       />
     );
 
@@ -167,6 +170,7 @@ describe("AddMachineModal - P05 structured per-status error UX", () => {
         onClose={() => {}}
         inventory={mockInventory as any}
         store={store}
+        onSuccess={() => {}}
       />
     );
 
@@ -202,6 +206,7 @@ describe("AddMachineModal - P04 custom relay origin support", () => {
         onClose={() => {}}
         inventory={mockInventory as any}
         store={store}
+        onSuccess={() => {}}
       />
     );
 
@@ -237,6 +242,7 @@ describe("AddMachineModal - P04 custom relay origin support", () => {
         onClose={() => {}}
         inventory={mockInventory as any}
         store={store}
+        onSuccess={() => {}}
       />
     );
 
@@ -276,6 +282,7 @@ describe("AddMachineModal - P04 custom relay origin support", () => {
         onClose={() => {}}
         inventory={mockInventory as any}
         store={store}
+        onSuccess={() => {}}
       />
     );
 
@@ -314,6 +321,7 @@ describe("AddMachineModal - P04 custom relay origin support", () => {
         onClose={() => {}}
         inventory={mockInventory as any}
         store={store}
+        onSuccess={() => {}}
         getStoredRelayOrigin={getStoredRelayOrigin}
       />
     );
