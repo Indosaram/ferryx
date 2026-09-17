@@ -1,0 +1,373 @@
+//! Unit tests for BrowserRemoteService, concurrency budgets, lifecycle, and admission
+//! Authoritative Spec: docs/plans/REMOTE_BROWSER_SCREENCAST_PLAN_2026-09-17.md (§4.3, §4.4, §8.1, Phase 7A)
+
+use super::manager::BrowserManager;
+use super::model::*;
+use super::remote_bridge_protocol::MAX_FRAME_PAYLOAD_BYTES;
+use super::remote_driver::*;
+use super::remote_service::*;
+use std::sync::Arc;
+
+fn setup_test_environment() -> (BrowserRemoteService, BrowserManager, String, String) {
+    let manager = BrowserManager::new();
+
+    // Register browser session 1
+    let b1 = manager
+        .register_session(CreateBrowserRequest {
+            browser_id: Some("browser-test-1".into()),
+            workspace_id: Some("ws-alpha".into()),
+            worktree_path: None,
+            url: "https://example.com/home".into(),
+            profile: None,
+            zoom_factor: None,
+            bounds: Some(LogicalRect {
+                x: 0.0,
+                y: 0.0,
+                width: 1024.0,
+                height: 768.0,
+            }),
+            visible: Some(true),
+        })
+        .expect("Create browser session 1");
+
+    // Register browser session 2
+    let b2 = manager
+        .register_session(CreateBrowserRequest {
+            browser_id: Some("browser-test-2".into()),
+            workspace_id: Some("ws-alpha".into()),
+            worktree_path: None,
+            url: "https://example.com/settings".into(),
+            profile: None,
+            zoom_factor: None,
+            bounds: Some(LogicalRect {
+                x: 0.0,
+                y: 0.0,
+                width: 1024.0,
+                height: 768.0,
+            }),
+            visible: Some(true),
+        })
+        .expect("Create browser session 2");
+
+    let broker = Arc::new(RemoteDriverBroker::new());
+    let service = BrowserRemoteService::new(manager.clone(), broker);
+    (service, manager, b1.browser_id, b2.browser_id)
+}
+
+#[test]
+fn test_concurrency_budget_max_viewers_and_captured_browsers() {
+    let (service, _manager, b1, b2) = setup_test_environment();
+
+    // §8.1 Budget Verification:
+    // MAX_VIEWERS_PER_BROWSER = 2
+    // MAX_CONCURRENT_CAPTURED_BROWSERS = 1
+    // MAX_GLOBAL_DRIVERS = 1
+
+    assert_eq!(MAX_VIEWERS_PER_BROWSER, 2);
+    assert_eq!(MAX_CONCURRENT_CAPTURED_BROWSERS, 1);
+    assert_eq!(MAX_GLOBAL_DRIVERS, 1);
+
+    // 1. Browser 1: viewer 1 subscribes -> ok
+    let sub1 = service
+        .subscribe(&b1, "device-1", "viewer-1")
+        .expect("Viewer 1 should subscribe");
+
+    // 2. Browser 1: viewer 2 subscribes -> ok
+    let sub2 = service
+        .subscribe(&b1, "device-2", "viewer-2")
+        .expect("Viewer 2 should subscribe");
+
+    // 3. Browser 1: viewer 3 subscribes -> rejected (max 2 viewers per browser)
+    let sub3_err = service
+        .subscribe(&b1, "device-3", "viewer-3")
+        .expect_err("Viewer 3 should exceed viewer limit");
+    assert!(
+        matches!(sub3_err, RemoteServiceError::QuotaExceeded(msg) if msg.contains("2 viewers")),
+        "Expected QuotaExceeded for viewers: {:?}",
+        sub3_err
+    );
+
+    // 4. Concurrently captured browsers: attempting to subscribe to browser 2 while browser 1 is active
+    // must fail with QuotaExceeded (max 1 concurrently captured browser)
+    let b2_sub_err = service
+        .subscribe(&b2, "device-4", "viewer-4")
+        .expect_err("Subscribing to second browser must exceed captured browser budget");
+    assert!(
+        matches!(b2_sub_err, RemoteServiceError::QuotaExceeded(msg) if msg.contains("1 concurrently captured browser")),
+        "Expected QuotaExceeded for captured browsers: {:?}",
+        b2_sub_err
+    );
+
+    // 5. Unsubscribe all viewers from browser 1 -> releases captured browser permit
+    assert!(service.unsubscribe(&b1, &sub1));
+    assert!(service.unsubscribe(&b1, &sub2));
+    assert_eq!(service.subscriber_count(&b1), 0);
+    assert_eq!(service.active_capture_count(), 0);
+
+    // 6. Now browser 2 can be subscribed and captured
+    let b2_sub_ok = service
+        .subscribe(&b2, "device-4", "viewer-4")
+        .expect("Browser 2 subscription should succeed now");
+    assert_eq!(service.active_capture_count(), 1);
+    assert!(service.unsubscribe(&b2, &b2_sub_ok));
+}
+
+#[test]
+fn test_concurrency_budget_single_global_driver() {
+    let (service, _manager, b1, b2) = setup_test_environment();
+    let sub1 = service.subscribe(&b1, "device-1", "v1").unwrap();
+    let sub2 = service.subscribe(&b1, "device-2", "v2").unwrap();
+
+    let broker = service.driver_broker();
+
+    // Device 1 claims driver lease on browser 1 -> succeeds
+    let lease1 = broker
+        .claim("device-1", "conn-1", &sub1, &b1, true)
+        .expect("Device 1 claim should succeed");
+    assert_eq!(lease1.device_id, "device-1");
+
+    // Device 2 attempts to claim driver lease -> rejected with BrowserDriverBusy (MAX_GLOBAL_DRIVERS = 1)
+    let err_dev2 = broker
+        .claim("device-2", "conn-2", &sub2, &b1, true)
+        .expect_err("Device 2 claim should be rejected");
+    assert!(matches!(err_dev2, RemoteDriverError::BrowserDriverBusy { .. }));
+
+    // Even attempting to claim on a different browser (browser 2) must be rejected because driver is GLOBAL
+    let err_diff_browser = broker
+        .claim("device-2", "conn-2", "sub-diff", &b2, true)
+        .expect_err("Claiming another browser must be rejected: global driver is busy");
+    assert!(matches!(err_diff_browser, RemoteDriverError::BrowserDriverBusy { .. }));
+
+    // Releasing device 1 lease frees the global driver slot
+    assert!(broker.release(&sub1, lease1.lease_epoch).unwrap());
+
+    // Device 3 can now acquire the global driver lease
+    let lease3 = broker
+        .claim("device-3", "conn-3", "sub-3", &b1, true)
+        .expect("Device 3 should acquire driver lease after release");
+    assert_eq!(lease3.device_id, "device-3");
+}
+
+#[test]
+fn test_producer_lifecycle_pause_on_zero_subscribers_and_resume() {
+    let (service, _manager, b1, _) = setup_test_environment();
+
+    // Initial state: 0 subscribers, producer inactive
+    assert!(!service.is_producer_active(&b1));
+    assert_eq!(service.active_capture_count(), 0);
+
+    // 1st subscriber joins -> producer immediately activates
+    let sub1 = service.subscribe(&b1, "dev1", "v1").unwrap();
+    assert!(service.is_producer_active(&b1));
+    assert_eq!(service.active_capture_count(), 1);
+
+    // 2nd subscriber joins -> producer remains active (shared producer)
+    let sub2 = service.subscribe(&b1, "dev2", "v2").unwrap();
+    assert!(service.is_producer_active(&b1));
+    assert_eq!(service.active_capture_count(), 1);
+
+    // 1st subscriber leaves -> 1 subscriber remains, producer remains active
+    assert!(service.unsubscribe(&b1, &sub1));
+    assert!(service.is_producer_active(&b1));
+    assert_eq!(service.active_capture_count(), 1);
+
+    // 2nd subscriber leaves -> 0 subscribers remain: producer immediately pauses
+    assert!(service.unsubscribe(&b1, &sub2));
+    assert!(!service.is_producer_active(&b1), "0 subscribers must immediately pause capture");
+    assert_eq!(service.active_capture_count(), 0);
+
+    // Re-subscribing a new viewer resumes producer capture
+    let sub3 = service.subscribe(&b1, "dev3", "v3").unwrap();
+    assert!(service.is_producer_active(&b1), "New subscriber must resume capture");
+    assert_eq!(service.active_capture_count(), 1);
+
+    assert!(service.unsubscribe(&b1, &sub3));
+    assert!(!service.is_producer_active(&b1));
+}
+
+#[test]
+fn test_latest_only_frame_admission_and_oversized_drop() {
+    let (service, _manager, b1, _) = setup_test_environment();
+    let sub1 = service.subscribe(&b1, "dev1", "v1").unwrap();
+
+    // 1. Frame 1 admitted immediately (1 in-flight)
+    let frame1 = vec![0x11, 0x22, 0x33];
+    let immediate1 = service.admit_frame(&b1, 101, frame1.clone()).unwrap();
+    assert_eq!(immediate1, vec![sub1.clone()]);
+
+    // 2. While Frame 1 is unacknowledged, Frame 2 arrives -> queued in pending slot
+    let frame2 = vec![0x44, 0x55, 0x66];
+    let immediate2 = service.admit_frame(&b1, 102, frame2.clone()).unwrap();
+    assert!(immediate2.is_empty(), "Busy viewer should not get immediate delivery");
+
+    // 3. Frame 3 arrives before Frame 1 is acknowledged -> displaces Frame 2 (latest-only)
+    let frame3 = vec![0x77, 0x88, 0x99];
+    let immediate3 = service.admit_frame(&b1, 103, frame3.clone()).unwrap();
+    assert!(immediate3.is_empty());
+
+    // 4. Viewer acknowledges Frame 1 -> pending Frame 3 is returned (Frame 2 was dropped)
+    let next_frame = service.acknowledge_frame(&b1, &sub1, 101);
+    assert_eq!(next_frame, Some(frame3), "Viewer must receive the latest pending frame (frame 3)");
+
+    // 5. Oversized frame (> 2 MiB) is permanently dropped
+    let oversized = vec![0xAA; MAX_FRAME_PAYLOAD_BYTES + 1];
+    let oversized_admitted = service.admit_frame(&b1, 104, oversized).unwrap();
+    assert!(oversized_admitted.is_empty(), "Oversized frame must be permanently dropped");
+}
+
+#[test]
+fn test_guard_verification_rejections() {
+    let (service, manager, b1, _) = setup_test_environment();
+    let sub = service.subscribe(&b1, "dev1", "v1").unwrap();
+
+    let lease = service
+        .driver_broker()
+        .claim("dev1", "conn1", &sub, &b1, true)
+        .unwrap();
+
+    let valid_instance = manager.get_instance_id(&b1).unwrap();
+    let valid_desktop_epoch = service.desktop_epoch();
+    let valid_gen = manager.get_state(&b1).unwrap().generation;
+
+    // 1. All valid guards pass
+    assert!(service
+        .execute_command_guard(
+            &b1,
+            lease.lease_epoch,
+            "dev1",
+            "conn1",
+            &valid_instance,
+            valid_desktop_epoch,
+            valid_gen
+        )
+        .is_ok());
+
+    // 2. Stale lease epoch rejected
+    let stale_lease_err = service.execute_command_guard(
+        &b1,
+        lease.lease_epoch + 99,
+        "dev1",
+        "conn1",
+        &valid_instance,
+        valid_desktop_epoch,
+        valid_gen,
+    );
+    assert_eq!(stale_lease_err, Err(RemoteServiceError::StaleLease));
+
+    // 3. Stale browser instance ID rejected
+    let stale_instance_err = service.execute_command_guard(
+        &b1,
+        lease.lease_epoch,
+        "dev1",
+        "conn1",
+        "stale-instance-xyz",
+        valid_desktop_epoch,
+        valid_gen,
+    );
+    assert_eq!(stale_instance_err, Err(RemoteServiceError::StaleInstance));
+
+    // 4. Stale desktop epoch rejected
+    let stale_epoch_err = service.execute_command_guard(
+        &b1,
+        lease.lease_epoch,
+        "dev1",
+        "conn1",
+        &valid_instance,
+        valid_desktop_epoch + 1,
+        valid_gen,
+    );
+    assert_eq!(stale_epoch_err, Err(RemoteServiceError::StaleLease));
+
+    // 5. Stale document generation rejected
+    let stale_gen_err = service.execute_command_guard(
+        &b1,
+        lease.lease_epoch,
+        "dev1",
+        "conn1",
+        &valid_instance,
+        valid_desktop_epoch,
+        valid_gen + 1,
+    );
+    assert_eq!(stale_gen_err, Err(RemoteServiceError::StaleGeneration));
+
+    // 6. Desktop owner reclaim revokes lease
+    let _ = service.driver_broker().desktop_reclaim();
+    let reclaimed_guard_err = service.execute_command_guard(
+        &b1,
+        lease.lease_epoch,
+        "dev1",
+        "conn1",
+        &valid_instance,
+        valid_desktop_epoch,
+        valid_gen,
+    );
+    assert_eq!(reclaimed_guard_err, Err(RemoteServiceError::DesktopReclaimed));
+}
+
+#[test]
+fn test_dom_snapshot_map_revision_url_change_increments_revision() {
+    let (service, manager, b1, _) = setup_test_environment();
+    let state_initial = manager.get_state(&b1).unwrap();
+
+    let targets1 = vec![
+        BrowserAutomationTarget {
+            reference: "search-box".into(),
+            selector: "input#search".into(),
+        },
+        BrowserAutomationTarget {
+            reference: "submit-btn".into(),
+            selector: "button[type='submit']".into(),
+        },
+    ];
+
+    // Record snapshot on initial document
+    let (snap1_id, rev1) = service
+        .record_snapshot(&b1, state_initial.generation, targets1)
+        .expect("Initial snapshot recording");
+
+    // Reference lookup succeeds
+    let found_selector = service
+        .verify_snapshot_ref(&b1, &snap1_id, rev1, "search-box")
+        .expect("Snapshot reference should resolve");
+    assert_eq!(found_selector, "input#search");
+
+    // Navigation / URL change occurs
+    manager
+        .update_navigation_state(
+            &b1,
+            Some("https://example.com/search-results".into()),
+            Some("Search Results".into()),
+            Some(false),
+            Some(true),
+            Some(false),
+            None,
+        )
+        .expect("Navigation update");
+
+    let state_after_nav = manager.get_state(&b1).unwrap();
+    assert_eq!(state_after_nav.url, "https://example.com/search-results");
+    assert!(state_after_nav.generation > state_initial.generation);
+
+    // Verification with old snapshot_id or rev1 MUST fail with SnapshotMapMismatch
+    let stale_lookup = service.verify_snapshot_ref(&b1, &snap1_id, rev1, "search-box");
+    assert_eq!(stale_lookup, Err(RemoteServiceError::SnapshotMapMismatch));
+
+    // Recording new snapshot on the navigated page yields a higher map revision
+    let targets2 = vec![BrowserAutomationTarget {
+        reference: "first-result".into(),
+        selector: ".result-item:first-child".into(),
+    }];
+
+    let (snap2_id, rev2) = service
+        .record_snapshot(&b1, state_after_nav.generation, targets2)
+        .expect("Snapshot on new URL should succeed");
+
+    assert_ne!(snap1_id, snap2_id, "Snapshot IDs must differ");
+    assert!(rev2 > rev1, "URL change must increment snapshot map revision ({} > {})", rev2, rev1);
+
+    // New reference resolves correctly
+    let new_selector = service
+        .verify_snapshot_ref(&b1, &snap2_id, rev2, "first-result")
+        .expect("New target should resolve");
+    assert_eq!(new_selector, ".result-item:first-child");
+}

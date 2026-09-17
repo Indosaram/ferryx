@@ -1174,3 +1174,14 @@ export async function watchDagProject(projectPath: string): Promise<DagWatchProj
   if (!isTauri()) return { projectPath, runs: [] };
   return invokeCommand<DagWatchProjectResult>("dag_watch_project", { projectPath });
 }
+
+export async function browserRemoteReclaim(): Promise<number> {
+  if (!isTauri()) return 0;
+  return invokeCommand<number>("cmd_browser_remote_reclaim");
+}
+
+export async function browserRemoteRevoke(): Promise<number> {
+  if (!isTauri()) return 0;
+  return invokeCommand<number>("cmd_browser_remote_revoke");
+}
+

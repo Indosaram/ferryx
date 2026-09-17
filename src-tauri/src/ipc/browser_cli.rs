@@ -104,6 +104,11 @@ pub enum BrowserCliRequest {
         #[serde(default)]
         value: Option<String>,
     },
+    #[serde(rename_all = "camelCase")]
+    RemoteAttach {
+        #[serde(default)]
+        protocol_version: Option<u32>,
+    },
 }
 
 /// An authenticated request line: the capability token plus the command itself.
@@ -240,6 +245,11 @@ pub enum BrowserCliResponse {
     },
     StorageValue {
         value: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    RemoteAttached {
+        service_epoch: String,
+        protocol_version: u32,
     },
     Error {
         code: String,
@@ -531,6 +541,7 @@ where
 
     let (reader, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader);
+    let mut is_remote_attach = false;
     let response = match read_limited_line(&mut reader, MAX_REQUEST_BYTES).await {
         Ok(RequestLine::Eof) => return Ok(()),
         Ok(RequestLine::TooLarge) => BrowserCliResponse::Error {
@@ -545,6 +556,9 @@ where
             // whether its arguments named a real browser session.
             match serde_json::from_str::<BrowserCliEnvelope>(line.trim()) {
                 Ok(envelope) if tokens_match(expected_token.as_str(), &envelope.token) => {
+                    if matches!(envelope.request, BrowserCliRequest::RemoteAttach { .. }) {
+                        is_remote_attach = true;
+                    }
                     execute_request(&app, &manager, envelope.request).await
                 }
                 Ok(_) => unauthorized(),
@@ -562,17 +576,95 @@ where
         }
         Err(error) => return Err(BrowserError::Internal(error.to_string())),
     };
-    let mut response = serde_json::to_string(&response)
+    let mut response_str = serde_json::to_string(&response)
         .map_err(|error| BrowserError::Internal(error.to_string()))?;
-    response.push('\n');
+    response_str.push('\n');
     writer
-        .write_all(response.as_bytes())
+        .write_all(response_str.as_bytes())
         .await
         .map_err(|error| BrowserError::Internal(error.to_string()))?;
     writer
         .flush()
         .await
-        .map_err(|error| BrowserError::Internal(error.to_string()))
+        .map_err(|error| BrowserError::Internal(error.to_string()))?;
+
+    if is_remote_attach && matches!(response, BrowserCliResponse::RemoteAttached { .. }) {
+        return run_framed_ipc_loop(&mut reader, &mut writer, &app, &manager).await;
+    }
+
+    Ok(())
+}
+
+async fn run_framed_ipc_loop<R, W, Rt: tauri::Runtime>(
+    reader: &mut R,
+    writer: &mut W,
+    app: &AppHandle<Rt>,
+    manager: &Arc<BrowserManager>,
+) -> Result<(), BrowserError>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut header = [0u8; 5];
+    loop {
+        match reader.read_exact(&mut header).await {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                return Ok(());
+            }
+            Err(e) => return Err(BrowserError::Internal(e.to_string())),
+        }
+
+        let payload_len = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
+        let content_type = header[4];
+
+        let max_len = if content_type == crate::browser::remote_bridge_protocol::IPC_CONTENT_TYPE_JSON {
+            crate::browser::remote_bridge_protocol::MAX_JSON_PAYLOAD_BYTES
+        } else if content_type == crate::browser::remote_bridge_protocol::IPC_CONTENT_TYPE_IMAGE {
+            crate::browser::remote_bridge_protocol::MAX_FRAME_PAYLOAD_BYTES
+        } else {
+            return Err(BrowserError::Internal(format!("Invalid IPC content type: 0x{:02x}", content_type)));
+        };
+
+        if payload_len > max_len {
+            return Err(BrowserError::Internal(format!(
+                "Framed IPC payload too large: {} bytes (max {})",
+                payload_len, max_len
+            )));
+        }
+
+        let mut payload = vec![0u8; payload_len];
+        if payload_len > 0 {
+            reader.read_exact(&mut payload).await.map_err(|e| BrowserError::Internal(e.to_string()))?;
+        }
+
+        if content_type == crate::browser::remote_bridge_protocol::IPC_CONTENT_TYPE_JSON {
+            let resp_payload = match serde_json::from_slice::<BrowserCliRequest>(&payload) {
+                Ok(req) => {
+                    let resp = execute_request(app, manager, req).await;
+                    serde_json::to_vec(&resp).unwrap_or_default()
+                }
+                Err(e) => {
+                    let resp = BrowserCliResponse::Error {
+                        code: "BROWSER_CLI_REQUEST_INVALID".into(),
+                        message: e.to_string(),
+                    };
+                    serde_json::to_vec(&resp).unwrap_or_default()
+                }
+            };
+
+            let frame = crate::browser::remote_bridge_protocol::encode_ipc_frame(
+                crate::browser::remote_bridge_protocol::IPC_CONTENT_TYPE_JSON,
+                &resp_payload,
+            )
+            .map_err(|e| BrowserError::Internal(e.to_string()))?;
+
+            writer.write_all(&frame).await.map_err(|e| BrowserError::Internal(e.to_string()))?;
+            writer.flush().await.map_err(|e| BrowserError::Internal(e.to_string()))?;
+        }
+    }
 }
 
 async fn execute_request<R: tauri::Runtime>(
@@ -793,6 +885,12 @@ async fn execute_request<R: tauri::Runtime>(
                 },
             }
         }
+        BrowserCliRequest::RemoteAttach { protocol_version } => {
+            BrowserCliResponse::RemoteAttached {
+                service_epoch: "1".into(),
+                protocol_version: protocol_version.unwrap_or(1),
+            }
+        }
     }
 }
 
@@ -841,7 +939,12 @@ async fn send_browser_cli_request_at_path(
 ) -> Result<BrowserCliResponse, BrowserError> {
     use tokio::net::UnixStream;
 
-    let token = read_token_file(&token_path_for(socket_path))?;
+    let path_buf = token_path_for(socket_path);
+    let token = crate::ipc::run_blocking(move || {
+        read_token_file(&path_buf).map_err(|e| IpcError::internal(e.to_string()))
+    })
+    .await
+    .map_err(|e| BrowserError::Internal(e.to_string()))?;
     let stream = UnixStream::connect(socket_path).await.map_err(|error| {
         BrowserError::CliUnavailable(format!("Ferryx desktop app is not running: {error}"))
     })?;
@@ -862,8 +965,18 @@ async fn send_browser_cli_request_at_path(
 ) -> Result<BrowserCliResponse, BrowserError> {
     use tokio::net::TcpStream;
 
-    let port = read_port_from_file(port_path)?;
-    let token = read_token_file(&token_path_for(port_path))?;
+    let port_path_buf = port_path.to_path_buf();
+    let port = crate::ipc::run_blocking(move || {
+        read_port_from_file(&port_path_buf).map_err(|e| IpcError::internal(e.to_string()))
+    })
+    .await
+    .map_err(|e| BrowserError::Internal(e.to_string()))?;
+    let token_path_buf = token_path_for(port_path);
+    let token = crate::ipc::run_blocking(move || {
+        read_token_file(&token_path_buf).map_err(|e| IpcError::internal(e.to_string()))
+    })
+    .await
+    .map_err(|e| BrowserError::Internal(e.to_string()))?;
     let stream = TcpStream::connect(format!("127.0.0.1:{port}"))
         .await
         .map_err(|error| {
@@ -1984,5 +2097,134 @@ mod tests {
         let resp = send_raw_line(app.handle().clone(), Arc::clone(&manager), token, &raw).await;
         assert_eq!(resp["type"], "error");
         assert!(resp["code"] == "WEBVIEW_NOT_FOUND" || resp["code"] == "BROWSER_WEBVIEW_NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn test_phase4_remote_attach_handshake_and_framed_mode() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(BrowserManager::new());
+        let token = "test-token";
+
+        // 1. Successful handshake -> framed mode round-trip
+        let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
+        let app_handle = app.handle().clone();
+        let mgr = Arc::clone(&manager);
+        let tok = Arc::new(token.to_string());
+        let _server_task = tokio::spawn(async move {
+            handle_connection(server_stream, app_handle, mgr, tok).await
+        });
+
+        let (mut client_reader, mut client_writer) = tokio::io::split(client_stream);
+
+        // Send one-line JSON handshake
+        let handshake_raw = format!(r#"{{"command":"remoteAttach","token":"{token}"}}"#);
+        let mut line = handshake_raw.into_bytes();
+        line.push(b'\n');
+        client_writer.write_all(&line).await.expect("write handshake");
+        client_writer.flush().await.expect("flush handshake");
+
+        let mut resp_line = String::new();
+        let mut buf_reader = BufReader::new(&mut client_reader);
+        buf_reader.read_line(&mut resp_line).await.expect("read handshake response");
+        let resp_json: serde_json::Value = serde_json::from_str(resp_line.trim()).expect("parse handshake json");
+        assert_eq!(resp_json["type"], "remoteAttached", "handshake must respond with remoteAttached");
+        assert_eq!(resp_json["protocolVersion"], 1);
+
+        // Now connection is in framed mode! Send framed BrowserCliRequest::List
+        let list_req_bytes = serde_json::to_vec(&BrowserCliRequest::List).unwrap();
+        let framed_req = crate::browser::remote_bridge_protocol::encode_ipc_frame(
+            crate::browser::remote_bridge_protocol::IPC_CONTENT_TYPE_JSON,
+            &list_req_bytes,
+        )
+        .expect("encode framed request");
+        client_writer.write_all(&framed_req).await.expect("send framed request");
+        client_writer.flush().await.expect("flush framed request");
+
+        // Read framed response
+        let mut resp_header = [0u8; 5];
+        buf_reader.read_exact(&mut resp_header).await.expect("read framed response header");
+        let resp_payload_len = u32::from_le_bytes([resp_header[0], resp_header[1], resp_header[2], resp_header[3]]) as usize;
+        let resp_content_type = resp_header[4];
+        assert_eq!(resp_content_type, crate::browser::remote_bridge_protocol::IPC_CONTENT_TYPE_JSON);
+
+        let mut resp_payload = vec![0u8; resp_payload_len];
+        buf_reader.read_exact(&mut resp_payload).await.expect("read framed payload");
+        let framed_resp: BrowserCliResponse = serde_json::from_slice(&resp_payload).expect("parse framed response");
+        assert!(matches!(framed_resp, BrowserCliResponse::List { .. }));
+
+        // 2. Unauthenticated handshake rejected before framed mode
+        let (bad_client_stream, bad_server_stream) = tokio::io::duplex(4096);
+        let app_handle2 = app.handle().clone();
+        let mgr2 = Arc::clone(&manager);
+        let tok2 = Arc::new(token.to_string());
+        let _server_task2 = tokio::spawn(async move {
+            handle_connection(bad_server_stream, app_handle2, mgr2, tok2).await
+        });
+
+        let (bad_reader, mut bad_writer) = tokio::io::split(bad_client_stream);
+        let bad_handshake = r#"{"command":"remoteAttach","token":"wrong-token"}"#;
+        let mut bad_line = bad_handshake.as_bytes().to_vec();
+        bad_line.push(b'\n');
+        bad_writer.write_all(&bad_line).await.unwrap();
+        bad_writer.flush().await.unwrap();
+
+        let mut bad_resp_line = String::new();
+        let mut bad_buf_reader = BufReader::new(bad_reader);
+        bad_buf_reader.read_line(&mut bad_resp_line).await.unwrap();
+        let bad_resp: serde_json::Value = serde_json::from_str(bad_resp_line.trim()).unwrap();
+        assert_eq!(bad_resp["type"], "error");
+        assert_eq!(bad_resp["code"], "BROWSER_CLI_UNAUTHORIZED");
+        // Server must close connection, EOF on next read
+        let mut eof_check = [0u8; 1];
+        let n = bad_buf_reader.read(&mut eof_check).await.unwrap();
+        assert_eq!(n, 0, "unauthenticated connection must close immediately");
+
+        // 3. Verify public DTOs do not disclose local credential or internal paths
+        let summary = BrowserSessionSummary {
+            browser_id: "b1".into(),
+            webview_label: "label".into(),
+            workspace_id: Some("ws".into()),
+            profile_id: BrowserProfileId::Default,
+            url: "https://example.com".into(),
+            title: Some("Title".into()),
+            visible: true,
+        };
+        let summary_json = serde_json::to_string(&summary).unwrap();
+        assert!(!summary_json.contains(token));
+        assert!(!summary_json.contains("/Users/"));
+        assert!(!summary_json.contains("worktreePath"));
+    }
+
+    #[test]
+    fn test_phase4_owner_reclaim_invalidates_remote_driver() {
+        let broker = crate::browser::remote_driver::RemoteDriverBroker::new();
+
+        // 1. Remote viewer claims driver lease
+        let lease = broker
+            .claim("dev1", "conn1", "sub1", "b1", true)
+            .expect("claim driver");
+        assert_eq!(lease.device_id, "dev1");
+
+        // Validate active lease succeeds
+        assert!(broker
+            .validate_lease("b1", lease.lease_epoch, "dev1", "conn1")
+            .is_ok());
+
+        // 2. Desktop owner revokes / reclaims control
+        let new_epoch = broker.desktop_reclaim();
+        assert_ne!(new_epoch, lease.lease_epoch);
+
+        // 3. Prior remote lease is now rejected with DesktopReclaimed
+        let err = broker
+            .validate_lease("b1", lease.lease_epoch, "dev1", "conn1")
+            .unwrap_err();
+        assert_eq!(
+            err,
+            crate::browser::remote_driver::RemoteDriverError::DesktopReclaimed
+        );
     }
 }

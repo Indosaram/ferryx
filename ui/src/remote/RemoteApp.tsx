@@ -26,6 +26,7 @@ import {
   type RemoteWorkspaceModel,
 } from "./RemoteSessionList";
 import { RemoteTerminal } from "./RemoteTerminal";
+import { RemoteBrowserWorkspace } from "./RemoteBrowserWorkspace";
 import { hostTransportUrl, remoteApiUrl as apiUrl, remoteSocketUrl } from "./remoteClient";
 
 const REMOTE_ACTIVE_SELECTION_CHANGED_EVENT = "remote_active_selection_changed";
@@ -324,6 +325,9 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
   }, []);
   const [hostDrawerOpen, setHostDrawerOpen] = useState(false);
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
+  const [viewMode, setViewMode] = useState<"terminal" | "browser">("terminal");
+  const [browserSessions, setBrowserSessions] = useState<Array<{ browserId: string; title?: string; url?: string }>>([]);
+  const [selectedBrowserId, setSelectedBrowserId] = useState<string | null>(null);
   // First render always speaks to the relay; a verified probe swaps this for a direct endpoint.
   const [transport, setTransport] = useState<CandidateEndpoint>(() => relayEndpoint(relayUrl));
   const remoteHostState = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
@@ -386,6 +390,32 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
   const rollbackTransport = useCallback(() => {
     setTransport((current) => current.url === relayUrl ? current : relayEndpoint(relayUrl));
   }, [relayUrl]);
+
+  const fetchBrowserSessions = useCallback(async () => {
+    if (!token) return;
+    try {
+      const wsId = model.context.workspaceId || "";
+      const wtSlug = model.context.worktreeSlug || "";
+      const params = new URLSearchParams();
+      if (wsId) params.set("workspaceId", wsId);
+      if (wtSlug) params.set("worktreeSlug", wtSlug);
+      const query = params.toString() ? `?${params.toString()}` : "";
+      const response = await fetch(apiUrl(transportBaseUrl, `/api/v1/browser/sessions${query}`), {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (response.ok) {
+        const data = await response.json();
+        if (Array.isArray(data)) {
+          setBrowserSessions(data);
+          if (data.length > 0 && !selectedBrowserId) {
+            setSelectedBrowserId(data[0].browserId);
+          }
+        }
+      }
+    } catch {
+      // Ignore network errors
+    }
+  }, [token, model.context.workspaceId, model.context.worktreeSlug, transportBaseUrl, selectedBrowserId]);
 
   useEffect(() => () => {
     workspaceRefreshVersionRef.current += 1;
@@ -904,37 +934,133 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
               Disconnect
             </button>
           )}
+
+          <div className="flex items-center gap-1 border-l border-border/40 pl-2">
+            <button
+              type="button"
+              data-testid="remote-view-mode-terminal"
+              onClick={() => setViewMode("terminal")}
+              className={`flex h-5 items-center rounded px-1.5 text-[11px] font-medium transition-colors ${
+                viewMode === "terminal"
+                  ? "bg-accent text-accent-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              Terminal
+            </button>
+            <button
+              type="button"
+              data-testid="remote-view-mode-browser"
+              onClick={() => {
+                setViewMode("browser");
+                void fetchBrowserSessions();
+              }}
+              className={`flex h-5 items-center rounded px-1.5 text-[11px] font-medium transition-colors ${
+                viewMode === "browser"
+                  ? "bg-accent text-accent-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              Browser
+            </button>
+          </div>
         </div>
       </header>
 
-      <RemoteWorkspaceMirror
-        model={model}
-        pending={pending}
-        selectorOpen={selectorOpen}
-        onSelectorOpenChange={setSelectorOpen}
-        onSelect={(option) => void selectContext(option)}
-        onCreateTerminal={() => {
-          if (!model.context.workspaceId) return;
-          void selectContext({ workspaceId: model.context.workspaceId, worktreeSlug: model.context.worktreeSlug, worktreeLabel: model.context.worktreeLabel }, true);
-        }}
-        creationError={creationError}
-      >
-        {effectiveSessionId ? (
-          <RemoteTerminal
-            key={`${effectiveSessionId}:${terminalRetryGeneration}`}
-            sessionId={effectiveSessionId}
-            token={token}
-            transportUrl={transportBaseUrl}
-            onTransportFailure={transport.url !== relayUrl ? rollbackTransport : undefined}
-            activeTabId={model.context.activeTabId}
-            onBack={() => undefined}
-            embedded
-            onSwipePreviousTab={handleSwipePreviousTab}
-            onSwipeNextTab={handleSwipeNextTab}
-            onSocketLifecycle={handleTerminalSocketLifecycle}
-          />
-        ) : null}
-      </RemoteWorkspaceMirror>
+      {viewMode === "browser" ? (
+        <div className="flex-1 flex flex-col min-h-0 bg-neutral-950 overflow-hidden">
+          {browserSessions.length > 0 && (
+            <div className="flex items-center gap-1.5 px-2 py-1 bg-neutral-900 border-b border-neutral-800 text-xs overflow-x-auto shrink-0">
+              <span className="text-neutral-400 text-[11px] shrink-0">Browsers:</span>
+              {browserSessions.map((s) => (
+                <button
+                  key={s.browserId}
+                  type="button"
+                  data-testid={`select-browser-${s.browserId}`}
+                  onClick={() => setSelectedBrowserId(s.browserId)}
+                  className={`px-2 py-0.5 rounded text-[11px] font-medium transition shrink-0 ${
+                    selectedBrowserId === s.browserId
+                      ? "bg-blue-600 text-white"
+                      : "bg-neutral-800 text-neutral-300 hover:bg-neutral-700"
+                  }`}
+                >
+                  {s.title || s.browserId}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => void fetchBrowserSessions()}
+                className="ml-auto text-[11px] text-neutral-400 hover:text-neutral-200"
+              >
+                Refresh
+              </button>
+            </div>
+          )}
+
+          {selectedBrowserId ? (
+            <RemoteBrowserWorkspace
+              baseUrl={transportBaseUrl}
+              browserId={selectedBrowserId}
+              deviceToken={token}
+              onBack={() => setViewMode("terminal")}
+            />
+          ) : (
+            <div className="flex flex-col items-center justify-center flex-1 p-4 text-center text-muted-foreground gap-3">
+              <p className="text-sm font-medium">No active browser session selected</p>
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  placeholder="Enter browser ID..."
+                  data-testid="remote-manual-browser-id-input"
+                  className="px-2 py-1 text-xs rounded bg-neutral-900 border border-neutral-700 text-foreground font-mono"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && (e.target as HTMLInputElement).value.trim()) {
+                      setSelectedBrowserId((e.target as HTMLInputElement).value.trim());
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  data-testid="remote-fetch-browsers-btn"
+                  onClick={() => void fetchBrowserSessions()}
+                  className="px-2.5 py-1 text-xs rounded bg-accent text-accent-foreground font-medium hover:bg-accent/80 transition"
+                >
+                  Refresh Sessions
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      ) : (
+        <RemoteWorkspaceMirror
+          model={model}
+          pending={pending}
+          selectorOpen={selectorOpen}
+          onSelectorOpenChange={setSelectorOpen}
+          onSelect={(option) => void selectContext(option)}
+          onCreateTerminal={() => {
+            if (!model.context.workspaceId) return;
+            void selectContext({ workspaceId: model.context.workspaceId, worktreeSlug: model.context.worktreeSlug, worktreeLabel: model.context.worktreeLabel }, true);
+          }}
+          creationError={creationError}
+        >
+          {effectiveSessionId ? (
+            <RemoteTerminal
+              key={`${effectiveSessionId}:${terminalRetryGeneration}`}
+              sessionId={effectiveSessionId}
+              token={token}
+              transportUrl={transportBaseUrl}
+              onTransportFailure={transport.url !== relayUrl ? rollbackTransport : undefined}
+              activeTabId={model.context.activeTabId}
+              onBack={() => undefined}
+              embedded
+              onSwipePreviousTab={handleSwipePreviousTab}
+              onSwipeNextTab={handleSwipeNextTab}
+              onSocketLifecycle={handleTerminalSocketLifecycle}
+            />
+          ) : null}
+        </RemoteWorkspaceMirror>
+      )}
 
       <MobileHostDrawer open={hostDrawerOpen} onOpenChange={setHostDrawerOpen} />
     </div>

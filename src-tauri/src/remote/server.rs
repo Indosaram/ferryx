@@ -2,6 +2,10 @@
 mod machine_owner_socket;
 use crate::remote::auth::{AuthError, DeviceAccessScope, DeviceInfo, DevicePermission};
 use crate::remote::backend::{RecoveryStream, RemoteRecoveryStatus, RemoteSessionBackend};
+use crate::remote::browser_admission::AdmissionController;
+use crate::remote::browser_backend::{DesktopScope, RemoteBrowserBackend, RemoteBrowserError};
+use crate::remote::browser_protocol::{ClientMessage, ServerMessage};
+use crate::remote::browser_ws::BrowserWsSession;
 use crate::remote::mirror::RemoteTerminalMirror;
 use crate::remote::protocol::RemoteGridFrame;
 use crate::remote::protocol::{
@@ -32,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tower_http::cors::{Any, CorsLayer};
@@ -249,6 +253,12 @@ fn unix_now_secs() -> u64 {
 fn valid_socket_target(target: &str) -> bool {
     target == "/api/v1/events"
         || target.strip_prefix("/api/v1/terminal/").is_some_and(|id| {
+            !id.is_empty()
+                && id.bytes().all(|b| {
+                    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b':')
+                })
+        })
+        || target.strip_prefix("/api/v1/browser/").is_some_and(|id| {
             !id.is_empty()
                 && id.bytes().all(|b| {
                     b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b':')
@@ -2484,6 +2494,7 @@ async fn get_capabilities(
     authenticate_machine_request(&state, &headers)?;
     let identity = load_gateway_identity(Arc::clone(&state)).await?;
     let device = authenticate_machine_request(&state, &headers)?;
+    let browser_caps = state.browser_backend().capabilities().await;
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(serde_json::json!({
         "apiVersion": 1,
         "machineId": identity.machine_id,
@@ -2499,6 +2510,13 @@ async fn get_capabilities(
             }
             capabilities
         } else { vec![] },
+        "browser": {
+            "browserAvailable": browser_caps.browser_available,
+            "supportedFormats": browser_caps.supported_formats,
+            "supportedCommands": browser_caps.supported_commands,
+            "maxEdge": browser_caps.max_edge,
+            "maxFps": browser_caps.max_fps,
+        },
         "limits": { "directoryEntries": 1000, "terminalSessions": 64 }
     }))).into_response())
 }
@@ -2766,6 +2784,227 @@ async fn operation_boundary(State(state): State<Arc<RemoteGatewayState>>, path: 
     Ok(super::workspace_api::ADMISSION.scope(admission, super::workspace_api::operation(State(state), path, headers)).await)
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserSessionsQuery {
+    pub workspace_id: Option<String>,
+    pub worktree_slug: Option<String>,
+}
+
+async fn list_browser_sessions(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    Query(query): Query<BrowserSessionsQuery>,
+) -> Result<Response, (StatusCode, String)> {
+    let token = extract_token(&headers)
+        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let _device = state
+        .auth_manager
+        .validate_token(&token)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
+
+    let scope = DesktopScope {
+        workspace_id: query.workspace_id.unwrap_or_default(),
+        worktree_slug: query.worktree_slug.unwrap_or_default(),
+    };
+
+    match state.browser_backend().list_sessions(&scope).await {
+        Ok(sessions) => Ok(Json(sessions).into_response()),
+        Err(RemoteBrowserError::Unavailable(msg)) => {
+            Err((StatusCode::SERVICE_UNAVAILABLE, format!("BROWSER_UNAVAILABLE: {msg}")))
+        }
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+async fn identify_browser_session(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    Query(query): Query<BrowserSessionsQuery>,
+) -> Result<Response, (StatusCode, String)> {
+    let token = extract_token(&headers)
+        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let _device = state
+        .auth_manager
+        .validate_token(&token)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
+
+    let scope = DesktopScope {
+        workspace_id: query.workspace_id.unwrap_or_default(),
+        worktree_slug: query.worktree_slug.unwrap_or_default(),
+    };
+
+    match state.browser_backend().identify_session(&scope).await {
+        Ok(session) => Ok(Json(serde_json::json!({ "browser": session })).into_response()),
+        Err(RemoteBrowserError::Unavailable(msg)) => {
+            Err((StatusCode::SERVICE_UNAVAILABLE, format!("BROWSER_UNAVAILABLE: {msg}")))
+        }
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+async fn ws_browser_handler(
+    ws: WebSocketUpgrade,
+    AxumPath(browser_id): AxumPath<String>,
+    Query(query): Query<AuthQuery>,
+    headers: HeaderMap,
+    State(state): State<Arc<RemoteGatewayState>>,
+) -> Result<Response, (StatusCode, String)> {
+    let target = format!("/api/v1/browser/{browser_id}");
+    if !valid_socket_target(&target) {
+        return Err((StatusCode::BAD_REQUEST, "Invalid browser target".into()));
+    }
+    let token = socket_credential(&state, &headers, &query, &target)
+        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let device = state
+        .auth_manager
+        .validate_token(&token)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
+
+    let service_epoch = state.browser_service_epoch();
+    let backend = state.browser_backend();
+    let admission = Arc::clone(&state.admission_controller);
+
+    Ok(ws
+        .max_message_size(4 * 1024 * 1024)
+        .max_frame_size(4 * 1024 * 1024)
+        .on_upgrade(move |socket| async move {
+            run_browser_ws_session(
+                socket,
+                browser_id,
+                device,
+                service_epoch,
+                backend,
+                admission,
+            )
+            .await;
+        }))
+}
+
+async fn run_browser_ws_session(
+    mut socket: WebSocket,
+    browser_id: String,
+    device: DeviceInfo,
+    service_epoch: u64,
+    backend: Arc<dyn RemoteBrowserBackend>,
+    admission: Arc<AdmissionController>,
+) {
+    let connection_id = format!("conn_{}", uuid::Uuid::new_v4());
+    let mut session = BrowserWsSession::new(
+        connection_id,
+        device.id.clone(),
+        browser_id.clone(),
+        device.permission,
+        Instant::now(),
+    );
+
+    let hello = ServerMessage::BrowserHello {
+        browser_id: browser_id.clone(),
+        browser_instance_id: "bi1".into(),
+        browser_service_epoch: service_epoch.to_string(),
+        desktop_epoch: "1".into(),
+        protocol_version: 1,
+        supported_commands: vec![
+            "navigate".into(),
+            "back".into(),
+            "forward".into(),
+            "reload".into(),
+            "click".into(),
+            "fill".into(),
+            "keypress".into(),
+            "eval".into(),
+            "wait".into(),
+            "getState".into(),
+        ],
+        capabilities: None,
+    };
+
+    if let Ok(json) = serde_json::to_string(&hello) {
+        if socket.send(Message::Text(json.into())).await.is_err() {
+            session.teardown(&admission);
+            return;
+        }
+    }
+
+    while let Some(msg) = socket.recv().await {
+        match msg {
+            Ok(Message::Text(text)) => {
+                match serde_json::from_str::<ClientMessage>(&text) {
+                    Ok(client_msg) => {
+                        match session
+                            .handle_client_message(
+                                client_msg,
+                                &*backend,
+                                &admission,
+                                Instant::now(),
+                            )
+                            .await
+                        {
+                            Ok(Some(reply)) => {
+                                if let Ok(reply_json) = serde_json::to_string(&reply) {
+                                    if socket.send(Message::Text(reply_json.into())).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(err) => {
+                                let err_reply = ServerMessage::BrowserError {
+                                    request_id: None,
+                                    code: "BROWSER_ERROR".into(),
+                                    message: err,
+                                    retryable: false,
+                                    retry_after_ms: None,
+                                };
+                                if let Ok(reply_json) = serde_json::to_string(&err_reply) {
+                                    let _ = socket.send(Message::Text(reply_json.into())).await;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let err_reply = ServerMessage::BrowserError {
+                            request_id: None,
+                            code: "BROWSER_INVALID_REQUEST".into(),
+                            message: e.to_string(),
+                            retryable: false,
+                            retry_after_ms: None,
+                        };
+                        if let Ok(reply_json) = serde_json::to_string(&err_reply) {
+                            let _ = socket.send(Message::Text(reply_json.into())).await;
+                        }
+                    }
+                }
+            }
+            Ok(Message::Binary(bytes)) => {
+                if let Err(e) = session.handle_client_binary(&bytes) {
+                    let err_reply = ServerMessage::BrowserError {
+                        request_id: None,
+                        code: "BROWSER_INVALID_REQUEST".into(),
+                        message: e,
+                        retryable: false,
+                        retry_after_ms: None,
+                    };
+                    if let Ok(reply_json) = serde_json::to_string(&err_reply) {
+                        let _ = socket.send(Message::Text(reply_json.into())).await;
+                    }
+                }
+            }
+            Ok(Message::Ping(p)) => {
+                if socket.send(Message::Pong(p)).await.is_err() {
+                    break;
+                }
+            }
+            Ok(Message::Close(_)) | Err(_) => {
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    session.teardown(&admission);
+}
+
 async fn remote_fallback(method: axum::http::Method, uri: axum::http::Uri) -> Response {
     if uri.path().starts_with("/api/") { return machine_error(StatusCode::NOT_FOUND, "NOT_FOUND"); }
     if method != axum::http::Method::GET && method != axum::http::Method::HEAD {
@@ -2811,6 +3050,9 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route("/api/v1/socket-ticket", post(issue_socket_ticket))
         .route("/api/v1/events", get(ws_events_handler))
         .route("/api/v1/terminal/{sessionId}", get(ws_terminal_handler))
+        .route("/api/v1/browser/sessions", get(list_browser_sessions))
+        .route("/api/v1/browser/identify", get(identify_browser_session))
+        .route("/api/v1/browser/{browserId}", get(ws_browser_handler))
         .route("/api/push/subscribe", post(push_subscribe))
         .route("/api/push/unsubscribe", post(push_unsubscribe))
         .fallback(remote_fallback)
@@ -3323,6 +3565,157 @@ mod tests {
             &request.code, &request.device_name, request.installation_id.as_deref(),
         ).unwrap();
         assert_eq!(device.access_scope, DeviceAccessScope::Mirror);
+    }
+
+    #[test]
+    fn test_phase4_server_valid_socket_target_allows_browser() {
+        assert!(valid_socket_target("/api/v1/browser/b1"));
+        assert!(!valid_socket_target("/api/v1/browser/"));
+    }
+
+    async fn raw_ws_handshake(
+        addr: SocketAddr,
+        path_and_query: &str,
+        token: Option<&str>,
+    ) -> (StatusCode, tokio::net::TcpStream) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::TcpStream::connect(addr).await.expect("tcp connect");
+        let auth = token
+            .map(|t| format!("Authorization: Bearer {t}\r\n"))
+            .unwrap_or_default();
+        let req = format!(
+            "GET {path_and_query} HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n{auth}\r\n"
+        );
+        stream.write_all(req.as_bytes()).await.expect("tcp write");
+
+        let mut response = Vec::new();
+        let mut byte = [0u8; 1];
+        while !response.ends_with(b"\r\n\r\n") {
+            let n = stream.read(&mut byte).await.expect("tcp read");
+            if n == 0 {
+                break;
+            }
+            response.push(byte[0]);
+        }
+        let resp_str = String::from_utf8_lossy(&response);
+        let status_code = if resp_str.starts_with("HTTP/1.1 101") {
+            StatusCode::SWITCHING_PROTOCOLS
+        } else if resp_str.starts_with("HTTP/1.1 401") {
+            StatusCode::UNAUTHORIZED
+        } else if resp_str.starts_with("HTTP/1.1 400") {
+            StatusCode::BAD_REQUEST
+        } else if resp_str.starts_with("HTTP/1.1 404") {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        (status_code, stream)
+    }
+
+    async fn read_ws_text_frame(stream: &mut tokio::net::TcpStream) -> String {
+        use tokio::io::AsyncReadExt;
+        let mut header = [0u8; 2];
+        stream.read_exact(&mut header).await.expect("read header");
+        let payload_len = (header[1] & 0x7f) as usize;
+        let actual_len = if payload_len == 126 {
+            let mut ext = [0u8; 2];
+            stream.read_exact(&mut ext).await.expect("read ext");
+            u16::from_be_bytes(ext) as usize
+        } else {
+            payload_len
+        };
+        let mut payload = vec![0u8; actual_len];
+        stream.read_exact(&mut payload).await.expect("read payload");
+        String::from_utf8(payload).expect("utf8 text frame")
+    }
+
+    #[tokio::test]
+    async fn test_phase4_gateway_browser_ws_single_use_ticket_admission() {
+        let terminal_service = Arc::new(TerminalService::default());
+        let registry = WorkspaceRegistry::new();
+        let state = Arc::new(RemoteGatewayState::new(terminal_service, registry));
+        let pin = state
+            .auth_manager
+            .create_pairing_code(DevicePermission::Control);
+        let (token, _device) = state
+            .auth_manager
+            .exchange_pairing_code(&pin, "s5-device")
+            .unwrap();
+        let test_backend = Arc::new(crate::remote::browser_backend::InProcessTestBackend::new());
+        state.set_browser_backend(test_backend.clone());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = create_remote_router(Arc::clone(&state));
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async { let _ = stop_rx.await; })
+                .await
+                .unwrap();
+        });
+
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        // 1. Issue a single-use socket ticket for browser endpoint
+        let ticket_body = serde_json::json!({ "target": "/api/v1/browser/b1" }).to_string();
+        let ticket_resp = client
+            .post(format!("http://{addr}/api/v1/socket-ticket"))
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/json")
+            .body(ticket_body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(ticket_resp.status(), reqwest::StatusCode::OK);
+        let ticket_text = ticket_resp.text().await.unwrap();
+        let ticket_json: serde_json::Value = serde_json::from_str(&ticket_text).unwrap();
+        let ticket = ticket_json["ticket"].as_str().unwrap();
+
+        // 2. (a) Valid single-use ticket connects and upgrades with 101 Switching Protocols + BrowserHello
+        let path_with_ticket = format!("/api/v1/browser/b1?ticket={ticket}");
+        let (status, mut stream) = raw_ws_handshake(addr, &path_with_ticket, None).await;
+        assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS, "valid ticket must succeed with 101");
+        let hello_msg = read_ws_text_frame(&mut stream).await;
+        let hello_json: serde_json::Value = serde_json::from_str(&hello_msg).unwrap();
+        assert_eq!(hello_json["type"], "browserHello");
+        assert_eq!(hello_json["browserId"], "b1");
+
+        // 3. (b) Replay of same ticket must be rejected (single-use)
+        let (replayed_status, _) = raw_ws_handshake(addr, &path_with_ticket, None).await;
+        assert_eq!(replayed_status, StatusCode::UNAUTHORIZED, "replayed single-use ticket must be rejected with 401");
+
+        // 4. Connect without ticket or credentials must be rejected
+        let (no_auth_status, _) = raw_ws_handshake(addr, "/api/v1/browser/b1", None).await;
+        assert_eq!(no_auth_status, StatusCode::UNAUTHORIZED, "unauthenticated connect must be rejected with 401");
+
+        // 5. Connect with invalid ticket must be rejected
+        let (fake_ticket_status, _) = raw_ws_handshake(addr, "/api/v1/browser/b1?ticket=fake-ticket-123", None).await;
+        assert_eq!(fake_ticket_status, StatusCode::UNAUTHORIZED, "invalid ticket must be rejected with 401");
+
+        // 6. Direct HTTP listing when backend is active
+        let list_resp = client
+            .get(format!("http://{addr}/api/v1/browser/sessions?workspaceId=ws1&worktreeSlug=main"))
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(list_resp.status(), reqwest::StatusCode::OK);
+
+        // 7. When GUI exits: browsers become unavailable (UnavailableBrowserBackend)
+        state.set_browser_backend(Arc::new(crate::remote::browser_backend::UnavailableBrowserBackend));
+        state.bump_browser_service_epoch();
+
+        let list_unavail = client
+            .get(format!("http://{addr}/api/v1/browser/sessions?workspaceId=ws1&worktreeSlug=main"))
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(list_unavail.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE, "unavailable backend must return 503");
+
+        let _ = stop_tx.send(());
+        let _ = server_task.await;
     }
 
     #[tokio::test]

@@ -23,6 +23,10 @@ pub struct ManagedBrowserSession {
     pub visible: bool,
     pub bounds: Option<LogicalRect>,
     pub automation_targets: HashMap<String, String>,
+    pub instance_id: String,
+    pub viewport_revision: u64,
+    pub remote_snapshot_id: Option<String>,
+    pub map_revision: u64,
     history: Vec<String>,
     history_index: usize,
     /// Set once the platform reports real engine history flags. The shadow
@@ -152,6 +156,10 @@ impl BrowserManager {
             visible,
             bounds: req.bounds,
             automation_targets: HashMap::new(),
+            instance_id: uuid.clone(),
+            viewport_revision: 1,
+            remote_snapshot_id: None,
+            map_revision: 0,
             history: vec![valid_url],
             history_index: 0,
             native_history_flags: false,
@@ -325,6 +333,7 @@ impl BrowserManager {
             .get_mut(browser_id)
             .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
         s.bounds = Some(bounds);
+        s.viewport_revision += 1;
         Ok(())
     }
 
@@ -380,6 +389,79 @@ impl BrowserManager {
         Ok(())
     }
 
+    pub fn get_instance_id(&self, browser_id: &str) -> Result<String, BrowserError> {
+        let guard = self.sessions.read();
+        let s = guard
+            .get(browser_id)
+            .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
+        Ok(s.instance_id.clone())
+    }
+
+    pub fn get_viewport_revision(&self, browser_id: &str) -> Result<u64, BrowserError> {
+        let guard = self.sessions.read();
+        let s = guard
+            .get(browser_id)
+            .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
+        Ok(s.viewport_revision)
+    }
+
+    pub fn record_remote_snapshot(
+        &self,
+        browser_id: &str,
+        generation: u64,
+        targets: Vec<BrowserAutomationTarget>,
+    ) -> Result<(String, u64), BrowserError> {
+        let mut guard = self.sessions.write();
+        let session = guard
+            .get_mut(browser_id)
+            .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
+        if session.generation != generation {
+            return Err(BrowserError::AutomationSnapshotStale);
+        }
+        let fresh_snapshot_id = Uuid::new_v4().to_string();
+        session.remote_snapshot_id = Some(fresh_snapshot_id.clone());
+        session.map_revision += 1;
+        session.automation_targets = targets
+            .into_iter()
+            .map(|target| (target.reference, target.selector))
+            .collect();
+        Ok((fresh_snapshot_id, session.map_revision))
+    }
+
+    pub fn verify_remote_target(
+        &self,
+        browser_id: &str,
+        snapshot_id: &str,
+        map_revision: u64,
+        reference: &str,
+    ) -> Result<String, BrowserError> {
+        let guard = self.sessions.read();
+        let session = guard
+            .get(browser_id)
+            .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
+        if session.remote_snapshot_id.as_deref() != Some(snapshot_id)
+            || session.map_revision != map_revision
+        {
+            return Err(BrowserError::AutomationSnapshotStale);
+        }
+        session
+            .automation_targets
+            .get(reference)
+            .cloned()
+            .ok_or_else(|| BrowserError::AutomationTargetNotFound(reference.to_string()))
+    }
+
+    pub fn get_geometry(
+        &self,
+        browser_id: &str,
+    ) -> Result<(Option<LogicalRect>, f64, u64), BrowserError> {
+        let guard = self.sessions.read();
+        let s = guard
+            .get(browser_id)
+            .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
+        Ok((s.bounds.clone(), s.zoom_factor, s.viewport_revision))
+    }
+
     pub fn set_visible(&self, browser_id: &str, visible: bool) -> Result<(), BrowserError> {
         let mut guard = self.sessions.write();
         let s = guard
@@ -396,6 +478,7 @@ impl BrowserManager {
             .get_mut(browser_id)
             .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
         s.zoom_factor = clamped;
+        s.viewport_revision += 1;
         Ok(clamped)
     }
 
@@ -421,6 +504,8 @@ impl BrowserManager {
                 s.url = u;
                 s.generation += 1;
                 s.automation_targets.clear();
+                s.remote_snapshot_id = None;
+                s.map_revision += 1;
                 s.load_error = None;
             }
         }

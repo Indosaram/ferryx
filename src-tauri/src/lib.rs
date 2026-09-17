@@ -923,6 +923,11 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
     let notification_activations = Arc::new(NotificationActivations::new());
     let browser_manager = Arc::new(browser::BrowserManager::new());
     let browser_cli_manager = Arc::clone(&browser_manager);
+    let driver_broker = Arc::new(browser::remote_driver::RemoteDriverBroker::new());
+    let browser_remote_service = Arc::new(browser::remote_service::BrowserRemoteService::new(
+        (*browser_manager).clone(),
+        Arc::clone(&driver_broker),
+    ));
     #[cfg(feature = "native-terminal")]
     let native_terminal_surface_host = NativeTerminalSurfaceHostState::default();
     let setup_activations = Arc::clone(&notification_activations);
@@ -1061,6 +1066,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         .manage(ipc::worktree_disk::WorktreeDiskScans::default())
         .manage(notification_audio)
         .manage(notification_activations)
+        .manage(driver_broker)
+        .manage(browser_remote_service)
         .manage(browser_manager);
 
     #[cfg(desktop)]
@@ -1208,6 +1215,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_browser_close,
         cmd_browser_list,
         cmd_browser_open_external,
+        cmd_browser_remote_reclaim,
+        cmd_browser_remote_revoke,
         cmd_open_file_path,
         dag_list_runs,
         dag_get_run,

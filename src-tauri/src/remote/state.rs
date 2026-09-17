@@ -1,5 +1,7 @@
 use crate::remote::auth::{write_private_json, AuthManager};
 use crate::remote::backend::RemoteSessionBackend;
+use crate::remote::browser_admission::AdmissionController;
+use crate::remote::browser_backend::{RemoteBrowserBackend, UnavailableBrowserBackend};
 use crate::remote::protocol::{RemoteActiveDesktopSelection, RemoteEventMessage};
 use crate::terminal::TerminalService;
 use crate::worktree::WorkspaceRegistry;
@@ -7,9 +9,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
-#[cfg(test)]
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 #[cfg(test)]
 use tokio::sync::Notify;
@@ -746,6 +746,9 @@ pub struct RemoteGatewayState {
     ///
     /// Maps ticket -> (device token, target, expiry unix seconds).
     pub socket_tickets: parking_lot::Mutex<std::collections::HashMap<String, (String, String, u64)>>,
+    pub browser_backend: parking_lot::RwLock<Arc<dyn RemoteBrowserBackend>>,
+    pub admission_controller: Arc<AdmissionController>,
+    pub browser_service_epoch: AtomicU64,
     snapshot_cache: RwLock<Option<WorkspaceCacheEntry>>,
     snapshot_lock: tokio::sync::Mutex<()>,
     #[cfg(test)]
@@ -908,6 +911,9 @@ impl RemoteGatewayState {
             desktop_event_sink: RwLock::new(None),
             relay_pairing: RwLock::new(None),
             socket_tickets: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            browser_backend: parking_lot::RwLock::new(Arc::new(UnavailableBrowserBackend)),
+            admission_controller: Arc::new(AdmissionController::new()),
+            browser_service_epoch: AtomicU64::new(1),
             snapshot_cache: RwLock::new(None),
             snapshot_lock: tokio::sync::Mutex::new(()),
             #[cfg(test)]
@@ -926,6 +932,27 @@ impl RemoteGatewayState {
 
     pub fn invalidate_workspace_snapshot(&self) {
         *self.snapshot_cache.write() = None;
+    }
+
+    pub fn browser_backend(&self) -> Arc<dyn RemoteBrowserBackend> {
+        self.browser_backend.read().clone()
+    }
+
+    pub fn set_browser_backend(&self, backend: Arc<dyn RemoteBrowserBackend>) {
+        *self.browser_backend.write() = backend;
+    }
+
+    pub fn bump_browser_service_epoch(&self) -> u64 {
+        self.browser_service_epoch.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    pub fn browser_service_epoch(&self) -> u64 {
+        self.browser_service_epoch.load(Ordering::SeqCst)
+    }
+
+    pub fn with_browser_backend(self, backend: Arc<dyn RemoteBrowserBackend>) -> Self {
+        *self.browser_backend.write() = backend;
+        self
     }
 
     pub(crate) async fn workspace_snapshot(
@@ -1806,5 +1833,32 @@ mod tests {
             "P16: snapshot request after removal and refresh interval expired must reflect removal immediately"
         );
         assert_eq!(state.snapshot_build_count(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_phase4_gateway_state_browser_backend_and_epoch_bump() {
+        let terminal = Arc::new(TerminalService::default());
+        let registry = WorkspaceRegistry::new();
+        let state = RemoteGatewayState::new(terminal, registry);
+
+        // Service epoch defaults to 1
+        assert_eq!(state.browser_service_epoch(), 1);
+        let bumped = state.bump_browser_service_epoch();
+        assert_eq!(bumped, 2);
+        assert_eq!(state.browser_service_epoch(), 2);
+
+        // Browser backend defaults to unavailable
+        let caps = state.browser_backend().capabilities().await;
+        assert!(!caps.browser_available);
+
+        // Inject in-process backend
+        let test_backend = Arc::new(crate::remote::browser_backend::InProcessTestBackend::new());
+        state.set_browser_backend(test_backend);
+        let scope = crate::remote::browser_backend::DesktopScope {
+            workspace_id: "ws1".into(),
+            worktree_slug: "main".into(),
+        };
+        let sessions = state.browser_backend().list_sessions(&scope).await.expect("list sessions");
+        assert!(sessions.is_empty());
     }
 }

@@ -2399,3 +2399,22 @@ pub async fn storage_browser_session<R: tauri::Runtime>(
     Ok(parse_storage_result(&raw))
 }
 
+#[tauri::command]
+pub async fn cmd_browser_remote_reclaim<R: tauri::Runtime>(
+    app: AppHandle<R>,
+) -> Result<u64, IpcError> {
+    use tauri::Manager;
+    if let Some(broker) = app.try_state::<Arc<crate::browser::remote_driver::RemoteDriverBroker>>() {
+        Ok(broker.desktop_reclaim())
+    } else {
+        Ok(1)
+    }
+}
+
+#[tauri::command]
+pub async fn cmd_browser_remote_revoke<R: tauri::Runtime>(
+    app: AppHandle<R>,
+) -> Result<u64, IpcError> {
+    cmd_browser_remote_reclaim(app).await
+}
+

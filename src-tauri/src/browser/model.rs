@@ -291,3 +291,12 @@ pub struct BrowserCookieEntry {
     pub value: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteSnapshotRecord {
+    pub snapshot_id: String,
+    pub map_revision: u64,
+    pub document_generation: u64,
+    pub targets: std::collections::HashMap<String, String>,
+}
+

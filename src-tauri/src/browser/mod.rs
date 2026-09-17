@@ -6,10 +6,19 @@ pub mod guest;
 pub mod linux;
 pub mod manager;
 pub mod model;
+pub mod remote_bridge_protocol;
+pub mod remote_driver;
+pub mod remote_input;
+pub mod remote_service;
 pub mod screenshot;
 pub mod security;
+pub mod snapshot_source;
 #[cfg(test)]
 pub mod tests;
+#[cfg(test)]
+mod snapshot_source_tests;
+#[cfg(test)]
+mod remote_service_tests;
 
 pub use cookies::{cookie_from_imported, parse_cookie_file, ImportedCookie};
 pub use download::download_url_to_path;
@@ -21,4 +30,9 @@ pub use guest::{
 };
 pub use manager::BrowserManager;
 pub use model::*;
+pub use remote_bridge_protocol::*;
+pub use remote_driver::*;
+pub use remote_input::*;
+pub use remote_service::*;
 pub use security::{default_desktop_user_agent, validate_url, BrowserError};
+pub use snapshot_source::*;

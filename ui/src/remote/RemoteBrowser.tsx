@@ -1,0 +1,218 @@
+/**
+ * RemoteBrowser Component (§4.5, Phase 5)
+ *
+ * Renders live WKWebView screencast with letterbox-aware coordinate mapping
+ * and a dedicated controls slot for Phase 6 composition.
+ */
+
+import React, { useEffect, useRef } from "react";
+import type {
+  BrowserFrame,
+  BrowserStateMessage,
+  BrowserSubscribeOptions,
+} from "./browserProtocol";
+import {
+  useRemoteBrowser,
+  type RemoteBrowserStatus,
+} from "./useRemoteBrowser";
+
+export interface RemoteBrowserPointClickEvent {
+  u: number;
+  v: number;
+  streamId: number;
+  seq: number;
+  documentGeneration: string;
+  viewportRevision: string;
+}
+
+export interface RemoteBrowserProps {
+  baseUrl: string;
+  browserId: string | null;
+  deviceToken: string;
+  options?: BrowserSubscribeOptions;
+  controls?: React.ReactNode;
+  className?: string;
+  onFrame?: (frame: BrowserFrame) => void;
+  onStateChange?: (state: BrowserStateMessage) => void;
+  onStatusChange?: (status: RemoteBrowserStatus) => void;
+  onPointClick?: (point: RemoteBrowserPointClickEvent) => void;
+}
+
+export const RemoteBrowser: React.FC<RemoteBrowserProps> = ({
+  baseUrl,
+  browserId,
+  deviceToken,
+  options,
+  controls,
+  className = "",
+  onFrame,
+  onStateChange,
+  onStatusChange,
+  onPointClick,
+}) => {
+  const {
+    status,
+    frame,
+    imageUrl,
+    browserState,
+    error,
+    reconnect,
+  } = useRemoteBrowser({
+    baseUrl,
+    browserId,
+    deviceToken,
+    options,
+  });
+
+  const viewportRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (frame && onFrame) {
+      onFrame(frame);
+    }
+  }, [frame, onFrame]);
+
+  useEffect(() => {
+    if (browserState && onStateChange) {
+      onStateChange(browserState);
+    }
+  }, [browserState, onStateChange]);
+
+  useEffect(() => {
+    if (onStatusChange) {
+      onStatusChange(status);
+    }
+  }, [status, onStatusChange]);
+
+  const handleViewportClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!frame || !imageUrl || !viewportRef.current || !onPointClick) {
+      return;
+    }
+
+    const rect = viewportRef.current.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+
+    const { imageWidth, imageHeight, streamId, documentGeneration, viewportRevision } =
+      frame.metadata;
+
+    if (imageWidth <= 0 || imageHeight <= 0) return;
+
+    const containerAspect = rect.width / rect.height;
+    const imageAspect = imageWidth / imageHeight;
+
+    let renderedWidth: number;
+    let renderedHeight: number;
+    let offsetLeft = 0;
+    let offsetTop = 0;
+
+    if (containerAspect > imageAspect) {
+      // Letterboxed horizontally (pillarbox)
+      renderedHeight = rect.height;
+      renderedWidth = rect.height * imageAspect;
+      offsetLeft = (rect.width - renderedWidth) / 2;
+    } else {
+      // Letterboxed vertically
+      renderedWidth = rect.width;
+      renderedHeight = rect.width / imageAspect;
+      offsetTop = (rect.height - renderedHeight) / 2;
+    }
+
+    const clickX = e.clientX - rect.left;
+    const clickY = e.clientY - rect.top;
+
+    // Discard clicks in letterbox margins (§4.5)
+    if (
+      clickX < offsetLeft ||
+      clickX > offsetLeft + renderedWidth ||
+      clickY < offsetTop ||
+      clickY > offsetTop + renderedHeight
+    ) {
+      return;
+    }
+
+    // Normalized coordinates (u, v) in [0, 1] relative to the actual image
+    const u = Math.min(Math.max((clickX - offsetLeft) / renderedWidth, 0), 1);
+    const v = Math.min(Math.max((clickY - offsetTop) / renderedHeight, 0), 1);
+
+    onPointClick({
+      u,
+      v,
+      streamId,
+      seq: frame.seq,
+      documentGeneration,
+      viewportRevision,
+    });
+  };
+
+  return (
+    <div
+      className={`relative flex flex-col w-full h-full bg-neutral-950 text-white overflow-hidden select-none ${className}`}
+    >
+      {/* Controls slot for Phase 6 composition */}
+      {controls && (
+        <div data-testid="remote-browser-controls-slot" className="shrink-0 z-10">
+          {controls}
+        </div>
+      )}
+
+      {/* Main Viewport */}
+      <div
+        ref={viewportRef}
+        data-testid="remote-browser-viewport"
+        className="relative flex-1 w-full h-full flex items-center justify-center overflow-hidden cursor-crosshair"
+        onClick={handleViewportClick}
+      >
+        {imageUrl ? (
+          <img
+            src={imageUrl}
+            alt="Remote browser stream"
+            className="w-full h-full object-contain pointer-events-none"
+            draggable={false}
+          />
+        ) : (
+          <div className="flex flex-col items-center justify-center text-neutral-500 text-sm">
+            {status === "opening" && <span>Connecting to remote browser...</span>}
+            {status === "ready" && <span>Waiting for screencast stream...</span>}
+            {status === "paused" && (
+              <span>
+                Stream paused {browserState?.pauseReason ? `(${browserState.pauseReason})` : ""}
+              </span>
+            )}
+            {status === "closed" && <span>Remote browser disconnected</span>}
+          </div>
+        )}
+
+        {/* Status Overlays */}
+        {status === "paused" && imageUrl && (
+          <div
+            data-testid="remote-browser-paused-badge"
+            className="absolute top-2 right-2 px-2 py-1 bg-amber-900/80 text-amber-200 text-xs rounded font-medium pointer-events-none"
+          >
+            Paused {browserState?.pauseReason ? `(${browserState.pauseReason})` : ""}
+          </div>
+        )}
+
+        {status === "opening" && imageUrl && (
+          <div className="absolute top-2 right-2 px-2 py-1 bg-blue-900/80 text-blue-200 text-xs rounded font-medium pointer-events-none">
+            Reconnecting...
+          </div>
+        )}
+
+        {status === "closed" && (
+          <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center p-4 z-20">
+            <p className="text-neutral-300 mb-2">
+              {error ? error.message : "Connection closed"}
+            </p>
+            <button
+              type="button"
+              onClick={reconnect}
+              className="px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-white rounded text-sm font-medium transition"
+            >
+              Reconnect
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};

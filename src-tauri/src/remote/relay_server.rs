@@ -1093,6 +1093,12 @@ fn valid_socket_target(target: &str) -> bool {
                     b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b':')
                 })
         })
+        || target.strip_prefix("/api/v1/browser/").is_some_and(|id| {
+            !id.is_empty()
+                && id.bytes().all(|b| {
+                    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b':')
+                })
+        })
 }
 
 #[derive(Deserialize)]
@@ -1158,6 +1164,20 @@ async fn browser_events_handler(
     browser_socket(state, machine, target.into(), device_token, ws).await
 }
 
+async fn browser_screencast_handler(
+    State(state): State<RelayState>,
+    AxumPath((machine, browser_id)): AxumPath<(String, String)>,
+    query: Result<Query<SocketQuery>, axum::extract::rejection::QueryRejection>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, StatusCode> {
+    let target = format!("/api/v1/browser/{browser_id}");
+    if !valid_socket_target(&target) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let device_token = consume_socket_ticket(&state, query, &machine, &target)?;
+    browser_socket(state, machine, target, device_token, ws).await
+}
+
 async fn browser_terminal_handler(
     State(state): State<RelayState>,
     AxumPath((machine, terminal)): AxumPath<(String, String)>,
@@ -1207,6 +1227,8 @@ async fn browser_terminal_handler(
     browser_socket(state, machine, target, device_token, ws).await
 }
 
+const BROWSER_MAX_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
+
 async fn browser_socket(
     state: RelayState,
     machine: String,
@@ -1214,10 +1236,16 @@ async fn browser_socket(
     device_token: String,
     ws: WebSocketUpgrade,
 ) -> Result<Response, StatusCode> {
+    let is_browser = target.starts_with("/api/v1/browser/");
+    let max_size = if is_browser {
+        BROWSER_MAX_MESSAGE_SIZE
+    } else {
+        MAX_MESSAGE_SIZE
+    };
     let (data, guard) = state.open_session_channel(&machine, None).await?;
     Ok(ws
-        .max_message_size(MAX_MESSAGE_SIZE)
-        .max_frame_size(MAX_MESSAGE_SIZE)
+        .max_message_size(max_size)
+        .max_frame_size(max_size)
         .on_upgrade(move |browser| async move {
             match timeout(
                 SESSION_TRANSFER_TIMEOUT,
@@ -1244,10 +1272,16 @@ async fn bridge_browser_socket(
 ) -> anyhow::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_tungstenite::tungstenite::Message as Wire;
-    let (client_io, tunnel_io) = tokio::io::duplex(MAX_MESSAGE_SIZE);
+    let is_browser = target.starts_with("/api/v1/browser/");
+    let buffer_size = if is_browser {
+        BROWSER_MAX_MESSAGE_SIZE
+    } else {
+        MAX_MESSAGE_SIZE
+    };
+    let (client_io, tunnel_io) = tokio::io::duplex(buffer_size);
     let (mut reader, mut writer) = tokio::io::split(tunnel_io);
     let tunnel = async {
-        let mut buffer = vec![0; MAX_MESSAGE_SIZE];
+        let mut buffer = vec![0; buffer_size];
         loop {
             tokio::select! {
                 count = reader.read(&mut buffer) => {
@@ -1768,6 +1802,10 @@ pub fn relay_router(state: RelayState) -> Router {
         .route(
             "/host/{machine_id}/api/v1/terminal/{terminal_id}",
             get(browser_terminal_handler),
+        )
+        .route(
+            "/host/{machine_id}/api/v1/browser/{browser_id}",
+            get(browser_screencast_handler),
         )
         .route(
             "/host/{machine_id}/api/v1/terminal/preferences",
@@ -4000,6 +4038,14 @@ mod tests {
         let valid = valid_socket_target(target);
         // Then the target is accepted.
         assert!(valid);
+    }
+
+    #[test]
+    fn test_phase4_relay_valid_socket_target_allows_browser() {
+        assert!(valid_socket_target("/api/v1/browser/b1"));
+        assert!(valid_socket_target("/api/v1/browser/b-test_123.valid"));
+        assert!(!valid_socket_target("/api/v1/browser/"));
+        assert!(!valid_socket_target("/api/v1/browser/has/slash"));
     }
 
     #[test]
