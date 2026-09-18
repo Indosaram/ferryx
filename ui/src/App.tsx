@@ -101,6 +101,7 @@ import { safeRandomUUID } from "./lib/uuid";
 import { getCachedSshHosts } from "./lib/sshHosts";
 import { reconnectAgentSession } from "./lib/agentReconnect";
 import { isPairedWorkspaceId, isRemoteWorkspaceId, registerRemoteProject, toRegisteredProject } from "./lib/remoteProject";
+import { healMissingSshRegistrations } from "./lib/sshRegistrationHeal";
 import { hasValidProjectTarget, projectRootWorktree } from "./lib/projectIdentity";
 import { groupProjects } from "./lib/projectGrouping";
 import { scheduleAgentAutoResume } from "./lib/agentAutoResume";
@@ -270,6 +271,22 @@ function canonicalizeProjectBootstrap(stored: ProjectBootstrap, startup: Registe
   return { projects, activeProjectId };
 }
 
+const healedSshWorkspaceIds = new Set<string>();
+
+function triggerSshRegistrationHeal(projects: RegisteredProject[]): void {
+  if (!isTauriRuntime()) return;
+  void healMissingSshRegistrations(projects, {
+    hasRegistered: (id) => healedSshWorkspaceIds.has(id),
+    register: async (req) => {
+      const res = await registerRemoteProject(req);
+      healedSshWorkspaceIds.add(req.workspaceId);
+      return res;
+    },
+  }).catch((err) => {
+    console.warn("SSH workspace registration heal skipped:", err);
+  });
+}
+
 export function App() {
   useApplyAppearanceSettings();
   const [isNativeRuntime] = useState(() => isTauriRuntime());
@@ -313,6 +330,7 @@ export function App() {
             console.warn("Workspace session preload skipped:", error);
           },
         );
+        triggerSshRegistrationHeal(prepared.projects);
         if (!cancelled) setBootstrap(prepared);
       })
       .catch(async (error) => {
@@ -348,6 +366,7 @@ export function App() {
           ).catch((preloadError) => {
             console.warn("Workspace session preload fallback skipped:", preloadError);
           });
+          triggerSshRegistrationHeal(prepared.projects);
           if (!cancelled) setBootstrap(prepared);
         }
       });

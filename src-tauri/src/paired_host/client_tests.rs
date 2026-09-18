@@ -507,6 +507,80 @@ fn operation_requires_machine_workspace_capability() {
     assert_eq!(operation.route().unwrap().capability,Some("machineWorkspaceV1"));
 }
 
+#[test]
+fn paste_upload_chunk_requires_machine_workspace_capability() {
+    let operation = Operation::PasteUploadChunk {
+        request: m::PasteUploadChunkRequest {
+            request_id: "3941b9de-b16d-4d9a-ae0a-118f90fd91f4".into(),
+            upload_id: "test-upload-1".into(),
+            file_name: "test.png".into(),
+            chunk_index: 0,
+            total_chunks: 1,
+            data: "aGVsbG8=".into(),
+        },
+    };
+    let route = operation.route().expect("route succeeds");
+    assert_eq!(route.capability, Some("machineWorkspaceV1"));
+    assert_eq!(route.segments, vec!["workspace", "paste-upload"]);
+}
+
+#[tokio::test]
+async fn paste_upload_chunk_executes_and_returns_result() {
+    let req_id = "3941b9de-b16d-4d9a-ae0a-118f90fd91f4".to_string();
+    let journal_id = req_id.clone();
+    let route = Router::new()
+        .route(
+            "/host/a/api/v1/workspace/operations/{id}",
+            get(move || async move {
+                (
+                    axum::http::StatusCode::NOT_FOUND,
+                    Json(json!({
+                        "error": {
+                            "code": "OPERATION_NOT_FOUND",
+                            "message": "missing",
+                            "retryable": false,
+                            "requestId": journal_id,
+                            "details": {}
+                        }
+                    })),
+                )
+            }),
+        )
+        .route(
+            "/host/a/api/v1/workspace/paste-upload",
+            post(|body: axum::body::Bytes| async move {
+                let req: m::PasteUploadChunkRequest =
+                    m::decode_json(&body, m::MACHINE_JSON_MAX_BYTES).unwrap();
+                assert_eq!(req.file_name, "test.png");
+                assert_eq!(req.chunk_index, 0);
+                Json(json!({
+                    "remotePath": "/tmp/ferryx-paste/test.png",
+                    "chunkIndex": 0
+                }))
+            }),
+        );
+    let (root, service, host, task) = fixture(route).await;
+    let op = Operation::PasteUploadChunk {
+        request: m::PasteUploadChunkRequest {
+            request_id: req_id,
+            upload_id: "u-1".into(),
+            file_name: "test.png".into(),
+            chunk_index: 0,
+            total_chunks: 1,
+            data: "aGVsbG8=".into(),
+        },
+    };
+    let result = MachineClient::new()
+        .execute(&service, request(&host, op))
+        .await;
+    cleanup(root, task).await;
+    let OperationResult::PasteUploadChunk(res) = result.unwrap().result else {
+        panic!("expected PasteUploadChunk result");
+    };
+    assert_eq!(res.remote_path, Some("/tmp/ferryx-paste/test.png".into()));
+    assert_eq!(res.chunk_index, 0);
+}
+
 #[tokio::test]
 async fn gatefix_p06_relay_ticket_failure_surfaces_typed_error_without_ws_retry() {
     use std::sync::{

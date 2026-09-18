@@ -302,6 +302,12 @@ pub enum DaemonRequest {
         legacy_socket_path: Option<String>,
     },
     AbortHandover,
+    #[serde(rename_all = "camelCase")]
+    UploadClipboardImage {
+        file_name: String,
+        #[serde(with = "base64_serde")]
+        data: Vec<u8>,
+    },
     Shutdown,
 }
 
@@ -319,6 +325,11 @@ pub enum DaemonResponse {
     PairedHostMigrateLegacyOk { receipt: crate::paired_host::inventory::MigrationReceipt },
     PairedHostForgetOk,
     PairedHostError { error: crate::paired_host::service::ServiceError },
+    #[serde(rename_all = "camelCase")]
+    UploadClipboardImageOk {
+        remote_path: String,
+        byte_length: usize,
+    },
     #[serde(rename_all = "camelCase")]
     HandshakeOk {
         version: u32,
@@ -600,6 +611,67 @@ pub fn decode_daemon_stream_frame(frame: &str) -> serde_json::Result<DaemonStrea
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upload_clipboard_image_protocol_round_trip() {
+        let req = DaemonRequest::UploadClipboardImage {
+            file_name: "screenshot.png".to_string(),
+            data: b"fake-png-payload".to_vec(),
+        };
+        let json = serde_json::to_string(&req).expect("serialize request");
+        assert!(
+            json.contains(r#""type":"uploadClipboardImage""#),
+            "expected camelCase type: {json}"
+        );
+        assert!(
+            json.contains(r#""fileName":"screenshot.png""#),
+            "expected camelCase fileName: {json}"
+        );
+        assert!(
+            !json.contains('['),
+            "data must be base64-encoded, not number array: {json}"
+        );
+
+        let decoded: DaemonRequest = serde_json::from_str(&json).expect("deserialize request");
+        match decoded {
+            DaemonRequest::UploadClipboardImage { file_name, data } => {
+                assert_eq!(file_name, "screenshot.png");
+                assert_eq!(data, b"fake-png-payload");
+            }
+            _ => panic!("unexpected variant"),
+        }
+
+        let resp = DaemonResponse::UploadClipboardImageOk {
+            remote_path: "/tmp/ferryx-paste/screenshot.png".to_string(),
+            byte_length: 16,
+        };
+        let resp_json = serde_json::to_string(&resp).expect("serialize response");
+        assert!(
+            resp_json.contains(r#""type":"uploadClipboardImageOk""#),
+            "expected camelCase response type: {resp_json}"
+        );
+        assert!(
+            resp_json.contains(r#""remotePath":""#),
+            "expected camelCase remotePath: {resp_json}"
+        );
+        assert!(
+            resp_json.contains(r#""byteLength":16"#),
+            "expected camelCase byteLength: {resp_json}"
+        );
+
+        let decoded_resp: DaemonResponse =
+            serde_json::from_str(&resp_json).expect("deserialize response");
+        match decoded_resp {
+            DaemonResponse::UploadClipboardImageOk {
+                remote_path,
+                byte_length,
+            } => {
+                assert_eq!(remote_path, "/tmp/ferryx-paste/screenshot.png");
+                assert_eq!(byte_length, 16);
+            }
+            _ => panic!("unexpected response variant"),
+        }
+    }
 
     #[test]
     fn test_daemon_stream_message_compact_base64_encoding() {

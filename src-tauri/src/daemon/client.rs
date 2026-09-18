@@ -209,6 +209,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::PrepareHandover => "prepareHandover",
         DaemonRequest::CommitHandover { .. } => "commitHandover",
         DaemonRequest::AbortHandover => "abortHandover",
+        DaemonRequest::UploadClipboardImage { .. } => "uploadClipboardImage",
         DaemonRequest::Shutdown => "shutdown",
     }
 }
@@ -578,6 +579,7 @@ impl DaemonClient {
             Operation::DeleteWorktree { request } => Some(request.request_id.clone()),
             Operation::CreateSession { request } => Some(request.request_id.clone()),
             Operation::CloseSession { request, .. } => Some(request.request_id.clone()),
+            Operation::PasteUploadChunk { request } => Some(request.request_id.clone()),
             Operation::Capabilities | Operation::Directories { .. } | Operation::Projects
             | Operation::Worktrees { .. } | Operation::WorktreeStatus { .. }
             | Operation::Sessions { .. } | Operation::Session { .. } | Operation::Operation { .. } => None,

@@ -2492,7 +2492,7 @@ async fn get_capabilities(
         "accessScope": device.access_scope,
         "permission": device.permission,
         "capabilities": if state.machine_services.is_some() && device.access_scope == DeviceAccessScope::Machine && device.permission == DevicePermission::Control {
-            let mut capabilities = vec!["directoryBrowseV1", "machineWorkspaceV1", "managedWorktreesV1"];
+            let mut capabilities = vec!["directoryBrowseV1", "machineWorkspaceV1", "managedWorktreesV1", "pairedPasteUploadV1"];
             if state.machine_services.as_ref().is_some_and(|services| services.workspaces.catalog().is_ok() && services.workspaces.journal.session_revision().is_ok()) {
                 capabilities.push("terminalCreateV1");
                 capabilities.push("terminalStreamV1");
@@ -2766,6 +2766,44 @@ async fn operation_boundary(State(state): State<Arc<RemoteGatewayState>>, path: 
     Ok(super::workspace_api::ADMISSION.scope(admission, super::workspace_api::operation(State(state), path, headers)).await)
 }
 
+async fn paste_upload_boundary(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+) -> Result<Response, Response> {
+    let admission = super::workspace_api::admit(
+        state.clone(),
+        headers.clone(),
+        true,
+        &uuid::Uuid::new_v4().to_string(),
+    )
+    .await?;
+    let body = project_body(request, &admission).await?;
+    let req: super::machine_protocol::PasteUploadChunkRequest =
+        super::machine_protocol::decode_json(&body, super::machine_protocol::MACHINE_JSON_MAX_BYTES)
+            .map_err(|_| machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST"))?;
+
+    use base64::Engine;
+    let chunk_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&req.data)
+        .map_err(|_| machine_error(StatusCode::BAD_REQUEST, "INVALID_BASE64"))?;
+
+    let saved = crate::clipboard_image::save_paste_chunk(
+        &req.upload_id,
+        &req.file_name,
+        req.chunk_index,
+        req.total_chunks,
+        &chunk_bytes,
+    )
+    .map_err(|e| machine_error(StatusCode::INTERNAL_SERVER_ERROR, &e.message))?;
+
+    let res = super::machine_protocol::PasteUploadChunkResult {
+        remote_path: saved.map(|p| p.to_string_lossy().into_owned()),
+        chunk_index: req.chunk_index,
+    };
+    Ok(Json(res).into_response())
+}
+
 async fn remote_fallback(method: axum::http::Method, uri: axum::http::Uri) -> Response {
     if uri.path().starts_with("/api/") { return machine_error(StatusCode::NOT_FOUND, "NOT_FOUND"); }
     if method != axum::http::Method::GET && method != axum::http::Method::HEAD {
@@ -2795,6 +2833,12 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route("/api/v1/workspace/projects", get(super::workspace_api::list).post(register_project_boundary).layer(axum::extract::DefaultBodyLimit::max(super::machine_protocol::MACHINE_JSON_MAX_BYTES)))
         .route("/api/v1/workspace/projects/{workspaceId}", axum::routing::delete(unregister_project_boundary).layer(axum::extract::DefaultBodyLimit::max(super::machine_protocol::MACHINE_JSON_MAX_BYTES)))
         .route("/api/v1/workspace/operations/{requestId}", get(operation_boundary))
+        .route(
+            "/api/v1/workspace/paste-upload",
+            post(paste_upload_boundary).layer(axum::extract::DefaultBodyLimit::max(
+                super::machine_protocol::MACHINE_JSON_MAX_BYTES,
+            )),
+        )
         .route("/api/v1/workspace/select", post(select_workspace))
         .route("/api/v1/workspace/selection", post(select_workspace))
         .route(

@@ -113,3 +113,150 @@ pub async fn paired_host_capabilities(
 ) -> Result<serde_json::Value> {
     daemon.paired_host_capabilities().await
 }
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteClipboardImagePaste {
+    pub remote_path: String,
+    pub byte_length: usize,
+}
+
+#[tauri::command]
+pub async fn cmd_daemon_paste_clipboard_image<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    daemon: State<'_, Arc<DaemonClient>>,
+    workspace_id: String,
+) -> std::result::Result<Option<RemoteClipboardImagePaste>, crate::ipc::IpcError> {
+    let Some(image) = crate::clipboard_image::read_clipboard_image_for_app(&app).await? else {
+        return Ok(None);
+    };
+
+    let byte_length = image.bytes.len();
+    if byte_length > crate::clipboard_image::MAX_CLIPBOARD_IMAGE_BYTES {
+        return Err(crate::ipc::IpcError::new(
+            crate::ipc::error::IpcErrorCode::PayloadTooLarge,
+            format!(
+                "Clipboard image exceeds maximum size of {} bytes",
+                crate::clipboard_image::MAX_CLIPBOARD_IMAGE_BYTES
+            ),
+        ));
+    }
+
+    let file_name = format!("{}.{}", uuid::Uuid::new_v4(), image.extension);
+
+    if workspace_id.starts_with("daemon:") {
+        use tauri::Manager;
+        let data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| crate::ipc::IpcError::internal(e.to_string()))?;
+        let stored = crate::paired_host::projects::resolve_stored_project(&data_dir, &workspace_id)
+            .ok_or_else(|| {
+                crate::ipc::IpcError::new(
+                    crate::ipc::error::IpcErrorCode::WorkspaceNotFound,
+                    "Paired daemon project not found. Re-select or re-pair this project.",
+                )
+            })?;
+
+        let host_id = match stored.target {
+            crate::scoped_contracts::RunTarget::PairedDaemon { host_id } => host_id,
+            _ => {
+                return Err(crate::ipc::IpcError::new(
+                    crate::ipc::error::IpcErrorCode::WorkspaceNotFound,
+                    "Project is not a paired daemon project.",
+                ));
+            }
+        };
+
+        let hosts = daemon
+            .paired_host_list()
+            .await
+            .map_err(|e| crate::ipc::IpcError::internal(format!("{e:?}")))?;
+        let host = hosts
+            .into_iter()
+            .find(|h| h.host_id == host_id)
+            .ok_or_else(|| {
+                crate::ipc::IpcError::internal(format!(
+                    "Paired machine '{host_id}' not found in inventory"
+                ))
+            })?;
+
+        if host.auth_status != crate::paired_host::inventory::AuthStatus::Paired {
+            return Err(crate::ipc::IpcError::internal(
+                "Machine authorization required for paired host",
+            ));
+        }
+
+        let upload_id = uuid::Uuid::new_v4().to_string();
+        const CHUNK_SIZE: usize = 32 * 1024;
+        let chunks: Vec<&[u8]> = image.bytes.chunks(CHUNK_SIZE).collect();
+        let total_chunks = chunks.len() as u32;
+        let mut final_remote_path = None;
+
+        use base64::Engine;
+        for (idx, chunk) in chunks.into_iter().enumerate() {
+            let request_id = uuid::Uuid::new_v4().to_string();
+            let b64_data = base64::engine::general_purpose::STANDARD.encode(chunk);
+            let op_req = crate::paired_host::client::OperationRequest {
+                host_id: host_id.clone(),
+                generation: host.generation,
+                operation: crate::paired_host::client::Operation::PasteUploadChunk {
+                    request: crate::remote::machine_protocol::PasteUploadChunkRequest {
+                        request_id,
+                        upload_id: upload_id.clone(),
+                        file_name: file_name.clone(),
+                        chunk_index: idx as u32,
+                        total_chunks,
+                        data: b64_data,
+                    },
+                },
+            };
+
+            let resp = daemon
+                .paired_host_operation(op_req)
+                .await
+                .map_err(|e| {
+                    crate::ipc::IpcError::internal(format!("{}: {:?}", e.code, e.machine_error))
+                })?;
+
+            if let crate::paired_host::client::OperationResult::PasteUploadChunk(result) = resp.result {
+                if let Some(path) = result.remote_path {
+                    final_remote_path = Some(path);
+                }
+            }
+        }
+
+        let remote_path = final_remote_path.ok_or_else(|| {
+            crate::ipc::IpcError::internal("Paired host did not return a finalized remote path")
+        })?;
+
+        return Ok(Some(RemoteClipboardImagePaste {
+            remote_path,
+            byte_length,
+        }));
+    }
+
+    let res = daemon
+        .send_request(crate::daemon::protocol::DaemonRequest::UploadClipboardImage {
+            file_name,
+            data: image.bytes,
+        })
+        .await
+        .map_err(|e| crate::ipc::IpcError::internal(format!("Daemon communication error: {e:?}")))?;
+
+    match res {
+        crate::daemon::protocol::DaemonResponse::UploadClipboardImageOk {
+            remote_path,
+            byte_length,
+        } => Ok(Some(RemoteClipboardImagePaste {
+            remote_path,
+            byte_length,
+        })),
+        crate::daemon::protocol::DaemonResponse::Error { message, .. } => {
+            Err(crate::ipc::IpcError::internal(message))
+        }
+        other => Err(crate::ipc::IpcError::internal(format!(
+            "Unexpected daemon response: {other:?}"
+        ))),
+    }
+}

@@ -1,14 +1,41 @@
-import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { unregisterProject } from "./tauri";
 import { pasteClipboardImageToRemote } from "./remoteProject";
 import { reconnectAgentSession } from "./agentReconnect";
 import { replaceExitedShellSession } from "./shellReplacement";
-import { TerminalPane } from "../components/TerminalPane";
 import type { TerminalSession } from "./types";
 
-const native = vi.hoisted(() => ({ invoke: vi.fn(async () => null) }));
-vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true, invoke: native.invoke }));
+if (typeof document === "undefined") {
+  const { JSDOM } = await import("jsdom");
+  const dom = new JSDOM("<!doctype html><html><body><div id=\"root\"></div></body></html>", { url: "http://localhost" });
+  Object.assign(globalThis, {
+    window: dom.window,
+    document: dom.window.document,
+    navigator: dom.window.navigator,
+    HTMLElement: dom.window.HTMLElement,
+    Node: dom.window.Node,
+  });
+  (dom.window as any).__TAURI_INTERNALS__ = {
+    transformCallback: () => 1,
+    unregisterCallback: () => {},
+  };
+}
+
+const { cleanup, render, screen } = await import("@testing-library/react");
+const { TerminalPane } = await import("../components/TerminalPane");
+
+const native = {
+  invoke: vi.fn(async (cmd?: string, _args?: unknown) => {
+    if (cmd === "cmd_daemon_paste_clipboard_image") {
+      return null;
+    }
+    return null;
+  }),
+};
+vi.mock("@tauri-apps/api/core", () => ({
+  isTauri: () => true,
+  invoke: (cmd: string, args?: unknown) => native.invoke(cmd, args),
+}));
 vi.mock("../components/NativeTerminalPane", () => ({ NativeTerminalPane: () => <div data-testid="native" /> }));
 vi.mock("../components/dag/DagPaneBadge", () => ({ DagPaneBadge: () => <div data-testid="dag" /> }));
 const session: TerminalSession = { id: "pane", workspaceId: `daemon:${"a".repeat(64)}`, cwd: "/srv/repo", worktree: null, backendSessionId: null, lifecycle: "exited" };
@@ -18,8 +45,14 @@ it("desktop removal does not unregister a paired project on the remote daemon", 
   expect(native.invoke).not.toHaveBeenCalled();
 });
 it("paired clipboard images never enter SSH upload", async () => {
-  await expect(pasteClipboardImageToRemote(session.workspaceId)).rejects.toMatchObject({ code: "UNSUPPORTED_CAPABILITY" });
-  expect(native.invoke).not.toHaveBeenCalled();
+  await pasteClipboardImageToRemote(session.workspaceId);
+  expect(native.invoke).not.toHaveBeenCalledWith("cmd_ssh_paste_clipboard_image", expect.anything());
+});
+it("paired clipboard images route to daemon paste command", async () => {
+  await pasteClipboardImageToRemote(session.workspaceId);
+  expect(native.invoke).toHaveBeenCalledWith("cmd_daemon_paste_clipboard_image", {
+    workspaceId: session.workspaceId,
+  });
 });
 it("paired shell recovery cannot spawn a local replacement", async () => {
   const spawn = vi.fn();

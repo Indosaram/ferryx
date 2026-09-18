@@ -67,6 +67,9 @@ pub enum Operation {
     Operation {
         request_id: String,
     },
+    PasteUploadChunk {
+        request: m::PasteUploadChunkRequest,
+    },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -92,6 +95,7 @@ pub enum OperationResult {
     CreateSession(m::Session),
     CloseSession(()),
     Operation(m::Operation),
+    PasteUploadChunk(m::PasteUploadChunkResult),
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -265,6 +269,10 @@ impl Operation {
                 path = "workspace/operations";
                 r.capability = Some("machineWorkspaceV1");
             }
+            Self::PasteUploadChunk { .. } => {
+                path = "workspace/paste-upload";
+                r.capability = Some("machineWorkspaceV1");
+            }
         }
         r.segments = path.split('/').map(str::to_owned).collect();
         match self {
@@ -297,6 +305,7 @@ impl Operation {
             Self::DeleteWorktree { request } => body!(request, Method::DELETE),
             Self::CreateSession { request } => body!(request, Method::POST),
             Self::CloseSession { request, .. } => body!(request, Method::DELETE),
+            Self::PasteUploadChunk { request } => body!(request, Method::POST),
             _ => {}
         }
         if r.body
@@ -821,6 +830,7 @@ fn map_result(host: &HostView, operation: &Operation, bytes: &[u8]) -> Result<Op
             }
             OperationResult::Operation(op)
         }
+        Operation::PasteUploadChunk { .. } => OperationResult::PasteUploadChunk(decode(bytes)?),
     })
 }
 #[cfg(test)]

@@ -2369,6 +2369,15 @@ impl DaemonServer {
                         Err(e) => daemon_error(e),
                     }
                 }
+                Ok(DaemonRequest::UploadClipboardImage { file_name, data }) => {
+                    match crate::clipboard_image::save_paste_file(&file_name, &data) {
+                        Ok(path) => DaemonResponse::UploadClipboardImageOk {
+                            remote_path: path.to_string_lossy().into_owned(),
+                            byte_length: data.len(),
+                        },
+                        Err(e) => daemon_error(e.message),
+                    }
+                }
                 Ok(DaemonRequest::Shutdown) => {
                     match self.persist_remote_sessions_at(self.remote_sessions_path.clone()).await {
                         Ok(()) => std::process::exit(0),
@@ -5086,6 +5095,44 @@ mod tests {
 
         let result = tokio::time::timeout(Duration::from_secs(2), server_task).await;
         assert!(result.is_ok(), "handle_client must terminate promptly when client disconnects from idle attach");
+    }
+
+    #[tokio::test]
+    async fn test_handle_client_upload_clipboard_image() {
+        let server = Arc::new(DaemonServer::new_with_paths(None, None));
+        let (client_stream, server_stream) = UnixStream::pair().expect("unix pair");
+        let server_clone = Arc::clone(&server);
+        let _server_task = tokio::spawn(async move {
+            server_clone.handle_client(server_stream).await;
+        });
+
+        let (read_half, mut write_half) = client_stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+
+        let req = DaemonRequest::UploadClipboardImage {
+            file_name: "test-client-paste.png".to_string(),
+            data: b"fake-daemon-paste-bytes".to_vec(),
+        };
+        let mut json = serde_json::to_string(&req).unwrap();
+        json.push('\n');
+        write_half.write_all(json.as_bytes()).await.unwrap();
+
+        reader.read_line(&mut line).await.unwrap();
+        let resp: DaemonResponse = serde_json::from_str(line.trim()).unwrap();
+        match resp {
+            DaemonResponse::UploadClipboardImageOk {
+                remote_path,
+                byte_length,
+            } => {
+                assert!(remote_path.ends_with("test-client-paste.png"));
+                assert_eq!(byte_length, 23);
+                let content = std::fs::read(&remote_path).expect("read saved paste file");
+                assert_eq!(content, b"fake-daemon-paste-bytes");
+                let _ = std::fs::remove_file(remote_path);
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
     }
 
     #[tokio::test]

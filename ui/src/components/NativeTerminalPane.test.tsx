@@ -21,6 +21,24 @@ const tauriCoreMocks = vi.hoisted(() => ({
   isTauri: vi.fn(() => true),
 }));
 
+const toastMocks = vi.hoisted(() => ({
+  error: vi.fn(),
+  info: vi.fn(),
+  loading: vi.fn(),
+  success: vi.fn(),
+  dismiss: vi.fn(),
+}));
+
+vi.mock("sonner", () => ({
+  toast: {
+    error: (...args: any[]) => toastMocks.error(...args),
+    info: (...args: any[]) => toastMocks.info(...args),
+    loading: (...args: any[]) => toastMocks.loading(...args),
+    success: (...args: any[]) => toastMocks.success(...args),
+    dismiss: (...args: any[]) => toastMocks.dismiss(...args),
+  },
+}));
+
 const tauriWindowMocks = vi.hoisted(() => {
   let dragDropListeners: Array<(event: { payload: any }) => void> = [];
   const unlisten = vi.fn();
@@ -1376,6 +1394,11 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     tauriCoreMocks.isTauri.mockReset();
     tauriCoreMocks.isTauri.mockReturnValue(true);
     tauriWindowMocks.reset();
+    toastMocks.error.mockClear();
+    toastMocks.info.mockClear();
+    toastMocks.loading.mockClear();
+    toastMocks.success.mockClear();
+    toastMocks.dismiss.mockClear();
     vi.stubGlobal("ResizeObserver", MockResizeObserver);
   });
 
@@ -2069,15 +2092,15 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       expectedChordCalls: 0,
     },
     {
-      description: "falls back to the agent chord when the clipboard held no image",
+      description: "surfaces an error and sends no chord when the clipboard held no image",
       result: null,
       expectedPaste: null,
-      expectedChordCalls: 1,
+      expectedChordCalls: 0,
     },
   ])(
     "sends a clipboard image to the SSH host owning a remote pane and $description",
     async ({ result, expectedPaste, expectedChordCalls }) => {
-      const sessionId = `term-session-remote-image-${expectedChordCalls}`;
+      const sessionId = `term-session-remote-image-${result ? "ok" : "none"}`;
       const session = { ...createSession(sessionId), workspaceId: "ssh:9f2c" };
       tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
         if (cmd === "cmd_native_terminal_clipboard_content") return { kind: "image" };
@@ -2091,6 +2114,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       const textarea = getByTestId("native-terminal-focus-sink");
       textarea.focus();
       tauriCoreMocks.invoke.mockClear();
+      toastMocks.error.mockClear();
 
       act(() => {
         textarea.dispatchEvent(
@@ -2122,6 +2146,11 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         expect(pasteCalls.map(([, args]) => args?.text)).toEqual(
           expectedPaste === null ? [] : [expectedPaste],
         );
+        if (result === null) {
+          expect(toastMocks.error).toHaveBeenCalledWith(
+            "No clipboard image could be read to send to the remote host.",
+          );
+        }
       });
     },
   );
@@ -3057,6 +3086,127 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       "cmd_native_terminal_paste",
       expect.anything(),
     );
+  });
+
+  it("DOM paste with an image on an ssh pane invokes cmd_ssh_paste_clipboard_image and sends no 0x16", async () => {
+    const workspaceId = `ssh:${"a".repeat(64)}`;
+    const sessionId = "term-session-ssh-dom-paste";
+    const session = { ...createSession(sessionId), workspaceId };
+    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "cmd_ssh_paste_clipboard_image") {
+        return { remotePath: "/tmp/ssh-paste.png", byteLength: 1234 };
+      }
+      return undefined;
+    });
+
+    const { getByTestId } = render(<NativeTerminalPane sessionId={sessionId} session={session} />);
+    const textarea = getByTestId("native-terminal-focus-sink");
+    textarea.focus();
+    tauriCoreMocks.invoke.mockClear();
+
+    const pasteEvent = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEvent, "clipboardData", {
+      value: { getData: () => "" },
+    });
+
+    act(() => {
+      textarea.dispatchEvent(pasteEvent);
+    });
+
+    expect(pasteEvent.defaultPrevented).toBe(true);
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_ssh_paste_clipboard_image", {
+        workspaceId,
+      });
+    });
+
+    const sendInputCalls = tauriCoreMocks.invoke.mock.calls.filter(
+      ([cmd, args]) =>
+        cmd === "cmd_native_terminal_send_input" && args?.input?.text === "\u0016",
+    );
+    expect(sendInputCalls).toHaveLength(0);
+  });
+
+  it("DOM paste with an image on a daemon pane invokes cmd_daemon_paste_clipboard_image and sends no 0x16", async () => {
+    const workspaceId = `daemon:${"b".repeat(64)}`;
+    const sessionId = "term-session-daemon-dom-paste";
+    const session = { ...createSession(sessionId), workspaceId };
+    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "cmd_daemon_paste_clipboard_image") {
+        return { remotePath: "/tmp/daemon-paste.png", byteLength: 5678 };
+      }
+      return undefined;
+    });
+
+    const { getByTestId } = render(<NativeTerminalPane sessionId={sessionId} session={session} />);
+    const textarea = getByTestId("native-terminal-focus-sink");
+    textarea.focus();
+    tauriCoreMocks.invoke.mockClear();
+
+    const pasteEvent = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEvent, "clipboardData", {
+      value: { getData: () => "" },
+    });
+
+    act(() => {
+      textarea.dispatchEvent(pasteEvent);
+    });
+
+    expect(pasteEvent.defaultPrevented).toBe(true);
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_daemon_paste_clipboard_image", {
+        workspaceId,
+      });
+    });
+
+    const sendInputCalls = tauriCoreMocks.invoke.mock.calls.filter(
+      ([cmd, args]) =>
+        cmd === "cmd_native_terminal_send_input" && args?.input?.text === "\u0016",
+    );
+    expect(sendInputCalls).toHaveLength(0);
+  });
+
+  it("silent-failure surface: when invoke resolves null for the upload command -> toast.error called and still NO 0x16 sent", async () => {
+    const workspaceId = `ssh:${"c".repeat(64)}`;
+    const sessionId = "term-session-ssh-dom-paste-null";
+    const session = { ...createSession(sessionId), workspaceId };
+    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "cmd_ssh_paste_clipboard_image") {
+        return null;
+      }
+      return undefined;
+    });
+
+    const { getByTestId } = render(<NativeTerminalPane sessionId={sessionId} session={session} />);
+    const textarea = getByTestId("native-terminal-focus-sink");
+    textarea.focus();
+    tauriCoreMocks.invoke.mockClear();
+    toastMocks.error.mockClear();
+
+    const pasteEvent = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEvent, "clipboardData", {
+      value: { getData: () => "" },
+    });
+
+    act(() => {
+      textarea.dispatchEvent(pasteEvent);
+    });
+
+    expect(pasteEvent.defaultPrevented).toBe(true);
+
+    await waitFor(() => {
+      expect(toastMocks.error).toHaveBeenCalledWith(
+        "No clipboard image could be read to send to the remote host.",
+      );
+    });
+
+    const sendInputCalls = tauriCoreMocks.invoke.mock.calls.filter(
+      ([cmd, args]) =>
+        cmd === "cmd_native_terminal_send_input" && args?.input?.text === "\u0016",
+    );
+    expect(sendInputCalls).toHaveLength(0);
   });
 
   it("routes a text paste targeting the terminal pane when the focus sink is not active to cmd_native_terminal_paste", () => {

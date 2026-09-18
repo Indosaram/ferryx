@@ -8,6 +8,8 @@
 //! Every platform reads its own clipboard behind [`read_clipboard_image`]; targets without an
 //! implementation return `None`, which leaves the caller on the existing local paste chord.
 
+use crate::ipc::IpcError;
+
 /// Upper bound on what one paste may push across the connection. Enforced by the caller so an
 /// oversized clipboard reports why it was refused instead of looking like an empty clipboard.
 pub const MAX_CLIPBOARD_IMAGE_BYTES: usize = 20 * 1024 * 1024;
@@ -299,6 +301,165 @@ pub fn dib_to_png(dib: &[u8]) -> Option<Vec<u8>> {
     Some(png)
 }
 
+const MAX_PASTE_FILE_NAME_LEN: usize = 128;
+
+fn invalid_arg(msg: impl Into<String>) -> IpcError {
+    IpcError::new(crate::ipc::error::IpcErrorCode::InvalidArgument, msg)
+}
+
+pub fn validate_paste_file_name(file_name: &str) -> Result<(), IpcError> {
+    if file_name.is_empty() || file_name.len() > MAX_PASTE_FILE_NAME_LEN {
+        return Err(invalid_arg("Invalid paste file name length"));
+    }
+    if file_name.contains('/') || file_name.contains('\\') || file_name.contains("..") {
+        return Err(invalid_arg("Path traversal is forbidden"));
+    }
+    if !file_name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+    {
+        return Err(invalid_arg("Invalid characters in paste file name"));
+    }
+    if file_name.starts_with('.') || !file_name.contains('.') {
+        return Err(invalid_arg("File name must contain an extension"));
+    }
+    Ok(())
+}
+
+pub fn validate_upload_id(upload_id: &str) -> Result<(), IpcError> {
+    if upload_id.is_empty() || upload_id.len() > 64 {
+        return Err(invalid_arg("Invalid upload ID length"));
+    }
+    if !upload_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err(invalid_arg("Invalid characters in upload ID"));
+    }
+    Ok(())
+}
+
+pub fn prune_old_paste_files(dir: &std::path::Path) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        let now = std::time::SystemTime::now();
+        let one_day = std::time::Duration::from_secs(24 * 60 * 60);
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_file() {
+                    if let Ok(modified) = meta.modified() {
+                        if let Ok(age) = now.duration_since(modified) {
+                            if age > one_day {
+                                let _ = std::fs::remove_file(entry.path());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub fn save_paste_chunk_in_dir(
+    dir: &std::path::Path,
+    upload_id: &str,
+    file_name: &str,
+    chunk_index: u32,
+    total_chunks: u32,
+    data: &[u8],
+) -> Result<Option<std::path::PathBuf>, IpcError> {
+    validate_paste_file_name(file_name)?;
+    validate_upload_id(upload_id)?;
+    if total_chunks == 0 || chunk_index >= total_chunks {
+        return Err(invalid_arg("Invalid chunk index or total chunks"));
+    }
+
+    std::fs::create_dir_all(dir)
+        .map_err(|e| IpcError::internal(format!("Failed to create paste directory: {e}")))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
+
+    if chunk_index == 0 {
+        prune_old_paste_files(dir);
+    }
+
+    let staging_name = format!("staging-{upload_id}.part");
+    let staging_path = dir.join(staging_name);
+
+    {
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).write(true);
+        if chunk_index == 0 {
+            options.truncate(true);
+        } else {
+            options.append(true);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+
+        use std::io::Write;
+        let mut file = options
+            .open(&staging_path)
+            .map_err(|e| IpcError::internal(format!("Failed to open staging file: {e}")))?;
+        file.write_all(data)
+            .map_err(|e| IpcError::internal(format!("Failed to write paste chunk: {e}")))?;
+        file.flush()
+            .map_err(|e| IpcError::internal(format!("Failed to flush paste chunk: {e}")))?;
+    }
+
+    if chunk_index + 1 == total_chunks {
+        let final_path = dir.join(file_name);
+        std::fs::rename(&staging_path, &final_path)
+            .map_err(|e| IpcError::internal(format!("Failed to finalize paste file: {e}")))?;
+        Ok(Some(final_path))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn save_paste_file_in_dir(
+    dir: &std::path::Path,
+    file_name: &str,
+    data: &[u8],
+) -> Result<std::path::PathBuf, IpcError> {
+    let upload_id = uuid::Uuid::new_v4().to_string();
+    let res = save_paste_chunk_in_dir(dir, &upload_id, file_name, 0, 1, data)?;
+    res.ok_or_else(|| IpcError::internal("Failed to finalize single paste file"))
+}
+
+pub fn default_paste_dir() -> std::path::PathBuf {
+    let tmp = std::env::var_os("TMPDIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    tmp.join("ferryx-paste")
+}
+
+pub fn save_paste_file(file_name: &str, data: &[u8]) -> Result<std::path::PathBuf, IpcError> {
+    let dir = default_paste_dir();
+    save_paste_file_in_dir(&dir, file_name, data)
+}
+
+pub fn save_paste_chunk(
+    upload_id: &str,
+    file_name: &str,
+    chunk_index: u32,
+    total_chunks: u32,
+    data: &[u8],
+) -> Result<Option<std::path::PathBuf>, IpcError> {
+    let dir = default_paste_dir();
+    save_paste_chunk_in_dir(
+        &dir,
+        upload_id,
+        file_name,
+        chunk_index,
+        total_chunks,
+        data,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,5 +546,76 @@ mod tests {
     fn an_empty_pasteboard_payload_never_becomes_a_clipboard_image() {
         assert_eq!(ClipboardImage::new(Vec::new(), "png"), None);
         assert!(ClipboardImage::new(vec![1, 2, 3], "png").is_some());
+    }
+
+    #[test]
+    fn save_paste_file_in_dir_writes_file_and_prunes_stale_files() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dir = temp.path().join("ferryx-paste");
+
+        // Pre-populate an old file (older than 24h)
+        std::fs::create_dir_all(&dir).expect("create dir");
+        let old_file = dir.join("old.png");
+        std::fs::write(&old_file, b"old-content").expect("write old file");
+        let two_days_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(48 * 3600);
+        let f = std::fs::File::open(&old_file).expect("open old file");
+        let _ = f.set_modified(two_days_ago);
+
+        // Pre-populate a fresh file
+        let fresh_file = dir.join("fresh.png");
+        std::fs::write(&fresh_file, b"fresh-content").expect("write fresh file");
+
+        // Save new file
+        let saved = save_paste_file_in_dir(&dir, "paste-1.png", b"new-bytes")
+            .expect("save_paste_file_in_dir succeeds");
+
+        assert_eq!(saved, dir.join("paste-1.png"));
+        assert_eq!(std::fs::read(&saved).expect("read saved"), b"new-bytes");
+
+        // Stale file must be pruned, fresh file must remain
+        assert!(!old_file.exists(), "stale file should have been pruned");
+        assert!(fresh_file.exists(), "fresh file should remain");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir_meta = std::fs::metadata(&dir).expect("dir meta");
+            assert_eq!(dir_meta.permissions().mode() & 0o777, 0o700);
+            let file_meta = std::fs::metadata(&saved).expect("file meta");
+            assert_eq!(file_meta.permissions().mode() & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn save_paste_chunk_in_dir_assembles_multi_part_upload() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dir = temp.path().join("ferryx-paste");
+        let upload_id = "test-upload-123";
+        let file_name = "image.png";
+
+        let chunk1 = b"Hello, ";
+        let chunk2 = b"world!";
+
+        let res1 = save_paste_chunk_in_dir(&dir, upload_id, file_name, 0, 2, chunk1)
+            .expect("chunk 0 succeeds");
+        assert_eq!(res1, None);
+
+        let res2 = save_paste_chunk_in_dir(&dir, upload_id, file_name, 1, 2, chunk2)
+            .expect("chunk 1 succeeds");
+        let final_path = res2.expect("chunk 1 finalizes");
+        assert_eq!(final_path, dir.join(file_name));
+        assert_eq!(std::fs::read(&final_path).expect("read final"), b"Hello, world!");
+    }
+
+    #[test]
+    fn save_paste_file_rejects_path_traversal_and_invalid_names() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dir = temp.path().join("ferryx-paste");
+
+        assert!(save_paste_file_in_dir(&dir, "../escape.png", b"data").is_err());
+        assert!(save_paste_file_in_dir(&dir, "sub/dir.png", b"data").is_err());
+        assert!(save_paste_file_in_dir(&dir, "noextension", b"data").is_err());
+        assert!(save_paste_file_in_dir(&dir, ".hidden", b"data").is_err());
+        assert!(save_paste_file_in_dir(&dir, "", b"data").is_err());
     }
 }

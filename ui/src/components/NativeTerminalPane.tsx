@@ -28,7 +28,7 @@ import {
 } from "../lib/tauri";
 import { useNativeTerminalVisibilityState } from "../lib/nativeTerminalVisibility";
 import { classifyNativeTerminalAttachError } from "../lib/nativeTerminalAttachPolicy";
-import { isRemoteWorkspaceId, pasteClipboardImageToRemote } from "../lib/remoteProject";
+import { isPairedWorkspaceId, isRemoteWorkspaceId, pasteClipboardImageToRemote } from "../lib/remoteProject";
 import { useSleepingSessionIds } from "../lib/sessionLifecycle";
 import { extractIpcErrorMessage } from "../lib/sshHosts";
 import type { NativeTerminalScrollbarPayload, TerminalSession } from "../lib/types";
@@ -1085,13 +1085,14 @@ export function NativeTerminalPane({
     sendInput({ text: "\u0016" });
   }, [sendInput]);
 
-  const remoteWorkspaceId = isRemoteWorkspaceId(session?.workspaceId)
-    ? (session?.workspaceId ?? null)
-    : null;
+  const remoteWorkspaceId =
+    isRemoteWorkspaceId(session?.workspaceId) || isPairedWorkspaceId(session?.workspaceId)
+      ? (session?.workspaceId ?? null)
+      : null;
 
   const pasteClipboardImage = useCallback(() => {
-    // An SSH pane's agent cannot reach this machine's clipboard, so the image travels to the
-    // host and its remote path is pasted in place of the local paste chord.
+    // An SSH or paired pane's agent cannot reach this machine's clipboard, so the image travels
+    // to the host and its remote path is pasted in place of the local paste chord.
     if (!remoteWorkspaceId) {
       sendImagePasteShortcut();
       return;
@@ -1099,7 +1100,7 @@ export function NativeTerminalPane({
     void pasteClipboardImageToRemote(remoteWorkspaceId)
       .then((result) => {
         if (!result) {
-          sendImagePasteShortcut();
+          toast.error("No clipboard image could be read to send to the remote host.");
           return;
         }
         sendPaste(`${quoteShellPath(result.remotePath)} `);
@@ -1552,6 +1553,8 @@ export function NativeTerminalPane({
       const text = event.clipboardData?.getData("text/plain") || event.clipboardData?.getData("text");
       if (text) {
         sendPaste(text);
+      } else if (isRemoteWorkspaceId(session?.workspaceId) || isPairedWorkspaceId(session?.workspaceId)) {
+        pasteClipboardImage();
       } else {
         sendImagePasteShortcut();
       }
@@ -1578,7 +1581,7 @@ export function NativeTerminalPane({
       window.removeEventListener("blur", clearPasteSuppression);
       clearPasteSuppression();
     };
-  }, [active, copySelectionOrInterrupt, performNativePasteFallback, sendCtrlC, sendImagePasteShortcut, sendInput, sendPaste, targetSessionId, visible]);
+  }, [active, copySelectionOrInterrupt, pasteClipboardImage, performNativePasteFallback, sendCtrlC, sendImagePasteShortcut, sendInput, sendPaste, session?.workspaceId, targetSessionId, visible]);
 
   useEffect(() => {
     if (!visible || !targetSessionId || !isTauri()) return;

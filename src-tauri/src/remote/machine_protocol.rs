@@ -258,6 +258,25 @@ pub enum Attached {
         replay_gap: Option<ReplayGap> },
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasteUploadChunkRequest {
+    #[serde(deserialize_with = "request_id")]
+    pub request_id: String,
+    pub upload_id: String,
+    pub file_name: String,
+    pub chunk_index: u32,
+    pub total_chunks: u32,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasteUploadChunkResult {
+    pub remote_path: Option<String>,
+    pub chunk_index: u32,
+}
+
 #[cfg(test)]
 #[path = "machine_protocol_tests.rs"]
 mod tests;

@@ -40,13 +40,21 @@ export function isRemoteWorkspaceId(workspaceId: string | null | undefined): boo
 export async function pasteClipboardImageToRemote(
   workspaceId: string,
 ): Promise<RemoteClipboardImagePaste | null> {
-  if (!isRemoteWorkspaceId(workspaceId)) {
+  let command: string | null = null;
+  if (typeof workspaceId === "string") {
+    if (workspaceId.startsWith("ssh:")) {
+      command = "cmd_ssh_paste_clipboard_image";
+    } else if (workspaceId.startsWith("daemon:")) {
+      command = "cmd_daemon_paste_clipboard_image";
+    }
+  }
+  if (!command) {
     throw { code: "UNSUPPORTED_CAPABILITY", message: "Clipboard image upload is not supported for this target." };
   }
   if (!isTauri()) {
     return null;
   }
-  const result = await invoke<RemoteClipboardImagePaste | null>("cmd_ssh_paste_clipboard_image", {
+  const result = await invoke<RemoteClipboardImagePaste | null>(command, {
     workspaceId,
   });
   return result ?? null;
