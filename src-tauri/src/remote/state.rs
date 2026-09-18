@@ -1,5 +1,7 @@
 use crate::remote::auth::{write_private_json, AuthManager};
 use crate::remote::backend::RemoteSessionBackend;
+use crate::remote::browser_admission::AdmissionController;
+use crate::remote::browser_backend::RemoteBrowserBackend;
 use crate::remote::protocol::{RemoteActiveDesktopSelection, RemoteEventMessage};
 use crate::terminal::TerminalService;
 use crate::worktree::WorkspaceRegistry;
@@ -7,9 +9,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
-#[cfg(test)]
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 #[cfg(test)]
 use tokio::sync::Notify;
@@ -762,6 +762,7 @@ pub struct RemoteGatewayState {
     pub workspace_registry: WorkspaceRegistry,
     pub ssh_store_path: RwLock<Option<PathBuf>>,
     pub active_selection: RwLock<Option<RemoteActiveDesktopSelection>>,
+    pub active_selection_tx: watch::Sender<Option<RemoteActiveDesktopSelection>>,
     pub active_session_tx: watch::Sender<Option<String>>,
     pub event_tx: broadcast::Sender<String>,
     pub is_running: RwLock<bool>,
@@ -785,6 +786,9 @@ pub struct RemoteGatewayState {
     ///
     /// Maps ticket -> (device token, target, expiry unix seconds).
     pub socket_tickets: parking_lot::Mutex<std::collections::HashMap<String, (String, String, u64)>>,
+    pub browser_backend: parking_lot::RwLock<Arc<dyn RemoteBrowserBackend>>,
+    pub admission_controller: Arc<AdmissionController>,
+    pub browser_service_epoch: AtomicU64,
     snapshot_cache: RwLock<Option<WorkspaceCacheEntry>>,
     snapshot_lock: tokio::sync::Mutex<()>,
     #[cfg(test)]
@@ -909,6 +913,7 @@ impl RemoteGatewayState {
         auth_path: Option<PathBuf>,
     ) -> Self {
         let (event_tx, _) = broadcast::channel(1024);
+        let (active_selection_tx, _) = watch::channel(None);
         let (active_session_tx, _) = watch::channel(None);
         let config = config_path
             .as_deref()
@@ -938,6 +943,7 @@ impl RemoteGatewayState {
             workspace_registry,
             machine_services: None,
             active_selection: RwLock::new(None),
+            active_selection_tx,
             ssh_store_path: RwLock::new(None),
             active_session_tx,
             event_tx,
@@ -947,6 +953,17 @@ impl RemoteGatewayState {
             desktop_event_sink: RwLock::new(None),
             relay_pairing: RwLock::new(None),
             socket_tickets: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            browser_backend: parking_lot::RwLock::new(Arc::new(
+                crate::remote::browser_backend::LocalIpcBrowserBackend::new(
+                    crate::daemon::server::get_runtime_dir()
+                        .join("browser.sock")
+                        .to_string_lossy()
+                        .to_string(),
+                    None,
+                ),
+            )),
+            admission_controller: Arc::new(AdmissionController::new()),
+            browser_service_epoch: AtomicU64::new(1),
             snapshot_cache: RwLock::new(None),
             snapshot_lock: tokio::sync::Mutex::new(()),
             #[cfg(test)]
@@ -965,6 +982,27 @@ impl RemoteGatewayState {
 
     pub fn invalidate_workspace_snapshot(&self) {
         *self.snapshot_cache.write() = None;
+    }
+
+    pub fn browser_backend(&self) -> Arc<dyn RemoteBrowserBackend> {
+        self.browser_backend.read().clone()
+    }
+
+    pub fn set_browser_backend(&self, backend: Arc<dyn RemoteBrowserBackend>) {
+        *self.browser_backend.write() = backend;
+    }
+
+    pub fn bump_browser_service_epoch(&self) -> u64 {
+        self.browser_service_epoch.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    pub fn browser_service_epoch(&self) -> u64 {
+        self.browser_service_epoch.load(Ordering::SeqCst)
+    }
+
+    pub fn with_browser_backend(self, backend: Arc<dyn RemoteBrowserBackend>) -> Self {
+        *self.browser_backend.write() = backend;
+        self
     }
 
     pub(crate) async fn workspace_snapshot(
@@ -1090,6 +1128,7 @@ impl RemoteGatewayState {
         }
         let session_id = selection.session_id.clone();
         let payload = serde_json::to_value(&selection).unwrap_or(serde_json::Value::Null);
+        self.active_selection_tx.send_replace(Some(selection.clone()));
         *self.active_selection.write() = Some(selection);
         // `send` fails and discards the value when no receiver is alive, which is the normal
         // state before any remote client attaches. `send_replace` stores it regardless so a
@@ -1100,6 +1139,7 @@ impl RemoteGatewayState {
 
     pub fn clear_active_selection(&self) {
         *self.active_selection.write() = None;
+        self.active_selection_tx.send_replace(None);
         self.active_session_tx.send_replace(None);
         self.emit_active_selection_changed(serde_json::Value::Null);
     }
@@ -1111,6 +1151,10 @@ impl RemoteGatewayState {
         }
     }
 
+    pub fn active_selection_watch_rx(&self) -> watch::Receiver<Option<RemoteActiveDesktopSelection>> {
+        self.active_selection_tx.subscribe()
+    }
+
     pub fn active_session_watch_rx(&self) -> watch::Receiver<Option<String>> {
         self.active_session_tx.subscribe()
     }
@@ -1120,6 +1164,14 @@ impl RemoteGatewayState {
     }
 
     pub fn set_desktop_event_sink(&self, sink: DesktopEventSink) {
+        let sink_clone = sink.clone();
+        self.admission_controller
+            .sharing_registry()
+            .set_listener(Arc::new(move |dto| {
+                if let Ok(payload) = serde_json::to_value(dto) {
+                    sink_clone("browser-remote-sharing", payload);
+                }
+            }));
         *self.desktop_event_sink.write() = Some(sink);
     }
 
@@ -1883,5 +1935,32 @@ mod tests {
             "P16: snapshot request after removal and refresh interval expired must reflect removal immediately"
         );
         assert_eq!(state.snapshot_build_count(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_phase4_gateway_state_browser_backend_and_epoch_bump() {
+        let terminal = Arc::new(TerminalService::default());
+        let registry = WorkspaceRegistry::new();
+        let state = RemoteGatewayState::new(terminal, registry);
+
+        // Service epoch defaults to 1
+        assert_eq!(state.browser_service_epoch(), 1);
+        let bumped = state.bump_browser_service_epoch();
+        assert_eq!(bumped, 2);
+        assert_eq!(state.browser_service_epoch(), 2);
+
+        // Browser backend defaults to unavailable
+        let caps = state.browser_backend().capabilities().await;
+        assert!(!caps.browser_available);
+
+        // Inject in-process backend
+        let test_backend = Arc::new(crate::remote::browser_backend::InProcessTestBackend::new());
+        state.set_browser_backend(test_backend);
+        let scope = crate::remote::browser_backend::DesktopScope {
+            workspace_id: "ws1".into(),
+            worktree_slug: "main".into(),
+        };
+        let sessions = state.browser_backend().list_sessions(&scope).await.expect("list sessions");
+        assert!(sessions.is_empty());
     }
 }

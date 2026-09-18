@@ -1,5 +1,10 @@
 pub mod auth;
 pub mod backend;
+pub mod browser_admission;
+pub mod browser_backend;
+pub mod browser_protocol;
+pub mod browser_security;
+pub mod browser_ws;
 pub mod discovery;
 pub(crate) mod filesystem;
 pub mod machine_protocol;
@@ -20,6 +25,24 @@ pub mod state;
 
 pub use auth::*;
 pub use backend::*;
+pub use browser_admission::{
+    AdmissionController, AdmissionOutcome, DriverBroker, DriverLease, SubscriberQueue,
+    MAX_CAPTURED_BROWSERS, MAX_GLOBAL_DRIVERS, MAX_VIEWERS_PER_BROWSER,
+};
+pub use browser_backend::{
+    BoxFuture, BrowserCapabilities, BrowserCommandContext, BrowserCommandResult,
+    BrowserRemoteState, DesktopScope, InProcessBrowserServiceBackend, InProcessTestBackend,
+    LocalIpcBrowserBackend, RemoteBrowserBackend, RemoteBrowserError, RemoteBrowserSessionSummary,
+    UnavailableBrowserBackend,
+};
+pub use browser_protocol::{
+    BinaryFrameHeader, BrowserCaptureRect, BrowserFrameMetadata, BrowserImageFormat,
+    BrowserSubscribeOptions, ClientMessage, DecodedBrowserFrame, ProtocolCodecError, ServerMessage,
+};
+pub use browser_security::{
+    require_permission, sanitize_url, RequestDeduplicator, SecurityError,
+};
+pub use browser_ws::{BrowserWsSession, WsConnectionState};
 pub use mirror::*;
 pub use protocol::*;
 pub use server::*;
@@ -35,3 +58,12 @@ mod filesystem_tests;
 
 #[cfg(test)]
 mod workspace_api_tests;
+
+#[cfg(test)]
+mod browser_protocol_tests;
+
+#[cfg(test)]
+mod browser_security_tests;
+
+#[cfg(test)]
+mod browser_lifecycle_tests;

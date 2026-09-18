@@ -1194,3 +1194,13 @@ export async function dagReadNodeArtifact(
   }
   return invokeCommand<string>("dag_read_node_artifact", { projectPath, relativePath });
 }
+
+export async function browserRemoteReclaim(): Promise<number> {
+  if (!isTauri()) return 0;
+  return invokeCommand<number>("cmd_browser_remote_reclaim");
+}
+
+export async function browserRemoteRevoke(): Promise<number> {
+  if (!isTauri()) return 0;
+  return invokeCommand<number>("cmd_browser_remote_revoke");
+}

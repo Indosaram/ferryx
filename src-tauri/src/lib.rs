@@ -923,6 +923,20 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
     let notification_activations = Arc::new(NotificationActivations::new());
     let browser_manager = Arc::new(browser::BrowserManager::new());
     let browser_cli_manager = Arc::clone(&browser_manager);
+    let driver_broker = Arc::new(browser::remote_driver::RemoteDriverBroker::new());
+    let browser_remote_service = Arc::new(browser::remote_service::BrowserRemoteService::new(
+        (*browser_manager).clone(),
+        Arc::clone(&driver_broker),
+    ));
+    let in_process_backend = Arc::new(
+        crate::remote::browser_backend::InProcessBrowserServiceBackend::new(
+            Arc::clone(&browser_remote_service),
+            Arc::clone(&browser_manager),
+        ),
+    );
+    remote_manager.set_browser_backend(Arc::clone(&in_process_backend) as Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>);
+    let in_process_backend_setup = Arc::clone(&in_process_backend);
+    let browser_remote_service_setup = Arc::clone(&browser_remote_service);
     #[cfg(feature = "native-terminal")]
     let native_terminal_surface_host = NativeTerminalSurfaceHostState::default();
     let setup_activations = Arc::clone(&notification_activations);
@@ -1061,6 +1075,20 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                 app.handle().clone(),
                 worktree_rescan_registry,
             );
+            browser_remote_service_setup.set_snapshot_source(Arc::new(
+                crate::browser::snapshot_source::TauriBrowserSnapshotSource::new(app.handle().clone()),
+            ));
+            let gui_executor = Arc::new(crate::ipc::browser::GuiBrowserCommandExecutor::new(
+                app.handle().clone(),
+                Arc::clone(&browser_cli_manager),
+            ));
+            in_process_backend_setup.set_executor(gui_executor);
+            if let Some(remote_state) = app.try_state::<Arc<crate::remote::state::RemoteGatewayState>>() {
+                remote_state.set_browser_backend(Arc::clone(&in_process_backend_setup) as Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>);
+            }
+            if let Some(remote_mgr) = app.try_state::<Arc<ipc::remote::RemoteGatewayManager>>() {
+                remote_mgr.set_browser_backend(Arc::clone(&in_process_backend_setup) as Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>);
+            }
             Ok(())
         })
         // Rust-side plugins only. The frontend uses rorca's own typed commands,
@@ -1068,13 +1096,23 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
+        .manage(
+            Arc::new(crate::ipc::browser::ProductionDaemonReclaimTransport::new(
+                Arc::clone(&remote_manager),
+                Arc::clone(&daemon_client),
+            )) as Arc<dyn crate::ipc::browser::DaemonReclaimTransport>,
+        )
         .manage(daemon_client)
         .manage(remote_manager)
         .manage(workspace_registry)
         .manage(ipc::worktree_disk::WorktreeDiskScans::default())
         .manage(notification_audio)
         .manage(notification_activations)
-        .manage(browser_manager);
+        .manage(driver_broker)
+        .manage(browser_remote_service)
+        .manage(browser_manager)
+        .manage(Arc::clone(&in_process_backend) as Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>)
+        .manage(in_process_backend);
 
     #[cfg(desktop)]
     let builder = if crate::ipc::updater::updater_managed_externally() {
@@ -1223,6 +1261,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_browser_close,
         cmd_browser_list,
         cmd_browser_open_external,
+        cmd_browser_remote_reclaim,
+        cmd_browser_remote_revoke,
         cmd_open_file_path,
         dag_list_runs,
         dag_get_run,

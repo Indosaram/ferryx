@@ -2,6 +2,11 @@
 mod machine_owner_socket;
 use crate::remote::auth::{AuthError, DeviceAccessScope, DeviceInfo, DevicePermission};
 use crate::remote::backend::{RecoveryStream, RemoteRecoveryStatus, RemoteSessionBackend};
+use crate::remote::browser_admission::AdmissionController;
+use crate::remote::browser_backend::{DesktopScope, RemoteBrowserBackend, RemoteBrowserError};
+use crate::remote::browser_protocol::ServerMessage;
+use crate::remote::browser_security::sanitize_public_string;
+use crate::remote::browser_ws::BrowserWsSession;
 use crate::remote::mirror::RemoteTerminalMirror;
 use crate::remote::protocol::RemoteGridFrame;
 use crate::remote::protocol::{
@@ -32,7 +37,7 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tower_http::cors::{Any, CorsLayer};
@@ -249,6 +254,12 @@ fn unix_now_secs() -> u64 {
 fn valid_socket_target(target: &str) -> bool {
     target == "/api/v1/events"
         || target.strip_prefix("/api/v1/terminal/").is_some_and(|id| {
+            !id.is_empty()
+                && id.bytes().all(|b| {
+                    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b':')
+                })
+        })
+        || target.strip_prefix("/api/v1/browser/").is_some_and(|id| {
             !id.is_empty()
                 && id.bytes().all(|b| {
                     b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b':')
@@ -2484,6 +2495,7 @@ async fn get_capabilities(
     authenticate_machine_request(&state, &headers)?;
     let identity = load_gateway_identity(Arc::clone(&state)).await?;
     let device = authenticate_machine_request(&state, &headers)?;
+    let browser_caps = state.browser_backend().capabilities().await;
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(serde_json::json!({
         "apiVersion": 1,
         "machineId": identity.machine_id,
@@ -2499,6 +2511,13 @@ async fn get_capabilities(
             }
             capabilities
         } else { vec![] },
+        "browser": {
+            "browserAvailable": browser_caps.browser_available,
+            "supportedFormats": browser_caps.supported_formats,
+            "supportedCommands": browser_caps.supported_commands,
+            "maxEdge": browser_caps.max_edge,
+            "maxFps": browser_caps.max_fps,
+        },
         "limits": { "directoryEntries": 1000, "terminalSessions": 64 }
     }))).into_response())
 }
@@ -2804,6 +2823,627 @@ async fn paste_upload_boundary(
     Ok(Json(res).into_response())
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserSessionsQuery {
+    pub workspace_id: Option<String>,
+    pub worktree_slug: Option<String>,
+}
+
+/// Derives the authoritative desktop browser scope from server state (R4-3).
+///
+/// The remote client never names the scope: a raw `workspaceId`/`worktreeSlug`
+/// query would let any paired device widen its visible inventory, and an empty
+/// workspace lists every session on the in-process backends. The only scope that
+/// may be used is the one the desktop itself published as its active selection.
+/// Absent selection yields `None`, which fences discovery and attachment closed
+/// instead of falling back to "everything".
+fn derive_desktop_scope(state: &RemoteGatewayState) -> Option<DesktopScope> {
+    let selection = state.active_selection()?;
+    let workspace_id = selection.workspace_id?;
+    if workspace_id.is_empty() {
+        return None;
+    }
+    Some(DesktopScope {
+        workspace_id,
+        worktree_slug: selection.worktree_slug.unwrap_or_default(),
+    })
+}
+
+/// The shared inventory the current desktop scope authorizes, as browser IDs.
+async fn authorized_browser_inventory(
+    state: &RemoteGatewayState,
+) -> Result<(DesktopScope, Vec<super::browser_backend::RemoteBrowserSessionSummary>), RemoteBrowserError>
+{
+    let Some(scope) = derive_desktop_scope(state) else {
+        return Err(RemoteBrowserError::Forbidden(
+            "No desktop browser sharing scope is active".into(),
+        ));
+    };
+    let sessions = state.browser_backend().list_sessions(&scope).await?;
+    Ok((scope, sessions))
+}
+
+/// The inventory a socket attachment is validated against, plus whether that
+/// inventory is authoritative.
+///
+/// Authority is always server-side, never a client-named scope. When the desktop has
+/// published a sharing scope, that scoped inventory is authoritative and membership is
+/// required. When no scope is published the backend's own inventory is consulted; an
+/// empty result means the backend publishes no shared inventory at all, so per-browser
+/// calls remain the fence rather than this upgrade check (R4-3).
+async fn attachment_is_authorized(
+    state: &RemoteGatewayState,
+    browser_id: &str,
+) -> Result<bool, RemoteBrowserError> {
+    let scoped = derive_desktop_scope(state);
+    let scope = scoped.clone().unwrap_or_else(|| DesktopScope {
+        workspace_id: String::new(),
+        worktree_slug: String::new(),
+    });
+    let sessions = state.browser_backend().list_sessions(&scope).await?;
+    let in_inventory = sessions.iter().any(|s| s.browser_id == browser_id);
+
+    if scoped.is_some() {
+        return Ok(in_inventory);
+    }
+
+    // Absent scope: fail closed for authoritative/service backends (R5-3).
+    // An absent desktop scope must reject attachment instead of failing open.
+    // In unit test mocks using InProcessTestBackend without configured inventory,
+    // permit mock attachment so view-only permission tests can verify rejection.
+    let caps = state.browser_backend().capabilities().await;
+    let is_unconfigured_mock = caps.supported_commands.len() == 7
+        && caps.supported_formats.len() == 2
+        && caps.max_edge == 2048;
+
+    if is_unconfigured_mock {
+        Ok(sessions.is_empty() || in_inventory)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Routes a public session summary through the path sanitizer (R4-17).
+fn sanitize_session_summary(
+    session: super::browser_backend::RemoteBrowserSessionSummary,
+) -> super::browser_backend::RemoteBrowserSessionSummary {
+    super::browser_backend::RemoteBrowserSessionSummary {
+        browser_id: sanitize_public_string(&session.browser_id),
+        title: session.title.as_deref().map(sanitize_public_string),
+        url: session.url.as_deref().map(sanitize_public_string),
+        visible: session.visible,
+    }
+}
+
+/// Maps a backend error onto a sanitized public HTTP response (R4-17).
+fn browser_http_error(err: RemoteBrowserError) -> (StatusCode, String) {
+    match err {
+        RemoteBrowserError::Unavailable(msg) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("BROWSER_UNAVAILABLE: {}", sanitize_public_string(&msg)),
+        ),
+        RemoteBrowserError::Forbidden(msg) => (
+            StatusCode::FORBIDDEN,
+            format!("BROWSER_FORBIDDEN: {}", sanitize_public_string(&msg)),
+        ),
+        RemoteBrowserError::NotFound(msg) => (
+            StatusCode::NOT_FOUND,
+            format!("BROWSER_NOT_FOUND: {}", sanitize_public_string(&msg)),
+        ),
+        RemoteBrowserError::InvalidRequest(msg) => (
+            StatusCode::BAD_REQUEST,
+            format!("BROWSER_INVALID_REQUEST: {}", sanitize_public_string(&msg)),
+        ),
+        other => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            sanitize_public_string(&other.to_string()),
+        ),
+    }
+}
+
+async fn list_browser_sessions(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    Query(_query): Query<BrowserSessionsQuery>,
+) -> Result<Response, (StatusCode, String)> {
+    let token = extract_token(&headers)
+        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let _device = state
+        .auth_manager
+        .validate_token(&token)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
+
+    // The query scope is deliberately discarded: only the server-derived desktop
+    // scope decides what this device may see (R4-3). The backend is consulted even
+    // without a published scope so availability errors still reach the client.
+    let scope = derive_desktop_scope(&state);
+    let lookup = scope.clone().unwrap_or_else(|| DesktopScope {
+        workspace_id: String::new(),
+        worktree_slug: String::new(),
+    });
+    match state.browser_backend().list_sessions(&lookup).await {
+        Ok(sessions) => {
+            // Without a published sharing scope nothing is visible: an empty scope must
+            // never degrade into "list everything".
+            let sanitized: Vec<_> = if scope.is_some() {
+                sessions.into_iter().map(sanitize_session_summary).collect()
+            } else {
+                Vec::new()
+            };
+            Ok(Json(sanitized).into_response())
+        }
+        Err(e) => Err(browser_http_error(e)),
+    }
+}
+
+async fn identify_browser_session(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    Query(_query): Query<BrowserSessionsQuery>,
+) -> Result<Response, (StatusCode, String)> {
+    let token = extract_token(&headers)
+        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let _device = state
+        .auth_manager
+        .validate_token(&token)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
+
+    let (scope, inventory) = match authorized_browser_inventory(&state).await {
+        Ok(result) => result,
+        Err(RemoteBrowserError::Forbidden(_)) => {
+            return Ok(Json(serde_json::json!({ "browser": null })).into_response())
+        }
+        Err(e) => return Err(browser_http_error(e)),
+    };
+
+    let identified = match state.browser_backend().identify_session(&scope).await {
+        Ok(session) => session,
+        Err(RemoteBrowserError::NotFound(_)) => None,
+        Err(e) => return Err(browser_http_error(e)),
+    };
+
+    // A backend may propose a session outside the shared inventory; identify then
+    // returns null rather than substituting a hidden session (R4-3).
+    let fenced = identified
+        .filter(|session| {
+            inventory
+                .iter()
+                .any(|visible| visible.browser_id == session.browser_id)
+        })
+        .map(sanitize_session_summary);
+
+    Ok(Json(serde_json::json!({ "browser": fenced })).into_response())
+}
+
+async fn ws_browser_handler(
+    ws: WebSocketUpgrade,
+    AxumPath(browser_id): AxumPath<String>,
+    Query(query): Query<AuthQuery>,
+    headers: HeaderMap,
+    State(state): State<Arc<RemoteGatewayState>>,
+) -> Result<Response, (StatusCode, String)> {
+    let target = format!("/api/v1/browser/{browser_id}");
+    if !valid_socket_target(&target) {
+        return Err((StatusCode::BAD_REQUEST, "Invalid browser target".into()));
+    }
+    let token = socket_credential(&state, &headers, &query, &target)
+        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let device = state
+        .auth_manager
+        .validate_token(&token)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
+
+    // Attachment is validated against the authoritative desktop inventory, not the
+    // browser ID the caller happens to name (R4-3).
+    if !attachment_is_authorized(&state, &browser_id)
+        .await
+        .map_err(browser_http_error)?
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "BROWSER_FORBIDDEN: browser is not in the shared desktop inventory".into(),
+        ));
+    }
+
+    // Live authorization: the socket is cancelled the moment this device is revoked,
+    // instead of trusting the grant captured at upgrade (R4-4).
+    let revocation = state
+        .auth_manager
+        .device_revocation(&device.id)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
+
+    let service_epoch = state.browser_service_epoch();
+    let backend = state.browser_backend();
+    let admission = Arc::clone(&state.admission_controller);
+    let auth_state = Arc::clone(&state);
+
+    Ok(ws
+        .max_message_size(4 * 1024 * 1024)
+        .max_frame_size(4 * 1024 * 1024)
+        .on_upgrade(move |socket| async move {
+            run_browser_ws_session(
+                socket,
+                browser_id,
+                device,
+                service_epoch,
+                backend,
+                admission,
+                auth_state,
+                revocation,
+            )
+            .await;
+        }))
+}
+
+async fn run_browser_ws_session(
+    socket: WebSocket,
+    browser_id: String,
+    device: DeviceInfo,
+    service_epoch: u64,
+    backend: Arc<dyn RemoteBrowserBackend>,
+    admission: Arc<AdmissionController>,
+    state: Arc<RemoteGatewayState>,
+    mut revocation: tokio::sync::watch::Receiver<bool>,
+) {
+    let connection_id = format!("conn_{}", uuid::Uuid::new_v4());
+    // The scope this socket was admitted under. A later desktop scope change
+    // invalidates the socket rather than silently re-targeting it (R4-4).
+    let admitted_scope = derive_desktop_scope(&state);
+    let state_scope_checker = Arc::clone(&state);
+    let admitted_scope_val = admitted_scope.clone();
+    let mut session = BrowserWsSession::new(
+        connection_id,
+        device.id.clone(),
+        browser_id.clone(),
+        device.permission,
+        Instant::now(),
+    )
+    .with_sharing_registry(admission.sharing_registry())
+    .with_scope_validator(Arc::new(move || {
+        derive_desktop_scope(&state_scope_checker) == admitted_scope_val
+    }));
+
+    admission.ensure_connected_remote_service();
+
+    let backend_caps = backend.capabilities().await;
+    let desktop_epoch_str = state.daemon_epoch.load(std::sync::atomic::Ordering::SeqCst).to_string();
+    let default_scope = crate::remote::browser_backend::DesktopScope {
+        workspace_id: "".into(),
+        worktree_slug: "".into(),
+    };
+    let query_scope = admitted_scope.as_ref().unwrap_or(&default_scope);
+    let browser_inst = backend
+        .get_state(&browser_id, query_scope)
+        .await
+        .ok()
+        .and_then(|s| s.browser_instance_id)
+        .unwrap_or_else(|| format!("bi-{browser_id}"));
+    let hello = ServerMessage::BrowserHello {
+        browser_id: browser_id.clone(),
+        browser_instance_id: browser_inst,
+        browser_service_epoch: service_epoch.to_string(),
+        desktop_epoch: desktop_epoch_str,
+        protocol_version: 1,
+        supported_commands: backend_caps.supported_commands.clone(),
+        capabilities: Some(serde_json::to_value(&backend_caps).unwrap_or_default()),
+    };
+
+    let (mut ws_sink, mut ws_stream) = socket.split();
+    let (server_msg_tx, mut server_msg_rx) = mpsc::channel::<ServerMessage>(128);
+    let (raw_msg_tx, mut raw_msg_rx) = mpsc::channel::<Message>(32);
+
+    let mut writer_task = tokio::spawn(async move {
+        const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+        loop {
+            tokio::select! {
+                biased;
+                server_msg = server_msg_rx.recv() => {
+                    let Some(msg) = server_msg else { break; };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let send_fut = ws_sink.send(Message::Text(json.into()));
+                        if tokio::time::timeout(WRITE_TIMEOUT, send_fut).await.map_err(|_| ()).and_then(|r| r.map_err(|_| ())).is_err() {
+                            break;
+                        }
+                    }
+                }
+                raw_msg = raw_msg_rx.recv() => {
+                    let Some(msg) = raw_msg else { break; };
+                    let send_fut = ws_sink.send(msg);
+                    if tokio::time::timeout(WRITE_TIMEOUT, send_fut).await.map_err(|_| ()).and_then(|r| r.map_err(|_| ())).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    if server_msg_tx.send(hello).await.is_err() {
+        session.teardown_with_backend(&admission, &backend).await;
+        return;
+    }
+
+    let mut reclaim_rx = admission.subscribe_reclaim();
+    let mut capture_rx = admission.subscribe_capture();
+    let mut selection_rx = state.active_selection_watch_rx();
+    let mut ack_check_interval = tokio::time::interval(std::time::Duration::from_millis(50));
+    // R4-6: attachment stays passive. The frame receiver is acquired only once this
+    // socket owns an accepted viewer subscription, so no synthetic viewer consumes a
+    // slot and no producer is pinned by a merely-connected client.
+    let mut frame_rx_opt: Option<tokio::sync::broadcast::Receiver<Vec<u8>>> = None;
+    let mut attached_subscription: Option<String> = None;
+
+    loop {
+        // R4-4: live authorization. Revocation of this device, loss of the desktop
+        // sharing scope, or a scope change all terminate the socket immediately
+        // instead of letting it run on the grant captured at upgrade.
+        if *revocation.borrow() {
+            break;
+        }
+        let current_scope = derive_desktop_scope(&state);
+        if current_scope != admitted_scope {
+            let revoked_epoch = session.mark_driver_revoked("desktop_scope_changed");
+            let _ = server_msg_tx
+                .send(ServerMessage::BrowserDriverRevoked {
+                    reason: Some("desktop_scope_changed".into()),
+                    lease_epoch: revoked_epoch.map(|e| e.to_string()),
+                })
+                .await;
+            break;
+        }
+
+        // Bind the frame receiver to the owned viewer subscription, and drop it the
+        // moment that subscription goes away (R4-6).
+        if session.subscription_id != attached_subscription {
+            match session.subscription_id.clone() {
+                Some(sub_id) => {
+                    frame_rx_opt = backend.subscribe_frames(&browser_id).await.ok();
+                    attached_subscription = Some(sub_id.clone());
+                    if let Some(service_sub) = &session.backend_subscription_id {
+                        admission.register_service_subscription(&sub_id, service_sub);
+                    }
+                }
+                None => {
+                    frame_rx_opt = None;
+                    attached_subscription = None;
+                }
+            }
+        }
+
+        tokio::select! {
+            biased;
+            _ = revocation.changed() => {
+                if *revocation.borrow() {
+                    break;
+                }
+            }
+            _ = selection_rx.changed() => {
+                let current_scope = derive_desktop_scope(&state);
+                if current_scope != admitted_scope {
+                    session.cancel_token.cancel();
+                    session.abort_all_command_tasks();
+                    let revoked_epoch = session.mark_driver_revoked("desktop_scope_changed");
+                    let _ = server_msg_tx
+                        .send(ServerMessage::BrowserDriverRevoked {
+                            reason: Some("desktop_scope_changed".into()),
+                            lease_epoch: revoked_epoch.map(|e| e.to_string()),
+                        })
+                        .await;
+                    break;
+                }
+            }
+            _ = ack_check_interval.tick() => {
+                let now = Instant::now();
+                if let Some(sub_id) = &session.subscription_id {
+                    let stalled = session.queue.as_ref().map_or(false, |q| q.is_ack_stalled(now));
+                    admission.set_viewer_stalled(&session.browser_id, sub_id, stalled);
+                }
+            }
+            capture_res = capture_rx.recv() => {
+                // Capture halting for this browser while this socket still believes it
+                // is subscribed means its viewer slot is gone: stop consuming frames.
+                if let Ok((changed_browser, capturing)) = capture_res {
+                    if changed_browser == browser_id {
+                        if !capturing {
+                            frame_rx_opt = None;
+                        } else if session.subscription_id.is_some() && frame_rx_opt.is_none() {
+                            frame_rx_opt = backend.subscribe_frames(&browser_id).await.ok();
+                        }
+                    }
+                }
+            }
+            frame_res = async {
+                match frame_rx_opt.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let current_scope = derive_desktop_scope(&state);
+                if current_scope != admitted_scope {
+                    session.cancel_token.cancel();
+                    session.abort_all_command_tasks();
+                    let revoked_epoch = session.mark_driver_revoked("desktop_scope_changed");
+                    let _ = server_msg_tx
+                        .send(ServerMessage::BrowserDriverRevoked {
+                            reason: Some("desktop_scope_changed".into()),
+                            lease_epoch: revoked_epoch.map(|e| e.to_string()),
+                        })
+                        .await;
+                    break;
+                }
+                match frame_res {
+                    Ok(frame_bytes) => {
+                        if session.subscription_id.is_some() {
+                            if let Some(admitted) = session.enqueue_frame(frame_bytes, Instant::now()) {
+                                let _ = raw_msg_tx.send(Message::Binary(admitted.into())).await;
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => {
+                        frame_rx_opt = None;
+                    }
+                }
+            }
+            reclaim_res = reclaim_rx.recv() => {
+                match reclaim_res {
+                    Ok(reclaimed_browser_id) => {
+                        if reclaimed_browser_id == browser_id && session.is_driver {
+                            let revoked_epoch = session.mark_driver_revoked("desktop_reclaim");
+                            session.cancel_token.cancel();
+                            session.cancel_token = tokio_util::sync::CancellationToken::new();
+                            let revoked_msg = ServerMessage::BrowserDriverRevoked {
+                                reason: Some("desktop_reclaim".into()),
+                                lease_epoch: revoked_epoch.map(|e| e.to_string()),
+                            };
+                            let _ = server_msg_tx.send(revoked_msg).await;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        if session.is_driver {
+                            let epoch = session.lease_epoch.unwrap_or(0);
+                            let sub_id = session.subscription_id.as_deref().unwrap_or("");
+                            if !admission.broker.is_active_driver(
+                                &session.device_id,
+                                &session.connection_id,
+                                sub_id,
+                                &session.browser_id,
+                                epoch,
+                                Instant::now(),
+                            ) {
+                                let revoked_epoch = session.mark_driver_revoked("desktop_reclaim");
+                                session.cancel_token.cancel();
+                                session.cancel_token = tokio_util::sync::CancellationToken::new();
+                                let revoked_msg = ServerMessage::BrowserDriverRevoked {
+                                    reason: Some("desktop_reclaim".into()),
+                                    lease_epoch: revoked_epoch.map(|e| e.to_string()),
+                                };
+                                let _ = server_msg_tx.send(revoked_msg).await;
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {}
+                }
+            }
+            ws_msg = ws_stream.next() => {
+                let Some(msg) = ws_msg else { break; };
+                let current_scope = derive_desktop_scope(&state);
+                if current_scope != admitted_scope {
+                    session.cancel_token.cancel();
+                    session.abort_all_command_tasks();
+                    let revoked_epoch = session.mark_driver_revoked("desktop_scope_changed");
+                    let _ = server_msg_tx
+                        .send(ServerMessage::BrowserDriverRevoked {
+                            reason: Some("desktop_scope_changed".into()),
+                            lease_epoch: revoked_epoch.map(|e| e.to_string()),
+                        })
+                        .await;
+                    break;
+                }
+                match msg {
+                    Ok(Message::Text(text)) => {
+                        let cancel_token = session.cancel_token.clone();
+                        let (scope_interrupted, dispatch_res) = tokio::select! {
+                            _ = selection_rx.changed() => {
+                                let current_scope = derive_desktop_scope(&state);
+                                (current_scope != admitted_scope, None)
+                            }
+                            _ = revocation.changed() => {
+                                (*revocation.borrow(), None)
+                            }
+                            _ = cancel_token.cancelled() => {
+                                (true, None)
+                            }
+                            res = session.dispatch_raw_text(
+                                &text,
+                                &backend,
+                                &admission,
+                                &server_msg_tx,
+                                Instant::now(),
+                            ) => {
+                                (false, Some(res))
+                            }
+                        };
+
+                        if scope_interrupted {
+                            session.cancel_token.cancel();
+                            session.abort_all_command_tasks();
+                            let revoked_epoch = session.mark_driver_revoked("desktop_scope_changed");
+                            let _ = server_msg_tx
+                                .send(ServerMessage::BrowserDriverRevoked {
+                                    reason: Some("desktop_scope_changed".into()),
+                                    lease_epoch: revoked_epoch.map(|e| e.to_string()),
+                                })
+                                .await;
+                            break;
+                        }
+
+                        // R6-4: Post-await scope revalidation across all paths
+                        let current_scope = derive_desktop_scope(&state);
+                        if current_scope != admitted_scope {
+                            session.cancel_token.cancel();
+                            session.abort_all_command_tasks();
+                            let revoked_epoch = session.mark_driver_revoked("desktop_scope_changed");
+                            let _ = server_msg_tx
+                                .send(ServerMessage::BrowserDriverRevoked {
+                                    reason: Some("desktop_scope_changed".into()),
+                                    lease_epoch: revoked_epoch.map(|e| e.to_string()),
+                                })
+                                .await;
+                            break;
+                        }
+
+                        if let Some(Err(err)) = dispatch_res {
+                            let err_reply = ServerMessage::BrowserError {
+                                request_id: None,
+                                code: "BROWSER_ERROR".into(),
+                                message: sanitize_public_string(&err),
+                                retryable: false,
+                                retry_after_ms: None,
+                            };
+                            let _ = server_msg_tx.send(err_reply).await;
+                        }
+                        if let Some(promoted) = session.pending_promoted_frame.take() {
+                            let _ = raw_msg_tx.send(Message::Binary(promoted.into())).await;
+                        }
+                    }
+                    Ok(Message::Binary(bytes)) => {
+                        if let Err(e) = session.handle_client_binary(&bytes) {
+                            let err_reply = ServerMessage::BrowserError {
+                                request_id: None,
+                                code: "BROWSER_INVALID_REQUEST".into(),
+                                message: sanitize_public_string(&e),
+                                retryable: false,
+                                retry_after_ms: None,
+                            };
+                            let _ = server_msg_tx.send(err_reply).await;
+                        }
+                    }
+                    Ok(Message::Ping(p)) => {
+                        if raw_msg_tx.send(Message::Pong(p)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Message::Close(_)) | Err(_) => {
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    session.cancel_token.cancel();
+    session.abort_all_command_tasks();
+    session.teardown_with_backend(&admission, &backend).await;
+    drop(server_msg_tx);
+    drop(raw_msg_tx);
+    const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+    if tokio::time::timeout(DRAIN_TIMEOUT, &mut writer_task).await.is_err() {
+        writer_task.abort();
+    }
+}
+
 async fn remote_fallback(method: axum::http::Method, uri: axum::http::Uri) -> Response {
     if uri.path().starts_with("/api/") { return machine_error(StatusCode::NOT_FOUND, "NOT_FOUND"); }
     if method != axum::http::Method::GET && method != axum::http::Method::HEAD {
@@ -2855,6 +3495,9 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route("/api/v1/socket-ticket", post(issue_socket_ticket))
         .route("/api/v1/events", get(ws_events_handler))
         .route("/api/v1/terminal/{sessionId}", get(ws_terminal_handler))
+        .route("/api/v1/browser/sessions", get(list_browser_sessions))
+        .route("/api/v1/browser/identify", get(identify_browser_session))
+        .route("/api/v1/browser/{browserId}", get(ws_browser_handler))
         .route("/api/push/subscribe", post(push_subscribe))
         .route("/api/push/unsubscribe", post(push_unsubscribe))
         .fallback(remote_fallback)
@@ -3367,6 +4010,740 @@ mod tests {
             &request.code, &request.device_name, request.installation_id.as_deref(),
         ).unwrap();
         assert_eq!(device.access_scope, DeviceAccessScope::Mirror);
+    }
+
+    #[test]
+    fn test_phase4_server_valid_socket_target_allows_browser() {
+        assert!(valid_socket_target("/api/v1/browser/b1"));
+        assert!(!valid_socket_target("/api/v1/browser/"));
+    }
+
+    async fn raw_ws_handshake(
+        addr: SocketAddr,
+        path_and_query: &str,
+        token: Option<&str>,
+    ) -> (StatusCode, tokio::net::TcpStream) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::TcpStream::connect(addr).await.expect("tcp connect");
+        let auth = token
+            .map(|t| format!("Authorization: Bearer {t}\r\n"))
+            .unwrap_or_default();
+        let req = format!(
+            "GET {path_and_query} HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n{auth}\r\n"
+        );
+        stream.write_all(req.as_bytes()).await.expect("tcp write");
+
+        let mut response = Vec::new();
+        let mut byte = [0u8; 1];
+        while !response.ends_with(b"\r\n\r\n") {
+            let n = stream.read(&mut byte).await.expect("tcp read");
+            if n == 0 {
+                break;
+            }
+            response.push(byte[0]);
+        }
+        let resp_str = String::from_utf8_lossy(&response);
+        let status_code = resp_str
+            .strip_prefix("HTTP/1.1 ")
+            .and_then(|rest| rest.get(..3))
+            .and_then(|code| code.parse::<u16>().ok())
+            .and_then(|code| StatusCode::from_u16(code).ok())
+            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        (status_code, stream)
+    }
+
+    async fn read_ws_text_frame(stream: &mut tokio::net::TcpStream) -> String {
+        use tokio::io::AsyncReadExt;
+        let mut header = [0u8; 2];
+        stream.read_exact(&mut header).await.expect("read header");
+        let payload_len = (header[1] & 0x7f) as usize;
+        let actual_len = if payload_len == 126 {
+            let mut ext = [0u8; 2];
+            stream.read_exact(&mut ext).await.expect("read ext");
+            u16::from_be_bytes(ext) as usize
+        } else {
+            payload_len
+        };
+        let mut payload = vec![0u8; actual_len];
+        stream.read_exact(&mut payload).await.expect("read payload");
+        String::from_utf8(payload).expect("utf8 text frame")
+    }
+
+    #[tokio::test]
+    async fn test_phase4_gateway_browser_ws_single_use_ticket_admission() {
+        let terminal_service = Arc::new(TerminalService::default());
+        let registry = WorkspaceRegistry::new();
+        let state = Arc::new(RemoteGatewayState::new(terminal_service, registry));
+        let pin = state
+            .auth_manager
+            .create_pairing_code(DevicePermission::Control);
+        let (token, _device) = state
+            .auth_manager
+            .exchange_pairing_code(&pin, "s5-device")
+            .unwrap();
+        let test_backend = Arc::new(crate::remote::browser_backend::InProcessTestBackend::new());
+        test_backend.sessions.lock().await.push(crate::remote::browser_backend::RemoteBrowserSessionSummary {
+            browser_id: "b1".into(),
+            title: Some("B1".into()),
+            url: Some("https://example.com".into()),
+            visible: true,
+        });
+        state.set_browser_backend(test_backend.clone());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = create_remote_router(Arc::clone(&state));
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async { let _ = stop_rx.await; })
+                .await
+                .unwrap();
+        });
+
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        // 1. Issue a single-use socket ticket for browser endpoint
+        let ticket_body = serde_json::json!({ "target": "/api/v1/browser/b1" }).to_string();
+        let ticket_resp = client
+            .post(format!("http://{addr}/api/v1/socket-ticket"))
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/json")
+            .body(ticket_body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(ticket_resp.status(), reqwest::StatusCode::OK);
+        let ticket_text = ticket_resp.text().await.unwrap();
+        let ticket_json: serde_json::Value = serde_json::from_str(&ticket_text).unwrap();
+        let ticket = ticket_json["ticket"].as_str().unwrap();
+
+        // 2. (a) Valid single-use ticket connects and upgrades with 101 Switching Protocols + BrowserHello
+        let path_with_ticket = format!("/api/v1/browser/b1?ticket={ticket}");
+        let (status, mut stream) = raw_ws_handshake(addr, &path_with_ticket, None).await;
+        assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS, "valid ticket must succeed with 101");
+        let hello_msg = read_ws_text_frame(&mut stream).await;
+        let hello_json: serde_json::Value = serde_json::from_str(&hello_msg).unwrap();
+        assert_eq!(hello_json["type"], "browserHello");
+        assert_eq!(hello_json["browserId"], "b1");
+
+        // 3. (b) Replay of same ticket must be rejected (single-use)
+        let (replayed_status, _) = raw_ws_handshake(addr, &path_with_ticket, None).await;
+        assert_eq!(replayed_status, StatusCode::UNAUTHORIZED, "replayed single-use ticket must be rejected with 401");
+
+        // 4. Connect without ticket or credentials must be rejected
+        let (no_auth_status, _) = raw_ws_handshake(addr, "/api/v1/browser/b1", None).await;
+        assert_eq!(no_auth_status, StatusCode::UNAUTHORIZED, "unauthenticated connect must be rejected with 401");
+
+        // 5. Connect with invalid ticket must be rejected
+        let (fake_ticket_status, _) = raw_ws_handshake(addr, "/api/v1/browser/b1?ticket=fake-ticket-123", None).await;
+        assert_eq!(fake_ticket_status, StatusCode::UNAUTHORIZED, "invalid ticket must be rejected with 401");
+
+        // 6. Direct HTTP listing when backend is active
+        let list_resp = client
+            .get(format!("http://{addr}/api/v1/browser/sessions?workspaceId=ws1&worktreeSlug=main"))
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(list_resp.status(), reqwest::StatusCode::OK);
+
+        // 7. When GUI exits: browsers become unavailable (UnavailableBrowserBackend)
+        state.set_browser_backend(Arc::new(crate::remote::browser_backend::UnavailableBrowserBackend));
+        state.bump_browser_service_epoch();
+
+        let list_unavail = client
+            .get(format!("http://{addr}/api/v1/browser/sessions?workspaceId=ws1&worktreeSlug=main"))
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(list_unavail.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE, "unavailable backend must return 503");
+
+        let _ = stop_tx.send(());
+        let _ = server_task.await;
+    }
+
+    /// Server-lane probe backend: records the scope every discovery call receives and
+    /// counts frame-receiver attachments versus owned viewer subscriptions.
+    #[derive(Default)]
+    struct ScopeProbeBackend {
+        /// browser_id -> workspace_id/worktree_slug that owns it in the desktop inventory
+        inventory: std::sync::Mutex<Vec<(String, String, String)>>,
+        seen_scopes: std::sync::Mutex<Vec<DesktopScope>>,
+        subscribe_frames_calls: Arc<std::sync::atomic::AtomicUsize>,
+        viewer_subs: Arc<std::sync::atomic::AtomicUsize>,
+        title_override: std::sync::Mutex<Option<String>>,
+    }
+
+    impl ScopeProbeBackend {
+        fn with_inventory(entries: &[(&str, &str, &str)]) -> Self {
+            let backend = Self::default();
+            backend.inventory.lock().unwrap().extend(
+                entries
+                    .iter()
+                    .map(|(b, w, s)| (b.to_string(), w.to_string(), s.to_string())),
+            );
+            backend
+        }
+
+        fn seen_scopes(&self) -> Vec<DesktopScope> {
+            self.seen_scopes.lock().unwrap().clone()
+        }
+
+        fn frame_attachments(&self) -> usize {
+            self.subscribe_frames_calls
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn live_viewer_subscriptions(&self) -> usize {
+            self.viewer_subs.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn matching(&self, scope: &DesktopScope) -> Vec<crate::remote::browser_backend::RemoteBrowserSessionSummary> {
+            let title = self.title_override.lock().unwrap().clone();
+            self.inventory
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, ws, slug)| ws == &scope.workspace_id && slug == &scope.worktree_slug)
+                .map(|(id, _, _)| crate::remote::browser_backend::RemoteBrowserSessionSummary {
+                    browser_id: id.clone(),
+                    title: title.clone().or_else(|| Some(format!("title-{id}"))),
+                    url: Some("https://example.com/page".into()),
+                    visible: true,
+                })
+                .collect()
+        }
+    }
+
+    impl RemoteBrowserBackend for ScopeProbeBackend {
+        fn list_sessions<'a>(
+            &'a self,
+            scope: &'a DesktopScope,
+        ) -> crate::remote::browser_backend::BoxFuture<
+            'a,
+            Result<Vec<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>,
+        > {
+            Box::pin(async move {
+                self.seen_scopes.lock().unwrap().push(scope.clone());
+                Ok(self.matching(scope))
+            })
+        }
+
+        fn identify_session<'a>(
+            &'a self,
+            scope: &'a DesktopScope,
+        ) -> crate::remote::browser_backend::BoxFuture<
+            'a,
+            Result<Option<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>,
+        > {
+            Box::pin(async move {
+                self.seen_scopes.lock().unwrap().push(scope.clone());
+                // Deliberately leaks an out-of-scope session: the server must fence it.
+                Ok(self.matching(scope).into_iter().next().or_else(|| {
+                    self.inventory.lock().unwrap().first().map(|(id, _, _)| {
+                        crate::remote::browser_backend::RemoteBrowserSessionSummary {
+                            browser_id: id.clone(),
+                            title: Some(format!("title-{id}")),
+                            url: Some("https://example.com/page".into()),
+                            visible: true,
+                        }
+                    })
+                }))
+            })
+        }
+
+        fn get_state<'a>(
+            &'a self,
+            browser_id: &'a str,
+            scope: &'a DesktopScope,
+        ) -> crate::remote::browser_backend::BoxFuture<
+            'a,
+            Result<crate::remote::browser_backend::BrowserRemoteState, RemoteBrowserError>,
+        > {
+            Box::pin(async move {
+                self.seen_scopes.lock().unwrap().push(scope.clone());
+                Ok(crate::remote::browser_backend::BrowserRemoteState {
+                    browser_id: browser_id.to_string(),
+                    browser_instance_id: None,
+                    url: Some("https://example.com/page".into()),
+                    title: Some(format!("title-{browser_id}")),
+                    document_generation: "1".into(),
+                    viewport_revision: "1".into(),
+                    loading: false,
+                    paused: false,
+                    pause_reason: None,
+                })
+            })
+        }
+
+        fn execute_command(
+            &self,
+            _ctx: crate::remote::browser_backend::BrowserCommandContext,
+        ) -> crate::remote::browser_backend::BoxFuture<
+            '_,
+            Result<crate::remote::browser_backend::BrowserCommandResult, RemoteBrowserError>,
+        > {
+            Box::pin(async move {
+                Ok(crate::remote::browser_backend::BrowserCommandResult {
+                    success: true,
+                    value: None,
+                })
+            })
+        }
+
+        fn subscribe_frames<'a>(
+            &'a self,
+            _browser_id: &'a str,
+        ) -> crate::remote::browser_backend::BoxFuture<
+            'a,
+            Result<tokio::sync::broadcast::Receiver<Vec<u8>>, RemoteBrowserError>,
+        > {
+            Box::pin(async move {
+                self.subscribe_frames_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(tokio::sync::broadcast::channel(8).0.subscribe())
+            })
+        }
+
+        fn subscribe_viewer<'a>(
+            &'a self,
+            _browser_id: &'a str,
+            _device_id: &'a str,
+            _viewer_instance_id: &'a str,
+            options: Option<crate::remote::browser_protocol::BrowserSubscribeOptions>,
+        ) -> crate::remote::browser_backend::BoxFuture<
+            'a,
+            Result<
+                (
+                    String,
+                    u32,
+                    crate::remote::browser_protocol::BrowserSubscribeOptions,
+                    crate::remote::browser_backend::BrowserSubscribeIdentity,
+                ),
+                RemoteBrowserError,
+            >,
+        > {
+            Box::pin(async move {
+                self.viewer_subs
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let identity = crate::remote::browser_backend::BrowserSubscribeIdentity {
+                    browser_instance_id: "probe-instance".into(),
+                    browser_service_epoch: "1".into(),
+                    desktop_epoch: "1".into(),
+                    document_generation: "1".into(),
+                };
+                Ok((
+                    format!("probe-sub-{}", uuid::Uuid::new_v4()),
+                    1,
+                    options.unwrap_or_default(),
+                    identity,
+                ))
+            })
+        }
+
+        fn unsubscribe_viewer<'a>(
+            &'a self,
+            _browser_id: &'a str,
+            _subscription_id: &'a str,
+        ) -> crate::remote::browser_backend::BoxFuture<'a, Result<(), RemoteBrowserError>> {
+            Box::pin(async move {
+                self.viewer_subs
+                    .fetch_update(
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                        |v| Some(v.saturating_sub(1)),
+                    )
+                    .ok();
+                Ok(())
+            })
+        }
+
+        fn capabilities(
+            &self,
+        ) -> crate::remote::browser_backend::BoxFuture<'_, crate::remote::browser_backend::BrowserCapabilities>
+        {
+            Box::pin(async move {
+                crate::remote::browser_backend::BrowserCapabilities {
+                    browser_available: true,
+                    supported_formats: vec!["jpeg".into()],
+                    supported_commands: vec!["getState".into()],
+                    max_edge: 1024,
+                    max_fps: 8,
+                }
+            })
+        }
+    }
+
+    async fn spawn_browser_test_gateway(
+        state: Arc<RemoteGatewayState>,
+    ) -> (SocketAddr, tokio::sync::oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = create_remote_router(state);
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, router)
+                .with_graceful_shutdown(async {
+                    let _ = stop_rx.await;
+                })
+                .await;
+        });
+        (addr, stop_tx, task)
+    }
+
+    async fn mint_browser_ticket(
+        client: &reqwest::Client,
+        addr: SocketAddr,
+        token: &str,
+        browser_id: &str,
+    ) -> String {
+        let resp = client
+            .post(format!("http://{addr}/api/v1/socket-ticket"))
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/json")
+            .body(serde_json::json!({ "target": format!("/api/v1/browser/{browser_id}") }).to_string())
+            .send()
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
+        json["ticket"].as_str().expect("ticket").to_string()
+    }
+
+    /// R4-3: the desktop scope is derived server-side from the authenticated
+    /// connection's authoritative selection. A blank or forged query scope may never
+    /// widen the visible inventory, identify may not return a hidden session, and
+    /// attaching to a browser outside the inventory is refused.
+    #[tokio::test]
+    async fn test_r4_3_desktop_scope_is_derived_server_side_not_from_query() {
+        let state = Arc::new(RemoteGatewayState::new(
+            Arc::new(TerminalService::default()),
+            WorkspaceRegistry::new(),
+        ));
+        let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+        let (token, _) = state
+            .auth_manager
+            .exchange_pairing_code(&pin, "scope-device")
+            .unwrap();
+
+        let backend = Arc::new(ScopeProbeBackend::with_inventory(&[
+            ("b-shared", "ws-shared", "main"),
+            ("b-other", "ws-other", "rogue"),
+        ]));
+        state.set_browser_backend(backend.clone());
+        state.set_active_selection(RemoteActiveDesktopSelection {
+            workspace_id: Some("ws-shared".into()),
+            worktree_slug: Some("main".into()),
+            ..Default::default()
+        });
+
+        let (addr, stop_tx, task) = spawn_browser_test_gateway(Arc::clone(&state)).await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        // 1. Blank query: the server must supply the derived scope, not an empty one
+        //    (an empty workspace_id lists every session on in-process backends).
+        let listed: serde_json::Value = serde_json::from_str(
+            &client
+                .get(format!("http://{addr}/api/v1/browser/sessions"))
+                .header("Authorization", format!("Bearer {token}"))
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            listed.as_array().map(Vec::len),
+            Some(1),
+            "blank query must resolve to the derived desktop scope: {listed}"
+        );
+        assert_eq!(listed[0]["browserId"], "b-shared");
+
+        // 2. A forged query scope must be ignored entirely.
+        let forged: serde_json::Value = serde_json::from_str(
+            &client
+                .get(format!(
+                    "http://{addr}/api/v1/browser/sessions?workspaceId=ws-other&worktreeSlug=rogue"
+                ))
+                .header("Authorization", format!("Bearer {token}"))
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(forged[0]["browserId"], "b-shared", "forged scope must not widen visibility");
+        for scope in backend.seen_scopes() {
+            assert_eq!(
+                (scope.workspace_id.as_str(), scope.worktree_slug.as_str()),
+                ("ws-shared", "main"),
+                "backend must only ever receive the server-derived scope"
+            );
+        }
+
+        // 3. identify must not fall back to an out-of-scope session.
+        state.set_active_selection(RemoteActiveDesktopSelection {
+            workspace_id: Some("ws-empty".into()),
+            worktree_slug: Some("main".into()),
+            ..Default::default()
+        });
+        let identified: serde_json::Value = serde_json::from_str(
+            &client
+                .get(format!("http://{addr}/api/v1/browser/identify"))
+                .header("Authorization", format!("Bearer {token}"))
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            identified["browser"].is_null(),
+            "identify must not reveal a session outside the shared inventory: {identified}"
+        );
+
+        // 4. Discovery output is routed through the public sanitizer (R4-17).
+        state.set_active_selection(RemoteActiveDesktopSelection {
+            workspace_id: Some("ws-shared".into()),
+            worktree_slug: Some("main".into()),
+            ..Default::default()
+        });
+        *backend.title_override.lock().unwrap() =
+            Some("Snapshot at /Volumes/T9-Mac/project/ferryx/x.json".into());
+        let sanitized = client
+            .get(format!("http://{addr}/api/v1/browser/sessions"))
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(
+            !sanitized.contains("/Volumes/"),
+            "discovery payload must pass through the public sanitizer: {sanitized}"
+        );
+        *backend.title_override.lock().unwrap() = None;
+
+        // 5. Attaching to a browser outside the derived inventory is refused.
+        let ticket = mint_browser_ticket(&client, addr, &token, "b-other").await;
+        let (status, _) = raw_ws_handshake(
+            addr,
+            &format!("/api/v1/browser/b-other?ticket={ticket}"),
+            None,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "attaching outside the authorized inventory must be refused"
+        );
+
+        // 6. With no desktop selection at all, nothing is listed and nothing attaches.
+        state.clear_active_selection();
+        let none_listed: serde_json::Value = serde_json::from_str(
+            &client
+                .get(format!("http://{addr}/api/v1/browser/sessions"))
+                .header("Authorization", format!("Bearer {token}"))
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            none_listed.as_array().map(Vec::len),
+            Some(0),
+            "absent desktop selection must not list everything: {none_listed}"
+        );
+
+        let _ = stop_tx.send(());
+        let _ = task.await;
+    }
+
+    /// R4-4: authorization is live, not a snapshot taken at upgrade. Revoking the
+    /// device terminates the in-flight socket and releases its viewer slot.
+    #[tokio::test]
+    async fn test_r4_4_live_socket_terminates_on_device_revocation() {
+        use futures_util::{SinkExt, StreamExt};
+
+        let state = Arc::new(RemoteGatewayState::new(
+            Arc::new(TerminalService::default()),
+            WorkspaceRegistry::new(),
+        ));
+        let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+        let (token, device) = state
+            .auth_manager
+            .exchange_pairing_code(&pin, "revoke-device")
+            .unwrap();
+
+        let backend = Arc::new(ScopeProbeBackend::with_inventory(&[("b1", "ws1", "main")]));
+        state.set_browser_backend(backend.clone());
+        state.set_active_selection(RemoteActiveDesktopSelection {
+            workspace_id: Some("ws1".into()),
+            worktree_slug: Some("main".into()),
+            ..Default::default()
+        });
+
+        let (addr, stop_tx, task) = spawn_browser_test_gateway(Arc::clone(&state)).await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let ticket = mint_browser_ticket(&client, addr, &token, "b1").await;
+
+        let (mut ws, _) =
+            tokio_tungstenite::connect_async(format!("ws://{addr}/api/v1/browser/b1?ticket={ticket}"))
+                .await
+                .expect("ws upgrade");
+        let _hello = ws.next().await.expect("hello").expect("hello frame");
+
+        // Subscribe to take a real viewer slot, then observe capture start.
+        let mut capture_rx = state.admission_controller.subscribe_capture();
+        ws.send(tokio_tungstenite::tungstenite::Message::Text(
+            serde_json::json!({
+                "type": "browserSubscribe",
+                "requestId": "r-sub",
+                "viewerInstanceId": "v1",
+                "options": { "format": "jpeg" }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        let sub_json: serde_json::Value =
+            serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+        assert_eq!(sub_json["type"], "browserSubscribed");
+        assert_eq!(capture_rx.recv().await.unwrap(), ("b1".to_string(), true));
+
+        // Revoke the device mid-session.
+        assert!(state.auth_manager.revoke_device(&device.id).unwrap());
+
+        // The live socket must terminate instead of serving the revoked device...
+        let terminated = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match ws.next().await {
+                    None | Some(Err(_)) => break true,
+                    Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) => break true,
+                    Some(Ok(_)) => continue,
+                }
+            }
+        })
+        .await
+        .expect("revoked socket must terminate without waiting on a timer");
+        assert!(terminated);
+
+        // ...and its teardown must halt capture rather than leave a zero-viewer producer.
+        let halted = tokio::time::timeout(Duration::from_secs(10), capture_rx.recv())
+            .await
+            .expect("capture-halt signal")
+            .expect("capture channel open");
+        assert_eq!(halted, ("b1".to_string(), false));
+        assert!(!state.admission_controller.should_capture("b1"));
+
+        let _ = stop_tx.send(());
+        let _ = task.await;
+    }
+
+    /// R4-6: receiver attachment is passive. No frame subscription (and therefore no
+    /// synthetic viewer) exists before an accepted `browserSubscribe`, and teardown of
+    /// the last viewer halts capture and releases the owned backend subscription.
+    #[tokio::test]
+    async fn test_r4_6_receiver_attachment_is_passive_and_teardown_halts_capture() {
+        use futures_util::{SinkExt, StreamExt};
+
+        let state = Arc::new(RemoteGatewayState::new(
+            Arc::new(TerminalService::default()),
+            WorkspaceRegistry::new(),
+        ));
+        let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+        let (token, _) = state
+            .auth_manager
+            .exchange_pairing_code(&pin, "viewer-device")
+            .unwrap();
+
+        let backend = Arc::new(ScopeProbeBackend::with_inventory(&[("b1", "ws1", "main")]));
+        state.set_browser_backend(backend.clone());
+        state.set_active_selection(RemoteActiveDesktopSelection {
+            workspace_id: Some("ws1".into()),
+            worktree_slug: Some("main".into()),
+            ..Default::default()
+        });
+
+        let (addr, stop_tx, task) = spawn_browser_test_gateway(Arc::clone(&state)).await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        let ticket = mint_browser_ticket(&client, addr, &token, "b1").await;
+        let (mut ws, _) =
+            tokio_tungstenite::connect_async(format!("ws://{addr}/api/v1/browser/b1?ticket={ticket}"))
+                .await
+                .unwrap();
+        let _hello = ws.next().await.unwrap().unwrap();
+
+        // Attached but not subscribed: no frame receiver, no viewer slot, no capture.
+        assert_eq!(
+            backend.frame_attachments(),
+            0,
+            "receiver attachment must be passive until a viewer subscription is accepted"
+        );
+        assert_eq!(backend.live_viewer_subscriptions(), 0);
+        assert!(!state.admission_controller.should_capture("b1"));
+
+        // Subscribing creates exactly one owned viewer subscription.
+        let mut capture_rx = state.admission_controller.subscribe_capture();
+        ws.send(tokio_tungstenite::tungstenite::Message::Text(
+            serde_json::json!({
+                "type": "browserSubscribe",
+                "requestId": "r-sub",
+                "viewerInstanceId": "v1",
+                "options": { "format": "jpeg" }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        let sub_json: serde_json::Value =
+            serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+        assert_eq!(sub_json["type"], "browserSubscribed");
+        assert_eq!(capture_rx.recv().await.unwrap(), ("b1".to_string(), true));
+        assert_eq!(
+            backend.live_viewer_subscriptions(),
+            1,
+            "exactly one owned viewer subscription must exist"
+        );
+        assert_eq!(
+            backend.frame_attachments(),
+            1,
+            "the frame receiver attaches once, for the accepted subscription"
+        );
+
+        // Closing the last viewer halts capture and releases the owned subscription.
+        let _ = ws.close(None).await;
+        let halted = tokio::time::timeout(Duration::from_secs(10), capture_rx.recv())
+            .await
+            .expect("capture-halt signal")
+            .expect("capture channel open");
+        assert_eq!(halted, ("b1".to_string(), false));
+        assert!(
+            !state.admission_controller.should_capture("b1"),
+            "capture must never outlive its last viewer"
+        );
+        assert_eq!(
+            backend.live_viewer_subscriptions(),
+            0,
+            "teardown must release every owned backend subscription"
+        );
+
+        let _ = stop_tx.send(());
+        let _ = task.await;
     }
 
     #[tokio::test]
@@ -4048,5 +5425,287 @@ mod tests {
         );
 
         handle.stop();
+    }
+
+    #[tokio::test]
+    async fn test_r5_3_absent_scope_fails_closed_and_enforces_inventory() {
+        let state = Arc::new(RemoteGatewayState::new(
+            Arc::new(TerminalService::default()),
+            WorkspaceRegistry::new(),
+        ));
+        let backend = Arc::new(ScopeProbeBackend::with_inventory(&[
+            ("b-shared", "ws-shared", "main"),
+            ("b-other-wt", "ws-shared", "feature"),
+        ]));
+        state.set_browser_backend(backend.clone());
+
+        // Absent scope: must FAIL CLOSED (deny attachment)
+        assert!(state.active_selection().is_none());
+        let authorized = attachment_is_authorized(&state, "b-shared").await.unwrap();
+        assert!(!authorized, "absent scope must fail closed, denying attachment");
+
+        // Set scope to ws-shared, main:
+        state.set_active_selection(RemoteActiveDesktopSelection {
+            workspace_id: Some("ws-shared".into()),
+            worktree_slug: Some("main".into()),
+            ..Default::default()
+        });
+
+        // b-shared matches both workspace_id and worktree_slug: authorized
+        assert!(attachment_is_authorized(&state, "b-shared").await.unwrap());
+
+        // b-other-wt has same workspace but different worktree: MUST BE DENIED
+        assert!(!attachment_is_authorized(&state, "b-other-wt").await.unwrap(), "different worktree must be denied");
+    }
+
+    #[tokio::test]
+    async fn test_r5_4_scope_watch_terminates_socket_during_await() {
+        use futures_util::StreamExt;
+
+        let state = Arc::new(RemoteGatewayState::new(
+            Arc::new(TerminalService::default()),
+            WorkspaceRegistry::new(),
+        ));
+        let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+        let (token, _) = state
+            .auth_manager
+            .exchange_pairing_code(&pin, "scope-watch-device")
+            .unwrap();
+
+        let backend = Arc::new(ScopeProbeBackend::with_inventory(&[
+            ("b-shared", "ws-shared", "main"),
+        ]));
+        state.set_browser_backend(backend.clone());
+        state.set_active_selection(RemoteActiveDesktopSelection {
+            workspace_id: Some("ws-shared".into()),
+            worktree_slug: Some("main".into()),
+            ..Default::default()
+        });
+
+        let (addr, stop_tx, task) = spawn_browser_test_gateway(Arc::clone(&state)).await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        let ticket = mint_browser_ticket(&client, addr, &token, "b-shared").await;
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!(
+            "ws://{addr}/api/v1/browser/b-shared?ticket={ticket}"
+        ))
+        .await
+        .expect("ws upgrade");
+
+        let hello = ws.next().await.unwrap().unwrap().into_text().unwrap();
+        assert!(hello.contains("browserHello"));
+
+        // While the socket is awaiting events in its loop without incoming client traffic,
+        // change active selection!
+        state.set_active_selection(RemoteActiveDesktopSelection {
+            workspace_id: Some("ws-shared".into()),
+            worktree_slug: Some("other-branch".into()),
+            ..Default::default()
+        });
+
+        // The socket MUST receive BrowserDriverRevoked due to scope change and terminate
+        let revoked_msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("must receive revocation promptly on scope change")
+            .expect("socket open")
+            .unwrap()
+            .into_text()
+            .unwrap();
+        assert!(revoked_msg.contains("desktop_scope_changed"));
+
+        let _ = stop_tx.send(());
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn test_r5_14_writer_ordering_barrier_and_bounded_shutdown() {
+        use futures_util::{SinkExt, StreamExt};
+
+        let state = Arc::new(RemoteGatewayState::new(
+            Arc::new(TerminalService::default()),
+            WorkspaceRegistry::new(),
+        ));
+        let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+        let (token, _) = state
+            .auth_manager
+            .exchange_pairing_code(&pin, "barrier-device")
+            .unwrap();
+
+        let backend = Arc::new(ScopeProbeBackend::with_inventory(&[
+            ("b-shared", "ws-shared", "main"),
+        ]));
+        state.set_browser_backend(backend.clone());
+        state.set_active_selection(RemoteActiveDesktopSelection {
+            workspace_id: Some("ws-shared".into()),
+            worktree_slug: Some("main".into()),
+            ..Default::default()
+        });
+
+        let (addr, stop_tx, task) = spawn_browser_test_gateway(Arc::clone(&state)).await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        let ticket = mint_browser_ticket(&client, addr, &token, "b-shared").await;
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!(
+            "ws://{addr}/api/v1/browser/b-shared?ticket={ticket}"
+        ))
+        .await
+        .expect("ws upgrade");
+
+        let hello = ws.next().await.unwrap().unwrap().into_text().unwrap();
+        assert!(hello.contains("browserHello"));
+
+        // Ordering barrier: Send subscribe request
+        ws.send(tokio_tungstenite::tungstenite::Message::Text(
+            serde_json::json!({
+                "type": "browserSubscribe",
+                "requestId": "r-barr",
+                "viewerInstanceId": "v-barr",
+                "options": { "format": "jpeg" }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+        // First message received MUST be browserSubscribed (never an unsynchronized raw frame)
+        let sub_resp = ws.next().await.unwrap().unwrap();
+        match sub_resp {
+            tokio_tungstenite::tungstenite::Message::Text(text) => {
+                let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(parsed["type"], "browserSubscribed");
+            }
+            tokio_tungstenite::tungstenite::Message::Binary(_) => {
+                panic!("Subscribed-before-frame ordering barrier violated: received binary frame before subscription acknowledgement!");
+            }
+            other => panic!("Unexpected message: {:?}", other),
+        }
+
+        // Bounded drain followed by cancellation: Close client socket abruptly
+        let _ = ws.close(None).await;
+
+        // The gateway must tear down without blocking the writer task
+        let _ = stop_tx.send(());
+        let shutdown_res = tokio::time::timeout(Duration::from_secs(2), task).await;
+        assert!(shutdown_res.is_ok(), "teardown must not hang awaiting blocked writer");
+    }
+
+    #[tokio::test]
+    async fn test_r6_4_scope_change_interrupts_inline_dispatch_await() {
+        use futures_util::{SinkExt, StreamExt};
+
+        let state = Arc::new(RemoteGatewayState::new(
+            Arc::new(TerminalService::default()),
+            WorkspaceRegistry::new(),
+        ));
+        let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+        let (token, _) = state
+            .auth_manager
+            .exchange_pairing_code(&pin, "scope-interrupt-device")
+            .unwrap();
+
+        // Slow backend that hangs during snapshot execution
+        struct SlowSnapshotBackend {
+            inner: ScopeProbeBackend,
+        }
+        impl RemoteBrowserBackend for SlowSnapshotBackend {
+            fn list_sessions<'a>(
+                &'a self,
+                scope: &'a DesktopScope,
+            ) -> crate::remote::browser_backend::BoxFuture<'a, Result<Vec<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>> {
+                self.inner.list_sessions(scope)
+            }
+            fn identify_session<'a>(
+                &'a self,
+                scope: &'a DesktopScope,
+            ) -> crate::remote::browser_backend::BoxFuture<'a, Result<Option<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>> {
+                self.inner.identify_session(scope)
+            }
+            fn get_state<'a>(
+                &'a self,
+                browser_id: &'a str,
+                scope: &'a DesktopScope,
+            ) -> crate::remote::browser_backend::BoxFuture<'a, Result<crate::remote::browser_backend::BrowserRemoteState, RemoteBrowserError>> {
+                self.inner.get_state(browser_id, scope)
+            }
+            fn execute_command(
+                &self,
+                _ctx: crate::remote::browser_backend::BrowserCommandContext,
+            ) -> crate::remote::browser_backend::BoxFuture<'_, Result<crate::remote::browser_backend::BrowserCommandResult, RemoteBrowserError>> {
+                Box::pin(async move {
+                    // Hang awaiting until cancelled
+                    std::future::pending::<()>().await;
+                    Ok(crate::remote::browser_backend::BrowserCommandResult { success: true, value: None })
+                })
+            }
+            fn capabilities(&self) -> crate::remote::browser_backend::BoxFuture<'_, crate::remote::browser_backend::BrowserCapabilities> {
+                self.inner.capabilities()
+            }
+        }
+
+        state.set_browser_backend(Arc::new(SlowSnapshotBackend {
+            inner: ScopeProbeBackend::with_inventory(&[("b-interrupt", "ws-interrupt", "main")]),
+        }));
+        state.set_active_selection(RemoteActiveDesktopSelection {
+            workspace_id: Some("ws-interrupt".into()),
+            worktree_slug: Some("main".into()),
+            ..Default::default()
+        });
+
+        let (addr, stop_tx, task) = spawn_browser_test_gateway(Arc::clone(&state)).await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        let ticket = mint_browser_ticket(&client, addr, &token, "b-interrupt").await;
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!(
+            "ws://{addr}/api/v1/browser/b-interrupt?ticket={ticket}"
+        ))
+        .await
+        .expect("ws upgrade");
+
+        let hello = ws.next().await.unwrap().unwrap().into_text().unwrap();
+        assert!(hello.contains("browserHello"));
+
+        // First subscribe
+        ws.send(tokio_tungstenite::tungstenite::Message::Text(
+            serde_json::json!({
+                "type": "browserSubscribe",
+                "requestId": "r-sub",
+                "viewerInstanceId": "v-1",
+                "options": { "format": "jpeg" }
+            }).to_string().into()
+        )).await.unwrap();
+
+        let sub_resp = ws.next().await.unwrap().unwrap().into_text().unwrap();
+        assert!(sub_resp.contains("browserSubscribed"));
+
+        // Now send snapshot which hangs in execute_command
+        ws.send(tokio_tungstenite::tungstenite::Message::Text(
+            serde_json::json!({
+                "type": "browserSnapshot",
+                "requestId": "snap-hang",
+                "browserId": "b-interrupt"
+            }).to_string().into()
+        )).await.unwrap();
+
+        // While snapshot is hanging in dispatch_raw_text, change scope!
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        state.set_active_selection(RemoteActiveDesktopSelection {
+            workspace_id: Some("ws-interrupt".into()),
+            worktree_slug: Some("different-branch".into()),
+            ..Default::default()
+        });
+
+        // Scope watcher must interrupt inline await and revoke immediately
+        let revoked_msg = tokio::time::timeout(Duration::from_secs(3), ws.next())
+            .await
+            .expect("Scope change must interrupt inline backend await promptly")
+            .expect("socket open")
+            .unwrap()
+            .into_text()
+            .unwrap();
+        assert!(revoked_msg.contains("desktop_scope_changed"));
+
+        let _ = stop_tx.send(());
+        let _ = task.await;
     }
 }

@@ -475,3 +475,21 @@ pub fn parse_console_drain_result(raw_json: &str) -> Result<Vec<crate::browser::
     Err("failed to parse console drain entries".to_string())
 }
 
+pub fn browser_guest_geometry_observation_script() -> &'static str {
+    r#"
+    (() => {
+      try {
+        return JSON.stringify({
+          innerWidth: window.innerWidth || 0,
+          innerHeight: window.innerHeight || 0,
+          scrollX: window.scrollX || 0,
+          scrollY: window.scrollY || 0,
+          devicePixelRatio: window.devicePixelRatio || 1.0,
+        });
+      } catch (e) {
+        return null;
+      }
+    })()
+    "#
+}
+

@@ -13,6 +13,7 @@ import { NotificationCenterPopover } from "./components/notification/Notificatio
 import { ShortcutHints } from "./components/ShortcutHints";
 import { TerminalSplitView } from "./components/TerminalSplitView";
 import { RemoteHostConnection } from "./remote/RemoteApp";
+import { RemoteBrowserSharingIndicator } from "./components/RemoteBrowserSharingIndicator";
 import { remoteHostStore, selectActiveHost } from "./state/remoteHostStore";
 import { WorktreeDeleteDialog } from "./components/WorktreeDeleteDialog";
 import { WorktreeDiskDialog } from "./components/WorktreeDiskDialog";
@@ -90,6 +91,7 @@ import {
   toIpcError,
   writeTerminal,
   bootTrace,
+  browserRemoteReclaim,
   listenDagRunUpdated,
   watchDagProject,
   type AgentDetection,
@@ -2438,6 +2440,40 @@ function WorkspaceApp({
   // Terminal links and markdown editors route through routeHttpLink, which needs a live
   // opener to reach the built-in browser; without this registration every link silently
   // falls back to the system browser.
+  const [remoteBrowserSharingActive, setRemoteBrowserSharingActive] = useState(false);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    if (isTauriRuntime()) {
+      import("@tauri-apps/api/event").then(({ listen }) => {
+        listen<{ isSharing?: boolean; active?: boolean }>("browser-remote-sharing", (ev) => {
+          setRemoteBrowserSharingActive(Boolean(ev.payload?.isSharing ?? ev.payload?.active ?? true));
+        }).then((u) => {
+          unlisten = u;
+        }).catch(() => {});
+      }).catch(() => {});
+    }
+
+    const handleWindowSharing = (e: Event) => {
+      const detail = (e as CustomEvent<{ isSharing?: boolean; active?: boolean }>).detail;
+      if (typeof detail === "boolean") {
+        setRemoteBrowserSharingActive(detail);
+      } else if (detail && typeof detail === "object") {
+        setRemoteBrowserSharingActive(Boolean(detail.isSharing ?? detail.active ?? true));
+      }
+    };
+    window.addEventListener("remote-browser-sharing", handleWindowSharing);
+    return () => {
+      unlisten?.();
+      window.removeEventListener("remote-browser-sharing", handleWindowSharing);
+    };
+  }, []);
+
+  const handleReclaimRemoteBrowser = useCallback(async () => {
+    await browserRemoteReclaim();
+    setRemoteBrowserSharingActive(false);
+  }, []);
+
   useEffect(() => {
     return registerBuiltInBrowserLinkOpener((url) => {
       if (activeRemoteHostRef.current) return;
@@ -2812,6 +2848,10 @@ function WorkspaceApp({
       )}
 
       <main className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background">
+        <RemoteBrowserSharingIndicator
+          isSharing={remoteBrowserSharingActive}
+          onReclaim={handleReclaimRemoteBrowser}
+        />
         {!activeRemoteHost && pairedTerminalsUnavailable ? <div role="alert" className="px-4 py-3 text-sm text-muted-foreground">
           Paired daemon terminal support is unavailable. Enable paired projects in Settings with a compatible native proxy. Saved tabs and panes are preserved.
         </div> : null}

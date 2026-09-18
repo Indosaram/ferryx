@@ -1,7 +1,8 @@
-use crate::browser::BrowserError;
+use crate::browser::snapshot_source::*;
+
 use crate::ipc::error::{IpcError, IpcErrorCode};
 use std::path::PathBuf;
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 pub fn resolve_screenshot_path(path_str: &str) -> Result<PathBuf, IpcError> {
     let trimmed = path_str.trim();
@@ -64,124 +65,8 @@ pub async fn take_browser_screenshot<R: tauri::Runtime>(
     out_path: &str,
 ) -> Result<String, IpcError> {
     let target_path = resolve_screenshot_path(out_path)?;
-    let webview = app
-        .get_webview(webview_label)
-        .ok_or_else(|| BrowserError::WebviewNotFound(webview_label.to_string()))?;
-
-    let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Vec<u8>, IpcError>>(1);
-    let tx_mutex = std::sync::Mutex::new(Some(tx));
-
-    webview
-        .with_webview(move |platform| unsafe {
-            use objc2::rc::Retained;
-            use objc2::{class, msg_send, runtime::AnyObject};
-
-            let view: &AnyObject = &*platform.inner().cast();
-            let tx_mutex = tx_mutex;
-            let callback =
-                block2::RcBlock::new(move |image: *mut AnyObject, error: *mut AnyObject| {
-                    let result = if !error.is_null() || image.is_null() {
-                        Err(IpcError::new(
-                            IpcErrorCode::BrowserScreenshotFailed,
-                            "WKWebView snapshot failed",
-                        ))
-                    } else {
-                        let tiff: Option<Retained<AnyObject>> = msg_send![image, TIFFRepresentation];
-                        tiff.ok_or_else(|| {
-                            IpcError::new(
-                                IpcErrorCode::BrowserScreenshotFailed,
-                                "snapshot has no TIFF representation",
-                            )
-                        })
-                        .and_then(|tiff| {
-                            let bitmap: Option<Retained<AnyObject>> =
-                                msg_send![class!(NSBitmapImageRep), imageRepWithData: &*tiff];
-                            let bitmap = bitmap.ok_or_else(|| {
-                                IpcError::new(
-                                    IpcErrorCode::BrowserScreenshotFailed,
-                                    "cannot decode snapshot bitmap image",
-                                )
-                            })?;
-                            let properties: Retained<AnyObject> =
-                                msg_send![class!(NSDictionary), dictionary];
-                            // 4 is NSBitmapImageFileTypePNG
-                            let data: Option<Retained<AnyObject>> = msg_send![
-                                &*bitmap,
-                                representationUsingType: 4usize,
-                                properties: &*properties
-                            ];
-                            let data = data.ok_or_else(|| {
-                                IpcError::new(
-                                    IpcErrorCode::BrowserScreenshotFailed,
-                                    "cannot encode snapshot to PNG",
-                                )
-                            })?;
-                            let length: usize = msg_send![&*data, length];
-                            if length == 0 {
-                                return Err(IpcError::new(
-                                    IpcErrorCode::BrowserScreenshotFailed,
-                                    "empty PNG snapshot generated",
-                                ));
-                            }
-                            let pointer: *const u8 = msg_send![&*data, bytes];
-                            Ok(std::slice::from_raw_parts(pointer, length).to_vec())
-                        })
-                    };
-                    if let Ok(mut guard) = tx_mutex.lock() {
-                        if let Some(sender) = guard.take() {
-                            let _ = sender.send(result);
-                        }
-                    }
-                });
-
-            let _: () = msg_send![
-                view,
-                takeSnapshotWithConfiguration: std::ptr::null::<AnyObject>(),
-                completionHandler: &*callback
-            ];
-        })
-        .map_err(|e| {
-            IpcError::new(
-                IpcErrorCode::BrowserScreenshotFailed,
-                format!("failed to attach webview snapshot handler: {e}"),
-            )
-        })?;
-
-    let (tx_async, rx_async) = tokio::sync::oneshot::channel();
-    std::thread::spawn(move || {
-        let res = rx
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .map_err(|e| {
-                IpcError::new(
-                    IpcErrorCode::BrowserScreenshotFailed,
-                    format!("screenshot timed out: {e}"),
-                )
-            })
-            .and_then(|r| r);
-        let _ = tx_async.send(res);
-    });
-
-    let png_bytes = rx_async.await.map_err(|_| {
-        IpcError::new(
-            IpcErrorCode::BrowserScreenshotFailed,
-            "snapshot task channel closed",
-        )
-    })??;
-
-    if let Some(parent) = target_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-    }
-
-    std::fs::write(&target_path, png_bytes).map_err(|e| {
-        IpcError::new(
-            IpcErrorCode::BrowserScreenshotFailed,
-            format!("failed to write screenshot to {}: {e}", target_path.display()),
-        )
-    })?;
-
-    Ok(target_path.to_string_lossy().to_string())
+    let source = TauriBrowserSnapshotSource::new(app.clone());
+    take_browser_screenshot_with_source(&source, webview_label, target_path).await
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -195,6 +80,35 @@ pub async fn take_browser_screenshot<R: tauri::Runtime>(
         IpcErrorCode::Unsupported,
         "screenshots are unavailable on this platform",
     ))
+}
+
+pub async fn take_browser_screenshot_with_source<S: BrowserSnapshotSource + ?Sized>(
+    source: &S,
+    webview_label: &str,
+    target_path: PathBuf,
+) -> Result<String, IpcError> {
+    let snapshot = source
+        .capture_snapshot(webview_label, SnapshotOptions::png())
+        .await?;
+
+    let path_to_write = target_path.clone();
+    crate::ipc::run_blocking(move || {
+        if let Some(parent) = path_to_write.parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
+        std::fs::write(&path_to_write, snapshot.bytes).map_err(|e| {
+            IpcError::new(
+                IpcErrorCode::BrowserScreenshotFailed,
+                format!("failed to write screenshot to {}: {e}", path_to_write.display()),
+            )
+        })?;
+        Ok(())
+    })
+    .await?;
+
+    Ok(target_path.to_string_lossy().to_string())
 }
 
 #[cfg(test)]
@@ -212,5 +126,36 @@ mod tests {
 
         let abs = resolve_screenshot_path("/tmp/direct.png").expect("absolute path");
         assert_eq!(abs, PathBuf::from("/tmp/direct.png"));
+    }
+
+    #[tokio::test]
+    async fn test_take_browser_screenshot_with_source_png_file_contract() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let file_path = temp_dir.path().join("shot.png");
+        let source = FakeBrowserSnapshotSource::new(FakeSnapshotBehavior::Auto {
+            width: 120,
+            height: 90,
+        });
+
+        let saved_path = take_browser_screenshot_with_source(&source, "main-view", file_path.clone())
+            .await
+            .expect("should save PNG file");
+
+        assert_eq!(saved_path, file_path.to_string_lossy().to_string());
+        let read_bytes = std::fs::read(&file_path).expect("file should exist");
+        assert!(read_bytes.starts_with(&[0x89, b'P', b'N', b'G']));
+    }
+
+    #[tokio::test]
+    async fn test_take_browser_screenshot_with_source_unsupported_propagates() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let file_path = temp_dir.path().join("shot.png");
+        let source = UnsupportedSnapshotSource;
+
+        let err = take_browser_screenshot_with_source(&source, "main-view", file_path)
+            .await
+            .expect_err("should propagate unsupported error");
+
+        assert_eq!(err.code, IpcErrorCode::Unsupported);
     }
 }
