@@ -1166,6 +1166,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         ipc::ssh::cmd_ssh_helper_update_state,
         ipc::ssh::cmd_ssh_paste_clipboard_image,
         ipc::paired_host::cmd_daemon_paste_clipboard_image,
+        clipboard_image::cmd_local_paste_clipboard_image,
         ipc::ssh::cmd_ssh_list_remote_worktrees,
         ipc::ssh::cmd_ssh_create_remote_worktree,
         ipc::ssh::cmd_ssh_delete_remote_worktree,

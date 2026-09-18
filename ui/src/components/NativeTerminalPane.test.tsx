@@ -2040,11 +2040,14 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     },
   );
 
-  it("claims macOS Cmd+V on focused textarea and routes native image clipboard content through agent Ctrl+V shortcut without DOM paste", async () => {
+  it("claims macOS Cmd+V on focused textarea and saves clipboard image locally, pasting the local path", async () => {
     const session = createSession("term-session-native-image-paste");
     tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
       if (cmd === "cmd_native_terminal_clipboard_content") {
         return { kind: "image" };
+      }
+      if (cmd === "cmd_local_paste_clipboard_image") {
+        return { localPath: "/tmp/ferryx-paste/local-img.png", byteLength: 5678 };
       }
       return undefined;
     });
@@ -2072,16 +2075,12 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_clipboard_content");
-      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image");
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
         sessionId: "term-session-native-image-paste",
-        input: { text: "\u0016" },
+        text: "/tmp/ferryx-paste/local-img.png ",
       });
     });
-
-    const pasteCalls = tauriCoreMocks.invoke.mock.calls.filter(
-      ([cmd]) => cmd === "cmd_native_terminal_paste",
-    );
-    expect(pasteCalls).toHaveLength(0);
   });
 
   it.each([
@@ -2155,11 +2154,15 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     },
   );
 
-  it("keeps a local pane on the agent paste chord and never uploads its clipboard image", async () => {
+  it("saves a local pane clipboard image and never uploads it over SSH or daemon", async () => {
     const session = createSession("term-session-local-image-paste");
-    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) =>
-      cmd === "cmd_native_terminal_clipboard_content" ? { kind: "image" } : undefined,
-    );
+    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "cmd_native_terminal_clipboard_content") return { kind: "image" };
+      if (cmd === "cmd_local_paste_clipboard_image") {
+        return { localPath: "/tmp/ferryx-paste/local-pane.png", byteLength: 1234 };
+      }
+      return undefined;
+    });
 
     const { getByTestId } = render(
       <NativeTerminalPane sessionId="term-session-local-image-paste" session={session} />,
@@ -2181,13 +2184,18 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
 
     await waitFor(() => {
-      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image");
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
         sessionId: "term-session-local-image-paste",
-        input: { text: "\u0016" },
+        text: "/tmp/ferryx-paste/local-pane.png ",
       });
     });
     expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith(
       "cmd_ssh_paste_clipboard_image",
+      expect.anything(),
+    );
+    expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith(
+      "cmd_daemon_paste_clipboard_image",
       expect.anything(),
     );
   });
@@ -2359,11 +2367,14 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
   });
 
-  it("claims Ctrl+V on focused textarea and routes native image clipboard content through agent Ctrl+V shortcut without DOM paste", async () => {
+  it("claims Ctrl+V on focused textarea and saves clipboard image locally, pasting the local path", async () => {
     const session = createSession("term-session-native-image-paste-ctrl-v");
     tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
       if (cmd === "cmd_native_terminal_clipboard_content") {
         return { kind: "image" };
+      }
+      if (cmd === "cmd_local_paste_clipboard_image") {
+        return { localPath: "/tmp/ferryx-paste/ctrl-v.png", byteLength: 999 };
       }
       return undefined;
     });
@@ -2391,16 +2402,12 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_clipboard_content");
-      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image");
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
         sessionId: "term-session-native-image-paste-ctrl-v",
-        input: { text: "\u0016" },
+        text: "/tmp/ferryx-paste/ctrl-v.png ",
       });
     });
-
-    const pasteCalls = tauriCoreMocks.invoke.mock.calls.filter(
-      ([cmd]) => cmd === "cmd_native_terminal_paste",
-    );
-    expect(pasteCalls).toHaveLength(0);
   });
 
   it("routes AppKit-consumed macOS Cmd+V to the last-focused split terminal exactly once", async () => {
@@ -2409,6 +2416,9 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
       if (cmd === "cmd_native_terminal_clipboard_content") {
         return { kind: "image" };
+      }
+      if (cmd === "cmd_local_paste_clipboard_image") {
+        return { localPath: "/tmp/ferryx-paste/right.png", byteLength: 100 };
       }
       return undefined;
     });
@@ -2434,23 +2444,24 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
 
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_clipboard_content");
-      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image");
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
         sessionId: "term-session-native-menu-paste-right",
-        input: { text: "\u0016" },
+        text: "/tmp/ferryx-paste/right.png ",
       });
     });
-    const leftInputs = tauriCoreMocks.invoke.mock.calls.filter(
+    const leftPastes = tauriCoreMocks.invoke.mock.calls.filter(
       ([cmd, args]) =>
-        cmd === "cmd_native_terminal_send_input" &&
+        cmd === "cmd_native_terminal_paste" &&
         (args as { sessionId?: string })?.sessionId === "term-session-native-menu-paste-left",
     );
-    const rightInputs = tauriCoreMocks.invoke.mock.calls.filter(
+    const rightPastes = tauriCoreMocks.invoke.mock.calls.filter(
       ([cmd, args]) =>
-        cmd === "cmd_native_terminal_send_input" &&
+        cmd === "cmd_native_terminal_paste" &&
         (args as { sessionId?: string })?.sessionId === "term-session-native-menu-paste-right",
     );
-    expect(leftInputs).toHaveLength(0);
-    expect(rightInputs).toHaveLength(1);
+    expect(leftPastes).toHaveLength(0);
+    expect(rightPastes).toHaveLength(1);
   });
 
   it("leaves AppKit-consumed Cmd+V to an external editable instead of a terminal", () => {
@@ -3002,10 +3013,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
 
     expect(pasteEvent.defaultPrevented).toBe(true);
-    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
-      sessionId: "term-session-image-dom",
-      input: { text: "\u0016" },
-    });
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image");
   });
 
   it("forwards a fixture PNG paste at the DOM paste seam through the agent's Ctrl+V shortcut", () => {
@@ -3042,10 +3050,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
 
     expect(pasteEvent.defaultPrevented).toBe(true);
-    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
-      sessionId: "term-session-fixture-png",
-      input: { text: "\u0016" },
-    });
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image");
   });
 
   it("routes an image-only paste targeting the terminal pane when the focus sink is not active exclusively through Ctrl+V exactly once", () => {
@@ -3074,14 +3079,10 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
 
     expect(pasteEvent.defaultPrevented).toBe(true);
-    const sendInputCalls = tauriCoreMocks.invoke.mock.calls.filter(
-      ([cmd]) => cmd === "cmd_native_terminal_send_input",
+    const localPasteCalls = tauriCoreMocks.invoke.mock.calls.filter(
+      ([cmd]) => cmd === "cmd_local_paste_clipboard_image",
     );
-    expect(sendInputCalls).toHaveLength(1);
-    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
-      sessionId: "term-session-image-pane-target",
-      input: { text: "\u0016" },
-    });
+    expect(localPasteCalls).toHaveLength(1);
     expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith(
       "cmd_native_terminal_paste",
       expect.anything(),
@@ -3158,6 +3159,47 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     await waitFor(() => {
       expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_daemon_paste_clipboard_image", {
         workspaceId,
+      });
+    });
+
+    const sendInputCalls = tauriCoreMocks.invoke.mock.calls.filter(
+      ([cmd, args]) =>
+        cmd === "cmd_native_terminal_send_input" && args?.input?.text === "\u0016",
+    );
+    expect(sendInputCalls).toHaveLength(0);
+  });
+
+  it("DOM paste with an image on a local pane invokes cmd_local_paste_clipboard_image and sends no 0x16", async () => {
+    const sessionId = "term-session-local-dom-paste";
+    const session = createSession(sessionId);
+    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "cmd_local_paste_clipboard_image") {
+        return { localPath: "/tmp/ferryx-paste/dom-local.png", byteLength: 4321 };
+      }
+      return undefined;
+    });
+
+    const { getByTestId } = render(<NativeTerminalPane sessionId={sessionId} session={session} />);
+    const textarea = getByTestId("native-terminal-focus-sink");
+    textarea.focus();
+    tauriCoreMocks.invoke.mockClear();
+
+    const pasteEvent = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEvent, "clipboardData", {
+      value: { getData: () => "" },
+    });
+
+    act(() => {
+      textarea.dispatchEvent(pasteEvent);
+    });
+
+    expect(pasteEvent.defaultPrevented).toBe(true);
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image");
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
+        sessionId,
+        text: "/tmp/ferryx-paste/dom-local.png ",
       });
     });
 
@@ -3269,10 +3311,9 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
 
     const sends = tauriCoreMocks.invoke.mock.calls.filter(
-      ([command]) => command === "cmd_native_terminal_send_input",
+      ([command]) => command === "cmd_local_paste_clipboard_image",
     );
     expect(sends).toHaveLength(1);
-    expect(sends[0]?.[1]).toMatchObject({ sessionId: "daemon-image-right" });
   });
 
   it("routes neutral BODY keyboard input only to the last-focused split terminal", () => {
@@ -3379,10 +3420,9 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
 
     const sends = tauriCoreMocks.invoke.mock.calls.filter(
-      ([command]) => command === "cmd_native_terminal_send_input",
+      ([command]) => command === "cmd_local_paste_clipboard_image",
     );
     expect(sends).toHaveLength(1);
-    expect(sends[0]?.[1]).toMatchObject({ sessionId: "daemon-unmount-left" });
   });
 
   it("uses half-open native drop bounds so a split divider belongs to only the right pane", async () => {

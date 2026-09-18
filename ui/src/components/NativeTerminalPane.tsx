@@ -28,7 +28,7 @@ import {
 } from "../lib/tauri";
 import { useNativeTerminalVisibilityState } from "../lib/nativeTerminalVisibility";
 import { classifyNativeTerminalAttachError } from "../lib/nativeTerminalAttachPolicy";
-import { isPairedWorkspaceId, isRemoteWorkspaceId, pasteClipboardImageToRemote } from "../lib/remoteProject";
+import { isPairedWorkspaceId, isRemoteWorkspaceId, pasteClipboardImageLocally, pasteClipboardImageToRemote } from "../lib/remoteProject";
 import { useSleepingSessionIds } from "../lib/sessionLifecycle";
 import { extractIpcErrorMessage } from "../lib/sshHosts";
 import type { NativeTerminalScrollbarPayload, TerminalSession } from "../lib/types";
@@ -1091,29 +1091,42 @@ export function NativeTerminalPane({
       : null;
 
   const pasteClipboardImage = useCallback(() => {
-    // An SSH or paired pane's agent cannot reach this machine's clipboard, so the image travels
-    // to the host and its remote path is pasted in place of the local paste chord.
-    if (!remoteWorkspaceId) {
-      sendImagePasteShortcut();
-      return;
+    if (remoteWorkspaceId) {
+      void pasteClipboardImageToRemote(remoteWorkspaceId)
+        .then((result) => {
+          if (!result) {
+            toast.error("No clipboard image could be read to send to the remote host.");
+            return;
+          }
+          sendPaste(`${quoteShellPath(result.remotePath)} `);
+        })
+        .catch((error: unknown) => {
+          toast.error(
+            `Failed to send the clipboard image to the remote host: ${extractIpcErrorMessage(
+              error,
+              "unknown error",
+            )}`,
+          );
+        });
+    } else {
+      void pasteClipboardImageLocally()
+        .then((result) => {
+          if (!result) {
+            toast.error("No clipboard image could be read from the clipboard.");
+            return;
+          }
+          sendPaste(`${quoteShellPath(result.localPath)} `);
+        })
+        .catch((error: unknown) => {
+          toast.error(
+            `Failed to paste clipboard image: ${extractIpcErrorMessage(
+              error,
+              "unknown error",
+            )}`,
+          );
+        });
     }
-    void pasteClipboardImageToRemote(remoteWorkspaceId)
-      .then((result) => {
-        if (!result) {
-          toast.error("No clipboard image could be read to send to the remote host.");
-          return;
-        }
-        sendPaste(`${quoteShellPath(result.remotePath)} `);
-      })
-      .catch((error: unknown) => {
-        toast.error(
-          `Failed to send the clipboard image to the remote host: ${extractIpcErrorMessage(
-            error,
-            "unknown error",
-          )}`,
-        );
-      });
-  }, [remoteWorkspaceId, sendImagePasteShortcut, sendPaste]);
+  }, [remoteWorkspaceId, sendPaste]);
 
   const suppressNextPasteRef = useRef(false);
 
@@ -1553,10 +1566,8 @@ export function NativeTerminalPane({
       const text = event.clipboardData?.getData("text/plain") || event.clipboardData?.getData("text");
       if (text) {
         sendPaste(text);
-      } else if (isRemoteWorkspaceId(session?.workspaceId) || isPairedWorkspaceId(session?.workspaceId)) {
-        pasteClipboardImage();
       } else {
-        sendImagePasteShortcut();
+        pasteClipboardImage();
       }
     };
 

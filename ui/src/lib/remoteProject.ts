@@ -25,12 +25,29 @@ export interface RemoteClipboardImagePaste {
   byteLength: number;
 }
 
+export interface LocalClipboardImagePaste {
+  localPath: string;
+  byteLength: number;
+}
+
 export function isPairedWorkspaceId(workspaceId: string | null | undefined): boolean {
   return typeof workspaceId === "string" && workspaceId.startsWith("daemon:");
 }
 
 export function isRemoteWorkspaceId(workspaceId: string | null | undefined): boolean {
   return typeof workspaceId === "string" && workspaceId.startsWith("ssh:");
+}
+
+/**
+ * Saves the clipboard image to a private temporary file on this machine and resolves to the
+ * path local agents can open. `null` means the clipboard held no image.
+ */
+export async function pasteClipboardImageLocally(): Promise<LocalClipboardImagePaste | null> {
+  if (!isTauri()) {
+    return null;
+  }
+  const result = await invoke<LocalClipboardImagePaste | null>("cmd_local_paste_clipboard_image");
+  return result ?? null;
 }
 
 /**

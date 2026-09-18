@@ -55,15 +55,50 @@ pub fn read_clipboard_image() -> Option<ClipboardImage> {
     }
 
     // AppKit apps (Preview, Keynote) leave only TIFF behind, which agents reject.
-    let tiff = data_for("public.tiff")?;
-    let rep = NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(&tiff))?;
-    // SAFETY: UB category: FFI boundary UB.
-    // Runtime invariant: `rep` is a live NSBitmapImageRep decoded from pasteboard TIFF and the
-    // property dictionary is a valid empty NSDictionary, which is what PNG encoding accepts.
-    let png = unsafe {
-        rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new())
-    }?;
-    ClipboardImage::new(png.to_vec(), "png")
+    if let Some(tiff) = data_for("public.tiff") {
+        if let Some(rep) = NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(&tiff)) {
+            // SAFETY: UB category: FFI boundary UB.
+            // Runtime invariant: `rep` is a live NSBitmapImageRep decoded from pasteboard TIFF and the
+            // property dictionary is a valid empty NSDictionary, which is what PNG encoding accepts.
+            let png = unsafe {
+                rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new())
+            };
+            if let Some(png) = png {
+                if let Some(image) = ClipboardImage::new(png.to_vec(), "png") {
+                    return Some(image);
+                }
+            }
+        }
+    }
+
+    // Check if a file URL pointing to an image was copied (e.g. from Finder).
+    let file_url_type = NSString::from_str("public.file-url");
+    if let Some(text) = pasteboard.stringForType(&file_url_type) {
+        if let Some(url) = objc2_foundation::NSURL::URLWithString(&text) {
+            if let Some(path_str) = url.path() {
+                let path_buf = std::path::PathBuf::from(path_str.to_string());
+                if let Some(ext) = path_buf.extension().and_then(|e| e.to_str()) {
+                    let ext_lower = ext.to_ascii_lowercase();
+                    let extension = match ext_lower.as_str() {
+                        "png" => Some("png"),
+                        "jpg" | "jpeg" => Some("jpg"),
+                        "gif" => Some("gif"),
+                        "webp" => Some("webp"),
+                        _ => None,
+                    };
+                    if let Some(ext_static) = extension {
+                        if let Ok(bytes) = std::fs::read(&path_buf) {
+                            if let Some(image) = ClipboardImage::new(bytes, ext_static) {
+                                return Some(image);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
 }
 
 #[cfg(target_os = "windows")]
@@ -458,6 +493,41 @@ pub fn save_paste_chunk(
         total_chunks,
         data,
     )
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalClipboardImagePaste {
+    pub local_path: String,
+    pub byte_length: usize,
+}
+
+#[tauri::command]
+pub async fn cmd_local_paste_clipboard_image<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<Option<LocalClipboardImagePaste>, IpcError> {
+    let Some(image) = read_clipboard_image_for_app(&app).await? else {
+        return Ok(None);
+    };
+
+    let byte_length = image.bytes.len();
+    if byte_length > MAX_CLIPBOARD_IMAGE_BYTES {
+        return Err(IpcError::new(
+            crate::ipc::error::IpcErrorCode::PayloadTooLarge,
+            format!(
+                "Clipboard image exceeds maximum size of {} bytes",
+                MAX_CLIPBOARD_IMAGE_BYTES
+            ),
+        ));
+    }
+
+    let file_name = format!("{}.{}", uuid::Uuid::new_v4(), image.extension);
+    let path = save_paste_file(&file_name, &image.bytes)?;
+
+    Ok(Some(LocalClipboardImagePaste {
+        local_path: path.to_string_lossy().to_string(),
+        byte_length,
+    }))
 }
 
 #[cfg(test)]
