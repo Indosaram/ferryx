@@ -1,0 +1,46 @@
+$ vitest run --maxWorkers=1 src/lib/fileLinkRegression.test.ts src/lib/linkRouting.test.ts src/components/NativeTerminalPane.test.tsx src/components/settings/TerminalSection.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/preview/ui
+
+stderr | src/components/NativeTerminalPane.test.tsx > NativeTerminalPane daemon and session identity mapping > retries mount attach on rejection with exponential backoff and attaches on eventual success
+Native terminal IPC command failed {
+  command: [32m'cmd_native_terminal_attach'[39m,
+  error: Error: mount attach failed
+      at [90m/Users/indo/code/project/orca-lite-wt/preview/ui/[39msrc/components/NativeTerminalPane.test.tsx:5293:19
+      at mockCall [90m(file:///Users/indo/code/project/orca-lite-wt/preview/ui/[39mnode_modules/[4m@vitest/spy[24m/dist/index.js:96:15[90m)[39m
+      at spy [90m(file:///Users/indo/code/project/orca-lite-wt/preview/ui/[39mnode_modules/[4mtinyspy[24m/dist/index.js:47:80[90m)[39m
+      at Object.operation [90m(/Users/indo/code/project/orca-lite-wt/preview/ui/[39msrc/components/NativeTerminalPane.tsx:858:13[90m)[39m
+      at [90m/Users/indo/code/project/orca-lite-wt/preview/ui/[39msrc/lib/nativeTerminalLifecycle.ts:242:19
+      at startLifecycleOperation [90m(/Users/indo/code/project/orca-lite-wt/preview/ui/[39msrc/lib/nativeTerminalLifecycle.ts:157:30[90m)[39m
+      at enqueueNativeTerminalLifecycle [90m(/Users/indo/code/project/orca-lite-wt/preview/ui/[39msrc/lib/nativeTerminalLifecycle.ts:325:12[90m)[39m
+      at attachNativeTerminalLifecycle [90m(/Users/indo/code/project/orca-lite-wt/preview/ui/[39msrc/lib/nativeTerminalLifecycle.ts:240:22[90m)[39m
+      at [90m/Users/indo/code/project/orca-lite-wt/preview/ui/[39msrc/components/NativeTerminalPane.tsx:855:12
+      at [90m/Users/indo/code/project/orca-lite-wt/preview/ui/[39msrc/components/NativeTerminalPane.tsx:2006:17
+}
+
+stderr | src/components/NativeTerminalPane.test.tsx > NativeTerminalPane daemon and session identity mapping > retries mount attach on rejection with exponential backoff and attaches on eventual success
+Native terminal IPC command failed {
+  command: [32m'cmd_native_terminal_attach'[39m,
+  error: Error: mount attach failed
+      at [90m/Users/indo/code/project/orca-lite-wt/preview/ui/[39msrc/components/NativeTerminalPane.test.tsx:5293:19
+      at mockCall [90m(file:///Users/indo/code/project/orca-lite-wt/preview/ui/[39mnode_modules/[4m@vitest/spy[24m/dist/index.js:96:15[90m)[39m
+      at spy [90m(file:///Users/indo/code/project/orca-lite-wt/preview/ui/[39mnode_modules/[4mtinyspy[24m/dist/index.js:47:80[90m)[39m
+      at Object.operation [90m(/Users/indo/code/project/orca-lite-wt/preview/ui/[39msrc/components/NativeTerminalPane.tsx:858:13[90m)[39m
+      at [90m/Users/indo/code/project/orca-lite-wt/preview/ui/[39msrc/lib/nativeTerminalLifecycle.ts:242:19
+      at startLifecycleOperation [90m(/Users/indo/code/project/orca-lite-wt/preview/ui/[39msrc/lib/nativeTerminalLifecycle.ts:157:30[90m)[39m
+      at enqueueNativeTerminalLifecycle [90m(/Users/indo/code/project/orca-lite-wt/preview/ui/[39msrc/lib/nativeTerminalLifecycle.ts:325:12[90m)[39m
+      at attachNativeTerminalLifecycle [90m(/Users/indo/code/project/orca-lite-wt/preview/ui/[39msrc/lib/nativeTerminalLifecycle.ts:240:22[90m)[39m
+      at reattachNativeTerminalLifecycle [90m(/Users/indo/code/project/orca-lite-wt/preview/ui/[39msrc/lib/nativeTerminalLifecycle.ts:269:10[90m)[39m
+      at [90m/Users/indo/code/project/orca-lite-wt/preview/ui/[39msrc/components/NativeTerminalPane.tsx:855:12
+}
+
+ ✓ src/components/NativeTerminalPane.test.tsx (169 tests) 2564ms
+ ✓ src/components/settings/TerminalSection.test.tsx (11 tests) 92ms
+ ✓ src/lib/linkRouting.test.ts (21 tests) 10ms
+ ✓ src/lib/fileLinkRegression.test.ts (5 tests) 7ms
+
+ Test Files  4 passed (4)
+      Tests  206 passed (206)
+   Start at  15:45:53
+   Duration  5.29s (transform 270ms, setup 342ms, collect 743ms, tests 2.67s, environment 817ms, prepare 128ms)
+

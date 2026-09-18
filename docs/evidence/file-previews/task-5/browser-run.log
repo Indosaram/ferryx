@@ -1,0 +1,22 @@
+[step] metadata-loaded {"preload":"metadata","controls":true,"autoplay":false,"paused":true,"currentTime":0,"duration":6,"readyState":4,"videoWidth":320,"src":"/media/preview-fixture.webm"}
+[step] play-started {"trigger":"native-controls-space-key","events":[{"currentTime":0.005448,"readyState":4,"paused":false}],"currentTime":0.005472,"duration":6,"paused":false,"readyState":4,"videoWidth":320,"videoHeight":240}
+[step] playing {"times":[0.264359,0.530565,0.796029],"presented":{"mediaTime":0.867,"presentedFrames":14,"width":320,"height":240}}
+[step] seeked {"seeked":{"events":[{"currentTime":4.2,"readyState":4,"paused":true}],"currentTime":4.2,"duration":6,"paused":true,"readyState":4,"videoWidth":320,"videoHeight":240},"presented":{"mediaTime":4.267,"presentedFrames":16,"width":320,"height":240},"pausedAt":4.256329}
+[step] unsupported-source-failure {"alert":"broken.webm cannot be played here: this container or codec is not supported by the preview.Try again","log":[{"at":1124,"event":"onFailure","detail":{"reason":"UnsupportedFormat","message":"broken.webm cannot be played here: this container or codec is not supported by the preview.","details":{"reason":"UnsupportedFormat","displayName":"broken.webm"}}}],"mediaErrorCode":4}
+[step] recovery-callbacks {"callbacks":["onFailure","onReload","onExternalOpen"]}
+[step] replacement-teardown {"connected":false,"src":null,"paused":true,"currentSrc":"http://127.0.0.1:47531/not-a-video"}
+[step] replacement-playing {"replayedTimes":[0.257343,0.521715]}
+[step] closed {"connected":false,"src":null,"paused":true,"networkState":0,"readyState":0}
+[step] stale-events-safe {"failuresAfterClose":1,"consoleErrors":[]}
+BROWSER_EVIDENCE_OK desktop 1280x800
+[step] metadata-loaded {"preload":"metadata","controls":true,"autoplay":false,"paused":true,"currentTime":0,"duration":6,"readyState":4,"videoWidth":320,"src":"/media/preview-fixture.webm"}
+[step] play-started {"trigger":"native-controls-space-key","events":[{"currentTime":0.017345,"readyState":4,"paused":false}],"currentTime":0.017369,"duration":6,"paused":false,"readyState":4,"videoWidth":320,"videoHeight":240}
+[step] playing {"times":[0.254929,0.520914,0.786093],"presented":{"mediaTime":0.867,"presentedFrames":14,"width":320,"height":240}}
+[step] seeked {"seeked":{"events":[{"currentTime":4.2,"readyState":4,"paused":true}],"currentTime":4.2,"duration":6,"paused":true,"readyState":4,"videoWidth":320,"videoHeight":240},"presented":{"mediaTime":4.267,"presentedFrames":16,"width":320,"height":240},"pausedAt":4.260712}
+[step] unsupported-source-failure {"alert":"broken.webm cannot be played here: this container or codec is not supported by the preview.Try again","log":[{"at":1042,"event":"onFailure","detail":{"reason":"UnsupportedFormat","message":"broken.webm cannot be played here: this container or codec is not supported by the preview.","details":{"reason":"UnsupportedFormat","displayName":"broken.webm"}}}],"mediaErrorCode":4}
+[step] recovery-callbacks {"callbacks":["onFailure","onReload","onExternalOpen"]}
+[step] replacement-teardown {"connected":false,"src":null,"paused":true,"currentSrc":"http://127.0.0.1:47531/not-a-video"}
+[step] replacement-playing {"replayedTimes":[0.25242,0.518261]}
+[step] closed {"connected":false,"src":null,"paused":true,"networkState":0,"readyState":0}
+[step] stale-events-safe {"failuresAfterClose":1,"consoleErrors":[]}
+BROWSER_EVIDENCE_OK narrow 420x760

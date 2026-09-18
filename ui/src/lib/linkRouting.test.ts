@@ -1,3 +1,5 @@
+import { filePreviewController } from "./filePreview";
+import type { FilePreviewSource } from "./filePreviewTypes";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { resetBrowserSettings, saveBrowserSettings } from "./browserSettings";
@@ -289,5 +291,82 @@ describe("openTerminalToken", () => {
       line: 42,
       col: 5,
     });
+  });
+  it("routes file token to preview modal when source is provided and shiftKey is false", async () => {
+    const openSpy = vi.spyOn(filePreviewController, "open").mockResolvedValue(undefined);
+    const source: FilePreviewSource = {
+      leafId: "leaf-1",
+      sessionId: "front-1",
+      backendSessionId: "back-1",
+      workspaceId: "ws-1",
+    };
+    const res = await openTerminalToken(
+      {
+        type: "file",
+        path: "src/main.rs",
+        line: 42,
+        col: 5,
+        raw: "src/main.rs:42:5",
+      },
+      {
+        source,
+        shiftKey: false,
+      },
+    );
+    expect(res).toBe(true);
+    expect(openSpy).toHaveBeenCalledWith(source, {
+      path: "src/main.rs",
+      backendSessionId: "back-1",
+      line: 42,
+      col: 5,
+    });
+    expect(invoke).not.toHaveBeenCalledWith("cmd_open_file_path", expect.anything());
+    openSpy.mockRestore();
+  });
+
+  it("routes file token to cmd_open_file_path when shiftKey is true even if source is provided", async () => {
+    const openSpy = vi.spyOn(filePreviewController, "open");
+    const source: FilePreviewSource = {
+      leafId: "leaf-1",
+      sessionId: "front-1",
+      backendSessionId: "back-1",
+      workspaceId: "ws-1",
+    };
+    const res = await openTerminalToken(
+      {
+        type: "file",
+        path: "src/main.rs",
+        line: 42,
+        col: 5,
+        raw: "src/main.rs:42:5",
+      },
+      {
+        source,
+        shiftKey: true,
+        cwd: "/Users/user/project",
+        editor: "vscode",
+      },
+    );
+    expect(res).toBe(true);
+    expect(invoke).toHaveBeenCalledWith("cmd_open_file_path", {
+      path: "src/main.rs",
+      cwd: "/Users/user/project",
+      sessionId: "back-1",
+      editor: "vscode",
+      line: 42,
+      col: 5,
+    });
+    expect(openSpy).not.toHaveBeenCalled();
+    openSpy.mockRestore();
+  });
+  it("recognizes single media and markdown file tokens (R13)", () => {
+    for (const name of ["clip.mp4", "anim.webm", "photo.webp", "movie.mov", "DOC.MARKDOWN"]) {
+      const token = resolveTokenAtCol(name, 2);
+      expect(token).not.toBeNull();
+      expect(token?.type).toBe("file");
+      if (token?.type === "file") {
+        expect(token.path).toBe(name);
+      }
+    }
   });
 });

@@ -1,0 +1,13 @@
+== bun install --frozen-lockfile ==
+EXIT=0
+bun install v1.4.0 (34cbb9a40)
+
+Checked 472 installs across 537 packages (no changes) [103.00ms]
+== bun run build (tsc && vite build) ==
+EXIT=0
+
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+✓ built in 2.30s

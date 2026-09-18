@@ -1,0 +1,9 @@
+== cargo test --lib file_link ==
+EXIT=0
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 1308 filtered out; finished in 1.71s
+
+== cargo check ==
+EXIT=0
+warning: `ferryx` (lib) generated 19 warnings (run `cargo fix --lib -p ferryx` to apply 3 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.86s

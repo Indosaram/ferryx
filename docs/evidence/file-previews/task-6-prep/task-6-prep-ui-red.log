@@ -1,0 +1,69 @@
+$ vitest run --maxWorkers=1 src/lib/filePreviewTypes.test.ts
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/preview/ui
+
+ ❯ src/lib/filePreviewTypes.test.ts (11 tests | 2 failed) 7ms
+   ✓ file preview shared discriminants > freezes the four previewable kinds 1ms
+   ✓ file preview shared discriminants > freezes the nine machine error reasons 0ms
+   ✓ file preview shared discriminants > names the three preview commands 0ms
+   ✓ file preview shared discriminants > carries the frozen resource bounds 0ms
+   ✓ filePreviewErrorReason > reads the machine reason out of the IpcError envelope 0ms
+   ✓ filePreviewErrorReason > returns null for errors without a preview reason 0ms
+   × filePreviewErrorReason > never invents a reason from an unknown discriminant 2ms
+     → expected 'SomethingElse' to be null
+   ✓ filePreviewErrorReason > guards unknown values 0ms
+   ✓ cross-language parity with the Rust contract > declares the same error reasons as file_preview_contract.rs 0ms
+   ✓ cross-language parity with the Rust contract > declares the same encodings as file_preview_contract.rs 0ms
+   × cross-language parity with the Rust contract > keeps the Rust payload DTOs on camelCase wire keys 2ms
+     → expected '\n/// `cmd_file_preview_open` result.…' to contain '#[serde(rename_all = "camelCase")]'
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/filePreviewTypes.test.ts > filePreviewErrorReason > never invents a reason from an unknown discriminant
+AssertionError: expected 'SomethingElse' to be null
+
+[32m- Expected:[39m 
+null
+
+[31m+ Received:[39m 
+"SomethingElse"
+
+ ❯ src/lib/filePreviewTypes.test.ts:74:78
+     72| 
+     73|   it("never invents a reason from an unknown discriminant", () => {
+     74|     expect(filePreviewErrorReason({ details: { reason: "SomethingElse"…
+       |                                                                              ^
+     75|   });
+     76| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+ FAIL  src/lib/filePreviewTypes.test.ts > cross-language parity with the Rust contract > keeps the Rust payload DTOs on camelCase wire keys
+AssertionError: expected '\n/// `cmd_file_preview_open` result.…' to contain '#[serde(rename_all = "camelCase")]'
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- #[[7ms[27mer[7mde(rename_all = "camelCase"[27m)][39m
+[31m+[39m
+[31m+ /// `cmd_file_preview_open` result.[39m
+[31m+ #[[7md[27mer[7mive(Debug, Clone, PartialEq, Serialize, Deserialize[27m)][39m
+
+ ❯ src/lib/filePreviewTypes.test.ts:105:26
+    103|     for (const { index } of dtoBlocks) {
+    104|       const attributes = rustContract.split("\n").slice(Math.max(0, in…
+    105|       expect(attributes).toContain('#[serde(rename_all = "camelCase")]…
+       |                          ^
+    106|     }
+    107|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  2 failed | 9 passed (11)
+   Start at  16:03:25
+   Duration  433ms (transform 32ms, setup 79ms, collect 10ms, tests 7ms, environment 157ms, prepare 24ms)
+
+error: script "test" exited with code 1
+EXIT=1

@@ -1,0 +1,12 @@
+{"at":"2026-09-15T07:24:25.295Z","path":"/","range":null,"status":200}
+{"at":"2026-09-15T07:24:25.310Z","path":"/assets/qa-file-preview-video-DSTOGZsq.js","range":null,"status":200}
+{"at":"2026-09-15T07:24:25.310Z","path":"/assets/qa-file-preview-video-Cf56okTs.css","range":null,"status":200}
+{"at":"2026-09-15T07:24:25.352Z","path":"/assets/geist-variable-CrgPqtmy.woff2","range":null,"status":200}
+{"at":"2026-09-15T07:24:25.359Z","path":"/media/preview-fixture.webm","range":"bytes=0-","status":206,"start":0,"end":33729,"bytes":33730}
+{"at":"2026-09-15T07:24:26.412Z","path":"/not-a-video","range":"bytes=0-","status":200,"bytes":11}
+{"at":"2026-09-15T07:24:27.404Z","path":"/","range":null,"status":200}
+{"at":"2026-09-15T07:24:27.407Z","path":"/assets/qa-file-preview-video-DSTOGZsq.js","range":null,"status":200}
+{"at":"2026-09-15T07:24:27.407Z","path":"/assets/qa-file-preview-video-Cf56okTs.css","range":null,"status":200}
+{"at":"2026-09-15T07:24:27.424Z","path":"/assets/geist-variable-CrgPqtmy.woff2","range":null,"status":200}
+{"at":"2026-09-15T07:24:27.424Z","path":"/media/preview-fixture.webm","range":"bytes=0-","status":206,"start":0,"end":33729,"bytes":33730}
+{"at":"2026-09-15T07:24:28.444Z","path":"/not-a-video","range":"bytes=0-","status":200,"bytes":11}

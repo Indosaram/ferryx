@@ -1,0 +1,29 @@
+$ tsc && vite build
+vite v6.4.3 building for production...
+transforming...
+✓ 1899 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                                        3.08 kB │ gzip:   1.10 kB
+dist/assets/crush-DHElXcRZ.png                         5.46 kB
+dist/assets/droid-BhrKLgQ8.svg                         6.30 kB │ gzip:   2.88 kB
+dist/assets/antigravity-DgAQAdn3.svg                   7.63 kB │ gzip:   1.72 kB
+dist/assets/gjc-CmlXGg4z.png                          22.73 kB
+dist/assets/geist-variable-CrgPqtmy.woff2             69.44 kB
+dist/assets/ferryx-icon-OXRkkUvz.png                 805.82 kB
+dist/assets/index-B_wE7WLl.css                        80.71 kB │ gzip:  14.59 kB
+dist/assets/card-B15xvQfV.js                           1.39 kB │ gzip:   0.63 kB
+dist/assets/remoteHostStore-CqoUFxjk.js                4.37 kB │ gzip:   1.64 kB
+dist/assets/pairedHostInventory-DRT-7nyf.js            4.55 kB │ gzip:   1.91 kB
+dist/assets/PermissionsOnboardingDialog-C_sUsey3.js    6.25 kB │ gzip:   1.85 kB
+dist/assets/browser-CGA_f9EI.js                       25.78 kB │ gzip:  10.13 kB
+dist/assets/RemoteApp-Dy8HbELd.js                    158.91 kB │ gzip:  50.11 kB
+dist/assets/index-X4-arMq3.js                        189.69 kB │ gzip:  60.69 kB
+dist/assets/SettingsDialog-C4yRumNk.js               204.32 kB │ gzip:  60.59 kB
+dist/assets/App-DlDq-5Sw.js                          569.25 kB │ gzip: 165.20 kB
+
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+✓ built in 2.91s

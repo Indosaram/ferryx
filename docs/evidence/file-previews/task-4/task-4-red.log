@@ -1,0 +1,527 @@
+$ vitest run --maxWorkers=1 src/components/FilePreviewImage.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/preview/ui
+
+ ❯ src/components/FilePreviewImage.test.tsx (13 tests | 10 failed) 69ms
+   ✓ FilePreviewImage source admission > renders the capability URL for every allowlisted raster type 32ms
+   × FilePreviewImage source admission > never creates an img source for an SVG payload 5ms
+     → expected <img …(2)></img> to be null
+   × FilePreviewImage source admission > never creates an img source when metadata is missing 1ms
+     → expected <img alt="screenshot.png"></img> to be null
+   × FilePreviewImage source admission > reports unsupported metadata exactly once per generation 1ms
+     → expected "spy" to be called 1 times, but got 0 times
+   × FilePreviewImage zoom and pan > starts fitted and reports intrinsic dimensions after load 3ms
+     → Unable to find an element by: [data-testid="file-preview-image-zoom"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mclass[39m=[32m"flex h-full w-full items-center justify-center"[39m
+      [33mdata-testid[39m=[32m"file-preview-image-viewport"[39m
+    [36m>[39m
+      [36m<img[39m
+        [33malt[39m=[32m"screenshot.png"[39m
+        [33msrc[39m=[32m"http://127.0.0.1:52341/preview/handle-a"[39m
+      [36m/>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+   × FilePreviewImage zoom and pan > switches to 100% at the intrinsic pixel size 4ms
+     → Unable to find an accessible element with the role "button" and name "Actual size"
+
+Here are the accessible roles:
+
+  img:
+
+  Name "screenshot.png":
+  [36m<img[39m
+    [33malt[39m=[32m"screenshot.png"[39m
+    [33msrc[39m=[32m"http://127.0.0.1:52341/preview/handle-a"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mclass[39m=[32m"flex h-full w-full items-center justify-center"[39m
+      [33mdata-testid[39m=[32m"file-preview-image-viewport"[39m
+    [36m>[39m
+      [36m<img[39m
+        [33malt[39m=[32m"screenshot.png"[39m
+        [33msrc[39m=[32m"http://127.0.0.1:52341/preview/handle-a"[39m
+      [36m/>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+   × FilePreviewImage zoom and pan > steps zoom by 10 percentage points and clamps at 10% and 800% 2ms
+     → Unable to find an accessible element with the role "button" and name "Actual size"
+
+Here are the accessible roles:
+
+  img:
+
+  Name "screenshot.png":
+  [36m<img[39m
+    [33malt[39m=[32m"screenshot.png"[39m
+    [33msrc[39m=[32m"http://127.0.0.1:52341/preview/handle-a"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mclass[39m=[32m"flex h-full w-full items-center justify-center"[39m
+      [33mdata-testid[39m=[32m"file-preview-image-viewport"[39m
+    [36m>[39m
+      [36m<img[39m
+        [33malt[39m=[32m"screenshot.png"[39m
+        [33msrc[39m=[32m"http://127.0.0.1:52341/preview/handle-a"[39m
+      [36m/>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+   × FilePreviewImage zoom and pan > pans only while zoomed and resets pan and zoom together 2ms
+     → Unable to find an element by: [data-testid="file-preview-image-canvas"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mclass[39m=[32m"flex h-full w-full items-center justify-center"[39m
+      [33mdata-testid[39m=[32m"file-preview-image-viewport"[39m
+    [36m>[39m
+      [36m<img[39m
+        [33malt[39m=[32m"screenshot.png"[39m
+        [33msrc[39m=[32m"http://127.0.0.1:52341/preview/handle-a"[39m
+      [36m/>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+   × FilePreviewImage zoom and pan > returns to fit and clears pan when a new generation replaces the image 3ms
+     → Unable to find an accessible element with the role "button" and name "Actual size"
+
+Here are the accessible roles:
+
+  img:
+
+  Name "screenshot.png":
+  [36m<img[39m
+    [33malt[39m=[32m"screenshot.png"[39m
+    [33msrc[39m=[32m"http://127.0.0.1:52341/preview/handle-a"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mclass[39m=[32m"flex h-full w-full items-center justify-center"[39m
+      [33mdata-testid[39m=[32m"file-preview-image-viewport"[39m
+    [36m>[39m
+      [36m<img[39m
+        [33malt[39m=[32m"screenshot.png"[39m
+        [33msrc[39m=[32m"http://127.0.0.1:52341/preview/handle-a"[39m
+      [36m/>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+   × FilePreviewImage failure handling > shows a recoverable error with retry, reload and external actions 9ms
+     → Unable to find an accessible element with the role "button" and name "Reload file"
+
+Here are the accessible roles:
+
+  paragraph:
+
+  Name "":
+  [36m<p[39m
+    [33mclass[39m=[32m"text-sm text-muted-foreground"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+  button:
+
+  Name "Open externally":
+  [36m<button[39m
+    [33mtype[39m=[32m"button"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mclass[39m=[32m"flex flex-col items-center gap-2 p-4"[39m
+      [33mdata-testid[39m=[32m"file-preview-image-error"[39m
+    [36m>[39m
+      [36m<p[39m
+        [33mclass[39m=[32m"text-sm text-muted-foreground"[39m
+      [36m>[39m
+        [0mThis image could not be displayed.[0m
+      [36m</p>[39m
+      [36m<button[39m
+        [33mtype[39m=[32m"button"[39m
+      [36m>[39m
+        [0mOpen externally[0m
+      [36m</button>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+   ✓ FilePreviewImage failure handling > reports one failure per failed load, not one per render 2ms
+   × FilePreviewImage failure handling > ignores a late error from an image the modal already replaced 2ms
+     → expected <div …(2)><p …(1)></p>
+…(1)</div> to be null
+   ✓ FilePreviewImage failure handling > ignores a late load from an image the modal already replaced 1ms
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 10 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/FilePreviewImage.test.tsx > FilePreviewImage source admission > never creates an img source for an SVG payload
+AssertionError: expected <img …(2)></img> to be null
+
+[32m- Expected:[39m 
+null
+
+[31m+ Received:[39m 
+<img
+  alt="diagram.svg"
+  src="http://127.0.0.1:52341/preview/handle-a"
+/>
+
+ ❯ src/components/FilePreviewImage.test.tsx:95:39
+     93|     );
+     94| 
+     95|     expect(screen.queryByRole("img")).toBeNull();
+       |                                       ^
+     96|     expect(document.querySelector("img")).toBeNull();
+     97|     expect(screen.getByTestId("file-preview-image-unsupported")).toBeI…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/10]⎯
+
+ FAIL  src/components/FilePreviewImage.test.tsx > FilePreviewImage source admission > never creates an img source when metadata is missing
+AssertionError: expected <img alt="screenshot.png"></img> to be null
+
+[32m- Expected:[39m 
+null
+
+[31m+ Received:[39m 
+<img
+  alt="screenshot.png"
+/>
+
+ ❯ src/components/FilePreviewImage.test.tsx:109:43
+    107|     renderImage(imagePayload({ mediaUrl: null }), 1, spies);
+    108| 
+    109|     expect(document.querySelector("img")).toBeNull();
+       |                                           ^
+    110|     expect(spies.onFailure).toHaveBeenCalledTimes(1);
+    111|     expect(spies.onFailure.mock.calls[0][0].reason).toBe("UnsupportedF…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/10]⎯
+
+ FAIL  src/components/FilePreviewImage.test.tsx > FilePreviewImage source admission > reports unsupported metadata exactly once per generation
+AssertionError: expected "spy" to be called 1 times, but got 0 times
+ ❯ src/components/FilePreviewImage.test.tsx:127:29
+    125|     );
+    126| 
+    127|     expect(spies.onFailure).toHaveBeenCalledTimes(1);
+       |                             ^
+    128|   });
+    129| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/10]⎯
+
+ FAIL  src/components/FilePreviewImage.test.tsx > FilePreviewImage zoom and pan > starts fitted and reports intrinsic dimensions after load
+TestingLibraryElementError: Unable to find an element by: [data-testid="file-preview-image-zoom"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mclass[39m=[32m"flex h-full w-full items-center justify-center"[39m
+      [33mdata-testid[39m=[32m"file-preview-image-viewport"[39m
+    [36m>[39m
+      [36m<img[39m
+        [33malt[39m=[32m"screenshot.png"[39m
+        [33msrc[39m=[32m"http://127.0.0.1:52341/preview/handle-a"[39m
+      [36m/>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/components/FilePreviewImage.test.tsx:137:19
+    135|     loadImage(img, 1600, 900);
+    136| 
+    137|     expect(screen.getByTestId("file-preview-image-zoom")).toHaveTextCo…
+       |                   ^
+    138|     expect(screen.getByTestId("file-preview-image-dimensions")).toHave…
+    139|     expect(img.style.width).toBe("");
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/10]⎯
+
+ FAIL  src/components/FilePreviewImage.test.tsx > FilePreviewImage zoom and pan > switches to 100% at the intrinsic pixel size
+TestingLibraryElementError: Unable to find an accessible element with the role "button" and name "Actual size"
+
+Here are the accessible roles:
+
+  img:
+
+  Name "screenshot.png":
+  [36m<img[39m
+    [33malt[39m=[32m"screenshot.png"[39m
+    [33msrc[39m=[32m"http://127.0.0.1:52341/preview/handle-a"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mclass[39m=[32m"flex h-full w-full items-center justify-center"[39m
+      [33mdata-testid[39m=[32m"file-preview-image-viewport"[39m
+    [36m>[39m
+      [36m<img[39m
+        [33malt[39m=[32m"screenshot.png"[39m
+        [33msrc[39m=[32m"http://127.0.0.1:52341/preview/handle-a"[39m
+      [36m/>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/components/FilePreviewImage.test.tsx:147:28
+    145|     loadImage(img, 800, 600);
+    146| 
+    147|     fireEvent.click(screen.getByRole("button", { name: "Actual size" }…
+       |                            ^
+    148| 
+    149|     expect(screen.getByTestId("file-preview-image-zoom")).toHaveTextCo…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/10]⎯
+
+ FAIL  src/components/FilePreviewImage.test.tsx > FilePreviewImage zoom and pan > steps zoom by 10 percentage points and clamps at 10% and 800%
+TestingLibraryElementError: Unable to find an accessible element with the role "button" and name "Actual size"
+
+Here are the accessible roles:
+
+  img:
+
+  Name "screenshot.png":
+  [36m<img[39m
+    [33malt[39m=[32m"screenshot.png"[39m
+    [33msrc[39m=[32m"http://127.0.0.1:52341/preview/handle-a"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mclass[39m=[32m"flex h-full w-full items-center justify-center"[39m
+      [33mdata-testid[39m=[32m"file-preview-image-viewport"[39m
+    [36m>[39m
+      [36m<img[39m
+        [33malt[39m=[32m"screenshot.png"[39m
+        [33msrc[39m=[32m"http://127.0.0.1:52341/preview/handle-a"[39m
+      [36m/>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/components/FilePreviewImage.test.tsx:157:28
+    155|     loadImage(screen.getByRole("img") as HTMLImageElement, 400, 400);
+    156| 
+    157|     fireEvent.click(screen.getByRole("button", { name: "Actual size" }…
+       |                            ^
+    158|     const zoomIn = screen.getByRole("button", { name: "Zoom in" });
+    159|     const zoomOut = screen.getByRole("button", { name: "Zoom out" });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/10]⎯
+
+ FAIL  src/components/FilePreviewImage.test.tsx > FilePreviewImage zoom and pan > pans only while zoomed and resets pan and zoom together
+TestingLibraryElementError: Unable to find an element by: [data-testid="file-preview-image-canvas"]
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mclass[39m=[32m"flex h-full w-full items-center justify-center"[39m
+      [33mdata-testid[39m=[32m"file-preview-image-viewport"[39m
+    [36m>[39m
+      [36m<img[39m
+        [33malt[39m=[32m"screenshot.png"[39m
+        [33msrc[39m=[32m"http://127.0.0.1:52341/preview/handle-a"[39m
+      [36m/>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/components/FilePreviewImage.test.tsx:179:19
+    177| 
+    178|     drag(viewport(), { x: 100, y: 100 }, { x: 160, y: 130 });
+    179|     expect(screen.getByTestId("file-preview-image-canvas").style.trans…
+       |                   ^
+    180| 
+    181|     fireEvent.click(screen.getByRole("button", { name: "Actual size" }…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/10]⎯
+
+ FAIL  src/components/FilePreviewImage.test.tsx > FilePreviewImage zoom and pan > returns to fit and clears pan when a new generation replaces the image
+TestingLibraryElementError: Unable to find an accessible element with the role "button" and name "Actual size"
+
+Here are the accessible roles:
+
+  img:
+
+  Name "screenshot.png":
+  [36m<img[39m
+    [33malt[39m=[32m"screenshot.png"[39m
+    [33msrc[39m=[32m"http://127.0.0.1:52341/preview/handle-a"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mclass[39m=[32m"flex h-full w-full items-center justify-center"[39m
+      [33mdata-testid[39m=[32m"file-preview-image-viewport"[39m
+    [36m>[39m
+      [36m<img[39m
+        [33malt[39m=[32m"screenshot.png"[39m
+        [33msrc[39m=[32m"http://127.0.0.1:52341/preview/handle-a"[39m
+      [36m/>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/components/FilePreviewImage.test.tsx:194:28
+    192|     const { rerender } = renderImage(imagePayload(), 1, spies);
+    193|     loadImage(screen.getByRole("img") as HTMLImageElement, 2000, 1500);
+    194|     fireEvent.click(screen.getByRole("button", { name: "Actual size" }…
+       |                            ^
+    195|     drag(viewport(), { x: 0, y: 0 }, { x: 40, y: 40 });
+    196| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[8/10]⎯
+
+ FAIL  src/components/FilePreviewImage.test.tsx > FilePreviewImage failure handling > shows a recoverable error with retry, reload and external actions
+TestingLibraryElementError: Unable to find an accessible element with the role "button" and name "Reload file"
+
+Here are the accessible roles:
+
+  paragraph:
+
+  Name "":
+  [36m<p[39m
+    [33mclass[39m=[32m"text-sm text-muted-foreground"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+  button:
+
+  Name "Open externally":
+  [36m<button[39m
+    [33mtype[39m=[32m"button"[39m
+  [36m/>[39m
+
+  --------------------------------------------------
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mclass[39m=[32m"flex flex-col items-center gap-2 p-4"[39m
+      [33mdata-testid[39m=[32m"file-preview-image-error"[39m
+    [36m>[39m
+      [36m<p[39m
+        [33mclass[39m=[32m"text-sm text-muted-foreground"[39m
+      [36m>[39m
+        [0mThis image could not be displayed.[0m
+      [36m</p>[39m
+      [36m<button[39m
+        [33mtype[39m=[32m"button"[39m
+      [36m>[39m
+        [0mOpen externally[0m
+      [36m</button>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/components/FilePreviewImage.test.tsx:230:28
+    228|     expect(spies.onExternalOpen).toHaveBeenCalledTimes(1);
+    229| 
+    230|     fireEvent.click(screen.getByRole("button", { name: "Reload file" }…
+       |                            ^
+    231|     expect(spies.onReload).toHaveBeenCalledTimes(1);
+    232| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[9/10]⎯
+
+ FAIL  src/components/FilePreviewImage.test.tsx > FilePreviewImage failure handling > ignores a late error from an image the modal already replaced
+AssertionError: expected <div …(2)><p …(1)></p>
+…(1)</div> to be null
+
+[32m- Expected:[39m 
+null
+
+[31m+ Received:[39m 
+<div
+  class="flex flex-col items-center gap-2 p-4"
+  data-testid="file-preview-image-error"
+>
+  <p
+    class="text-sm text-muted-foreground"
+  >
+    This image could not be displayed.
+  </p>
+  <button
+    type="button"
+  >
+    Open externally
+  </button>
+</div>
+
+ ❯ src/components/FilePreviewImage.test.tsx:276:62
+    274|     fireEvent.error(stale);
+    275| 
+    276|     expect(screen.queryByTestId("file-preview-image-error")).toBeNull(…
+       |                                                              ^
+    277|     expect(spies.onFailure).not.toHaveBeenCalled();
+    278|     expect(screen.getByRole("img")).toBeInTheDocument();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[10/10]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  10 failed | 3 passed (13)
+   Start at  16:14:33
+   Duration  503ms (transform 32ms, setup 74ms, collect 27ms, tests 69ms, environment 151ms, prepare 24ms)
+
+error: script "test" exited with code 1
+EXIT=1

@@ -1,3 +1,4 @@
+import { filePreviewController } from "../lib/filePreview";
 import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -3687,18 +3688,20 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       toJSON: () => ({}),
     });
 
-    // Simulate Cmd+click on the file path
+    // Simulate Shift+Cmd+click on the file path
     act(() => {
       fireEvent.pointerDown(pane, {
         button: 0,
         clientX: 120,
         clientY: 20,
         metaKey: true,
+        shiftKey: true,
       });
       window.dispatchEvent(
         new PointerEvent("pointerup", {
           clientX: 120,
           clientY: 20,
+          shiftKey: true,
           bubbles: true,
         }),
       );
@@ -3720,6 +3723,85 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
   });
 
+  it("handles Cmd+click without Shift to open file preview modal", async () => {
+    const openSpy = vi.spyOn(filePreviewController, "open").mockResolvedValue(undefined);
+    const session = {
+      ...createSession("term-session-preview-click", "daemon-preview-click"),
+      cwd: "/Users/indo/code/project",
+    };
+    tauriCoreMocks.invoke.mockImplementation(async (command, args: any) => {
+      if (command === "cmd_native_terminal_attach") {
+        return {
+          cellWidthPx: 10,
+          cellHeightPx: 20,
+          cursorCol: 0,
+          cursorRow: 0,
+          cols: 80,
+          rows: 24,
+        };
+      }
+      if (command === "cmd_native_terminal_line_at") {
+        return {
+          text: "ERROR at src/components/App.tsx:42:10 in test",
+          col: args.col,
+          row: args.row,
+        };
+      }
+      return undefined;
+    });
+
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-preview-click" session={session} />,
+    );
+    const pane = getByTestId("native-terminal-pane");
+    const viewport = getByTestId("native-terminal-viewport");
+
+    vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue({
+      left: 0,
+      top: 0,
+      right: 800,
+      bottom: 480,
+      width: 800,
+      height: 480,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+
+    act(() => {
+      fireEvent.pointerDown(pane, {
+        button: 0,
+        clientX: 120,
+        clientY: 20,
+        metaKey: true,
+        shiftKey: false,
+      });
+      window.dispatchEvent(
+        new PointerEvent("pointerup", {
+          clientX: 120,
+          clientY: 20,
+          shiftKey: false,
+          bubbles: true,
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(openSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: "term-session-preview-click",
+          backendSessionId: "daemon-preview-click",
+        }),
+        expect.objectContaining({
+          path: "src/components/App.tsx",
+          backendSessionId: "daemon-preview-click",
+          line: 42,
+          col: 10,
+        }),
+      );
+    });
+    openSpy.mockRestore();
+  });
   it("shows a link underline only while hovering a token with the modifier", async () => {
     const session = createSession("hover-file", "hover-backend");
     tauriCoreMocks.invoke.mockImplementation(async (command) => {
@@ -3794,11 +3876,13 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         clientX: 80,
         clientY: 20,
         metaKey: true,
+        shiftKey: true,
       });
       window.dispatchEvent(
         new PointerEvent("pointerup", {
           clientX: 80,
           clientY: 20,
+          shiftKey: true,
           bubbles: true,
         }),
       );

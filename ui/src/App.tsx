@@ -19,6 +19,17 @@ import { WorktreeDeleteDialog } from "./components/WorktreeDeleteDialog";
 import { WorktreeDiskDialog } from "./components/WorktreeDiskDialog";
 import { ConfirmCloseTabDialog } from "./components/ConfirmCloseTabDialog";
 import { TerminalLinkActions } from "./components/TerminalLinkActions";
+import { FilePreviewDialog } from "./components/FilePreviewDialog";
+import { FilePreviewText } from "./components/FilePreviewText";
+import { FilePreviewImage } from "./components/FilePreviewImage";
+import { FilePreviewVideo } from "./components/FilePreviewVideo";
+
+const filePreviewRenderers = {
+  text: FilePreviewText,
+  markdown: FilePreviewText,
+  image: FilePreviewImage,
+  video: FilePreviewVideo,
+};
 import { Toaster, toast } from "./components/ui/sonner";
 import { IconButton } from "./components/ui/IconButton";
 import { copyTextToClipboard } from "./lib/clipboard";
@@ -3116,6 +3127,7 @@ function WorkspaceApp({
           onClose={() => setDiskManageProject(null)}
         />
       ) : null}
+      <FilePreviewDialog renderers={filePreviewRenderers} />
     </div>
   );
 }

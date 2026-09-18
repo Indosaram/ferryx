@@ -1,3 +1,5 @@
+import { filePreviewController } from "./filePreview";
+import type { FilePreviewSource } from "./filePreviewTypes";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { isHttpUrl, loadBrowserSettings } from "./browserSettings";
 import { openExternalUrl } from "./browserTauri";
@@ -81,9 +83,9 @@ export async function requestTerminalLinkOpen(url: string, shiftKey = false): Pr
 
 const KNOWN_EXTENSIONS = new Set([
   "ts", "tsx", "js", "jsx", "mjs", "cjs", "rs", "py", "go", "json", "json5",
-  "toml", "yaml", "yml", "md", "mdx", "css", "scss", "html", "sh", "bash",
+  "toml", "yaml", "yml", "md", "markdown", "mdx", "css", "scss", "html", "sh", "bash",
   "zsh", "lock", "txt", "c", "cpp", "cc", "h", "hpp", "svg", "png", "jpg",
-  "jpeg", "gif", "env", "conf", "config", "log", "sql", "diff", "patch",
+  "jpeg", "gif", "webp", "mp4", "m4v", "mov", "webm", "ogv", "env", "conf", "config", "log", "sql", "diff", "patch",
 ]);
 
 function isEastAsianWide(code: number): boolean {
@@ -258,6 +260,8 @@ export type OpenTerminalTokenOptions = {
   cwd?: string;
   sessionId?: string;
   editor?: "system" | "vscode" | "cursor" | "zed";
+  preview?: boolean;
+  source?: FilePreviewSource;
 };
 
 /**
@@ -278,14 +282,31 @@ export async function openTerminalToken(
     if (!isTauri()) {
       return false;
     }
-    return invoke<boolean>("cmd_open_file_path", {
+    const shouldOpenPreview = options.preview ?? (Boolean(options.source) && !options.shiftKey);
+    if (!options.shiftKey && shouldOpenPreview) {
+      const source: FilePreviewSource = options.source ?? {
+        leafId: options.sessionId ?? "default-leaf",
+        sessionId: options.sessionId ?? "default-session",
+        backendSessionId: options.sessionId ?? "default-session",
+        workspaceId: null,
+      };
+      await filePreviewController.open(source, {
         path: token.path,
-        cwd: options.cwd,
-        sessionId: options.sessionId,
-        editor: options.editor,
-        line: token.line,
-        col: token.col,
+        backendSessionId: source.backendSessionId,
+        line: token.line ?? null,
+        col: token.col ?? null,
       });
+      return true;
+    }
+
+    return invoke<boolean>("cmd_open_file_path", {
+      path: token.path,
+      cwd: options.cwd,
+      sessionId: options.source?.backendSessionId ?? options.sessionId,
+      editor: options.editor,
+      line: token.line,
+      col: token.col,
+    });
   }
 
   return false;

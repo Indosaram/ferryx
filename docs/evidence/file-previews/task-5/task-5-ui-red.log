@@ -1,0 +1,197 @@
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/preview/ui
+
+ ❯ src/components/FilePreviewVideo.test.tsx (9 tests | 7 failed) 47ms
+   × FilePreviewVideo > renders a native video element with metadata preload and never autoplays 13ms
+     → expected null to be 'metadata' // Object.is equality
+   × FilePreviewVideo > exposes reload and external-open callbacks 21ms
+     → Unable to find an accessible element with the role "button" and name `/reload/i`
+
+There are no accessible roles. But there might be some inaccessible roles. If you wish to access them, then set the `hidden` option to `true`. Learn more about this here: https://testing-library.com/docs/dom-testing-library/api-queries#byrole
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mdata-testid[39m=[32m"file-preview-video"[39m
+    [36m>[39m
+      [36m<video[39m
+        [33mcontrols[39m=[32m""[39m
+        [33mdata-testid[39m=[32m"file-preview-video-element"[39m
+        [33msrc[39m=[32m"http://127.0.0.1:47531/media/handle-1"[39m
+      [36m/>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+   × FilePreviewVideo > surfaces a decode failure as a recoverable UnsupportedFormat error 2ms
+     → expected "spy" to be called 1 times, but got 0 times
+   × FilePreviewVideo > reports an unsupported source as UnsupportedFormat and a network error without inventing a reason 1ms
+     → Cannot read properties of undefined (reading '0')
+   ✓ FilePreviewVideo > ignores aborted and reason-less media errors produced by teardown 2ms
+   × FilePreviewVideo > pauses, detaches the source and reloads the element when the preview closes 1ms
+     → expected "pause" to be called 1 times, but got 0 times
+   × FilePreviewVideo > tears down the replaced element, mounts a fresh one and drops the stale failure 4ms
+     → Unable to find an accessible element with the role "alert"
+
+There are no accessible roles. But there might be some inaccessible roles. If you wish to access them, then set the `hidden` option to `true`. Learn more about this here: https://testing-library.com/docs/dom-testing-library/api-queries#byrole
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mdata-testid[39m=[32m"file-preview-video"[39m
+    [36m>[39m
+      [36m<video[39m
+        [33mcontrols[39m=[32m""[39m
+        [33mdata-testid[39m=[32m"file-preview-video-element"[39m
+        [33msrc[39m=[32m"http://127.0.0.1:47531/media/handle-1"[39m
+      [36m/>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+   ✓ FilePreviewVideo > ignores an error event that arrives on a detached element after replacement 2ms
+   × FilePreviewVideo > reports a payload with no media URL instead of rendering an empty player 1ms
+     → expected "spy" to be called 1 times, but got 0 times
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 7 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/FilePreviewVideo.test.tsx > FilePreviewVideo > renders a native video element with metadata preload and never autoplays
+AssertionError: expected null to be 'metadata' // Object.is equality
+
+[32m- Expected:[39m 
+"metadata"
+
+[31m+ Received:[39m 
+null
+
+ ❯ src/components/FilePreviewVideo.test.tsx:77:43
+     75|     expect(video.getAttribute("src")).toBe("http://127.0.0.1:47531/med…
+     76|     expect(video).toHaveAttribute("controls");
+     77|     expect(video.getAttribute("preload")).toBe("metadata");
+       |                                           ^
+     78|     expect(video.hasAttribute("autoplay")).toBe(false);
+     79|     expect(video.hasAttribute("loop")).toBe(false);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/7]⎯
+
+ FAIL  src/components/FilePreviewVideo.test.tsx > FilePreviewVideo > exposes reload and external-open callbacks
+TestingLibraryElementError: Unable to find an accessible element with the role "button" and name `/reload/i`
+
+There are no accessible roles. But there might be some inaccessible roles. If you wish to access them, then set the `hidden` option to `true`. Learn more about this here: https://testing-library.com/docs/dom-testing-library/api-queries#byrole
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mdata-testid[39m=[32m"file-preview-video"[39m
+    [36m>[39m
+      [36m<video[39m
+        [33mcontrols[39m=[32m""[39m
+        [33mdata-testid[39m=[32m"file-preview-video-element"[39m
+        [33msrc[39m=[32m"http://127.0.0.1:47531/media/handle-1"[39m
+      [36m/>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/components/FilePreviewVideo.test.tsx:97:28
+     95|     );
+     96| 
+     97|     fireEvent.click(screen.getByRole("button", { name: /reload/i }));
+       |                            ^
+     98|     fireEvent.click(screen.getByRole("button", { name: /open externall…
+     99| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/7]⎯
+
+ FAIL  src/components/FilePreviewVideo.test.tsx > FilePreviewVideo > surfaces a decode failure as a recoverable UnsupportedFormat error
+AssertionError: expected "spy" to be called 1 times, but got 0 times
+ ❯ src/components/FilePreviewVideo.test.tsx:121:23
+    119|     fireEvent.error(video);
+    120| 
+    121|     expect(onFailure).toHaveBeenCalledTimes(1);
+       |                       ^
+    122|     const failure = onFailure.mock.calls[0][0] as FilePreviewFailure;
+    123|     expect(failure.reason).toBe("UnsupportedFormat");
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/7]⎯
+
+ FAIL  src/components/FilePreviewVideo.test.tsx > FilePreviewVideo > reports an unsupported source as UnsupportedFormat and a network error without inventing a reason
+TypeError: Cannot read properties of undefined (reading '0')
+ ❯ src/components/FilePreviewVideo.test.tsx:148:35
+    146|     setMediaError(videoElement(), MEDIA_ERR_SRC_NOT_SUPPORTED);
+    147|     fireEvent.error(videoElement());
+    148|     expect((onFailure.mock.calls[0][0] as FilePreviewFailure).reason).…
+       |                                   ^
+    149| 
+    150|     rerender(
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/7]⎯
+
+ FAIL  src/components/FilePreviewVideo.test.tsx > FilePreviewVideo > pauses, detaches the source and reloads the element when the preview closes
+AssertionError: expected "pause" to be called 1 times, but got 0 times
+ ❯ src/components/FilePreviewVideo.test.tsx:203:25
+    201|     unmount();
+    202| 
+    203|     expect(media.pause).toHaveBeenCalledTimes(1);
+       |                         ^
+    204|     expect(video.hasAttribute("src")).toBe(false);
+    205|     expect(media.load).toHaveBeenCalledTimes(1);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/7]⎯
+
+ FAIL  src/components/FilePreviewVideo.test.tsx > FilePreviewVideo > tears down the replaced element, mounts a fresh one and drops the stale failure
+TestingLibraryElementError: Unable to find an accessible element with the role "alert"
+
+There are no accessible roles. But there might be some inaccessible roles. If you wish to access them, then set the `hidden` option to `true`. Learn more about this here: https://testing-library.com/docs/dom-testing-library/api-queries#byrole
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mdata-testid[39m=[32m"file-preview-video"[39m
+    [36m>[39m
+      [36m<video[39m
+        [33mcontrols[39m=[32m""[39m
+        [33mdata-testid[39m=[32m"file-preview-video-element"[39m
+        [33msrc[39m=[32m"http://127.0.0.1:47531/media/handle-1"[39m
+      [36m/>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ Object.getElementError node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/components/FilePreviewVideo.test.tsx:222:19
+    220|     setMediaError(firstVideo, MEDIA_ERR_DECODE);
+    221|     fireEvent.error(firstVideo);
+    222|     expect(screen.getByRole("alert")).toBeInTheDocument();
+       |                   ^
+    223| 
+    224|     const second = videoPayload({
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/7]⎯
+
+ FAIL  src/components/FilePreviewVideo.test.tsx > FilePreviewVideo > reports a payload with no media URL instead of rendering an empty player
+AssertionError: expected "spy" to be called 1 times, but got 0 times
+ ❯ src/components/FilePreviewVideo.test.tsx:282:23
+    280| 
+    281|     expect(screen.queryByTestId("file-preview-video-element")).toBeNul…
+    282|     expect(onFailure).toHaveBeenCalledTimes(1);
+       |                       ^
+    283|     expect((onFailure.mock.calls[0][0] as FilePreviewFailure).reason).…
+    284|     expect(screen.getByRole("alert")).toBeInTheDocument();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/7]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  7 failed | 2 passed (9)
+   Start at  16:14:26
+   Duration  432ms (transform 32ms, setup 74ms, collect 27ms, tests 47ms, environment 158ms, prepare 24ms)
+
+error: "vitest" exited with code 1

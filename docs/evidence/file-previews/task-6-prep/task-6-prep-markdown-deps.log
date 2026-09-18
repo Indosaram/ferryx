@@ -1,0 +1,13 @@
+== markdown dependency smoke (temporary file, deleted after run) ==
+EXIT=0
+$ vitest run --maxWorkers=1 src/lib/__prepSmoke.markdownDeps.test.tsx
+
+ RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/preview/ui
+
+ ✓ src/lib/__prepSmoke.markdownDeps.test.tsx (1 test) 35ms
+
+ Test Files  1 passed (1)
+      Tests  1 passed (1)
+   Start at  16:07:18
+   Duration  831ms (transform 29ms, setup 126ms, collect 116ms, tests 35ms, environment 258ms, prepare 29ms)
+

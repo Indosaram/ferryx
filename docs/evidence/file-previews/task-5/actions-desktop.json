@@ -1,0 +1,134 @@
+[
+  {
+    "step": "metadata-loaded",
+    "at": "2026-09-15T07:24:25.393Z",
+    "preload": "metadata",
+    "controls": true,
+    "autoplay": false,
+    "paused": true,
+    "currentTime": 0,
+    "duration": 6,
+    "readyState": 4,
+    "videoWidth": 320,
+    "src": "/media/preview-fixture.webm"
+  },
+  {
+    "step": "play-started",
+    "at": "2026-09-15T07:24:25.453Z",
+    "trigger": "native-controls-space-key",
+    "events": [
+      {
+        "currentTime": 0.005448,
+        "readyState": 4,
+        "paused": false
+      }
+    ],
+    "currentTime": 0.005472,
+    "duration": 6,
+    "paused": false,
+    "readyState": 4,
+    "videoWidth": 320,
+    "videoHeight": 240
+  },
+  {
+    "step": "playing",
+    "at": "2026-09-15T07:24:26.303Z",
+    "times": [
+      0.264359,
+      0.530565,
+      0.796029
+    ],
+    "presented": {
+      "mediaTime": 0.867,
+      "presentedFrames": 14,
+      "width": 320,
+      "height": 240
+    }
+  },
+  {
+    "step": "seeked",
+    "at": "2026-09-15T07:24:26.386Z",
+    "seeked": {
+      "events": [
+        {
+          "currentTime": 4.2,
+          "readyState": 4,
+          "paused": true
+        }
+      ],
+      "currentTime": 4.2,
+      "duration": 6,
+      "paused": true,
+      "readyState": 4,
+      "videoWidth": 320,
+      "videoHeight": 240
+    },
+    "presented": {
+      "mediaTime": 4.267,
+      "presentedFrames": 16,
+      "width": 320,
+      "height": 240
+    },
+    "pausedAt": 4.256329
+  },
+  {
+    "step": "unsupported-source-failure",
+    "at": "2026-09-15T07:24:26.436Z",
+    "alert": "broken.webm cannot be played here: this container or codec is not supported by the preview.Try again",
+    "log": [
+      {
+        "at": 1124,
+        "event": "onFailure",
+        "detail": {
+          "reason": "UnsupportedFormat",
+          "message": "broken.webm cannot be played here: this container or codec is not supported by the preview.",
+          "details": {
+            "reason": "UnsupportedFormat",
+            "displayName": "broken.webm"
+          }
+        }
+      }
+    ],
+    "mediaErrorCode": 4
+  },
+  {
+    "step": "recovery-callbacks",
+    "at": "2026-09-15T07:24:26.521Z",
+    "callbacks": [
+      "onFailure",
+      "onReload",
+      "onExternalOpen"
+    ]
+  },
+  {
+    "step": "replacement-teardown",
+    "at": "2026-09-15T07:24:26.547Z",
+    "connected": false,
+    "src": null,
+    "paused": true,
+    "currentSrc": "http://127.0.0.1:47531/not-a-video"
+  },
+  {
+    "step": "replacement-playing",
+    "at": "2026-09-15T07:24:27.070Z",
+    "replayedTimes": [
+      0.257343,
+      0.521715
+    ]
+  },
+  {
+    "step": "closed",
+    "at": "2026-09-15T07:24:27.097Z",
+    "connected": false,
+    "src": null,
+    "paused": true,
+    "networkState": 0,
+    "readyState": 0
+  },
+  {
+    "step": "stale-events-safe",
+    "at": "2026-09-15T07:24:27.125Z",
+    "failuresAfterClose": 1,
+    "consoleErrors": []
+  }
+]

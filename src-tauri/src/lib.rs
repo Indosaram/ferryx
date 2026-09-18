@@ -937,6 +937,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
     remote_manager.set_browser_backend(Arc::clone(&in_process_backend) as Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>);
     let in_process_backend_setup = Arc::clone(&in_process_backend);
     let browser_remote_service_setup = Arc::clone(&browser_remote_service);
+    let file_preview_service = tauri::async_runtime::block_on(crate::ipc::file_preview::FilePreviewService::start())
+        .expect("file preview service failed to start");
     #[cfg(feature = "native-terminal")]
     let native_terminal_surface_host = NativeTerminalSurfaceHostState::default();
     let setup_activations = Arc::clone(&notification_activations);
@@ -962,6 +964,16 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
 
     let builder = builder
         .on_window_event(|window, event| {
+            // R6: a destroyed window must never leave preview capabilities
+            // (retained descriptors, capability URLs) behind.
+            if let tauri::WindowEvent::Destroyed = event {
+                if let Some(service) = window
+                    .app_handle()
+                    .try_state::<Arc<crate::ipc::file_preview::FilePreviewService>>()
+                {
+                    service.close_window(window.label());
+                }
+            }
             #[cfg(target_os = "macos")]
             if let tauri::WindowEvent::DragDrop(drag_event) = event {
                 if crate::ipc::debug::switch_debug_sink_enabled(
@@ -1012,7 +1024,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                 }
             }
             #[cfg(not(target_os = "macos"))]
-            let _ = (window, event);
+            let _ = event;
         })
         .setup(move |app| {
             #[cfg(target_os = "macos")]
@@ -1112,7 +1124,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         .manage(browser_remote_service)
         .manage(browser_manager)
         .manage(Arc::clone(&in_process_backend) as Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>)
-        .manage(in_process_backend);
+        .manage(in_process_backend)
+        .manage(file_preview_service);
 
     #[cfg(desktop)]
     let builder = if crate::ipc::updater::updater_managed_externally() {
@@ -1132,6 +1145,10 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         crate::ipc::paired_host::paired_host_pair,
         crate::ipc::paired_host::paired_host_migrate_legacy,
         crate::ipc::paired_host::paired_host_forget,
+        crate::ipc::file_preview::cmd_file_preview_open,
+        crate::ipc::file_preview::cmd_file_preview_open_child,
+        crate::ipc::file_preview::cmd_file_preview_open_child_document,
+        crate::ipc::file_preview::cmd_file_preview_close,
         crate::ipc::updater::cmd_updater_managed_externally,
         crate::ipc::updater::cmd_distribution_channel,
         cmd_switch_debug_log,
