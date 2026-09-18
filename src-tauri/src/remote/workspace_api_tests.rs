@@ -415,7 +415,7 @@ async fn r12_unreadable_root() {
     let (token, _) = state.auth_manager.exchange_pairing_code(&pin, "repair").unwrap();
     let mut headers = HeaderMap::new();
     headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
-    std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0)).unwrap();
+    std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o0)).unwrap();
     let response = super::workspace_api::list(State(state.clone()), headers.clone()).await;
     let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
     std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o700)).unwrap();

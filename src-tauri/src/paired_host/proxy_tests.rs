@@ -136,7 +136,10 @@ async fn socket_fixture(native: bool, drop_connected: bool, spontaneous: Option<
         assert!(terminal.pty_manager().list_sessions().is_empty());
     }
     drop(proxy);
-    assert!(!hub.has_session(&id));
+    assert_eq!(hub.has_session(&id), spontaneous != Some(true));
+    assert!(!hub.transport_owner(&id));
+    let reattach_descriptor = Descriptor { host_id: host.host_id.clone(), generation: host.generation, target: m::RemoteTerminalTarget { machine_id: "a".into(), daemon_epoch: Epoch(1), session_id: "s".into() }, after_sequence: None };
+    assert!(Proxy::new(reattach_descriptor, hub.clone()).is_ok());
     tokio::time::timeout(Duration::from_secs(5), closed_rx).await.unwrap().unwrap();
     shutdown.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();

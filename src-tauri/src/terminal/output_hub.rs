@@ -396,6 +396,7 @@ struct SessionHub {
 #[derive(Clone)]
 pub struct TerminalOutputHub {
     sessions: Arc<RwLock<HashMap<String, Arc<RwLock<SessionHub>>>>>,
+    transport_owners: Arc<RwLock<std::collections::HashSet<String>>>,
     capacity: usize,
 }
 
@@ -409,6 +410,7 @@ impl TerminalOutputHub {
     pub fn new(capacity: usize) -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            transport_owners: Arc::new(RwLock::new(std::collections::HashSet::new())),
             capacity,
         }
     }
@@ -599,10 +601,23 @@ impl TerminalOutputHub {
 
     pub fn remove_session(&self, session_id: &str) {
         self.sessions.write().remove(session_id);
+        self.transport_owners.write().remove(session_id);
     }
 
     pub fn has_session(&self, session_id: &str) -> bool {
         self.sessions.read().contains_key(session_id)
+    }
+
+    pub fn claim_transport(&self, session_id: &str) -> bool {
+        self.transport_owners.write().insert(session_id.to_string())
+    }
+
+    pub fn release_transport(&self, session_id: &str) {
+        self.transport_owners.write().remove(session_id);
+    }
+
+    pub fn transport_owner(&self, session_id: &str) -> bool {
+        self.transport_owners.read().contains(session_id)
     }
 
     pub fn session_sequence_range(&self, session_id: &str) -> Option<(Option<u64>, Option<u64>)> {
@@ -630,6 +645,22 @@ impl TerminalOutputHub {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transport_claim_fences_live_owner_and_adopts_retained_history() {
+        let hub = TerminalOutputHub::new(1024);
+        hub.register_session("s");
+        hub.publish("s", b"history".to_vec());
+        assert!(hub.claim_transport("s"));
+        assert!(!hub.claim_transport("s"));
+        assert!(hub.transport_owner("s"));
+        hub.release_transport("s");
+        assert!(!hub.transport_owner("s"));
+        assert!(hub.has_session("s"));
+        let attachment = hub.subscribe_with_sequence("s", None).unwrap();
+        assert!(!attachment.snapshot.history.is_empty());
+        assert!(hub.claim_transport("s"));
+    }
 
     #[tokio::test]
     async fn ssh_process_survival_gap_precedes_recovered_bytes_and_invalidates_history() {

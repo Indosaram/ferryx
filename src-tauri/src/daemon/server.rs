@@ -2154,6 +2154,10 @@ impl DaemonServer {
                     Ok(()) => DaemonResponse::PairedHostForgetOk,
                     Err(error) => DaemonResponse::PairedHostError { error },
                 },
+                Ok(DaemonRequest::PairedHostRevoke { host_id, generation }) => {
+                    self.paired_hosts.revoke_on_auth_failure(host_id, generation).await;
+                    DaemonResponse::PairedHostForgetOk
+                }
                 Ok(DaemonRequest::GetCapabilities) => {
                     let mut capabilities = vec!["machinePairingV1".into(), "sshPasswordV1".into()];
                     if self.paired_hosts.available().await { capabilities.push("pairedHostInventoryV1".into()); }

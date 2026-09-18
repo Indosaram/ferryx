@@ -110,6 +110,15 @@ impl ClientError {
             ambiguous: false,
         }
     }
+    /// R5-N3: a structured machine rejection is definitive — the remote
+    /// processed and refused the request, so it must stay non-ambiguous.
+    /// Only transport/decode uncertainty (no machine_error) may be relabeled.
+    pub(crate) fn relabel_transport_uncertainty(&mut self, request_id: &str) {
+        self.request_id = Some(request_id.to_string());
+        if self.machine_error.is_none() {
+            self.ambiguous = true;
+        }
+    }
 }
 impl From<ServiceError> for ClientError {
     fn from(e: ServiceError) -> Self {
@@ -679,8 +688,7 @@ impl MachineClient {
                 Ok(bytes) => bytes,
                 Err(mut e) => {
                     if let Some(id) = &route.request_id {
-                        e.request_id = Some(id.clone());
-                        e.ambiguous = true;
+                        e.relabel_transport_uncertainty(id);
                     }
                     return Err(e);
                 }

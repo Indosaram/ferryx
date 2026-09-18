@@ -261,6 +261,8 @@ pub enum DaemonRequest {
     PairedHostMigrateLegacy { request: crate::paired_host::service::MigrationRequest },
     #[serde(rename_all = "camelCase")]
     PairedHostForget { host_id: String, expected_generation: crate::scoped_contracts::Epoch },
+    #[serde(rename_all = "camelCase")]
+    PairedHostRevoke { host_id: String, generation: crate::scoped_contracts::Epoch },
     /// Separate variant: an old daemon rejects machine issuance instead of
     /// ignoring an unknown scope field and accidentally issuing a mirror PIN.
     RemoteCreateMachinePairingCode,

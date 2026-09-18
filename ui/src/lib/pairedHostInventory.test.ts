@@ -211,6 +211,50 @@ it("subscribes app-wide to native inventory generation/online/auth change events
   expect(store.getState().hosts[hostId].online).toBe(false);
   expect(store.getState().hosts[hostId].authStatus).toBe("revoked");
 });
+it("R5-N4: authoritative revoke sets a generation barrier and stale lists cannot resurrect paired state", async () => {
+  let eventHandler!: (event: { payload: any }) => void;
+  vi.mocked(listen).mockImplementation(async (name, handler) => {
+    if (name === "paired_host_inventory_changed") {
+      eventHandler = handler as any;
+    }
+    return () => {};
+  });
+  const { inventory, store, commands } = fixture();
+  await inventory.refresh();
+  expect(store.getState().hosts[hostId].authStatus).toBe("paired");
+
+  await (inventory as any).subscribeAppWide();
+
+  // The authoritative daemon revoke carries the post-bump view: generation 10, revoked.
+  eventHandler({
+    payload: {
+      type: "revoke",
+      hostId,
+      generation: "10",
+      host: { ...view, generation: "10", authStatus: "revoked", online: false },
+    },
+  });
+  expect(store.getState().hosts[hostId].authStatus).toBe("revoked");
+  expect(store.getState().hosts[hostId].generation).toBe("10");
+
+  // A refresh started after the revoke that still returns the stale cached
+  // paired row (generation 9) must not resurrect paired state. Fail-safe is
+  // rejection (the entry is dropped or stays revoked), never paired again.
+  const staleList = deferred<HostView[]>();
+  vi.mocked(commands.list).mockReturnValueOnce(staleList.promise);
+  const refreshPromise = inventory.refresh();
+  staleList.resolve([{ ...view, authStatus: "paired", online: true }]);
+  await refreshPromise;
+  const afterStale = store.getState().hosts[hostId];
+  expect(afterStale?.authStatus ?? "revoked").toBe("revoked");
+  expect(afterStale?.authStatus).not.toBe("paired");
+
+  // A legitimately re-paired newer generation lifts the barrier.
+  vi.mocked(commands.list).mockResolvedValueOnce([{ ...view, generation: "11", authStatus: "paired", online: true }]);
+  await inventory.refresh();
+  expect(store.getState().hosts[hostId].authStatus).toBe("paired");
+  expect(store.getState().hosts[hostId].generation).toBe("11");
+});
 it("preserves structured error {code, message, details, retryable} on pair failure", async () => {
   const { inventory, commands } = fixture();
   const structuredError = {

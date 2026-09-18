@@ -196,6 +196,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::PairedHostPair { .. } => "pairedHostPair",
         DaemonRequest::PairedHostMigrateLegacy { .. } => "pairedHostMigrateLegacy",
         DaemonRequest::PairedHostForget { .. } => "pairedHostForget",
+        DaemonRequest::PairedHostRevoke { .. } => "pairedHostRevoke",
         DaemonRequest::RemoteCreateMachinePairingCode => "remoteCreateMachinePairingCode",
         DaemonRequest::RemoteConfigure { .. } => "remoteConfigure",
         DaemonRequest::RemoteCreatePairingCode { .. } => "remoteCreatePairingCode",
@@ -581,19 +582,35 @@ impl DaemonClient {
             | Operation::Worktrees { .. } | Operation::WorktreeStatus { .. }
             | Operation::Sessions { .. } | Operation::Session { .. } | Operation::Operation { .. } => None,
         };
-        // IPC cannot establish whether the remote mutation committed. In particular,
-        // its retained 35s deadline can expire during the inner 40s HTTP attempt.
-        // Preserve reconciliation identity without retrying or changing daemon errors.
         let transport_error = |error: crate::paired_host::service::ServiceError| ClientError {
             code: error.code,
             machine_error: None,
             ambiguous: request_id.is_some(),
             request_id: request_id.clone(),
         };
-        match self.paired_host_request(DaemonRequest::PairedHostOperation { request }).await.map_err(&transport_error)? {
+        // IPC cannot establish whether the remote mutation committed. In particular,
+        // its retained 35s deadline can expire during the inner 40s HTTP attempt.
+        // Preserve reconciliation identity without retrying or changing daemon errors.
+        let host_id = request.host_id.clone();
+        let generation = request.generation;
+        let result = match self.paired_host_request(DaemonRequest::PairedHostOperation { request }).await.map_err(&transport_error)? {
             DaemonResponse::PairedHostOperationOk { response } => Ok(response),
             DaemonResponse::PairedHostOperationError { error } => Err(error),
             _ => Err(transport_error(crate::paired_host::service::ServiceError::unavailable())),
+        };
+        match result {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                // R5-N4: a definitive UNAUTHORIZED must fence the native inventory
+                // to a revoked state; otherwise a later same-generation cached
+                // event or list resurrects paired UI state without reauthentication.
+                if error.code == "UNAUTHORIZED" {
+                    let _ = self
+                        .paired_host_request(DaemonRequest::PairedHostRevoke { host_id, generation })
+                        .await;
+                }
+                Err(error)
+            }
         }
     }
     pub async fn paired_host_capabilities(&self) -> crate::paired_host::service::Result<serde_json::Value> {

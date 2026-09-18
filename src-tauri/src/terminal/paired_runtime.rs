@@ -145,9 +145,18 @@ struct ReapOwner {
 impl Drop for ReapOwner {
     fn drop(&mut self) {
         if let Some(owners) = self.owners.upgrade() {
-            let mut owners = owners.lock();
-            if owners.get(&self.id).is_some_and(|owner| Arc::ptr_eq(&owner.identity, &self.identity)) {
-                owners.remove(&self.id);
+            // The cancel path can run synchronously while the aborting thread
+            // already holds this mutex: install holds it across tokio::spawn of
+            // the actor, and a runtime shutdown (or an Owner replaced under the
+            // lock) cancels the task from that same thread. A blocking re-lock
+            // would self-deadlock the non-reentrant mutex, so degrade to a
+            // try-lock; under contention the aborting context owns the map
+            // transition, and a skipped removal is inert because every live-task
+            // check filters finished entries.
+            if let Some(mut owners) = owners.try_lock() {
+                if owners.get(&self.id).is_some_and(|owner| Arc::ptr_eq(&owner.identity, &self.identity)) {
+                    owners.remove(&self.id);
+                }
             }
         }
         #[cfg(test)]
@@ -781,7 +790,12 @@ mod tests {
             }
         });
 
-        let res = tokio::time::timeout(Duration::from_secs(3), async {
+        // The deadline exists to catch an opposite-lock-order deadlock, which
+        // never completes; 200 serialized temp-file+rename cycles on this
+        // volume legitimately exceed a few seconds under load, so a tight
+        // bound produces false failures (and, before the ReapOwner try-lock
+        // fix, a wedged suite shutdown). Keep it generous but finite.
+        let res = tokio::time::timeout(Duration::from_secs(30), async {
             let (res1, res2) = tokio::join!(t1, t2);
             res1.unwrap();
             res2.unwrap();

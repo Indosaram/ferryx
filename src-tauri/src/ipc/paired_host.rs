@@ -72,20 +72,11 @@ pub async fn paired_host_pair<R: tauri::Runtime>(
 
 #[tauri::command]
 pub async fn paired_host_migrate_legacy<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
+    _app: tauri::AppHandle<R>,
     daemon: State<'_, Arc<DaemonClient>>,
     request: MigrationRequest,
 ) -> Result<MigrationReceipt> {
     let receipt = daemon.paired_host_migrate_legacy(request).await?;
-    let _ = emit_paired_host_inventory_changed(
-        &app,
-        &InventoryChangeEvent {
-            r#type: "migrate".into(),
-            host: None,
-            host_id: Some(receipt.host_id.clone()),
-            generation: Some(receipt.generation.0.to_string()),
-        },
-    );
     Ok(receipt)
 }
 

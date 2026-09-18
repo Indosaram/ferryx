@@ -1190,6 +1190,9 @@ fn default_pending_cleanups_path() -> Option<std::path::PathBuf> {
 }
 #[cfg(test)]
 fn default_pending_cleanups_path() -> Option<std::path::PathBuf> {
+    if let Ok(dir) = std::env::var("FERRYX_PAIRED_PENDING_CLEANUPS_DIR") {
+        return Some(std::path::PathBuf::from(dir).join("paired_pending_cleanups.json"));
+    }
     None
 }
 
@@ -1378,24 +1381,29 @@ pub async fn execute_cleanup_close(
 }
 
 pub async fn reap_cleanup_unknowns(daemon_client: &DaemonClient) -> usize {
-    let pending = {
-        let mut guard = PENDING_CLEANUPS.lock();
-        std::mem::take(&mut *guard)
-    };
+    ensure_pending_cleanups_loaded();
+    // P11: the reaper works on a cloned snapshot while every unresolved record
+    // stays in the authoritative pending vector — persistable at all times, so a
+    // restart during any network await cannot lose an outstanding cleanup intent.
+    let snapshot: Vec<CleanupRecord> = PENDING_CLEANUPS.lock().clone();
 
-    let mut remaining = Vec::new();
     let mut resolved_count = 0;
     const MAX_REAP_ATTEMPTS: usize = 3;
 
-    for mut item in pending {
+    for mut item in snapshot {
         if item.attempts >= MAX_REAP_ATTEMPTS {
             // P11: exhausted cleanups must be retained, not silently dropped —
             // the uncertainty is still real and must stay observable/diagnosable.
+            retain_pending_cleanups(&item.cleanup_request_id);
             EXHAUSTED_CLEANUPS.lock().push(item);
             persist_pending_cleanups();
             continue;
         }
         item.attempts += 1;
+        // Persist the attempt bump before the network await: a crash mid-await
+        // keeps both the record and its attempt progression on disk.
+        upsert_pending_cleanups(item.clone());
+        persist_pending_cleanups();
 
         let journal_req = crate::paired_host::client::OperationRequest {
             host_id: item.host_id.clone(),
@@ -1410,18 +1418,17 @@ pub async fn reap_cleanup_unknowns(daemon_client: &DaemonClient) -> usize {
                 if let crate::paired_host::client::OperationResult::Operation(
                     crate::remote::machine_protocol::Operation::Completed { outcome, .. },
                 ) = resp.result {
-                    match outcome {
-                        crate::remote::machine_protocol::OperationOutcome::Error { .. } => {
-                            item.resolved = true;
-                            EXHAUSTED_CLEANUPS.lock().push(item);
-                            resolved_count += 1;
-                            continue;
-                        }
-                        _ => {
-                            resolved_count += 1;
-                            continue;
-                        }
+                    retain_pending_cleanups(&item.cleanup_request_id);
+                    if matches!(
+                        outcome,
+                        crate::remote::machine_protocol::OperationOutcome::Error { .. }
+                    ) {
+                        item.resolved = true;
+                        EXHAUSTED_CLEANUPS.lock().push(item);
                     }
+                    resolved_count += 1;
+                    persist_pending_cleanups();
+                    continue;
                 }
             }
             Err(e) => {
@@ -1440,20 +1447,34 @@ pub async fn reap_cleanup_unknowns(daemon_client: &DaemonClient) -> usize {
                         },
                     };
                     if daemon_client.paired_host_operation(retry_op).await.is_ok() {
+                        retain_pending_cleanups(&item.cleanup_request_id);
                         resolved_count += 1;
+                        persist_pending_cleanups();
                         continue;
                     }
                 }
             }
         }
-        remaining.push(item);
     }
-
-    let mut guard = PENDING_CLEANUPS.lock();
-    guard.extend(remaining);
-    drop(guard);
-    persist_pending_cleanups();
     resolved_count
+}
+
+fn retain_pending_cleanups(cleanup_request_id: &str) {
+    PENDING_CLEANUPS
+        .lock()
+        .retain(|r| r.cleanup_request_id != cleanup_request_id);
+}
+
+fn upsert_pending_cleanups(record: CleanupRecord) {
+    let mut guard = PENDING_CLEANUPS.lock();
+    if let Some(existing) = guard
+        .iter_mut()
+        .find(|r| r.cleanup_request_id == record.cleanup_request_id)
+    {
+        *existing = record;
+    } else {
+        guard.push(record);
+    }
 }
 
 #[tauri::command]
@@ -1702,6 +1723,8 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
             startup: crate::remote::machine_protocol::Startup::Shell,
         };
 
+        let mut active_request_id = client_request_id.clone();
+
         let mut op_resp = daemon_client
             .paired_host_operation(crate::paired_host::client::OperationRequest {
                 host_id: host_id.clone(),
@@ -1719,8 +1742,10 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                     error = %e.code,
                     "Retrying paired session spawn without parent session inheritance"
                 );
+                let fallback_request_id = uuid::Uuid::new_v4().to_string();
+                active_request_id = fallback_request_id.clone();
                 let fallback_request = crate::remote::machine_protocol::CreateSessionRequest {
-                    request_id: uuid::Uuid::new_v4().to_string(),
+                    request_id: fallback_request_id,
                     inherit_from_session_id: None,
                     cwd_relative: cwd_relative.clone(),
                     ..create_request
@@ -1745,13 +1770,13 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                 }
             },
             Err(ref e) if e.ambiguous || matches!(e.code.as_str(), "TIMEOUT" | "OPERATION_OUTCOME_UNKNOWN") => {
-                match reconcile_ambiguous_create(&daemon_client, &host_id, host.generation, &client_request_id, false).await? {
+                match reconcile_ambiguous_create(&daemon_client, &host_id, host.generation, &active_request_id, false).await? {
                     Some(session) => session,
                     None => {
                         let unknown_err = crate::paired_host::client::ClientError {
                             code: "OPERATION_OUTCOME_UNKNOWN".to_string(),
                             machine_error: None,
-                            request_id: Some(client_request_id.clone()),
+                            request_id: Some(active_request_id.clone()),
                             ambiguous: true,
                         };
                         return Err(map_client_error(&unknown_err, Some(&host_id), Some(host.generation)));
@@ -2531,6 +2556,53 @@ pub(crate) fn map_client_error(
 mod tests {
     use super::*;
     use crate::ipc::IpcErrorCode;
+
+    #[tokio::test]
+    async fn p11_reap_keeps_unresolved_cleanup_in_authoritative_and_persisted_state() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _env_guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("FERRYX_PAIRED_PENDING_CLEANUPS_DIR", dir.path());
+        clear_pending_cleanups_for_test();
+        clear_exhausted_cleanups_for_test();
+
+        let record = |request_id: &str, attempts: usize| CleanupRecord {
+            host_id: format!("host-{request_id}"),
+            generation: crate::scoped_contracts::Epoch(1),
+            session_id: format!("sess-{request_id}"),
+            daemon_epoch: crate::scoped_contracts::Epoch(1),
+            cleanup_request_id: request_id.to_string(),
+            attempts,
+            resolved: false,
+        };
+        PENDING_CLEANUPS.lock().push(record("cleanup-exhausted", 3));
+        PENDING_CLEANUPS.lock().push(record("cleanup-unresolved", 0));
+
+        let socket = dir.path().join("never-answers.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let client = crate::daemon::client::DaemonClient::new_with_socket(socket);
+
+        let reap = reap_cleanup_unknowns(&client);
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(250), reap).await;
+
+        assert!(get_pending_cleanups().iter().any(|r| r.cleanup_request_id == "cleanup-unresolved"));
+        assert!(get_exhausted_cleanups().iter().any(|r| r.cleanup_request_id == "cleanup-exhausted"));
+
+        let data = std::fs::read(dir.path().join("paired_pending_cleanups.json")).unwrap();
+        #[derive(serde::Deserialize)]
+        struct Saved {
+            pending: Vec<serde_json::Value>,
+            exhausted: Vec<serde_json::Value>,
+        }
+        let saved: Saved = serde_json::from_slice(&data).unwrap();
+        assert!(saved.pending.iter().any(|v| v.get("cleanup_request_id").and_then(|s| s.as_str()) == Some("cleanup-unresolved")));
+        assert!(saved.exhausted.iter().any(|v| v.get("cleanup_request_id").and_then(|s| s.as_str()) == Some("cleanup-exhausted")));
+
+        std::env::remove_var("FERRYX_PAIRED_PENDING_CLEANUPS_DIR");
+        clear_pending_cleanups_for_test();
+        clear_exhausted_cleanups_for_test();
+        drop(listener);
+    }
 
     #[test]
     fn test_p08_client_error_surfaces_as_typed_ipc_error_code_and_not_internal() {

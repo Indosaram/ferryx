@@ -97,6 +97,38 @@ mod native_transport_tests {
             assert!(inventory::normalize_origin(origin).is_err());
         }
     }
+
+    #[test]
+    fn r5_n1_multibyte_error_message_truncates_on_char_boundary() {
+        let message: String = "あ".repeat(200);
+        let body = format!(r#"{{"message":"{message}"}}"#);
+        let error = map_http_error(reqwest::StatusCode::BAD_REQUEST, body.as_bytes());
+        assert_eq!(error.message.chars().count(), 170);
+        assert_eq!(error.message.len(), 510);
+    }
+
+    #[test]
+    fn r5_n1_mixed_boundary_message_stays_valid_utf8() {
+        let ascii: String = "a".repeat(170);
+        let multibyte: String = "あ".repeat(171);
+        let body = format!(r#"{{"message":"{ascii}{multibyte}"}}"#);
+        let error = map_http_error(reqwest::StatusCode::BAD_REQUEST, body.as_bytes());
+        assert!(error.message.ends_with('あ'));
+    }
+
+    #[test]
+    fn r5_n2_error_details_projection_is_allowlisted_and_sanitized() {
+        let body = r#"{"code":"UNAUTHORIZED","message":"denied","details":{"hint":"check relay","deviceToken":"0123456789abcdef0123456789abcdef"},"request_id":"req-1","machine_id":"m","nested":{"token":"t"}}"#;
+        let error = map_http_error(reqwest::StatusCode::UNAUTHORIZED, body.as_bytes());
+        assert_eq!(error.code, "UNAUTHORIZED");
+        let details = error.details.expect("safe details retained");
+        assert_eq!(details.get("hint").and_then(|v| v.as_str()), Some("check relay"));
+        assert_eq!(details.get("request_id").and_then(|v| v.as_str()), Some("req-1"));
+        assert!(details.get("deviceToken").is_none());
+        assert!(details.get("machine_id").is_none());
+        assert!(details.get("nested").is_none());
+        assert!(!serde_json::to_string(&details).unwrap().contains("0123456789abcdef"));
+    }
 }
 
 use super::inventory::{self, GrantScope, HostView, Inventory, InventoryError, LegacyCredential, MigrationReceipt, Pairing};
@@ -285,6 +317,32 @@ impl PairedHostService {
         }
         Ok(())
     }
+
+    pub async fn revoke_on_auth_failure(&self, host_id: String, generation: Epoch) {
+        let view = {
+            let id = host_id.clone();
+            self.run(move |store| {
+                store.mark_auth_unavailable(&id, generation, true)?;
+                store
+                    .list()
+                    .into_iter()
+                    .find(|v| v.host_id == id)
+                    .ok_or(InventoryError::Unavailable)
+            })
+            .await
+        };
+        if let Ok(view) = view {
+            let generation = view.generation.0.to_string();
+            if let Some(sink) = &self.event_sink {
+                sink(InventoryChangeEvent {
+                    r#type: "revoke".into(),
+                    host: Some(view),
+                    host_id: Some(host_id),
+                    generation: Some(generation),
+                });
+            }
+        }
+    }
     async fn json<T: DeserializeOwned>(&self, request: reqwest::RequestBuilder) -> Result<T> {
         let response = match request.send().await {
             Ok(resp) => resp,
@@ -424,21 +482,22 @@ impl PairedHostService {
         }).await
     }
     pub async fn migrate_legacy(&self, request: MigrationRequest) -> Result<MigrationReceipt> {
-        let receipt = tokio::time::timeout(Duration::from_secs(20), self.migrate_inner(request))
+        let (receipt, view) = tokio::time::timeout(Duration::from_secs(20), self.migrate_inner(request))
             .await
             .map_err(|_| ServiceError::migration())?
             .map_err(|_| ServiceError::migration())?;
+        let generation = receipt.generation.0.to_string();
         if let Some(sink) = &self.event_sink {
             sink(InventoryChangeEvent {
                 r#type: "migrate".into(),
-                host: None,
+                host: Some(view),
                 host_id: Some(receipt.host_id.clone()),
-                generation: Some(receipt.generation.0.to_string()),
+                generation: Some(generation),
             });
         }
         Ok(receipt)
     }
-    async fn migrate_inner(&self, request: MigrationRequest) -> Result<MigrationReceipt> {
+    async fn migrate_inner(&self, request: MigrationRequest) -> Result<(MigrationReceipt, HostView)> {
         let origin = self.origin(&request.relay_origin)?;
         let host_id = inventory::host_key(&origin, &request.machine_id)?;
         let snapshot = self.run(|store| store.generation_snapshot()).await?;
@@ -449,7 +508,13 @@ impl PairedHostService {
         }};
         self.run(move |store| {
             if store.generation_snapshot()?.get(&legacy.host_id) != snapshot.get(&legacy.host_id) { return Err(InventoryError::MigrationPending); }
-            store.migrate_copy(&legacy)
+            let receipt = store.migrate_copy(&legacy)?;
+            let view = store
+                .list()
+                .into_iter()
+                .find(|v| v.host_id == receipt.host_id)
+                .ok_or(InventoryError::MigrationPending)?;
+            Ok((receipt, view))
         }).await
     }
 }
@@ -538,13 +603,7 @@ fn map_http_error(status: reqwest::StatusCode, bytes: &[u8]) -> ServiceError {
     };
 
     let message = if let Some(msg) = raw_message {
-        let trimmed = msg.trim();
-        let bounded = if trimmed.len() > 512 {
-            &trimmed[..512]
-        } else {
-            trimmed
-        };
-        sanitize_error_text(bounded)
+        sanitize_error_text(truncate_utf8_boundary(msg.trim(), 512))
     } else {
         match code {
             "PIN_NOT_FOUND" => "The pairing PIN was not found or is invalid".into(),
@@ -559,24 +618,7 @@ fn map_http_error(status: reqwest::StatusCode, bytes: &[u8]) -> ServiceError {
         }
     };
 
-    let details = json_obj.as_ref().and_then(|v| {
-        v.get("details").cloned().or_else(|| {
-            if let Some(map) = v.as_object() {
-                let filtered: serde_json::Map<String, serde_json::Value> = map
-                    .iter()
-                    .filter(|(k, _)| *k != "code" && *k != "message" && *k != "error")
-                    .map(|(k, val)| (k.clone(), val.clone()))
-                    .collect();
-                if !filtered.is_empty() {
-                    Some(serde_json::Value::Object(filtered))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        })
-    });
+    let details = project_safe_details(json_obj.as_ref());
 
     ServiceError {
         code: code.into(),
@@ -588,6 +630,38 @@ fn map_http_error(status: reqwest::StatusCode, bytes: &[u8]) -> ServiceError {
 
 fn is_retryable_http_status(status: u16) -> bool {
     matches!(status, 429 | 502 | 503 | 504)
+}
+
+fn truncate_utf8_boundary(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+fn project_safe_details(json_obj: Option<&serde_json::Value>) -> Option<serde_json::Value> {
+    const SAFE_DETAIL_KEYS: [&str; 4] = ["request_id", "reason", "hint", "detail"];
+    let obj = json_obj?.as_object()?;
+    let mut projected = serde_json::Map::new();
+    let sources = [obj.get("details").and_then(|d| d.as_object()), Some(obj)];
+    for source in sources.into_iter().flatten() {
+        for key in SAFE_DETAIL_KEYS {
+            if projected.contains_key(key) {
+                continue;
+            }
+            if let Some(value) = source.get(key).and_then(serde_json::Value::as_str) {
+                let sanitized = sanitize_error_text(truncate_utf8_boundary(value.trim(), 512));
+                if !sanitized.is_empty() {
+                    projected.insert(key.to_string(), serde_json::Value::String(sanitized));
+                }
+            }
+        }
+    }
+    if projected.is_empty() { None } else { Some(serde_json::Value::Object(projected)) }
 }
 
 fn sanitize_error_text(text: &str) -> String {

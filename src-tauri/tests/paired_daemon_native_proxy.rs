@@ -11,7 +11,7 @@ async fn a23_slow_consumer_is_bounded_and_drop_removes_host_qualified_entries() 
     other.host_id = "b".into();
     let b = Proxy::new(other, hub.clone()).unwrap();
     assert_ne!(a.id(), b.id());
-    assert!(Proxy::new(descriptor, hub.clone()).is_err());
+    assert!(Proxy::new(descriptor.clone(), hub.clone()).is_err());
     let mut slow = hub.subscribe_with_sequence(a.id(), None).unwrap().receiver;
     for _ in 0..4096 { hub.publish(a.id(), vec![b'x'; 16]); }
     assert!(matches!(slow.try_recv(), Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_))));
@@ -21,7 +21,18 @@ async fn a23_slow_consumer_is_bounded_and_drop_removes_host_qualified_entries() 
     let ids = [a.id().to_owned(), b.id().to_owned()];
     drop(a);
     drop(b);
-    for id in ids { assert!(!hub.has_session(&id)); }
+    // R4-N3: an unconfirmed exit releases the transport claim but retains the
+    // host-qualified entry so the next proxy can adopt the retained history.
+    let other_b = Descriptor { host_id: "b".into(), generation: Epoch(1), target: RemoteTerminalTarget { machine_id: "machine".into(), daemon_epoch: Epoch(1), session_id: "same".into() }, after_sequence: None };
+    for id in &ids {
+        assert!(!hub.transport_owner(id));
+        assert!(hub.has_session(id));
+    }
+    assert!(Proxy::new(descriptor, hub.clone()).is_ok());
+    assert!(Proxy::new(other_b, hub.clone()).is_ok());
+    // Explicitly confirmed exits clear the entries and synchronously close the
+    // retained broadcast queues.
+    for id in &ids { hub.remove_session(id); }
     // Drain a finite retained broadcast queue; closure is synchronous, not time-based.
     while slow.try_recv().is_ok() {}
     assert!(matches!(slow.try_recv(), Err(tokio::sync::broadcast::error::TryRecvError::Closed)));

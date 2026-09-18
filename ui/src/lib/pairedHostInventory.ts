@@ -24,7 +24,7 @@ export interface LegacyCredentialRequest { relayOrigin: string; machineId: strin
 export interface PairedHostError {
   code: string;
   message: string;
-  details?: unknown;
+  details?: Record<string, string>;
   retryable: boolean;
 }
 
@@ -51,7 +51,7 @@ export function extractPairedHostError(err: unknown): PairedHostError {
       const message = rawMessage
         .replace(/[0-9a-fA-F]{32,}/g, "[REDACTED]")
         .replace(/\b[0-9]{6}\b/g, "[REDACTED]");
-      const details = obj.details;
+      const details = sanitizeErrorDetails(obj.details);
       const retryable = typeof obj.retryable === "boolean"
         ? obj.retryable
         : isRetryableCode(code);
@@ -90,6 +90,19 @@ function isRetryableCode(code: string): boolean {
     default:
       return true;
   }
+}
+
+function sanitizeErrorDetails(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const out: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (typeof entry !== "string") return undefined; // fail closed on unexpected shapes
+    const sanitized = entry
+      .replace(/[0-9a-fA-F]{32,}/g, "[REDACTED]")
+      .replace(/\b[0-9]{6}\b/g, "[REDACTED]");
+    out[key] = sanitized;
+  }
+  return out;
 }
 
 export interface PairedHostCommands {
@@ -227,6 +240,7 @@ export function createPairedHostInventory(store: RemoteHostStore, commands = nat
   let appWideUnlisten: InventoryUnlisten | null = null;
   const fencedGenerations = new Map<string, bigint>();
   const tombstones = new Map<string, bigint>();
+  const revokedGenerations = new Map<string, bigint>();
 
   // Machine features follow native inventory readiness alone; there is no
   // user-facing rollout gate. A local inventory failure fails closed below.
@@ -259,6 +273,13 @@ export function createPairedHostInventory(store: RemoteHostStore, commands = nat
     const tombstoneGen = tombstones.get(hostId);
     if (tombstoneGen !== undefined && incomingGen <= tombstoneGen) {
       return false; // forgotten at equal or newer generation
+    }
+    const revokedGen = revokedGenerations.get(hostId);
+    if (revokedGen !== undefined) {
+      // R5-N4: same-generation or older cached events/lists must not resurrect
+      // paired state after a definitive revocation.
+      if (incomingGen <= revokedGen && view.authStatus !== "revoked") return false;
+      if (incomingGen > revokedGen && view.authStatus === "paired") revokedGenerations.delete(hostId);
     }
     fencedGenerations.set(hostId, incomingGen);
     tombstones.delete(hostId);
@@ -299,15 +320,26 @@ export function createPairedHostInventory(store: RemoteHostStore, commands = nat
     } else if (event.type === "revoke") {
       if (event.hostId) {
         const existing = store.getState().hosts[event.hostId];
-        if (existing) {
-          if (event.generation && existing.generation) {
-            try {
-              if (BigInt(event.generation) < BigInt(existing.generation)) {
-                // R3-N4: stale revoke event for an older generation; ignore
-                return;
-              }
-            } catch {}
-          }
+        const eventGen = event.host?.generation ?? event.generation;
+        if (existing && eventGen && existing.generation) {
+          try {
+            if (BigInt(eventGen) < BigInt(existing.generation)) {
+              // R3-N4: stale revoke event for an older generation; ignore
+              return;
+            }
+          } catch {}
+        }
+        const barrierGen = eventGen ?? existing?.generation;
+        if (barrierGen) {
+          try {
+            const gen = BigInt(barrierGen);
+            const current = revokedGenerations.get(event.hostId);
+            if (current === undefined || gen > current) revokedGenerations.set(event.hostId, gen);
+          } catch {}
+        }
+        if (event.host) {
+          updateHostWithFence(event.host);
+        } else if (existing) {
           store.upsertHost({ ...existing, authStatus: "revoked", online: false });
         }
       }
@@ -345,12 +377,18 @@ export function createPairedHostInventory(store: RemoteHostStore, commands = nat
         if (fenced !== undefined && gen < fenced) return false;
         const tomb = tombstones.get(v.hostId);
         if (tomb !== undefined && gen <= tomb) return false;
+        const revokedGen = revokedGenerations.get(v.hostId);
+        if (revokedGen !== undefined && gen <= revokedGen && v.authStatus !== "revoked") return false;
         return true;
       });
       const hosts = validViews.map(endpoint);
       if (request !== refreshRequest || started !== revision) return;
       for (const v of validViews) {
         fencedGenerations.set(v.hostId, BigInt(v.generation));
+        const revokedGen = revokedGenerations.get(v.hostId);
+        if (revokedGen !== undefined && BigInt(v.generation) > revokedGen && v.authStatus === "paired") {
+          revokedGenerations.delete(v.hostId);
+        }
       }
       proxyAvailable = capability.pairedDaemonProxyV1 === true;
       store.setHosts(hosts);
@@ -394,6 +432,7 @@ export function createPairedHostInventory(store: RemoteHostStore, commands = nat
       }
       fencedGenerations.set(host.hostId, BigInt(host.generation!));
       tombstones.delete(host.hostId);
+      revokedGenerations.delete(host.hostId);
       store.upsertHost(host);
       onPaired?.(host);
       return { ok: true, host };

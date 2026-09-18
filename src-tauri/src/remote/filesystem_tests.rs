@@ -239,7 +239,7 @@ async fn directory_http_fixture(inject_send_failure: bool) {
                 use std::os::unix::ffi::OsStringExt;
                 std::fs::create_dir(home.join(std::ffi::OsString::from_vec(vec![255]))).unwrap();
             }
-            std::fs::set_permissions(home.join("denied"), std::fs::Permissions::from_mode(0))
+            std::fs::set_permissions(home.join("denied"), std::fs::Permissions::from_mode(0o0))
                 .unwrap();
         }
         let daemon = crate::daemon::server::DaemonServer::new_with_paths(

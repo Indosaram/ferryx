@@ -398,7 +398,7 @@ mod tests {
         assert!(listing.truncated);
         assert!(listing.entries.len() <= 1000);
         assert!(output.stdout.len() <= 16384);
-        std::fs::set_permissions(fixture.path(), std::fs::Permissions::from_mode(0)).unwrap();
+        std::fs::set_permissions(fixture.path(), std::fs::Permissions::from_mode(0o0)).unwrap();
         let output = std::process::Command::new("sh")
             .args(["-c", &script])
             .output()

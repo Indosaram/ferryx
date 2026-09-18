@@ -60,8 +60,14 @@ pub struct Proxy {
 impl Proxy {
     pub fn new(descriptor: Descriptor, hub: Arc<TerminalOutputHub>) -> Result<Self> {
         let id = m::proxy_backend_id(&descriptor.host_id, &descriptor.target).map_err(|_| error("INVALID_REQUEST"))?;
-        if hub.has_session(&id) { return Err(error("CONTROL_CONFLICT")); }
-        hub.register_session(&id);
+        // R4-N3: live-transport ownership is fenced separately from the retained
+        // output entry. A retained hub (transport lost without confirmed exit) is
+        // adoptable by the next proxy instead of conflicting; only a live owner conflicts.
+        if !hub.claim_transport(&id) { return Err(error("CONTROL_CONFLICT")); }
+        // Adopting a retained entry must keep its buffered history and live
+        // subscribers: re-registering would reset the bounded buffer and drop
+        // the old broadcast sender.
+        if !hub.has_session(&id) { hub.register_session(&id); }
         Ok(Self { id, descriptor, hub, transport: None, controller: None, replay_pending: false, exited: false })
     }
     pub fn id(&self) -> &str { &self.id }
@@ -160,8 +166,39 @@ impl Proxy {
 }
 impl Drop for Proxy {
     fn drop(&mut self) {
+        self.hub.release_transport(&self.id);
         if self.exited {
             self.hub.remove_session(&self.id);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn descriptor() -> Descriptor {
+        Descriptor {
+            host_id: "host-key".into(),
+            generation: Epoch(1),
+            target: m::RemoteTerminalTarget {
+                machine_id: "m".into(),
+                daemon_epoch: Epoch(1),
+                session_id: "s".into(),
+            },
+            after_sequence: None,
+        }
+    }
+
+    #[test]
+    fn proxy_reclaims_retained_hub_entry_after_unconfirmed_exit() {
+        let hub = Arc::new(TerminalOutputHub::new(1024));
+        let first = Proxy::new(descriptor(), hub.clone()).unwrap();
+        assert!(Proxy::new(descriptor(), hub.clone()).is_err());
+        drop(first);
+        let second = Proxy::new(descriptor(), hub.clone()).unwrap();
+        assert!(hub.has_session(second.id()));
+        assert!(Proxy::new(descriptor(), hub.clone()).is_err());
+        drop(second);
     }
 }

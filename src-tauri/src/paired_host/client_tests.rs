@@ -881,4 +881,94 @@ async fn test_p14_inventory_mutation_emits_inventory_changed_event() {
     task.abort();
 }
 
+#[tokio::test]
+async fn test_r4_n1_migrate_event_carries_correlated_host_view() {
+    let root = crate::ipc::run_blocking(|| Ok(tempfile::tempdir().unwrap())).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let router = Router::new().route(
+        "/api/v1/pair/exchange",
+        post(|| async {
+            Json(json!({
+                "token": "fixture-secret",
+                "machineId": "a",
+                "device": {
+                    "id": "d",
+                    "name": "d",
+                    "permission": "control",
+                    "accessScope": "machine",
+                    "createdAt": 1,
+                    "lastSeenAt": 1
+                }
+            }))
+        }),
+    ).route(
+        "/host/a/api/v1/capabilities",
+        get(|| async { Json(caps("a")) }),
+    );
+    let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let mut service = PairedHostService::open_test_loopback(root.path().join("data"));
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    service.set_event_sink(std::sync::Arc::new(move |event| {
+        let _ = tx.send(event);
+    }));
+
+    let receipt = service
+        .migrate_legacy(super::super::service::MigrationRequest {
+            relay_origin: origin,
+            machine_id: "a".into(),
+            display_label: "fixture".into(),
+            device_token: Secret("fixture-secret".into()),
+        })
+        .await
+        .unwrap();
+
+    let event = rx.try_recv().expect("migrate must emit the inventory changed event");
+    assert_eq!(event.r#type, "migrate");
+    assert_eq!(event.host_id.as_deref(), Some(receipt.host_id.as_str()));
+    assert_eq!(event.generation.as_deref(), Some(receipt.generation.0.to_string().as_str()));
+    let event_host = event.host.as_ref().expect("R4-N1: migrate event must carry the correlated host view");
+    assert_eq!(event_host.host_id, receipt.host_id);
+    assert_eq!(event_host.generation, receipt.generation);
+
+    // The GUI fence keys on the serialized hostId/generation pair — assert the
+    // exact wire shape the IPC layer delivers to pairedHostInventory.ts.
+    let json_val = serde_json::to_value(&event).unwrap();
+    assert_eq!(json_val["type"], "migrate");
+    assert_eq!(json_val["host"]["hostId"], receipt.host_id);
+    assert_eq!(json_val["host"]["generation"], receipt.generation.0.to_string());
+
+    cleanup(root, task).await;
+}
+
+#[test]
+fn test_r5_n3_machine_rejection_stays_definitive_and_transport_uncertainty_relabeled() {
+    let mut machine = ClientError {
+        code: "UNAUTHORIZED".into(),
+        machine_error: Some(m::MachineError {
+            code: "UNAUTHORIZED".into(),
+            message: "denied".into(),
+            retryable: false,
+            request_id: "srv-1".into(),
+            details: Default::default(),
+        }),
+        request_id: None,
+        ambiguous: false,
+    };
+    machine.relabel_transport_uncertainty("req-1");
+    assert_eq!(machine.request_id.as_deref(), Some("req-1"));
+    assert!(!machine.ambiguous, "a structured machine rejection is definitive");
+
+    let mut transport = ClientError {
+        code: "TIMEOUT".into(),
+        machine_error: None,
+        request_id: None,
+        ambiguous: false,
+    };
+    transport.relabel_transport_uncertainty("req-2");
+    assert_eq!(transport.request_id.as_deref(), Some("req-2"));
+    assert!(transport.ambiguous, "transport uncertainty must be relabeled ambiguous");
+}
+
 
