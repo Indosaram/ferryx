@@ -1560,6 +1560,48 @@ describe("worktree tab and session isolation", () => {
       expect(noOpState).toBe(initialTerminalState);
     });
 
+    it("REBIND_SESSION_BACKEND on paired workspace updates remoteConnectionState to connected", () => {
+      const pairedWs = "daemon:111122223333444455556666777788889999aaaabbbbccccddddeeeeffff0000";
+      const initialState: WorkspaceState = {
+        worktrees: [worktree],
+        activeWorktreePath: worktree.path,
+        sessions: {
+          "paired-pane": {
+            id: "paired-pane",
+            cwd: "/remote/path",
+            worktreePath: "/remote/path",
+            workspaceId: pairedWs,
+            worktree: null,
+            backendSessionId: null,
+            lifecycle: "exited",
+            remoteConnectionState: "expired",
+            remoteFailure: null,
+          },
+        },
+        layout: createLayoutState([
+          { kind: "terminal", id: "tab-1", label: "Tab 1", sessionId: "paired-pane" },
+        ]),
+        unreadTabIds: {},
+        unreadWorktreePaths: {},
+      };
+
+      const nextState = workspaceReducer(initialState, {
+        type: "REBIND_SESSION_BACKEND",
+        sessionId: "paired-pane",
+        backendSessionId: "daemon-session:new-proxy",
+      });
+
+      expect(nextState.sessions["paired-pane"]).toMatchObject({
+        backendSessionId: "daemon-session:new-proxy",
+        remoteConnectionState: "connected",
+        remoteGeneration: 1,
+        remoteFailure: null,
+        remoteReplayGap: null,
+        lifecycle: "running",
+        processState: "running",
+      });
+    });
+
     it("ensureSessionBackends calls spawnTerminal exactly once for sessions with null backendSessionId and rebinds them", async () => {
       const { services } = createServices();
       const { result } = renderHook(() =>

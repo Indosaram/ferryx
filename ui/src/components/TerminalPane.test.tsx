@@ -7,6 +7,7 @@ import { parseDagRunSnapshot } from "../lib/dagTypes";
 import { resetSessionLifecycleForTests, setSessionSleeping } from "../lib/sessionLifecycle";
 import type { TerminalSession } from "../lib/types";
 import { dagStore } from "../state/dagStore";
+import { remoteHostStore } from "../state/remoteHostStore";
 import { TerminalPane } from "./TerminalPane";
 
 const parsedDagSnapshot = parseDagRunSnapshot(dagRunSampleJson);
@@ -450,5 +451,54 @@ describe("TerminalPane native routing contract", () => {
     );
 
     expect(screen.getByText("Shell exited")).toBeInTheDocument();
+  });
+
+  it("renders Open new shell button for exited paired session when machineFeaturesEnabled is true", () => {
+    remoteHostStore.setState(s => ({ ...s, nativeStatus: "ready", machineFeaturesEnabled: true }));
+    const onOpenNewShell = vi.fn();
+    const pairedSession: TerminalSession = {
+      id: "paired-pane",
+      workspaceId: "daemon:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+      cwd: "/remote/repo",
+      worktree: null,
+      backendSessionId: null,
+      lifecycle: "exited",
+    };
+    render(
+      <TerminalPane
+        session={pairedSession}
+        active={true}
+        onOpenNewShell={onOpenNewShell}
+      />,
+    );
+
+    expect(screen.queryByTestId("paired-terminal-unavailable")).toBeNull();
+    expect(screen.getByText("Shell exited")).toBeInTheDocument();
+    const btn = screen.getByRole("button", { name: "Open new shell" });
+    expect(btn).toBeInTheDocument();
+    fireEvent.click(btn);
+    expect(onOpenNewShell).toHaveBeenCalledWith("paired-pane");
+    remoteHostStore.reset();
+  });
+
+  it("renders Paired terminal unavailable when machineFeaturesEnabled is false", () => {
+    remoteHostStore.setState(s => ({ ...s, nativeStatus: "ready", machineFeaturesEnabled: false }));
+    const pairedSession: TerminalSession = {
+      id: "paired-pane",
+      workspaceId: "daemon:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+      cwd: "/remote/repo",
+      worktree: null,
+      backendSessionId: null,
+      lifecycle: "exited",
+    };
+    render(
+      <TerminalPane
+        session={pairedSession}
+        active={true}
+      />,
+    );
+
+    expect(screen.getByTestId("paired-terminal-unavailable")).toBeInTheDocument();
+    remoteHostStore.reset();
   });
 });

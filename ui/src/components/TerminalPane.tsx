@@ -22,6 +22,7 @@ import type { TerminalSession } from "../lib/types";
 import { NativeTerminalPane } from "./NativeTerminalPane";
 import { TerminalSearchOverlay } from "./TerminalSearchOverlay";
 import { DagPaneBadge } from "./dag/DagPaneBadge";
+import { remoteHostStore } from "../state/remoteHostStore";
 
 type TerminalPaneProps = {
   session: TerminalSession;
@@ -231,14 +232,17 @@ export function TerminalPane({
         </div>
       );
     }
-    return <div data-testid="paired-terminal-unavailable" role="status" className="flex h-full items-center justify-center p-6 text-center text-sm text-muted-foreground">
-      <div>
-        <h2 className="font-medium text-foreground">Paired terminal unavailable</h2>
-        <p>Native remote terminal support is not available in this version. The saved pane is retained; no replacement shell has been started.</p>
-        {session.remoteConnectionState === "expired" ? <p>The owning daemon reported this session expired.</p> : null}
-        <p>Reconnect and file or image actions are disabled. No Local or SSH fallback is used.</p>
-      </div>
-    </div>;
+    const pairedMachineFeaturesEnabled = remoteHostStore.getState().machineFeaturesEnabled === true;
+    if (!pairedMachineFeaturesEnabled || !onOpenNewShell) {
+      return <div data-testid="paired-terminal-unavailable" role="status" className="flex h-full items-center justify-center p-6 text-center text-sm text-muted-foreground">
+        <div>
+          <h2 className="font-medium text-foreground">Paired terminal unavailable</h2>
+          <p>Native remote terminal support is not available in this version. The saved pane is retained; no replacement shell has been started.</p>
+          {session.remoteConnectionState === "expired" ? <p>The owning daemon reported this session expired.</p> : null}
+          <p>Reconnect and file or image actions are disabled. No Local or SSH fallback is used.</p>
+        </div>
+      </div>;
+    }
   }
 
   return (

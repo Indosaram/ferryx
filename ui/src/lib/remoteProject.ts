@@ -1,5 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import type { RegisteredProject } from "./tauri";
+import { getMigratedItem, PROJECTS_STORAGE_KEY } from "./storageKeys";
+import type { RegisteredProject, SpawnTerminalRequest } from "./tauri";
 import type { BranchDeletionPreview, Worktree } from "./types";
 
 export interface RegisterRemoteProjectRequest {
@@ -36,6 +37,25 @@ export function isPairedWorkspaceId(workspaceId: string | null | undefined): boo
 
 export function isRemoteWorkspaceId(workspaceId: string | null | undefined): boolean {
   return typeof workspaceId === "string" && workspaceId.startsWith("ssh:");
+}
+
+export function resolvePairedStartup(workspaceId: string): SpawnTerminalRequest["startup"] {
+  if (workspaceId.startsWith("daemon:")) {
+    try {
+      const stored: unknown = JSON.parse(getMigratedItem(PROJECTS_STORAGE_KEY) ?? "[]");
+      if (Array.isArray(stored)) {
+        const found = stored.find((p: RegisteredProject) => p?.workspaceId === workspaceId);
+        if (found?.target?.kind === "pairedDaemon" && found.remoteWorkspaceId) {
+          return {
+            kind: "pairedDaemon",
+            hostId: found.target.hostId,
+            remoteWorkspaceId: found.remoteWorkspaceId,
+          };
+        }
+      }
+    } catch {}
+  }
+  return null;
 }
 
 /**

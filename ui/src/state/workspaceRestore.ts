@@ -120,8 +120,9 @@ function prepareDiskRestoredState(workspaceId: string, state: WorkspaceState): W
   const sessions = Object.fromEntries(
     Object.entries(state.sessions).map(([id, session]) => {
       const isLocal = !isRemoteWorkspaceId(session.workspaceId) && !isPairedWorkspaceId(session.workspaceId);
+      const isPaired = isPairedWorkspaceId(session.workspaceId);
       const isMissing = session.backendSessionId === null;
-      const shouldSleep = isLocal && isMissing && (
+      const shouldSleep = (isLocal || isPaired) && isMissing && (
         policy === "lazy" || (policy === "activeOnly" && !activeSessionIds.has(id))
       );
       // Every sleeping local session gets a frontend-only standby identity. This prevents

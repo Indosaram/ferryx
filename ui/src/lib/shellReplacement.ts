@@ -3,7 +3,7 @@ import { isStandbyBackendSessionId } from "./sessionLifecycle";
 import { safeRandomUUID } from "./uuid";
 import type { SpawnTerminalResult } from "./tauri";
 import type { StructuredIpcError, TerminalSession } from "./types";
-import { isPairedWorkspaceId, isRemoteWorkspaceId } from "./remoteProject";
+import { isPairedWorkspaceId, isRemoteWorkspaceId, resolvePairedStartup } from "./remoteProject";
 
 type RebindAction = {
   type: "REBIND_SESSION_BACKEND";
@@ -50,7 +50,9 @@ export function replaceExitedShellSession(
     let spawned: SpawnTerminalResult | null = null;
     try {
       const shouldBlockAgent = Boolean(initial?.agentType && !options?.clearAgent);
-      if (!initial || !hasReplaceableBackend(initial) || shouldBlockAgent || isPairedWorkspaceId(initial.workspaceId) || isRemoteWorkspaceId(initial.workspaceId)) {
+      const isPaired = isPairedWorkspaceId(initial?.workspaceId);
+      const pairedStartup = isPaired && initial ? resolvePairedStartup(initial.workspaceId) : null;
+      if (!initial || !hasReplaceableBackend(initial) || shouldBlockAgent || isRemoteWorkspaceId(initial.workspaceId) || (isPaired && !pairedStartup)) {
         throw invalidReplacement("Terminal session cannot be replaced with a new shell");
       }
       spawned = await (dependencies.spawn ?? spawnTerminalDetailed)({
@@ -58,7 +60,7 @@ export function replaceExitedShellSession(
         worktree: initial.worktree,
         cwd: initial.cwd,
         clientRequestId: (dependencies.createRequestId ?? (() => `shell-replacement-${safeRandomUUID()}`))(),
-        startup: null,
+        startup: pairedStartup,
       });
       const requireCurrent = (): TerminalSession => {
         const current = dependencies.getSessions()[localSessionId];

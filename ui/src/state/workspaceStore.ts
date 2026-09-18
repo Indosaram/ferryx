@@ -11,12 +11,11 @@ import { resolveAgentLogo } from "../lib/agentIcon";
 import { agentDisplayNameForType, classifyTerminalTitleActivity, formatTabLabelFromTitle, isBareAgentTitle, normalizeTerminalTitle, parseAgentTitle } from "../lib/agentTitle";
 import { workspaceName } from "../lib/branchFilter";
 import { closeBrowser, createBrowser, navigateBrowser, reloadBrowser, type BrowserSessionCreatedPayload } from "../lib/browserTauri";
-import { closeTerminal, DEFAULT_WORKSPACE_ID, discoverAgentProviderSession, getTerminalCwd, onNativeTerminalAgentState, onNativeTerminalBell, onNativeTerminalFocus, onNativeTerminalTitle, spawnTerminal, toIpcError, waitForTerminalExit } from "../lib/tauri";
+import { closeTerminal, DEFAULT_WORKSPACE_ID, discoverAgentProviderSession, getTerminalCwd, onNativeTerminalAgentState, onNativeTerminalBell, onNativeTerminalFocus, onNativeTerminalTitle, spawnTerminal, toIpcError, waitForTerminalExit, type SpawnTerminalRequest } from "../lib/tauri";
 import * as tauriIpc from "../lib/tauri";
-import type { SpawnTerminalRequest } from "../lib/tauri";
 import { ensureTerminalEvents, terminalEventBus } from "../lib/terminalEvents";
 import { switchDebug } from "../lib/switchDebug";
-import { isPairedWorkspaceId, isRemoteWorkspaceId } from "../lib/remoteProject";
+import { isPairedWorkspaceId, isRemoteWorkspaceId, resolvePairedStartup } from "../lib/remoteProject";
 import { findGroupForWorkspace, groupProjects } from "../lib/projectGrouping";
 import { hasValidProjectTarget } from "../lib/projectIdentity";
 import { getCachedSshHosts } from "../lib/sshHosts";
@@ -107,6 +106,7 @@ export type WorkspaceServices = {
     clientRequestId?: string | null;
     shell?: string | null;
     inheritFromSessionId?: string | null;
+    startup?: SpawnTerminalRequest["startup"];
   }) => Promise<string>;
   /** Optional detailed spawn carrying the daemon-resolved cwd; enables the single-hop split path. */
   spawnTerminalDetailed?: (request: {
@@ -116,6 +116,7 @@ export type WorkspaceServices = {
     clientRequestId?: string | null;
     shell?: string | null;
     inheritFromSessionId?: string | null;
+    startup?: SpawnTerminalRequest["startup"];
   }) => Promise<{ sessionId: string; session?: { cwd?: string | null } | null }>;
   /** Optional batch spawn for restore/recovery; falls back to per-session spawns when absent. */
   spawnTerminalsBatch?: (spawns: Array<Parameters<WorkspaceServices["spawnTerminal"]>[0]>) => Promise<Array<{ index: number; sessionId: string | null; error: string | null }>>;
@@ -699,10 +700,12 @@ export function useWorkspaceStore({
         await services.ensureTerminalEvents();
         const requests = targets.map((sessionId) => {
           const session = stateRef.current.sessions[sessionId];
+          const startup = resolvePairedStartup(workspaceId);
           return {
             workspaceId,
             worktree: session?.worktree ?? null,
             cwd: session?.cwd ?? session?.worktreePath ?? null,
+            ...(startup ? { startup } : {}),
           };
         });
         let entries: Array<{ index: number; sessionId: string | null; error: string | null }> = [];
@@ -741,10 +744,12 @@ export function useWorkspaceStore({
             const session = stateRef.current.sessions[sessionId];
             if (!session || session.backendSessionId != null) return;
             await services.ensureTerminalEvents();
+            const startup = resolvePairedStartup(workspaceId);
             const backendSessionId = await services.spawnTerminal({
               workspaceId,
               worktree: session.worktree,
               cwd: session.cwd ?? session.worktreePath,
+              ...(startup ? { startup } : {}),
             });
             // Recovery spawns can outlive a project switch; rebinding now would
             // point another project's session at this PTY.
@@ -795,6 +800,12 @@ export function useWorkspaceStore({
           (tab) => tab.kind !== "browser" && sessionWorktreePath(snapshot.sessions[tab.sessionId]) === worktree.path,
         ) ?? snapshot.layout.tabs[0];
         if (activeTab) {
+          if (activeTab.kind !== "browser") {
+            const activeSession = snapshot.sessions[activeTab.sessionId];
+            if (activeSession && activeSession.backendSessionId === null && isPairedWorkspaceId(activeSession.workspaceId)) {
+              void ensureSessionBackends([activeSession.id], { fallbackToShell: true });
+            }
+          }
           if (hasValidActiveTab) {
             switchDebug("worktree.ensure.skipped", {
               workspaceId,
@@ -844,6 +855,13 @@ export function useWorkspaceStore({
         const activeTabId = parkedLayout.activeTabId ?? parkedLayout.tabs[0]?.id;
         if (activeTabId) {
           dispatch({ type: "ACTIVATE_TAB", tabId: activeTabId });
+          const activeTab = parkedLayout.tabs.find((t) => t.id === activeTabId);
+          if (activeTab && activeTab.kind !== "browser") {
+            const activeSession = snapshot.sessions[activeTab.sessionId];
+            if (activeSession && activeSession.backendSessionId === null && isPairedWorkspaceId(activeSession.workspaceId)) {
+              void ensureSessionBackends([activeSession.id], { fallbackToShell: true });
+            }
+          }
           return activeTabId;
         }
         return parkedLayout.tabs[0].id;
@@ -860,6 +878,12 @@ export function useWorkspaceStore({
         });
         selectWorktreeImmediately();
         dispatch({ type: "ACTIVATE_TAB", tabId: existingInCurrent.id });
+        if (existingInCurrent.kind !== "browser") {
+          const existingSession = snapshot.sessions[existingInCurrent.sessionId];
+          if (existingSession && existingSession.backendSessionId === null && isPairedWorkspaceId(existingSession.workspaceId)) {
+            void ensureSessionBackends([existingSession.id], { fallbackToShell: true });
+          }
+        }
         return existingInCurrent.id;
       }
 
@@ -2404,7 +2428,8 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       // identity and activity. An unchanged id is a same-process reattach (the daemon
       // restarted around the same PTY); the pane keeps its agent and generation.
       const isSshBackendReplaced = isRemoteWorkspaceId(session.workspaceId) && session.backendSessionId !== action.backendSessionId;
-      const shouldClearAgent = isSshBackendReplaced || action.clearAgent === true;
+      const isPairedBackendReplaced = isPairedWorkspaceId(session.workspaceId) && session.backendSessionId !== action.backendSessionId;
+      const shouldClearAgent = isSshBackendReplaced || isPairedBackendReplaced || action.clearAgent === true;
       const activityBySessionId = { ...state.activityBySessionId };
       if (shouldClearAgent) delete activityBySessionId[action.sessionId];
       return {
@@ -2430,7 +2455,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
                   providerSession: null,
                 }
               : {}),
-            ...(isSshBackendReplaced
+            ...(isSshBackendReplaced || isPairedBackendReplaced
               ? {
                   remoteConnectionState: "connected",
                   remoteGeneration: 1,
@@ -3004,24 +3029,7 @@ function clearWorktreeUnreadWhenRead(
   return { ...state, unreadWorktreePaths };
 }
 
-function resolvePairedStartup(workspaceId: string): SpawnTerminalRequest["startup"] {
-  if (workspaceId.startsWith("daemon:")) {
-    try {
-      const stored: unknown = JSON.parse(getMigratedItem(PROJECTS_STORAGE_KEY) ?? "[]");
-      if (Array.isArray(stored)) {
-        const found = stored.find((p: RegisteredProject) => p?.workspaceId === workspaceId);
-        if (found?.target?.kind === "pairedDaemon" && found.remoteWorkspaceId) {
-          return {
-            kind: "pairedDaemon",
-            hostId: found.target.hostId,
-            remoteWorkspaceId: found.remoteWorkspaceId,
-          };
-        }
-      }
-    } catch {}
-  }
-  return null;
-}
+// resolvePairedStartup is imported from ../lib/remoteProject
 
 async function spawnTerminalForLogicalAction(
   services: WorkspaceServices,
