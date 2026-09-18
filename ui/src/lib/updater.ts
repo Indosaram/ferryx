@@ -84,7 +84,17 @@ export async function getCurrentVersion(): Promise<string | null> {
 export async function checkForUpdate(): Promise<void> {
   if (!isTauri()) return;
   if (await updatesManagedExternally()) return;
-  if (status.state !== "idle" && status.state !== "error") return;
+  // Re-checking only refreshes the pending handle, so it stays allowed while an update is already
+  // offered: a release published mid-session then replaces the stale offer. It must not run while a
+  // check or download is in flight, nor once an update is staged, or it would discard a completed
+  // download and re-enable the install button on top of a running installer.
+  if (
+    status.state === "checking" ||
+    status.state === "downloading" ||
+    status.state === "downloaded"
+  ) {
+    return;
+  }
 
   setStatus({ state: "checking" });
   try {

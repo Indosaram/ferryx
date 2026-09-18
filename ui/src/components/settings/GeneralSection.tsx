@@ -124,7 +124,7 @@ export function SoftwareUpdateCard() {
           variant="outline"
           size="sm"
           onClick={() => void checkForUpdate()}
-          disabled={busy}
+          disabled={busy || isDownloaded}
           className="no-drag flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-border px-2 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
         >
           <RotateCw className="size-3" />

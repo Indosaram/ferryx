@@ -85,6 +85,9 @@ describe("Settings > General software update control", () => {
     const status = await screen.findByTestId("settings-update-status");
     expect(status).toHaveTextContent(/Version 2026\.08\.26\.1 is available\./);
 
+    // Re-checking stays available so a release published mid-session can replace this offer.
+    expect(within(card).getByRole("button", { name: /check for updates/i })).toBeEnabled();
+
     const installAndRelaunch = within(card).getByRole("button", { name: /install and relaunch/i });
     expect(installAndRelaunch).toBeEnabled();
     expect(installAndRelaunch).toHaveAttribute("data-variant", "primary");
@@ -131,6 +134,9 @@ describe("Settings > General software update control", () => {
     const buttons = within(card).getAllByRole("button");
     expect(buttons).toHaveLength(2);
     expect(within(card).queryByRole("button", { name: /download update/i })).not.toBeInTheDocument();
+
+    // Re-checking is refused once a download is staged, so the button must not look clickable.
+    expect(within(card).getByRole("button", { name: /check for updates/i })).toBeDisabled();
 
     const install = within(card).getByRole("button", { name: /install and relaunch/i });
     expect(install).toBeEnabled();

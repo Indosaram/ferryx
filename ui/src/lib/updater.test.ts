@@ -276,7 +276,7 @@ describe("periodic update polling", () => {
     }
   });
 
-  it("does not re-check while an update is already offered", async () => {
+  it("keeps re-checking while an update is offered so a newer release replaces it", async () => {
     vi.useFakeTimers();
     try {
       check.mockResolvedValue(updateHandle([]));
@@ -284,10 +284,46 @@ describe("periodic update polling", () => {
 
       const stop = updater.startUpdatePolling(1000);
       await vi.advanceTimersByTimeAsync(0);
-      expect(updater.getUpdateStatus().state).toBe("available");
+      expect(updater.getUpdateStatus()).toMatchObject({
+        state: "available",
+        version: "2026.08.26.1",
+      });
 
+      check.mockResolvedValue({ ...updateHandle([]), version: "2026.09.18.1" });
+      await vi.advanceTimersByTimeAsync(1000);
+
+      expect(check).toHaveBeenCalledTimes(2);
+      expect(updater.getUpdateStatus()).toMatchObject({
+        state: "available",
+        version: "2026.09.18.1",
+      });
+      stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not re-check once an update is staged for install", async () => {
+    vi.useFakeTimers();
+    try {
+      check.mockResolvedValue(
+        updateHandle([
+          { event: "Started", data: { contentLength: 10 } },
+          { event: "Progress", data: { chunkLength: 10 } },
+          { event: "Finished" },
+        ]),
+      );
+      const updater = await freshModule();
+
+      await updater.checkForUpdate();
+      await updater.downloadAndInstallUpdate();
+      expect(updater.getUpdateStatus().state).toBe("downloaded");
+
+      const stop = updater.startUpdatePolling(1000);
       await vi.advanceTimersByTimeAsync(5000);
+
       expect(check).toHaveBeenCalledTimes(1);
+      expect(updater.getUpdateStatus().state).toBe("downloaded");
       stop();
     } finally {
       vi.useRealTimers();
