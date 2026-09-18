@@ -223,6 +223,33 @@ pub fn truncate_eval_result(output: &str) -> (String, bool) {
     (output[..boundary].to_string(), true)
 }
 
+/// Decodes the JSON evaluation result returned by automation actions (click, fill)
+/// and verifies that target lookup succeeded (R5-6).
+pub fn decode_action_result(raw: &str) -> Result<(), String> {
+    let parsed: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|e| format!("invalid action result json: {e}"))?;
+    let obj = if let Some(s) = parsed.as_str() {
+        serde_json::from_str::<serde_json::Value>(s)
+            .map_err(|e| format!("invalid nested action result json: {e}"))?
+    } else {
+        parsed
+    };
+    if obj.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        let err_msg = obj
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("target element not found");
+        return Err(err_msg.to_string());
+    }
+    Ok(())
+}
+
+/// Tracks the highest queued IME fill revision per (browser_id, lease_epoch, target)
+/// to enforce supersession at execution time (R5-13).
+pub static IME_SUPERSESSION_TRACKER: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashMap<(String, u64, String), u64>>,
+> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,5 +393,22 @@ mod tests {
         assert!(truncated);
         assert!(out.len() <= 65_536);
         assert!(std::str::from_utf8(out.as_bytes()).is_ok(), "must be valid UTF-8 boundary");
+    }
+
+    #[test]
+    fn test_r5_6_decode_action_result_rejects_missing_target() {
+        // Ok result
+        assert!(decode_action_result(r#"{"ok":true}"#).is_ok());
+        assert!(decode_action_result(r#""{\"ok\":true}""#).is_ok());
+
+        // Target not found error
+        let err1 = decode_action_result(r#"{"ok":false,"error":"element not found"}"#).unwrap_err();
+        assert_eq!(err1, "element not found");
+
+        let err2 = decode_action_result(r#""{\"ok\":false,\"error\":\"no element at coordinates\"}""#).unwrap_err();
+        assert_eq!(err2, "no element at coordinates");
+
+        // Missing ok or ok != true
+        assert!(decode_action_result(r#"{"error":"failed"}"#).is_err());
     }
 }

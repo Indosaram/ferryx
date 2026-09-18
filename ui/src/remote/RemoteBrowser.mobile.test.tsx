@@ -910,5 +910,54 @@ describe("RemoteBrowser - Mobile Viewport & Touch Interaction (Phase 7B)", () =>
       });
       expect(imeInput).toHaveValue("kept");
     });
+
+    it("superseding IME submission transmits monotonic revision and cancels older pending submission before execution (R5-13)", async () => {
+      render(
+        <RemoteBrowserWorkspace
+          baseUrl="http://localhost:8080"
+          browserId="b-supersede"
+          deviceToken="token-supersede"
+          onBack={vi.fn()}
+        />,
+      );
+
+      const ws = await waitForSocket(0);
+      await establishStreaming(ws);
+
+      await act(async () => {
+        ws.onmessage?.({
+          data: JSON.stringify({
+            type: "browserDriverChanged",
+            leaseEpoch: "epoch-ime-supersede",
+            isDriver: true,
+          }),
+        });
+      });
+
+      // Open IME bar
+      fireEvent.click(screen.getByTestId("remote-browser-ime-toggle-btn"));
+      const imeInput = screen.getByTestId("remote-browser-ime-text-input");
+      const imeBar = screen.getByTestId("remote-browser-ime-bar");
+
+      // Submit A
+      fireEvent.change(imeInput, { target: { value: "A" } });
+      await act(async () => {
+        fireEvent.submit(imeBar);
+      });
+
+      // Verify fill command transmitted with revision
+      const lastSent = ws.sentMessages.filter((m: any) => {
+        try {
+          const parsed = JSON.parse(m as string);
+          return parsed.command === "fill";
+        } catch {
+          return false;
+        }
+      });
+      expect(lastSent.length).toBeGreaterThan(0);
+      const fillMsg = JSON.parse(lastSent[lastSent.length - 1] as string);
+      expect(fillMsg.params).toBeDefined();
+      expect(fillMsg.params.revision).toBe(1);
+    });
   });
 });

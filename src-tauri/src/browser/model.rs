@@ -265,14 +265,186 @@ pub struct BrowserAutomationRequest {
     pub action: BrowserAutomationAction,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "condition", rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BrowserWaitCondition {
     Selector { selector: String },
     Text { text: String },
     UrlContains { fragment: String },
     LoadState { state: String },
     Function { script: String },
+    WithTimeout {
+        inner: Box<BrowserWaitCondition>,
+        timeout_ms: u64,
+    },
+}
+
+impl serde::Serialize for BrowserWaitCondition {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+        match self {
+            Self::Selector { selector } => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("condition", "selector")?;
+                map.serialize_entry("selector", selector)?;
+                map.end()
+            }
+            Self::Text { text } => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("condition", "text")?;
+                map.serialize_entry("text", text)?;
+                map.end()
+            }
+            Self::UrlContains { fragment } => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("condition", "urlContains")?;
+                map.serialize_entry("fragment", fragment)?;
+                map.end()
+            }
+            Self::LoadState { state } => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("condition", "loadState")?;
+                map.serialize_entry("state", state)?;
+                map.end()
+            }
+            Self::Function { script } => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("condition", "function")?;
+                map.serialize_entry("script", script)?;
+                map.end()
+            }
+            Self::WithTimeout { inner, timeout_ms } => {
+                let mut val = serde_json::to_value(inner).map_err(serde::ser::Error::custom)?;
+                if let Some(obj) = val.as_object_mut() {
+                    obj.insert("timeoutMs".into(), serde_json::json!(timeout_ms));
+                }
+                val.serialize(serializer)
+            }
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for BrowserWaitCondition {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(tag = "condition", rename_all = "camelCase")]
+        enum TaggedCondition {
+            Selector {
+                selector: String,
+                #[serde(default, alias = "timeout_ms")]
+                timeout_ms: Option<u64>,
+            },
+            Text {
+                text: String,
+                #[serde(default, alias = "timeout_ms")]
+                timeout_ms: Option<u64>,
+            },
+            UrlContains {
+                fragment: String,
+                #[serde(default, alias = "timeout_ms")]
+                timeout_ms: Option<u64>,
+            },
+            LoadState {
+                state: String,
+                #[serde(default, alias = "timeout_ms")]
+                timeout_ms: Option<u64>,
+            },
+            Function {
+                script: String,
+                #[serde(default, alias = "timeout_ms")]
+                timeout_ms: Option<u64>,
+            },
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Helper {
+            Tagged(TaggedCondition),
+            StringScript(String),
+            StringConditionWithTimeout {
+                condition: String,
+                #[serde(default, alias = "timeout_ms")]
+                timeout_ms: Option<u64>,
+            },
+            UntaggedScript {
+                script: String,
+                #[serde(default, alias = "timeout_ms")]
+                timeout_ms: Option<u64>,
+            },
+            UntaggedSelector {
+                selector: String,
+                #[serde(default, alias = "timeout_ms")]
+                timeout_ms: Option<u64>,
+            },
+            UntaggedText {
+                text: String,
+                #[serde(default, alias = "timeout_ms")]
+                timeout_ms: Option<u64>,
+            },
+            UntaggedUrl {
+                fragment: String,
+                #[serde(default, alias = "timeout_ms")]
+                timeout_ms: Option<u64>,
+            },
+            UntaggedLoadState {
+                state: String,
+                #[serde(default, alias = "timeout_ms")]
+                timeout_ms: Option<u64>,
+            },
+        }
+
+        fn wrap(base: BrowserWaitCondition, timeout_ms: Option<u64>) -> BrowserWaitCondition {
+            match timeout_ms {
+                Some(ms) => BrowserWaitCondition::WithTimeout {
+                    inner: Box::new(base),
+                    timeout_ms: ms,
+                },
+                None => base,
+            }
+        }
+
+        match Helper::deserialize(deserializer)? {
+            Helper::Tagged(TaggedCondition::Selector { selector, timeout_ms }) => {
+                Ok(wrap(Self::Selector { selector }, timeout_ms))
+            }
+            Helper::Tagged(TaggedCondition::Text { text, timeout_ms }) => {
+                Ok(wrap(Self::Text { text }, timeout_ms))
+            }
+            Helper::Tagged(TaggedCondition::UrlContains { fragment, timeout_ms }) => {
+                Ok(wrap(Self::UrlContains { fragment }, timeout_ms))
+            }
+            Helper::Tagged(TaggedCondition::LoadState { state, timeout_ms }) => {
+                Ok(wrap(Self::LoadState { state }, timeout_ms))
+            }
+            Helper::Tagged(TaggedCondition::Function { script, timeout_ms }) => {
+                Ok(wrap(Self::Function { script }, timeout_ms))
+            }
+            Helper::StringScript(script) => Ok(Self::Function { script }),
+            Helper::StringConditionWithTimeout { condition, timeout_ms } => {
+                Ok(wrap(Self::Function { script: condition }, timeout_ms))
+            }
+            Helper::UntaggedScript { script, timeout_ms } => {
+                Ok(wrap(Self::Function { script }, timeout_ms))
+            }
+            Helper::UntaggedSelector { selector, timeout_ms } => {
+                Ok(wrap(Self::Selector { selector }, timeout_ms))
+            }
+            Helper::UntaggedText { text, timeout_ms } => {
+                Ok(wrap(Self::Text { text }, timeout_ms))
+            }
+            Helper::UntaggedUrl { fragment, timeout_ms } => {
+                Ok(wrap(Self::UrlContains { fragment }, timeout_ms))
+            }
+            Helper::UntaggedLoadState { state, timeout_ms } => {
+                Ok(wrap(Self::LoadState { state }, timeout_ms))
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -298,5 +470,45 @@ pub struct RemoteSnapshotRecord {
     pub map_revision: u64,
     pub document_generation: u64,
     pub targets: std::collections::HashMap<String, String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_r5_15_wait_condition_string_and_tagged_deserialization() {
+        // String form (sent by UI)
+        let from_str: BrowserWaitCondition =
+            serde_json::from_str(r#""document.title !== ''""#).unwrap();
+        assert_eq!(
+            from_str,
+            BrowserWaitCondition::Function {
+                script: "document.title !== ''".into()
+            }
+        );
+
+        // Tagged form
+        let from_tagged: BrowserWaitCondition = serde_json::from_str(
+            r##"{"condition":"selector","selector":"#ready"}"##,
+        )
+        .unwrap();
+        assert_eq!(
+            from_tagged,
+            BrowserWaitCondition::Selector {
+                selector: "#ready".into()
+            }
+        );
+
+        // Untagged script object
+        let from_script: BrowserWaitCondition =
+            serde_json::from_str(r#"{"script":"1 + 1 === 2"}"#).unwrap();
+        assert_eq!(
+            from_script,
+            BrowserWaitCondition::Function {
+                script: "1 + 1 === 2".into()
+            }
+        );
+    }
 }
 

@@ -88,6 +88,32 @@ impl SharingInner {
 pub struct SharingRegistry {
     inner: Mutex<SharingInner>,
     tx: tokio::sync::broadcast::Sender<SharingState>,
+    listener: parking_lot::RwLock<Option<SharingStateListener>>,
+}
+
+pub type SharingStateListener =
+    Arc<dyn Fn(&crate::browser::remote_bridge_protocol::BrowserSharingState) + Send + Sync>;
+
+impl From<&SharingState> for crate::browser::remote_bridge_protocol::BrowserSharingState {
+    fn from(s: &SharingState) -> Self {
+        let driver_status = match s.driver_status {
+            SharingDriverStatus::Idle => {
+                crate::browser::remote_bridge_protocol::BrowserSharingDriverStatus::Idle
+            }
+            SharingDriverStatus::Viewing => {
+                crate::browser::remote_bridge_protocol::BrowserSharingDriverStatus::Viewing
+            }
+            SharingDriverStatus::Driving => {
+                crate::browser::remote_bridge_protocol::BrowserSharingDriverStatus::Driving
+            }
+        };
+        crate::browser::remote_bridge_protocol::BrowserSharingState::new(
+            s.is_sharing,
+            s.active_sessions_count as u32,
+            driver_status,
+            s.driver_device_id.clone(),
+        )
+    }
 }
 
 impl SharingRegistry {
@@ -96,6 +122,7 @@ impl SharingRegistry {
         Self {
             inner: Mutex::new(SharingInner::default()),
             tx,
+            listener: parking_lot::RwLock::new(None),
         }
     }
 
@@ -107,6 +134,22 @@ impl SharingRegistry {
         self.inner.lock().snapshot()
     }
 
+    pub fn set_listener(&self, listener: SharingStateListener) {
+        *self.listener.write() = Some(listener);
+    }
+
+    pub fn spawn_tauri_forwarder<F>(&self, emit: F) -> tokio::task::JoinHandle<()>
+    where
+        F: Fn(crate::browser::remote_bridge_protocol::BrowserSharingState) + Send + Sync + 'static,
+    {
+        let mut rx = self.subscribe();
+        tokio::spawn(async move {
+            while let Ok(state) = rx.recv().await {
+                emit(crate::browser::remote_bridge_protocol::BrowserSharingState::from(&state));
+            }
+        })
+    }
+
     fn publish(&self) {
         let mut guard = self.inner.lock();
         let state = guard.snapshot();
@@ -115,7 +158,11 @@ impl SharingRegistry {
         }
         guard.last_published = Some(state.clone());
         drop(guard);
-        let _ = self.tx.send(state);
+        let _ = self.tx.send(state.clone());
+        if let Some(listener) = self.listener.read().as_ref() {
+            let dto = crate::browser::remote_bridge_protocol::BrowserSharingState::from(&state);
+            listener(&dto);
+        }
     }
 
     pub fn viewer_admitted(&self, connection_id: &str, device_id: &str) {
@@ -777,7 +824,40 @@ impl BrowserWsSession {
                         let _ = out_tx.send(err).await;
                         return Ok(());
                     }
+
+                    // Synchronize lease renewal with the backend service broker (R5-8):
+                    if let Err(e) = backend
+                        .heartbeat_driver(&self.device_id, &self.connection_id, sub_id, epoch)
+                        .await
+                    {
+                        let err = browser_error(
+                            request_id,
+                            "BROWSER_INVALID_REQUEST",
+                            format!("Backend driver lease renewal failed: {e}"),
+                            false,
+                            None,
+                        );
+                        let _ = out_tx.send(err).await;
+                        return Ok(());
+                    }
                 }
+
+                // Authoritative document generation refresh on heartbeat (R5-7):
+                if let Some(ref mut ident) = self.negotiated_identity {
+                    if let Ok(state) = backend
+                        .get_state(
+                            &self.browser_id,
+                            &crate::remote::browser_backend::DesktopScope {
+                                workspace_id: "".into(),
+                                worktree_slug: "".into(),
+                            },
+                        )
+                        .await
+                    {
+                        ident.document_generation = state.document_generation;
+                    }
+                }
+
                 let resp = ServerMessage::BrowserPong {
                     request_id,
                     timestamp: Some(now.elapsed().as_secs_f64()),
@@ -840,9 +920,7 @@ impl BrowserWsSession {
                     now,
                 ) {
                     Ok(lease) => {
-                        self.is_driver = true;
-                        self.lease_epoch = Some(lease.lease_epoch);
-                        let _ = backend
+                        match backend
                             .claim_driver(
                                 &browser_id,
                                 &self.device_id,
@@ -850,17 +928,45 @@ impl BrowserWsSession {
                                 &subscription_id,
                                 lease.lease_epoch,
                             )
-                            .await;
-                        if let Some(registry) = self.sharing.as_ref() {
-                            registry.driver_claimed(&self.connection_id, &self.device_id);
+                            .await
+                        {
+                            Ok(()) => {
+                                self.is_driver = true;
+                                self.lease_epoch = Some(lease.lease_epoch);
+                                if let Some(registry) = self.sharing.as_ref() {
+                                    registry.driver_claimed(&self.connection_id, &self.device_id);
+                                }
+                                let resp = ServerMessage::BrowserDriverClaimed {
+                                    request_id,
+                                    lease_epoch: lease.lease_epoch.to_string(),
+                                    expires_at: lease.expires_at.elapsed().as_secs_f64(),
+                                };
+                                let _ = out_tx.send(resp).await;
+                                Ok(())
+                            }
+                            Err(e) => {
+                                let _ = admission.broker.release_driver(
+                                    &self.device_id,
+                                    &self.connection_id,
+                                    &subscription_id,
+                                    &browser_id,
+                                    lease.lease_epoch,
+                                );
+                                let err = browser_error(
+                                    Some(request_id),
+                                    match e {
+                                        crate::remote::browser_backend::RemoteBrowserError::Forbidden(_) => "BROWSER_FORBIDDEN",
+                                        crate::remote::browser_backend::RemoteBrowserError::NotFound(_) => "BROWSER_NOT_FOUND",
+                                        _ => "BROWSER_DRIVER_BUSY",
+                                    },
+                                    format!("Backend driver claim failed: {e}"),
+                                    false,
+                                    None,
+                                );
+                                let _ = out_tx.send(err).await;
+                                Ok(())
+                            }
                         }
-                        let resp = ServerMessage::BrowserDriverClaimed {
-                            request_id,
-                            lease_epoch: lease.lease_epoch.to_string(),
-                            expires_at: lease.expires_at.elapsed().as_secs_f64(),
-                        };
-                        let _ = out_tx.send(resp).await;
-                        Ok(())
                     }
                     Err(code) => {
                         let err = browser_error(
@@ -1175,6 +1281,32 @@ impl BrowserWsSession {
                     }
                 };
 
+                // R5-13: IME fills supersession tracking per (browser_id, lease_epoch, target)
+                let maybe_fill_rev = if command == "fill" {
+                    params.as_ref().and_then(|p| {
+                        p.get("revision")
+                            .or_else(|| p.get("imeRevision"))
+                            .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok())))
+                    })
+                } else {
+                    None
+                };
+                let fill_target = if command == "fill" {
+                    params.as_ref().and_then(|p| {
+                        p.get("reference").or_else(|| p.get("selector"))
+                    }).and_then(|v| v.as_str()).unwrap_or("active").to_string()
+                } else {
+                    String::new()
+                };
+
+                if let Some(rev) = maybe_fill_rev {
+                    let mut tracker = crate::browser::remote_input::IME_SUPERSESSION_TRACKER.lock();
+                    let entry = tracker.entry((browser_id.clone(), epoch, fill_target.clone())).or_insert(0);
+                    if rev > *entry {
+                        *entry = rev;
+                    }
+                }
+
                 // P1-07: TypeSafe-approved spawned_command_tasks pattern:
                 // Spawn command execution onto an async task with results returned to out_tx.
                 // Reader loop is NOT blocked!
@@ -1254,6 +1386,27 @@ impl BrowserWsSession {
                         );
                         let _ = out_tx.send(err_reply).await;
                         return;
+                    }
+
+                    // R5-13: Enforce supersession at the executor before write
+                    if let Some(rev) = maybe_fill_rev {
+                        let is_superseded = {
+                            let tracker = crate::browser::remote_input::IME_SUPERSESSION_TRACKER.lock();
+                            tracker
+                                .get(&(browser_id_str.clone(), epoch, fill_target.clone()))
+                                .copied()
+                                .map(|max_rev| max_rev > rev)
+                                .unwrap_or(false)
+                        };
+                        if is_superseded {
+                            drop(eval_permit);
+                            let reply = ServerMessage::BrowserResult {
+                                request_id,
+                                result: Some(serde_json::json!({ "filled": true, "superseded": true })),
+                            };
+                            let _ = out_tx.send(reply).await;
+                            return;
+                        }
                     }
 
                     let res = tokio::select! {

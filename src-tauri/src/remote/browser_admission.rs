@@ -347,7 +347,11 @@ pub struct AdmissionController {
     capture_tx: tokio::sync::broadcast::Sender<(String, bool)>,
     /// Authoritative sharing publisher shared by every socket on this gateway (R4-5).
     sharing: Arc<crate::remote::browser_ws::SharingRegistry>,
+    mapped_service_subs: Mutex<HashMap<String, String>>,
+    eligibility_hook: parking_lot::RwLock<Option<ViewerEligibilityHook>>,
 }
+
+pub type ViewerEligibilityHook = Arc<dyn Fn(&str, &str, bool, bool) + Send + Sync>;
 
 impl AdmissionController {
     pub fn new() -> Self {
@@ -359,7 +363,29 @@ impl AdmissionController {
             limiters: Mutex::new(HashMap::new()),
             capture_tx,
             sharing: Arc::new(crate::remote::browser_ws::SharingRegistry::new()),
+            mapped_service_subs: Mutex::new(HashMap::new()),
+            eligibility_hook: parking_lot::RwLock::new(None),
         }
+    }
+
+    pub fn register_service_subscription(&self, admission_sub: &str, service_sub: &str) {
+        self.mapped_service_subs
+            .lock()
+            .insert(admission_sub.to_string(), service_sub.to_string());
+    }
+
+    pub fn set_eligibility_hook(&self, hook: ViewerEligibilityHook) {
+        *self.eligibility_hook.write() = Some(hook);
+    }
+
+    pub fn connect_remote_service(
+        &self,
+        service: Arc<crate::browser::remote_service::BrowserRemoteService>,
+    ) {
+        self.set_eligibility_hook(Arc::new(move |browser_id, service_sub_id, paused, stalled| {
+            service.set_viewer_paused(browser_id, service_sub_id, paused);
+            service.set_viewer_stalled(browser_id, service_sub_id, stalled);
+        }));
     }
 
     /// The gateway-wide sharing publisher every browser socket reports through (R4-5).
@@ -463,6 +489,7 @@ impl AdmissionController {
         }
         drop(viewers_map);
         drop(captured);
+        self.mapped_service_subs.lock().remove(subscription_id);
         // The last owned viewer leaving halts capture: a producer must never keep
         // running with zero viewers (R4-6).
         if halted {
@@ -481,10 +508,14 @@ impl AdmissionController {
 
     pub fn set_viewer_paused(&self, browser_id: &str, subscription_id: &str, paused: bool) {
         let mut viewers_map = self.viewers.lock();
+        let mut stalled = false;
+        let mut found = false;
         if let Some(browser_viewers) = viewers_map.get_mut(browser_id) {
             let was_capturing = browser_viewers.values().any(|v| !v.paused && !v.stalled);
             if let Some(entry) = browser_viewers.get_mut(subscription_id) {
                 entry.paused = paused;
+                stalled = entry.stalled;
+                found = true;
             }
             let now_capturing = browser_viewers.values().any(|v| !v.paused && !v.stalled);
             drop(viewers_map);
@@ -492,19 +523,45 @@ impl AdmissionController {
                 let _ = self.capture_tx.send((browser_id.to_string(), now_capturing));
             }
         }
+        if found {
+            let mapped_sub = self
+                .mapped_service_subs
+                .lock()
+                .get(subscription_id)
+                .cloned()
+                .unwrap_or_else(|| subscription_id.to_string());
+            if let Some(hook) = self.eligibility_hook.read().as_ref() {
+                hook(browser_id, &mapped_sub, paused, stalled);
+            }
+        }
     }
 
     pub fn set_viewer_stalled(&self, browser_id: &str, subscription_id: &str, stalled: bool) {
         let mut viewers_map = self.viewers.lock();
+        let mut paused = false;
+        let mut found = false;
         if let Some(browser_viewers) = viewers_map.get_mut(browser_id) {
             let was_capturing = browser_viewers.values().any(|v| !v.paused && !v.stalled);
             if let Some(entry) = browser_viewers.get_mut(subscription_id) {
                 entry.stalled = stalled;
+                paused = entry.paused;
+                found = true;
             }
             let now_capturing = browser_viewers.values().any(|v| !v.paused && !v.stalled);
             drop(viewers_map);
             if was_capturing != now_capturing {
                 let _ = self.capture_tx.send((browser_id.to_string(), now_capturing));
+            }
+        }
+        if found {
+            let mapped_sub = self
+                .mapped_service_subs
+                .lock()
+                .get(subscription_id)
+                .cloned()
+                .unwrap_or_else(|| subscription_id.to_string());
+            if let Some(hook) = self.eligibility_hook.read().as_ref() {
+                hook(browser_id, &mapped_sub, paused, stalled);
             }
         }
     }
@@ -696,5 +753,107 @@ pub mod tests {
 
         // After reclaim, driver is no longer active
         assert!(!broker.is_active_driver("dev1", "conn1", "sub1", "b1", 1, now));
+    }
+
+    #[tokio::test]
+    async fn test_r5_12_pause_and_ack_stall_control_capture_and_mapped_eligibility() {
+        let ctrl = AdmissionController::new();
+        let mut capture_rx = ctrl.subscribe_capture();
+
+        let recorded_hooks = Arc::new(std::sync::Mutex::new(Vec::<(String, String, bool, bool)>::new()));
+        let hooks_clone = Arc::clone(&recorded_hooks);
+        ctrl.set_eligibility_hook(Arc::new(move |b, s, paused, stalled| {
+            hooks_clone.lock().unwrap().push((b.to_string(), s.to_string(), paused, stalled));
+        }));
+
+        ctrl.try_subscribe("b1", "sub-adm-1", "dev1", "v1").unwrap();
+        ctrl.register_service_subscription("sub-adm-1", "sub-svc-1");
+        assert_eq!(capture_rx.recv().await.unwrap(), ("b1".to_string(), true));
+        assert!(ctrl.should_capture("b1"));
+
+        // 1. Pause viewer -> capture halts, eligibility hook called with mapped service sub ID
+        ctrl.set_viewer_paused("b1", "sub-adm-1", true);
+        assert_eq!(capture_rx.recv().await.unwrap(), ("b1".to_string(), false));
+        assert!(!ctrl.should_capture("b1"), "paused viewer must halt capture");
+        {
+            let hooks = recorded_hooks.lock().unwrap();
+            assert_eq!(hooks.last(), Some(&("b1".into(), "sub-svc-1".into(), true, false)));
+        }
+
+        // 2. Resume viewer -> capture resumes
+        ctrl.set_viewer_paused("b1", "sub-adm-1", false);
+        assert_eq!(capture_rx.recv().await.unwrap(), ("b1".to_string(), true));
+        assert!(ctrl.should_capture("b1"), "resumed viewer must restore capture");
+        {
+            let hooks = recorded_hooks.lock().unwrap();
+            assert_eq!(hooks.last(), Some(&("b1".into(), "sub-svc-1".into(), false, false)));
+        }
+
+        // 3. ACK stall -> capture halts, eligibility hook called with stalled=true
+        ctrl.set_viewer_stalled("b1", "sub-adm-1", true);
+        assert_eq!(capture_rx.recv().await.unwrap(), ("b1".to_string(), false));
+        assert!(!ctrl.should_capture("b1"), "stalled viewer must halt capture");
+        {
+            let hooks = recorded_hooks.lock().unwrap();
+            assert_eq!(hooks.last(), Some(&("b1".into(), "sub-svc-1".into(), false, true)));
+        }
+
+        // 4. ACK arrives -> stall cleared, capture resumes
+        ctrl.set_viewer_stalled("b1", "sub-adm-1", false);
+        assert_eq!(capture_rx.recv().await.unwrap(), ("b1".to_string(), true));
+        assert!(ctrl.should_capture("b1"));
+        {
+            let hooks = recorded_hooks.lock().unwrap();
+            assert_eq!(hooks.last(), Some(&("b1".into(), "sub-svc-1".into(), false, false)));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_r5_5_sharing_registry_forwards_live_changes_with_dto() {
+        let registry = crate::remote::browser_ws::SharingRegistry::new();
+        let received = Arc::new(std::sync::Mutex::new(Vec::<crate::browser::remote_bridge_protocol::BrowserSharingState>::new()));
+        let rec_clone = Arc::clone(&received);
+        registry.set_listener(Arc::new(move |dto: &crate::browser::remote_bridge_protocol::BrowserSharingState| {
+            rec_clone.lock().unwrap().push(dto.clone());
+        }));
+
+        // 1. Viewer admitted -> Viewing
+        registry.viewer_admitted("conn1", "dev1");
+        {
+            let rec = received.lock().unwrap();
+            assert_eq!(rec.len(), 1);
+            assert_eq!(rec[0].r#type, "browserSharingState");
+            assert!(rec[0].is_sharing);
+            assert_eq!(rec[0].active_sessions_count, 1);
+            assert_eq!(rec[0].driver_status, crate::browser::remote_bridge_protocol::BrowserSharingDriverStatus::Viewing);
+        }
+
+        // 2. Driver claimed -> Driving
+        registry.driver_claimed("conn1", "dev1");
+        {
+            let rec = received.lock().unwrap();
+            assert_eq!(rec.len(), 2);
+            assert_eq!(rec[1].driver_status, crate::browser::remote_bridge_protocol::BrowserSharingDriverStatus::Driving);
+            assert_eq!(rec[1].driver_device_id.as_deref(), Some("dev1"));
+        }
+
+        // 3. Driver released -> Viewing
+        registry.driver_released("conn1");
+        {
+            let rec = received.lock().unwrap();
+            assert_eq!(rec.len(), 3);
+            assert_eq!(rec[2].driver_status, crate::browser::remote_bridge_protocol::BrowserSharingDriverStatus::Viewing);
+            assert_eq!(rec[2].driver_device_id, None);
+        }
+
+        // 4. Viewer removed -> Idle
+        registry.viewer_removed("conn1");
+        {
+            let rec = received.lock().unwrap();
+            assert_eq!(rec.len(), 4);
+            assert!(!rec[3].is_sharing);
+            assert_eq!(rec[3].active_sessions_count, 0);
+            assert_eq!(rec[3].driver_status, crate::browser::remote_bridge_protocol::BrowserSharingDriverStatus::Idle);
+        }
     }
 }

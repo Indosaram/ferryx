@@ -103,16 +103,20 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
   const [imeTargetRef, setImeTargetRef] = useState("active");
   const [showImeBar, setShowImeBar] = useState(false);
 
-  // Revision-Keyed Submission Queue for IME (R4-12)
+  // Revision-Keyed Submission Queue for IME (R4-12, R5-13)
   interface ImeSubmissionRecord {
     revision: number;
     submittedChunk: string;
     fullValue: string;
     targetRef: string;
     completed: boolean;
+    superseded?: boolean;
+    executing?: boolean;
   }
   const imeSubmissionSeqRef = useRef<number>(0);
   const pendingImeSubmissionsRef = useRef<ImeSubmissionRecord[]>([]);
+  // Per (target, lease) latest queued revision tracking (R5-13)
+  const latestQueuedRevRef = useRef<Map<string, number>>(new Map());
 
   // Wire point click with normalized (u, v) coordinates when in driving mode
   const handlePointClick = (point: RemoteBrowserPointClickEvent) => {
@@ -132,7 +136,7 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
   };
 
   // Mobile IME submission: do NOT dispatch intermediate composition keystrokes; send confirmed text via fill
-  // Revision-Keyed Submission Queue: monotonic revision counter, ordered completion, and coherent full-value replacement (R4-12)
+  // Revision-Keyed Submission Queue: monotonic revision counter, ordered completion, and coherent full-value replacement (R4-12, R5-13)
   const handleImeSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isComposing) {
@@ -153,16 +157,52 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
     if (!unsubmittedText.trim()) return;
 
     // Monotonic submission revision counter
+    const targetRef = imeTargetRef || "active";
+    const queueKey = `${targetRef}:${driver.leaseEpoch || "none"}`;
     const submissionRev = ++imeSubmissionSeqRef.current;
+    latestQueuedRevRef.current.set(queueKey, submissionRev);
+
+    // Cancel any older non-executing pending submissions for the same target and lease (R5-13)
+    for (const older of pendingImeSubmissionsRef.current) {
+      if (older.targetRef === targetRef && older.revision < submissionRev && !older.executing) {
+        older.superseded = true;
+      }
+    }
+
     const fullValue = imeText; // Coherent full-value replacement prevents suffix overwriting earlier text
     const record: ImeSubmissionRecord = {
       revision: submissionRev,
       submittedChunk: unsubmittedText,
       fullValue,
-      targetRef: imeTargetRef || "active",
+      targetRef,
       completed: false,
     };
     pendingImeSubmissionsRef.current.push(record);
+
+    const retireCompleted = () => {
+      while (
+        pendingImeSubmissionsRef.current.length > 0 &&
+        pendingImeSubmissionsRef.current[0].completed
+      ) {
+        const head = pendingImeSubmissionsRef.current.shift()!;
+        setImeText((current) => {
+          // Only slice if current buffer starts with this chunk, preserving unrelated edits
+          if (current.startsWith(head.submittedChunk)) {
+            return current.slice(head.submittedChunk.length);
+          }
+          return current;
+        });
+      }
+    };
+
+    // Check if superseded before execution starts (R5-13)
+    if (record.superseded || (latestQueuedRevRef.current.get(queueKey) ?? 0) > record.revision) {
+      record.completed = true;
+      retireCompleted();
+      return;
+    }
+
+    record.executing = true;
 
     // Acquire remote snapshot before fill when needed (for snapshot element references)
     const isTargetRef = Boolean(
@@ -185,32 +225,46 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
       }
     }
 
+    // Recheck supersession before remote write (R5-13)
+    if ((latestQueuedRevRef.current.get(queueKey) ?? 0) > record.revision) {
+      record.completed = true;
+      retireCompleted();
+      return;
+    }
+
     try {
-      await driver.fill(
-        record.targetRef,
-        record.fullValue,
-        {
-          snapshotId: effectiveSnapId ?? undefined,
-          mapRevision: effectiveMapRev ?? undefined,
-        }
-      );
+      if (client && driver.leaseEpoch) {
+        await client.sendCommand({
+          browserId,
+          leaseEpoch: driver.leaseEpoch,
+          browserInstanceId: browserInstanceId || "default",
+          desktopEpoch: desktopEpoch || "1",
+          documentGeneration: documentGeneration || "1",
+          command: "fill",
+          params: {
+            reference: record.targetRef,
+            selector: record.targetRef,
+            value: record.fullValue,
+            text: record.fullValue,
+            snapshotId: effectiveSnapId ?? undefined,
+            mapRevision: effectiveMapRev ?? undefined,
+            revision: record.revision,
+            imeRevision: record.revision,
+          },
+        });
+      } else {
+        await driver.fill(
+          record.targetRef,
+          record.fullValue,
+          {
+            snapshotId: effectiveSnapId ?? undefined,
+            mapRevision: effectiveMapRev ?? undefined,
+          }
+        );
+      }
       // Mark this submission record completed
       record.completed = true;
-
-      // Ordered completion: retire completed submissions from the queue head in strict FIFO order
-      while (
-        pendingImeSubmissionsRef.current.length > 0 &&
-        pendingImeSubmissionsRef.current[0].completed
-      ) {
-        const head = pendingImeSubmissionsRef.current.shift()!;
-        setImeText((current) => {
-          // Only slice if current buffer starts with this chunk, preserving unrelated edits
-          if (current.startsWith(head.submittedChunk)) {
-            return current.slice(head.submittedChunk.length);
-          }
-          return current;
-        });
-      }
+      retireCompleted();
     } catch {
       // On failure, remove from queue without slicing so user does not lose typed text
       const idx = pendingImeSubmissionsRef.current.indexOf(record);

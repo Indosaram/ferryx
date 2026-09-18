@@ -124,14 +124,14 @@ fn absolute_path_len(rest: &str) -> Option<usize> {
         return (!body.is_empty()).then_some(end);
     }
 
-    // Absolute POSIX path: requires a named first segment and at least one more
-    // separator, so prose like "and/or" is never mistaken for a path.
+    // Absolute POSIX path: requires a named first segment starting with alphanumeric, '.', '_', or '-'.
+    // Root-level paths (e.g. /secret.pem) and nested paths (/var/log) are recognized (R5-16).
     let body = token.strip_prefix('/')?;
     let first = body.chars().next()?;
     if !(first.is_alphanumeric() || matches!(first, '.' | '_' | '-')) {
         return None;
     }
-    body.contains('/').then_some(end)
+    Some(end)
 }
 
 /// Redacts every absolute filesystem path while leaving HTTP(S) URLs byte-identical,
@@ -146,8 +146,11 @@ pub fn sanitize_public_string(raw: &str) -> String {
         let rest = &raw[cursor..];
 
         // HTTP(S) URLs are public identifiers and pass through untouched, even when
-        // their path segments look like local directories.
-        if rest.starts_with("http://") || rest.starts_with("https://") {
+        // their path segments look like local directories. Recognized case-insensitively while
+        // preserving original bytes (R5-16).
+        let is_http_url = (rest.len() >= 7 && rest[..7].eq_ignore_ascii_case("http://"))
+            || (rest.len() >= 8 && rest[..8].eq_ignore_ascii_case("https://"));
+        if is_http_url {
             let end = url_token_end(rest).max(1);
             out.push_str(&rest[..end]);
             cursor += end;
@@ -360,6 +363,36 @@ pub mod tests {
         assert_eq!(
             sanitize_public_string(win_path),
             "Failed to open [redacted-path] in viewer"
+        );
+    }
+
+    #[test]
+    fn test_r5_16_root_level_paths_and_case_insensitive_urls() {
+        // Root-level absolute paths must be redacted
+        assert_eq!(
+            sanitize_public_string("Key stored at /secret.pem on host"),
+            "Key stored at [redacted-path] on host"
+        );
+        assert_eq!(
+            sanitize_public_string("Reading /flag.txt"),
+            "Reading [redacted-path]"
+        );
+        assert_eq!(
+            sanitize_public_string("/etc_config"),
+            "[redacted-path]"
+        );
+
+        // Uppercase and mixed-case HTTP(S) URLs must be preserved byte-identically
+        let upper_url = "HTTPS://EXAMPLE.COM/SECRET.PEM";
+        assert_eq!(sanitize_public_string(upper_url), upper_url);
+
+        let mixed_url = "Http://localhost:8080/flag.txt";
+        assert_eq!(sanitize_public_string(mixed_url), mixed_url);
+
+        let url_in_prose = "Open HTTP://api.example.com/test now";
+        assert_eq!(
+            sanitize_public_string(url_in_prose),
+            "Open HTTP://api.example.com/test now"
         );
     }
 

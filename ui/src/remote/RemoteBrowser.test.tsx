@@ -468,6 +468,47 @@ describe("BrowserClient", () => {
     expect(hasBackpressureError).toBe(true);
   });
 
+  it("enforces control-inclusive count and byte budgets for control messages on overflow (R5-14)", async () => {
+    const client = new BrowserClient("ws://localhost:9000/browser/b1");
+    await drainAsync();
+
+    // Enqueue 70 CONTROL messages (claimDriver)
+    const promises: Promise<any>[] = [];
+    for (let i = 0; i < 70; i++) {
+      promises.push(
+        client.claimDriver("b1", `ep${i}`, 100).catch((err) => err)
+      );
+    }
+
+    const results = await Promise.all(promises);
+    const hasBackpressureError = results.some(
+      (r) => r instanceof Error && /backpressure/i.test(r.message)
+    );
+    expect(hasBackpressureError).toBe(true);
+  });
+
+  it("enforces byte budgets on oversized writer messages (R5-14)", async () => {
+    const client = new BrowserClient("ws://localhost:9000/browser/b1");
+    await drainAsync();
+
+    // Create a message whose text exceeds 1 MiB
+    const hugeParams = { data: "x".repeat(1024 * 1024 + 10) };
+    await expect(
+      client.sendCommand(
+        {
+          browserId: "b1",
+          leaseEpoch: "ep1",
+          browserInstanceId: "bi1",
+          desktopEpoch: "1",
+          documentGeneration: "1",
+          command: "test",
+          params: hugeParams,
+        },
+        100
+      )
+    ).rejects.toThrow(/backpressure/i);
+  });
+
   it("executes bounded shutdown/join within specified timeout (R4-14)", async () => {
     const client = new BrowserClient("ws://localhost:9000/browser/b1");
     const ws = MockWebSocket.instances[0];

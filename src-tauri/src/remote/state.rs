@@ -723,6 +723,7 @@ pub struct RemoteGatewayState {
     pub workspace_registry: WorkspaceRegistry,
     pub ssh_store_path: RwLock<Option<PathBuf>>,
     pub active_selection: RwLock<Option<RemoteActiveDesktopSelection>>,
+    pub active_selection_tx: watch::Sender<Option<RemoteActiveDesktopSelection>>,
     pub active_session_tx: watch::Sender<Option<String>>,
     pub event_tx: broadcast::Sender<String>,
     pub is_running: RwLock<bool>,
@@ -873,6 +874,7 @@ impl RemoteGatewayState {
         auth_path: Option<PathBuf>,
     ) -> Self {
         let (event_tx, _) = broadcast::channel(1024);
+        let (active_selection_tx, _) = watch::channel(None);
         let (active_session_tx, _) = watch::channel(None);
         let config = config_path
             .as_deref()
@@ -902,6 +904,7 @@ impl RemoteGatewayState {
             workspace_registry,
             machine_services: None,
             active_selection: RwLock::new(None),
+            active_selection_tx,
             ssh_store_path: RwLock::new(None),
             active_session_tx,
             event_tx,
@@ -1086,6 +1089,7 @@ impl RemoteGatewayState {
         }
         let session_id = selection.session_id.clone();
         let payload = serde_json::to_value(&selection).unwrap_or(serde_json::Value::Null);
+        self.active_selection_tx.send_replace(Some(selection.clone()));
         *self.active_selection.write() = Some(selection);
         // `send` fails and discards the value when no receiver is alive, which is the normal
         // state before any remote client attaches. `send_replace` stores it regardless so a
@@ -1096,6 +1100,7 @@ impl RemoteGatewayState {
 
     pub fn clear_active_selection(&self) {
         *self.active_selection.write() = None;
+        self.active_selection_tx.send_replace(None);
         self.active_session_tx.send_replace(None);
         self.emit_active_selection_changed(serde_json::Value::Null);
     }
@@ -1107,6 +1112,10 @@ impl RemoteGatewayState {
         }
     }
 
+    pub fn active_selection_watch_rx(&self) -> watch::Receiver<Option<RemoteActiveDesktopSelection>> {
+        self.active_selection_tx.subscribe()
+    }
+
     pub fn active_session_watch_rx(&self) -> watch::Receiver<Option<String>> {
         self.active_session_tx.subscribe()
     }
@@ -1116,6 +1125,14 @@ impl RemoteGatewayState {
     }
 
     pub fn set_desktop_event_sink(&self, sink: DesktopEventSink) {
+        let sink_clone = sink.clone();
+        self.admission_controller
+            .sharing_registry()
+            .set_listener(Arc::new(move |dto| {
+                if let Ok(payload) = serde_json::to_value(dto) {
+                    sink_clone("browser-remote-sharing", payload);
+                }
+            }));
         *self.desktop_event_sink.write() = Some(sink);
     }
 

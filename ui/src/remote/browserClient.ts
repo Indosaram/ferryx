@@ -302,12 +302,17 @@ export class BrowserClient {
       }
     }
 
-    // Check bounded queue capacity & enforce backpressure on non-control messages (R4-14)
-    const nonControlCount = this.writerQueue.filter((m) => m.priority !== MessagePriority.CONTROL).length;
+    // Check bounded queue capacity & enforce backpressure with control-inclusive count/byte budgets (R4-14, R5-14)
     const inFlightCount = this.pendingRequests.size;
+    const totalQueueCount = this.writerQueue.length;
+    const currentQueueBytes = this.writerQueue.reduce((acc, m) => acc + (m.text?.length ?? 0), 0);
+    const msgBytes = msg.text?.length ?? 0;
+    const MAX_QUEUE_BYTES = 1024 * 1024; // 1 MiB
+
     if (
-      msg.priority !== MessagePriority.CONTROL &&
-      (nonControlCount >= MAX_QUEUE_CAPACITY || inFlightCount >= MAX_QUEUE_CAPACITY)
+      totalQueueCount >= MAX_QUEUE_CAPACITY ||
+      inFlightCount >= MAX_QUEUE_CAPACITY ||
+      currentQueueBytes + msgBytes > MAX_QUEUE_BYTES
     ) {
       throw new Error("BrowserClient queue full: backpressure limit exceeded");
     }

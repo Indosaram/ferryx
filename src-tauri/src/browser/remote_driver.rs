@@ -71,6 +71,18 @@ impl RemoteDriverBroker {
         browser_id: &str,
         has_control: bool,
     ) -> Result<DriverLease, RemoteDriverError> {
+        self.claim_with_epoch(device_id, connection_id, subscription_id, browser_id, has_control, 0)
+    }
+
+    pub fn claim_with_epoch(
+        &self,
+        device_id: &str,
+        connection_id: &str,
+        subscription_id: &str,
+        browser_id: &str,
+        has_control: bool,
+        forced_epoch: u64,
+    ) -> Result<DriverLease, RemoteDriverError> {
         if !has_control {
             return Err(RemoteDriverError::Unauthorized(
                 "control permission required to claim driver lease".into(),
@@ -101,12 +113,13 @@ impl RemoteDriverBroker {
                     && current.subscription_id == subscription_id
                     && current.browser_id == browser_id
                 {
+                    let epoch = if forced_epoch > 0 { forced_epoch } else { current.lease_epoch };
                     let renewed = DriverLease {
                         device_id: device_id.to_string(),
                         connection_id: connection_id.to_string(),
                         subscription_id: subscription_id.to_string(),
                         browser_id: browser_id.to_string(),
-                        lease_epoch: current.lease_epoch,
+                        lease_epoch: epoch,
                         expires_at: now + LEASE_TTL,
                     };
                     *guard = Some(renewed.clone());
@@ -122,7 +135,12 @@ impl RemoteDriverBroker {
 
         // Previous lease expired or was None. Create fresh lease.
         self.desktop_reclaimed.store(false, Ordering::SeqCst);
-        let new_epoch = self.epoch_counter.fetch_add(1, Ordering::SeqCst);
+        let new_epoch = if forced_epoch > 0 {
+            self.epoch_counter.fetch_max(forced_epoch + 1, Ordering::SeqCst);
+            forced_epoch
+        } else {
+            self.epoch_counter.fetch_add(1, Ordering::SeqCst)
+        };
         let lease = DriverLease {
             device_id: device_id.to_string(),
             connection_id: connection_id.to_string(),

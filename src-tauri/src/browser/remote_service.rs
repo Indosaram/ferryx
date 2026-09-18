@@ -482,6 +482,17 @@ impl BrowserRemoteService {
                     }
                 };
 
+                // Sample immutable ticket before acquisition (R5-9):
+                // (instance_id, service_epoch, desktop_epoch, generation, viewport_revision)
+                let ticket_instance_id = match manager.get_instance_id(&browser_id_clone) {
+                    Ok(id) => id,
+                    Err(_) => break,
+                };
+                let ticket_service_epoch = service_epoch;
+                let ticket_desktop_epoch = desktop_epoch.load(Ordering::SeqCst);
+                let ticket_generation = state.generation;
+                let ticket_viewport_rev = viewport_rev;
+
                 // Acquire shared native-capture permit
                 let permit = match native_capture_semaphore.clone().try_acquire_owned() {
                     Ok(p) => p,
@@ -535,8 +546,8 @@ impl BrowserRemoteService {
                     Err(_) => continue,
                 };
 
-                // Revalidate current state immediately before publication (R4-7 Part C):
-                // State was sampled before the await; recheck document generation, visibility, and existence.
+                // Revalidate current state immediately before publication (R4-7 Part C, R5-9):
+                // Ticket was sampled before the await; require exact match on (instance_id, service_epoch, desktop_epoch, generation, viewport_revision)
                 let current_state = match manager.get_state(&browser_id_clone) {
                     Ok(s) => s,
                     Err(_) => break,
@@ -547,8 +558,19 @@ impl BrowserRemoteService {
                     continue;
                 }
 
-                if current_state.generation != state.generation {
-                    // Drop frame sampled before a generation bump; advance seq to emit a resync sequence gap
+                let current_instance_id = manager.get_instance_id(&browser_id_clone).unwrap_or_default();
+                let current_desktop_epoch = desktop_epoch.load(Ordering::SeqCst);
+                let (_, _, current_viewport_rev) = manager
+                    .get_geometry(&browser_id_clone)
+                    .unwrap_or((None, 1.0, 1));
+
+                if current_instance_id != ticket_instance_id
+                    || current_state.generation != ticket_generation
+                    || current_desktop_epoch != ticket_desktop_epoch
+                    || current_viewport_rev != ticket_viewport_rev
+                {
+                    // Ticket mismatch! Drop frame sampled before instance/epoch/generation/viewport change;
+                    // advance seq to emit a resync sequence gap
                     seq = seq.wrapping_add(1);
                     continue;
                 }
@@ -574,11 +596,11 @@ impl BrowserRemoteService {
                         .map(|d| d.as_secs_f64())
                         .unwrap_or(0.0),
                     stream_id,
-                    browser_instance_id: manager.get_instance_id(&browser_id_clone).unwrap_or_default(),
-                    browser_service_epoch: service_epoch.to_string(),
-                    desktop_epoch: desktop_epoch.load(Ordering::SeqCst).to_string(),
-                    document_generation: current_state.generation.to_string(),
-                    viewport_revision: viewport_rev.to_string(),
+                    browser_instance_id: ticket_instance_id,
+                    browser_service_epoch: ticket_service_epoch.to_string(),
+                    desktop_epoch: ticket_desktop_epoch.to_string(),
+                    document_generation: ticket_generation.to_string(),
+                    viewport_revision: ticket_viewport_rev.to_string(),
                     capture_rect: crate::remote::browser_protocol::BrowserCaptureRect {
                         x: capture_rect.x,
                         y: capture_rect.y,
@@ -1003,5 +1025,108 @@ mod tests {
         let huge_frame = vec![0u8; MAX_FRAME_PAYLOAD_BYTES + 1];
         let admitted_huge = service.admit_frame(&b1, 4, huge_frame).unwrap();
         assert!(admitted_huge.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_r5_9_producer_ticket_drops_frame_on_instance_replacement() {
+        struct SingleCoordinatedSource {
+            started_tx: tokio::sync::mpsc::Sender<()>,
+            proceed_rx: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<()>>,
+        }
+
+        impl crate::browser::snapshot_source::BrowserSnapshotSource for SingleCoordinatedSource {
+            fn is_supported(&self) -> bool { true }
+            fn capture_snapshot<'a>(
+                &'a self,
+                webview_label: &'a str,
+                options: crate::browser::snapshot_source::SnapshotOptions,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<crate::browser::snapshot_source::BrowserSnapshot, crate::ipc::IpcError>> + Send + 'a>> {
+                let (coordinator, _) = crate::browser::snapshot_source::SnapshotCallbackCoordinator::new();
+                self.take_snapshot_coordinated(webview_label, options, coordinator)
+            }
+            fn take_snapshot_coordinated<'a>(
+                &'a self,
+                _webview_label: &'a str,
+                _options: crate::browser::snapshot_source::SnapshotOptions,
+                _coordinator: crate::browser::snapshot_source::SnapshotCallbackCoordinator,
+            ) -> crate::remote::browser_backend::BoxFuture<'a, Result<crate::browser::snapshot_source::BrowserSnapshot, crate::ipc::IpcError>> {
+                Box::pin(async move {
+                    let _ = self.started_tx.send(()).await;
+                    let _ = self.proceed_rx.lock().await.recv().await;
+                    Ok(crate::browser::snapshot_source::BrowserSnapshot::new(
+                        crate::browser::snapshot_source::sample_valid_jpeg_bytes(),
+                        crate::browser::snapshot_source::SnapshotFormat::Jpeg { quality: 80 },
+                        800,
+                        600,
+                    ))
+                })
+            }
+        }
+
+        let (service, b1) = create_test_service();
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::channel(1);
+        let (proceed_tx, proceed_rx) = tokio::sync::mpsc::channel(1);
+
+        let source = Arc::new(SingleCoordinatedSource {
+            started_tx,
+            proceed_rx: tokio::sync::Mutex::new(proceed_rx),
+        });
+        service.set_snapshot_source(source);
+
+        let mut frame_rx = service.subscribe_frames(&b1);
+        let old_instance_id = service.manager.get_instance_id(&b1).unwrap();
+        let sub = service.subscribe(&b1, "dev-ticket", "v-ticket").unwrap();
+
+        // Await deterministic signal that capture tick 1 has sampled ticket and entered await
+        tokio::time::timeout(std::time::Duration::from_secs(2), started_rx.recv())
+            .await
+            .expect("Capture must start")
+            .expect("started channel open");
+
+        // While tick 1 is inside capture await: close and recreate browser with SAME ID
+        service.manager.remove_session(&b1);
+        service
+            .manager
+            .register_session(CreateBrowserRequest {
+                browser_id: Some(b1.clone()),
+                workspace_id: Some("ws-1".into()),
+                worktree_path: None,
+                url: "https://example.com/recreated".into(),
+                profile: None,
+                zoom_factor: None,
+                bounds: Some(LogicalRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 800.0,
+                    height: 600.0,
+                }),
+                visible: Some(true),
+            })
+            .unwrap();
+
+        let new_instance_id = service.manager.get_instance_id(&b1).unwrap();
+        assert_ne!(old_instance_id, new_instance_id, "Recreated session has new instance_id");
+        assert_eq!(
+            service.manager.get_state(&b1).unwrap().generation,
+            1,
+            "Recreated session restarts at generation 1"
+        );
+
+        // Now allow tick 1 to complete its capture await
+        proceed_tx.send(()).await.unwrap();
+
+        // Immediate unsubscribe to ensure tick 2 does not produce a frame
+        // (we are specifically testing that tick 1's old frame is dropped!)
+        let recv_frame = tokio::time::timeout(std::time::Duration::from_millis(100), frame_rx.recv()).await;
+        // In tick 1, ticket mismatch occurred: instance_id changed! Frame MUST have been dropped!
+        if let Ok(Ok(frame_bytes)) = recv_frame {
+            let (_, metadata, _) = crate::browser::remote_bridge_protocol::decode_frame(&frame_bytes).unwrap();
+            panic!(
+                "Old capture must not be published! Received frame with browser_instance_id={}, ticket was {}",
+                metadata.browser_instance_id, old_instance_id
+            );
+        }
+
+        service.unsubscribe(&b1, &sub);
     }
 }

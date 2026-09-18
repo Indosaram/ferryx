@@ -968,10 +968,10 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
       </header>
 
       {viewMode === "browser" ? (
-        <div className="flex-1 flex flex-col min-h-0 bg-neutral-950 overflow-hidden">
+        <div className="flex-1 flex flex-col min-h-0 bg-background overflow-hidden">
           {browserSessions.length > 0 && (
-            <div className="flex items-center gap-1.5 px-2 py-1 bg-neutral-900 border-b border-neutral-800 text-xs overflow-x-auto shrink-0">
-              <span className="text-neutral-400 text-[11px] shrink-0">Browsers:</span>
+            <div className="flex items-center gap-1.5 px-2 py-1 bg-card border-b border-border text-xs overflow-x-auto shrink-0">
+              <span className="text-muted-foreground text-[11px] shrink-0">Browsers:</span>
               {browserSessions.map((s) => (
                 <button
                   key={s.browserId}
@@ -980,8 +980,8 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
                   onClick={() => setSelectedBrowserId(s.browserId)}
                   className={`px-2 py-0.5 rounded text-[11px] font-medium transition shrink-0 ${
                     selectedBrowserId === s.browserId
-                      ? "bg-blue-600 text-white"
-                      : "bg-neutral-800 text-neutral-300 hover:bg-neutral-700"
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-muted text-muted-foreground hover:bg-accent hover:text-accent-foreground"
                   }`}
                 >
                   {s.title || s.browserId}
@@ -990,7 +990,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
               <button
                 type="button"
                 onClick={() => void fetchBrowserSessions()}
-                className="ml-auto text-[11px] text-neutral-400 hover:text-neutral-200"
+                className="ml-auto text-[11px] text-muted-foreground hover:text-foreground"
               >
                 Refresh
               </button>
@@ -1012,7 +1012,7 @@ export const RemoteHostConnection: React.FC<{ hostId: string; relayUrl: string; 
                   type="text"
                   placeholder="Enter browser ID..."
                   data-testid="remote-manual-browser-id-input"
-                  className="px-2 py-1 text-xs rounded bg-neutral-900 border border-neutral-700 text-foreground font-mono"
+                  className="px-2 py-1 text-xs rounded bg-card border border-border text-foreground font-mono"
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && (e.target as HTMLInputElement).value.trim()) {
                       setSelectedBrowserId((e.target as HTMLInputElement).value.trim());

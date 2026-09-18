@@ -124,11 +124,11 @@ export const RemoteBrowserSharingIndicator: React.FC<RemoteBrowserSharingIndicat
       if (onReclaim) {
         await onReclaim();
       }
-      // Publish the reclaimed state so every listener stops showing remote control.
+      // Reclaiming revokes the driver; retain viewing status if viewers remain
       const reclaimed: RemoteBrowserSharingState = {
-        isSharing: false,
-        activeSessionsCount: 0,
-        driverStatus: "idle",
+        isSharing: internalSessionsCount > 0,
+        activeSessionsCount: internalSessionsCount,
+        driverStatus: internalSessionsCount > 0 ? "viewing" : "idle",
         driverDeviceId: null,
       };
       applySharingState(reclaimed);

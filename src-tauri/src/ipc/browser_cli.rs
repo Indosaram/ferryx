@@ -183,6 +183,14 @@ where
     deserializer.deserialize_option(U64OrDecimalStringVisitor)
 }
 
+fn never_grant_client_approval<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let _ = bool::deserialize(deserializer);
+    Ok(false)
+}
+
 /// Closed remote browser operations permitted over framed remote transport.
 ///
 /// Disallows legacy CLI commands (List, Open, Close, Focus, Screenshot, Cookies, Storage, Act, Snapshot, RemoteAttach)
@@ -256,14 +264,16 @@ pub enum RemoteBrowserOperation {
     Wait {
         browser_id: String,
         condition: BrowserWaitCondition,
-        #[serde(default)]
+        #[serde(default, alias = "timeout_ms")]
+        timeout_ms: Option<u64>,
+        #[serde(default, deserialize_with = "never_grant_client_approval")]
         has_approval: bool,
     },
     #[serde(rename_all = "camelCase")]
     Eval {
         browser_id: String,
         script: String,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "never_grant_client_approval")]
         has_approval: bool,
     },
     #[serde(rename_all = "camelCase")]
@@ -274,11 +284,96 @@ pub enum RemoteBrowserOperation {
     Snapshot {
         browser_id: String,
     },
+    #[serde(rename_all = "camelCase")]
+    List {
+        #[serde(default)]
+        workspace_id: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    Execute {
+        browser_id: String,
+        command: String,
+        #[serde(default)]
+        params: Option<serde_json::Value>,
+        #[serde(default)]
+        document_generation: Option<String>,
+        #[serde(default)]
+        browser_instance_id: Option<String>,
+        #[serde(default)]
+        desktop_epoch: Option<String>,
+        #[serde(default)]
+        lease_epoch: Option<String>,
+        #[serde(default)]
+        device_id: Option<String>,
+        #[serde(default)]
+        connection_id: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    SubscribeViewer {
+        browser_id: String,
+        device_id: String,
+        viewer_instance_id: String,
+        #[serde(default)]
+        options: Option<crate::remote::browser_protocol::BrowserSubscribeOptions>,
+    },
+    #[serde(rename_all = "camelCase")]
+    UnsubscribeViewer {
+        browser_id: String,
+        subscription_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    ClaimDriver {
+        browser_id: String,
+        device_id: String,
+        connection_id: String,
+        subscription_id: String,
+        #[serde(default, deserialize_with = "deserialize_u64_or_decimal_string")]
+        lease_epoch: Option<u64>,
+    },
+    #[serde(rename_all = "camelCase")]
+    ReleaseDriver {
+        subscription_id: String,
+        #[serde(default, deserialize_with = "deserialize_u64_or_decimal_string")]
+        lease_epoch: Option<u64>,
+    },
+    #[serde(rename_all = "camelCase")]
+    HeartbeatDriver {
+        device_id: String,
+        connection_id: String,
+        subscription_id: String,
+        #[serde(default, deserialize_with = "deserialize_u64_or_decimal_string")]
+        lease_epoch: Option<u64>,
+    },
 }
 
 impl RemoteBrowserOperation {
     pub fn validate(&self) -> Result<(), IpcError> {
         match self {
+            Self::List { .. } => Ok(()),
+            Self::Execute { browser_id, command, .. } => {
+                if browser_id.trim().is_empty() {
+                    return Err(IpcError::new(IpcErrorCode::InvalidArgument, "browserId required"));
+                }
+                if command.trim().is_empty() {
+                    return Err(IpcError::new(IpcErrorCode::InvalidArgument, "command required"));
+                }
+                Ok(())
+            }
+            Self::SubscribeViewer { browser_id, .. } => {
+                if browser_id.trim().is_empty() {
+                    return Err(IpcError::new(IpcErrorCode::InvalidArgument, "browserId required"));
+                }
+                Ok(())
+            }
+            Self::UnsubscribeViewer { browser_id, .. } => {
+                if browser_id.trim().is_empty() {
+                    return Err(IpcError::new(IpcErrorCode::InvalidArgument, "browserId required"));
+                }
+                Ok(())
+            }
+            Self::ClaimDriver { .. }
+            | Self::ReleaseDriver { .. }
+            | Self::HeartbeatDriver { .. } => Ok(()),
             Self::Navigate { url, .. } => {
                 crate::browser::validate_url(url).map_err(IpcError::from)?;
                 Ok(())
@@ -322,7 +417,15 @@ impl RemoteBrowserOperation {
                 has_approval,
                 ..
             } => {
-                if let BrowserWaitCondition::Function { script } = condition {
+                let script: Option<&str> = match condition {
+                    BrowserWaitCondition::Function { script } => Some(script.as_str()),
+                    BrowserWaitCondition::WithTimeout { inner, .. } => match &**inner {
+                        BrowserWaitCondition::Function { script } => Some(script.as_str()),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(script) = script {
                     crate::browser::remote_input::validate_eval_script(script, *has_approval)
                         .map_err(|e| IpcError::new(IpcErrorCode::InvalidArgument, e.to_string()))?;
                 }
@@ -552,7 +655,13 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
             let webview = app
                 .get_webview(&state.webview_label)
                 .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
-            let _ = crate::ipc::browser::eval_webview(webview, script).await?;
+            let res_str = crate::ipc::browser::eval_webview(webview, script).await?;
+            crate::browser::remote_input::decode_action_result(&res_str).map_err(|err_msg| {
+                IpcError::new(
+                    IpcErrorCode::Custom("BROWSER_TARGET_NOT_FOUND".into()),
+                    err_msg,
+                )
+            })?;
             let mut res_map = serde_json::Map::new();
             res_map.insert("clicked".into(), serde_json::json!(true));
             if let Some(sid) = stream_id {
@@ -621,7 +730,13 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                 }})()"#,
                 selector_json, value_json
             );
-            let _ = crate::ipc::browser::eval_webview(webview, script).await?;
+            let res_str = crate::ipc::browser::eval_webview(webview, script).await?;
+            crate::browser::remote_input::decode_action_result(&res_str).map_err(|err_msg| {
+                IpcError::new(
+                    IpcErrorCode::Custom("BROWSER_TARGET_NOT_FOUND".into()),
+                    err_msg,
+                )
+            })?;
             Ok(serde_json::json!({ "filled": true }))
         }
         RemoteBrowserOperation::Keypress { browser_id, key } => {
@@ -646,9 +761,11 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
         RemoteBrowserOperation::Wait {
             browser_id,
             condition,
+            timeout_ms,
             ..
         } => {
-            crate::ipc::browser::wait_browser_session(app, manager, &browser_id, condition).await?;
+            let timeout = timeout_ms.map(std::time::Duration::from_millis);
+            crate::ipc::browser::wait_browser_session_with_timeout(app, manager, &browser_id, condition, timeout).await?;
             Ok(serde_json::json!({ "conditionMet": true }))
         }
         RemoteBrowserOperation::Eval {
@@ -671,19 +788,327 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
             let instance_id = manager.get_instance_id(&browser_id).unwrap_or_default();
             let (bounds, _, viewport_revision) =
                 manager.get_geometry(&browser_id).unwrap_or((None, 1.0, 1));
+            let (service_epoch, desktop_epoch) = if let Some(svc) = app.try_state::<Arc<crate::browser::remote_service::BrowserRemoteService>>() {
+                (svc.service_epoch(), svc.desktop_epoch())
+            } else if let Some(backend) = app.try_state::<Arc<crate::remote::browser_backend::InProcessBrowserServiceBackend>>() {
+                (backend.remote_service.service_epoch(), backend.remote_service.desktop_epoch())
+            } else if let Some(mgr) = app.try_state::<Arc<crate::ipc::remote::RemoteGatewayManager>>() {
+                if let Some(st) = mgr.state() {
+                    (st.browser_service_epoch.load(std::sync::atomic::Ordering::Relaxed), 1)
+                } else {
+                    (1, 1)
+                }
+            } else {
+                (1, 1)
+            };
             Ok(serde_json::json!({
                 "browserId": state.browser_id,
                 "browserInstanceId": instance_id,
-                "browserServiceEpoch": "1",
-                "desktopEpoch": "1",
+                "browserServiceEpoch": service_epoch.to_string(),
+                "desktopEpoch": desktop_epoch.to_string(),
                 "documentGeneration": state.generation.to_string(),
                 "url": state.url,
                 "title": state.title,
                 "loading": state.loading,
-                "generation": state.generation,
-                "viewportRevision": viewport_revision,
+                "generation": state.generation.to_string(),
+                "viewportRevision": viewport_revision.to_string(),
                 "bounds": bounds,
             }))
+        }
+        RemoteBrowserOperation::List { workspace_id } => {
+            let sessions = manager.list_sessions();
+            let filtered: Vec<_> = sessions
+                .into_iter()
+                .filter(|s| {
+                    match &workspace_id {
+                        Some(ws) if !ws.is_empty() => s.workspace_id.as_deref() == Some(ws),
+                        _ => true,
+                    }
+                })
+                .map(|s| {
+                    serde_json::json!({
+                        "browserId": s.browser_id,
+                        "title": s.title,
+                        "url": s.url,
+                        "visible": s.visible,
+                        "workspaceId": s.workspace_id,
+                    })
+                })
+                .collect();
+            Ok(serde_json::Value::Array(filtered))
+        }
+        RemoteBrowserOperation::Execute {
+            browser_id,
+            command,
+            params,
+            document_generation,
+            browser_instance_id,
+            desktop_epoch,
+            lease_epoch,
+            device_id,
+            connection_id,
+        } => {
+            let service = app.try_state::<Arc<crate::browser::remote_service::BrowserRemoteService>>()
+                .map(|s| Arc::clone(&s))
+                .or_else(|| {
+                    app.try_state::<Arc<crate::remote::browser_backend::InProcessBrowserServiceBackend>>()
+                        .map(|b| Arc::clone(&b.remote_service))
+                });
+
+            if let Some(service) = service {
+                let lease_ep = lease_epoch.as_deref().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+                let dt_ep = desktop_epoch.as_deref().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+                let gen = document_generation.as_deref().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+                let dev = device_id.as_deref().unwrap_or("");
+                let conn = connection_id.as_deref().unwrap_or("");
+                let inst = browser_instance_id.as_deref().unwrap_or("");
+
+                service.execute_command_guard(&browser_id, lease_ep, dev, conn, inst, dt_ep, gen)
+                    .map_err(|e| match e {
+                        crate::browser::remote_service::RemoteServiceError::BrowserNotFound(id) => {
+                            IpcError::new(IpcErrorCode::Custom("BROWSER_NOT_FOUND".into()), id)
+                        }
+                        crate::browser::remote_service::RemoteServiceError::StaleLease
+                        | crate::browser::remote_service::RemoteServiceError::DesktopReclaimed => {
+                            IpcError::new(IpcErrorCode::Custom("BROWSER_FORBIDDEN".into()), e.to_string())
+                        }
+                        crate::browser::remote_service::RemoteServiceError::StaleInstance
+                        | crate::browser::remote_service::RemoteServiceError::StaleGeneration => {
+                            IpcError::new(IpcErrorCode::Custom("BROWSER_STALE_IDENTITY".into()), e.to_string())
+                        }
+                        other => IpcError::new(IpcErrorCode::Custom("BROWSER_EXECUTION_FAILED".into()), other.to_string()),
+                    })?;
+            } else {
+                if let Some(ref inst) = browser_instance_id {
+                    let actual_inst = manager.get_instance_id(&browser_id)?;
+                    if inst != &actual_inst {
+                        return Err(IpcError::new(
+                            IpcErrorCode::Custom("BROWSER_STALE_IDENTITY".into()),
+                            format!("Stale instance ID: expected {actual_inst}, got {inst}"),
+                        ));
+                    }
+                }
+                if let Some(ref gen_str) = document_generation {
+                    let state = manager.get_state(&browser_id)?;
+                    if gen_str != &state.generation.to_string() {
+                        return Err(IpcError::new(
+                            IpcErrorCode::Custom("BROWSER_STALE_IDENTITY".into()),
+                            format!("Stale document generation: expected {}, got {gen_str}", state.generation),
+                        ));
+                    }
+                }
+            }
+
+            match command.as_str() {
+                "navigate" => {
+                    let url = params.as_ref().and_then(|p| p.get("url")).and_then(|v| v.as_str()).unwrap_or("");
+                    crate::browser::validate_url(url).map_err(IpcError::from)?;
+                    let state = navigate_browser_session(app, manager, &browser_id, url).await?;
+                    Ok(serde_json::to_value(&state).unwrap_or_default())
+                }
+                "back" => {
+                    crate::ipc::browser::history_navigation(app, manager, &browser_id, false)?;
+                    let state = manager.get_state(&browser_id)?;
+                    Ok(serde_json::to_value(&state).unwrap_or_default())
+                }
+                "forward" => {
+                    crate::ipc::browser::history_navigation(app, manager, &browser_id, true)?;
+                    let state = manager.get_state(&browser_id)?;
+                    Ok(serde_json::to_value(&state).unwrap_or_default())
+                }
+                "reload" => {
+                    let state = manager.begin_reload(&browser_id)?;
+                    let webview = app
+                        .get_webview(&state.webview_label)
+                        .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
+                    webview.reload().map_err(|e| BrowserError::Internal(e.to_string()))?;
+                    Ok(serde_json::to_value(&state).unwrap_or_default())
+                }
+                "getState" => {
+                    let state = manager.get_state(&browser_id)?;
+                    let instance_id = manager.get_instance_id(&browser_id).unwrap_or_default();
+                    let (bounds, _, viewport_revision) = manager.get_geometry(&browser_id).unwrap_or((None, 1.0, 1));
+                    Ok(serde_json::json!({
+                        "browserId": state.browser_id,
+                        "browserInstanceId": instance_id,
+                        "documentGeneration": state.generation.to_string(),
+                        "generation": state.generation.to_string(),
+                        "viewportRevision": viewport_revision.to_string(),
+                        "url": state.url,
+                        "title": state.title,
+                        "loading": state.loading,
+                        "bounds": bounds,
+                    }))
+                }
+                other => Err(IpcError::new(
+                    IpcErrorCode::InvalidArgument,
+                    format!("unsupported bridge execute command: {other}"),
+                )),
+            }
+        }
+        RemoteBrowserOperation::SubscribeViewer {
+            browser_id,
+            device_id,
+            viewer_instance_id,
+            options,
+        } => {
+            let service = app.try_state::<Arc<crate::browser::remote_service::BrowserRemoteService>>()
+                .map(|s| Arc::clone(&s))
+                .or_else(|| {
+                    app.try_state::<Arc<crate::remote::browser_backend::InProcessBrowserServiceBackend>>()
+                        .map(|b| Arc::clone(&b.remote_service))
+                });
+            if let Some(service) = service {
+                let requested_profile = options.as_ref().map(|opt| {
+                    let format = match opt.format {
+                        crate::remote::browser_protocol::BrowserImageFormat::Png => {
+                            crate::browser::snapshot_source::SnapshotFormat::Png
+                        }
+                        crate::remote::browser_protocol::BrowserImageFormat::Jpeg => {
+                            crate::browser::snapshot_source::SnapshotFormat::Jpeg {
+                                quality: opt.quality.unwrap_or(70).clamp(1, 100),
+                            }
+                        }
+                    };
+                    crate::browser::remote_service::NegotiatedCaptureProfile {
+                        format,
+                        quality: opt.quality.unwrap_or(70).clamp(1, 100),
+                        interval_ms: opt.interval_ms.unwrap_or(80).clamp(50, 5000),
+                        max_edge: opt.max_edge.unwrap_or(2048).clamp(64, 2048),
+                    }
+                });
+
+                let (sub_id, negotiated_prof) = service
+                    .subscribe_with_profile(&browser_id, &device_id, &viewer_instance_id, requested_profile)
+                    .map_err(|e| IpcError::new(IpcErrorCode::Custom("BROWSER_SUBSCRIPTION_FAILED".into()), e.to_string()))?;
+                let stream_id = service.active_stream_id(&browser_id).unwrap_or(1);
+                let state = manager.get_state(&browser_id)?;
+                let instance_id = manager.get_instance_id(&browser_id).unwrap_or_default();
+
+                let negotiated_options = crate::remote::browser_protocol::BrowserSubscribeOptions {
+                    format: match negotiated_prof.format {
+                        crate::browser::snapshot_source::SnapshotFormat::Png => {
+                            crate::remote::browser_protocol::BrowserImageFormat::Png
+                        }
+                        crate::browser::snapshot_source::SnapshotFormat::Jpeg { .. } => {
+                            crate::remote::browser_protocol::BrowserImageFormat::Jpeg
+                        }
+                    },
+                    quality: match negotiated_prof.format {
+                        crate::browser::snapshot_source::SnapshotFormat::Jpeg { quality } => Some(quality),
+                        _ => None,
+                    },
+                    interval_ms: Some(negotiated_prof.interval_ms),
+                    max_edge: Some(negotiated_prof.max_edge),
+                };
+
+                let identity = crate::remote::browser_backend::BrowserSubscribeIdentity {
+                    browser_instance_id: instance_id,
+                    browser_service_epoch: service.service_epoch().to_string(),
+                    desktop_epoch: service.desktop_epoch().to_string(),
+                    document_generation: state.generation.to_string(),
+                };
+
+                Ok(serde_json::json!({
+                    "subscriptionId": sub_id,
+                    "streamId": stream_id,
+                    "options": negotiated_options,
+                    "identity": identity,
+                }))
+            } else {
+                let state = manager.get_state(&browser_id)?;
+                let instance_id = manager.get_instance_id(&browser_id).unwrap_or_default();
+                let identity = crate::remote::browser_backend::BrowserSubscribeIdentity {
+                    browser_instance_id: instance_id,
+                    browser_service_epoch: "1".into(),
+                    desktop_epoch: "1".into(),
+                    document_generation: state.generation.to_string(),
+                };
+                Ok(serde_json::json!({
+                    "subscriptionId": format!("sub-{}", uuid::Uuid::new_v4()),
+                    "streamId": 1,
+                    "options": options.unwrap_or_default(),
+                    "identity": identity,
+                }))
+            }
+        }
+        RemoteBrowserOperation::UnsubscribeViewer {
+            browser_id,
+            subscription_id,
+        } => {
+            let service = app.try_state::<Arc<crate::browser::remote_service::BrowserRemoteService>>()
+                .map(|s| Arc::clone(&s))
+                .or_else(|| {
+                    app.try_state::<Arc<crate::remote::browser_backend::InProcessBrowserServiceBackend>>()
+                        .map(|b| Arc::clone(&b.remote_service))
+                });
+            if let Some(service) = service {
+                service.unsubscribe(&browser_id, &subscription_id);
+            }
+            Ok(serde_json::json!({ "unsubscribed": true }))
+        }
+        RemoteBrowserOperation::ClaimDriver {
+            browser_id,
+            device_id,
+            connection_id,
+            subscription_id,
+            lease_epoch,
+        } => {
+            let broker = app.try_state::<Arc<crate::browser::remote_driver::RemoteDriverBroker>>()
+                .map(|b| Arc::clone(&b))
+                .or_else(|| {
+                    app.try_state::<Arc<crate::browser::remote_service::BrowserRemoteService>>()
+                        .map(|s| s.driver_broker().clone())
+                });
+            if let Some(broker) = broker {
+                let lease = broker.claim_with_epoch(
+                    &device_id,
+                    &connection_id,
+                    &subscription_id,
+                    &browser_id,
+                    true,
+                    lease_epoch.unwrap_or(0),
+                ).map_err(|e| IpcError::new(IpcErrorCode::Custom("BROWSER_FORBIDDEN".into()), e.to_string()))?;
+                Ok(serde_json::json!({
+                    "leaseEpoch": lease.lease_epoch.to_string(),
+                    "expiresAt": lease.expires_at.elapsed().as_secs_f64(),
+                }))
+            } else {
+                Ok(serde_json::json!({ "status": "ok" }))
+            }
+        }
+        RemoteBrowserOperation::ReleaseDriver {
+            subscription_id,
+            lease_epoch,
+        } => {
+            let broker = app.try_state::<Arc<crate::browser::remote_driver::RemoteDriverBroker>>()
+                .map(|b| Arc::clone(&b))
+                .or_else(|| {
+                    app.try_state::<Arc<crate::browser::remote_service::BrowserRemoteService>>()
+                        .map(|s| s.driver_broker().clone())
+                });
+            if let Some(broker) = broker {
+                let _ = broker.release(&subscription_id, lease_epoch.unwrap_or(0));
+            }
+            Ok(serde_json::json!({ "status": "ok" }))
+        }
+        RemoteBrowserOperation::HeartbeatDriver {
+            device_id,
+            connection_id,
+            subscription_id,
+            lease_epoch,
+        } => {
+            let broker = app.try_state::<Arc<crate::browser::remote_driver::RemoteDriverBroker>>()
+                .map(|b| Arc::clone(&b))
+                .or_else(|| {
+                    app.try_state::<Arc<crate::browser::remote_service::BrowserRemoteService>>()
+                        .map(|s| s.driver_broker().clone())
+                });
+            if let Some(broker) = broker {
+                let _ = broker.heartbeat(&device_id, &connection_id, &subscription_id, lease_epoch.unwrap_or(0))
+                    .map_err(|e| IpcError::new(IpcErrorCode::Custom("BROWSER_INVALID_REQUEST".into()), e.to_string()))?;
+            }
+            Ok(serde_json::json!({ "status": "ok" }))
         }
         RemoteBrowserOperation::Snapshot { browser_id } => {
             let state = manager.get_state(&browser_id)?;
@@ -1275,19 +1700,7 @@ where
         }
 
         if content_type == crate::browser::remote_bridge_protocol::IPC_CONTENT_TYPE_JSON {
-            let parsed_op = serde_json::from_slice::<RemoteBrowserOperation>(&payload).or_else(|_| {
-                if let Ok(mut val) = serde_json::from_slice::<serde_json::Value>(&payload) {
-                    if let Some(cmd) = val.get("command").cloned() {
-                        if val.get("operation").is_none() {
-                            if let Some(obj) = val.as_object_mut() {
-                                obj.insert("operation".to_string(), cmd);
-                                return serde_json::from_value::<RemoteBrowserOperation>(serde_json::Value::Object(obj.clone()));
-                            }
-                        }
-                    }
-                }
-                serde_json::from_slice::<RemoteBrowserOperation>(&payload)
-            });
+            let parsed_op = serde_json::from_slice::<RemoteBrowserOperation>(&payload);
 
             let resp_payload = match parsed_op {
                 Ok(op) => match execute_remote_operation(app, manager, op).await {
@@ -3282,6 +3695,7 @@ mod tests {
             condition: BrowserWaitCondition::Function {
                 script: "() => true".into(),
             },
+            timeout_ms: None,
             has_approval: false,
         };
         let err_no_appr = wait_no_approval.validate().unwrap_err();
@@ -3297,6 +3711,7 @@ mod tests {
             condition: BrowserWaitCondition::Function {
                 script: huge_script,
             },
+            timeout_ms: None,
             has_approval: true,
         };
         let err_too_large = wait_too_large.validate().unwrap_err();
@@ -3311,6 +3726,7 @@ mod tests {
             condition: BrowserWaitCondition::Function {
                 script: "document.title === 'Done'".into(),
             },
+            timeout_ms: None,
             has_approval: true,
         };
         assert!(wait_valid.validate().is_ok());
@@ -3321,6 +3737,7 @@ mod tests {
             condition: BrowserWaitCondition::Selector {
                 selector: "#ready-btn".into(),
             },
+            timeout_ms: None,
             has_approval: false,
         };
         assert!(wait_selector.validate().is_ok());
@@ -3330,6 +3747,7 @@ mod tests {
             condition: BrowserWaitCondition::Text {
                 text: "Success".into(),
             },
+            timeout_ms: None,
             has_approval: false,
         };
         assert!(wait_text.validate().is_ok());
@@ -3409,5 +3827,49 @@ mod tests {
         assert_eq!(map_rev, "1");
         assert_eq!(elements.len(), 1);
         assert_eq!(elements[0]["ref"], "btn-1");
+    }
+
+    #[test]
+    fn test_r5_15_eval_wait_lease_approval_and_normalization() {
+        use crate::browser::model::BrowserWaitCondition;
+
+        // 1. Client sending hasApproval: true in JSON is NOT trusted (must be rejected)
+        let eval_json_untrusted = serde_json::json!({
+            "operation": "eval",
+            "browserId": "b1",
+            "script": "2 + 2",
+            "hasApproval": true
+        });
+        let eval_op: RemoteBrowserOperation = serde_json::from_value(eval_json_untrusted).unwrap();
+        assert!(eval_op.validate().is_err(), "Client-supplied hasApproval boolean must not grant approval");
+
+        // 2. Direct Rust construction with has_approval: true succeeds
+        let eval_trusted = RemoteBrowserOperation::Eval {
+            browser_id: "b1".into(),
+            script: "2 + 2".into(),
+            has_approval: true,
+        };
+        assert!(eval_trusted.validate().is_ok());
+
+        // 3. String wait condition with timeoutMs is accepted and preserved
+        let wait_json = serde_json::json!({
+            "operation": "wait",
+            "browserId": "b1",
+            "condition": "document.title !== ''",
+            "timeoutMs": 3500
+        });
+        let wait_op: RemoteBrowserOperation = serde_json::from_value(wait_json).unwrap();
+        match wait_op {
+            RemoteBrowserOperation::Wait { condition, timeout_ms, .. } => {
+                assert_eq!(
+                    condition,
+                    BrowserWaitCondition::Function {
+                        script: "document.title !== ''".into()
+                    }
+                );
+                assert_eq!(timeout_ms, Some(3500));
+            }
+            _ => panic!("Expected Wait operation"),
+        }
     }
 }

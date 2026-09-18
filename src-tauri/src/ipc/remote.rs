@@ -18,6 +18,7 @@ use tauri::State;
 #[derive(Clone)]
 pub struct RemoteGatewayManager {
     inner: RemoteGatewayManagerInner,
+    browser_backend: Arc<parking_lot::RwLock<Option<Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>>>>,
 }
 
 #[derive(Clone)]
@@ -36,12 +37,14 @@ impl RemoteGatewayManager {
                 state,
                 server_handle: Arc::new(Mutex::new(None)),
             },
+            browser_backend: Arc::new(parking_lot::RwLock::new(None)),
         }
     }
 
     pub fn from_daemon(daemon_client: Arc<DaemonClient>) -> Self {
         Self {
             inner: RemoteGatewayManagerInner::Daemon(daemon_client),
+            browser_backend: Arc::new(parking_lot::RwLock::new(None)),
         }
     }
 
@@ -56,14 +59,25 @@ impl RemoteGatewayManager {
         &self,
         backend: Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>,
     ) {
+        *self.browser_backend.write() = Some(Arc::clone(&backend));
         match &self.inner {
             RemoteGatewayManagerInner::State { state, .. } => {
                 state.set_browser_backend(backend);
             }
             RemoteGatewayManagerInner::Daemon(_) => {
-                // In daemon mode, the daemon's RemoteGatewayState is configured to route
-                // via LocalIpcBrowserBackend to the GUI's browser CLI UDS endpoint.
+                // In daemon mode, retain the configured backend reference so the GUI
+                // bridge and callers can access it directly (R5-1).
             }
+        }
+    }
+
+    pub fn browser_backend(&self) -> Option<Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>> {
+        if let Some(backend) = self.browser_backend.read().clone() {
+            return Some(backend);
+        }
+        match &self.inner {
+            RemoteGatewayManagerInner::State { state, .. } => Some(state.browser_backend()),
+            RemoteGatewayManagerInner::Daemon(_) => None,
         }
     }
 

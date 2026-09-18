@@ -191,6 +191,16 @@ pub trait RemoteBrowserBackend: Send + Sync {
         Box::pin(async move { Ok(()) })
     }
 
+    fn heartbeat_driver<'a>(
+        &'a self,
+        _device_id: &'a str,
+        _connection_id: &'a str,
+        _subscription_id: &'a str,
+        _lease_epoch: u64,
+    ) -> BoxFuture<'a, Result<(), RemoteBrowserError>> {
+        Box::pin(async move { Ok(()) })
+    }
+
     fn unsubscribe_viewer<'a>(
         &'a self,
         browser_id: &'a str,
@@ -369,6 +379,14 @@ pub struct LocalIpcBrowserBackend {
     frame_senders: parking_lot::Mutex<HashMap<String, tokio::sync::broadcast::Sender<Vec<u8>>>>,
 }
 
+fn json_val_to_decimal_string(val: &serde_json::Value) -> Option<String> {
+    match val {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
 impl LocalIpcBrowserBackend {
     pub const IPC_CONTENT_TYPE_JSON: u8 = 0x01;
     pub const IPC_CONTENT_TYPE_IMAGE: u8 = 0x02;
@@ -380,6 +398,13 @@ impl LocalIpcBrowserBackend {
             socket_path,
             local_credential,
             frame_senders: parking_lot::Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn publish_frame(&self, browser_id: &str, frame: Vec<u8>) {
+        let senders = self.frame_senders.lock();
+        if let Some(sender) = senders.get(browser_id) {
+            let _ = sender.send(frame);
         }
     }
 
@@ -507,19 +532,32 @@ impl RemoteBrowserBackend for LocalIpcBrowserBackend {
         scope: &'a DesktopScope,
     ) -> BoxFuture<'a, Result<Vec<RemoteBrowserSessionSummary>, RemoteBrowserError>> {
         Box::pin(async move {
-            let req = serde_json::json!({
-                "command": "list",
-                "workspaceId": scope.workspace_id,
-            });
-            let payload = self.send_framed_request(&serde_json::to_vec(&req).unwrap()).await?;
+            let req = crate::ipc::browser_cli::RemoteBrowserOperation::List {
+                workspace_id: if scope.workspace_id.is_empty() {
+                    None
+                } else {
+                    Some(scope.workspace_id.clone())
+                },
+            };
+            let req_bytes = serde_json::to_vec(&req).map_err(|e| {
+                RemoteBrowserError::ExecutionFailed(format!("Failed to serialize list request: {e}"))
+            })?;
+            let payload = self.send_framed_request(&req_bytes).await?;
             let val: serde_json::Value = serde_json::from_slice(&payload).map_err(|e| {
                 RemoteBrowserError::ExecutionFailed(format!("Failed to parse session list: {e}"))
             })?;
-            let items = if let Some(arr) = val.as_array() {
+            if let Some(err_code) = val.get("code").and_then(|v| v.as_str()) {
+                let msg = val.get("message").and_then(|v| v.as_str()).unwrap_or("List failed");
+                return match err_code {
+                    "BROWSER_CLI_REQUEST_INVALID" | "BROWSER_INVALID_REQUEST" => Err(RemoteBrowserError::InvalidRequest(msg.to_string())),
+                    "BROWSER_CLI_UNAUTHORIZED" => Err(RemoteBrowserError::Forbidden(msg.to_string())),
+                    _ => Err(RemoteBrowserError::ExecutionFailed(msg.to_string())),
+                };
+            }
+            let data = val.get("result").unwrap_or(&val);
+            let items = if let Some(arr) = data.as_array() {
                 arr.clone()
-            } else if let Some(arr) = val.get("result").and_then(|v| v.as_array()) {
-                arr.clone()
-            } else if let Some(arr) = val.get("sessions").and_then(|v| v.as_array()) {
+            } else if let Some(arr) = data.get("sessions").and_then(|v| v.as_array()) {
                 arr.clone()
             } else {
                 Vec::new()
@@ -562,14 +600,24 @@ impl RemoteBrowserBackend for LocalIpcBrowserBackend {
         _scope: &'a DesktopScope,
     ) -> BoxFuture<'a, Result<BrowserRemoteState, RemoteBrowserError>> {
         Box::pin(async move {
-            let req = serde_json::json!({
-                "command": "getState",
-                "browserId": browser_id,
-            });
-            let payload = self.send_framed_request(&serde_json::to_vec(&req).unwrap()).await?;
+            let req = crate::ipc::browser_cli::RemoteBrowserOperation::GetState {
+                browser_id: browser_id.to_string(),
+            };
+            let req_bytes = serde_json::to_vec(&req).map_err(|e| {
+                RemoteBrowserError::ExecutionFailed(format!("Failed to serialize getState request: {e}"))
+            })?;
+            let payload = self.send_framed_request(&req_bytes).await?;
             let val: serde_json::Value = serde_json::from_slice(&payload).map_err(|e| {
                 RemoteBrowserError::ExecutionFailed(format!("Failed to parse getState response: {e}"))
             })?;
+            if let Some(err_code) = val.get("code").and_then(|v| v.as_str()) {
+                let msg = val.get("message").and_then(|v| v.as_str()).unwrap_or("getState failed");
+                return match err_code {
+                    "BROWSER_NOT_FOUND" | "BROWSER_CLI_NOT_FOUND" => Err(RemoteBrowserError::NotFound(msg.to_string())),
+                    "BROWSER_CLI_REQUEST_INVALID" | "BROWSER_INVALID_REQUEST" => Err(RemoteBrowserError::InvalidRequest(msg.to_string())),
+                    _ => Err(RemoteBrowserError::ExecutionFailed(msg.to_string())),
+                };
+            }
             let data = val.get("result").unwrap_or(&val);
             if let Some(err) = data.get("error").and_then(|v| v.as_str()) {
                 return Err(RemoteBrowserError::NotFound(err.to_string()));
@@ -579,16 +627,30 @@ impl RemoteBrowserBackend for LocalIpcBrowserBackend {
                 .or_else(|| data.get("instanceId"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
+
+            let doc_gen = data
+                .get("documentGeneration")
+                .or_else(|| data.get("generation"))
+                .and_then(json_val_to_decimal_string)
+                .ok_or_else(|| RemoteBrowserError::ExecutionFailed("Missing document generation in getState response".into()))?;
+
+            let vp_rev = data
+                .get("viewportRevision")
+                .and_then(json_val_to_decimal_string)
+                .unwrap_or_else(|| "1".into());
+
+            let visible = data.get("visible").and_then(|v| v.as_bool()).unwrap_or(true);
+
             Ok(BrowserRemoteState {
                 browser_id: data.get("browserId").and_then(|v| v.as_str()).unwrap_or(browser_id).to_string(),
                 browser_instance_id: inst_id,
                 url: data.get("url").and_then(|v| v.as_str()).map(|s| s.to_string()),
                 title: data.get("title").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                document_generation: data.get("generation").or_else(|| data.get("documentGeneration")).and_then(|v| v.as_str()).unwrap_or("1").to_string(),
-                viewport_revision: data.get("viewportRevision").and_then(|v| v.as_str()).unwrap_or("1").to_string(),
+                document_generation: doc_gen,
+                viewport_revision: vp_rev,
                 loading: data.get("loading").and_then(|v| v.as_bool()).unwrap_or(false),
-                paused: !data.get("visible").and_then(|v| v.as_bool()).unwrap_or(true),
-                pause_reason: if !data.get("visible").and_then(|v| v.as_bool()).unwrap_or(true) { Some("hidden".into()) } else { None },
+                paused: !visible,
+                pause_reason: if !visible { Some("hidden".into()) } else { None },
             })
         })
     }
@@ -598,21 +660,21 @@ impl RemoteBrowserBackend for LocalIpcBrowserBackend {
         ctx: BrowserCommandContext,
     ) -> BoxFuture<'_, Result<BrowserCommandResult, RemoteBrowserError>> {
         Box::pin(async move {
-            let mut req = serde_json::json!({
-                "command": ctx.command,
-                "browserId": ctx.browser_id,
-            });
-            if let Some(params) = &ctx.params {
-                if let Some(obj) = params.as_object() {
-                    for (k, v) in obj {
-                        req[k] = v.clone();
-                    }
-                }
-            }
-            if let Some(gen) = &ctx.document_generation {
-                req["documentGeneration"] = serde_json::json!(gen);
-            }
-            let payload = self.send_framed_request(&serde_json::to_vec(&req).unwrap()).await?;
+            let req = crate::ipc::browser_cli::RemoteBrowserOperation::Execute {
+                browser_id: ctx.browser_id,
+                command: ctx.command,
+                params: ctx.params,
+                document_generation: ctx.document_generation,
+                browser_instance_id: ctx.browser_instance_id,
+                desktop_epoch: ctx.desktop_epoch,
+                lease_epoch: ctx.lease_epoch,
+                device_id: ctx.device_id,
+                connection_id: ctx.connection_id,
+            };
+            let req_bytes = serde_json::to_vec(&req).map_err(|e| {
+                RemoteBrowserError::ExecutionFailed(format!("Failed to serialize execute request: {e}"))
+            })?;
+            let payload = self.send_framed_request(&req_bytes).await?;
             let val: serde_json::Value = serde_json::from_slice(&payload).map_err(|e| {
                 RemoteBrowserError::ExecutionFailed(format!("Failed to parse command response: {e}"))
             })?;
@@ -621,7 +683,8 @@ impl RemoteBrowserBackend for LocalIpcBrowserBackend {
                 return match err_code {
                     "BROWSER_CLI_REQUEST_INVALID" | "BROWSER_INVALID_REQUEST" => Err(RemoteBrowserError::InvalidRequest(msg.to_string())),
                     "BROWSER_WAIT_TIMEOUT" => Err(RemoteBrowserError::WaitTimeout),
-                    "BROWSER_CLI_UNAUTHORIZED" => Err(RemoteBrowserError::Forbidden(msg.to_string())),
+                    "BROWSER_CLI_UNAUTHORIZED" | "BROWSER_FORBIDDEN" => Err(RemoteBrowserError::Forbidden(msg.to_string())),
+                    "BROWSER_NOT_FOUND" => Err(RemoteBrowserError::NotFound(msg.to_string())),
                     _ => Err(RemoteBrowserError::ExecutionFailed(msg.to_string())),
                 };
             }
@@ -657,8 +720,8 @@ impl RemoteBrowserBackend for LocalIpcBrowserBackend {
     fn subscribe_viewer<'a>(
         &'a self,
         browser_id: &'a str,
-        _device_id: &'a str,
-        _viewer_instance_id: &'a str,
+        device_id: &'a str,
+        viewer_instance_id: &'a str,
         options: Option<crate::remote::browser_protocol::BrowserSubscribeOptions>,
     ) -> BoxFuture<
         'a,
@@ -673,44 +736,145 @@ impl RemoteBrowserBackend for LocalIpcBrowserBackend {
         >,
     > {
         Box::pin(async move {
-            if self.socket_path.is_empty() {
-                return Err(RemoteBrowserError::Unavailable("Local IPC socket path empty".into()));
-            }
-            if !std::path::Path::new(&self.socket_path).exists() {
-                return Err(RemoteBrowserError::Unavailable(
-                    "GUI process not running or socket unconnected".into(),
-                ));
-            }
-
-            // Query bridge state for identity negotiation
-            let state = self
-                .get_state(
-                    browser_id,
-                    &DesktopScope {
-                        workspace_id: "".into(),
-                        worktree_slug: "".into(),
-                    },
-                )
-                .await?;
-            let sub_id = format!("ipc-sub-{}", uuid::Uuid::new_v4());
-            let identity = BrowserSubscribeIdentity {
-                browser_instance_id: state
-                    .browser_instance_id
-                    .unwrap_or_else(|| format!("bi-{browser_id}")),
-                browser_service_epoch: "1".into(),
-                desktop_epoch: "1".into(),
-                document_generation: state.document_generation,
+            let req = crate::ipc::browser_cli::RemoteBrowserOperation::SubscribeViewer {
+                browser_id: browser_id.to_string(),
+                device_id: device_id.to_string(),
+                viewer_instance_id: viewer_instance_id.to_string(),
+                options: options.clone(),
             };
-            Ok((sub_id, 1, options.unwrap_or_default(), identity))
+            let req_bytes = serde_json::to_vec(&req).map_err(|e| {
+                RemoteBrowserError::ExecutionFailed(format!("Failed to serialize subscribe request: {e}"))
+            })?;
+            let payload = self.send_framed_request(&req_bytes).await?;
+            let val: serde_json::Value = serde_json::from_slice(&payload).map_err(|e| {
+                RemoteBrowserError::ExecutionFailed(format!("Failed to parse subscribe response: {e}"))
+            })?;
+            if let Some(err_code) = val.get("code").and_then(|v| v.as_str()) {
+                let msg = val.get("message").and_then(|v| v.as_str()).unwrap_or("Subscribe failed");
+                return match err_code {
+                    "BROWSER_NOT_FOUND" => Err(RemoteBrowserError::NotFound(msg.to_string())),
+                    "BROWSER_SUBSCRIPTION_FAILED" => Err(RemoteBrowserError::ExecutionFailed(msg.to_string())),
+                    "BROWSER_CLI_REQUEST_INVALID" | "BROWSER_INVALID_REQUEST" => Err(RemoteBrowserError::InvalidRequest(msg.to_string())),
+                    "BROWSER_CLI_UNAUTHORIZED" | "BROWSER_FORBIDDEN" => Err(RemoteBrowserError::Forbidden(msg.to_string())),
+                    _ => Err(RemoteBrowserError::ExecutionFailed(msg.to_string())),
+                };
+            }
+            let data = val.get("result").unwrap_or(&val);
+            let sub_id = data.get("subscriptionId").and_then(|v| v.as_str())
+                .ok_or_else(|| RemoteBrowserError::ExecutionFailed("Missing subscriptionId in subscribe response".into()))?
+                .to_string();
+            let stream_id = data.get("streamId").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+            let negotiated_opts = if let Some(opts_val) = data.get("options") {
+                serde_json::from_value(opts_val.clone()).unwrap_or_else(|_| options.unwrap_or_default())
+            } else {
+                options.unwrap_or_default()
+            };
+            let ident_val = data.get("identity")
+                .ok_or_else(|| RemoteBrowserError::ExecutionFailed("Missing identity in subscribe response".into()))?;
+            let identity: BrowserSubscribeIdentity = serde_json::from_value(ident_val.clone()).map_err(|e| {
+                RemoteBrowserError::ExecutionFailed(format!("Failed to parse identity: {e}"))
+            })?;
+
+            Ok((sub_id, stream_id, negotiated_opts, identity))
         })
     }
 
     fn unsubscribe_viewer<'a>(
         &'a self,
-        _browser_id: &'a str,
-        _subscription_id: &'a str,
+        browser_id: &'a str,
+        subscription_id: &'a str,
     ) -> BoxFuture<'a, Result<(), RemoteBrowserError>> {
-        Box::pin(async move { Ok(()) })
+        Box::pin(async move {
+            let req = crate::ipc::browser_cli::RemoteBrowserOperation::UnsubscribeViewer {
+                browser_id: browser_id.to_string(),
+                subscription_id: subscription_id.to_string(),
+            };
+            if let Ok(req_bytes) = serde_json::to_vec(&req) {
+                let _ = self.send_framed_request(&req_bytes).await;
+            }
+            Ok(())
+        })
+    }
+
+    fn claim_driver<'a>(
+        &'a self,
+        browser_id: &'a str,
+        device_id: &'a str,
+        connection_id: &'a str,
+        subscription_id: &'a str,
+        lease_epoch: u64,
+    ) -> BoxFuture<'a, Result<(), RemoteBrowserError>> {
+        Box::pin(async move {
+            let req = crate::ipc::browser_cli::RemoteBrowserOperation::ClaimDriver {
+                browser_id: browser_id.to_string(),
+                device_id: device_id.to_string(),
+                connection_id: connection_id.to_string(),
+                subscription_id: subscription_id.to_string(),
+                lease_epoch: Some(lease_epoch),
+            };
+            let req_bytes = serde_json::to_vec(&req).map_err(|e| {
+                RemoteBrowserError::ExecutionFailed(format!("Failed to serialize claim request: {e}"))
+            })?;
+            let payload = self.send_framed_request(&req_bytes).await?;
+            let val: serde_json::Value = serde_json::from_slice(&payload).map_err(|e| {
+                RemoteBrowserError::ExecutionFailed(format!("Failed to parse claim response: {e}"))
+            })?;
+            if let Some(err_code) = val.get("code").and_then(|v| v.as_str()) {
+                let msg = val.get("message").and_then(|v| v.as_str()).unwrap_or("Claim failed");
+                return match err_code {
+                    "BROWSER_FORBIDDEN" => Err(RemoteBrowserError::Forbidden(msg.to_string())),
+                    "BROWSER_NOT_FOUND" => Err(RemoteBrowserError::NotFound(msg.to_string())),
+                    _ => Err(RemoteBrowserError::ExecutionFailed(msg.to_string())),
+                };
+            }
+            Ok(())
+        })
+    }
+
+    fn release_driver<'a>(
+        &'a self,
+        subscription_id: &'a str,
+        lease_epoch: u64,
+    ) -> BoxFuture<'a, Result<(), RemoteBrowserError>> {
+        Box::pin(async move {
+            let req = crate::ipc::browser_cli::RemoteBrowserOperation::ReleaseDriver {
+                subscription_id: subscription_id.to_string(),
+                lease_epoch: Some(lease_epoch),
+            };
+            if let Ok(req_bytes) = serde_json::to_vec(&req) {
+                let _ = self.send_framed_request(&req_bytes).await;
+            }
+            Ok(())
+        })
+    }
+
+    fn heartbeat_driver<'a>(
+        &'a self,
+        device_id: &'a str,
+        connection_id: &'a str,
+        subscription_id: &'a str,
+        lease_epoch: u64,
+    ) -> BoxFuture<'a, Result<(), RemoteBrowserError>> {
+        Box::pin(async move {
+            let req = crate::ipc::browser_cli::RemoteBrowserOperation::HeartbeatDriver {
+                device_id: device_id.to_string(),
+                connection_id: connection_id.to_string(),
+                subscription_id: subscription_id.to_string(),
+                lease_epoch: Some(lease_epoch),
+            };
+            let req_bytes = serde_json::to_vec(&req).map_err(|e| {
+                RemoteBrowserError::ExecutionFailed(format!("Failed to serialize heartbeat request: {e}"))
+            })?;
+            let payload = self.send_framed_request(&req_bytes).await?;
+            let val: serde_json::Value = serde_json::from_slice(&payload).map_err(|e| {
+                RemoteBrowserError::ExecutionFailed(format!("Failed to parse heartbeat response: {e}"))
+            })?;
+            if let Some(_err_code) = val.get("code").and_then(|v| v.as_str()) {
+                let msg = val.get("message").and_then(|v| v.as_str()).unwrap_or("Heartbeat failed");
+                return Err(RemoteBrowserError::Forbidden(msg.to_string()));
+            }
+            Ok(())
+        })
     }
 
     fn capabilities(&self) -> BoxFuture<'_, BrowserCapabilities> {
@@ -1371,14 +1535,20 @@ impl RemoteBrowserBackend for InProcessBrowserServiceBackend {
         device_id: &'a str,
         connection_id: &'a str,
         subscription_id: &'a str,
-        _lease_epoch: u64,
+        lease_epoch: u64,
     ) -> BoxFuture<'a, Result<(), RemoteBrowserError>> {
-        let res = self.remote_service.driver_broker().claim(
+        if self.manager.get_state(browser_id).is_err() {
+            return Box::pin(async move {
+                Err(RemoteBrowserError::NotFound(browser_id.to_string()))
+            });
+        }
+        let res = self.remote_service.driver_broker().claim_with_epoch(
             device_id,
             connection_id,
             subscription_id,
             browser_id,
             true,
+            lease_epoch,
         );
         Box::pin(async move {
             match res {
@@ -1395,6 +1565,27 @@ impl RemoteBrowserBackend for InProcessBrowserServiceBackend {
     ) -> BoxFuture<'a, Result<(), RemoteBrowserError>> {
         let _ = self.remote_service.driver_broker().release(subscription_id, lease_epoch);
         Box::pin(async move { Ok(()) })
+    }
+
+    fn heartbeat_driver<'a>(
+        &'a self,
+        device_id: &'a str,
+        connection_id: &'a str,
+        subscription_id: &'a str,
+        lease_epoch: u64,
+    ) -> BoxFuture<'a, Result<(), RemoteBrowserError>> {
+        let res = self.remote_service.driver_broker().heartbeat(
+            device_id,
+            connection_id,
+            subscription_id,
+            lease_epoch,
+        );
+        Box::pin(async move {
+            match res {
+                Ok(_) => Ok(()),
+                Err(e) => Err(RemoteBrowserError::Forbidden(e.to_string())),
+            }
+        })
     }
 
     fn unsubscribe_viewer<'a>(
@@ -1912,5 +2103,329 @@ pub mod tests {
         state.set_browser_backend(Arc::clone(&backend) as Arc<dyn RemoteBrowserBackend>);
         let updated_caps = state.browser_backend().capabilities().await;
         assert!(updated_caps.browser_available);
+    }
+
+    #[tokio::test]
+    async fn test_r5_1_list_sessions_propagates_error_envelope() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let sock_path = temp_dir.path().join("r5_1_test.sock");
+        let token_path = temp_dir.path().join("r5_1_test.token");
+        std::fs::write(&token_path, "secret-token").unwrap();
+
+        let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let (reader, mut writer) = stream.into_split();
+                let mut reader = tokio::io::BufReader::new(reader);
+
+                // Read handshake line
+                let mut line = String::new();
+                use tokio::io::AsyncBufReadExt;
+                let _ = reader.read_line(&mut line).await;
+                let _ = writer.write_all(b"{\"type\":\"remoteAttached\"}\n").await;
+                let _ = writer.flush().await;
+
+                // Read framed request
+                let mut hdr = [0u8; 5];
+                if reader.read_exact(&mut hdr).await.is_ok() {
+                    let len = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]) as usize;
+                    let mut payload = vec![0u8; len];
+                    let _ = reader.read_exact(&mut payload).await;
+
+                    // Respond with an error envelope
+                    let err_json = serde_json::json!({
+                        "code": "BROWSER_INVALID_REQUEST",
+                        "message": "Bridge daemon simulated failure"
+                    });
+                    let resp_payload = serde_json::to_vec(&err_json).unwrap();
+                    let mut frame = Vec::new();
+                    frame.extend_from_slice(&(resp_payload.len() as u32).to_le_bytes());
+                    frame.push(LocalIpcBrowserBackend::IPC_CONTENT_TYPE_JSON);
+                    frame.extend_from_slice(&resp_payload);
+                    let _ = writer.write_all(&frame).await;
+                    let _ = writer.flush().await;
+                }
+            }
+        });
+
+        let backend = LocalIpcBrowserBackend::new(
+            sock_path.to_str().unwrap().to_string(),
+            Some("secret-token".to_string()),
+        );
+        let scope = DesktopScope {
+            workspace_id: "".into(),
+            worktree_slug: "".into(),
+        };
+
+        // R5-1: Error envelope from bridge must propagate as Err, NEVER become Ok([]) empty inventory
+        let res = backend.list_sessions(&scope).await;
+        assert!(res.is_err(), "Bridge error envelope must propagate as Err, but got: {:?}", res);
+    }
+
+    #[tokio::test]
+    async fn test_r5_2_params_cannot_overwrite_authorized_target() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let sock_path = temp_dir.path().join("r5_2_test.sock");
+        let token_path = temp_dir.path().join("r5_2_test.token");
+        std::fs::write(&token_path, "secret-token").unwrap();
+
+        let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+
+        let received_req = Arc::new(parking_lot::Mutex::new(None));
+        let received_clone = Arc::clone(&received_req);
+
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let (reader, mut writer) = stream.into_split();
+                let mut reader = tokio::io::BufReader::new(reader);
+
+                // Handshake
+                let mut line = String::new();
+                use tokio::io::AsyncBufReadExt;
+                let _ = reader.read_line(&mut line).await;
+                let _ = writer.write_all(b"{\"type\":\"remoteAttached\"}\n").await;
+                let _ = writer.flush().await;
+
+                // Read framed request
+                let mut hdr = [0u8; 5];
+                if reader.read_exact(&mut hdr).await.is_ok() {
+                    let len = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]) as usize;
+                    let mut payload = vec![0u8; len];
+                    let _ = reader.read_exact(&mut payload).await;
+                    let val: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+                    *received_clone.lock() = Some(val);
+
+                    // Respond ok
+                    let resp = serde_json::json!({ "result": { "status": "ok" } });
+                    let resp_payload = serde_json::to_vec(&resp).unwrap();
+                    let mut frame = Vec::new();
+                    frame.extend_from_slice(&(resp_payload.len() as u32).to_le_bytes());
+                    frame.push(LocalIpcBrowserBackend::IPC_CONTENT_TYPE_JSON);
+                    frame.extend_from_slice(&resp_payload);
+                    let _ = writer.write_all(&frame).await;
+                    let _ = writer.flush().await;
+                }
+            }
+        });
+
+        let backend = LocalIpcBrowserBackend::new(
+            sock_path.to_str().unwrap().to_string(),
+            Some("secret-token".to_string()),
+        );
+
+        let ctx = BrowserCommandContext {
+            browser_id: "authorized-browser-A".into(),
+            command: "navigate".into(),
+            params: Some(serde_json::json!({
+                "browserId": "victim-browser-B",
+                "command": "eval",
+                "operation": "eval",
+                "script": "stolen()"
+            })),
+            document_generation: Some("1".into()),
+            ..Default::default()
+        };
+
+        let _ = backend.execute_command(ctx).await;
+
+        let sent = received_req.lock().clone().expect("Must have received framed request");
+        // R5-2: Authoritative envelope target must remain authorized-browser-A, NOT overwritten by params
+        assert_eq!(
+            sent.get("browserId").and_then(|v| v.as_str()),
+            Some("authorized-browser-A"),
+            "Authoritative browserId was overwritten by params! Sent: {:?}",
+            sent
+        );
+        assert_ne!(
+            sent.get("command").and_then(|v| v.as_str()),
+            Some("eval"),
+            "Command was overwritten by params! Sent: {:?}",
+            sent
+        );
+    }
+
+    #[tokio::test]
+    async fn test_r5_7_numeric_generation_and_revision_parsing() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let sock_path = temp_dir.path().join("r5_7_test.sock");
+        let token_path = temp_dir.path().join("r5_7_test.token");
+        std::fs::write(&token_path, "secret-token").unwrap();
+
+        let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let (reader, mut writer) = stream.into_split();
+                let mut reader = tokio::io::BufReader::new(reader);
+
+                // Handshake
+                let mut line = String::new();
+                use tokio::io::AsyncBufReadExt;
+                let _ = reader.read_line(&mut line).await;
+                let _ = writer.write_all(b"{\"type\":\"remoteAttached\"}\n").await;
+                let _ = writer.flush().await;
+
+                // Read framed request
+                let mut hdr = [0u8; 5];
+                if reader.read_exact(&mut hdr).await.is_ok() {
+                    let len = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]) as usize;
+                    let mut payload = vec![0u8; len];
+                    let _ = reader.read_exact(&mut payload).await;
+
+                    // Response has NUMERIC generation 42 and NUMERIC viewportRevision 7
+                    let resp = serde_json::json!({
+                        "result": {
+                            "browserId": "b1",
+                            "generation": 42,
+                            "viewportRevision": 7,
+                            "visible": true
+                        }
+                    });
+                    let resp_payload = serde_json::to_vec(&resp).unwrap();
+                    let mut frame = Vec::new();
+                    frame.extend_from_slice(&(resp_payload.len() as u32).to_le_bytes());
+                    frame.push(LocalIpcBrowserBackend::IPC_CONTENT_TYPE_JSON);
+                    frame.extend_from_slice(&resp_payload);
+                    let _ = writer.write_all(&frame).await;
+                    let _ = writer.flush().await;
+                }
+            }
+        });
+
+        let backend = LocalIpcBrowserBackend::new(
+            sock_path.to_str().unwrap().to_string(),
+            Some("secret-token".to_string()),
+        );
+
+        let state = backend
+            .get_state("b1", &DesktopScope { workspace_id: "".into(), worktree_slug: "".into() })
+            .await
+            .unwrap();
+
+        // R5-7: Must parse numeric generation 42 as "42", not fall back to "1"
+        assert_eq!(
+            state.document_generation, "42",
+            "Numeric generation was not parsed correctly, fell back to 1"
+        );
+        assert_eq!(
+            state.viewport_revision, "7",
+            "Numeric viewportRevision was not parsed correctly, fell back to 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_r5_8_service_lease_epoch_synchronization() {
+        let manager = Arc::new(BrowserManager::new());
+        let broker = Arc::new(crate::browser::remote_driver::RemoteDriverBroker::new());
+        let service = Arc::new(BrowserRemoteService::new((*manager).clone(), Arc::clone(&broker)));
+        let backend = InProcessBrowserServiceBackend::new(
+            Arc::clone(&service),
+            Arc::clone(&manager),
+        );
+
+        // Register session
+        let _ = manager.register_session(crate::browser::model::CreateBrowserRequest {
+            browser_id: Some("b-lease-sync".into()),
+            workspace_id: Some("ws1".into()),
+            worktree_path: None,
+            url: "https://example.com".into(),
+            profile: None,
+            zoom_factor: None,
+            bounds: None,
+            visible: Some(true),
+        }).unwrap();
+
+        // R5-8: Gateway epoch 42 must be adopted by backend claim_driver so both brokers agree on epoch
+        let gateway_epoch = 42u64;
+        backend
+            .claim_driver("b-lease-sync", "dev-1", "conn-1", "sub-1", gateway_epoch)
+            .await
+            .expect("claim_driver must succeed");
+
+        // The service broker must now validate lease epoch 42
+        let val_res = broker.validate_lease("b-lease-sync", gateway_epoch, "dev-1", "conn-1");
+        assert!(
+            val_res.is_ok(),
+            "Broker did not synchronize gateway lease epoch 42: {:?}",
+            val_res
+        );
+
+        // Heartbeat driver extends the lease
+        let hb_res = backend
+            .heartbeat_driver("dev-1", "conn-1", "sub-1", gateway_epoch)
+            .await;
+        assert!(hb_res.is_ok(), "Heartbeat driver must succeed: {:?}", hb_res);
+    }
+
+    #[tokio::test]
+    async fn test_r5_1_remote_gateway_manager_from_daemon_retains_backend() {
+        let client = Arc::new(crate::daemon::client::DaemonClient::new());
+        let mgr = crate::ipc::remote::RemoteGatewayManager::from_daemon(client);
+        assert!(mgr.browser_backend().is_none());
+
+        let test_backend = Arc::new(InProcessTestBackend::new());
+        mgr.set_browser_backend(test_backend.clone());
+        assert!(mgr.browser_backend().is_some(), "RemoteGatewayManager::from_daemon must retain backend set via set_browser_backend");
+    }
+
+    #[tokio::test]
+    async fn test_r5_8_ws_claim_propagates_backend_error_and_heartbeat_renews() {
+        use std::time::Instant;
+        use crate::remote::browser_ws::BrowserWsSession;
+        use crate::remote::browser_protocol::{ClientMessage, ServerMessage};
+        use crate::remote::browser_admission::AdmissionController;
+        use crate::remote::auth::DevicePermission;
+
+        let now = Instant::now();
+        let mut session = BrowserWsSession::new(
+            "conn-err".into(),
+            "dev-err".into(),
+            "b-missing".into(),
+            DevicePermission::Control,
+            now,
+        );
+        let admission = AdmissionController::new();
+
+        // Use InProcessBrowserServiceBackend without registered session so claim fails
+        let manager = Arc::new(BrowserManager::new());
+        let broker = Arc::new(crate::browser::remote_driver::RemoteDriverBroker::new());
+        let service = Arc::new(BrowserRemoteService::new((*manager).clone(), Arc::clone(&broker)));
+        let backend: Arc<dyn RemoteBrowserBackend> = Arc::new(InProcessBrowserServiceBackend::new(
+            Arc::clone(&service),
+            Arc::clone(&manager),
+        ));
+
+        // Fake a subscription on session
+        session.subscription_id = Some("sub-test".into());
+
+        // Attempt driver claim for nonexistent browser: backend will fail, and WS MUST NOT swallow the error
+        let claim_msg = ClientMessage::BrowserDriverClaim {
+            request_id: "req-fail".into(),
+            subscription_id: "sub-test".into(),
+            browser_id: "b-missing".into(),
+        };
+        let resp = session
+            .handle_client_message(claim_msg, &backend, &admission, now)
+            .await
+            .unwrap()
+            .unwrap();
+
+        match resp {
+            ServerMessage::BrowserError { ref code, .. } => {
+                assert!(
+                    code == "BROWSER_FORBIDDEN" || code == "BROWSER_NOT_FOUND" || code == "BROWSER_DRIVER_BUSY",
+                    "Expected propagated error code from backend failure, got {code}"
+                );
+            }
+            other => panic!("Expected BrowserError, got {:?}", other),
+        }
+        assert!(!session.is_driver, "Session must not be marked as driver when backend claim fails");
     }
 }
