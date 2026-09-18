@@ -35,6 +35,7 @@ class MockWebSocket {
   onmessage: ((event: { data: string | ArrayBuffer | ArrayBufferLike }) => void) | null = null;
   sentMessages: (string | ArrayBuffer)[] = [];
   readyState: number = 1; // Start OPEN in tests
+  bufferedAmount: number = 0;
 
   constructor(readonly url: string) {
     MockWebSocket.instances.push(this);
@@ -507,6 +508,57 @@ describe("BrowserClient", () => {
         100
       )
     ).rejects.toThrow(/backpressure/i);
+  });
+
+  it("enforces UTF-8 byte accounting on multibyte messages exceeding 1 MiB wire budget (R6-12)", async () => {
+    const client = new BrowserClient("ws://localhost:9000/browser/b1");
+    await drainAsync();
+
+    // 400,000 Korean chars: JS string.length is 400,000 (< 1 MiB), but UTF-8 byte length is 1,200,000 (> 1 MiB)
+    const multibyteParams = { title: "가".repeat(400_000) };
+    await expect(
+      client.sendCommand(
+        {
+          browserId: "b1",
+          leaseEpoch: "ep1",
+          browserInstanceId: "bi1",
+          desktopEpoch: "1",
+          documentGeneration: "1",
+          command: "test",
+          params: multibyteParams,
+        },
+        100
+      )
+    ).rejects.toThrow(/backpressure/i);
+  });
+
+  it("consults native bufferedAmount and includes control traffic in backpressure (R6-12)", async () => {
+    const client = new BrowserClient("ws://localhost:9000/browser/b1");
+    const ws = MockWebSocket.instances[MockWebSocket.instances.length - 1];
+    await drainAsync();
+
+    // Simulate high native send buffer exceeding budget
+    ws.bufferedAmount = 1024 * 1024;
+
+    // Command should be rejected immediately due to backpressure
+    await expect(
+      client.sendCommand(
+        {
+          browserId: "b1",
+          leaseEpoch: "ep1",
+          browserInstanceId: "bi1",
+          desktopEpoch: "1",
+          documentGeneration: "1",
+          command: "navigate",
+        },
+        100
+      )
+    ).rejects.toThrow(/backpressure/i);
+
+    // Control requests (claimDriver, pause, resume) must also be rejected by backpressure
+    await expect(client.claimDriver("b1", "sub-1", 100)).rejects.toThrow(/backpressure/i);
+    expect(() => client.pause("b1", 1)).toThrow(/backpressure/i);
+    expect(() => client.resume("b1", 1)).toThrow(/backpressure/i);
   });
 
   it("executes bounded shutdown/join within specified timeout (R4-14)", async () => {

@@ -107,19 +107,24 @@ impl RemoteDriverBroker {
         // Check if existing lease is active
         if let Some(ref current) = *guard {
             if now < current.expires_at {
-                // If same owner and same browser, refresh lease
+                // If same owner and same browser, refresh lease (idempotent same-owner renewal only, R6-8)
                 if current.device_id == device_id
                     && current.connection_id == connection_id
                     && current.subscription_id == subscription_id
                     && current.browser_id == browser_id
                 {
-                    let epoch = if forced_epoch > 0 { forced_epoch } else { current.lease_epoch };
+                    if forced_epoch > 0 && forced_epoch != current.lease_epoch {
+                        return Err(RemoteDriverError::StaleLease {
+                            expected: current.lease_epoch,
+                            actual: forced_epoch,
+                        });
+                    }
                     let renewed = DriverLease {
                         device_id: device_id.to_string(),
                         connection_id: connection_id.to_string(),
                         subscription_id: subscription_id.to_string(),
                         browser_id: browser_id.to_string(),
-                        lease_epoch: epoch,
+                        lease_epoch: current.lease_epoch,
                         expires_at: now + LEASE_TTL,
                     };
                     *guard = Some(renewed.clone());
@@ -135,8 +140,15 @@ impl RemoteDriverBroker {
 
         // Previous lease expired or was None. Create fresh lease.
         self.desktop_reclaimed.store(false, Ordering::SeqCst);
+        let floor = self.epoch_counter.load(Ordering::SeqCst);
         let new_epoch = if forced_epoch > 0 {
-            self.epoch_counter.fetch_max(forced_epoch + 1, Ordering::SeqCst);
+            if forced_epoch < floor {
+                return Err(RemoteDriverError::StaleLease {
+                    expected: floor,
+                    actual: forced_epoch,
+                });
+            }
+            self.epoch_counter.store(forced_epoch + 1, Ordering::SeqCst);
             forced_epoch
         } else {
             self.epoch_counter.fetch_add(1, Ordering::SeqCst)
@@ -348,6 +360,67 @@ mod tests {
         // Heartbeat with wrong epoch fails
         let bad_epoch = broker.heartbeat("dev1", "conn1", "sub1", lease.lease_epoch + 99);
         assert!(matches!(bad_epoch, Err(RemoteDriverError::StaleLease { .. })));
+    }
+
+    #[test]
+    fn test_r6_8_claim_with_epoch_rejects_stale_and_decreasing_epochs() {
+        let broker = RemoteDriverBroker::new();
+
+        // 1. Initial claim at forced epoch 42 succeeds
+        let lease = broker.claim_with_epoch("dev1", "conn1", "sub1", "b1", true, 42).unwrap();
+        assert_eq!(lease.lease_epoch, 42);
+
+        // 2. Same-owner claim with decreasing epoch (1) must be rejected
+        broker.claim_history.lock().clear();
+        let stale_renewal = broker.claim_with_epoch("dev1", "conn1", "sub1", "b1", true, 1);
+        assert!(
+            matches!(stale_renewal, Err(RemoteDriverError::StaleLease { expected: 42, actual: 1 })),
+            "Same-owner renewal with decreasing epoch must be rejected with StaleLease"
+        );
+
+        // 3. Same-owner claim with mismatched forced epoch (99) must be rejected (idempotent renewal only)
+        broker.claim_history.lock().clear();
+        let mismatch_renewal = broker.claim_with_epoch("dev1", "conn1", "sub1", "b1", true, 99);
+        assert!(
+            matches!(mismatch_renewal, Err(RemoteDriverError::StaleLease { .. })),
+            "Same-owner renewal with mismatched epoch must be rejected"
+        );
+
+        // 4. Idempotent same-owner renewal with same epoch (42) or 0 succeeds
+        broker.claim_history.lock().clear();
+        let idemp_renewal = broker.claim_with_epoch("dev1", "conn1", "sub1", "b1", true, 42).unwrap();
+        assert_eq!(idemp_renewal.lease_epoch, 42);
+        broker.claim_history.lock().clear();
+        let idemp_zero = broker.claim_with_epoch("dev1", "conn1", "sub1", "b1", true, 0).unwrap();
+        assert_eq!(idemp_zero.lease_epoch, 42);
+
+        // 5. Release lease
+        assert!(broker.release("sub1", 42).unwrap());
+
+        // 6. Fresh claim with stale epoch 10 (floor is 43) must be rejected
+        broker.claim_history.lock().clear();
+        let stale_fresh = broker.claim_with_epoch("dev2", "conn2", "sub2", "b1", true, 10);
+        assert!(
+            matches!(stale_fresh, Err(RemoteDriverError::StaleLease { .. })),
+            "Fresh claim with epoch below monotonic floor must be rejected"
+        );
+
+        // 7. Fresh claim with monotonic epoch 50 succeeds (floor becomes 51)
+        broker.claim_history.lock().clear();
+        let fresh_ok = broker.claim_with_epoch("dev2", "conn2", "sub2", "b1", true, 50).unwrap();
+        assert_eq!(fresh_ok.lease_epoch, 50);
+
+        // 8. Desktop reclaim advances monotonic floor
+        let reclaim_epoch = broker.desktop_reclaim();
+        assert!(reclaim_epoch >= 51);
+
+        // 9. Replayed forced epoch 50 must be rejected
+        broker.claim_history.lock().clear();
+        let replay_after_reclaim = broker.claim_with_epoch("dev3", "conn3", "sub3", "b1", true, 50);
+        assert!(
+            matches!(replay_after_reclaim, Err(RemoteDriverError::StaleLease { .. })),
+            "Replayed forced epoch after reclaim must be rejected"
+        );
     }
 
     #[test]

@@ -1083,6 +1083,12 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
+        .manage(
+            Arc::new(crate::ipc::browser::ProductionDaemonReclaimTransport::new(
+                Arc::clone(&remote_manager),
+                Arc::clone(&daemon_client),
+            )) as Arc<dyn crate::ipc::browser::DaemonReclaimTransport>,
+        )
         .manage(daemon_client)
         .manage(remote_manager)
         .manage(workspace_registry)

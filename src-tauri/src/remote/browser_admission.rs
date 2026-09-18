@@ -356,7 +356,7 @@ pub type ViewerEligibilityHook = Arc<dyn Fn(&str, &str, bool, bool) + Send + Syn
 impl AdmissionController {
     pub fn new() -> Self {
         let (capture_tx, _) = tokio::sync::broadcast::channel(64);
-        Self {
+        let ctrl = Self {
             broker: Arc::new(DriverBroker::new()),
             viewers: Mutex::new(HashMap::new()),
             captured_browsers: Mutex::new(HashSet::new()),
@@ -365,17 +365,33 @@ impl AdmissionController {
             sharing: Arc::new(crate::remote::browser_ws::SharingRegistry::new()),
             mapped_service_subs: Mutex::new(HashMap::new()),
             eligibility_hook: parking_lot::RwLock::new(None),
+        };
+        if let Some(service) = crate::browser::remote_service::get_active_service() {
+            ctrl.connect_remote_service(service);
         }
+        ctrl
     }
 
     pub fn register_service_subscription(&self, admission_sub: &str, service_sub: &str) {
-        self.mapped_service_subs
-            .lock()
-            .insert(admission_sub.to_string(), service_sub.to_string());
+        let mut map = self.mapped_service_subs.lock();
+        map.insert(admission_sub.to_string(), service_sub.to_string());
+        map.insert(service_sub.to_string(), service_sub.to_string());
     }
 
     pub fn set_eligibility_hook(&self, hook: ViewerEligibilityHook) {
         *self.eligibility_hook.write() = Some(hook);
+    }
+
+    pub fn has_eligibility_hook(&self) -> bool {
+        self.eligibility_hook.read().is_some()
+    }
+
+    pub fn ensure_connected_remote_service(&self) {
+        if !self.has_eligibility_hook() {
+            if let Some(service) = crate::browser::remote_service::get_active_service() {
+                self.connect_remote_service(service);
+            }
+        }
     }
 
     pub fn connect_remote_service(
@@ -512,10 +528,21 @@ impl AdmissionController {
         let mut found = false;
         if let Some(browser_viewers) = viewers_map.get_mut(browser_id) {
             let was_capturing = browser_viewers.values().any(|v| !v.paused && !v.stalled);
-            if let Some(entry) = browser_viewers.get_mut(subscription_id) {
-                entry.paused = paused;
-                stalled = entry.stalled;
-                found = true;
+            let target_sub = if browser_viewers.contains_key(subscription_id) {
+                Some(subscription_id.to_string())
+            } else {
+                self.mapped_service_subs
+                    .lock()
+                    .iter()
+                    .find(|(_, svc)| svc.as_str() == subscription_id)
+                    .map(|(adm, _)| adm.clone())
+            };
+            if let Some(ref sub) = target_sub {
+                if let Some(entry) = browser_viewers.get_mut(sub) {
+                    entry.paused = paused;
+                    stalled = entry.stalled;
+                    found = true;
+                }
             }
             let now_capturing = browser_viewers.values().any(|v| !v.paused && !v.stalled);
             drop(viewers_map);
@@ -524,6 +551,11 @@ impl AdmissionController {
             }
         }
         if found {
+            if self.eligibility_hook.read().is_none() {
+                if let Some(service) = crate::browser::remote_service::get_active_service() {
+                    self.connect_remote_service(service);
+                }
+            }
             let mapped_sub = self
                 .mapped_service_subs
                 .lock()
@@ -542,10 +574,21 @@ impl AdmissionController {
         let mut found = false;
         if let Some(browser_viewers) = viewers_map.get_mut(browser_id) {
             let was_capturing = browser_viewers.values().any(|v| !v.paused && !v.stalled);
-            if let Some(entry) = browser_viewers.get_mut(subscription_id) {
-                entry.stalled = stalled;
-                paused = entry.paused;
-                found = true;
+            let target_sub = if browser_viewers.contains_key(subscription_id) {
+                Some(subscription_id.to_string())
+            } else {
+                self.mapped_service_subs
+                    .lock()
+                    .iter()
+                    .find(|(_, svc)| svc.as_str() == subscription_id)
+                    .map(|(adm, _)| adm.clone())
+            };
+            if let Some(ref sub) = target_sub {
+                if let Some(entry) = browser_viewers.get_mut(sub) {
+                    entry.stalled = stalled;
+                    paused = entry.paused;
+                    found = true;
+                }
             }
             let now_capturing = browser_viewers.values().any(|v| !v.paused && !v.stalled);
             drop(viewers_map);
@@ -554,6 +597,11 @@ impl AdmissionController {
             }
         }
         if found {
+            if self.eligibility_hook.read().is_none() {
+                if let Some(service) = crate::browser::remote_service::get_active_service() {
+                    self.connect_remote_service(service);
+                }
+            }
             let mapped_sub = self
                 .mapped_service_subs
                 .lock()
@@ -855,5 +903,62 @@ pub mod tests {
             assert_eq!(rec[3].active_sessions_count, 0);
             assert_eq!(rec[3].driver_status, crate::browser::remote_bridge_protocol::BrowserSharingDriverStatus::Idle);
         }
+    }
+
+    #[tokio::test]
+    async fn test_r6_9_viewer_pause_and_ack_stall_reaches_remote_service_via_admission() {
+        use crate::browser::BrowserManager;
+        use crate::browser::model::CreateBrowserRequest;
+        use crate::browser::remote_driver::RemoteDriverBroker;
+        use crate::browser::remote_service::BrowserRemoteService;
+
+        let manager = BrowserManager::new();
+        let broker = Arc::new(RemoteDriverBroker::new());
+        let service = Arc::new(BrowserRemoteService::new(manager.clone(), broker));
+
+        manager
+            .register_session(CreateBrowserRequest {
+                browser_id: Some("b-r69".into()),
+                workspace_id: Some("ws-1".into()),
+                worktree_path: None,
+                url: "https://example.com".into(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .unwrap();
+
+        let service_sub = service.subscribe("b-r69", "dev1", "view1").unwrap();
+
+        let ctrl = AdmissionController::new();
+        ctrl.connect_remote_service(service.clone());
+        ctrl.try_subscribe("b-r69", "sub-adm-r69", "dev1", "view1").unwrap();
+        ctrl.register_service_subscription("sub-adm-r69", &service_sub);
+
+        // Verify initial state in service
+        let initial_viewer = service.get_viewer_info("b-r69", &service_sub).unwrap();
+        assert!(!initial_viewer.paused);
+        assert!(!initial_viewer.stalled);
+
+        // Pause through admission
+        ctrl.set_viewer_paused("b-r69", "sub-adm-r69", true);
+        let paused_viewer = service.get_viewer_info("b-r69", &service_sub).unwrap();
+        assert!(paused_viewer.paused, "Viewer pause must reach BrowserRemoteService");
+
+        // Stall through admission
+        ctrl.set_viewer_stalled("b-r69", "sub-adm-r69", true);
+        let stalled_viewer = service.get_viewer_info("b-r69", &service_sub).unwrap();
+        assert!(stalled_viewer.stalled, "Viewer stall must reach BrowserRemoteService");
+
+        // Resume through admission
+        ctrl.set_viewer_paused("b-r69", "sub-adm-r69", false);
+        let resumed_viewer = service.get_viewer_info("b-r69", &service_sub).unwrap();
+        assert!(!resumed_viewer.paused, "Viewer resume must reach BrowserRemoteService");
+
+        // Clear stall through admission
+        ctrl.set_viewer_stalled("b-r69", "sub-adm-r69", false);
+        let unstalled_viewer = service.get_viewer_info("b-r69", &service_sub).unwrap();
+        assert!(!unstalled_viewer.stalled, "Viewer stall clear must reach BrowserRemoteService");
     }
 }

@@ -147,9 +147,10 @@ pub fn sanitize_public_string(raw: &str) -> String {
 
         // HTTP(S) URLs are public identifiers and pass through untouched, even when
         // their path segments look like local directories. Recognized case-insensitively while
-        // preserving original bytes (R5-16).
-        let is_http_url = (rest.len() >= 7 && rest[..7].eq_ignore_ascii_case("http://"))
-            || (rest.len() >= 8 && rest[..8].eq_ignore_ascii_case("https://"));
+        // preserving original bytes (R5-16, R6-14).
+        let bytes = rest.as_bytes();
+        let is_http_url = bytes.get(..7).is_some_and(|b| b.eq_ignore_ascii_case(b"http://"))
+            || bytes.get(..8).is_some_and(|b| b.eq_ignore_ascii_case(b"https://"));
         if is_http_url {
             let end = url_token_end(rest).max(1);
             out.push_str(&rest[..end]);
@@ -416,5 +417,22 @@ pub mod tests {
             dedup.check_or_record(0, now),
             Err(SecurityError::OutcomeUnknown)
         ));
+    }
+
+    #[test]
+    fn test_r6_14_multibyte_utf8_sanitization_no_panic() {
+        // Multibyte UTF-8 input whose byte 7/8 falls within a character boundary (R6-14)
+        assert_eq!(sanitize_public_string("가나다"), "가나다");
+
+        // Regression tests for specified URL prefixes (case-insensitivity preserved, bytes unmodified)
+        assert_eq!(sanitize_public_string("http://"), "http://");
+        assert_eq!(sanitize_public_string("https://"), "https://");
+        assert_eq!(sanitize_public_string("HTTP://x"), "HTTP://x");
+
+        // Multibyte mixed with paths and URLs
+        assert_eq!(
+            sanitize_public_string("가나다 /var/log/app.log HTTP://x/path 가나다"),
+            "가나다 [redacted-path] HTTP://x/path 가나다"
+        );
     }
 }

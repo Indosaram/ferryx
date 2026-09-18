@@ -959,5 +959,139 @@ describe("RemoteBrowser - Mobile Viewport & Touch Interaction (Phase 7B)", () =>
       expect(fillMsg.params).toBeDefined();
       expect(fillMsg.params.revision).toBe(1);
     });
+
+    it("sends distinct fill payloads for active element, CSS selector, and snapshot reference (R6-10)", async () => {
+      render(
+        <RemoteBrowserWorkspace
+          baseUrl="http://localhost:8080"
+          browserId="b-payloads"
+          deviceToken="token-payloads"
+          onBack={vi.fn()}
+        />,
+      );
+
+      const ws = await waitForSocket(0);
+      await establishStreaming(ws);
+
+      await act(async () => {
+        ws.onmessage?.({
+          data: JSON.stringify({
+            type: "browserDriverChanged",
+            leaseEpoch: "epoch-ime-payloads",
+            isDriver: true,
+          }),
+        });
+      });
+
+      // Open IME bar
+      fireEvent.click(screen.getByTestId("remote-browser-ime-toggle-btn"));
+      const imeInput = screen.getByTestId("remote-browser-ime-text-input");
+      const imeRefInput = screen.getByTestId("remote-browser-ime-ref-input");
+      const imeBar = screen.getByTestId("remote-browser-ime-bar");
+
+      // 1. Flow for 'active' element (default imeTargetRef is "active")
+      fireEvent.change(imeInput, { target: { value: "active text" } });
+      await act(async () => {
+        fireEvent.submit(imeBar);
+      });
+
+      const activeFills = ws.sentMessages.filter((m: any) => {
+        try {
+          const parsed = JSON.parse(m as string);
+          return parsed.command === "fill" && parsed.params?.value === "active text";
+        } catch {
+          return false;
+        }
+      });
+      expect(activeFills.length).toBe(1);
+      const activeMsg = JSON.parse(activeFills[0] as string);
+      expect(activeMsg.params.reference).toBeUndefined();
+      expect(activeMsg.params.selector).toBeUndefined();
+      expect(activeMsg.params.snapshotId).toBeUndefined();
+      expect(activeMsg.params.mapRevision).toBeUndefined();
+      expect(activeMsg.params.value).toBe("active text");
+
+      // Complete active fill so IME buffer retires head
+      await act(async () => {
+        ws.onmessage?.({
+          data: JSON.stringify({
+            type: "browserResult",
+            requestId: activeMsg.requestId,
+            result: { ok: true },
+          }),
+        });
+      });
+
+      // 2. Flow for CSS selector (e.g. #search-box)
+      fireEvent.change(imeRefInput, { target: { value: "#search-box" } });
+      fireEvent.change(imeInput, { target: { value: "css text" } });
+      await act(async () => {
+        fireEvent.submit(imeBar);
+      });
+
+      const cssFills = ws.sentMessages.filter((m: any) => {
+        try {
+          const parsed = JSON.parse(m as string);
+          return parsed.command === "fill" && parsed.params?.value === "css text";
+        } catch {
+          return false;
+        }
+      });
+      expect(cssFills.length).toBe(1);
+      const cssMsg = JSON.parse(cssFills[0] as string);
+      expect(cssMsg.params.selector).toBe("#search-box");
+      expect(cssMsg.params.reference).toBeUndefined();
+      expect(cssMsg.params.snapshotId).toBeUndefined();
+      expect(cssMsg.params.mapRevision).toBeUndefined();
+      expect(cssMsg.params.value).toBe("css text");
+
+      // Complete css fill
+      await act(async () => {
+        ws.onmessage?.({
+          data: JSON.stringify({
+            type: "browserResult",
+            requestId: cssMsg.requestId,
+            result: { ok: true },
+          }),
+        });
+      });
+
+      // 3. Flow for snapshot reference (e.g. elem-42) with existing snapshot state
+      await act(async () => {
+        ws.onmessage?.({
+          data: JSON.stringify({
+            type: "browserState",
+            browserId: "b-payloads",
+            documentGeneration: "1",
+            viewportRevision: "1",
+            loading: false,
+            paused: false,
+            snapshotId: "snap-42",
+            mapRevision: "42",
+          }),
+        });
+      });
+
+      fireEvent.change(imeRefInput, { target: { value: "elem-42" } });
+      fireEvent.change(imeInput, { target: { value: "snapshot text" } });
+      await act(async () => {
+        fireEvent.submit(imeBar);
+      });
+
+      const snapFills = ws.sentMessages.filter((m: any) => {
+        try {
+          const parsed = JSON.parse(m as string);
+          return parsed.command === "fill" && parsed.params?.value === "snapshot text";
+        } catch {
+          return false;
+        }
+      });
+      expect(snapFills.length).toBe(1);
+      const snapMsg = JSON.parse(snapFills[0] as string);
+      expect(snapMsg.params.reference).toBe("elem-42");
+      expect(snapMsg.params.snapshotId).toBe("snap-42");
+      expect(snapMsg.params.mapRevision).toBe("42");
+      expect(snapMsg.params.value).toBe("snapshot text");
+    });
   });
 });

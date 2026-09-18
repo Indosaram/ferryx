@@ -3052,6 +3052,8 @@ async fn run_browser_ws_session(
     // The scope this socket was admitted under. A later desktop scope change
     // invalidates the socket rather than silently re-targeting it (R4-4).
     let admitted_scope = derive_desktop_scope(&state);
+    let state_scope_checker = Arc::clone(&state);
+    let admitted_scope_val = admitted_scope.clone();
     let mut session = BrowserWsSession::new(
         connection_id,
         device.id.clone(),
@@ -3059,7 +3061,12 @@ async fn run_browser_ws_session(
         device.permission,
         Instant::now(),
     )
-    .with_sharing_registry(admission.sharing_registry());
+    .with_sharing_registry(admission.sharing_registry())
+    .with_scope_validator(Arc::new(move || {
+        derive_desktop_scope(&state_scope_checker) == admitted_scope_val
+    }));
+
+    admission.ensure_connected_remote_service();
 
     let backend_caps = backend.capabilities().await;
     let desktop_epoch_str = state.daemon_epoch.load(std::sync::atomic::Ordering::SeqCst).to_string();
@@ -3175,6 +3182,8 @@ async fn run_browser_ws_session(
             _ = selection_rx.changed() => {
                 let current_scope = derive_desktop_scope(&state);
                 if current_scope != admitted_scope {
+                    session.cancel_token.cancel();
+                    session.abort_all_command_tasks();
                     let revoked_epoch = session.mark_driver_revoked("desktop_scope_changed");
                     let _ = server_msg_tx
                         .send(ServerMessage::BrowserDriverRevoked {
@@ -3213,6 +3222,8 @@ async fn run_browser_ws_session(
             } => {
                 let current_scope = derive_desktop_scope(&state);
                 if current_scope != admitted_scope {
+                    session.cancel_token.cancel();
+                    session.abort_all_command_tasks();
                     let revoked_epoch = session.mark_driver_revoked("desktop_scope_changed");
                     let _ = server_msg_tx
                         .send(ServerMessage::BrowserDriverRevoked {
@@ -3280,6 +3291,8 @@ async fn run_browser_ws_session(
                 let Some(msg) = ws_msg else { break; };
                 let current_scope = derive_desktop_scope(&state);
                 if current_scope != admitted_scope {
+                    session.cancel_token.cancel();
+                    session.abort_all_command_tasks();
                     let revoked_epoch = session.mark_driver_revoked("desktop_scope_changed");
                     let _ = server_msg_tx
                         .send(ServerMessage::BrowserDriverRevoked {
@@ -3291,16 +3304,58 @@ async fn run_browser_ws_session(
                 }
                 match msg {
                     Ok(Message::Text(text)) => {
-                        if let Err(err) = session
-                            .dispatch_raw_text(
+                        let cancel_token = session.cancel_token.clone();
+                        let (scope_interrupted, dispatch_res) = tokio::select! {
+                            _ = selection_rx.changed() => {
+                                let current_scope = derive_desktop_scope(&state);
+                                (current_scope != admitted_scope, None)
+                            }
+                            _ = revocation.changed() => {
+                                (*revocation.borrow(), None)
+                            }
+                            _ = cancel_token.cancelled() => {
+                                (true, None)
+                            }
+                            res = session.dispatch_raw_text(
                                 &text,
                                 &backend,
                                 &admission,
                                 &server_msg_tx,
                                 Instant::now(),
-                            )
-                            .await
-                        {
+                            ) => {
+                                (false, Some(res))
+                            }
+                        };
+
+                        if scope_interrupted {
+                            session.cancel_token.cancel();
+                            session.abort_all_command_tasks();
+                            let revoked_epoch = session.mark_driver_revoked("desktop_scope_changed");
+                            let _ = server_msg_tx
+                                .send(ServerMessage::BrowserDriverRevoked {
+                                    reason: Some("desktop_scope_changed".into()),
+                                    lease_epoch: revoked_epoch.map(|e| e.to_string()),
+                                })
+                                .await;
+                            break;
+                        }
+
+                        // R6-4: Post-await scope revalidation across all paths
+                        let current_scope = derive_desktop_scope(&state);
+                        if current_scope != admitted_scope {
+                            session.cancel_token.cancel();
+                            session.abort_all_command_tasks();
+                            let revoked_epoch = session.mark_driver_revoked("desktop_scope_changed");
+                            let _ = server_msg_tx
+                                .send(ServerMessage::BrowserDriverRevoked {
+                                    reason: Some("desktop_scope_changed".into()),
+                                    lease_epoch: revoked_epoch.map(|e| e.to_string()),
+                                })
+                                .await;
+                            break;
+                        }
+
+                        if let Some(Err(err)) = dispatch_res {
                             let err_reply = ServerMessage::BrowserError {
                                 request_id: None,
                                 code: "BROWSER_ERROR".into(),
@@ -3340,6 +3395,8 @@ async fn run_browser_ws_session(
         }
     }
 
+    session.cancel_token.cancel();
+    session.abort_all_command_tasks();
     session.teardown_with_backend(&admission, &backend).await;
     drop(server_msg_tx);
     drop(raw_msg_tx);
@@ -5487,5 +5544,124 @@ mod tests {
         let _ = stop_tx.send(());
         let shutdown_res = tokio::time::timeout(Duration::from_secs(2), task).await;
         assert!(shutdown_res.is_ok(), "teardown must not hang awaiting blocked writer");
+    }
+
+    #[tokio::test]
+    async fn test_r6_4_scope_change_interrupts_inline_dispatch_await() {
+        use futures_util::{SinkExt, StreamExt};
+
+        let state = Arc::new(RemoteGatewayState::new(
+            Arc::new(TerminalService::default()),
+            WorkspaceRegistry::new(),
+        ));
+        let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+        let (token, _) = state
+            .auth_manager
+            .exchange_pairing_code(&pin, "scope-interrupt-device")
+            .unwrap();
+
+        // Slow backend that hangs during snapshot execution
+        struct SlowSnapshotBackend {
+            inner: ScopeProbeBackend,
+        }
+        impl RemoteBrowserBackend for SlowSnapshotBackend {
+            fn list_sessions<'a>(
+                &'a self,
+                scope: &'a DesktopScope,
+            ) -> crate::remote::browser_backend::BoxFuture<'a, Result<Vec<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>> {
+                self.inner.list_sessions(scope)
+            }
+            fn identify_session<'a>(
+                &'a self,
+                scope: &'a DesktopScope,
+            ) -> crate::remote::browser_backend::BoxFuture<'a, Result<Option<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>> {
+                self.inner.identify_session(scope)
+            }
+            fn get_state<'a>(
+                &'a self,
+                browser_id: &'a str,
+                scope: &'a DesktopScope,
+            ) -> crate::remote::browser_backend::BoxFuture<'a, Result<crate::remote::browser_backend::BrowserRemoteState, RemoteBrowserError>> {
+                self.inner.get_state(browser_id, scope)
+            }
+            fn execute_command(
+                &self,
+                _ctx: crate::remote::browser_backend::BrowserCommandContext,
+            ) -> crate::remote::browser_backend::BoxFuture<'_, Result<crate::remote::browser_backend::BrowserCommandResult, RemoteBrowserError>> {
+                Box::pin(async move {
+                    // Hang awaiting until cancelled
+                    std::future::pending::<()>().await;
+                    Ok(crate::remote::browser_backend::BrowserCommandResult { success: true, value: None })
+                })
+            }
+            fn capabilities(&self) -> crate::remote::browser_backend::BoxFuture<'_, crate::remote::browser_backend::BrowserCapabilities> {
+                self.inner.capabilities()
+            }
+        }
+
+        state.set_browser_backend(Arc::new(SlowSnapshotBackend {
+            inner: ScopeProbeBackend::with_inventory(&[("b-interrupt", "ws-interrupt", "main")]),
+        }));
+        state.set_active_selection(RemoteActiveDesktopSelection {
+            workspace_id: Some("ws-interrupt".into()),
+            worktree_slug: Some("main".into()),
+            ..Default::default()
+        });
+
+        let (addr, stop_tx, task) = spawn_browser_test_gateway(Arc::clone(&state)).await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        let ticket = mint_browser_ticket(&client, addr, &token, "b-interrupt").await;
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!(
+            "ws://{addr}/api/v1/browser/b-interrupt?ticket={ticket}"
+        ))
+        .await
+        .expect("ws upgrade");
+
+        let hello = ws.next().await.unwrap().unwrap().into_text().unwrap();
+        assert!(hello.contains("browserHello"));
+
+        // First subscribe
+        ws.send(tokio_tungstenite::tungstenite::Message::Text(
+            serde_json::json!({
+                "type": "browserSubscribe",
+                "requestId": "r-sub",
+                "viewerInstanceId": "v-1",
+                "options": { "format": "jpeg" }
+            }).to_string().into()
+        )).await.unwrap();
+
+        let sub_resp = ws.next().await.unwrap().unwrap().into_text().unwrap();
+        assert!(sub_resp.contains("browserSubscribed"));
+
+        // Now send snapshot which hangs in execute_command
+        ws.send(tokio_tungstenite::tungstenite::Message::Text(
+            serde_json::json!({
+                "type": "browserSnapshot",
+                "requestId": "snap-hang",
+                "browserId": "b-interrupt"
+            }).to_string().into()
+        )).await.unwrap();
+
+        // While snapshot is hanging in dispatch_raw_text, change scope!
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        state.set_active_selection(RemoteActiveDesktopSelection {
+            workspace_id: Some("ws-interrupt".into()),
+            worktree_slug: Some("different-branch".into()),
+            ..Default::default()
+        });
+
+        // Scope watcher must interrupt inline await and revoke immediately
+        let revoked_msg = tokio::time::timeout(Duration::from_secs(3), ws.next())
+            .await
+            .expect("Scope change must interrupt inline backend await promptly")
+            .expect("socket open")
+            .unwrap()
+            .into_text()
+            .unwrap();
+        assert!(revoked_msg.contains("desktop_scope_changed"));
+
+        let _ = stop_tx.send(());
+        let _ = task.await;
     }
 }

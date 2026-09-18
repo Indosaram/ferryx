@@ -204,16 +204,21 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
 
     record.executing = true;
 
-    // Acquire remote snapshot before fill when needed (for snapshot element references)
-    const isTargetRef = Boolean(
-      imeTargetRef &&
-      imeTargetRef !== "active" &&
-      !imeTargetRef.startsWith("#") &&
-      !imeTargetRef.startsWith(".")
-    );
+    // Distinct fill flows (R6-10):
+    // 'active'-element fills and CSS-selector fills must NOT require/attach a snapshot reference;
+    // only snapshot-id fills attach snapshotId+mapRevision.
+    const trimmedTarget = (record.targetRef || "").trim();
+    const isActiveTarget = !trimmedTarget || trimmedTarget === "active";
+    const isCssTarget =
+      !isActiveTarget &&
+      (trimmedTarget.startsWith("#") ||
+        trimmedTarget.startsWith(".") ||
+        trimmedTarget.startsWith("["));
+    const isSnapshotRef = !isActiveTarget && !isCssTarget;
+
     let effectiveSnapId = workspaceSnapshotId ?? driver.snapshotId;
     let effectiveMapRev = workspaceMapRevision ?? driver.mapRevision;
-    if (isTargetRef && (!effectiveSnapId || !effectiveMapRev) && client && typeof client.takeSnapshot === "function") {
+    if (isSnapshotRef && (!effectiveSnapId || !effectiveMapRev) && client && typeof client.takeSnapshot === "function") {
       try {
         const snap = await client.takeSnapshot(browserId);
         effectiveSnapId = snap.snapshotId;
@@ -234,6 +239,26 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
 
     try {
       if (client && driver.leaseEpoch) {
+        const fillParams: Record<string, unknown> = {
+          value: record.fullValue,
+          text: record.fullValue,
+          revision: record.revision,
+          imeRevision: record.revision,
+        };
+
+        if (isSnapshotRef) {
+          fillParams.reference = record.targetRef;
+          if (effectiveSnapId) {
+            fillParams.snapshotId = effectiveSnapId;
+          }
+          if (effectiveMapRev) {
+            fillParams.mapRevision = effectiveMapRev;
+          }
+        } else if (isCssTarget) {
+          fillParams.selector = record.targetRef;
+        }
+        // Active element targets attach neither reference nor selector nor snapshot metadata
+
         await client.sendCommand({
           browserId,
           leaseEpoch: driver.leaseEpoch,
@@ -241,26 +266,24 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
           desktopEpoch: desktopEpoch || "1",
           documentGeneration: documentGeneration || "1",
           command: "fill",
-          params: {
-            reference: record.targetRef,
-            selector: record.targetRef,
-            value: record.fullValue,
-            text: record.fullValue,
-            snapshotId: effectiveSnapId ?? undefined,
-            mapRevision: effectiveMapRev ?? undefined,
-            revision: record.revision,
-            imeRevision: record.revision,
-          },
+          params: fillParams,
         });
       } else {
-        await driver.fill(
-          record.targetRef,
-          record.fullValue,
-          {
-            snapshotId: effectiveSnapId ?? undefined,
-            mapRevision: effectiveMapRev ?? undefined,
-          }
-        );
+        if (isSnapshotRef) {
+          await driver.fill(
+            record.targetRef,
+            record.fullValue,
+            {
+              snapshotId: effectiveSnapId ?? undefined,
+              mapRevision: effectiveMapRev ?? undefined,
+            }
+          );
+        } else {
+          await driver.fill(
+            record.targetRef,
+            record.fullValue
+          );
+        }
       }
       // Mark this submission record completed
       record.completed = true;

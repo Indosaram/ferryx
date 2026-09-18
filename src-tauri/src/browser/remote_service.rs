@@ -82,6 +82,7 @@ pub struct ViewerInfo {
     pub stalled: bool,
 }
 
+#[derive(Clone)]
 pub struct BrowserRemoteService {
     manager: BrowserManager,
     driver_broker: Arc<RemoteDriverBroker>,
@@ -100,9 +101,16 @@ pub struct BrowserRemoteService {
     quarantined_permits: Arc<parking_lot::Mutex<HashMap<String, crate::browser::snapshot_source::SnapshotCallbackCoordinator>>>,
 }
 
+pub static ACTIVE_REMOTE_SERVICE: parking_lot::RwLock<Option<Arc<BrowserRemoteService>>> =
+    parking_lot::RwLock::new(None);
+
+pub fn get_active_service() -> Option<Arc<BrowserRemoteService>> {
+    ACTIVE_REMOTE_SERVICE.read().clone()
+}
+
 impl BrowserRemoteService {
     pub fn new(manager: BrowserManager, driver_broker: Arc<RemoteDriverBroker>) -> Self {
-        Self {
+        let svc = Self {
             manager,
             driver_broker,
             subscribers_per_browser: Arc::new(parking_lot::Mutex::new(HashMap::new())),
@@ -118,7 +126,9 @@ impl BrowserRemoteService {
             snapshot_source: Arc::new(parking_lot::RwLock::new(Arc::new(UnsupportedSnapshotSource))),
             native_capture_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
             quarantined_permits: Arc::new(parking_lot::Mutex::new(HashMap::new())),
-        }
+        };
+        *ACTIVE_REMOTE_SERVICE.write() = Some(Arc::new(svc.clone()));
+        svc
     }
 
     pub fn with_snapshot_source(
@@ -126,7 +136,7 @@ impl BrowserRemoteService {
         driver_broker: Arc<RemoteDriverBroker>,
         snapshot_source: Arc<dyn BrowserSnapshotSource>,
     ) -> Self {
-        Self {
+        let svc = Self {
             manager,
             driver_broker,
             subscribers_per_browser: Arc::new(parking_lot::Mutex::new(HashMap::new())),
@@ -142,7 +152,9 @@ impl BrowserRemoteService {
             snapshot_source: Arc::new(parking_lot::RwLock::new(snapshot_source)),
             native_capture_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
             quarantined_permits: Arc::new(parking_lot::Mutex::new(HashMap::new())),
-        }
+        };
+        *ACTIVE_REMOTE_SERVICE.write() = Some(Arc::new(svc.clone()));
+        svc
     }
 
     pub fn set_snapshot_source(&self, snapshot_source: Arc<dyn BrowserSnapshotSource>) {
@@ -226,6 +238,21 @@ impl BrowserRemoteService {
                 viewer.stalled = stalled;
             }
         }
+    }
+
+    pub fn get_viewer_info(&self, browser_id: &str, subscription_id: &str) -> Option<ViewerInfo> {
+        let subs = self.subscribers_per_browser.lock();
+        subs.get(browser_id).and_then(|m| m.get(subscription_id)).cloned()
+    }
+
+    pub fn is_viewer_paused(&self, browser_id: &str, subscription_id: &str) -> bool {
+        let subs = self.subscribers_per_browser.lock();
+        subs.get(browser_id).and_then(|m| m.get(subscription_id)).map_or(false, |v| v.paused)
+    }
+
+    pub fn is_viewer_stalled(&self, browser_id: &str, subscription_id: &str) -> bool {
+        let subs = self.subscribers_per_browser.lock();
+        subs.get(browser_id).and_then(|m| m.get(subscription_id)).map_or(false, |v| v.stalled)
     }
 
     /// Subscribes a viewer to a browser's shared screencast producer.
@@ -409,9 +436,28 @@ impl BrowserRemoteService {
                 profile.interval_ms.clamp(50, 5000),
             ));
             let mut seq: u32 = 0;
+            let mut had_receivers = false;
 
             loop {
                 interval.tick().await;
+
+                let rx_count = tx.receiver_count();
+                if rx_count > 0 {
+                    had_receivers = true;
+                } else if had_receivers {
+                    // All frame receivers disconnected: stop GUI capture immediately (R6-9)
+                    let mut active_map = producer_active.lock();
+                    if let Some(active) = active_map.get_mut(&browser_id_clone) {
+                        if *active {
+                            *active = false;
+                            captures_in_progress.fetch_sub(1, Ordering::SeqCst);
+                        }
+                    }
+                    active_stream_ids.lock().remove(&browser_id_clone);
+                    producer_handles.lock().remove(&browser_id_clone);
+                    subscribers_map.lock().remove(&browser_id_clone);
+                    break;
+                }
 
                 // While active subscribers > 0
                 let (has_active_subscribers, has_eligible_subscribers) = {
@@ -616,7 +662,20 @@ impl BrowserRemoteService {
                     &metadata,
                     &snapshot.bytes,
                 ) {
-                    let _ = tx.send(frame_bytes);
+                    if tx.send(frame_bytes).is_err() && had_receivers {
+                        // All frame receivers disconnected during send: stop GUI capture immediately (R6-9)
+                        let mut active_map = producer_active.lock();
+                        if let Some(active) = active_map.get_mut(&browser_id_clone) {
+                            if *active {
+                                *active = false;
+                                captures_in_progress.fetch_sub(1, Ordering::SeqCst);
+                            }
+                        }
+                        active_stream_ids.lock().remove(&browser_id_clone);
+                        producer_handles.lock().remove(&browser_id_clone);
+                        subscribers_map.lock().remove(&browser_id_clone);
+                        break;
+                    }
                 }
             }
         });
@@ -1128,5 +1187,51 @@ mod tests {
         }
 
         service.unsubscribe(&b1, &sub);
+    }
+
+    #[tokio::test]
+    async fn test_r6_9_receiver_disconnect_stops_gui_capture() {
+        let manager = BrowserManager::new();
+        let broker = Arc::new(RemoteDriverBroker::new());
+        let service = Arc::new(BrowserRemoteService::new(manager.clone(), broker));
+
+        manager
+            .register_session(CreateBrowserRequest {
+                browser_id: Some("b-dc-1".into()),
+                workspace_id: Some("ws-1".into()),
+                worktree_path: None,
+                url: "https://example.com".into(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .unwrap();
+
+        let _sub_id = service.subscribe("b-dc-1", "dev1", "view1").unwrap();
+        assert!(service.is_producer_active("b-dc-1"));
+        assert_eq!(service.active_capture_count(), 1);
+
+        // Subscribe to frames
+        let frame_rx = service.subscribe_frames("b-dc-1");
+
+        // Allow producer to observe the connected receiver on a capture tick
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Now drop the frame receiver: client disconnected
+        drop(frame_rx);
+
+        // Wait bounded time for producer loop to detect receiver disconnect and halt
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        assert!(
+            !service.is_producer_active("b-dc-1"),
+            "Producer must stop when frame receivers disconnect"
+        );
+        assert_eq!(
+            service.active_capture_count(),
+            0,
+            "Capture count must reach 0 on receiver disconnect"
+        );
     }
 }

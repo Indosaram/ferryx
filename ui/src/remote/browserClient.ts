@@ -47,9 +47,20 @@ interface OutgoingWriterMessage {
   id: string;
   priority: MessagePriority;
   text: string;
+  byteLength?: number;
   requiresSubscription: boolean;
   streamId?: number;
   seq?: number;
+}
+
+const utf8TextEncoder = typeof TextEncoder !== "undefined" ? new TextEncoder() : null;
+
+function getUtf8ByteLength(text: string | undefined): number {
+  if (!text) return 0;
+  if (utf8TextEncoder) {
+    return utf8TextEncoder.encode(text).length;
+  }
+  return typeof Buffer !== "undefined" ? Buffer.byteLength(text, "utf8") : text.length;
 }
 
 const MAX_QUEUE_CAPACITY = 64;
@@ -280,6 +291,15 @@ export class BrowserClient {
   }
 
   private isPumping = false;
+  private pumpTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private schedulePump(): void {
+    if (this.pumpTimer || this.isClosed || !this.isSocketOpen()) return;
+    this.pumpTimer = setTimeout(() => {
+      this.pumpTimer = null;
+      this.pumpWriter();
+    }, 16);
+  }
 
   private enqueueMessage(msg: OutgoingWriterMessage): void {
     if (this.isClosed || this.isClosing) {
@@ -302,17 +322,19 @@ export class BrowserClient {
       }
     }
 
-    // Check bounded queue capacity & enforce backpressure with control-inclusive count/byte budgets (R4-14, R5-14)
+    // Check bounded queue capacity & enforce backpressure with control-inclusive count/byte budgets (R4-14, R5-14, R6-12)
     const inFlightCount = this.pendingRequests.size;
     const totalQueueCount = this.writerQueue.length;
-    const currentQueueBytes = this.writerQueue.reduce((acc, m) => acc + (m.text?.length ?? 0), 0);
-    const msgBytes = msg.text?.length ?? 0;
+    const currentQueueBytes = this.writerQueue.reduce((acc, m) => acc + (m.byteLength ?? 0), 0);
+    const msgBytes = msg.byteLength ?? getUtf8ByteLength(msg.text);
+    msg.byteLength = msgBytes;
+    const nativeBuffered = (this.ws && typeof this.ws.bufferedAmount === "number") ? this.ws.bufferedAmount : 0;
     const MAX_QUEUE_BYTES = 1024 * 1024; // 1 MiB
 
     if (
       totalQueueCount >= MAX_QUEUE_CAPACITY ||
       inFlightCount >= MAX_QUEUE_CAPACITY ||
-      currentQueueBytes + msgBytes > MAX_QUEUE_BYTES
+      currentQueueBytes + nativeBuffered + msgBytes > MAX_QUEUE_BYTES
     ) {
       throw new Error("BrowserClient queue full: backpressure limit exceeded");
     }
@@ -338,6 +360,9 @@ export class BrowserClient {
     this.isPumping = true;
     try {
       while (this.writerQueue.length > 0 && this.isSocketOpen() && !this.isClosed) {
+        const nativeBuffered = (this.ws && typeof this.ws.bufferedAmount === "number") ? this.ws.bufferedAmount : 0;
+        const MAX_QUEUE_BYTES = 1024 * 1024; // 1 MiB
+
         // Find highest-priority message eligible to send:
         // Subscribed barrier holds subscription-dependent messages until browserSubscribed confirms (R4-14)
         let eligibleIdx = -1;
@@ -356,6 +381,16 @@ export class BrowserClient {
 
         if (eligibleIdx === -1) {
           // Waiting behind subscribed-barrier
+          break;
+        }
+
+        const candidate = this.writerQueue[eligibleIdx];
+        const msgBytes = candidate.byteLength ?? getUtf8ByteLength(candidate.text);
+        candidate.byteLength = msgBytes;
+
+        // Bounded pumping: do not drain writerQueue into native send buffer if it would overflow MAX_QUEUE_BYTES (R6-12)
+        if (nativeBuffered > 0 && nativeBuffered + msgBytes > MAX_QUEUE_BYTES) {
+          this.schedulePump();
           break;
         }
 
@@ -721,7 +756,10 @@ export class BrowserClient {
         MessagePriority.CONTROL,
         true,
       );
-    } catch {
+    } catch (err) {
+      if (err instanceof Error && /backpressure/i.test(err.message)) {
+        throw err;
+      }
       // Ignored if socket closed
     }
   }
@@ -738,7 +776,10 @@ export class BrowserClient {
         MessagePriority.CONTROL,
         true,
       );
-    } catch {
+    } catch (err) {
+      if (err instanceof Error && /backpressure/i.test(err.message)) {
+        throw err;
+      }
       // Ignored if socket closed
     }
   }
@@ -746,6 +787,11 @@ export class BrowserClient {
   async close(timeoutMs = 1000): Promise<void> {
     if (this.isClosed) return;
     this.isClosing = true;
+
+    if (this.pumpTimer) {
+      clearTimeout(this.pumpTimer);
+      this.pumpTimer = null;
+    }
 
     // Bounded join: drain remaining high-priority control messages within timeoutMs (R4-14)
     if (this.isSocketOpen() && timeoutMs > 0) {

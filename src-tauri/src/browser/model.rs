@@ -332,68 +332,79 @@ impl<'de> serde::Deserialize<'de> for BrowserWaitCondition {
         D: serde::Deserializer<'de>,
     {
         #[derive(Deserialize)]
-        #[serde(tag = "condition", rename_all = "camelCase")]
+        #[serde(tag = "condition", rename_all = "camelCase", rename_all_fields = "camelCase")]
         enum TaggedCondition {
+            #[serde(rename_all = "camelCase")]
             Selector {
                 selector: String,
-                #[serde(default, alias = "timeout_ms")]
+                #[serde(default, rename = "timeoutMs", alias = "timeout_ms")]
                 timeout_ms: Option<u64>,
             },
+            #[serde(rename_all = "camelCase")]
             Text {
                 text: String,
-                #[serde(default, alias = "timeout_ms")]
+                #[serde(default, rename = "timeoutMs", alias = "timeout_ms")]
                 timeout_ms: Option<u64>,
             },
+            #[serde(rename_all = "camelCase")]
             UrlContains {
                 fragment: String,
-                #[serde(default, alias = "timeout_ms")]
+                #[serde(default, rename = "timeoutMs", alias = "timeout_ms")]
                 timeout_ms: Option<u64>,
             },
+            #[serde(rename_all = "camelCase")]
             LoadState {
                 state: String,
-                #[serde(default, alias = "timeout_ms")]
+                #[serde(default, rename = "timeoutMs", alias = "timeout_ms")]
                 timeout_ms: Option<u64>,
             },
+            #[serde(rename_all = "camelCase")]
             Function {
                 script: String,
-                #[serde(default, alias = "timeout_ms")]
+                #[serde(default, rename = "timeoutMs", alias = "timeout_ms")]
                 timeout_ms: Option<u64>,
             },
         }
 
         #[derive(Deserialize)]
-        #[serde(untagged)]
+        #[serde(untagged, rename_all_fields = "camelCase")]
         enum Helper {
             Tagged(TaggedCondition),
             StringScript(String),
+            #[serde(rename_all = "camelCase")]
             StringConditionWithTimeout {
                 condition: String,
-                #[serde(default, alias = "timeout_ms")]
+                #[serde(default, rename = "timeoutMs", alias = "timeout_ms")]
                 timeout_ms: Option<u64>,
             },
+            #[serde(rename_all = "camelCase")]
             UntaggedScript {
                 script: String,
-                #[serde(default, alias = "timeout_ms")]
+                #[serde(default, rename = "timeoutMs", alias = "timeout_ms")]
                 timeout_ms: Option<u64>,
             },
+            #[serde(rename_all = "camelCase")]
             UntaggedSelector {
                 selector: String,
-                #[serde(default, alias = "timeout_ms")]
+                #[serde(default, rename = "timeoutMs", alias = "timeout_ms")]
                 timeout_ms: Option<u64>,
             },
+            #[serde(rename_all = "camelCase")]
             UntaggedText {
                 text: String,
-                #[serde(default, alias = "timeout_ms")]
+                #[serde(default, rename = "timeoutMs", alias = "timeout_ms")]
                 timeout_ms: Option<u64>,
             },
+            #[serde(rename_all = "camelCase")]
             UntaggedUrl {
                 fragment: String,
-                #[serde(default, alias = "timeout_ms")]
+                #[serde(default, rename = "timeoutMs", alias = "timeout_ms")]
                 timeout_ms: Option<u64>,
             },
+            #[serde(rename_all = "camelCase")]
             UntaggedLoadState {
                 state: String,
-                #[serde(default, alias = "timeout_ms")]
+                #[serde(default, rename = "timeoutMs", alias = "timeout_ms")]
                 timeout_ms: Option<u64>,
             },
         }
@@ -509,6 +520,133 @@ mod tests {
                 script: "1 + 1 === 2".into()
             }
         );
+    }
+
+    #[test]
+    fn test_r6_13_wait_condition_with_timeout_serde_roundtrip() {
+        // Tagged selector condition with camelCase timeoutMs
+        let expected = BrowserWaitCondition::WithTimeout {
+            inner: Box::new(BrowserWaitCondition::Selector {
+                selector: "#ready".into(),
+            }),
+            timeout_ms: 25,
+        };
+
+        // Forward: Deserialization from JSON with camelCase timeoutMs
+        let json_input = r##"{"condition":"selector","selector":"#ready","timeoutMs":25}"##;
+        let deserialized: BrowserWaitCondition = serde_json::from_str(json_input).unwrap();
+        assert_eq!(deserialized, expected);
+
+        // Backward: Serialization produces JSON with camelCase timeoutMs
+        let serialized = serde_json::to_string(&expected).unwrap();
+        let serialized_value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(
+            serialized_value,
+            serde_json::json!({
+                "condition": "selector",
+                "selector": "#ready",
+                "timeoutMs": 25
+            })
+        );
+
+        // Round-trip from serialized
+        let roundtrip: BrowserWaitCondition = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(roundtrip, expected);
+
+        // Tagged other conditions with camelCase timeoutMs
+        let cases = vec![
+            (
+                r#"{"condition":"text","text":"hello","timeoutMs":100}"#,
+                BrowserWaitCondition::WithTimeout {
+                    inner: Box::new(BrowserWaitCondition::Text {
+                        text: "hello".into(),
+                    }),
+                    timeout_ms: 100,
+                },
+            ),
+            (
+                r#"{"condition":"urlContains","fragment":"/auth","timeoutMs":50}"#,
+                BrowserWaitCondition::WithTimeout {
+                    inner: Box::new(BrowserWaitCondition::UrlContains {
+                        fragment: "/auth".into(),
+                    }),
+                    timeout_ms: 50,
+                },
+            ),
+            (
+                r#"{"condition":"loadState","state":"complete","timeoutMs":200}"#,
+                BrowserWaitCondition::WithTimeout {
+                    inner: Box::new(BrowserWaitCondition::LoadState {
+                        state: "complete".into(),
+                    }),
+                    timeout_ms: 200,
+                },
+            ),
+            (
+                r#"{"condition":"function","script":"window.loaded","timeoutMs":300}"#,
+                BrowserWaitCondition::WithTimeout {
+                    inner: Box::new(BrowserWaitCondition::Function {
+                        script: "window.loaded".into(),
+                    }),
+                    timeout_ms: 300,
+                },
+            ),
+            // Untagged variants with camelCase timeoutMs
+            (
+                r##"{"selector":"#btn","timeoutMs":500}"##,
+                BrowserWaitCondition::WithTimeout {
+                    inner: Box::new(BrowserWaitCondition::Selector {
+                        selector: "#btn".into(),
+                    }),
+                    timeout_ms: 500,
+                },
+            ),
+            (
+                r#"{"text":"Click here","timeoutMs":400}"#,
+                BrowserWaitCondition::WithTimeout {
+                    inner: Box::new(BrowserWaitCondition::Text {
+                        text: "Click here".into(),
+                    }),
+                    timeout_ms: 400,
+                },
+            ),
+            (
+                r#"{"script":"return true","timeoutMs":600}"#,
+                BrowserWaitCondition::WithTimeout {
+                    inner: Box::new(BrowserWaitCondition::Function {
+                        script: "return true".into(),
+                    }),
+                    timeout_ms: 600,
+                },
+            ),
+            (
+                r#"{"condition":"custom.check()","timeoutMs":700}"#,
+                BrowserWaitCondition::WithTimeout {
+                    inner: Box::new(BrowserWaitCondition::Function {
+                        script: "custom.check()".into(),
+                    }),
+                    timeout_ms: 700,
+                },
+            ),
+            // Backward compatibility with snake_case timeout_ms
+            (
+                r##"{"condition":"selector","selector":"#ready","timeout_ms":25}"##,
+                BrowserWaitCondition::WithTimeout {
+                    inner: Box::new(BrowserWaitCondition::Selector {
+                        selector: "#ready".into(),
+                    }),
+                    timeout_ms: 25,
+                },
+            ),
+        ];
+
+        for (json_str, expected_cond) in cases {
+            let parsed: BrowserWaitCondition = serde_json::from_str(json_str).unwrap();
+            assert_eq!(parsed, expected_cond, "Failed for JSON: {}", json_str);
+            let reserialized = serde_json::to_string(&parsed).unwrap();
+            let reparsed: BrowserWaitCondition = serde_json::from_str(&reserialized).unwrap();
+            assert_eq!(reparsed, expected_cond, "Failed round-trip for: {}", json_str);
+        }
     }
 }
 
