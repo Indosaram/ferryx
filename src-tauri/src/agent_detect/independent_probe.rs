@@ -234,3 +234,31 @@ fn probe_bare_shell_prompt_empty_title_returns_none() {
         "bare shell prompt with empty title must return None"
     );
 }
+
+#[test]
+fn probe_generic_selection_and_esc_cancel_do_not_fabricate_copilot() {
+    // Guard against: copilot. selection_blocker ("enter to select", "esc to cancel")
+    // and working_cancel_hint ("esc to cancel") falsely matching generic CLI prompts (fzf, inquirer, select).
+    let select_rows = [
+        "? Select a package to install: (Use arrow keys)",
+        "❯ 1. react",
+        "  2. vue",
+        "enter to select · esc to cancel",
+    ];
+    assert_eq!(
+        detect(&select_rows, "", None),
+        None,
+        "generic enter-to-select / esc-to-cancel prompt must not fabricate copilot"
+    );
+
+    let cancel_rows = [
+        "$ fzf",
+        "> search query",
+        "esc to cancel",
+    ];
+    assert_eq!(
+        detect(&cancel_rows, "", None),
+        None,
+        "generic esc-to-cancel prompt must not fabricate copilot"
+    );
+}

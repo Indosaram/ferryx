@@ -284,6 +284,24 @@ describe("TerminalPane native routing contract", () => {
     expect(screen.queryByRole("button", { name: /reconnect/i })).toBeNull();
   });
 
+  it("renders Open new shell button when an agent session cannot reconnect and onOpenNewShell is provided", () => {
+    const onOpenNewShell = vi.fn();
+    render(
+      <TerminalPane
+        session={createExitedSession({ agentType: "copilot", providerSession: null, agentSessionId: null })}
+        active={true}
+        onOpenNewShell={onOpenNewShell}
+      />,
+    );
+
+    expect(screen.getByText("Session reference unavailable.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /reconnect/i })).toBeNull();
+    const openShellButton = screen.getByRole("button", { name: "Open new shell" });
+    expect(openShellButton).toBeInTheDocument();
+    fireEvent.click(openShellButton);
+    expect(onOpenNewShell).toHaveBeenCalledWith("session-exited");
+  });
+
   it("shows deterministic typed failure copy and exposes retry", () => {
     // Given: a reconnect attempt rejected an invalid provider reference.
     const onReconnect = vi.fn();

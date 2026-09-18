@@ -22,6 +22,7 @@ import { hasValidProjectTarget } from "../lib/projectIdentity";
 import { getCachedSshHosts } from "../lib/sshHosts";
 import { getMigratedItem, PROJECTS_STORAGE_KEY } from "../lib/storageKeys";
 import { startSshRecovery } from "../lib/sshRecovery";
+import { canCaptureAuthoritativeProviderSession } from "../lib/agentResume";
 import { getAgentReconnectAffordance } from "../lib/agentResumeAffordance";
 import { getNativeWindowFocused } from "../lib/nativeWindowFocus";
 import { isWindowForegroundFocused } from "../lib/notificationCoordinator";
@@ -2504,8 +2505,11 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       const session = nextState.sessions[action.sessionId];
       if (!session) return nextState;
 
-      const updatedAgentType = session.agentType ?? (agentType || null);
       const updatedProviderSession = action.providerSession ?? session.providerSession;
+      const isAuthoritative = Boolean(agentType && canCaptureAuthoritativeProviderSession(agentType));
+      const hasProviderSession = Boolean(updatedProviderSession);
+      const shouldAdoptAgentType = Boolean(session.agentType || !isAuthoritative || hasProviderSession);
+      const updatedAgentType = shouldAdoptAgentType ? (session.agentType ?? (agentType || null)) : session.agentType;
 
       if (
         updatedAgentType === session.agentType

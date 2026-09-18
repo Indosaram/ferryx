@@ -11,6 +11,7 @@ type RebindAction = {
   backendSessionId: string;
   cwd?: string;
   daemonEpoch?: string | null;
+  clearAgent?: boolean;
 };
 
 export type ShellReplacementDependencies = {
@@ -29,12 +30,17 @@ function invalidReplacement(message: string): StructuredIpcError {
 }
 
 function hasReplaceableBackend(session: TerminalSession): boolean {
-  return session.backendSessionId === null || isStandbyBackendSessionId(session.backendSessionId);
+  return session.backendSessionId === null || isStandbyBackendSessionId(session.backendSessionId) || session.lifecycle === "exited";
 }
+
+export type ShellReplacementOptions = {
+  clearAgent?: boolean;
+};
 
 export function replaceExitedShellSession(
   localSessionId: string,
   dependencies: ShellReplacementDependencies,
+  options?: ShellReplacementOptions,
 ): Promise<SpawnTerminalResult> {
   const existing = inFlightReplacements.get(localSessionId);
   if (existing) return existing;
@@ -43,7 +49,8 @@ export function replaceExitedShellSession(
     const initial = dependencies.getSessions()[localSessionId];
     let spawned: SpawnTerminalResult | null = null;
     try {
-      if (!initial || !hasReplaceableBackend(initial) || initial.agentType || isPairedWorkspaceId(initial.workspaceId) || isRemoteWorkspaceId(initial.workspaceId)) {
+      const shouldBlockAgent = Boolean(initial?.agentType && !options?.clearAgent);
+      if (!initial || !hasReplaceableBackend(initial) || shouldBlockAgent || isPairedWorkspaceId(initial.workspaceId) || isRemoteWorkspaceId(initial.workspaceId)) {
         throw invalidReplacement("Terminal session cannot be replaced with a new shell");
       }
       spawned = await (dependencies.spawn ?? spawnTerminalDetailed)({
@@ -55,7 +62,8 @@ export function replaceExitedShellSession(
       });
       const requireCurrent = (): TerminalSession => {
         const current = dependencies.getSessions()[localSessionId];
-        if (!current || !hasReplaceableBackend(current) || current.agentType || isRemoteWorkspaceId(current.workspaceId) || current.workspaceId !== initial.workspaceId) {
+        const shouldBlockCurrentAgent = Boolean(current?.agentType && !options?.clearAgent);
+        if (!current || !hasReplaceableBackend(current) || shouldBlockCurrentAgent || isRemoteWorkspaceId(current.workspaceId) || current.workspaceId !== initial.workspaceId) {
           throw invalidReplacement("Terminal session changed while opening a new shell");
         }
         return current;
@@ -69,6 +77,7 @@ export function replaceExitedShellSession(
         backendSessionId: spawned.sessionId,
         cwd: spawned.session.cwd ?? current.cwd,
         daemonEpoch: spawned.daemonEpoch,
+        clearAgent: options?.clearAgent,
       });
       return spawned;
     } catch (error) {

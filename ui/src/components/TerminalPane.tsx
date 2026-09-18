@@ -427,6 +427,18 @@ export function TerminalPane({
                     <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
                     <span>Reconnecting session...</span>
                   </Button>
+                ) : onOpenNewShell ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    disabled={isPending}
+                    aria-label="Open new shell"
+                    onClick={handleOpenNewShell}
+                    className="w-full max-w-[220px]"
+                  >
+                    <span>Open new shell</span>
+                  </Button>
                 ) : null}
               </div>
             ) : (

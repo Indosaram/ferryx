@@ -12,4 +12,36 @@ describe("shell replacement", () => {
     expect(spawn).not.toHaveBeenCalled();
     expect(dispatch).not.toHaveBeenCalled();
   });
+
+  it("replaces an exited local shell session when backendSessionId is still set", async () => {
+    const session: TerminalSession = { id: "pane", workspaceId: "local-ws", cwd: "/repo", worktree: null, backendSessionId: "exited-pty", lifecycle: "exited" };
+    const spawn = vi.fn().mockResolvedValue({ sessionId: "new-pty", session: { cwd: "/repo" }, daemonEpoch: "epoch-1" });
+    const dispatch = vi.fn();
+    const result = await replaceExitedShellSession("pane", { getSessions: () => ({ pane: session }), spawn, dispatch });
+    expect(result.sessionId).toBe("new-pty");
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "REBIND_SESSION_BACKEND",
+      sessionId: "pane",
+      backendSessionId: "new-pty",
+      cwd: "/repo",
+      daemonEpoch: "epoch-1",
+      clearAgent: undefined,
+    });
+  });
+
+  it("allows replacing an exited agent session when clearAgent is true", async () => {
+    const session: TerminalSession = { id: "pane", workspaceId: "local-ws", cwd: "/repo", worktree: null, backendSessionId: null, lifecycle: "exited", agentType: "copilot" };
+    const spawn = vi.fn().mockResolvedValue({ sessionId: "new-pty", session: { cwd: "/repo" }, daemonEpoch: "epoch-1" });
+    const dispatch = vi.fn();
+    const result = await replaceExitedShellSession("pane", { getSessions: () => ({ pane: session }), spawn, dispatch }, { clearAgent: true });
+    expect(result.sessionId).toBe("new-pty");
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "REBIND_SESSION_BACKEND",
+      sessionId: "pane",
+      backendSessionId: "new-pty",
+      cwd: "/repo",
+      daemonEpoch: "epoch-1",
+      clearAgent: true,
+    });
+  });
 });

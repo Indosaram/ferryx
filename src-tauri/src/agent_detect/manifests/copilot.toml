@@ -14,6 +14,10 @@ region = "whole_recent"
 visible_blocker = true
 all = [
   { any = [
+    { contains = ["suggested edits"] },
+    { contains = ["copilot"] },
+  ] },
+  { any = [
     { contains = ["esc to cancel"] },
     { contains = ["esc cancel"] },
   ] },
@@ -44,9 +48,6 @@ state = "working"
 priority = 100
 region = "whole_recent"
 visible_working = true
-any = [
-  { contains = ["esc to cancel"] },
-  { contains = ["esc cancel"] },
-  { contains = ["esc again to cancel"] },
-  { contains = ["esc interrupt"] }
-]
+# Generic "esc to cancel" / "esc cancel" / "esc interrupt" match any interactive shell/CLI/fzf.
+# Copilot CLI generation cancel requires "esc again to cancel".
+contains = ["esc again to cancel"]

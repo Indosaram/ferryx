@@ -2901,24 +2901,36 @@ function WorkspaceApp({
               void handleReconnectAgentSession(sessionId);
             }}
             onReconnectSshSession={handleReconnectSshSession}
-            onOpenNewShell={(sessionId) => replaceExitedShellSession(sessionId, {
-              getSessions: () => stateRef.current.sessions,
-              dispatch: dispatchWorkspaceAction,
-              persist: async (result, localSession) => {
-                const current = stateRef.current;
-                const nextState = workspaceReducer(current, {
-                  type: "REBIND_SESSION_BACKEND",
-                  sessionId: localSession.id,
-                  backendSessionId: result.sessionId,
-                  cwd: result.session.cwd ?? localSession.cwd,
-                  daemonEpoch: result.daemonEpoch,
-                });
-                await persistSessionStrict(activeProject.workspaceId, activeProject.repoRoot, nextState);
-              },
-            }).then(() => undefined).catch((error) => {
-              reportRuntimeError(error);
-              throw error;
-            })}
+            onOpenNewShell={(sessionId) => {
+              const session = stateRef.current.sessions[sessionId];
+              const isAgent = Boolean(
+                session?.agentType ||
+                session?.providerSession ||
+                stateRef.current.activityBySessionId?.[sessionId]?.isAgent
+              );
+              if (session?.agentType) {
+                dispatchWorkspaceAction({ type: "RESET_AGENT_STATE", sessionId });
+              }
+              return replaceExitedShellSession(sessionId, {
+                getSessions: () => stateRef.current.sessions,
+                dispatch: dispatchWorkspaceAction,
+                persist: async (result, localSession) => {
+                  const current = stateRef.current;
+                  const nextState = workspaceReducer(current, {
+                    type: "REBIND_SESSION_BACKEND",
+                    sessionId: localSession.id,
+                    backendSessionId: result.sessionId,
+                    cwd: result.session.cwd ?? localSession.cwd,
+                    daemonEpoch: result.daemonEpoch,
+                    clearAgent: isAgent,
+                  });
+                  await persistSessionStrict(activeProject.workspaceId, activeProject.repoRoot, nextState);
+                },
+              }, { clearAgent: isAgent }).then(() => undefined).catch((error) => {
+                reportRuntimeError(error);
+                throw error;
+              });
+            }}
             onBackendSessionUnavailable={(sessionId, backendSessionId, reason, bindingKey) => {
               markBackendSessionUnavailable(sessionId, backendSessionId, reason, bindingKey);
               const session = stateRef.current.sessions[sessionId];

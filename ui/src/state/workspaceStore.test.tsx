@@ -1748,6 +1748,27 @@ describe("worktree tab and session isolation", () => {
       expect(nextState.sessions["session-1"].providerSession).toEqual({ key: "session_id", id: "omo-sess-456" });
     });
 
+    it("SESSION_SCREEN_ACTIVITY does not latch session.agentType without providerSession for authoritative agents", () => {
+      const baseState = restoredSplitState();
+      expect(baseState.sessions["session-1"].agentType).toBeUndefined();
+
+      const nextState = workspaceReducer(baseState, {
+        type: "SESSION_SCREEN_ACTIVITY",
+        tabId: "tab-primary",
+        sessionId: "session-1",
+        state: "working",
+        ruleId: "copilot_screen",
+        manifestId: "copilot",
+      });
+
+      // session.agentType must NOT be latched without verified providerSession
+      expect(nextState.sessions["session-1"].agentType).toBeUndefined();
+      expect(nextState.sessions["session-1"].providerSession).toBeUndefined();
+      // activityBySessionId still reflects active agent for visual feedback
+      expect(nextState.activityBySessionId?.["session-1"]?.isAgent).toBe(true);
+      expect(nextState.activityBySessionId?.["session-1"]?.agentType).toBe("copilot");
+    });
+
     it("APPLY_PROVIDER_SESSION sets providerSession and agentType when session.agentType is unset", () => {
       const baseState = restoredSplitState();
       expect(baseState.sessions["session-1"].agentType).toBeUndefined();
