@@ -45,6 +45,24 @@ const AGENT_DETECT_INTERVAL_DETACHED: std::time::Duration = std::time::Duration:
 /// How long the pump waits for the next output chunk before treating a burst as drained and
 /// re-running any detection the throttle skipped (trailing-edge detect).
 const AGENT_DETECT_TRAILING_IDLE: std::time::Duration = std::time::Duration::from_millis(60);
+/// A remote session refills its local output hub *after* attach, so its retained scrollback
+/// arrives as a burst of streamed frames instead of the single history blob a local attach feeds
+/// through `feed_attachment_history`. Painting each frame makes the pane visibly scroll from the
+/// top of the scrollback down to the end, so the burst is absorbed instead: frames are fed to the
+/// grid without scheduling a paint, and one bottom-locked paint follows once the burst drains.
+const REPLAY_ABSORB_IDLE: std::time::Duration = std::time::Duration::from_millis(120);
+/// Upper bound on absorbing, so a session that keeps producing output cannot stay unpainted.
+const REPLAY_ABSORB_MAX: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Whether the post-attach replay burst is still being absorbed. The window closes on the first
+/// gap longer than [`REPLAY_ABSORB_IDLE`], or at [`REPLAY_ABSORB_MAX`] for a stream that never
+/// goes idle.
+fn replay_absorb_continues(
+    since_attach: std::time::Duration,
+    since_last_output: std::time::Duration,
+) -> bool {
+    since_attach < REPLAY_ABSORB_MAX && since_last_output < REPLAY_ABSORB_IDLE
+}
 pub const NATIVE_TERMINAL_SCROLLBAR_EVENT: &str = "native_terminal_scrollbar";
 pub const NATIVE_TERMINAL_FOCUS_EVENT: &str = "native_terminal_focus";
 
@@ -1500,6 +1518,13 @@ impl NativeTerminalSurfaceHostState {
         let event_sink = Arc::clone(&self.event_sink);
         let session_id_owned = session_id.to_string();
         let app_handle = app.clone();
+        // Only a remote session streams its scrollback back after attach; a local attach already
+        // lands its whole history in one paint.
+        let absorbs_replay_burst = sessions
+            .lock()
+            .get(&session_id_owned)
+            .map(|session| session.is_remote)
+            .unwrap_or(false);
         let pump_task = tokio::spawn(async move {
             let schedule_render = || {
                 if render_coordinator.schedule_render() {
@@ -1519,6 +1544,18 @@ impl NativeTerminalSurfaceHostState {
                     }
                 }
             };
+            let lock_to_bottom = || {
+                let mut sessions_guard = sessions.lock();
+                if let Some(session) = sessions_guard.get_mut(&session_id_owned) {
+                    let _ = session
+                        .terminal
+                        .scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
+                }
+            };
+            let mut replay_absorb = absorbs_replay_burst.then(|| {
+                let now = std::time::Instant::now();
+                (now, now)
+            });
             loop {
                 let deadline = sessions.lock().get(&session_id_owned)
                     .and_then(|session| session.terminal.synchronized_output_deadline());
@@ -1578,6 +1615,17 @@ impl NativeTerminalSurfaceHostState {
                             if detected {
                                 update_sender.send_replace(());
                             }
+                            if let Some((started_at, last_output_at)) = replay_absorb {
+                                let now = std::time::Instant::now();
+                                if !replay_absorb_continues(
+                                    now.duration_since(started_at),
+                                    now.duration_since(last_output_at),
+                                ) {
+                                    replay_absorb = None;
+                                    lock_to_bottom();
+                                    schedule_render();
+                                }
+                            }
                             continue;
                         }
                     };
@@ -1614,7 +1662,27 @@ impl NativeTerminalSurfaceHostState {
                         }
 
                         if session_exists {
-                            schedule_render();
+                            let now = std::time::Instant::now();
+                            let absorbing = match replay_absorb {
+                                Some((started_at, last_output_at))
+                                    if replay_absorb_continues(
+                                        now.duration_since(started_at),
+                                        now.duration_since(last_output_at),
+                                    ) =>
+                                {
+                                    replay_absorb = Some((started_at, now));
+                                    true
+                                }
+                                Some(_) => {
+                                    replay_absorb = None;
+                                    lock_to_bottom();
+                                    false
+                                }
+                                None => false,
+                            };
+                            if !absorbing {
+                                schedule_render();
+                            }
                         }
                     }
                     DaemonStreamMessage::Lagged {
@@ -2721,6 +2789,25 @@ impl NativeTerminalSurfaceHostState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_absorb_spans_the_burst_and_closes_on_idle_or_cap() {
+        // Frames still arriving inside both bounds: the pane must not paint the scroll-through.
+        assert!(replay_absorb_continues(
+            std::time::Duration::from_millis(500),
+            std::time::Duration::from_millis(10)
+        ));
+        // The burst drained, so the next wakeup paints once at the bottom.
+        assert!(!replay_absorb_continues(
+            std::time::Duration::from_millis(500),
+            REPLAY_ABSORB_IDLE
+        ));
+        // A session that never goes idle still paints at the cap instead of staying blank.
+        assert!(!replay_absorb_continues(
+            REPLAY_ABSORB_MAX,
+            std::time::Duration::from_millis(10)
+        ));
+    }
 
     #[test]
     fn p06_initial_layout_sets_ghostty_pixel_reply() {
