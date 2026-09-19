@@ -3759,6 +3759,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_suspended_surface_renders_again_when_output_returns() {
+        // Suspension must not be a one-way door. The test above proves occlusion arms no retry,
+        // which is only half the contract: if suspending also latched the coordinator, the pane
+        // would go dark permanently instead of waking, which is worse than the spin it replaced.
+        let mut harness = DirectRenderHarness::new(vec![
+            SimulatedAcquisition::Occluded,
+            SimulatedAcquisition::Frame,
+        ]);
+
+        let suspended = harness.scroll_once().unwrap();
+        assert!(suspended.render_suspended);
+        assert!(!suspended.presented);
+
+        // Not scroll_once again: it asserts the VT offset moved, and we are already at Top.
+        // Driving render directly is what a visibility command ultimately does anyway.
+        let resumed = harness
+            .state
+            .render(&harness.window, harness.request.clone())
+            .unwrap();
+        assert!(
+            resumed.presented,
+            "output arriving after an occluded frame must present, not stay suspended"
+        );
+        assert!(
+            !resumed.render_suspended,
+            "a surface that presented is no longer suspended"
+        );
+    }
+
+    #[tokio::test]
     async fn direct_retry_scheduled_timeout_rearms_without_inline_recursion() {
         let mut harness = DirectRenderHarness::new(vec![
             SimulatedAcquisition::Dropped,
