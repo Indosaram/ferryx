@@ -209,6 +209,11 @@ pub(crate) struct Session {
     transport: Option<Arc<dyn Transport>>,
     task: Option<tokio::task::JoinHandle<()>>,
     updates: watch::Sender<RemoteSessionDetails>,
+    /// Latest client-requested size that never reached the remote PTY because the
+    /// session was disconnected or the in-flight RPC failed. Re-applied on the next
+    /// successful connect so pane geometry survives the connection race instead of
+    /// leaving the remote PTY at its spawn defaults.
+    pending_size: Option<(u16, u16)>,
 }
 pub(crate) struct Entry {
     pub(crate) state: Mutex<Session>,
@@ -339,6 +344,7 @@ impl RemoteRuntime {
                 updates,
                 transport: None,
                 task: None,
+                pending_size: None,
             }),
             control: Arc::new(AsyncMutex::new(())),
         });
@@ -451,7 +457,17 @@ impl RemoteRuntime {
                 "Remote control operation in flight; input was not queued",
             )
         })?;
-        check_connected(&e.state.lock(), generation)?;
+        {
+            let mut s = e.state.lock();
+            if let Err(error) = check_connected(&s, generation) {
+                // A size request that could not be dispatched is still the pane's
+                // intent; remember it so the next connect re-applies it.
+                if size.is_some() {
+                    s.pending_size = size;
+                }
+                return Err(error);
+            }
+        }
         drop(guard);
         let hub = self.hub.clone();
         Ok(Box::pin(async move {
@@ -462,8 +478,15 @@ impl RemoteRuntime {
                 )
             })?;
             let (client, target) = {
-                let s = e.state.lock();
-                check_connected(&s, generation)?;
+                let mut s = e.state.lock();
+                if let Err(error) = check_connected(&s, generation) {
+                    // The reconnect raced between admission and dispatch; the size
+                    // request must survive it exactly like the admission failure.
+                    if size.is_some() {
+                        s.pending_size = size;
+                    }
+                    return Err(error);
+                }
                 (
                     s.transport.clone().unwrap(),
                     s.details.descriptor.target.clone(),
@@ -482,6 +505,7 @@ impl RemoteRuntime {
                     if let Some((cols, rows)) = size {
                         s.details.descriptor.cols = cols;
                         s.details.descriptor.rows = rows;
+                        s.pending_size = None;
                         hub.record_resize(&s.details.descriptor.backend_session_id, cols, rows);
                         Entry::notify(&s);
                     }
@@ -489,6 +513,11 @@ impl RemoteRuntime {
                 }
                 Err(error) => {
                     let failure = RemoteFailure::from_bridge(&error);
+                    // The request never reached the remote PTY; keep it for the
+                    // reconnect path so the size is not silently lost.
+                    if size.is_some() {
+                        s.pending_size = size;
+                    }
                     fail(&mut s, failure.clone());
                     Err(failure)
                 }
@@ -604,6 +633,7 @@ async fn run(
             if info.exited {
                 return Err(BridgeError::TargetNotFound);
             }
+            let mut desired_size: Option<(u16, u16)> = None;
             {
                 let _gate = e.control.lock().await;
                 let mut s = e.state.lock();
@@ -614,7 +644,26 @@ async fn run(
                 s.details.pid = Some(info.pid);
                 s.details.state = RemoteConnectionState::Connected;
                 s.details.failure = None;
+                desired_size = Some(s.pending_size.take().unwrap_or((
+                    s.details.descriptor.cols,
+                    s.details.descriptor.rows,
+                )));
                 Entry::notify(&s);
+            }
+            // Converge the remote PTY onto the last size the daemon knows about
+            // before streaming resumes: a reconnect must not leave the remote shell
+            // at stale spawn defaults while the pane renders a different grid.
+            if let Some((cols, rows)) = desired_size {
+                if client.resize(&d.target, cols, rows).await.is_ok() {
+                    let mut s = e.state.lock();
+                    if s.details.generation != generation {
+                        return Ok(());
+                    }
+                    s.details.descriptor.cols = cols;
+                    s.details.descriptor.rows = rows;
+                    hub.record_resize(&d.backend_session_id, cols, rows);
+                    Entry::notify(&s);
+                }
             }
             // Subscribe before observing state so control-side failures cannot be lost
             // while the independent reader is in a long poll.

@@ -1625,7 +1625,28 @@ impl DaemonClient {
         cols: u16,
         rows: u16,
     ) -> Result<(), IpcError> {
-        self.require_local_control(session_id).await?;
+        // The native surface dispatcher is generation-less. Geometry is not payload
+        // input: resolving the remote's CURRENT generation here is safe (the daemon
+        // applies it under its live connection), unlike generation-less writes which
+        // must be rejected for remote sessions.
+        match self.remote_session_status(session_id).await? {
+            DaemonResponse::RemoteSessionDetailsOk { details: Some(details), .. } => {
+                return crate::ipc::terminal::remote_control_result(self
+                    .send_interactive_request(DaemonRequest::RemoteResize {
+                        session_id: session_id.into(),
+                        generation: details.generation,
+                        cols,
+                        rows,
+                    })
+                    .await?);
+            }
+            DaemonResponse::RemoteSessionError { failure } => {
+                return Err(IpcError::internal(failure.to_string()).with_details(serde_json::to_value(failure)
+                    .map_err(|error| IpcError::internal(error.to_string()))?));
+            }
+            DaemonResponse::Error { message, .. } => return Err(IpcError::internal(message)),
+            _ => {}
+        }
         let resp = self
             .send_interactive_request(DaemonRequest::Resize {
                 session_id: session_id.to_string(),

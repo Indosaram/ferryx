@@ -18,6 +18,8 @@ struct Fake {
     writes: AtomicUsize,
     stops: AtomicUsize,
     write_failure: parking_lot::Mutex<Option<BridgeError>>,
+    resizes: AtomicUsize,
+    last_resize: parking_lot::Mutex<Option<(u16, u16)>>,
 }
 impl Transport for Fake {
     fn describe<'a>(&'a self, t: &'a TargetRef) -> Rpc<'a, DescribeResult> {
@@ -53,8 +55,12 @@ impl Transport for Fake {
             Ok(())
         })
     }
-    fn resize<'a>(&'a self, _: &'a TargetRef, _: u16, _: u16) -> Rpc<'a, ()> {
-        Box::pin(async { Ok(()) })
+    fn resize<'a>(&'a self, _: &'a TargetRef, cols: u16, rows: u16) -> Rpc<'a, ()> {
+        Box::pin(async move {
+            self.resizes.fetch_add(1, Ordering::SeqCst);
+            *self.last_resize.lock() = Some((cols, rows));
+            Ok(())
+        })
     }
     fn stop<'a>(&'a self, _: &'a TargetRef) -> Rpc<'a, ()> {
         Box::pin(async move {
@@ -106,6 +112,8 @@ fn fixture() -> (
         writes: AtomicUsize::new(0),
         stops: AtomicUsize::new(0),
         write_failure: parking_lot::Mutex::new(None),
+        resizes: AtomicUsize::new(0),
+        last_resize: parking_lot::Mutex::new(None),
     });
     let dialer = Arc::new(Dialer {
         fake,
@@ -153,6 +161,65 @@ fn output(cursor: u64, gap: bool) -> ReadResult {
             bytes: format!("record-{cursor};").into_bytes(),
         }],
     }
+}
+
+#[tokio::test]
+async fn ssh_pane_resize_during_outage_is_applied_after_reconnect() {
+    let (runtime, _, dialer, tx) = fixture();
+    runtime.restore(descriptor()).unwrap();
+    let mut rx = runtime.subscribe("local-stable").unwrap();
+    let connected = state(&mut rx, |d| d.state == RemoteConnectionState::Connected).await;
+    // Force a transport outage; the redial parks on the delay clock.
+    tx.send(Err(BridgeError::ConnectionClosed)).unwrap();
+    state(&mut rx, |d| {
+        d.state == RemoteConnectionState::Reconnecting && d.generation > connected.generation
+    })
+    .await;
+    // The pane's resize arrives while the remote is dialing: it must be remembered,
+    // not dropped, so the remote PTY never stays at spawn defaults.
+    assert!(runtime
+        .resize("local-stable", connected.generation, 132, 43)
+        .is_err());
+    dialer.clock.add_permits(1);
+    state(&mut rx, |d| {
+        d.state == RemoteConnectionState::Connected && d.generation > connected.generation
+    })
+    .await;
+    let detail = state(&mut rx, |d| {
+        d.descriptor.cols == 132 && d.descriptor.rows == 43
+    })
+    .await;
+    assert_eq!(*dialer.fake.last_resize.lock(), Some((132, 43)));
+    assert_eq!(detail.descriptor.target, descriptor().target);
+}
+
+#[tokio::test]
+async fn ssh_reconnect_reasserts_recorded_pane_size() {
+    let (runtime, _, dialer, tx) = fixture();
+    runtime.restore(descriptor()).unwrap();
+    let mut rx = runtime.subscribe("local-stable").unwrap();
+    let connected = state(&mut rx, |d| d.state == RemoteConnectionState::Connected).await;
+    runtime
+        .resize("local-stable", connected.generation, 120, 40)
+        .unwrap()
+        .await
+        .unwrap();
+    assert_eq!(*dialer.fake.last_resize.lock(), Some((120, 40)));
+    tx.send(Err(BridgeError::ConnectionClosed)).unwrap();
+    state(&mut rx, |d| {
+        d.state == RemoteConnectionState::Reconnecting && d.generation > connected.generation
+    })
+    .await;
+    dialer.clock.add_permits(1);
+    let reconnected = state(&mut rx, |d| {
+        d.state == RemoteConnectionState::Connected && d.generation > connected.generation
+    })
+    .await;
+    // The connect path re-asserted the last accepted size without a new request:
+    // one resize at the first connect, one explicit, one at the redial.
+    assert_eq!(*dialer.fake.last_resize.lock(), Some((120, 40)));
+    assert_eq!(dialer.fake.resizes.load(Ordering::SeqCst), 3);
+    assert_eq!((reconnected.descriptor.cols, reconnected.descriptor.rows), (120, 40));
 }
 
 #[tokio::test]
