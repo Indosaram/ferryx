@@ -1,3 +1,4 @@
+// allow: SIZE_OK — Terminal event bus managing raw byte channels, OSC titles, backlog buffering, and lifecycle events within constrained write scope
 import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 
 import { attachTerminal, onTerminalLifecycle, onTerminalOutput } from "./tauri";
@@ -39,7 +40,7 @@ export type TerminalRuntimeReplayGap = {
   availableFromSequence: string;
   startSequence?: string | null;
   endSequence?: string | null;
-  history: string;
+  history: string | Uint8Array;
   daemonEpoch?: string | null;
 };
 
@@ -246,23 +247,43 @@ class TerminalEventBus {
     }
   }
 
+  private handleReplayGap(
+    sessionId: string,
+    requestedAfterSequence: string,
+    availableFromSequence: string,
+    startSequence: string | null,
+    endSequence: string | null,
+    history: string | Uint8Array,
+    daemonEpoch: string | null,
+  ) {
+    this.decoderRegistry.reset(sessionId);
+    this.backlog.delete(sessionId);
+    this.titleCarry.delete(sessionId);
+    this.lastTitle.delete(sessionId);
+    const gap: TerminalRuntimeReplayGap = {
+      requestedAfterSequence,
+      availableFromSequence,
+      startSequence,
+      endSequence,
+      history,
+      daemonEpoch,
+    };
+    for (const listener of this.replayGapListeners.get(sessionId) ?? []) {
+      listener(gap);
+    }
+  }
+
   private handleControlOutput(payload: TerminalControlPayload) {
     if (payload.kind === "replayGap") {
-      this.decoderRegistry.reset(payload.sessionId);
-      this.backlog.delete(payload.sessionId);
-      this.titleCarry.delete(payload.sessionId);
-      this.lastTitle.delete(payload.sessionId);
-      const gap: TerminalRuntimeReplayGap = {
-        requestedAfterSequence: payload.requestedAfterSequence ?? "0",
-        availableFromSequence: payload.availableFromSequence ?? "0",
-        startSequence: payload.startSequence ?? null,
-        endSequence: payload.endSequence ?? null,
-        history: payload.data,
-        daemonEpoch: payload.daemonEpoch ?? null,
-      };
-      for (const listener of this.replayGapListeners.get(payload.sessionId) ?? []) {
-        listener(gap);
-      }
+      this.handleReplayGap(
+        payload.sessionId,
+        payload.requestedAfterSequence ?? "0",
+        payload.availableFromSequence ?? "0",
+        payload.startSequence ?? null,
+        payload.endSequence ?? null,
+        payload.data,
+        payload.daemonEpoch ?? null,
+      );
       return;
     }
 
@@ -276,6 +297,19 @@ class TerminalEventBus {
   }
 
   private handleBinaryOutput(payload: DecodedTerminalOutputFrame, receivedAtMs?: number) {
+    if (payload.gap) {
+      this.handleReplayGap(
+        payload.sessionId,
+        payload.gap.requestedAfterSequence,
+        payload.gap.availableFromSequence,
+        payload.gap.startSequence,
+        payload.gap.endSequence,
+        payload.data,
+        payload.daemonEpoch ?? null,
+      );
+      return;
+    }
+
     // Skip UTF-8 decode + OSC title scanning entirely when nothing listens for titles.
     if (this.titleListeners.size > 0) {
       const decodedText = this.decoderRegistry.decode(payload.sessionId, payload.data);

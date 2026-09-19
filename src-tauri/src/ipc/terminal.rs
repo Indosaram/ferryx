@@ -21,9 +21,20 @@ const BATCH_FLUSH_INTERVAL: Duration = Duration::from_millis(10);
 const BATCH_MAX_BYTES: usize = 32 * 1024;
 const CWD_CACHE_TTL: Duration = Duration::from_millis(500);
 const TERMINAL_OUTPUT_FRAME_VERSION: u8 = 1;
+const TERMINAL_OUTPUT_FRAME_VERSION_V2: u8 = 2;
 const TERMINAL_OUTPUT_FRAME_FIXED_BYTES: usize = 20;
 const TERMINAL_OUTPUT_FRAME_HAS_SEQUENCE: u8 = 1 << 0;
 const TERMINAL_OUTPUT_FRAME_HAS_DAEMON_EPOCH: u8 = 1 << 1;
+const TERMINAL_OUTPUT_FRAME_HAS_GAP: u8 = 1 << 2;
+const TERMINAL_OUTPUT_FRAME_GAP_BYTES: usize = 32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalReplayGapFields {
+    pub requested_after_sequence: u64,
+    pub available_from_sequence: u64,
+    pub start_sequence: u64,
+    pub end_sequence: u64,
+}
 
 static CWD_CACHE: Mutex<Option<HashMap<String, (Instant, PathBuf)>>> = Mutex::new(None);
 static TERMINAL_OUTPUT_CHANNEL: Mutex<Option<Channel<Response>>> = Mutex::new(None);
@@ -446,6 +457,7 @@ fn encode_terminal_output_frame(
     data: &[u8],
     sequence: Option<u64>,
     daemon_epoch: Option<u64>,
+    gap: Option<TerminalReplayGapFields>,
 ) -> Option<Vec<u8>> {
     let session_id = session_id.as_bytes();
     let session_id_len = u16::try_from(session_id.len()).ok()?;
@@ -456,15 +468,35 @@ fn encode_terminal_output_frame(
     if daemon_epoch.is_some() {
         flags |= TERMINAL_OUTPUT_FRAME_HAS_DAEMON_EPOCH;
     }
+    if gap.is_some() {
+        flags |= TERMINAL_OUTPUT_FRAME_HAS_GAP;
+    }
+
+    let version = if gap.is_some() {
+        TERMINAL_OUTPUT_FRAME_VERSION_V2
+    } else {
+        TERMINAL_OUTPUT_FRAME_VERSION
+    };
+    let gap_len = if gap.is_some() {
+        TERMINAL_OUTPUT_FRAME_GAP_BYTES
+    } else {
+        0
+    };
 
     let mut frame =
-        Vec::with_capacity(TERMINAL_OUTPUT_FRAME_FIXED_BYTES + session_id.len() + data.len());
-    frame.push(TERMINAL_OUTPUT_FRAME_VERSION);
+        Vec::with_capacity(TERMINAL_OUTPUT_FRAME_FIXED_BYTES + session_id.len() + gap_len + data.len());
+    frame.push(version);
     frame.push(flags);
     frame.extend_from_slice(&session_id_len.to_le_bytes());
     frame.extend_from_slice(&sequence.unwrap_or_default().to_le_bytes());
     frame.extend_from_slice(&daemon_epoch.unwrap_or_default().to_le_bytes());
     frame.extend_from_slice(session_id);
+    if let Some(gap) = gap {
+        frame.extend_from_slice(&gap.requested_after_sequence.to_le_bytes());
+        frame.extend_from_slice(&gap.available_from_sequence.to_le_bytes());
+        frame.extend_from_slice(&gap.start_sequence.to_le_bytes());
+        frame.extend_from_slice(&gap.end_sequence.to_le_bytes());
+    }
     frame.extend_from_slice(data);
     Some(frame)
 }
@@ -488,7 +520,7 @@ fn flush_terminal_output<R: Runtime>(
     let channel = TERMINAL_OUTPUT_CHANNEL.lock().clone();
     if let Some(channel) = channel {
         if let Some(frame) =
-            encode_terminal_output_frame(session_id, buffer, sequence, daemon_epoch)
+            encode_terminal_output_frame(session_id, buffer, sequence, daemon_epoch, None)
         {
             match channel.send(Response::new(frame)) {
                 Ok(()) => {
@@ -543,6 +575,41 @@ fn emit_terminal_replay_gap<R: Runtime>(
     history: &[u8],
     daemon_epoch: Option<&str>,
 ) -> bool {
+    let channel = TERMINAL_OUTPUT_CHANNEL.lock().clone();
+    if let Some(channel) = channel {
+        let epoch_u64 = daemon_epoch.and_then(|s| s.parse::<u64>().ok());
+        let gap_fields = TerminalReplayGapFields {
+            requested_after_sequence,
+            available_from_sequence,
+            start_sequence: start_sequence.unwrap_or_default(),
+            end_sequence: end_sequence.unwrap_or_default(),
+        };
+        if let Some(frame) = encode_terminal_output_frame(
+            session_id,
+            history,
+            end_sequence,
+            epoch_u64,
+            Some(gap_fields),
+        ) {
+            match channel.send(Response::new(frame)) {
+                Ok(()) => {
+                    crate::terminal::metrics::record_channel_send_for_session(session_id);
+                    return true;
+                }
+                Err(error) => {
+                    tracing::debug!("Failed to send terminal replay gap channel frame: {error}");
+                    let mut guard = TERMINAL_OUTPUT_CHANNEL.lock();
+                    if guard
+                        .as_ref()
+                        .is_some_and(|current| current.id() == channel.id())
+                    {
+                        *guard = None;
+                    }
+                }
+            }
+        }
+    }
+
     let payload = TerminalOutputPayload {
         session_id: session_id.to_string(),
         kind: TerminalOutputKind::ReplayGap,
@@ -2664,6 +2731,95 @@ mod tests {
         assert_ne!(ipc.code, IpcErrorCode::InternalError);
         let serialized_code = serde_json::to_value(&ipc.code).unwrap();
         assert_eq!(serialized_code, "UNKNOWN_PAIRED_CODE_XYZ");
+    }
+
+    #[test]
+    fn test_encode_terminal_output_frame_v2_gap() {
+        let session_id = "test-session-gap";
+        let history = b"\x1b[32mhello replay\x1b[0m";
+        let sequence = Some(500u64);
+        let daemon_epoch = Some(42u64);
+        let gap = TerminalReplayGapFields {
+            requested_after_sequence: 100,
+            available_from_sequence: 200,
+            start_sequence: 201,
+            end_sequence: 500,
+        };
+
+        let frame = encode_terminal_output_frame(
+            session_id,
+            history,
+            sequence,
+            daemon_epoch,
+            Some(gap),
+        )
+        .expect("frame should encode");
+
+        // Version 2
+        assert_eq!(frame[0], 2);
+        // Flags: HAS_SEQUENCE (1<<0) | HAS_DAEMON_EPOCH (1<<1) | HAS_GAP (1<<2) = 7
+        assert_eq!(
+            frame[1] & TERMINAL_OUTPUT_FRAME_HAS_GAP,
+            TERMINAL_OUTPUT_FRAME_HAS_GAP
+        );
+        assert_eq!(frame[1], (1 << 0) | (1 << 1) | (1 << 2));
+
+        // Session ID length (u16le) at offset 2..4
+        let session_id_len = u16::from_le_bytes(frame[2..4].try_into().unwrap()) as usize;
+        assert_eq!(session_id_len, session_id.len());
+
+        // Sequence (u64le) at offset 4..12
+        let seq = u64::from_le_bytes(frame[4..12].try_into().unwrap());
+        assert_eq!(seq, 500);
+
+        // Daemon epoch (u64le) at offset 12..20
+        let epoch = u64::from_le_bytes(frame[12..20].try_into().unwrap());
+        assert_eq!(epoch, 42);
+
+        // Session id bytes at 20..20+session_id_len
+        assert_eq!(&frame[20..20 + session_id_len], session_id.as_bytes());
+
+        // Gap fields (4x u64le) at offset 20+session_id_len .. 20+session_id_len+32
+        let gap_offset = 20 + session_id_len;
+        let req_after = u64::from_le_bytes(frame[gap_offset..gap_offset + 8].try_into().unwrap());
+        assert_eq!(req_after, 100);
+        let avail_from =
+            u64::from_le_bytes(frame[gap_offset + 8..gap_offset + 16].try_into().unwrap());
+        assert_eq!(avail_from, 200);
+        let start_seq =
+            u64::from_le_bytes(frame[gap_offset + 16..gap_offset + 24].try_into().unwrap());
+        assert_eq!(start_seq, 201);
+        let end_seq =
+            u64::from_le_bytes(frame[gap_offset + 24..gap_offset + 32].try_into().unwrap());
+        assert_eq!(end_seq, 500);
+
+        // Data offset: immediately after the 32-byte gap block
+        let data_offset = gap_offset + 32;
+        assert_eq!(&frame[data_offset..], history);
+        assert_eq!(frame.len(), data_offset + history.len());
+    }
+
+    #[test]
+    fn test_encode_terminal_output_frame_v1_unchanged() {
+        let session_id = "test-session-v1";
+        let data = b"regular output";
+        let sequence = Some(123u64);
+        let daemon_epoch = Some(456u64);
+
+        let frame =
+            encode_terminal_output_frame(session_id, data, sequence, daemon_epoch, None)
+                .expect("frame should encode");
+
+        // Version 1
+        assert_eq!(frame[0], 1);
+        // Flags: HAS_SEQUENCE | HAS_DAEMON_EPOCH, no HAS_GAP
+        assert_eq!(frame[1] & TERMINAL_OUTPUT_FRAME_HAS_GAP, 0);
+        assert_eq!(frame[1], (1 << 0) | (1 << 1));
+
+        let session_id_len = u16::from_le_bytes(frame[2..4].try_into().unwrap()) as usize;
+        let data_offset = 20 + session_id_len;
+        assert_eq!(&frame[data_offset..], data);
+        assert_eq!(frame.len(), data_offset + data.len());
     }
 }
 

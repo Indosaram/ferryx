@@ -83,7 +83,83 @@ describe("TerminalOutputDecoderRegistry", () => {
   });
 });
 
+function encodeTerminalOutputV2GapFrame(
+  sessionId: string,
+  data: Uint8Array,
+  sequence: bigint,
+  daemonEpoch: bigint,
+  gap: {
+    requestedAfterSequence: bigint;
+    availableFromSequence: bigint;
+    startSequence: bigint;
+    endSequence: bigint;
+  },
+): Uint8Array {
+  const sessionBytes = new TextEncoder().encode(sessionId);
+  const frame = new Uint8Array(20 + sessionBytes.byteLength + 32 + data.byteLength);
+  const view = new DataView(frame.buffer);
+  const flags = (1 << 0) | (1 << 1) | (1 << 2);
+  view.setUint8(0, 2);
+  view.setUint8(1, flags);
+  view.setUint16(2, sessionBytes.byteLength, true);
+  view.setBigUint64(4, sequence, true);
+  view.setBigUint64(12, daemonEpoch, true);
+  frame.set(sessionBytes, 20);
+  const gapOffset = 20 + sessionBytes.byteLength;
+  view.setBigUint64(gapOffset, gap.requestedAfterSequence, true);
+  view.setBigUint64(gapOffset + 8, gap.availableFromSequence, true);
+  view.setBigUint64(gapOffset + 16, gap.startSequence, true);
+  view.setBigUint64(gapOffset + 24, gap.endSequence, true);
+  frame.set(data, gapOffset + 32);
+  return frame;
+}
+
 describe("decodeTerminalOutputFrame", () => {
+  it("decodes version 2 frame with replay gap fields", () => {
+    const payload = new Uint8Array([0x1b, 0x5b, 0x32, 0x4a]);
+    const frame = encodeTerminalOutputV2GapFrame(
+      "session-v2-gap",
+      payload,
+      100n,
+      200n,
+      {
+        requestedAfterSequence: 10n,
+        availableFromSequence: 20n,
+        startSequence: 30n,
+        endSequence: 100n,
+      },
+    );
+
+    const decoded = decodeTerminalOutputFrame(frame);
+
+    expect(decoded).toEqual({
+      sessionId: "session-v2-gap",
+      data: payload,
+      sequence: "100",
+      daemonEpoch: "200",
+      gap: {
+        requestedAfterSequence: "10",
+        availableFromSequence: "20",
+        startSequence: "30",
+        endSequence: "100",
+      },
+    });
+  });
+
+  it("decodes version 1 frame unchanged with backward compatibility", () => {
+    const payload = new Uint8Array([1, 2, 3, 4, 5]);
+    const frame = encodeTerminalOutputFrame("session-v1-compat", payload, 555n, 777n);
+
+    const decoded = decodeTerminalOutputFrame(frame);
+
+    expect(decoded).toEqual({
+      sessionId: "session-v1-compat",
+      data: payload,
+      sequence: "555",
+      daemonEpoch: "777",
+    });
+    expect(decoded.gap).toBeUndefined();
+  });
   it("parses session metadata while preserving the PTY payload as a Uint8Array view", () => {
     const payload = new Uint8Array([0, 1, 2, 0x1b, 0xff, 65]);
     const frame = encodeTerminalOutputFrame("session-raw-1", payload, 1234567890123n, 987654321n);
