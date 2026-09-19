@@ -9,6 +9,7 @@
 //! threads can, because the compiler checks every call site.
 
 use std::marker::PhantomData;
+use std::sync::{Arc, Condvar, Mutex};
 use std::sync::mpsc;
 use std::thread;
 
@@ -98,11 +99,102 @@ impl Drop for GpuWorker {
     }
 }
 
+/// A value lent to another thread and guaranteed to come back before its owner tears down.
+///
+/// The GPU leg travels to the worker while the native child view stays behind. The view may only
+/// be destroyed once the leg (and the `wgpu::Surface` inside it) is home again, so [`reclaim`]
+/// blocks until the borrower returns it.
+///
+/// [`reclaim`]: LentSlot::reclaim
+pub struct LentSlot<T> {
+    cell: Arc<(Mutex<Option<T>>, Condvar)>,
+}
+
+impl<T> Clone for LentSlot<T> {
+    fn clone(&self) -> Self {
+        Self {
+            cell: Arc::clone(&self.cell),
+        }
+    }
+}
+
+impl<T> LentSlot<T> {
+    pub fn new(value: T) -> Self {
+        Self {
+            cell: Arc::new((Mutex::new(Some(value)), Condvar::new())),
+        }
+    }
+
+    pub fn lend(&self) -> Option<T> {
+        self.cell.0.lock().expect("lent slot poisoned").take()
+    }
+
+    pub fn give_back(&self, value: T) {
+        *self.cell.0.lock().expect("lent slot poisoned") = Some(value);
+        self.cell.1.notify_all();
+    }
+
+    /// Waits up to `deadline` for the value to come home, then removes it.
+    ///
+    /// Bounded on purpose: teardown runs on the UI thread, so a borrower that never returns must
+    /// cost a slow close rather than a permanent freeze. `None` means the value never arrived and
+    /// the caller must not assume it is safe to destroy whatever the value points at.
+    pub fn reclaim_within(&self, deadline: std::time::Duration) -> Option<T> {
+        let start = std::time::Instant::now();
+        let mut guard = self.cell.0.lock().expect("lent slot poisoned");
+        while guard.is_none() {
+            let remaining = deadline.checked_sub(start.elapsed())?;
+            let (next, _) = self
+                .cell
+                .1
+                .wait_timeout(guard, remaining)
+                .expect("lent slot poisoned");
+            guard = next;
+        }
+        guard.take()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{mpsc, Arc};
+
+    #[test]
+    fn reclaim_spends_its_deadline_waiting_for_a_value_that_is_still_lent() {
+        let slot = LentSlot::new(7u32);
+        let _borrowed = slot.lend().expect("value starts present");
+        let budget = std::time::Duration::from_millis(80);
+        let start = std::time::Instant::now();
+        assert_eq!(slot.reclaim_within(budget), None, "the value is still out");
+        assert!(
+            start.elapsed() >= budget / 2,
+            "reclaim must wait for the borrower instead of reporting an absent value at once"
+        );
+    }
+
+    #[test]
+    fn reclaim_returns_the_value_the_borrower_gave_back() {
+        let slot = LentSlot::new(7u32);
+        let borrowed = slot.lend().expect("value starts present");
+        let giver = slot.clone();
+        let handle = thread::spawn(move || giver.give_back(borrowed));
+        assert_eq!(
+            slot.reclaim_within(std::time::Duration::from_secs(5)),
+            Some(7)
+        );
+        handle.join().expect("giver thread joins");
+    }
+
+    #[test]
+    fn reclaim_is_immediate_when_nothing_is_lent() {
+        let slot = LentSlot::new(3u32);
+        assert_eq!(
+            slot.reclaim_within(std::time::Duration::from_secs(5)),
+            Some(3)
+        );
+    }
 
     #[test]
     fn gpu_jobs_run_off_the_calling_thread() {
