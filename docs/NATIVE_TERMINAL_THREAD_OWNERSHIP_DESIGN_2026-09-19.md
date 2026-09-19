@@ -878,3 +878,27 @@ worker.submit(move |gpu| {                 // 통째로 GPU 잡에 넘기고
 
 주의: `:2704`의 다른 `render_snapshot`과 `PlatformCompositorTarget::new(window)`(≈:2802)는
 별개다. 후자는 **생성 경로**이고 네이티브 타깃을 만들기 때문에 UI 레그에 남아야 한다(12.11).
+
+### 12.13 분할선은 `present(frame)` 바로 다음이다 (정확한 코드 형태)
+
+`render_snapshot`(:2832)의 꼬리는 이렇게 생겼다(:2936~):
+
+```rust
+self.renderer.present(frame);                  // <- GPU 레그는 여기서 끝난다
+self.target.reveal_after_present();            // AppKit
+self.target.restore_first_responder(window);   // AppKit, window가 필요한 유일한 곳
+Ok(NativeTerminalSurfaceReceipt { presented: true, .. })   // 순수 데이터
+```
+
+AppKit 호출 두 개가 **연속**이고 `present` 바로 뒤에 있으며, 그 뒤는 영수증 조립(순수 데이터)
+뿐이다. 즉 3번째 홉은 이미 한 덩어리로 모여 있다 — 흩어진 것을 모으는 작업이 필요 없다.
+
+첫 증분(동시성 변경 없음, 컴파일 + 기존 테스트로 검증):
+1. 두 AppKit 호출을 `finish_presentation(&mut self, window: &Window<R>)` 같은 메서드로 추출
+2. `render_snapshot`은 `present(frame)`에서 끝나고 영수증 조립에 필요한 값만 반환
+3. 호출자가 `render_snapshot` 직후 `finish_presentation`을 호출 — **순서도 스레드도 그대로**
+4. 그 결과 `render_snapshot`에서 `window`와 `<R: Runtime>`가 사라진다
+
+이 상태가 되면 3단계는 "`render_snapshot`을 GpuWorker로 보내고, `finish_presentation`을
+완료 콜백에서 UI 스레드에 태운다"가 된다. 막힘 B(영수증 되돌리기, §12.7)가 바로 이 지점에서
+만난다: `finish_render`도 완료 경로로 같이 가야 한다.
