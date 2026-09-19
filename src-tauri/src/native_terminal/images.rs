@@ -160,12 +160,19 @@ impl ImageCache {
                         .ok_or(NativeTerminalError::LimitExceeded)?;
                     if ptr.is_null()
                         || pixels == 0
-                        || pixels > super::png_decoder::IMAGE_LIMIT / 4
                         || pixels.checked_mul(channels) != Some(len)
                     {
                         return Err(NativeTerminalError::InvalidValue(
                             "Invalid Kitty image payload dimensions".into(),
                         ));
+                    }
+                    // Too large to expand is a resource limit, not corruption. Propagating an
+                    // error here aborts the whole snapshot, so one oversized image would blank
+                    // every text frame in the pane. Drop just this image, as the no-value branch
+                    // above already does, and keep rendering.
+                    if pixels > super::png_decoder::IMAGE_LIMIT / 4 {
+                        self.images.remove(&id);
+                        continue;
                     }
                     // SAFETY: Validated non-null decoded foreign buffer and exact
                     // format length; copied before any mutating terminal call.
