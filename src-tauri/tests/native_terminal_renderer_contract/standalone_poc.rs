@@ -12,12 +12,21 @@ fn poc_binary_path() -> std::path::PathBuf {
             } else {
                 "release"
             };
-            let target_bin = std::env::var_os("CARGO_TARGET_DIR")
+            // The POC is declared as [[example]], so cargo emits it under <profile>/examples/.
+            // Probing <profile>/ directly could never find it, and CARGO_BIN_EXE_* is only set
+            // for bin targets, so the fallback above is the path that actually runs.
+            let target_root = std::env::var_os("CARGO_TARGET_DIR")
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| manifest_dir.join("target"))
-                .join(profile)
+                .join(profile);
+            let example_bin = target_root
+                .join("examples")
                 .join("native_terminal_renderer_poc");
-            target_bin
+            if example_bin.exists() {
+                example_bin
+            } else {
+                target_root.join("native_terminal_renderer_poc")
+            }
         });
 
     if !bin_path.exists() {
