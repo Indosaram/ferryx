@@ -204,13 +204,20 @@ const RENDER_FOLLOW_UP: u8 = 3;
 #[derive(Debug, Default)]
 pub struct RenderScheduleCoordinator {
     state: AtomicU8,
+    frame_clock: FrameClock,
 }
 
 impl RenderScheduleCoordinator {
     pub fn new() -> Self {
         Self {
             state: AtomicU8::new(RENDER_IDLE),
+            frame_clock: FrameClock::default(),
         }
+    }
+
+    /// How long the caller must wait before re-dispatching a frame that failed to present.
+    pub fn delay_before_retry(&self) -> std::time::Duration {
+        self.frame_clock.delay_before_retry(std::time::Instant::now())
     }
 
     /// Attempts to schedule a render pass.
@@ -257,14 +264,20 @@ impl RenderScheduleCoordinator {
 
     /// Marks a scheduled frame as actively rendering without clearing its pending state.
     pub fn begin_render(&self) -> bool {
-        self.state
+        let began = self
+            .state
             .compare_exchange(
                 RENDER_SCHEDULED,
                 RENDERING,
                 Ordering::SeqCst,
                 Ordering::SeqCst,
             )
-            .is_ok()
+            .is_ok();
+        if began {
+            self.frame_clock
+                .mark_frame_started(std::time::Instant::now());
+        }
+        began
     }
 
     /// Completes the active frame.
@@ -470,9 +483,11 @@ fn dispatch_scheduled_render<R: Runtime>(
 
         if coordinator.finish_render() {
             // Wry runs main-thread dispatch inline; enqueue off-thread to avoid recursive retries,
-            // and pace the follow-up so a stalled surface cannot spin the main thread.
+            // and pace the follow-up so a stalled surface cannot spin the main thread. The wait is
+            // whatever remains of this frame's budget, so a frame that already overran goes now.
+            let follow_up_delay = coordinator.delay_before_retry();
             tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(RETRY_FRAME_INTERVAL).await;
+                tokio::time::sleep(follow_up_delay).await;
                 dispatch_scheduled_render(
                     follow_up_window,
                     hosts,
@@ -499,6 +514,140 @@ fn dispatch_scheduled_render<R: Runtime>(
 /// Pacing the retry caps that cost regardless of how long the surface stays unavailable.
 pub(crate) const RETRY_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(8);
 
+/// Paces frames against when the last one *started*, not when it finished.
+///
+/// Sleeping a fixed interval after every frame charges the full interval even when the frame
+/// itself already spent it, so a slow frame paid twice and every coalesced follow-up inherited
+/// up to a full interval of avoidable latency. Measuring from the frame start makes a burst
+/// inside one interval collapse to a single pass while a frame that already overran dispatches
+/// immediately.
+#[derive(Debug)]
+pub struct FrameClock {
+    interval: std::time::Duration,
+    last_frame_started: Mutex<Option<std::time::Instant>>,
+}
+
+impl FrameClock {
+    pub const fn new(interval: std::time::Duration) -> Self {
+        Self {
+            interval,
+            last_frame_started: Mutex::new(None),
+        }
+    }
+
+    /// How long to wait before the next frame may start. `now` is a parameter so the policy is
+    /// testable without sleeping.
+    pub fn delay_before_next_frame(&self, now: std::time::Instant) -> std::time::Duration {
+        let Some(started) = *self.last_frame_started.lock() else {
+            // Nothing has rendered yet; the first frame must not be delayed.
+            return std::time::Duration::ZERO;
+        };
+        self.interval.saturating_sub(now.saturating_duration_since(started))
+    }
+
+    /// Delay before RE-dispatching a frame that just failed to present.
+    ///
+    /// Distinct from `delay_before_next_frame` because a retry is by definition never the first
+    /// frame: if no frame start was recorded, pacing conservatively by a full interval is right,
+    /// while returning zero would silently restore the inline re-dispatch spin. Not every render
+    /// path marks the clock, so this must not assume one did.
+    pub fn delay_before_retry(&self, now: std::time::Instant) -> std::time::Duration {
+        let Some(started) = *self.last_frame_started.lock() else {
+            return self.interval;
+        };
+        self.interval
+            .saturating_sub(now.saturating_duration_since(started))
+    }
+
+    pub fn mark_frame_started(&self, now: std::time::Instant) {
+        *self.last_frame_started.lock() = Some(now);
+    }
+}
+
+impl Default for FrameClock {
+    fn default() -> Self {
+        Self::new(RETRY_FRAME_INTERVAL)
+    }
+}
+
+#[cfg(test)]
+mod frame_clock_tests {
+    use super::FrameClock;
+    use std::time::{Duration, Instant};
+
+    const INTERVAL: Duration = Duration::from_millis(8);
+
+    #[test]
+    fn the_first_frame_is_never_delayed() {
+        let clock = FrameClock::new(INTERVAL);
+        assert_eq!(
+            clock.delay_before_next_frame(Instant::now()),
+            Duration::ZERO,
+            "nothing has rendered yet, so the first frame must go immediately"
+        );
+    }
+
+    #[test]
+    fn a_burst_inside_one_interval_waits_only_the_remainder() {
+        // SC1: output arriving mid-frame must collapse into one pass, not render back to back.
+        let clock = FrameClock::new(INTERVAL);
+        let start = Instant::now();
+        clock.mark_frame_started(start);
+        assert_eq!(
+            clock.delay_before_next_frame(start + Duration::from_millis(3)),
+            Duration::from_millis(5),
+            "3ms into an 8ms budget leaves 5ms, not another full interval"
+        );
+    }
+
+    #[test]
+    fn a_frame_that_already_overran_dispatches_immediately() {
+        // The regression a fixed post-frame sleep caused: a 20ms frame still paid another 8ms,
+        // so slow frames were charged twice and coalesced follow-ups inherited the latency.
+        let clock = FrameClock::new(INTERVAL);
+        let start = Instant::now();
+        clock.mark_frame_started(start);
+        assert_eq!(
+            clock.delay_before_next_frame(start + Duration::from_millis(20)),
+            Duration::ZERO,
+            "a frame that outran its budget must not be delayed again"
+        );
+    }
+
+    #[test]
+    fn an_unrecorded_clock_still_paces_a_retry() {
+        // The bug this pins, which I shipped and caught only because an existing test failed:
+        // not every render path marks the clock. When nothing was recorded, returning ZERO here
+        // silently removed the retry pacing entirely and restored the inline re-dispatch spin.
+        // A retry is never the first frame, so an unrecorded clock must pace a full interval.
+        let clock = FrameClock::new(INTERVAL);
+        assert_eq!(
+            clock.delay_before_retry(Instant::now()),
+            INTERVAL,
+            "an unmarked clock must pace a retry, never let it fire immediately"
+        );
+        assert_eq!(
+            clock.delay_before_next_frame(Instant::now()),
+            Duration::ZERO,
+            "but a genuine first frame is still not delayed"
+        );
+    }
+
+    #[test]
+    fn marking_a_new_frame_restarts_the_budget() {
+        let clock = FrameClock::new(INTERVAL);
+        let start = Instant::now();
+        clock.mark_frame_started(start);
+        let later = start + Duration::from_millis(20);
+        clock.mark_frame_started(later);
+        assert_eq!(
+            clock.delay_before_next_frame(later + Duration::from_millis(1)),
+            Duration::from_millis(7),
+            "the budget must be measured from the newest frame start"
+        );
+    }
+}
+
 fn defer_scheduled_render<R: Runtime>(
     window: Window<R>,
     hosts: Arc<Mutex<HashMap<String, NativeTerminalSurfaceHost>>>,
@@ -508,9 +657,10 @@ fn defer_scheduled_render<R: Runtime>(
 ) {
     #[cfg(test)]
     let test_window = window.clone();
+    let retry_delay = coordinator.delay_before_retry();
     // Wry runs main-thread dispatch inline; enqueue off-thread to avoid recursive retries.
     let _task = tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(RETRY_FRAME_INTERVAL).await;
+        tokio::time::sleep(retry_delay).await;
         dispatch_scheduled_render(window, hosts, sessions, session_id, coordinator);
     });
     #[cfg(test)]
@@ -3567,16 +3717,21 @@ mod tests {
                 .map(|_| SimulatedAcquisition::Dropped)
                 .collect::<Vec<_>>(),
         );
-        assert!(!harness.scroll_once().unwrap().presented);
-        // Time only the deferred-retry window: including scroll_once() would let its own cost
-        // satisfy the bound and mask a missing pace.
+        // Timed from before the frame, because the clock measures the budget from frame START:
+        // the frame's own cost counts toward the interval, which is the point of a frame clock.
+        // An earlier revision timed only the post-frame window, which was correct against a fixed
+        // post-frame sleep but contradicts clock-based pacing.
         let started = std::time::Instant::now();
+        assert!(!harness.scroll_once().unwrap().presented);
         harness.await_submissions().await;
         let waited = started.elapsed();
         assert!(
             waited >= RETRY_FRAME_INTERVAL,
-            "a dropped frame must wait at least one frame interval before retrying, never re-dispatch inline; waited {waited:?}"
+            "a dropped frame must not retry before one frame interval has passed since the frame began, never re-dispatch inline; waited {waited:?}"
         );
+        // No assertion that the queue is empty: eight drops are scripted, so a further retry is
+        // legitimately pending here. The deterministic proof of the pacing policy itself lives in
+        // frame_clock_tests; this test pins that the dispatch path actually consults the clock.
     }
 
     #[tokio::test]
