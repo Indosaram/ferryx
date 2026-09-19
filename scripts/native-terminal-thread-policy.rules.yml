@@ -1,0 +1,23 @@
+# Why this gate exists: on macOS `get_current_texture` blocks in
+# `-[CAMetalLayer nextDrawable]` and adapter/device requests block via
+# `pollster::block_on`. The main thread is also the only thread servicing WebKit
+# IPC, so GPU work parked there stalls the terminal output path itself.
+
+id: native-terminal-no-gpu-on-main-thread
+language: rust
+severity: error
+message: >-
+  GPU acquisition inside a run_on_main_thread closure blocks the macOS main
+  thread on the compositor and starves WebKit IPC. Move this onto the GPU
+  worker and hand the result back as a FrameOutcome.
+rule:
+  all:
+    - any:
+        - pattern: $A.get_current_texture($$$)
+        - pattern: $A.configure_surface($$$)
+        - pattern: $A.request_adapter($$$)
+        - pattern: $A.request_device($$$)
+        - pattern: $A.acquire_surface_frame($$$)
+    - inside:
+        stopBy: end
+        pattern: $W.run_on_main_thread($$$)
