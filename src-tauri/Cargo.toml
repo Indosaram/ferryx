@@ -66,6 +66,7 @@ tokio = { version = "1.53", features = ["full"] }
 tokio-util = "0.7"
 portable-pty = { version = "0.9", path = "vendor/portable-pty" }
 base64 = "0.23"
+bytes = "1.12"
 libc = "0.2"
 anyhow = "1.0"
 thiserror = "2.0"

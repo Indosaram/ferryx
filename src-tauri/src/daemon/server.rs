@@ -18,6 +18,7 @@ use crate::worktree::{WorkspaceRegistry, WorktreeIdentity};
 use super::session_service::*;
 #[cfg(test)]
 use crate::daemon::protocol::AgentProviderSessionKey;
+use bytes::Bytes;
 use parking_lot::{Mutex, RwLock};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -1983,12 +1984,13 @@ impl DaemonServer {
                                     .map(|(c, r)| (Some(c), Some(r)))
                                     .unwrap_or((None, None));
                                 let hub = Arc::clone(self.terminal_service.output_hub());
+                                let history_flat = Bytes::from(std::mem::take(&mut attachment.snapshot.history));
                                 let history_segments = history_ranges
                                     .iter()
                                     .map(|r| HistorySegmentWire {
                                         cols: r.cols,
                                         rows: r.rows,
-                                        bytes: attachment.snapshot.history[r.start..r.end].to_vec(),
+                                        bytes: history_flat.slice(r.start..r.end),
                                     })
                                     .collect();
                                 let resp = DaemonResponse::AttachOk {
@@ -1997,7 +1999,7 @@ impl DaemonServer {
                                     start_sequence: attachment.snapshot.history_start_sequence,
                                     end_sequence: attachment.snapshot.history_end_sequence,
                                     gap: attachment.snapshot.gap,
-                                    history: attachment.snapshot.history,
+                                    history: history_flat,
                                     pty_cols,
                                     pty_rows,
                                     history_segments,
@@ -2886,7 +2888,7 @@ impl DaemonServer {
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {
                     // Re-subscribe with sequence after last_seen_sequence to recover replay gap
-                    if let Some((att, history_ranges)) =
+                    if let Some((mut att, history_ranges)) =
                         hub.subscribe_with_sequence_ranges(&session_id, last_seen_sequence)
                     {
                         rx = att.receiver;
@@ -2901,12 +2903,13 @@ impl DaemonServer {
                             .map(|gap| gap.available_from_sequence)
                             .or(att.snapshot.history_start_sequence)
                             .unwrap_or_else(|| requested_after_sequence.saturating_add(1));
+                        let lag_history = Bytes::from(std::mem::take(&mut att.snapshot.history));
                         let segments = history_ranges
                             .iter()
                             .map(|r| HistorySegmentWire {
                                 cols: r.cols,
                                 rows: r.rows,
-                                bytes: att.snapshot.history[r.start..r.end].to_vec(),
+                                bytes: lag_history.slice(r.start..r.end),
                             })
                             .collect();
                         let msg = DaemonStreamMessage::Lagged {
@@ -2915,7 +2918,7 @@ impl DaemonServer {
                             available_from_sequence,
                             start_sequence: att.snapshot.history_start_sequence,
                             end_sequence: att.snapshot.history_end_sequence,
-                            history: Cow::Borrowed(&att.snapshot.history),
+                            history: lag_history,
                             segments,
                         };
                         frame_buf.clear();

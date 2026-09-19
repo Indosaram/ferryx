@@ -33,7 +33,7 @@ async fn ssh_daemon_restart_restores_identity_without_local_pty() {
     assert!(matches!(reply, DaemonResponse::RemoteSessionDetailsOk { details: Some(_), legacy_direct_ssh: false }));
     write.write_all(b"{\"type\":\"attach\",\"sessionId\":\"original-pane-backend\",\"afterSequence\":999}\n").await.unwrap();
     let line = tokio::time::timeout(Duration::from_secs(3), lines.next_line()).await.unwrap().unwrap().unwrap();
-    assert!(matches!(serde_json::from_str::<DaemonResponse>(&line).unwrap(), DaemonResponse::AttachOk { gap: Some(_), history, .. } if history == b"retained replay"));
+    assert!(matches!(serde_json::from_str::<DaemonResponse>(&line).unwrap(), DaemonResponse::AttachOk { gap: Some(_), history, .. } if history.as_ref() == b"retained replay"));
     let line = tokio::time::timeout(Duration::from_secs(3), lines.next_line()).await.unwrap().unwrap().unwrap();
     assert!(matches!(serde_json::from_str::<DaemonStreamMessage>(&line).unwrap(), DaemonStreamMessage::RemoteStatus { .. }));
     serving.abort();

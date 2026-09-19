@@ -12,6 +12,7 @@ use crate::session::PersistedWorkspaceSession;
 use crate::terminal::output_hub::ReplayGap;
 use crate::terminal::TerminalSignal;
 use crate::worktree::WorktreeIdentity;
+use bytes::Bytes;
 use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -330,7 +331,7 @@ pub struct DaemonAttachment {
     pub start_sequence: Option<u64>,
     pub end_sequence: Option<u64>,
     pub gap: Option<ReplayGap>,
-    pub history: Vec<u8>,
+    pub history: Bytes,
     pub history_segments: Vec<crate::terminal::output_hub::HistorySegment>,
     pub pty_cols: Option<u16>,
     pub pty_rows: Option<u16>,
@@ -1506,7 +1507,7 @@ impl DaemonClient {
                     .map(|wire| crate::terminal::output_hub::HistorySegment {
                         cols: wire.cols,
                         rows: wire.rows,
-                        bytes: wire.bytes,
+                        bytes: wire.bytes.to_vec(),
                     })
                     .collect();
 
@@ -2342,7 +2343,7 @@ mod tests {
         let (_tx, rx) = mpsc::channel(4);
         state.attach_daemon_attachment::<tauri::test::MockRuntime>("remote", DaemonAttachment {
             session_id: "remote".into(), epoch: 1, start_sequence: None, end_sequence: None,
-            gap: None, history: b"\x1b[?1000h\x1b[?1006h".to_vec(), history_segments: vec![],
+            gap: None, history: bytes::Bytes::from(b"\x1b[?1000h\x1b[?1006h".to_vec()), history_segments: vec![],
             pty_cols: Some(80), pty_rows: Some(24), remote_generation: None, messages: rx,
             stream_task: tokio::spawn(std::future::pending()),
         }, None).unwrap();

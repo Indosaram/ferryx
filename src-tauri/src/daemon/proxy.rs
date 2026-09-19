@@ -501,12 +501,12 @@ impl LegacyPeer {
                     .map(|seg| crate::terminal::output_hub::HistorySegment {
                         cols: seg.cols,
                         rows: seg.rows,
-                        bytes: seg.bytes,
+                        bytes: seg.bytes.to_vec(),
                     })
                     .collect();
                 let snapshot = AttachmentSnapshot {
                     session_id: session_id.to_string(),
-                    history,
+                    history: history.to_vec(),
                     history_segments: segments,
                     history_start_sequence: start_sequence,
                     history_end_sequence: end_sequence,

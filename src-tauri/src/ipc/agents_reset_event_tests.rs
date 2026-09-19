@@ -49,7 +49,7 @@ async fn reset_scenario(succeeds: bool) {
             start_sequence: None,
             end_sequence: None,
             gap: None,
-            history: Vec::new(),
+            history: bytes::Bytes::new(),
             history_segments: Vec::new(),
             pty_cols: None,
             pty_rows: None,

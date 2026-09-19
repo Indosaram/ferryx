@@ -6,6 +6,7 @@ use crate::session::PersistedWorkspaceSession;
 use crate::terminal::output_hub::ReplayGap;
 use crate::terminal::TerminalSignal;
 use crate::worktree::WorktreeIdentity;
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::path::PathBuf;
@@ -20,7 +21,7 @@ pub struct HistorySegmentWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rows: Option<u16>,
     #[serde(with = "base64_serde")]
-    pub bytes: Vec<u8>,
+    pub bytes: Bytes,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -410,7 +411,7 @@ pub enum DaemonResponse {
         end_sequence: Option<u64>,
         gap: Option<ReplayGap>,
         #[serde(with = "base64_serde")]
-        history: Vec<u8>,
+        history: Bytes,
         #[serde(default)]
         pty_cols: Option<u16>,
         #[serde(default)]
@@ -515,7 +516,7 @@ pub enum DaemonStreamMessage<'a> {
         start_sequence: Option<u64>,
         end_sequence: Option<u64>,
         #[serde(with = "base64_serde")]
-        history: Cow<'a, [u8]>,
+        history: Bytes,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         segments: Vec<HistorySegmentWire>,
     },
@@ -879,7 +880,7 @@ mod tests {
             available_from_sequence: 35,
             start_sequence: Some(35),
             end_sequence: Some(100),
-            history: Cow::Borrowed(b"history bytes"),
+            history: bytes::Bytes::from_static(b"history bytes"),
             segments: Vec::new(),
         };
         let json = serde_json::to_string(&replay).expect("serialize replay gap");
@@ -975,7 +976,7 @@ mod tests {
             start_sequence: Some(1),
             end_sequence: Some(10),
             gap: None,
-            history: b"initial prompt $ ".to_vec(),
+            history: bytes::Bytes::from(b"initial prompt $ ".to_vec()),
             pty_cols: None,
             pty_rows: None,
             history_segments: Vec::new(),
@@ -1007,7 +1008,7 @@ mod tests {
                 assert_eq!(start_sequence, Some(1));
                 assert_eq!(end_sequence, Some(10));
                 assert!(gap.is_none());
-                assert_eq!(history, b"initial prompt $ ");
+                assert_eq!(history.as_ref(), b"initial prompt $ ");
                 assert_eq!(pty_cols, None);
                 assert_eq!(pty_rows, None);
                 assert_eq!(history_segments, Vec::<HistorySegmentWire>::new());
@@ -1038,7 +1039,7 @@ mod tests {
                 assert_eq!(start_sequence, Some(1));
                 assert_eq!(end_sequence, Some(10));
                 assert!(gap.is_none());
-                assert_eq!(history, b"initial prompt $ ");
+                assert_eq!(history.as_ref(), b"initial prompt $ ");
                 assert_eq!(pty_cols, None);
                 assert_eq!(pty_rows, None);
                 assert_eq!(history_segments, Vec::<HistorySegmentWire>::new());
@@ -1054,19 +1055,19 @@ mod tests {
             start_sequence: Some(1),
             end_sequence: Some(2),
             gap: None,
-            history: b"AB".to_vec(),
+            history: bytes::Bytes::from(b"AB".to_vec()),
             pty_cols: Some(120),
             pty_rows: Some(30),
             history_segments: vec![
                 HistorySegmentWire {
                     cols: Some(80),
                     rows: Some(24),
-                    bytes: b"A".to_vec(),
+                    bytes: bytes::Bytes::from(b"A".to_vec()),
                 },
                 HistorySegmentWire {
                     cols: Some(120),
                     rows: Some(30),
-                    bytes: b"B".to_vec(),
+                    bytes: bytes::Bytes::from(b"B".to_vec()),
                 },
             ],
             remote_generation: None,
@@ -1088,12 +1089,12 @@ mod tests {
                         HistorySegmentWire {
                             cols: Some(80),
                             rows: Some(24),
-                            bytes: b"A".to_vec(),
+                            bytes: bytes::Bytes::from(b"A".to_vec()),
                         },
                         HistorySegmentWire {
                             cols: Some(120),
                             rows: Some(30),
-                            bytes: b"B".to_vec(),
+                            bytes: bytes::Bytes::from(b"B".to_vec()),
                         },
                     ]
                 );
@@ -1108,7 +1109,7 @@ mod tests {
             start_sequence: Some(1),
             end_sequence: Some(10),
             gap: None,
-            history: b"initial prompt $ ".to_vec(),
+            history: bytes::Bytes::from(b"initial prompt $ ".to_vec()),
             pty_cols: Some(120),
             pty_rows: Some(30),
             history_segments: Vec::new(),
