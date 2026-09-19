@@ -5,7 +5,11 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 
 const DEFAULT_BUFFER_CAPACITY: usize = 512 * 1024; // 512 KiB
-const BROADCAST_CAPACITY: usize = 1024;
+// Per-channel lag/backlog bound for the sequence and legacy raw broadcast rings: 64 chunks
+// x 64 KiB = ~4 MiB worst-case backlog vs the 512 KiB ring = 8 chunks, still 8x headroom
+// over ring coverage. A smaller bound only increases Lagged frequency, which ReplayGap
+// recovery already handles by resyncing via snapshot_after.
+const BROADCAST_CAPACITY: usize = 64;
 const RESIZE_LEDGER_CAPACITY: usize = 4096;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -502,8 +506,13 @@ impl TerminalOutputHub {
         hub.machine_senders.retain(|sender| sender.publish(&chunk));
         // Broadcast to sequence subscribers (cheap Arc refcount bump on the payload).
         let _ = hub.sender.send(chunk.clone());
-        // Broadcast to legacy raw receivers
-        let _ = hub.raw_sender.send(chunk.bytes.to_vec());
+        // Broadcast to legacy raw receivers. Skip the deep copy when nobody is listening:
+        // a subscriber that attaches later gets its history from the buffer snapshot, and
+        // one that falls more than BROADCAST_CAPACITY chunks behind resyncs via Lagged +
+        // ReplayGap recovery, so skipping can only drop copies, never correctness.
+        if hub.raw_sender.receiver_count() > 0 {
+            let _ = hub.raw_sender.send(chunk.bytes.to_vec());
+        }
 
         Some(chunk)
     }
@@ -1088,5 +1097,49 @@ mod tests {
         hub.publish(session_id, b"\x1b[?2004lexiting\r\n".to_vec())
             .expect("disable 2004l");
         assert!(!hub.is_bracketed_paste_enabled(session_id));
+    }
+
+    #[test]
+    fn raw_broadcast_backlog_is_bounded() {
+        // Given: a registered session whose raw broadcast receiver never drains.
+        let hub = TerminalOutputHub::new(1024);
+        let (mut raw_rx, _seq_rx) = hub.register_session_channels("t-lag");
+
+        // When: 70 chunks are published against the 64-slot broadcast ring.
+        for _ in 0..70 {
+            hub.publish("t-lag", vec![0u8; 64]).expect("chunk published");
+        }
+
+        // Then: the receiver lags by exactly 70 - 64 = 6 skipped chunks instead of
+        // retaining the whole unbounded backlog.
+        assert!(matches!(
+            raw_rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Lagged(6))
+        ));
+    }
+
+    #[test]
+    fn publish_without_raw_receivers_keeps_new_subscriber_correct() {
+        // Given: a session registered with no raw receiver attached at all.
+        let hub = TerminalOutputHub::new(1024);
+        let (raw_rx, _seq_rx) = hub.register_session_channels("t-skip");
+        drop(raw_rx);
+
+        // When: 2000 chunks are published with zero raw receivers...
+        for _ in 0..2000 {
+            hub.publish("t-skip", vec![0u8; 64]).expect("chunk published");
+        }
+
+        // ...then a raw subscriber attaches and one more chunk is published.
+        let (_history, mut late_rx) = hub.subscribe("t-skip").expect("session exists");
+        hub.publish("t-skip", b"after-subscribe".to_vec())
+            .expect("chunk published");
+
+        // Then: the late subscriber receives the newest chunk - skipping the copy
+        // while nobody listened never costs correctness for subscribed receivers.
+        let received = late_rx
+            .try_recv()
+            .expect("new subscriber receives the newest chunk");
+        assert_eq!(&received[..], b"after-subscribe");
     }
 }
