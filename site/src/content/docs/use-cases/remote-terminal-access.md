@@ -18,7 +18,7 @@ All of these are legitimate. Engineers have used them for decades. Each one asks
 Ferryx (SUL-1.0 licensed, Rust and Tauri v2) takes a different cut at this. Its headless Rust daemon owns the pseudoterminals instead of the desktop GUI, and an authenticated gateway serves a mobile web client. The pieces:
 
 - **Sessions outlive the GUI.** Closing or reloading the desktop app doesn't kill running processes, because the daemon, not the window, owns the PTYs.
-- **Reconnects replay what you missed.** Output lives in a ring buffer with monotonic sequence numbers. When a client reconnects, it receives the output it missed. If the buffer overflowed, the client is told there's a gap rather than being shown silently corrupted output.
+- **Reconnects replay what you missed.** Output lives in a 512 KiB ring buffer per session with monotonic sequence numbers. When a client reconnects, it receives the output it missed. If the buffer overflowed, the client is told there's a gap rather than being shown silently corrupted output.
 - **Pairing uses a 6-digit PIN.** You pair a phone with the running daemon by entering a 6-digit PIN.
 - **The mobile client is a custom DOM grid.** Ferryx doesn't ship xterm.js to the phone; the remote terminal renders through a purpose-built DOM grid.
 - **Off-LAN access is configurable.** A relay or proxy URL can be set for reaching a machine that isn't on the same LAN or VPN.
@@ -31,4 +31,4 @@ The verifiable parts are the ones listed above: the gateway requires authenticat
 
 ## Trying it
 
-Ferryx ships as a macOS universal DMG, through the Microsoft Store on Windows, and as Linux AppImage and .deb packages. The project is SUL-1.0 licensed and currently at v0.1.0-alpha. For the rest of the workspace, including split panes, embedded browser tabs, and managed git worktrees, see the [introduction](/docs/introduction/) and [git worktree workflow](/use-cases/git-worktree-workflow/).
+Ferryx ships as a macOS universal DMG, through the Microsoft Store on Windows, and as Linux AppImage and .deb packages; a standalone `ferryx-cli` binary runs the same headless daemon on a Linux server with no GUI dependencies. The project is SUL-1.0 licensed and currently at v0.1.0-alpha. For the rest of the workspace, including split panes, embedded browser tabs, and managed git worktrees, see the [introduction](/docs/introduction/) and [git worktree workflow](/use-cases/git-worktree-workflow/); the [product facts](/docs/facts/) page lists the pairing, relay, and packaging details with their sources.

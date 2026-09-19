@@ -45,16 +45,16 @@ That's the standard zero-install pattern: a worktree per task, a tmux window per
 
 ## What Ferryx automates
 
-Ferryx is a desktop workspace built with Rust and Tauri v2 that applies the same pattern with the bookkeeping handled:
+Ferryx is a desktop workspace built with Rust and Tauri v2 that applies the same pattern with the bookkeeping handled. Any agent you can start from a shell runs in a pane — Claude Code, Codex, Gemini CLI, and the rest:
 
 - Worktrees per workspace. Managed worktrees live in `.orca-worktrees/wt-<slug>` on branches named `orca/<workspace-id>/<slug>`, and worktree paths are jailed to the repository root. Naming and placement stay consistent because the app, not you, does them every time.
-- Panes per workspace. Each agent gets its own terminal pane in a split layout, so state is visible at a glance, and panes and tabs rearrange by drag-and-drop.
+- Panes per workspace. Each agent gets its own terminal pane in a split layout, so state is visible at a glance, and panes and tabs rearrange by drag-and-drop. Status-detection manifests ship for eleven agents, including Claude Code, Codex, Cursor, Cline, GitHub Copilot CLI, OpenCode, Grok, and Kimi, so a pane reports whether its agent is working, waiting on you, or idle without you reading the scrollback.
 - An embedded browser beside the panes. Browser tabs use native WebViews, so documentation or a preview can sit next to the terminals without a second window.
 
 Session lifetime works differently from a plain GUI terminal:
 
 - A headless Rust PTY daemon owns the pseudoterminals, not the GUI process. Closing or reloading the GUI does not kill running agent processes.
-- Output is buffered in a ring buffer with monotonic sequence numbers. When the GUI reconnects, the daemon replays the output you missed, so the transcript picks up where it left off.
+- Output is buffered in a 512 KiB ring buffer per session with monotonic sequence numbers. When the GUI reconnects, the daemon replays the output you missed, so the transcript picks up where it left off; if the buffer wrapped while you were away, the client is told there is a gap rather than shown a corrupted transcript.
 
 ## Checking a long run from your phone
 
@@ -66,4 +66,4 @@ Long runs don't need you at the desk. Ferryx ships an authenticated mobile remot
 
 ## Doing it manually is still fine
 
-Nothing above requires Ferryx. git worktree plus tmux and a couple of scripts gets you the same isolation, and many engineers should keep using exactly that setup. The honest summary is that Ferryx adds ergonomics and bookkeeping: automated worktree creation and branch naming, visible per-agent state, daemon-managed session lifetime, an embedded browser, and a phone client. If those conveniences are worth a v0.1.0-alpha desktop app to you, start with the [setup introduction](/docs/introduction/). For a closer look at how it compares with the tmux baseline, read [Ferryx vs tmux and git worktree](/compare/tmux-git-worktree/).
+Nothing above requires Ferryx. git worktree plus tmux and a couple of scripts gets you the same isolation, and many engineers should keep using exactly that setup. The honest summary is that Ferryx adds ergonomics and bookkeeping: automated worktree creation and branch naming, visible per-agent state, daemon-managed session lifetime, an embedded browser, and a phone client. If those conveniences are worth a v0.1.0-alpha desktop app to you, start with the [setup introduction](/docs/introduction/), or read the [product facts](/docs/facts/) for the sourced version of every claim above. For a closer look at how it compares with the tmux baseline, read [Ferryx vs tmux and git worktree](/compare/tmux-git-worktree/).

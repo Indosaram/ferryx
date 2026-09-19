@@ -3,7 +3,7 @@ title: Introduction
 description: Introduction to Ferryx, a native Rust terminal workspace for running parallel AI coding agents with Git worktree isolation and mobile remote access.
 ---
 
-Ferryx is a native desktop terminal workspace for running several AI coding agents at the same time. It's written in Rust on Tauri v2, parses terminal output with libghostty-vt, and renders panes with WGPU on a native child surface, so there's no Electron in the stack. The project is SUL-1.0 licensed (source-available, free for personal and non-commercial use) and ships for macOS, Windows, and Linux.
+Ferryx is a native desktop terminal workspace for running several CLI coding agents — Claude Code, Codex, Gemini CLI, or anything else you start from a shell — at the same time, each in its own Git worktree. It's written in Rust on Tauri v2, parses terminal output with libghostty-vt, and renders panes with WGPU on a native child surface, so there's no Electron in the stack. The project is SUL-1.0 licensed (source-available, free for personal and non-commercial use) and ships for macOS, Windows, and Linux. For the checkable version of every claim on this page, see [product facts](/docs/facts/).
 
 ## The problem it addresses
 
@@ -17,7 +17,7 @@ Most of Ferryx reduces to six concepts.
 
 - **Workspaces.** A workspace groups tabs, panes, and sessions around one project. ⌘1 through ⌘9 switch between them, and ⌘B toggles the sidebar.
 - **Worktrees.** Each agent that needs isolation gets a managed Git worktree under `.orca-worktrees/wt-<slug>` on a branch named `orca/<workspace-id>/<slug>`, jailed to the repository root.
-- **Panes and tabs.** Terminals open as tabs and split into vertical or horizontal panes. ⌘T opens a terminal tab, ⌘D splits right, ⌘⇧D splits down, and you can drag a tab into any pane to rearrange the layout. Agents such as Claude Code, Codex, and Gemini CLI run here like any other command.
+- **Panes and tabs.** Terminals open as tabs and split into vertical or horizontal panes. ⌘T opens a terminal tab, ⌘D splits right, ⌘⇧D splits down, and you can drag a tab into any pane to rearrange the layout. Agents such as Claude Code, Codex, and Gemini CLI run here like any other command; status-detection manifests ship for eleven of them, including Claude Code, Codex, Cursor, Cline, GitHub Copilot CLI, OpenCode, Grok, and Kimi, so a pane can report whether its agent is working, waiting on you, or idle.
 - **Browser tabs.** ⌘⇧B opens a browser tab beside the terminal panes, using the native WebView instead of a separate app. Documentation, a CI dashboard, or a deployed preview can live next to the sessions that depend on them.
 - **The daemon.** A headless Rust PTY daemon owns the pseudoterminals, not the window. Closing or reloading the GUI doesn't kill running processes. Output sits in a ring buffer with monotonic sequence numbers, so reconnecting replays what you missed; if the buffer has wrapped, the client is told there's a gap instead of being shown corrupted output. It's the persistence instinct of a terminal multiplexer, without giving up a graphical interface. Workspace state snapshots automatically, and the daemon reattaches, so an exit or crash doesn't cost you work.
 - **Remote access.** The daemon serves an authenticated gateway for a mobile web client. Pairing uses a 6-digit PIN, the terminal renders as a custom DOM grid rather than xterm.js, and a configurable relay URL covers access from outside your LAN.
@@ -47,6 +47,7 @@ The command palette (⌘K) is there if you'd rather browse actions than memorize
 
 ## Where to go next
 
+- [Product facts](/docs/facts/), a single sourced reference for the license, platforms, packages, agent manifests, worktree paths, and daemon behaviour.
 - [Technical architecture](/docs/architecture/), for how the daemon, the replay protocol, and the rendering pipeline fit together.
 - [Keyboard shortcuts](/docs/shortcuts/), the complete reference.
 - [Running coding agents in parallel](/use-cases/parallel-ai-agents/), on why agents collide in a shared directory and how a worktree per agent fixes it.

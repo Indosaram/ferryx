@@ -11,21 +11,49 @@ import { THEME_STORAGE_KEY } from '../lib/theme';
 
 const baseUrl = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL : `${import.meta.env.BASE_URL}/`;
 
-const title = 'Ferryx — Ultra-Lightweight Rust Native Ghostty AI Workspace';
+const title = 'Ferryx — Run Parallel AI Coding Agents in Git Worktrees';
+// Concrete over evocative: the words a crawler and an answer engine need are the ones a
+// person would search for — the agents, the isolation mechanism, and the platforms.
 const description =
-  'Parallel agentic development in a Rust-native workspace: libghostty terminal core, wgpu GPU rendering, embedded browser tabs, and zero Electron overhead.';
+  'Run Claude Code, Codex, and other CLI coding agents in parallel, each in its own Git worktree. Native Rust terminal workspace for macOS, Windows, Linux.';
 const socialDescription =
-  'Parallel agentic development. Zero Bloat. Native Ghostty terminal core, wgpu rendering & Rust multi-agent workspace.';
+  'Run Claude Code, Codex, and other CLI coding agents side by side, each isolated in its own Git worktree. Native Rust, no Electron.';
 // Crawlers reject relative social URLs, so resolve everything against the deployed origin.
 const canonical = new URL(baseUrl, Astro.site ?? Astro.url).href;
 const socialImage = new URL(`${baseUrl}og-image.png`, Astro.site ?? Astro.url).href;
 
+// Every value below is checkable against the repository or a release artifact; see
+// /docs/facts/ for the same inventory in prose with its sources.
+const repoUrl = 'https://github.com/Indosaram/ferryx';
 const structuredData = {
   '@context': 'https://schema.org',
   '@graph': [
-    { '@type': 'SoftwareApplication', name: 'Ferryx', applicationCategory: 'DeveloperApplication', operatingSystem: ['macOS', 'Windows', 'Linux'], url: canonical, description, image: socialImage, downloadUrl: 'https://github.com/Indosaram/ferryx/releases', offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD', availability: 'https://schema.org/InStock' } },
-    { '@type': 'WebSite', name: 'Ferryx', url: canonical, description, publisher: { '@id': 'https://github.com/Indosaram/ferryx' } },
-    { '@type': 'Organization', '@id': 'https://github.com/Indosaram/ferryx', name: 'Project Maho', url: 'https://github.com/Indosaram/ferryx', logo: new URL(`${baseUrl}apple-touch-icon.png`, Astro.site ?? Astro.url).href }
+    {
+      '@type': 'SoftwareApplication',
+      name: 'Ferryx',
+      applicationCategory: 'DeveloperApplication',
+      applicationSubCategory: 'Terminal emulator',
+      operatingSystem: ['macOS', 'Windows', 'Linux'],
+      url: canonical,
+      description,
+      image: socialImage,
+      license: `${repoUrl}/blob/main/LICENSE`,
+      isAccessibleForFree: true,
+      downloadUrl: `${repoUrl}/releases/latest`,
+      softwareHelp: new URL(`${baseUrl}docs/introduction/`, Astro.site ?? Astro.url).href,
+      featureList: [
+        'Runs CLI coding agents such as Claude Code, Codex, and Gemini CLI in parallel terminal panes',
+        'Managed Git worktree per agent, created and removed by the app and jailed to the repository root',
+        'Headless Rust PTY daemon keeps sessions alive when the window closes, and replays missed output on reconnect',
+        'libghostty-vt terminal parsing with WGPU native-surface rendering, on Tauri v2 instead of Electron',
+        'Embedded native WebView browser tabs beside the terminal panes',
+        'Authenticated mobile web client paired with a 6-digit PIN',
+      ],
+      offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD', availability: 'https://schema.org/InStock' },
+      publisher: { '@id': repoUrl },
+    },
+    { '@type': 'WebSite', name: 'Ferryx', url: canonical, description, publisher: { '@id': repoUrl } },
+    { '@type': 'Organization', '@id': repoUrl, name: 'Ferryx', url: repoUrl, sameAs: [repoUrl, 'https://discord.gg/Z2hBkQEHUG'], logo: new URL(`${baseUrl}apple-touch-icon.png`, Astro.site ?? Astro.url).href }
   ]
 };
 ---
@@ -94,7 +122,7 @@ const structuredData = {
     <div class="min-h-screen bg-page text-ink flex flex-col selection:bg-ink selection:text-page">
       <Navbar client:load basePath={baseUrl} />
       <main class="flex-1">
-        <Hero client:load />
+        <Hero client:load basePath={baseUrl} />
         <section id="preview" class="relative z-0 overflow-hidden pb-8 sm:pb-12">
           <div class="relative mx-auto max-w-5xl px-4 sm:px-6 pt-24 pb-14 text-center">
             <h2 class="text-[clamp(1.75rem,3.2vw,2.5rem)] font-medium tracking-[-0.03em] leading-[1.1] text-ink">The real workspace, running in your browser</h2>
