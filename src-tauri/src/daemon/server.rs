@@ -1966,9 +1966,9 @@ impl DaemonServer {
                         let is_remote = self.terminal_service.remote().contains(&session_id);
                         match self
                             .terminal_service
-                            .attach_remote_with_sequence(&session_id, if is_remote { None } else { after_sequence })
+                            .attach_remote_with_sequence_ranges(&session_id, if is_remote { None } else { after_sequence })
                         {
-                            Ok((mut attachment, remote_generation)) => {
+                            Ok((mut attachment, history_ranges, remote_generation)) => {
                                 if is_remote {
                                     attachment.snapshot.gap = Some(crate::terminal::output_hub::ReplayGap {
                                         requested_after_sequence: after_sequence.unwrap_or(0),
@@ -1983,14 +1983,12 @@ impl DaemonServer {
                                     .map(|(c, r)| (Some(c), Some(r)))
                                     .unwrap_or((None, None));
                                 let hub = Arc::clone(self.terminal_service.output_hub());
-                                let history_segments = attachment
-                                    .snapshot
-                                    .history_segments
+                                let history_segments = history_ranges
                                     .iter()
-                                    .map(|seg| HistorySegmentWire {
-                                        cols: seg.cols,
-                                        rows: seg.rows,
-                                        bytes: seg.bytes.clone(),
+                                    .map(|r| HistorySegmentWire {
+                                        cols: r.cols,
+                                        rows: r.rows,
+                                        bytes: attachment.snapshot.history[r.start..r.end].to_vec(),
                                     })
                                     .collect();
                                 let resp = DaemonResponse::AttachOk {
@@ -2888,7 +2886,8 @@ impl DaemonServer {
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {
                     // Re-subscribe with sequence after last_seen_sequence to recover replay gap
-                    if let Some(att) = hub.subscribe_with_sequence(&session_id, last_seen_sequence)
+                    if let Some((att, history_ranges)) =
+                        hub.subscribe_with_sequence_ranges(&session_id, last_seen_sequence)
                     {
                         rx = att.receiver;
                         let requested_after_sequence = last_seen_sequence.unwrap_or(0);
@@ -2902,14 +2901,12 @@ impl DaemonServer {
                             .map(|gap| gap.available_from_sequence)
                             .or(att.snapshot.history_start_sequence)
                             .unwrap_or_else(|| requested_after_sequence.saturating_add(1));
-                        let segments = att
-                            .snapshot
-                            .history_segments
+                        let segments = history_ranges
                             .iter()
-                            .map(|seg| HistorySegmentWire {
-                                cols: seg.cols,
-                                rows: seg.rows,
-                                bytes: seg.bytes.clone(),
+                            .map(|r| HistorySegmentWire {
+                                cols: r.cols,
+                                rows: r.rows,
+                                bytes: att.snapshot.history[r.start..r.end].to_vec(),
                             })
                             .collect();
                         let msg = DaemonStreamMessage::Lagged {

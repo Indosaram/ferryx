@@ -1,5 +1,5 @@
 use crate::daemon::session_lifecycle::{SessionLifecycleRegistry, SessionProcessState};
-use crate::terminal::output_hub::{SessionAttachment, TerminalOutputHub};
+use crate::terminal::output_hub::{HistoryRange, SessionAttachment, TerminalOutputHub};
 use crate::terminal::{PtyError, PtyManager, PtySession, TerminalSignal};
 use crate::worktree::manager::WorktreeManager;
 use parking_lot::Mutex;
@@ -231,6 +231,23 @@ impl TerminalService {
             .ok_or_else(|| PtyError::SessionNotFound(session_id.to_string()))
     }
 
+    /// Ranges variant of [`Self::attach_with_sequence`]: history segments are described as
+    /// byte offsets into the snapshot's flat history so callers can build wire segments
+    /// without an intermediate full materialization of segment bytes.
+    pub fn attach_with_sequence_ranges(
+        &self,
+        session_id: &str,
+        after_sequence: Option<u64>,
+    ) -> Result<(SessionAttachment, Vec<HistoryRange>), PtyError> {
+        if !self.list_sessions().contains(&session_id.to_string()) {
+            return Err(PtyError::SessionNotFound(session_id.to_string()));
+        }
+
+        self.output_hub
+            .subscribe_with_sequence_ranges(session_id, after_sequence)
+            .ok_or_else(|| PtyError::SessionNotFound(session_id.to_string()))
+    }
+
     /// Attaches to a session while snapshotting remote generation under the remote state lock.
     ///
     /// For remote sessions, this holds the entry's state lock while taking the hub snapshot,
@@ -250,6 +267,26 @@ impl TerminalService {
         } else {
             let attachment = self.attach_with_sequence(session_id, after_sequence)?;
             Ok((attachment, None))
+        }
+    }
+
+    /// Ranges variant of [`Self::attach_remote_with_sequence`]: returns history segment
+    /// byte offsets alongside the attachment so the daemon wire build can slice the flat
+    /// snapshot directly instead of cloning materialized segment buffers.
+    pub fn attach_remote_with_sequence_ranges(
+        &self,
+        session_id: &str,
+        after_sequence: Option<u64>,
+    ) -> Result<(SessionAttachment, Vec<HistoryRange>, Option<u64>), PtyError> {
+        if self.remote.contains(session_id) {
+            let (attachment, ranges, generation) = self
+                .remote
+                .attach_snapshot_with_generation_ranges(session_id, after_sequence)
+                .map_err(|_| PtyError::SessionNotFound(session_id.to_string()))?;
+            Ok((attachment, ranges, Some(generation)))
+        } else {
+            let (attachment, ranges) = self.attach_with_sequence_ranges(session_id, after_sequence)?;
+            Ok((attachment, ranges, None))
         }
     }
 

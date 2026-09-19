@@ -28,6 +28,14 @@ pub struct HistorySegment {
     pub bytes: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HistoryRange {
+    pub cols: Option<u16>,
+    pub rows: Option<u16>,
+    pub start: usize,
+    pub end: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutputChunk {
     pub sequence: u64,
@@ -204,7 +212,7 @@ impl BoundedBuffer {
         &self,
         after_sequence: Option<u64>,
     ) -> (Vec<u8>, Option<u64>, Option<u64>, Option<ReplayGap>) {
-        let (history, _, start, end, gap) = self.snapshot_after_segmented(after_sequence, &[]);
+        let (history, _, start, end, gap) = self.snapshot_after_ranges(after_sequence, &[]);
         (history, start, end, gap)
     }
 
@@ -219,77 +227,68 @@ impl BoundedBuffer {
         Option<u64>,
         Option<ReplayGap>,
     ) {
-        if self.chunks.is_empty() {
-            let segments = segment_history(&[], ledger, after_sequence);
-            return (Vec::new(), segments, None, None, None);
+        let (history, ranges, start, end, gap) = self.snapshot_after_ranges(after_sequence, ledger);
+        let segments = ranges.into_iter().map(|r| HistorySegment {
+            cols: r.cols,
+            rows: r.rows,
+            bytes: history[r.start..r.end].to_vec(),
+        }).collect();
+        (history, segments, start, end, gap)
+    }
+
+    pub(crate) fn snapshot_after_ranges(
+        &self,
+        after_sequence: Option<u64>,
+        ledger: &[ResizePoint],
+    ) -> (Vec<u8>, Vec<HistoryRange>, Option<u64>, Option<u64>, Option<ReplayGap>) {
+        let first = self.start_sequence();
+        let last = self.end_sequence();
+        let gap = after_sequence.zip(first).and_then(|(requested, first)| {
+            (requested < first.saturating_sub(1)).then_some(ReplayGap {
+                requested_after_sequence: requested,
+                available_from_sequence: first,
+            })
+        });
+        let full = after_sequence.is_none() || gap.is_some();
+        let mut chunks = self.chunks.iter().filter(|c| full || Some(c.sequence) > after_sequence);
+        let Some(first_chunk) = chunks.next() else {
+            let ranges = ledger.last().filter(|p| after_sequence.is_none_or(|s| p.sequence > s))
+                .map(|p| vec![HistoryRange { cols: Some(p.cols), rows: Some(p.rows), start: 0, end: 0 }])
+                .unwrap_or_default();
+            return (Vec::new(), ranges, None, last, None);
+        };
+        let needs_prefix = full && self.bracketed_paste_enabled && !self.buffer_contains_active_bracketed_paste();
+        let mut history = Vec::with_capacity(self.current_size + if needs_prefix { 8 } else { 0 });
+        if needs_prefix { history.extend_from_slice(b"\x1b[?2004h"); }
+        let mut li = 0;
+        let mut size = (None, None);
+        while li < ledger.len() && ledger[li].sequence <= first_chunk.sequence {
+            size = (Some(ledger[li].cols), Some(ledger[li].rows));
+            li += 1;
         }
-
-        let first_seq = self.chunks.front().unwrap().sequence;
-        let last_seq = self.chunks.back().unwrap().sequence;
-
-        match after_sequence {
-            None => {
-                let chunk_refs: Vec<&OutputChunk> = self.chunks.iter().collect();
-                let mut segments = segment_history(&chunk_refs, ledger, after_sequence);
-                let history = self.snapshot();
-                if self.bracketed_paste_enabled && !self.buffer_contains_active_bracketed_paste() {
-                    if let Some(first_seg) = segments.first_mut() {
-                        first_seg.bytes.splice(0..0, b"\x1b[?2004h".iter().copied());
-                    } else {
-                        segments.push(HistorySegment {
-                            cols: None,
-                            rows: None,
-                            bytes: b"\x1b[?2004h".to_vec(),
-                        });
-                    }
-                }
-                (history, segments, Some(first_seq), Some(last_seq), None)
+        let mut ranges = Vec::new();
+        let mut start = 0;
+        history.extend_from_slice(&first_chunk.bytes);
+        for chunk in chunks {
+            let mut next_size = size;
+            while li < ledger.len() && ledger[li].sequence <= chunk.sequence {
+                next_size = (Some(ledger[li].cols), Some(ledger[li].rows));
+                li += 1;
             }
-            Some(req_seq) => {
-                if req_seq >= last_seq {
-                    let segments = segment_history(&[], ledger, Some(req_seq));
-                    (Vec::new(), segments, None, Some(last_seq), None)
-                } else if req_seq + 1 < first_seq {
-                    // Eviction gap: requested sequence has been evicted
-                    let gap = Some(ReplayGap {
-                        requested_after_sequence: req_seq,
-                        available_from_sequence: first_seq,
-                    });
-                    let chunk_refs: Vec<&OutputChunk> = self.chunks.iter().collect();
-                    let mut segments = segment_history(&chunk_refs, ledger, after_sequence);
-                    let history = self.snapshot();
-                    if self.bracketed_paste_enabled
-                        && !self.buffer_contains_active_bracketed_paste()
-                    {
-                        if let Some(first_seg) = segments.first_mut() {
-                            first_seg.bytes.splice(0..0, b"\x1b[?2004h".iter().copied());
-                        } else {
-                            segments.push(HistorySegment {
-                                cols: None,
-                                rows: None,
-                                bytes: b"\x1b[?2004h".to_vec(),
-                            });
-                        }
-                    }
-                    (history, segments, Some(first_seq), Some(last_seq), gap)
-                } else {
-                    let mut history = Vec::new();
-                    let mut start_seq = None;
-                    let mut included_chunks = Vec::new();
-                    for chunk in &self.chunks {
-                        if chunk.sequence > req_seq {
-                            if start_seq.is_none() {
-                                start_seq = Some(chunk.sequence);
-                            }
-                            history.extend_from_slice(&chunk.bytes);
-                            included_chunks.push(chunk);
-                        }
-                    }
-                    let segments = segment_history(&included_chunks, ledger, after_sequence);
-                    (history, segments, start_seq, Some(last_seq), None)
-                }
+            if next_size != size {
+                ranges.push(HistoryRange { cols: size.0, rows: size.1, start, end: history.len() });
+                start = history.len();
+                size = next_size;
+            }
+            history.extend_from_slice(&chunk.bytes);
+        }
+        ranges.push(HistoryRange { cols: size.0, rows: size.1, start, end: history.len() });
+        if let Some(point) = ledger.get(li..).and_then(|suffix| suffix.last()) {
+            if (Some(point.cols), Some(point.rows)) != size {
+                ranges.push(HistoryRange { cols: Some(point.cols), rows: Some(point.rows), start: history.len(), end: history.len() });
             }
         }
+        (history, ranges, Some(first_chunk.sequence), last, gap)
     }
 }
 
@@ -575,6 +574,21 @@ impl TerminalOutputHub {
         session_id: &str,
         after_sequence: Option<u64>,
     ) -> Option<SessionAttachment> {
+        let (mut attachment, ranges) = self.subscribe_with_sequence_ranges(session_id, after_sequence)?;
+        attachment.snapshot.history_segments = ranges.into_iter().map(|r| HistorySegment {
+            cols: r.cols,
+            rows: r.rows,
+            bytes: attachment.snapshot.history[r.start..r.end].to_vec(),
+        }).collect();
+        Some(attachment)
+    }
+
+    // Subscribe and capture offsets under one lock, without duplicating snapshot bytes.
+    pub(crate) fn subscribe_with_sequence_ranges(
+        &self,
+        session_id: &str,
+        after_sequence: Option<u64>,
+    ) -> Option<(SessionAttachment, Vec<HistoryRange>)> {
         let session_hub = {
             let sessions = self.sessions.read();
             sessions.get(session_id).cloned()
@@ -586,7 +600,7 @@ impl TerminalOutputHub {
         // 2. Snapshot within the same critical section
         let (history, history_segments, history_start_sequence, history_end_sequence, gap) = hub
             .buffer
-            .snapshot_after_segmented(after_sequence, &hub.resize_ledger);
+            .snapshot_after_ranges(after_sequence, &hub.resize_ledger);
         let gap = gap.or_else(|| {
             hub.replay_gap.clone().filter(|gap| {
                 after_sequence.is_none_or(|after| after < gap.available_from_sequence - 1)
@@ -598,14 +612,14 @@ impl TerminalOutputHub {
             history_start_sequence,
             history_end_sequence,
             history,
-            history_segments,
+            history_segments: Vec::new(),
             gap,
         };
 
-        Some(SessionAttachment {
+        Some((SessionAttachment {
             snapshot,
             receiver: rx,
-        })
+        }, history_segments))
     }
 
     pub fn remove_session(&self, session_id: &str) {
@@ -654,6 +668,65 @@ impl TerminalOutputHub {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    struct CountingAlloc;
+    thread_local! {
+        static ALLOC_COUNTS: Cell<Option<(usize, usize)>> = const { Cell::new(None) };
+    }
+    impl CountingAlloc {
+        fn adjust(old: usize, new: usize) {
+            let _ = ALLOC_COUNTS.try_with(|counts| {
+                if let Some((current, peak)) = counts.get() {
+                    let current = current.saturating_sub(old) + new;
+                    counts.set(Some((current, peak.max(current))));
+                }
+            });
+        }
+        fn enable() { ALLOC_COUNTS.with(|c| c.set(Some((0, 0)))); }
+        fn disable() -> usize {
+            ALLOC_COUNTS.with(|c| c.replace(None).unwrap().1)
+        }
+    }
+    unsafe impl GlobalAlloc for CountingAlloc {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let ptr = System.alloc(layout);
+            if !ptr.is_null() { Self::adjust(0, layout.size()); }
+            ptr
+        }
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            let ptr = System.alloc_zeroed(layout);
+            if !ptr.is_null() { Self::adjust(0, layout.size()); }
+            ptr
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            System.dealloc(ptr, layout);
+            Self::adjust(layout.size(), 0);
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+            let new_ptr = System.realloc(ptr, layout, size);
+            if !new_ptr.is_null() { Self::adjust(layout.size(), size); }
+            new_ptr
+        }
+    }
+    #[global_allocator]
+    static COUNTING_ALLOC: CountingAlloc = CountingAlloc;
+
+    #[test]
+    fn alloc_peak_single_materialization() {
+        let retained = 192 * 1024;
+        let mut buffer = BoundedBuffer::new(retained);
+        for _ in 0..48 { buffer.push(vec![b'x'; retained / 48]); }
+        let ledger = vec![ResizePoint { sequence: 1, cols: 80, rows: 24 }];
+        CountingAlloc::enable();
+        let snapshot = buffer.snapshot_after_ranges(None, &ledger);
+        let peak = CountingAlloc::disable();
+        assert_eq!(snapshot.0.len(), retained);
+        assert!(!snapshot.1.is_empty());
+        println!("alloc peak: {peak}/{retained} = {:.6}x", peak as f64 / retained as f64);
+        assert!(peak * 100 <= retained * 135, "peak_bytes={peak}, retained={retained}, ratio={:.6}", peak as f64 / retained as f64);
+    }
 
     #[test]
     fn transport_claim_fences_live_owner_and_adopts_retained_history() {

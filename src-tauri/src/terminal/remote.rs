@@ -392,6 +392,30 @@ impl RemoteRuntime {
             .ok_or_else(|| RemoteFailure::new(RemoteFailureKind::Missing, "Session not found in hub"))?;
         Ok((attachment, generation))
     }
+
+    /// Ranges variant of [`Self::attach_snapshot_with_generation`]: returns history segment
+    /// byte offsets into the snapshot's flat history instead of materialized segment buffers.
+    pub fn attach_snapshot_with_generation_ranges(
+        &self,
+        id: &str,
+        after_sequence: Option<u64>,
+    ) -> Result<
+        (
+            crate::terminal::output_hub::SessionAttachment,
+            Vec<crate::terminal::output_hub::HistoryRange>,
+            u64,
+        ),
+        RemoteFailure,
+    > {
+        let e = self.entry(id)?;
+        let s = e.state.lock();
+        let generation = s.details.generation;
+        let (attachment, ranges) = self
+            .hub
+            .subscribe_with_sequence_ranges(id, after_sequence)
+            .ok_or_else(|| RemoteFailure::new(RemoteFailureKind::Missing, "Session not found in hub"))?;
+        Ok((attachment, ranges, generation))
+    }
     fn launch(&self, entry: &Arc<Entry>, initial: Option<Arc<dyn Transport>>) {
         let mut state = entry.state.lock();
         let generation = state.details.generation;
