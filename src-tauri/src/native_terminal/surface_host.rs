@@ -463,8 +463,10 @@ fn dispatch_scheduled_render<R: Runtime>(
         drop(hosts_guard);
 
         if coordinator.finish_render() {
-            // Wry runs main-thread dispatch inline; enqueue off-thread to avoid recursive retries.
+            // Wry runs main-thread dispatch inline; enqueue off-thread to avoid recursive retries,
+            // and pace the follow-up so a stalled surface cannot spin the main thread.
             tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(RETRY_FRAME_INTERVAL).await;
                 dispatch_scheduled_render(
                     follow_up_window,
                     hosts,
@@ -484,6 +486,13 @@ fn dispatch_scheduled_render<R: Runtime>(
     }
 }
 
+/// Lower bound between a dropped frame and its retry.
+///
+/// A surface that refuses a drawable (Metal `Timeout`, occluded window) used to re-dispatch
+/// inline, so a compositor stall became an unbounded main-thread spin at display refresh.
+/// Pacing the retry caps that cost regardless of how long the surface stays unavailable.
+pub(crate) const RETRY_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(8);
+
 fn defer_scheduled_render<R: Runtime>(
     window: Window<R>,
     hosts: Arc<Mutex<HashMap<String, NativeTerminalSurfaceHost>>>,
@@ -495,6 +504,7 @@ fn defer_scheduled_render<R: Runtime>(
     let test_window = window.clone();
     // Wry runs main-thread dispatch inline; enqueue off-thread to avoid recursive retries.
     let _task = tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(RETRY_FRAME_INTERVAL).await;
         dispatch_scheduled_render(window, hosts, sessions, session_id, coordinator);
     });
     #[cfg(test)]
@@ -3525,6 +3535,28 @@ mod tests {
             .state
             .is_session_render_pending(&harness.request.session_id));
         assert!(harness.dispatched.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn persistent_drop_must_not_immediately_redispatch() {
+        // A surface that keeps refusing a drawable (Metal `Timeout`, or an occluded window)
+        // must re-arm on the frame clock. Enqueueing the retry inline turns a transient
+        // compositor stall into an unbounded main-thread spin.
+        let mut harness = DirectRenderHarness::new(
+            (0..8)
+                .map(|_| SimulatedAcquisition::Dropped)
+                .collect::<Vec<_>>(),
+        );
+        assert!(!harness.scroll_once().unwrap().presented);
+        // Time only the deferred-retry window: including scroll_once() would let its own cost
+        // satisfy the bound and mask a missing pace.
+        let started = std::time::Instant::now();
+        harness.await_submissions().await;
+        let waited = started.elapsed();
+        assert!(
+            waited >= RETRY_FRAME_INTERVAL,
+            "a dropped frame must wait at least one frame interval before retrying, never re-dispatch inline; waited {waited:?}"
+        );
     }
 
     #[tokio::test]
