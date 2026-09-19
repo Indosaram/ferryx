@@ -155,6 +155,8 @@ fn panic_free_layout(
 pub struct NativeTerminalSurfaceReceipt {
     pub presented: bool,
     pub render_deferred: bool,
+    /// The surface is not visible; no retry may be armed until visibility returns.
+    pub render_suspended: bool,
     pub cols: u16,
     pub rows: u16,
     pub rebuilt_rows: u16,
@@ -178,6 +180,7 @@ impl NativeTerminalSurfaceReceipt {
         Self {
             presented: false,
             render_deferred: false,
+            render_suspended: false,
             cols: layout.cols,
             rows: layout.rows,
             rebuilt_rows,
@@ -448,7 +451,10 @@ fn dispatch_scheduled_render<R: Runtime>(
                     render_input.synchronized_output,
                 ) {
                     Ok(receipt) => {
-                        if !receipt.presented && !receipt.render_deferred {
+                        if !receipt.presented
+                            && !receipt.render_deferred
+                            && !receipt.render_suspended
+                        {
                             coordinator.schedule_render();
                         }
                     }
@@ -2403,7 +2409,7 @@ impl NativeTerminalSurfaceHostState {
         session_id: &str,
         receipt: NativeTerminalSurfaceReceipt,
     ) {
-        if receipt.presented || receipt.render_deferred {
+        if receipt.presented || receipt.render_deferred || receipt.render_suspended {
             return;
         }
         let coordinator = self
@@ -2594,6 +2600,7 @@ enum SimulatedAcquisition {
     Frame,
     NeedsReconfigure,
     Dropped,
+    Occluded,
     Fatal,
 }
 
@@ -2601,7 +2608,7 @@ enum SimulatedAcquisition {
 fn acquire_surface_frame(
     mut acquire: impl FnMut() -> SimulatedAcquisition,
     reconfigure: impl FnOnce() -> Result<(), NativeTerminalError>,
-) -> Result<Option<()>, NativeTerminalError> {
+) -> Result<(Option<()>, bool), NativeTerminalError> {
     let outcome = match acquire() {
         SimulatedAcquisition::NeedsReconfigure => {
             reconfigure()?;
@@ -2610,8 +2617,9 @@ fn acquire_surface_frame(
         outcome => outcome,
     };
     Ok(match outcome {
-        SimulatedAcquisition::Frame => Some(()),
-        SimulatedAcquisition::Dropped => None,
+        SimulatedAcquisition::Frame => (Some(()), false),
+        SimulatedAcquisition::Dropped => (None, false),
+        SimulatedAcquisition::Occluded => (None, true),
         SimulatedAcquisition::Fatal => return Err(NativeTerminalError::OutOfMemory),
         SimulatedAcquisition::NeedsReconfigure => {
             unreachable!("reconfigure already applied before final acquisition")
@@ -2715,6 +2723,7 @@ impl NativeSurfaceFrameTarget {
             height: surface_size.height,
         };
 
+        let mut render_suspended = false;
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => Some(frame),
@@ -2728,12 +2737,20 @@ impl NativeSurfaceFrameTarget {
                     wgpu::CurrentSurfaceTexture::Success(frame)
                     | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => Some(frame),
                     ref other => match classify_surface_error(other)? {
-                        SurfaceFrameAction::Drop => None,
+                        SurfaceFrameAction::Retry => None,
+                        SurfaceFrameAction::Suspend => {
+                            render_suspended = true;
+                            None
+                        }
                     },
                 }
             }
             ref other => match classify_surface_error(other)? {
-                SurfaceFrameAction::Drop => None,
+                SurfaceFrameAction::Retry => None,
+                SurfaceFrameAction::Suspend => {
+                    render_suspended = true;
+                    None
+                }
             },
         };
         let cell_metrics = CellMetrics {
@@ -2741,14 +2758,16 @@ impl NativeSurfaceFrameTarget {
             height_px: self.renderer.config().cell_height_px,
         };
         let Some(frame) = frame else {
-            return Ok(NativeTerminalSurfaceReceipt::from_snapshot(
+            let mut receipt = NativeTerminalSurfaceReceipt::from_snapshot(
                 layout,
                 snapshot,
                 0,
                 0,
                 cell_metrics,
                 logical_bounds,
-            ));
+            );
+            receipt.render_suspended = render_suspended;
+            return Ok(receipt);
         };
         let view = frame
             .texture
@@ -2896,7 +2915,7 @@ mod tests {
             snapshot: &RenderSnapshot,
         ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
             (self.assert_host_locked)();
-            let frame = acquire_surface_frame(
+            let (frame, render_suspended) = acquire_surface_frame(
                 || {
                     self.events.lock().push(FrameEvent::Acquire);
                     self.acquisitions
@@ -2916,6 +2935,7 @@ mod tests {
             });
             Ok(NativeTerminalSurfaceReceipt {
                 presented,
+                render_suspended,
                 ..NativeTerminalSurfaceReceipt::from_snapshot(
                     layout,
                     snapshot,
@@ -3556,6 +3576,30 @@ mod tests {
         assert!(
             waited >= RETRY_FRAME_INTERVAL,
             "a dropped frame must wait at least one frame interval before retrying, never re-dispatch inline; waited {waited:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn occluded_surface_suspends_instead_of_retrying() {
+        // Only ONE acquisition is scripted: a retry would drain the deque and panic, so this
+        // fails loudly if occlusion is treated as a transient drop.
+        let mut harness = DirectRenderHarness::new(vec![SimulatedAcquisition::Occluded]);
+        let receipt = harness.scroll_once().unwrap();
+        assert!(!receipt.presented);
+        assert!(
+            receipt.render_suspended,
+            "an occluded surface must report suspension, not a plain dropped frame"
+        );
+        assert!(
+            !harness
+                .state
+                .is_session_render_pending(&harness.request.session_id),
+            "an occluded surface must not arm a retry; it wakes on a visibility command"
+        );
+        harness.await_submissions().await;
+        assert!(
+            harness.dispatched.try_recv().is_err(),
+            "occlusion must cost zero further dispatches until visibility returns"
         );
     }
 

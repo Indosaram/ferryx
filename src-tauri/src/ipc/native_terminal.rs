@@ -1619,6 +1619,7 @@ mod tests {
         let receipt = into_ipc_receipt("deferred".into(), NativeTerminalSurfaceReceipt {
             presented: false,
             render_deferred: true,
+            render_suspended: false,
             cols: 80,
             rows: 24,
             rebuilt_rows: 0,
@@ -1725,6 +1726,7 @@ mod tests {
             let receipt = into_ipc_receipt("presentation".into(), NativeTerminalSurfaceReceipt {
                 presented,
                 render_deferred: false,
+                render_suspended: false,
                 cols: 80,
                 rows: 24,
                 rebuilt_rows: 0,
