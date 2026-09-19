@@ -146,7 +146,7 @@ import { useBrowserSessionHydration } from "./state/browserSessionHydration";
 import { preloadWorkspaceSnapshots, useWorkspaceRestore } from "./state/workspaceRestore";
 import { clearHmrWorkspaceState, getHmrWorkspaceState } from "./state/hmrWorkspaceState";
 import { clearWorkspaceSnapshot, getWorkspaceSnapshot, listWorkspaceSnapshots } from "./state/workspaceSnapshotCache";
-import { emptySidebarWorkspaceIds } from "./state/sidebarWorkspaceState";
+import { emptySidebarWorkspaceIds, worktreeHasOpenTabs } from "./state/sidebarWorkspaceState";
 import { useWorkspaceRuntime } from "./state/workspaceRuntime";
 import { listPairedProjectWorktrees } from "./state/pairedProjectWorktrees";
 import { getTabSessionIds, hasNavigableSession, selectGlobalUnreadBadgeCount, selectNotificationWorkspaceLabel, selectWorktreeActivitySummaries, useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
@@ -2179,17 +2179,13 @@ function WorkspaceApp({
   const handleSelectWorktreeByIndex = useCallback(
     (index: number) => {
       if (activeRemoteHostRef.current) return;
-      const visible = listVisibleWorktrees(
+      const visible = listShortcutWorktrees(
         projectsRef.current,
         stateRef.current.worktrees,
         activeProjectRef.current.workspaceId,
         inactiveProjectWorktreesRef.current,
-        emptySidebarWorkspaceIds(
-          projectsRef.current,
-          activeProjectRef.current.workspaceId,
-          stateRef.current,
-          listWorkspaceSnapshots(),
-        ),
+        stateRef.current,
+        listWorkspaceSnapshots(),
       );
       const target = visible[index];
       if (target) handleSelectWorktree(target);
@@ -2801,10 +2797,11 @@ function WorkspaceApp({
           return {
             tabIds: Array.from({ length: 9 }, (_, index) => group?.tabIds[index] ?? current.layout.tabs[index]?.id ?? ""),
             closeTabId: activeTab && !activeTab.pinned && (!paneLayout || paneLayout.root.type === "leaf") ? activeTab.id : null,
-            worktrees: listVisibleWorktrees(
+            worktrees: listShortcutWorktrees(
               projectsRef.current, current.worktrees, activeProjectRef.current.workspaceId,
               inactiveProjectWorktreesRef.current,
-              emptySidebarWorkspaceIds(projectsRef.current, activeProjectRef.current.workspaceId, current, listWorkspaceSnapshots()),
+              current,
+              listWorkspaceSnapshots(),
             ),
           };
         }}
@@ -3190,6 +3187,33 @@ function listVisibleWorktrees(
   }
 
   return visible;
+}
+
+/**
+ * Shortcut navigation (Cmd+1..9) targets only worktrees whose layouts currently
+ * own tabs; tabless worktrees stay listed in the sidebar but off the shortcut
+ * ladder so a digit never lands on an empty workspace.
+ */
+function listShortcutWorktrees(
+  projects: RegisteredProject[],
+  worktrees: Worktree[],
+  activeProjectId: string,
+  inactiveProjectWorktrees: Record<string, Worktree[]>,
+  liveState: WorkspaceState,
+  snapshots: ReadonlyArray<readonly [string, WorkspaceState]>,
+): Worktree[] {
+  const visible = listVisibleWorktrees(
+    projects, worktrees, activeProjectId, inactiveProjectWorktrees,
+    emptySidebarWorkspaceIds(projects, activeProjectId, liveState, snapshots),
+  );
+  const states = new Map(snapshots);
+  states.set(liveState.workspaceId ?? activeProjectId, liveState);
+  return visible.filter((row) =>
+    worktreeHasOpenTabs(
+      states.get(resolveWorktreeOwnerId(row, projects, activeProjectId) ?? (liveState.workspaceId ?? activeProjectId)),
+      row.path,
+    ),
+  );
 }
 
 function loadCollapsedProjectIds(projects: RegisteredProject[], activeProjectId: string): Set<string> {

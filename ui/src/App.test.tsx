@@ -42,7 +42,7 @@ const { resolve } = await import("node:path");
 const { act, cleanup, fireEvent, render, screen, waitFor, within } = await import("@testing-library/react");
 const { afterEach, beforeEach, describe, expect, it, vi } = await import("vitest");
 await import("./test/setup");
-import type { TabPaneLayout, Worktree } from "./lib/types";
+import type { LayoutState, TabPaneLayout, Worktree } from "./lib/types";
 import type { TerminalActivity } from "./lib/activity";
 import { createLayoutState } from "./state/layout";
 import { clearWorkspaceSnapshot, setWorkspaceSnapshot } from "./state/workspaceSnapshotCache";
@@ -129,7 +129,7 @@ const workspace = {
   dispatchWorkspaceAction: vi.fn(),
   reportRuntimeError: vi.fn(),
   storeState: {
-    activeWorktreePath: "/repo/main",
+    activeWorktreePath: "/repo/main" as string | null,
     layout: {
       activeTabId: "tab-1",
       layoutsByTabId: {
@@ -142,6 +142,7 @@ const workspace = {
         { id: "tab-4", label: "docs", sessionId: "sess-4" },
       ],
     },
+    worktreeLayouts: undefined as Record<string, LayoutState> | undefined,
     sessions: {
       "sess-1": { id: "sess-1", cwd: "/repo/main" },
       "sess-2": { id: "sess-2", cwd: "/repo/feature" },
@@ -165,6 +166,7 @@ vi.mock("./lib/tauri", () => ({
   DEFAULT_TERMINAL_FONT_STACK: "monospace",
   listenDagRunUpdated: vi.fn(() => Promise.resolve(() => undefined)),
   watchDagProject: vi.fn((projectPath: string) => Promise.resolve({ projectPath, runs: [] })),
+  discoverDagWatchRoots: vi.fn(() => Promise.resolve([])),
   getTerminalPreferences: () => Promise.resolve({}),
   createWorktree: native.createWorktree,
   getWorktreeStatus: native.getWorktreeStatus,
@@ -798,6 +800,25 @@ describe("App project workspace flow", () => {
     fireEvent.keyDown(window, { key: "1", metaKey: true });
 
     expect(workspace.ensureTabForWorktree).not.toHaveBeenCalled();
+  });
+
+  it("skips tabless background worktrees when indexing Cmd+N targets", async () => {
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "/repo", gitRoot: "/repo" }]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
+    localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify([]));
+    await act(async () => { render(<App />); });
+
+    // In the default fixture, /repo/main is active with tabs; /repo/feature has no parked tabs.
+    // Cmd+2 must not select /repo/feature because it owns no open tabs.
+    fireEvent.keyDown(window, { key: "2", metaKey: true });
+    expect(workspace.ensureTabForWorktree).not.toHaveBeenCalled();
+
+    // Parking an open tab under /repo/feature makes it a valid shortcut navigation target.
+    workspace.storeState.worktreeLayouts = {
+      "/repo/feature": createLayoutState([{ id: "tab-feature-parked", label: "feature", sessionId: "sess-2" }]),
+    };
+    fireEvent.keyDown(window, { key: "2", metaKey: true });
+    await waitFor(() => expect(workspace.ensureTabForWorktree).toHaveBeenCalledWith(workspace.storeState.worktrees[1]));
   });
 
   it("routes the native Cmd+T menu accelerator through the normal new-terminal callback", async () => {
@@ -1825,6 +1846,11 @@ describe("App project workspace flow", () => {
     const betaFeature = { path: "/repo/beta-feature", branch: "refs/heads/orca/beta/feature" };
     const betaDocs = { path: "/repo/beta-docs", branch: "refs/heads/orca/beta/docs" };
     workspace.storeState.worktrees.push(betaFeature, betaDocs);
+    workspace.storeState.worktreeLayouts = {
+      "/repo/feature": createLayoutState([{ id: "tab-feature", label: "feature", sessionId: "sess-2" }]),
+      "/repo/bugfix": createLayoutState([{ id: "tab-bugfix", label: "bugfix", sessionId: "sess-3" }]),
+      "/repo/docs": createLayoutState([{ id: "tab-docs", label: "docs", sessionId: "sess-4" }]),
+    };
 
     try {
       render(<App />);
@@ -1905,6 +1931,9 @@ describe("App project workspace flow", () => {
       repoRoot: "/repo",
       gitRoot: "/repo",
     });
+    workspace.storeState.worktreeLayouts = {
+      "/repo/feature": createLayoutState([{ id: "tab-feature", label: "feature", sessionId: "sess-2" }]),
+    };
 
     render(<App />);
     await waitFor(() => expect(native.onSelectWorktreeMenu).toHaveBeenCalled());
@@ -1924,6 +1953,7 @@ describe("App project workspace flow", () => {
   it("targets the synthesized root row of a visible non-Git project via native Cmd+digit", async () => {
     seedSidebarBrowserTab("plain-docs");
     const originalWorktrees = [...workspace.storeState.worktrees];
+    const originalActiveWorktreePath = workspace.storeState.activeWorktreePath;
     const projects = [
       { workspaceId: "alpha", repoRoot: "/repos/alpha", gitRoot: "/repos/alpha" },
       { workspaceId: "plain-docs", repoRoot: "/notes/docs", gitRoot: null },
@@ -1948,6 +1978,7 @@ describe("App project workspace flow", () => {
       prunable: null,
     };
     workspace.storeState.worktrees = [alphaMain];
+    workspace.storeState.activeWorktreePath = alphaMain.path;
 
     try {
       render(<App />);
@@ -1970,6 +2001,7 @@ describe("App project workspace flow", () => {
       // When the non-Git project is active and has no git rows, digit 1 targets its synthesized root row directly.
       localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "plain-docs");
       workspace.storeState.worktrees = [];
+      workspace.storeState.activeWorktreePath = null;
       render(<App />);
       await waitFor(() => expect(native.onSelectWorktreeMenu).toHaveBeenCalled());
 
@@ -1986,6 +2018,7 @@ describe("App project workspace flow", () => {
       );
     } finally {
       workspace.storeState.worktrees = originalWorktrees;
+      workspace.storeState.activeWorktreePath = originalActiveWorktreePath;
       clearWorkspaceSnapshot("plain-docs");
     }
   });
@@ -1993,6 +2026,7 @@ describe("App project workspace flow", () => {
   it("targets inactive cached rows before extra owned rows matching Sidebar top-to-bottom order via native Cmd+digit", async () => {
     seedSidebarBrowserTab("beta");
     const originalWorktrees = [...workspace.storeState.worktrees];
+    const originalActiveWorktreePath = workspace.storeState.activeWorktreePath;
     const projects = [
       { workspaceId: "alpha", repoRoot: "/repos/alpha", gitRoot: "/repos/alpha" },
       { workspaceId: "beta", repoRoot: "/repos/beta", gitRoot: "/repos/beta" },
@@ -2044,6 +2078,7 @@ describe("App project workspace flow", () => {
       prunable: null,
     };
     workspace.storeState.worktrees = [alphaMain, betaExtra, betaCached1, betaCached2];
+    workspace.storeState.activeWorktreePath = alphaMain.path;
 
     native.listWorktrees.mockImplementation(async (workspaceId: string) => {
       if (workspaceId === "beta") return [betaCached1, betaCached2];
@@ -2074,6 +2109,7 @@ describe("App project workspace flow", () => {
       );
     } finally {
       workspace.storeState.worktrees = originalWorktrees;
+      workspace.storeState.activeWorktreePath = originalActiveWorktreePath;
       clearWorkspaceSnapshot("beta");
     }
   });
@@ -2095,6 +2131,11 @@ describe("App project workspace flow", () => {
 
   it("navigates workspaces with Cmd+1..4 and terminal tabs with Ctrl+1..4 ignoring out-of-range keys", async () => {
     native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "." });
+    workspace.storeState.worktreeLayouts = {
+      "/repo/feature": createLayoutState([{ id: "tab-feature", label: "feature", sessionId: "sess-2" }]),
+      "/repo/bugfix": createLayoutState([{ id: "tab-bugfix", label: "bugfix", sessionId: "sess-3" }]),
+      "/repo/docs": createLayoutState([{ id: "tab-docs", label: "docs", sessionId: "sess-4" }]),
+    };
     render(<App />);
 
     // Cmd+1..4 selects workspace indexes 1..4 (worktrees 0..3)
