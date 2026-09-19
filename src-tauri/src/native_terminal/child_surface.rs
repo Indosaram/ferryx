@@ -41,6 +41,41 @@ impl ChildSurfaceGeometry {
     }
 }
 
+/// Remembers the geometry last pushed to the compositor so identical bounds stop at the
+/// boundary instead of becoming a platform call.
+///
+/// Every frame re-sends the pane rectangle, but the rectangle only changes when the pane is
+/// actually resized. Without this latch each frame issues a `SetWindowPos` / `setFrame` /
+/// `wl_subsurface.set_position` that asks the compositor to move a surface to where it already
+/// is, which is a per-frame relayout for every visible pane.
+#[derive(Debug, Default)]
+pub struct GeometryLatch {
+    last_applied: std::sync::Mutex<Option<ChildSurfaceGeometry>>,
+}
+
+impl GeometryLatch {
+    /// Returns true only when `next` differs from the last applied geometry, recording it.
+    pub fn needs_apply(&self, next: ChildSurfaceGeometry) -> bool {
+        let Ok(mut last_applied) = self.last_applied.lock() else {
+            // A poisoned latch must not silently freeze the surface in a stale position.
+            return true;
+        };
+        if *last_applied == Some(next) {
+            return false;
+        }
+        *last_applied = Some(next);
+        true
+    }
+
+    /// Drops the memo so the next call re-applies, for reattach and surface recreation where
+    /// the compositor no longer holds the geometry we think it does.
+    pub fn invalidate(&self) {
+        if let Ok(mut last_applied) = self.last_applied.lock() {
+            *last_applied = None;
+        }
+    }
+}
+
 /// Placement for a `wl_subsurface`, whose position is parent-surface-local **logical**
 /// coordinates while its buffer is sized in physical pixels and divided back down by the
 /// integer `wl_surface.set_buffer_scale`. This is why the X11/Win32 `ChildSurfaceGeometry`
@@ -119,5 +154,42 @@ impl ChildSurfaceVisibility {
     pub fn mark_detached(&mut self) {
         self.detached = true;
         self.mapped = false;
+    }
+}
+
+#[cfg(test)]
+mod geometry_latch_tests {
+    use super::{ChildSurfaceGeometry, GeometryLatch};
+
+    fn geometry(x: i32, width: u32) -> ChildSurfaceGeometry {
+        ChildSurfaceGeometry { x, y: 0, width, height: 600 }
+    }
+
+    #[test]
+    fn repeated_identical_geometry_applies_exactly_once() {
+        let latch = GeometryLatch::default();
+        let bounds = geometry(10, 800);
+        assert!(latch.needs_apply(bounds), "first placement must reach the compositor");
+        let extra = (0..64).filter(|_| latch.needs_apply(bounds)).count();
+        assert_eq!(extra, 0, "re-sending identical bounds must not mutate the platform surface");
+    }
+
+    #[test]
+    fn a_changed_rectangle_applies_again() {
+        let latch = GeometryLatch::default();
+        assert!(latch.needs_apply(geometry(10, 800)));
+        assert!(latch.needs_apply(geometry(10, 801)), "a resize must reach the compositor");
+        assert!(latch.needs_apply(geometry(11, 801)), "a move must reach the compositor");
+        assert!(!latch.needs_apply(geometry(11, 801)), "and then settle");
+    }
+
+    #[test]
+    fn invalidate_forces_reapply_after_reattach() {
+        let latch = GeometryLatch::default();
+        let bounds = geometry(10, 800);
+        assert!(latch.needs_apply(bounds));
+        assert!(!latch.needs_apply(bounds));
+        latch.invalidate();
+        assert!(latch.needs_apply(bounds), "after reattach the compositor no longer holds our geometry");
     }
 }

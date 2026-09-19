@@ -24,7 +24,9 @@ use raw_window_handle::{
 };
 use tauri::{Runtime, Window};
 
-use crate::native_terminal::child_surface::{ChildSurfaceGeometry, ChildSurfaceVisibility};
+use crate::native_terminal::child_surface::{
+    ChildSurfaceGeometry, ChildSurfaceVisibility, GeometryLatch,
+};
 use crate::native_terminal::composition::{
     CompositorTargetKind, LogicalBounds, PlatformCompositorDescriptor,
 };
@@ -208,6 +210,7 @@ impl HasDisplayHandle for NativeChildViewHandle {
 pub struct WindowsCompositorTarget {
     handle: Arc<NativeChildViewHandle>,
     visibility: Mutex<ChildSurfaceVisibility>,
+    geometry_latch: GeometryLatch,
 }
 
 // SAFETY: `WindowsCompositorTarget` contains thread-safe handles.
@@ -274,6 +277,7 @@ impl WindowsCompositorTarget {
         Ok(Self {
             handle,
             visibility: Mutex::new(ChildSurfaceVisibility::default()),
+            geometry_latch: GeometryLatch::default(),
         })
     }
 
@@ -297,6 +301,11 @@ impl WindowsCompositorTarget {
         else {
             return;
         };
+        // Every frame re-sends the pane rectangle; only a real move/resize may reach the
+        // compositor, otherwise each frame relayouts the surface to where it already is.
+        if !self.geometry_latch.needs_apply(geometry) {
+            return;
+        }
         // SAFETY: The child HWND is owned by this target and remains valid until drop.
         unsafe {
             SetWindowPos(
@@ -520,6 +529,7 @@ mod tests {
                 hinstance: NonZeroIsize::new(instance as isize),
             }),
             visibility: Mutex::new(ChildSurfaceVisibility::default()),
+            geometry_latch: GeometryLatch::default(),
         };
         assert_ne!(
             unsafe {
