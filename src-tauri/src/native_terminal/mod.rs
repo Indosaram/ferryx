@@ -41,6 +41,7 @@ mod snapshot;
 mod surface_error;
 #[cfg(feature = "native-terminal")]
 pub mod surface_host;
+pub mod thread_ownership;
 #[cfg(feature = "native-terminal")]
 mod surface_snapshot;
 mod sys;

@@ -35,6 +35,18 @@ jobs:
       - name: Verify release workflow policy
         run: bun scripts/release-workflow-policy.mjs
 
+      # Backstop for the thread-ownership invariant: no GPU acquisition inside a
+      # run_on_main_thread closure. The !Send tokens are the real enforcement, since a
+      # lexical rule cannot follow a call into another function; this catches the direct
+      # mistake. ast-grep comes from the @ast-grep/cli devDependency, not a system install.
+      - name: Verify native terminal thread policy
+        run: bun scripts/native-terminal-thread-policy.mjs
+
+      # The gate must prove itself: this plants a violation, requires a non-zero exit, and
+      # requires exit 0 on the clean tree. Without it a silently broken rule reports success.
+      - name: Test native terminal thread policy gate
+        run: bun test scripts/native-terminal-thread-policy.test.mjs
+
       - name: Build Frontend UI
         run: bun run --cwd ui build
 
@@ -152,10 +164,12 @@ jobs:
             --test ghostty_build_info_ffi \
             --test ipc_hardening_contract \
             --test native_terminal_capability_contract \
+            --test native_terminal_child_surface_contract \
             --test native_terminal_composition_contract \
             --test native_terminal_engine_contract \
             --test native_terminal_input_boundary_contract \
             --test native_terminal_surface_host_contract \
+            --test native_terminal_wayland_subsurface_contract \
             --test rorca_native_contract \
             --test session_persistence_integration \
             --test worktree_safety \
