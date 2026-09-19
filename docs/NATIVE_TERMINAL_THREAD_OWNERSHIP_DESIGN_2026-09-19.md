@@ -856,3 +856,25 @@ worker.submit(move |gpu| {                 // 통째로 GPU 잡에 넘기고
 
 착수 순서 수정: 시그니처에서 Tauri 의존을 걷어내는 것이 **가장 먼저**다. 그 전에는 2회 홉
 구조를 짜봐야 컴파일 단계에서 막힌다.
+
+### 12.12 막힘 C는 생각보다 작다 — 호출 하나를 3번째 홉으로 옮기면 된다
+
+12.11을 쓰고 나서 실제 본문을 세어 봤다. GPU 작업을 하는 `render_snapshot`(:2832) 안에서
+`window`가 쓰이는 곳은 **딱 한 군데다.**
+
+```
+:2938  self.target.restore_first_responder(window);
+```
+
+포커스 복원(AppKit) 호출이고, 바로 옆이 `reveal_after_present`(:2937)다. 즉 이 호출은
+**원래부터 UI 레그에 있어야 할 작업**이며, 2회 홉 설계의 **3번째 홉(reveal)에 자연스럽게
+속한다.** 옮기고 나면 `render_snapshot`은 `Window`를 전혀 필요로 하지 않는다.
+
+정정: 12.11의 "시그니처 대수술"은 과장이었다. 실제로는
+1. `restore_first_responder`를 reveal 레그로 이동
+2. `render_snapshot`에서 `window: &Window<R>` 파라미터와 `<R: Runtime>` 제거
+두 단계다. **동시성 변경이 아니므로** 컴파일과 기존 테스트만으로 검증되고, 스레드 배치는
+그대로다. R4의 첫 증분으로 안전하게 단독 착수 가능하다.
+
+주의: `:2704`의 다른 `render_snapshot`과 `PlatformCompositorTarget::new(window)`(≈:2802)는
+별개다. 후자는 **생성 경로**이고 네이티브 타깃을 만들기 때문에 UI 레그에 남아야 한다(12.11).
