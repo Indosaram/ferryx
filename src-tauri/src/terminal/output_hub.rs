@@ -32,7 +32,7 @@ pub struct HistorySegment {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HistoryRange {
+pub struct HistoryRange {
     pub cols: Option<u16>,
     pub rows: Option<u16>,
     pub start: usize,
