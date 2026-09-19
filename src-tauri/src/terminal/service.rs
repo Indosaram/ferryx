@@ -6,7 +6,7 @@ use parking_lot::Mutex;
 use portable_pty::CommandBuilder;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 
 #[derive(Clone)]
 pub struct TerminalService {
@@ -101,7 +101,7 @@ impl TerminalService {
         &self,
         cols: u16,
         rows: u16,
-    ) -> Result<(String, broadcast::Receiver<Vec<u8>>), PtyError> {
+    ) -> Result<(String, watch::Receiver<()>), PtyError> {
         let (session_id, pty_rx) = self.pty_manager.spawn_shell(cols, rows)?;
         Ok(self.register_output(session_id, pty_rx, cols, rows))
     }
@@ -113,7 +113,7 @@ impl TerminalService {
         rows: u16,
         worktree_manager: &WorktreeManager,
         worktree_path: &Path,
-    ) -> Result<(String, broadcast::Receiver<Vec<u8>>), PtyError> {
+    ) -> Result<(String, watch::Receiver<()>), PtyError> {
         let (session_id, pty_rx) =
             self.pty_manager
                 .spawn_in_worktree(cmd, cols, rows, worktree_manager, worktree_path)?;
@@ -128,7 +128,7 @@ impl TerminalService {
         rows: u16,
         worktree_manager: &WorktreeManager,
         worktree_path: &Path,
-    ) -> Result<(String, broadcast::Receiver<Vec<u8>>), PtyError> {
+    ) -> Result<(String, watch::Receiver<()>), PtyError> {
         let (session_id, pty_rx) = self.pty_manager.spawn_in_worktree_with_id(
             session_id, cmd, cols, rows, worktree_manager, worktree_path,
         )?;
@@ -143,7 +143,7 @@ impl TerminalService {
         cols: u16,
         rows: u16,
         state_endpoint: Option<&crate::ssh::state_bridge::StateEndpoint>,
-    ) -> Result<(String, broadcast::Receiver<Vec<u8>>), PtyError> {
+    ) -> Result<(String, watch::Receiver<()>), PtyError> {
         let session_id = uuid::Uuid::new_v4().to_string();
         let agent_sock = crate::daemon::server::agent_state_socket_path();
         let has_sock = std::path::Path::new(&agent_sock).exists();
@@ -176,16 +176,19 @@ impl TerminalService {
         mut pty_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
         cols: u16,
         rows: u16,
-    ) -> (String, broadcast::Receiver<Vec<u8>>) {
+    ) -> (String, watch::Receiver<()>) {
         self.lifecycle.lock().mark_running(session_id.clone());
-        let broadcast_rx = self.output_hub.register_session(&session_id);
+        let _raw_rx = self.output_hub.register_session(&session_id);
+        drop(_raw_rx);
         self.output_hub.record_initial_size(&session_id, cols, rows);
 
+        let (lifecycle_tx, lifecycle_rx) = watch::channel(());
         // Spawn output pump task from PTY reader to OutputHub
         let output_hub = Arc::clone(&self.output_hub);
         let lifecycle = Arc::clone(&self.lifecycle);
         let session_id_clone = session_id.clone();
         tokio::spawn(async move {
+            let _lifecycle_tx = lifecycle_tx;
             while let Some(chunk) = pty_rx.recv().await {
                 let read_unix_micros = crate::terminal::metrics::take_pty_read_timestamp(
                     &session_id_clone,
@@ -201,7 +204,7 @@ impl TerminalService {
             }
         });
 
-        (session_id, broadcast_rx)
+        (session_id, lifecycle_rx)
     }
 
     pub fn attach(

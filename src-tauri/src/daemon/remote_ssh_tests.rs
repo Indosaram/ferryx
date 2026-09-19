@@ -312,7 +312,11 @@ async fn exercise_child(root: &Path) {
         let expected = format!("^SSH-OK:{}", response.repo_root);
         tokio::time::timeout(Duration::from_secs(10), async {
             while !String::from_utf8_lossy(&history).contains(&expected) {
-                history.extend(events.recv().await.expect("SSH PTY output event"));
+                match events.recv().await {
+                    Ok(chunk) => history.extend(chunk),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(e) => panic!("SSH PTY output event: {e}"),
+                }
             }
         })
         .await
@@ -359,7 +363,11 @@ async fn exercise_child(root: &Path) {
     let expected_wt = format!("^SSH-OK:{}", wt_dir.to_str().unwrap());
     tokio::time::timeout(Duration::from_secs(10), async {
         while !String::from_utf8_lossy(&wt_history).contains(&expected_wt) {
-            wt_history.extend(wt_events.recv().await.expect("SSH PTY output event"));
+            match wt_events.recv().await {
+                Ok(chunk) => wt_history.extend(chunk),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(e) => panic!("SSH PTY output event: {e}"),
+            }
         }
     })
     .await
@@ -411,7 +419,11 @@ async fn exercise_child(root: &Path) {
     let expected = format!("^SSH-OK:{}", response.repo_root);
     tokio::time::timeout(Duration::from_secs(10), async {
         while !String::from_utf8_lossy(&replay).contains(&expected) {
-            replay.extend(output.recv().await.unwrap());
+            match output.recv().await {
+                Ok(chunk) => replay.extend(chunk),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(e) => panic!("SSH PTY output event: {e}"),
+            }
         }
     }).await.expect("restart replays original retained output without rerunning command");
     daemon.validate_session_ssh_target(&retained).await.unwrap();

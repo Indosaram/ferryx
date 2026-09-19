@@ -5,11 +5,14 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 
 const DEFAULT_BUFFER_CAPACITY: usize = 512 * 1024; // 512 KiB
-// Per-channel lag/backlog bound for the sequence and legacy raw broadcast rings: 64 chunks
-// x 64 KiB = ~4 MiB worst-case backlog vs the 512 KiB ring = 8 chunks, still 8x headroom
-// over ring coverage. A smaller bound only increases Lagged frequency, which ReplayGap
-// recovery already handles by resyncing via snapshot_after.
+// Sequence-channel lag/backlog bound: 64 chunks x 64 KiB = ~4 MiB worst-case backlog vs
+// the 512 KiB ring = 8 chunks, still 8x headroom over ring coverage. A smaller bound only
+// increases Lagged frequency, which ReplayGap recovery already handles by resyncing via
+// snapshot_after.
 const BROADCAST_CAPACITY: usize = 64;
+// Legacy raw-byte channel keeps the pre-reduction capacity: its consumers have no sequence
+// metadata and no ReplayGap resynchronization, so lagging would silently drop output.
+const RAW_BROADCAST_CAPACITY: usize = 1024;
 const RESIZE_LEDGER_CAPACITY: usize = 4096;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -439,7 +442,7 @@ impl TerminalOutputHub {
         broadcast::Receiver<OutputChunk>,
     ) {
         let (tx, rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let (raw_tx, raw_rx) = broadcast::channel(BROADCAST_CAPACITY);
+        let (raw_tx, raw_rx) = broadcast::channel(RAW_BROADCAST_CAPACITY);
         let hub = SessionHub {
             machine_senders: Vec::new(),
             buffer: BoundedBuffer::new(self.capacity),
@@ -1173,22 +1176,44 @@ mod tests {
     }
 
     #[test]
-    fn raw_broadcast_backlog_is_bounded() {
-        // Given: a registered session whose raw broadcast receiver never drains.
+    fn seq_broadcast_backlog_is_bounded() {
+        // Given: a registered session whose sequence receiver never drains.
         let hub = TerminalOutputHub::new(1024);
-        let (mut raw_rx, _seq_rx) = hub.register_session_channels("t-lag");
+        let (_raw_rx, mut seq_rx) = hub.register_session_channels("t-lag");
 
-        // When: 70 chunks are published against the 64-slot broadcast ring.
+        // When: 70 chunks are published against the 64-slot sequence ring.
         for _ in 0..70 {
             hub.publish("t-lag", vec![0u8; 64]).expect("chunk published");
         }
 
         // Then: the receiver lags by exactly 70 - 64 = 6 skipped chunks instead of
-        // retaining the whole unbounded backlog.
+        // retaining the whole unbounded backlog. ReplayGap recovery resyncs lagged
+        // sequence subscribers from the ring snapshot.
         assert!(matches!(
-            raw_rx.try_recv(),
+            seq_rx.try_recv(),
             Err(broadcast::error::TryRecvError::Lagged(6))
         ));
+    }
+
+    #[test]
+    fn raw_channel_keeps_legacy_capacity() {
+        // Given: the legacy raw channel has no sequence metadata and no ReplayGap
+        // resync, so it must retain the pre-reduction capacity instead of lagging.
+        let hub = TerminalOutputHub::new(1024);
+        let (mut raw_rx, _seq_rx) = hub.register_session_channels("t-raw");
+
+        // When: 70 chunks are published (below the 1024-slot raw ring).
+        for _ in 0..70 {
+            hub.publish("t-raw", vec![0u8; 64]).expect("chunk published");
+        }
+
+        // Then: the raw receiver reads every chunk with no loss and no lag error.
+        for _ in 0..70 {
+            let chunk = raw_rx
+                .try_recv()
+                .expect("raw consumer never lags within legacy capacity");
+            assert_eq!(chunk.len(), 64);
+        }
     }
 
     #[test]

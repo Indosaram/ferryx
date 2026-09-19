@@ -1230,12 +1230,7 @@ impl DaemonSessionService {
                     }.subscribe(target)).transpose()
                 } else { Ok(None) };
                 tokio::spawn(async move {
-                    loop {
-                        match lifecycle_rx.recv().await {
-                            Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                            Err(broadcast::error::RecvError::Closed) => break,
-                        }
-                    }
+                    let _ = lifecycle_rx.changed().await;
                     match metadata_task {
                         Ok(Some(task)) => if let Err(error) = task.await { tracing::warn!(%error, "Machine metadata task failed"); },
                         Ok(None) => {},
