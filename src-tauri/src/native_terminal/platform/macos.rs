@@ -145,6 +145,51 @@ impl HasDisplayHandle for NativeChildViewHandle {
 pub struct MacosCompositorTarget {
     view_ptr: NonNull<c_void>,
     handle: Arc<NativeChildViewHandle>,
+    frame_latch: Arc<AppKitFrameLatch>,
+}
+
+/// Deduplicates identical AppKit frame applications for the child terminal view.
+///
+/// The key is the COMPUTED frame, never the incoming `LogicalBounds`. That distinction is
+/// load-bearing: the AppKit frame is derived from the superview height and its flipped-ness, so
+/// resizing the window moves the frame while the logical bounds are byte-for-byte unchanged.
+/// Latching on the logical bounds would swallow that reposition and strand the surface at a
+/// stale rectangle.
+#[derive(Debug, Default)]
+struct AppKitFrameLatch {
+    last_applied: std::sync::Mutex<Option<[u64; 5]>>,
+}
+
+impl AppKitFrameLatch {
+    /// Bit patterns, not tolerances: identical inputs recompute bit-identically, and any real
+    /// change - even a single ULP - must reach AppKit instead of being rounded away by an epsilon.
+    fn key(x: f64, y: f64, width: f64, height: f64, scale_factor: f64) -> [u64; 5] {
+        [
+            x.to_bits(),
+            y.to_bits(),
+            width.to_bits(),
+            height.to_bits(),
+            scale_factor.to_bits(),
+        ]
+    }
+
+    fn needs_apply(&self, next: [u64; 5]) -> bool {
+        let Ok(mut last) = self.last_applied.lock() else {
+            // A poisoned lock must never freeze the surface at a stale position.
+            return true;
+        };
+        if last.as_ref() == Some(&next) {
+            return false;
+        }
+        *last = Some(next);
+        true
+    }
+
+    fn invalidate(&self) {
+        if let Ok(mut last) = self.last_applied.lock() {
+            *last = None;
+        }
+    }
 }
 
 // SAFETY: `MacosCompositorTarget` owns the retained raw pointer to the `FerryxNativeTerminalView`.
@@ -156,7 +201,11 @@ unsafe impl Sync for MacosCompositorTarget {}
 ///
 /// Shared by both `update_viewport` paths so the main-thread and dispatched
 /// branches cannot drift apart.
-unsafe fn apply_viewport(view: &FerryxNativeTerminalView, bounds: Option<LogicalBounds>) {
+unsafe fn apply_viewport(
+    view: &FerryxNativeTerminalView,
+    bounds: Option<LogicalBounds>,
+    latch: &AppKitFrameLatch,
+) {
     unsafe {
         if let Some(window) = view.window() {
             configure_window_background(
@@ -167,6 +216,8 @@ unsafe fn apply_viewport(view: &FerryxNativeTerminalView, bounds: Option<Logical
             );
         }
         let Some(bounds) = bounds else {
+            // Hiding drops the applied frame so the next reveal re-applies unconditionally.
+            latch.invalidate();
             view.setHidden(true);
             view.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0)));
             return;
@@ -177,6 +228,17 @@ unsafe fn apply_viewport(view: &FerryxNativeTerminalView, bounds: Option<Logical
         let superview_bounds = superview.bounds();
         let is_flipped = superview.isFlipped();
         let appkit_frame = bounds.to_appkit_frame(superview_bounds.size.height, is_flipped);
+        // Every frame re-sends the pane rectangle; without this each one is a setFrame plus a
+        // layer reconfigure that moves the view to where it already is.
+        if !latch.needs_apply(AppKitFrameLatch::key(
+            appkit_frame.x,
+            appkit_frame.y,
+            appkit_frame.width,
+            appkit_frame.height,
+            bounds.scale_factor,
+        )) {
+            return;
+        }
         view.setFrame(NSRect::new(
             NSPoint::new(appkit_frame.x, appkit_frame.y),
             NSSize::new(appkit_frame.width, appkit_frame.height),
@@ -310,6 +372,7 @@ impl MacosCompositorTarget {
         Ok(Self {
             view_ptr: raw_view_ptr,
             handle,
+            frame_latch: Arc::new(AppKitFrameLatch::default()),
         })
     }
 
@@ -344,10 +407,11 @@ impl MacosCompositorTarget {
         if let Some(mtm) = MainThreadMarker::new() {
             let _ = mtm;
             let view = unsafe { &*(view_ptr as *const FerryxNativeTerminalView) };
-            unsafe { apply_viewport(view, bounds) };
+            unsafe { apply_viewport(view, bounds, &self.frame_latch) };
         } else {
+            let latch = Arc::clone(&self.frame_latch);
             dispatch2::DispatchQueue::main().exec_async(move || unsafe {
-                apply_viewport(&*(view_ptr as *const FerryxNativeTerminalView), bounds)
+                apply_viewport(&*(view_ptr as *const FerryxNativeTerminalView), bounds, &latch)
             });
         }
     }
@@ -445,5 +509,64 @@ impl Drop for MacosCompositorTarget {
                 }
             });
         }
+    }
+}
+
+
+#[cfg(test)]
+mod appkit_frame_latch_tests {
+    use super::AppKitFrameLatch;
+
+    #[test]
+    fn repeated_identical_frames_apply_once() {
+        let latch = AppKitFrameLatch::default();
+        let frame = AppKitFrameLatch::key(10.0, 20.0, 800.0, 480.0, 2.0);
+        assert!(latch.needs_apply(frame), "the first frame must reach AppKit");
+        for tick in 0..64 {
+            assert!(
+                !latch.needs_apply(frame),
+                "identical frame {tick} must not be re-applied"
+            );
+        }
+    }
+
+    #[test]
+    fn recomputed_origin_under_a_resized_superview_still_applies() {
+        // The regression this guards is latching on LogicalBounds instead of the computed frame:
+        // a superview height change moves the flipped-Y origin while the logical rect is identical,
+        // so a bounds-keyed latch would strand the surface at the old position.
+        let latch = AppKitFrameLatch::default();
+        let before = AppKitFrameLatch::key(0.0, 100.0, 800.0, 480.0, 2.0);
+        let after = AppKitFrameLatch::key(0.0, 260.0, 800.0, 480.0, 2.0);
+        assert!(latch.needs_apply(before));
+        assert!(
+            latch.needs_apply(after),
+            "a recomputed origin must reach AppKit"
+        );
+    }
+
+    #[test]
+    fn scale_factor_change_alone_applies() {
+        let latch = AppKitFrameLatch::default();
+        let at_1x = AppKitFrameLatch::key(0.0, 0.0, 800.0, 480.0, 1.0);
+        let at_2x = AppKitFrameLatch::key(0.0, 0.0, 800.0, 480.0, 2.0);
+        assert!(latch.needs_apply(at_1x));
+        assert!(
+            latch.needs_apply(at_2x),
+            "moving between displays changes contentsScale and must reach AppKit"
+        );
+    }
+
+    #[test]
+    fn invalidate_forces_the_next_frame_through() {
+        let latch = AppKitFrameLatch::default();
+        let frame = AppKitFrameLatch::key(4.0, 8.0, 100.0, 50.0, 2.0);
+        assert!(latch.needs_apply(frame));
+        assert!(!latch.needs_apply(frame));
+        latch.invalidate();
+        assert!(
+            latch.needs_apply(frame),
+            "hiding must force the next reveal to re-apply its frame"
+        );
     }
 }
