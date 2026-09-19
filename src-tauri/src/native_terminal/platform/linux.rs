@@ -242,6 +242,7 @@ pub struct LinuxCompositorTarget {
     child: Option<LinuxChild>,
     visibility: Mutex<ChildSurfaceVisibility>,
     geometry_latch: GeometryLatch,
+    wayland_geometry_latch: GeometryLatch<WaylandSubsurfaceGeometry>,
 }
 
 // SAFETY: `LinuxCompositorTarget` contains thread-safe handles.
@@ -333,6 +334,7 @@ impl LinuxCompositorTarget {
             child,
             visibility: Mutex::new(ChildSurfaceVisibility::default()),
             geometry_latch: GeometryLatch::default(),
+            wayland_geometry_latch: GeometryLatch::default(),
         })
     }
 
@@ -392,6 +394,12 @@ impl LinuxCompositorTarget {
                 let Some(geometry) = WaylandSubsurfaceGeometry::from_logical_bounds(bounds) else {
                     return;
                 };
+                // Identical geometry must not reach the compositor: a repeated
+                // wl_subsurface.set_position plus commit is a per-frame relayout for a
+                // subsurface that is already exactly where it belongs.
+                if !self.wayland_geometry_latch.needs_apply(geometry) {
+                    return;
+                }
                 child.set_geometry(
                     geometry.position_x,
                     geometry.position_y,

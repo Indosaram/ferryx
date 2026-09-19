@@ -48,14 +48,26 @@ impl ChildSurfaceGeometry {
 /// actually resized. Without this latch each frame issues a `SetWindowPos` / `setFrame` /
 /// `wl_subsurface.set_position` that asks the compositor to move a surface to where it already
 /// is, which is a per-frame relayout for every visible pane.
-#[derive(Debug, Default)]
-pub struct GeometryLatch {
-    last_applied: std::sync::Mutex<Option<ChildSurfaceGeometry>>,
+/// Generic over the geometry type because Wayland positions a subsurface in logical
+/// coordinates with an integer buffer scale and therefore cannot share X11/Win32's
+/// `ChildSurfaceGeometry`. The default parameter keeps every existing `GeometryLatch` use
+/// meaning `GeometryLatch<ChildSurfaceGeometry>`.
+#[derive(Debug)]
+pub struct GeometryLatch<T = ChildSurfaceGeometry> {
+    last_applied: std::sync::Mutex<Option<T>>,
 }
 
-impl GeometryLatch {
+impl<T> Default for GeometryLatch<T> {
+    fn default() -> Self {
+        Self {
+            last_applied: std::sync::Mutex::new(None),
+        }
+    }
+}
+
+impl<T: Copy + PartialEq> GeometryLatch<T> {
     /// Returns true only when `next` differs from the last applied geometry, recording it.
-    pub fn needs_apply(&self, next: ChildSurfaceGeometry) -> bool {
+    pub fn needs_apply(&self, next: T) -> bool {
         let Ok(mut last_applied) = self.last_applied.lock() else {
             // A poisoned latch must not silently freeze the surface in a stale position.
             return true;
@@ -192,4 +204,27 @@ mod geometry_latch_tests {
         latch.invalidate();
         assert!(latch.needs_apply(bounds), "after reattach the compositor no longer holds our geometry");
     }
+    #[test]
+    fn wayland_subsurface_geometry_latches_on_its_own_type() {
+        // Wayland positions in logical coords with an integer buffer scale, so it cannot share
+        // ChildSurfaceGeometry. The latch must still collapse identical geometry to one call.
+        use super::WaylandSubsurfaceGeometry;
+        let latch: GeometryLatch<WaylandSubsurfaceGeometry> = GeometryLatch::default();
+        let geometry = WaylandSubsurfaceGeometry {
+            position_x: 24,
+            position_y: 48,
+            buffer_scale: 2,
+            physical_width: 1600,
+            physical_height: 960,
+        };
+        assert!(latch.needs_apply(geometry), "first geometry must reach the compositor");
+        for tick in 0..32 {
+            assert!(!latch.needs_apply(geometry), "identical geometry {tick} must not re-apply");
+        }
+        let moved = WaylandSubsurfaceGeometry { position_x: 25, ..geometry };
+        assert!(latch.needs_apply(moved), "a one-pixel move must reach the compositor");
+        let rescaled = WaylandSubsurfaceGeometry { buffer_scale: 1, ..moved };
+        assert!(latch.needs_apply(rescaled), "an output scale change must reach the compositor");
+    }
+
 }
