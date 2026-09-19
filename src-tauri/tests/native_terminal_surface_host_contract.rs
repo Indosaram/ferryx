@@ -1060,6 +1060,51 @@ fn native_terminal_render_coordinator_coalesces_rapid_bursts_and_rearms_after_co
     );
 }
 
+#[test]
+fn idle_ticks_issue_zero_render_passes() {
+    // SC1: with nothing dirty and no geometry change, the coordinator must issue no work.
+    // The failure this pins is self-sustaining idle rendering: if a completed frame re-arms
+    // itself when no output arrived during it, the surface renders forever at display refresh
+    // and burns a fifth of a core doing nothing. That is the idle CPU cost this design targets.
+    let coordinator = RenderScheduleCoordinator::new();
+    let mut render_passes = 0usize;
+
+    // Exactly one output event, carried through a full frame.
+    assert!(
+        coordinator.schedule_render(),
+        "the first output event must schedule a frame"
+    );
+    render_passes += 1;
+    assert!(
+        coordinator.begin_render(),
+        "a scheduled frame must be able to begin"
+    );
+    assert!(
+        !coordinator.finish_render(),
+        "a frame that saw no new output must not re-arm itself"
+    );
+
+    // N ticks of an idle surface: no output, no geometry change, no visibility change.
+    for tick in 0..240 {
+        assert!(
+            !coordinator.is_render_pending(),
+            "idle tick {tick} must leave the coordinator idle"
+        );
+        assert!(
+            !coordinator.consume_render(),
+            "idle tick {tick} must have no frame to consume"
+        );
+        if coordinator.is_render_pending() {
+            render_passes += 1;
+        }
+    }
+
+    assert_eq!(
+        render_passes, 1,
+        "240 idle ticks must add zero render passes beyond the one real output event"
+    );
+}
+
 #[tokio::test]
 async fn native_terminal_surface_host_state_coalescing_seam_tracks_session_lifecycle() {
     let state = NativeTerminalSurfaceHostState::default();
