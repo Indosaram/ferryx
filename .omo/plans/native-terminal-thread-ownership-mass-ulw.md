@@ -197,3 +197,26 @@ GPU 작업 전에 드롭되고, 렌더 클로저 전체가 `run_on_main_thread` 
    직후 `finish_render`를 호출하면 유휴 0프레임 불변식이 깨진다.
 3. 하네스는 `RenderDispatch`로 디스패치를 가로채므로 실제 wgpu/AppKit을 검증하지 못한다.
    실제 표면 검증은 변경분이 포함된 빌드를 띄워야 가능하다.
+
+
+## R4 재개 지점 (정확한 경계)
+
+**이미 되어 있는 것 — 다시 만들지 말 것.**
+- `GpuWorker` (`thread_ownership.rs`)는 **미연결이지만 완전히 테스트됨**. 셋 다 sleep 없음:
+  off-thread 실행(스레드 id 비교), 제출 순서 FIFO + 단일 스레드(프레임 역전 불가),
+  shutdown이 큐를 비우고 join(진행 중 인코드와 teardown 경쟁 = 서피스 use-after-free 방지).
+- `UiThread`/`GpuThread` 토큰은 `!Send`이고 그 사실이 컴파일로 강제됨(`E0283`로 증명).
+- CI 게이트는 `ui-check`에 연결되어 있고 게이트 자신의 테스트도 CI에서 돈다.
+
+**남은 것은 배선 하나뿐이다.** `surface_host.rs` 렌더 경로를 2회 홉으로 바꾸는 것:
+`UiThread(지오메트리) → GpuThread(acquire/encode/present) → UiThread(reveal)`.
+
+**착수 전에 반드시 읽을 것:** 설계 문서 §12.5~12.10. 특히
+- §12.7 막힘 A/B (`&mut host` 빌림이 UI 레그 쓰기와 연속, 영수증 되돌리기)
+- §12.10 **컴파일되지만 입력을 삼키는 우회** — 가장 빠지기 쉬운 함정
+- §12.8 왜 이게 유일한 진짜 수정인지 (블로킹 acquire × 패널당 디바이스)
+
+**검증 순서(타협 금지):** 스케줄링 구조 먼저 → 가짜 GPU를 주입해 **스레드 id로** GPU 레그가
+다른 스레드에서 도는 것 증명 → 진짜 wgpu는 **맨 마지막**. 현재 테스트 하네스는 dispatch를
+가로채므로 real wgpu/AppKit을 전혀 건드리지 않는다. **green이어도 실제 터미널에 대해서는
+아무것도 증명하지 못한다.** 실기 확인 없이 기본 활성화로 내보내지 말 것.
