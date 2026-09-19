@@ -10,7 +10,7 @@ const acquireOutsideClosure = `
 fn render(window: &Window) {
     let frame = surface.get_current_texture().unwrap();
     let _ = window.run_on_main_thread(move || {
-        host.present(frame);
+        host.finish_presentation(window);
     });
 }
 `;
@@ -18,7 +18,7 @@ const acquireInsideClosure = `
 fn render(window: &Window) {
     let _ = window.run_on_main_thread(move || {
         let frame = surface.get_current_texture().unwrap();
-        host.present(frame);
+        host.finish_presentation(window);
     });
 }
 `;
@@ -83,3 +83,21 @@ test("adapter requests inside a run_on_main_thread closure are rejected", async 
 test("the shipped backend tree holds the policy", async () => {
   expect(await scanThreadPolicy()).toEqual([]);
 });
+
+for (const dispatch of ["window.run_on_main_thread", "dispatch_render_on_main_thread"]) {
+  for (const call of ["queue.submit(commands)", "frame.present()", "renderer.render_to_surface_viewport(snapshot)"]) {
+    test(`${dispatch} rejects ${call}`, async () => {
+      const directory = join(fixtureRoot, `${dispatch}-${call.split("(")[0]}`);
+      await Bun.write(join(directory, "render.rs"), `
+fn render() {
+    ${dispatch}(move || {
+        ${call};
+    });
+}
+`);
+      const violations = await scanThreadPolicy([directory]);
+      expect(violations).toHaveLength(1);
+      expect(violations[0].text).toContain(call);
+    });
+  }
+}

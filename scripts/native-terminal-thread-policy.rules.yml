@@ -18,6 +18,9 @@ rule:
         - pattern: $A.request_adapter($$$)
         - pattern: $A.request_device($$$)
         - pattern: $A.acquire_surface_frame($$$)
+        - pattern: $A.submit($$$)
+        - pattern: $A.present($$$)
+        - pattern: $A.render_to_surface_viewport($$$)
     # Both spellings matter. The codebase does not call run_on_main_thread at the render site;
     # it hands a closure to dispatch_render_on_main_thread, which calls it. Matching only the
     # direct form left the real dispatch path unguarded and the gate reporting a clean tree.
