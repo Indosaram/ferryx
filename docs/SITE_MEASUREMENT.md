@@ -89,6 +89,25 @@ Use Realtime or DebugView to validate an intentional test visit. Ordinary report
 and custom dimensions can take time to populate. A successful browser collection
 request alone does not prove that the correct property received the event.
 
+### Separating QA traffic
+
+Local visits on `localhost`, `127.0.0.1`, and `[::1]` set GA `debug_mode: true`
+after consent. For an intentional production check, add `?analytics_debug=1`
+(or `&analytics_debug=1` after existing query parameters). This flag is not
+included in the reported page URL and does not bypass consent. Ordinary visits
+omit `debug_mode` entirely; `utm_source=qa` alone does not enable it.
+
+The flag applies to the current page only. Add it to each page tested on the
+production origin. Use DebugView to inspect those events and a developer-traffic
+filter to distinguish or exclude them from acquisition reports. A filter in
+**Testing** state labels matching traffic but does not discard it; **Active**
+exclusion changes future processing and cannot remove old QA events retroactively.
+
+The browser QA script asserts a debug marker (`ep.debug_mode=true` in the
+verified Google tag version) on both page and download network events.
+It must not silently generate ordinary production traffic.
+See [Google's DebugView documentation](https://support.google.com/analytics/answer/7201382?hl=en).
+
 ## Search registration
 
 1. Verify `https://ferryx.dev/` in Google Search Console using the configured HTML

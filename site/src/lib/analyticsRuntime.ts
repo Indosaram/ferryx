@@ -165,7 +165,10 @@ export function startAnalytics(win: Window = window): void {
 
     // page_location is pinned on the config, not just on the page_view: gtag.js otherwise
     // recomputes `dl` from location.href for every later hit and would ship the raw query.
+    const debugMode = ['localhost', '127.0.0.1', '[::1]'].includes(win.location.hostname) ||
+      new URLSearchParams(win.location.search).get('analytics_debug') === '1';
     gtag('config', measurementId, {
+      ...(debugMode ? { debug_mode: true } : {}),
       send_page_view: false,
       allow_google_signals: false,
       allow_ad_personalization_signals: false,

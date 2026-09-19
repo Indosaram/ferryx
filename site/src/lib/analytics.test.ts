@@ -13,7 +13,7 @@ import {
   resolveSiteAnalyticsConfig,
   sanitizePageLocation,
 } from './analytics';
-import { MICROSOFT_STORE_URL, PLATFORMS, type PlatformId } from './downloads';
+import { MICROSOFT_STORE_SEARCH_URL, PLATFORMS, type PlatformId } from './downloads';
 
 const CONTENT_ROOT = path.resolve(import.meta.dir, '..', 'content', 'docs');
 
@@ -138,7 +138,7 @@ describe('analytics contract — download classification', () => {
   });
 
   test('microsoft store links count as windows install intent', () => {
-    const target = classifyDownloadTarget(MICROSOFT_STORE_URL);
+    const target = classifyDownloadTarget(MICROSOFT_STORE_SEARCH_URL);
     expect(target).toEqual({ platform: 'windows', assetId: 'windows-store', destination: 'microsoft_store' });
     expect(classifyDownloadTarget('https://apps.microsoft.com/detail/9NFERRYX0001?hl=en-us')).toEqual({
       platform: 'windows',
@@ -171,9 +171,9 @@ describe('analytics contract — download classification', () => {
       assetId: 'ferryx_aarch64.rpm',
       destination: 'github_release_asset',
     });
-    expect(classifyDownloadTarget('https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_x64-setup.exe')).toEqual({
+    expect(classifyDownloadTarget('https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_x64.msix')).toEqual({
       platform: 'windows',
-      assetId: 'ferryx_x64-setup.exe',
+      assetId: 'ferryx_x64.msix',
       destination: 'github_release_asset',
     });
     expect(classifyDownloadTarget('https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx.sig')?.platform).toBe('unknown');

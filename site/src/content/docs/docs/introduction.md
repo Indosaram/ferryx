@@ -24,10 +24,10 @@ Most of Ferryx reduces to six concepts.
 
 ## Install
 
-Download from the [releases page](https://github.com/Indosaram/ferryx/releases/latest); the links below resolve against the latest release.
+Download from the [releases page](https://github.com/Indosaram/ferryx/releases/latest); the links below resolve against the latest release. Releases are calendar-versioned, so the newest tag is the one the release page shows.
 
 - **macOS**: universal DMG for Apple Silicon and Intel, [Ferryx_universal.dmg](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_universal.dmg)
-- **Windows**: [Microsoft Store](https://apps.microsoft.com/search?query=Ferryx), x64, with auto-updates
+- **Windows**: x64 installer, [Ferryx_x64-setup.exe](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_x64-setup.exe). It isn't code-signed yet, so SmartScreen warns on first run; check the SHA-256 below before you run it. There is no Microsoft Store listing today, and the MSIX in the release is an unsigned Store-ingestion package rather than something you can install directly.
 - **Linux**: [Ferryx_amd64.AppImage](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.AppImage) or [Ferryx_amd64.deb](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.deb), both x64
 
 Each release also publishes a `SHA256SUMS.txt` beside the binaries, so you can check a download before running it:
@@ -57,4 +57,4 @@ The command palette (⌘K) is there if you'd rather browse actions than memorize
 
 ## Status
 
-Ferryx is at v0.1.0-alpha. The core is usable, but expect rough edges and breaking changes between releases. Terminal sessions and daemon communication work on macOS, Windows, and Linux; a few OS integrations, such as Dock badge counters and launchd supervision, are macOS-only today. Questions and bug reports are welcome in the [Discord](https://discord.gg/Z2hBkQEHUG).
+Ferryx is early software: the core is usable, but expect rough edges and breaking changes between releases. Releases are calendar-versioned and published frequently, so check the [releases page](https://github.com/Indosaram/ferryx/releases/latest) for the current build and its notes. Terminal sessions and daemon communication work on macOS, Windows, and Linux; a few OS integrations, such as Dock badge counters and launchd supervision, are macOS-only today. Questions and bug reports are welcome in the [Discord](https://discord.gg/Z2hBkQEHUG).

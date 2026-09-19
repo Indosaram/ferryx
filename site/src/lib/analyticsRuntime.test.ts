@@ -8,7 +8,7 @@ import {
   mountConsentUi,
   startAnalytics,
 } from './analyticsRuntime';
-import { MICROSOFT_STORE_URL, PLATFORMS } from './downloads';
+import { MICROSOFT_STORE_SEARCH_URL, PLATFORMS } from './downloads';
 
 // jsdom is already vendored for the desktop UI test suite; the site adds no dependency for it.
 // Loading it once keeps the DOM contract tests honest about real capture-phase delegation.
@@ -115,6 +115,21 @@ beforeEach(() => {
 });
 
 describe('analytics runtime — unconfigured builds', () => {
+  test.each(['http://localhost:14173/', 'http://127.0.0.1:14173/', 'https://ferryx.dev/?analytics_debug=1'])(
+    'QA traffic sets debug_mode after consent at %s', (url) => {
+      const h = mount({ url });
+      expect(h.gtagCalls()).toEqual([]);
+      click(h.accept);
+      expect(calls(h, 'config')[0]?.[2]).toMatchObject({ debug_mode: true });
+    },
+  );
+
+  test('ordinary campaign traffic does not enable debug mode', () => {
+    const h = mount({ url: 'https://ferryx.dev/?utm_source=qa&analytics_debug=0' });
+    click(h.accept);
+    expect(calls(h, 'config')[0]?.[2]).not.toHaveProperty('debug_mode');
+  });
+
   test('an empty measurement id ships no consent prompt and no Google contact', () => {
     const h = mount({ measurementId: '' });
     expect(h.host.hasAttribute('hidden')).toBe(true);
@@ -396,7 +411,7 @@ describe('analytics runtime — download tracking', () => {
 
   test('a Microsoft Store click is counted as a windows install intent', () => {
     const h = mount({ stored: 'granted' });
-    click(anchor(h, MICROSOFT_STORE_URL, 'docs_markdown'));
+    click(anchor(h, MICROSOFT_STORE_SEARCH_URL, 'docs_markdown'));
     expect(downloadEvents(h)).toEqual([
       {
         platform: 'windows',

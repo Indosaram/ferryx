@@ -1,7 +1,9 @@
 import { Github } from "lucide-react";
 import { DiscordIcon } from "@/components/ui/PlatformIcons";
 import { DISCORD_INVITE_URL } from "@/lib/links";
-import ferryxIcon from "@/assets/ferryx-icon.png";
+// Rendered at 24 CSS px. Shares the navbar's 96px asset so the landing page never fetches
+// the 806 KB 1024x1024 original, which Starlight still uses for its own logo slot.
+import ferryxIcon from "@/assets/ferryx-icon-96.png";
 
 const iconSrc = typeof ferryxIcon === 'object' && ferryxIcon !== null && 'src' in ferryxIcon ? (ferryxIcon as { src: string }).src : String(ferryxIcon);
 

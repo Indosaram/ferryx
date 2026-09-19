@@ -52,7 +52,7 @@ The website can use Google Analytics 4, and only with your explicit permission:
 When you allow analytics, the site records:
 
 - **`page_view`:** Sent once per page load, replacing the automatic page view so the reported URL can be sanitized first (`site/src/lib/analyticsRuntime.ts:161-184`).
-- **`download_click`:** Sent when you click a release artifact link (`.dmg`, `.AppImage`, `.deb`, `ferryx-cli`) or a Microsoft Store link, with the parameters `platform`, `asset_id`, `destination`, and `link_location` (`site/src/lib/analytics.ts:127-160`). Opening the GitHub releases listing page is not recorded as a download.
+- **`download_click`:** Sent when you click a release artifact link (including `.dmg`, `.exe`, `.AppImage`, `.deb`, and versioned `ferryx-cli` artifacts), with the parameters `platform`, `asset_id`, `destination`, and `link_location` (`site/src/lib/analytics.ts`). The classifier also recognises Microsoft Store links, but the current menu offers the GitHub Windows installer, not a Store listing. Opening the GitHub releases listing page is not recorded as a download.
 
 What is deliberately not collected:
 

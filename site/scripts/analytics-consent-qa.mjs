@@ -6,6 +6,7 @@
 //
 // QA_CHROMIUM may point at a Playwright Chromium binary when the default download is absent.
 import path from 'node:path';
+import assert from 'node:assert/strict';
 import { existsSync, statSync, mkdirSync } from 'node:fs';
 import { chromium, devices } from '../../ui/node_modules/playwright/index.mjs';
 
@@ -122,7 +123,17 @@ async function session(name, contextOptions) {
     events: [...hit.matchAll(/(?:[?&\n]|^)en=([^&\n|]+)/g)].map((m) => m[1]),
     reportedUrl: /[?&]dl=([^&|]*)/.exec(hit)?.[1] ?? null,
     leaksQuery: hit.includes(LEAK),
+    debug: /(?:[?&\n]|^)(?:_dbg=1|ep\.debug_mode=true|epn\.debug_mode=1)(?:[&\n|]|$)/.test(hit),
   }));
+
+  assert.equal(before.googleRequests, 0);
+  assert.equal(afterDecline.googleRequests, 0);
+  assert.deepEqual(consoleErrors, []);
+  const eventHits = networkHits.filter((hit) => hit.events.length > 0);
+  assert.ok(eventHits.some((hit) => hit.events.includes('page_view')));
+  assert.ok(eventHits.some((hit) => hit.events.includes('download_click')));
+  assert.ok(eventHits.every((hit) => hit.debug), 'Local QA events must carry the GA debug marker');
+  assert.ok(networkHits.every((hit) => !hit.leaksQuery));
 
   results.push({
     name,

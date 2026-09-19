@@ -22,7 +22,7 @@ pseudoterminals so sessions outlive the window.
 | Project name | Ferryx | `src-tauri/tauri.conf.json` (`productName`) |
 | Bundle identifier | `com.ferryx.app` | `src-tauri/tauri.conf.json` |
 | License | Sustainable Use License 1.0 (SUL-1.0), source-available; permits your own internal business purposes, non-commercial use, or personal use | [`LICENSE`](https://github.com/Indosaram/ferryx/blob/main/LICENSE) |
-| Current release | See the latest published release and its release notes | [Releases](https://github.com/Indosaram/ferryx/releases/latest) |
+| Current release | Calendar-versioned (`vYYYY.MM.DD.N`); see the latest published release and its notes | [Releases](https://github.com/Indosaram/ferryx/releases/latest) |
 | Source repository | `github.com/Indosaram/ferryx` | GitHub |
 | Price | Free to download | [Releases](https://github.com/Indosaram/ferryx/releases/latest) |
 
@@ -35,11 +35,18 @@ full terms.
 
 | Platform | Package | Requirement |
 | :--- | :--- | :--- |
-| macOS | Universal DMG (Apple Silicon and Intel) | macOS 10.15+ |
-| Windows | Microsoft Store (MSIX, auto-updating) | Windows 10/11 x64 with WebView2 |
+| macOS | Universal DMG (Apple Silicon and Intel), signed and notarised | macOS 10.15+ |
+| Windows | `Ferryx_x64-setup.exe` installer, not code-signed yet | Windows 10/11 x64 with WebView2 |
 | Linux | AppImage (x86_64) | glibc 2.31+, WebKitGTK 4.0/4.1 with GTK 3 |
 | Linux | Debian/Ubuntu `.deb` (x86_64) | glibc 2.31+, WebKitGTK 4.0/4.1 with GTK 3 |
 | Linux headless | `ferryx-cli` single binary, PTY daemon and CLI (x86_64) | No GUI or WebKit dependency |
+
+There is no Microsoft Store listing: the Store catalogue returns no Ferryx product, and the
+`Ferryx_x64.msix` in each release is an unsigned Store-ingestion package, not an installable one.
+Windows users install the `.exe`, which self-updates. `ferryx-cli` is not published by every
+release; the most recent one that publishes it is
+[v2026.09.11.1](https://github.com/Indosaram/ferryx/releases/download/v2026.09.11.1/ferryx-cli),
+and it can otherwise be built from source with `cargo build --release --bin ferryx-cli`.
 
 Every release publishes `SHA256SUMS.txt` beside the binaries, so a download can be checked with
 `sha256sum -c SHA256SUMS.txt` before it is run.

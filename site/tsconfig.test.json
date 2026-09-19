@@ -1,0 +1,11 @@
+{
+  // `bun test --cwd site` program: bun's globals (bun:test, import.meta.dir, Bun.*) are only
+  // valid here. They cannot join the browser program above because bun-types redeclares
+  // Uint8Array.fromBase64 as required while the desktop UI declares it optional.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["bun", "astro/client"]
+  },
+  "include": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/**/*.d.ts"],
+  "exclude": []
+}
