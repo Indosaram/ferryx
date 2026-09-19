@@ -2728,15 +2728,20 @@ impl NativeTerminalSurfaceHost {
             });
         }
         match &mut self.frame_target {
-            HostFrameTarget::Native(target) => target.render_snapshot(
-                window,
-                self.logical_bounds,
-                layout,
-                snapshot,
-                selection,
-                scrollbar_overlay,
-                attention_frame,
-            ),
+            HostFrameTarget::Native(target) => {
+                let receipt = target.render_snapshot(
+                    self.logical_bounds,
+                    layout,
+                    snapshot,
+                    selection,
+                    scrollbar_overlay,
+                    attention_frame,
+                )?;
+                if receipt.presented {
+                    target.finish_presentation(window);
+                }
+                Ok(receipt)
+            }
             #[cfg(test)]
             HostFrameTarget::Injected(target) => target.render_snapshot(layout, snapshot),
         }
@@ -2829,9 +2834,15 @@ impl NativeSurfaceFrameTarget {
         })
     }
 
-    fn render_snapshot<R: Runtime>(
+    // Runs only when a frame was actually presented: the no-frame path returns a receipt with
+    // `presented` unset and must not touch AppKit, or a suspended surface would be revealed.
+    fn finish_presentation<R: Runtime>(&mut self, window: &Window<R>) {
+        self.target.reveal_after_present();
+        self.target.restore_first_responder(window);
+    }
+
+    fn render_snapshot(
         &mut self,
-        window: &Window<R>,
         logical_bounds: Option<LogicalBounds>,
         layout: SurfaceCompositionLayout,
         snapshot: &RenderSnapshot,
@@ -2934,8 +2945,6 @@ impl NativeSurfaceFrameTarget {
             attention_frame,
         )?;
         self.renderer.present(frame);
-        self.target.reveal_after_present();
-        self.target.restore_first_responder(window);
         Ok(NativeTerminalSurfaceReceipt {
             presented: true,
             ..NativeTerminalSurfaceReceipt::from_snapshot(
