@@ -2054,6 +2054,8 @@ impl NativeTerminalSurfaceHostState {
                             }
                         }
                     }
+                    DaemonStreamMessage::DagRunUpdated { .. }
+                    | DaemonStreamMessage::DagInventory { .. } => {}
                     DaemonStreamMessage::Exit { .. } => {
                         update_sender.send_replace(());
                         break;
@@ -2691,7 +2693,7 @@ impl NativeTerminalSurfaceHost {
 
     fn update_config(&mut self, config: RendererConfig) -> Result<(), NativeTerminalError> {
         match &mut self.frame_target {
-            HostFrameTarget::Native(target) => target.renderer.update_config(config),
+            HostFrameTarget::Native(target) => target.leg.renderer.update_config(config),
             #[cfg(test)]
             HostFrameTarget::Injected(target) => {
                 target.cell_metrics = CellMetrics {
@@ -2716,8 +2718,8 @@ impl NativeTerminalSurfaceHost {
         if synchronized_output {
             let cell_metrics = match &self.frame_target {
                 HostFrameTarget::Native(target) => CellMetrics {
-                    width_px: target.renderer.config().cell_width_px,
-                    height_px: target.renderer.config().cell_height_px,
+                    width_px: target.leg.renderer.config().cell_width_px,
+                    height_px: target.leg.renderer.config().cell_height_px,
                 },
                 #[cfg(test)]
                 HostFrameTarget::Injected(target) => target.cell_metrics,
@@ -2731,7 +2733,7 @@ impl NativeTerminalSurfaceHost {
         }
         match &mut self.frame_target {
             HostFrameTarget::Native(target) => {
-                let receipt = target.render_snapshot(
+                let receipt = target.leg.render_snapshot(
                     self.logical_bounds,
                     layout,
                     snapshot,
@@ -2784,21 +2786,32 @@ fn acquire_surface_frame(
     })
 }
 
+/// GPU-owned half of a native frame target: exactly the state the render pass touches, and
+/// nothing that talks to the window server. Split out so the render pass can move to a GPU worker
+/// thread while the child view stays on the UI thread, where the platform requires it.
+struct GpuLeg {
+    surface: wgpu::Surface<'static>,
+    renderer: NativeTerminalRenderer,
+    format: wgpu::TextureFormat,
+    size: PhysicalSize<u32>,
+}
+
 /// Native WGPU surface, platform compositor child view, and renderer.
 ///
 /// # Drop Order Invariant
 ///
 /// In Rust, struct fields are dropped in top-to-bottom declaration order.
-/// 1. `surface` MUST drop before `target`: The WGPU `Surface` (and its internal Metal layer) must
-///    be dropped and destroyed while the native child NSView (`target`) is still valid and parented.
-/// 2. `target` drops after `surface`: Unparents (`removeFromSuperview`) and releases the child NSView.
-/// 3. `renderer` drops: Releases GPU device, pipelines, and glyph atlas resources.
+/// 1. `leg` (which owns `surface`) MUST drop before `target`: the WGPU `Surface` and its internal
+///    Metal layer must be destroyed while the native child NSView (`target`) is still valid and
+///    parented.
+/// 2. `target` drops after: unparents (`removeFromSuperview`) and releases the child NSView.
+/// 3. The renderer inside `leg` drops with it: GPU device, pipelines, and glyph atlas.
+///
+/// Sending `leg` to a worker thread converts this from a layout property into a runtime
+/// obligation: an in-flight leg must be reclaimed before `target` may be destroyed.
 struct NativeSurfaceFrameTarget {
-    surface: wgpu::Surface<'static>,
+    leg: GpuLeg,
     target: PlatformCompositorTarget,
-    renderer: NativeTerminalRenderer,
-    format: wgpu::TextureFormat,
-    size: PhysicalSize<u32>,
 }
 
 impl NativeSurfaceFrameTarget {
@@ -2828,11 +2841,13 @@ impl NativeSurfaceFrameTarget {
         let size = PhysicalSize::new(1, 1);
         let format = renderer.configure_surface(&surface, size.width, size.height)?;
         Ok(Self {
-            surface,
+            leg: GpuLeg {
+                surface,
+                renderer,
+                format,
+                size,
+            },
             target,
-            renderer,
-            format,
-            size,
         })
     }
 
@@ -2843,6 +2858,9 @@ impl NativeSurfaceFrameTarget {
         self.target.restore_first_responder(window);
     }
 
+}
+
+impl GpuLeg {
     fn render_snapshot(
         &mut self,
         logical_bounds: Option<LogicalBounds>,
