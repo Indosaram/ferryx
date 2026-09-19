@@ -158,6 +158,7 @@ pub struct MacosCompositorTarget {
 #[derive(Debug, Default)]
 struct AppKitFrameLatch {
     last_applied: std::sync::Mutex<Option<[u64; 5]>>,
+    revealed: std::sync::atomic::AtomicBool,
 }
 
 impl AppKitFrameLatch {
@@ -185,10 +186,21 @@ impl AppKitFrameLatch {
         true
     }
 
+    /// True exactly once per hidden -> shown transition. `reveal` runs after every present, so
+    /// without this each frame re-enters AppKit - and off the main thread that means enqueueing a
+    /// main-queue block per frame. `invalidate` re-arms it because hiding must stay undoable.
+    fn should_reveal(&self) -> bool {
+        !self
+            .revealed
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+    }
+
     fn invalidate(&self) {
         if let Ok(mut last) = self.last_applied.lock() {
             *last = None;
         }
+        self.revealed
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -477,6 +489,9 @@ impl MacosCompositorTarget {
     /// Reveals the child view by unhiding it. Must only be called after
     /// the first rendered frame has been presented.
     pub fn reveal(&self) {
+        if !self.frame_latch.should_reveal() {
+            return;
+        }
         let view_ptr = self.view_ptr.as_ptr() as usize;
         if let Some(mtm) = MainThreadMarker::new() {
             let _ = mtm;
@@ -567,6 +582,37 @@ mod appkit_frame_latch_tests {
         assert!(
             latch.needs_apply(frame),
             "hiding must force the next reveal to re-apply its frame"
+        );
+    }
+}
+
+#[cfg(test)]
+mod reveal_latch_tests {
+    use super::AppKitFrameLatch;
+
+    #[test]
+    fn first_reveal_maps_and_the_rest_are_dropped() {
+        let latch = AppKitFrameLatch::default();
+        assert!(latch.should_reveal(), "the first present must map the view");
+        for _ in 0..64 {
+            assert!(
+                !latch.should_reveal(),
+                "a steady stream of presents must not re-enter AppKit"
+            );
+        }
+    }
+
+    #[test]
+    fn hiding_re_arms_so_the_view_can_come_back() {
+        let latch = AppKitFrameLatch::default();
+        assert!(latch.should_reveal());
+        assert!(!latch.should_reveal());
+        // update_viewport(None) hides the view and invalidates; a one-shot latch would
+        // strand it hidden forever.
+        latch.invalidate();
+        assert!(
+            latch.should_reveal(),
+            "a hidden view must be revealable again"
         );
     }
 }
