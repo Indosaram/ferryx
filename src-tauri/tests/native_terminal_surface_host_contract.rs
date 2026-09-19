@@ -3,7 +3,7 @@ use ferryx_lib::native_terminal::composition::{
     CellMetrics, CompositorTargetKind, LogicalBounds, PhysicalBounds, PlatformCompositorDescriptor,
 };
 use ferryx_lib::native_terminal::surface_host::{
-    snapshot_for_layout, NativeTerminalBellPayload, NativeTerminalBoundsRequest,
+    snapshot_for_layout, FrameClock, NativeTerminalBellPayload, NativeTerminalBoundsRequest,
     NativeTerminalEvent, NativeTerminalSurfaceHostState, NativeTerminalTitlePayload,
     RenderScheduleCoordinator,
 };
@@ -1548,4 +1548,44 @@ async fn input_and_paste_while_scrolled_up_scrolls_viewport_to_bottom() {
             Ok(())
         })
         .expect("verify scrollbar at bottom after paste");
+}
+
+#[test]
+fn idle_frame_clock_paces_a_burst_to_one_frame_per_interval() {
+    let interval = std::time::Duration::from_millis(8);
+    let clock = FrameClock::new(interval);
+    let start = std::time::Instant::now();
+
+    assert_eq!(
+        clock.delay_before_next_frame(start),
+        std::time::Duration::ZERO,
+        "the very first frame must never be delayed"
+    );
+
+    clock.mark_frame_started(start);
+
+    // The state-machine coalescing test above would pass without any clock at all: it never
+    // advances time. This pins the other half - that output arriving inside the interval is
+    // paced rather than dispatched, which is what stops a burst becoming a frame per byte.
+    for elapsed_ms in [0u64, 1, 4, 7] {
+        let now = start + std::time::Duration::from_millis(elapsed_ms);
+        assert!(
+            clock.delay_before_next_frame(now) > std::time::Duration::ZERO,
+            "output {elapsed_ms}ms into an 8ms interval must wait, not start a frame"
+        );
+    }
+
+    assert_eq!(
+        clock.delay_before_next_frame(start + interval),
+        std::time::Duration::ZERO,
+        "once the interval has elapsed the next frame may start immediately"
+    );
+
+    // Idle means idle: letting the clock run far past the interval never accrues a debt that
+    // would fire a burst of catch-up frames.
+    assert_eq!(
+        clock.delay_before_next_frame(start + interval * 30),
+        std::time::Duration::ZERO,
+        "a long idle period must not queue catch-up frames"
+    );
 }
