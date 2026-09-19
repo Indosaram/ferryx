@@ -25,7 +25,7 @@ use raw_window_handle::{
 use tauri::{Runtime, Window};
 
 use crate::native_terminal::child_surface::{
-    ChildSurfaceGeometry, ChildSurfaceVisibility, WaylandSubsurfaceGeometry,
+    ChildSurfaceGeometry, ChildSurfaceVisibility, GeometryLatch, WaylandSubsurfaceGeometry,
 };
 use crate::native_terminal::composition::{
     CompositorTargetKind, LogicalBounds, PlatformCompositorDescriptor,
@@ -241,6 +241,7 @@ pub struct LinuxCompositorTarget {
     handle: Arc<NativeChildViewHandle>,
     child: Option<LinuxChild>,
     visibility: Mutex<ChildSurfaceVisibility>,
+    geometry_latch: GeometryLatch,
 }
 
 // SAFETY: `LinuxCompositorTarget` contains thread-safe handles.
@@ -331,6 +332,7 @@ impl LinuxCompositorTarget {
             handle,
             child,
             visibility: Mutex::new(ChildSurfaceVisibility::default()),
+            geometry_latch: GeometryLatch::default(),
         })
     }
 
@@ -366,6 +368,11 @@ impl LinuxCompositorTarget {
                 let Some(geometry) = ChildSurfaceGeometry::from_logical_bounds(bounds) else {
                     return;
                 };
+                // Identical bounds must not reach X11: every frame re-sends the pane rectangle,
+                // so without this each frame is an XMoveResizeWindow round trip to no effect.
+                if !self.geometry_latch.needs_apply(geometry) {
+                    return;
+                }
                 // SAFETY: the child window and display belong to this target and stay valid
                 // until drop.
                 unsafe {
