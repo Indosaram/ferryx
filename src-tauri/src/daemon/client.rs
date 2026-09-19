@@ -207,6 +207,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::SubscribeRemoteEvents => "subscribeRemoteEvents",
         DaemonRequest::UpgradeBinary { .. } => "upgradeBinary",
         DaemonRequest::PrepareHandover => "prepareHandover",
+        DaemonRequest::TransferSessions { .. } => "transferSessions",
         DaemonRequest::CommitHandover { .. } => "commitHandover",
         DaemonRequest::AbortHandover => "abortHandover",
         DaemonRequest::UploadClipboardImage { .. } => "uploadClipboardImage",

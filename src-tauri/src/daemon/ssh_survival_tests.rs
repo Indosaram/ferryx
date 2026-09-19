@@ -97,7 +97,7 @@ async fn ssh_reconnect_safety_proxy_preserves_gap_marker() {
 fn ssh_reconnect_safety_retry_is_additive_protocol() {
     let request: DaemonRequest = serde_json::from_value(serde_json::json!({"type":"retryRemoteSession","sessionId":"original"})).unwrap();
     assert!(matches!(request, DaemonRequest::RetryRemoteSession { session_id } if session_id == "original"));
-    assert_eq!(DAEMON_PROTOCOL_VERSION, 4);
+    assert_eq!(DAEMON_PROTOCOL_VERSION, 5);
 }
 
 #[tokio::test]

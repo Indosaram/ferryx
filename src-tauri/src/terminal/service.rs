@@ -28,6 +28,7 @@ impl Default for TerminalService {
 
 impl TerminalService {
     pub fn new(pty_manager: Arc<PtyManager>, output_hub: Arc<TerminalOutputHub>) -> Self {
+        pty_manager.set_output_hub(output_hub.clone());
         Self {
             remote: Arc::new(super::remote::RemoteRuntime::new(output_hub.clone())),
             paired: Arc::new(super::paired_runtime::Runtime::default()),

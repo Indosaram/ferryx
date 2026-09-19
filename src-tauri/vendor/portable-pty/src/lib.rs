@@ -52,6 +52,8 @@ pub use cmdbuilder::CommandBuilder;
 
 #[cfg(unix)]
 pub mod unix;
+#[cfg(unix)]
+pub use unix::{master_from_owned_fd, OwnedFd, UnixMasterPty, UnixSlavePty};
 #[cfg(windows)]
 pub mod win;
 
@@ -168,6 +170,12 @@ impl_downcast!(ChildKiller);
 pub trait SlavePty {
     /// Spawns the command specified by the provided CommandBuilder
     fn spawn_command(&self, cmd: CommandBuilder) -> Result<Box<dyn Child + Send + Sync>, Error>;
+
+    /// If applicable on Unix, returns the raw file descriptor for the slave pty.
+    #[cfg(unix)]
+    fn as_raw_fd(&self) -> Option<unix::RawFd> {
+        None
+    }
 }
 
 /// Represents the exit status of a child process.

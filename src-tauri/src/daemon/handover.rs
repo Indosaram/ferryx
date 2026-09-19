@@ -18,6 +18,31 @@ pub enum HandoverStatus {
     Retired,
 }
 
+pub fn is_v5_ownership_transfer_enabled() -> bool {
+    #[cfg(unix)]
+    {
+        std::env::var("FERRYX_HANDOVER_V5")
+            .map(|v| v == "1" || v.to_lowercase() == "true")
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HandoverV5Metrics {
+    pub freeze_duration_ms: u64,
+    pub session_count: usize,
+    pub fd_count: usize,
+    pub rollback_reason: Option<String>,
+    pub commit_latency_ms: u64,
+    pub predecessor_exit_latency_ms: u64,
+    pub writer_pid: u32,
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -123,6 +148,41 @@ mod tests {
                 sessions: Vec::new(),
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn handover_v5_commit_retires_immediately_without_routes_or_socket_unlink() {
+        let dir = tempfile::tempdir().expect("isolated runtime directory");
+        let canonical = dir.path().join("daemon.sock");
+        let legacy = dir.path().join("legacy.sock");
+        let _canonical_listener = UnixListener::bind(&canonical).expect("canonical listener");
+        let _legacy_listener = UnixListener::bind(&legacy).expect("legacy listener");
+        let manager = HandoverManager::new(canonical.clone());
+        *manager.status.write() = HandoverStatus::Prepared;
+        *manager.legacy_socket_path.write() = Some(legacy.clone());
+        let manifest_path = dir.path().join("handover_routes.json");
+
+        let (retired_tx, retired_rx) = tokio::sync::oneshot::channel();
+        let retired_tx = std::sync::Arc::new(std::sync::Mutex::new(Some(retired_tx)));
+        manager.set_retirement_action(move || {
+            if let Some(tx) = retired_tx.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+        });
+
+        manager
+            .commit_handover_v5(&Arc::new(TerminalService::default()))
+            .expect("commit v5");
+
+        assert_eq!(manager.status(), HandoverStatus::Retired);
+        assert!(!manager.is_draining());
+        assert!(canonical.exists());
+        assert!(!manifest_path.exists());
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), retired_rx)
+            .await
+            .expect("timeout waiting for immediate retirement action");
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -296,6 +356,9 @@ impl HandoverManager {
     }
 
     pub fn commit_handover(&self, terminal_service: &Arc<TerminalService>) -> Result<(), String> {
+        if is_v5_ownership_transfer_enabled() {
+            return self.commit_handover_v5(terminal_service);
+        }
         let mut status_guard = self.status.write();
         if *status_guard != HandoverStatus::Prepared && *status_guard != HandoverStatus::Active {
             return Err(format!(
@@ -340,6 +403,55 @@ impl HandoverManager {
         // Notify upgrade spawner if waiting
         if let Some(tx) = self.commit_notify_tx.lock().take() {
             let _ = tx.send(());
+        }
+
+        Ok(())
+    }
+
+    pub fn commit_handover_v5(&self, _terminal_service: &Arc<TerminalService>) -> Result<(), String> {
+        let mut status_guard = self.status.write();
+        if *status_guard != HandoverStatus::Prepared && *status_guard != HandoverStatus::Active {
+            return Err(format!(
+                "Cannot commit v5 handover in state {:?}",
+                *status_guard
+            ));
+        }
+
+        if let Some(locks) = self.canonical_lock_files.lock().take() {
+            let _ = locks.detach_without_unlock();
+        }
+
+        let callbacks = std::mem::take(&mut *self.commit_callbacks.lock());
+        for cb in callbacks {
+            cb();
+        }
+
+        let _ = self.client_abort_tx.send(());
+
+        if let Some(tx) = self.commit_notify_tx.lock().take() {
+            let _ = tx.send(());
+        }
+
+        *status_guard = HandoverStatus::Retired;
+        self.is_draining.store(false, Ordering::SeqCst);
+
+        let legacy_path = self.legacy_socket_path.write().take();
+        let retirement_action = self.retirement_action.read().clone();
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                if let Some(path) = legacy_path {
+                    let _ = fs::remove_file(&path);
+                }
+                tracing::info!("Predecessor daemon completed v5 session ownership transfer and retired immediately.");
+                retirement_action();
+            });
+        } else {
+            if let Some(path) = legacy_path {
+                let _ = fs::remove_file(&path);
+            }
+            tracing::info!("Predecessor daemon completed v5 session ownership transfer and retired immediately.");
+            retirement_action();
         }
 
         Ok(())

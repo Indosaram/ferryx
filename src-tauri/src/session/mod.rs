@@ -169,6 +169,20 @@ pub struct PersistedWorkspaceSession {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
+/// Unique suffix per write attempt (pid + epoch nanos + counter). A shared fixed
+/// temporary filename let concurrent writers (multi-daemon handover, GUI + daemon)
+/// interleave create/truncate/write on one inode and publish a mixed document.
+fn unique_write_suffix() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{nanos}-{counter}", std::process::id())
+}
+
 pub fn save_session_to_path(
     path: &Path,
     session: &PersistedWorkspaceSession,
@@ -182,30 +196,52 @@ pub fn save_session_to_path(
         })?;
     }
 
+    let write_suffix = unique_write_suffix();
+
     if path.exists() {
         let original = fs::read(path).map_err(|e| IpcError::new(IpcErrorCode::IoError, format!("Failed to read pre-migration session: {e}")))?;
-        let previous: serde_json::Value = serde_json::from_slice(&original).map_err(|e| IpcError::new(IpcErrorCode::ParseError, format!("Cannot overwrite unreadable session: {e}")))?;
-        let version = previous.get("version").and_then(serde_json::Value::as_u64)
-            .ok_or_else(|| IpcError::new(IpcErrorCode::ParseError, "Missing session version"))?;
-        if version > u64::from(session.version) {
-            return Err(IpcError::new(IpcErrorCode::ParseError, "Refusing session schema downgrade"));
-        }
-        if version < 3 && session.version >= 3 {
-            let backup = path.with_extension("json.pre-v3");
-            // Linking the old inode publishes a complete snapshot without clobbering an
-            // earlier backup. Atomic replacement below never mutates that inode.
-            match fs::hard_link(path, &backup) {
-                Ok(()) => {},
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {},
-                Err(e) => return Err(IpcError::new(IpcErrorCode::IoError, format!("Failed to back up pre-v3 session: {e}"))),
+        match serde_json::from_slice::<serde_json::Value>(&original) {
+            Ok(previous) => {
+                let version = previous.get("version").and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| IpcError::new(IpcErrorCode::ParseError, "Missing session version"))?;
+                if version > u64::from(session.version) {
+                    return Err(IpcError::new(IpcErrorCode::ParseError, "Refusing session schema downgrade"));
+                }
+                if version < 3 && session.version >= 3 {
+                    let backup = path.with_extension("json.pre-v3");
+                    // Linking the old inode publishes a complete snapshot without clobbering an
+                    // earlier backup. Atomic replacement below never mutates that inode.
+                    match fs::hard_link(path, &backup) {
+                        Ok(()) => {},
+                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {},
+                        Err(e) => return Err(IpcError::new(IpcErrorCode::IoError, format!("Failed to back up pre-v3 session: {e}"))),
+                    }
+                    let verified = fs::read(&backup).map_err(|e| IpcError::new(IpcErrorCode::IoError, format!("Failed to verify pre-v3 backup: {e}")))?;
+                    if verified != original {
+                        return Err(IpcError::new(IpcErrorCode::IoError, "Pre-v3 backup differs from current legacy session"));
+                    }
+                    File::open(&backup).and_then(|file| file.sync_all()).map_err(|e| IpcError::new(IpcErrorCode::IoError, format!("Failed to sync pre-v3 backup: {e}")))?;
+                    if let Some(parent) = path.parent() {
+                        File::open(parent).and_then(|dir| dir.sync_all()).map_err(|e| IpcError::new(IpcErrorCode::IoError, format!("Failed to sync backup directory: {e}")))?;
+                    }
+                }
             }
-            let verified = fs::read(&backup).map_err(|e| IpcError::new(IpcErrorCode::IoError, format!("Failed to verify pre-v3 backup: {e}")))?;
-            if verified != original {
-                return Err(IpcError::new(IpcErrorCode::IoError, "Pre-v3 backup differs from current legacy session"));
-            }
-            File::open(&backup).and_then(|file| file.sync_all()).map_err(|e| IpcError::new(IpcErrorCode::IoError, format!("Failed to sync pre-v3 backup: {e}")))?;
-            if let Some(parent) = path.parent() {
-                File::open(parent).and_then(|dir| dir.sync_all()).map_err(|e| IpcError::new(IpcErrorCode::IoError, format!("Failed to sync backup directory: {e}")))?;
+            Err(e) => {
+                // Unreadable bytes (mixed/truncated publish, disk fault) must not block
+                // every future save: all writers publish complete snapshots, so nothing
+                // here can merge with them. Preserve the unreadable content, then replace.
+                let backup = path.with_extension(format!("json.corrupted-{write_suffix}"));
+                fs::rename(path, &backup).map_err(|io| {
+                    IpcError::new(
+                        IpcErrorCode::IoError,
+                        format!("Cannot overwrite unreadable session ({e}); preserving it at {} failed: {io}", backup.display()),
+                    )
+                })?;
+                tracing::warn!(
+                    backup = %backup.display(),
+                    error = %e,
+                    "Unreadable session state file preserved"
+                );
             }
         }
     }
@@ -217,32 +253,41 @@ pub fn save_session_to_path(
         )
     })?;
 
-    let tmp_path = path.with_extension("json.tmp");
+    let tmp_path = path.with_extension(format!("json.tmp-{write_suffix}"));
 
-    // Durable atomic write: write -> sync_all -> rename -> parent fsync
+    // Durable atomic write: write -> sync_all -> rename -> parent fsync. A unique
+    // temporary inode per attempt keeps concurrent publishers from interleaving.
     {
         use std::io::Write;
-        let mut file = File::create(&tmp_path).map_err(|e| {
-            IpcError::new(
-                IpcErrorCode::IoError,
-                format!("Failed to create temporary session file: {}", e),
-            )
-        })?;
-        file.write_all(serialized.as_bytes()).map_err(|e| {
-            IpcError::new(
-                IpcErrorCode::IoError,
-                format!("Failed to write session state: {}", e),
-            )
-        })?;
-        file.sync_all().map_err(|e| {
-            IpcError::new(
-                IpcErrorCode::IoError,
-                format!("Failed to fsync temporary session file: {}", e),
-            )
-        })?;
+        let write_result: Result<(), IpcError> = (|| {
+            let mut file = File::create(&tmp_path).map_err(|e| {
+                IpcError::new(
+                    IpcErrorCode::IoError,
+                    format!("Failed to create temporary session file: {}", e),
+                )
+            })?;
+            file.write_all(serialized.as_bytes()).map_err(|e| {
+                IpcError::new(
+                    IpcErrorCode::IoError,
+                    format!("Failed to write session state: {}", e),
+                )
+            })?;
+            file.sync_all().map_err(|e| {
+                IpcError::new(
+                    IpcErrorCode::IoError,
+                    format!("Failed to fsync temporary session file: {}", e),
+                )
+            })?;
+            Ok(())
+        })();
+        if let Err(error) = write_result {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(error);
+        }
     }
 
     fs::rename(&tmp_path, path).map_err(|e| {
+        let _ = fs::remove_file(&tmp_path);
         IpcError::new(
             IpcErrorCode::IoError,
             format!("Failed to atomically rename session state file: {}", e),
@@ -405,5 +450,97 @@ mod tests {
         assert!(loaded.is_none());
         assert!(!session_file.exists());
         assert!(dir.path().join("session_state.json.corrupted").exists());
+    }
+
+    fn minimal_v3_session(marker: &str) -> PersistedWorkspaceSession {
+        let mut session = PersistedWorkspaceSession::default();
+        session.version = 3;
+        session.extra.insert(
+            "testMarker".to_string(),
+            serde_json::Value::String(marker.to_string()),
+        );
+        session
+    }
+
+    #[test]
+    fn test_save_self_heals_unreadable_session() {
+        let dir = tempdir().unwrap();
+        let session_file = dir.path().join("session_state.json");
+        let unreadable = b"{\"version\":3,}trailing bytes".to_vec();
+        fs::write(&session_file, &unreadable).unwrap();
+
+        // A mixed/truncated publish must not block every future save.
+        save_session_to_path(&session_file, &minimal_v3_session("healed")).unwrap();
+
+        let loaded = load_session_from_path(&session_file).unwrap().unwrap();
+        assert_eq!(loaded.version, 3);
+        assert_eq!(loaded.extra["testMarker"], "healed");
+
+        // The unreadable bytes are preserved, not silently destroyed.
+        let preserved: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".corrupted"))
+            .collect();
+        assert_eq!(preserved.len(), 1);
+        assert_eq!(fs::read(preserved[0].path()).unwrap(), unreadable);
+    }
+
+    #[test]
+    fn test_concurrent_saves_never_publish_mixed_documents() {
+        let dir = tempdir().unwrap();
+        let session_file = dir.path().join("session_state.json");
+        save_session_to_path(&session_file, &minimal_v3_session("seed")).unwrap();
+
+        let writer_count = 4usize;
+        let iterations = 25u32;
+        let mut writers = Vec::new();
+        for writer in 0..writer_count {
+            let path = session_file.clone();
+            writers.push(std::thread::spawn(move || {
+                for iteration in 0..iterations {
+                    // Alternate short and long payloads so a shared temporary inode
+                    // would mix documents (the trailing-characters corruption shape).
+                    let marker = format!("writer-{writer}-iter-{iteration}-payload ");
+                    let filler = marker.repeat(if iteration % 2 == 0 { 96 } else { 24 });
+                    let mut session = PersistedWorkspaceSession::default();
+                    session.version = 3;
+                    session.extra.insert("marker".into(), serde_json::Value::String(filler));
+                    save_session_to_path(&path, &session).unwrap();
+                }
+            }));
+        }
+
+        // A concurrent reader must never observe a mixed document on the published path.
+        let reader_path = session_file.clone();
+        let reader = std::thread::spawn(move || {
+            for _ in 0..4000 {
+                if let Ok(bytes) = fs::read(&reader_path) {
+                    serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_else(|e| {
+                        panic!(
+                            "mixed session document published: {e} ({} bytes)",
+                            bytes.len()
+                        )
+                    });
+                }
+            }
+        });
+
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        reader.join().unwrap();
+
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "temporary files left behind: {leftovers:?}");
+
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&session_file).unwrap()).unwrap();
+        let marker = value["marker"].as_str().unwrap();
+        assert!(marker.starts_with("writer-"));
     }
 }

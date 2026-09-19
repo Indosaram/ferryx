@@ -1,3 +1,5 @@
+use crate::terminal::output_hub::TerminalOutputHub;
+use crate::terminal::session::{PtySessionExport, PtySessionSnapshot};
 use crate::terminal::{
     session::PtySessionConfig, PtyError, PtySession, PtySessionState, TerminalSignal,
 };
@@ -57,6 +59,7 @@ pub fn apply_session_env(
 pub struct PtyManager {
     sessions: Arc<RwLock<HashMap<String, Arc<PtySession>>>>,
     pty_system: Arc<Mutex<Box<dyn PtySystem + Send>>>,
+    output_hub: Arc<RwLock<Option<Arc<TerminalOutputHub>>>>,
 }
 
 impl Default for PtyManager {
@@ -70,7 +73,21 @@ impl PtyManager {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             pty_system: Arc::new(Mutex::new(native_pty_system())),
+            output_hub: Arc::new(RwLock::new(None)),
         }
+    }
+
+    pub fn with_output_hub(self, hub: Arc<TerminalOutputHub>) -> Self {
+        *self.output_hub.write() = Some(hub);
+        self
+    }
+
+    pub fn set_output_hub(&self, hub: Arc<TerminalOutputHub>) {
+        *self.output_hub.write() = Some(hub);
+    }
+
+    pub fn output_hub(&self) -> Option<Arc<TerminalOutputHub>> {
+        self.output_hub.read().clone()
     }
 
     pub fn spawn(
@@ -280,6 +297,10 @@ impl PtyManager {
             tx,
             worktree_path,
         }));
+
+        if let Some(hub) = self.output_hub.read().clone() {
+            session.set_output_hub(hub);
+        }
 
         self.sessions
             .write()
@@ -579,6 +600,113 @@ impl PtyManager {
             .ok_or_else(|| PtyError::SessionNotFound(session_id.to_string()))?;
         Ok(session.is_alive())
     }
+
+    /// Exports the session identified by `session_id` for handover transfer (design doc sections 7.2, 9.2).
+    #[cfg(unix)]
+    pub fn export_session(&self, session_id: &str) -> Result<PtySessionExport, PtyError> {
+        let hub = self.output_hub.read().clone();
+        self.export_session_with_hub(session_id, hub.as_deref())
+    }
+
+    /// Exports the session identified by `session_id` with an explicit `TerminalOutputHub` reference.
+    #[cfg(unix)]
+    pub fn export_session_with_hub(
+        &self,
+        session_id: &str,
+        hub: Option<&TerminalOutputHub>,
+    ) -> Result<PtySessionExport, PtyError> {
+        let session = self
+            .get_session(session_id)
+            .ok_or_else(|| PtyError::SessionNotFound(session_id.to_string()))?;
+        session.stop_reader();
+        session.export_for_transfer_with_hub(hub)
+    }
+
+    /// Non-unix stub for `export_session`.
+    #[cfg(not(unix))]
+    pub fn export_session(&self, _session_id: &str) -> Result<(), PtyError> {
+        Err(PtyError::Other("PTY export is only supported on Unix".into()))
+    }
+
+    /// Adopts an exported PTY session into this manager without spawning a command (design doc section 11 'PtyManager adoption').
+    ///
+    /// Rejects duplicate session IDs, restores output-hub state when an output hub is available,
+    /// constructs the adopted session via `PtySession::adopt_from_transfer`, inserts it into the
+    /// registry, marks it running, and starts lifecycle observation.
+    #[cfg(unix)]
+    pub fn adopt_transferred_session(
+        &self,
+        master: std::os::fd::OwnedFd,
+        snapshot: PtySessionSnapshot,
+    ) -> Result<mpsc::Receiver<Vec<u8>>, PtyError> {
+        let hub = self.output_hub.read().clone();
+        self.adopt_transferred_session_with_hub(
+            master,
+            snapshot,
+            hub.as_deref(),
+        )
+    }
+
+    /// Adopts a transferred session with an explicit `TerminalOutputHub` reference.
+    #[cfg(unix)]
+    pub fn adopt_transferred_session_with_hub(
+        &self,
+        master: std::os::fd::OwnedFd,
+        snapshot: PtySessionSnapshot,
+        output_hub: Option<&TerminalOutputHub>,
+    ) -> Result<mpsc::Receiver<Vec<u8>>, PtyError> {
+        let session_id = snapshot.session_id.clone();
+        if self.has_session(&session_id) {
+            return Err(PtyError::Other(format!(
+                "PTY session '{session_id}' already exists"
+            )));
+        }
+
+        if let Some(hub) = output_hub {
+            if let Some(hub_snap) = snapshot.hub_snapshot.as_ref() {
+                hub.import_session_state(&session_id, hub_snap.clone())
+                    .map_err(|e| PtyError::Other(format!("Failed to import hub state: {e}")))?;
+            } else {
+                let _ = hub.register_session(&session_id);
+                hub.record_initial_size(&session_id, snapshot.cols, snapshot.rows);
+            }
+        }
+
+        let initial_state = snapshot.state.clone();
+        let (session, rx) = PtySession::adopt_from_transfer(master, snapshot)?;
+        let session = Arc::new(session);
+
+        if let Some(hub) = output_hub
+            .map(|h| Arc::new(h.clone()))
+            .or_else(|| self.output_hub.read().clone())
+        {
+            session.set_output_hub(hub);
+        }
+
+        self.sessions
+            .write()
+            .insert(session_id.clone(), Arc::clone(&session));
+
+        match initial_state {
+            PtySessionState::Starting | PtySessionState::Running => {
+                session.mark_running();
+            }
+            _ => {}
+        }
+
+        self.start_lifecycle_watcher(session_id);
+        Ok(rx)
+    }
+
+    /// Adopts from a complete `PtySessionExport` struct by splitting it into descriptor and snapshot.
+    #[cfg(unix)]
+    pub fn adopt_transferred_export(
+        &self,
+        export: PtySessionExport,
+    ) -> Result<mpsc::Receiver<Vec<u8>>, PtyError> {
+        let (master, snapshot) = export.into_parts();
+        self.adopt_transferred_session(master, snapshot)
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -721,5 +849,187 @@ mod tests {
         let mut cmd_empty_ws = CommandBuilder::new("/bin/sh");
         apply_session_env(&mut cmd_empty_ws, "session-test-42", "/path/to/worktree", Some(""));
         assert_eq!(cmd_empty_ws.get_env("FERRYX_WORKSPACE_ID"), None);
+    }
+
+    #[tokio::test]
+    async fn test_pty_export_adopt_roundtrip_continuity_resize_liveness() {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+        let predecessor_hub = Arc::new(TerminalOutputHub::new(4096));
+        let predecessor_manager = PtyManager::new().with_output_hub(Arc::clone(&predecessor_hub));
+
+        // 1. Spawn a real PTY session through the predecessor manager
+        let cmd = CommandBuilder::new("/bin/sh");
+        let (session_id, mut pred_rx) = predecessor_manager
+            .spawn(cmd, 80, 24)
+            .expect("spawn PTY session");
+
+        predecessor_hub.register_session(&session_id);
+        predecessor_hub.record_initial_size(&session_id, 80, 24);
+
+        // Predecessor output pump to hub
+        let p_hub = Arc::clone(&predecessor_hub);
+        let p_id = session_id.clone();
+        let pred_pump = tokio::spawn(async move {
+            while let Some(chunk) = pred_rx.recv().await {
+                p_hub.publish(&p_id, chunk);
+            }
+        });
+
+        // 2. Write input before handover and wait for output to be recorded in hub
+        predecessor_manager
+            .write_input(&session_id, b"echo pre_handover_marker_12345\n")
+            .expect("write input to predecessor");
+
+        let mut pre_handover_found = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            if let Some(att) = predecessor_hub.subscribe(&session_id) {
+                let text = String::from_utf8_lossy(&att.0);
+                if text.contains("pre_handover_marker_12345") {
+                    pre_handover_found = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(pre_handover_found, "predecessor hub must capture pre-handover output");
+
+        // 3. Export session for transfer
+        let export = predecessor_manager
+            .export_session(&session_id)
+            .expect("export session");
+
+        assert_eq!(export.session_id, session_id);
+        assert_eq!(export.cols, 80);
+        assert_eq!(export.rows, 24);
+        assert!(export.pid.is_some(), "exported session must have child PID");
+        assert!(export.hub_snapshot.is_some(), "exported session must have hub snapshot");
+        assert!(export.master_raw_fd >= 0, "duplicated master fd must be valid");
+
+        // Stop predecessor reader so successor is the sole reader of the master PTY
+        if let Some(pred_session) = predecessor_manager.get_session(&session_id) {
+            pred_session.stop_reader();
+        }
+        pred_pump.abort();
+
+        // 4. Setup successor manager with its own TerminalOutputHub
+        let successor_hub = Arc::new(TerminalOutputHub::new(4096));
+        let successor_manager = PtyManager::new().with_output_hub(Arc::clone(&successor_hub));
+
+        // 5. Test duplicate-id adoption rejection
+        // Duplicate the master fd to test duplicate adoption attempt
+        let dup_raw = unsafe { libc::fcntl(export.master_fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+        assert!(dup_raw >= 0);
+        let dup_fd = unsafe { OwnedFd::from_raw_fd(dup_raw) };
+
+        let (master_fd, snapshot) = export.into_parts();
+        let snapshot_clone = snapshot.clone();
+
+        // First adoption succeeds
+        let mut succ_rx = successor_manager
+            .adopt_transferred_session(master_fd, snapshot)
+            .expect("adopt transferred session into successor");
+
+        // Second adoption with the same session id MUST be rejected
+        let dup_result = successor_manager.adopt_transferred_session(dup_fd, snapshot_clone);
+        assert!(
+            dup_result.is_err(),
+            "adoption with duplicate session_id must be rejected"
+        );
+
+        // Successor output pump to successor hub
+        let s_hub = Arc::clone(&successor_hub);
+        let s_id = session_id.clone();
+        let succ_pump = tokio::spawn(async move {
+            while let Some(chunk) = succ_rx.recv().await {
+                s_hub.publish(&s_id, chunk);
+            }
+        });
+
+        // 6. Assert input write -> output continuity through the hub
+        // Successor hub already imported historical chunks from predecessor!
+        let initial_attachment = successor_hub
+            .subscribe(&session_id)
+            .expect("successor hub must have imported session");
+        let initial_text = String::from_utf8_lossy(&initial_attachment.0);
+        assert!(
+            initial_text.contains("pre_handover_marker_12345"),
+            "successor hub must retain pre-handover output continuity"
+        );
+
+        // Now write new input through the adopted session
+        successor_manager
+            .write_input(&session_id, b"echo post_handover_continuity_67890\n")
+            .expect("write input to adopted session");
+
+        let mut post_handover_found = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            if let Some(att) = successor_hub.subscribe(&session_id) {
+                let text = String::from_utf8_lossy(&att.0);
+                if text.contains("post_handover_continuity_67890") {
+                    post_handover_found = true;
+                    // Verify continuity: both markers exist in the same continuous hub history
+                    assert!(
+                        text.contains("pre_handover_marker_12345"),
+                        "hub history must contain pre-handover marker alongside post-handover marker"
+                    );
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            post_handover_found,
+            "successor hub must receive post-handover output from adopted PTY"
+        );
+
+        // 7. Assert resize works on adopted session
+        successor_manager
+            .resize(&session_id, 120, 35)
+            .expect("resize adopted session");
+        let adopted_session = successor_manager
+            .get_session(&session_id)
+            .expect("get adopted session");
+        assert_eq!(adopted_session.get_size(), (120, 35));
+
+        // 8. Assert adopted session liveness is observable
+        assert!(
+            successor_manager.is_alive(&session_id).expect("liveness check"),
+            "adopted session must be reported alive while shell is running"
+        );
+        assert!(
+            adopted_session.is_alive(),
+            "adopted session object must report alive"
+        );
+
+        // Terminate adopted process and observe liveness transition to false
+        successor_manager
+            .signal(&session_id, TerminalSignal::Kill)
+            .expect("send kill signal to adopted process");
+
+        let mut observed_exit = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            if !adopted_session.is_alive() {
+                observed_exit = true;
+                break;
+            }
+            match successor_manager.is_alive(&session_id) {
+                Ok(false) => {
+                    observed_exit = true;
+                    break;
+                }
+                Err(PtyError::SessionNotFound(_)) => {
+                    observed_exit = true;
+                    break;
+                }
+                _ => tokio::time::sleep(Duration::from_millis(50)).await,
+            }
+        }
+        assert!(observed_exit, "adopted session exit must be observable");
+
+        succ_pump.abort();
     }
 }

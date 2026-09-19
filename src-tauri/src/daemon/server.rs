@@ -584,6 +584,22 @@ impl DaemonLockFile {
         }
         Ok(Self { _file: file })
     }
+
+    /// Detaches the underlying file without invoking `LOCK_UN`, preserving the lock
+    /// across ownership transfer to the successor process.
+    pub(crate) fn detach_without_unlock(mut self) -> File {
+        // SAFETY: `self._file` is a valid File. We read it out and forget `self`
+        // so that the `Drop` implementation (which calls `LOCK_UN`) does not execute.
+        let file = unsafe { std::ptr::read(&self._file) };
+        std::mem::forget(self);
+        file
+    }
+
+    /// Constructs a `DaemonLockFile` from an already-locked file descriptor received
+    /// during handover transfer.
+    pub(crate) fn from_locked_file(file: File) -> Self {
+        Self { _file: file }
+    }
 }
 
 #[cfg(unix)]
@@ -692,6 +708,25 @@ impl DaemonLockFile {
 pub(crate) struct DaemonLockFiles {
     _persistent: Option<DaemonLockFile>,
     _legacy: DaemonLockFile,
+}
+
+impl DaemonLockFiles {
+    /// Detaches both lock files without invoking `LOCK_UN`, preserving held locks
+    /// across handover ownership transfer.
+    pub(crate) fn detach_without_unlock(self) -> (Option<File>, File) {
+        let mut me = std::mem::ManuallyDrop::new(self);
+        let persistent = me._persistent.take().map(|p| p.detach_without_unlock());
+        let legacy = unsafe { std::ptr::read(&me._legacy) }.detach_without_unlock();
+        (persistent, legacy)
+    }
+
+    /// Adopts pre-locked files received via handover descriptor transfer.
+    pub(crate) fn from_locked_files(persistent: Option<File>, legacy: File) -> Self {
+        Self {
+            _persistent: persistent.map(DaemonLockFile::from_locked_file),
+            _legacy: DaemonLockFile::from_locked_file(legacy),
+        }
+    }
 }
 
 fn try_lock_file(file: File) -> Result<DaemonLockFile, String> {
@@ -1434,35 +1469,120 @@ impl DaemonServer {
                 legacy_path.clone(),
                 Vec::new(),
             ));
-            let sessions = legacy_peer.list_sessions().await?;
-            let route = crate::daemon::manifest::HandoverRoute {
-                legacy_socket_path: legacy_path.clone(),
-                sessions,
-            };
-            crate::ipc::run_blocking(move || {
-                crate::daemon::manifest::HandoverManifest::update_at_path(
-                    &crate::daemon::manifest::get_manifest_path(),
-                    |manifest| manifest.add_or_update_route(route),
-                )
-                .map_err(|error| {
-                    crate::ipc::IpcError::internal(format!(
-                        "Failed to persist predecessor route before handover: {error}"
-                    ))
-                })?;
-                Ok(())
-            })
-            .await
-            .map_err(|error| error.to_string())?;
-            // Commit handover with old daemon so it drops locks
-            let commit_resp = legacy_peer
-                .send_request(&DaemonRequest::CommitHandover {
-                    legacy_socket_path: None,
+
+            #[cfg(unix)]
+            if crate::daemon::handover::is_v5_ownership_transfer_enabled() {
+                let transfer_id = uuid::Uuid::new_v4().to_string();
+                let handover_socket_path = crate::daemon::handover_socket::get_handover_socket_path(&transfer_id);
+                let listener = crate::daemon::handover_socket::HandoverSocketListener::bind(&handover_socket_path)
+                    .map_err(|e| format!("Failed to bind handover socket: {e}"))?;
+
+                let accept_handle = tokio::task::spawn_blocking(move || {
+                    let (stream, _creds) = listener.accept()?;
+                    let mut exports = Vec::new();
+                    while let Ok(Some(export)) = crate::daemon::handover_socket::recv_session(&stream) {
+                        exports.push(export);
+                    }
+                    Ok::<_, crate::daemon::handover_socket::HandoverSocketError>(exports)
+                });
+
+                let transfer_resp = legacy_peer
+                    .send_request(&DaemonRequest::TransferSessions {
+                        handover_socket_path: handover_socket_path.to_string_lossy().into_owned(),
+                    })
+                    .await
+                    .map_err(|e| format!("TransferSessions request failed: {e}"))?;
+
+                if !matches!(transfer_resp, DaemonResponse::TransferSessionsOk { .. }) {
+                    return Err(format!("TransferSessions failed: {transfer_resp:?}"));
+                }
+
+                let exports = accept_handle
+                    .await
+                    .map_err(|e| format!("Handover worker panicked: {e}"))?
+                    .map_err(|e| format!("Handover socket receive error: {e}"))?;
+
+                for export in exports {
+                    tracing::info!(session_id = %export.session_id, "Adopting transferred session from predecessor");
+                    let (master, snapshot) = export.into_parts();
+                    self.terminal_service
+                        .pty_manager()
+                        .adopt_transferred_session(master, snapshot)
+                        .map_err(|e| format!("Failed to adopt transferred session: {e}"))?;
+                }
+
+                let commit_resp = legacy_peer
+                    .send_request(&DaemonRequest::CommitHandover {
+                        legacy_socket_path: None,
+                    })
+                    .await?;
+                if !matches!(commit_resp, DaemonResponse::CommitHandoverOk) {
+                    return Err(format!("CommitHandover failed: {commit_resp:?}"));
+                }
+            } else {
+                let sessions = legacy_peer.list_sessions().await?;
+                let route = crate::daemon::manifest::HandoverRoute {
+                    legacy_socket_path: legacy_path.clone(),
+                    sessions,
+                };
+                crate::ipc::run_blocking(move || {
+                    crate::daemon::manifest::HandoverManifest::update_at_path(
+                        &crate::daemon::manifest::get_manifest_path(),
+                        |manifest| manifest.add_or_update_route(route),
+                    )
+                    .map_err(|error| {
+                        crate::ipc::IpcError::internal(format!(
+                            "Failed to persist predecessor route before handover: {error}"
+                        ))
+                    })?;
+                    Ok(())
                 })
-                .await?;
-            if !matches!(commit_resp, DaemonResponse::CommitHandoverOk) {
-                return Err(format!("CommitHandover failed: {commit_resp:?}"));
+                .await
+                .map_err(|error| error.to_string())?;
+
+                let commit_resp = legacy_peer
+                    .send_request(&DaemonRequest::CommitHandover {
+                        legacy_socket_path: None,
+                    })
+                    .await?;
+                if !matches!(commit_resp, DaemonResponse::CommitHandoverOk) {
+                    return Err(format!("CommitHandover failed: {commit_resp:?}"));
+                }
+                self.session_router.add_legacy_peer(legacy_peer);
             }
-            self.session_router.add_legacy_peer(legacy_peer);
+
+            #[cfg(not(unix))]
+            {
+                let sessions = legacy_peer.list_sessions().await?;
+                let route = crate::daemon::manifest::HandoverRoute {
+                    legacy_socket_path: legacy_path.clone(),
+                    sessions,
+                };
+                crate::ipc::run_blocking(move || {
+                    crate::daemon::manifest::HandoverManifest::update_at_path(
+                        &crate::daemon::manifest::get_manifest_path(),
+                        |manifest| manifest.add_or_update_route(route),
+                    )
+                    .map_err(|error| {
+                        crate::ipc::IpcError::internal(format!(
+                            "Failed to persist predecessor route before handover: {error}"
+                        ))
+                    })?;
+                    Ok(())
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+
+                let commit_resp = legacy_peer
+                    .send_request(&DaemonRequest::CommitHandover {
+                        legacy_socket_path: None,
+                    })
+                    .await?;
+                if !matches!(commit_resp, DaemonResponse::CommitHandoverOk) {
+                    return Err(format!("CommitHandover failed: {commit_resp:?}"));
+                }
+                self.session_router.add_legacy_peer(legacy_peer);
+            }
         }
 
         let lock_files = acquire_daemon_locks(get_persistent_lock_path().as_deref(), &lock_path)?;
@@ -1502,9 +1622,17 @@ impl DaemonServer {
 
         tracing::info!("rorca daemon listening on {}", socket_path.display());
 
+        #[cfg(unix)]
+        if !crate::daemon::handover::is_v5_ownership_transfer_enabled() {
+            self.session_router.adopt_routes_from_manifest().await?;
+        }
+        #[cfg(not(unix))]
         self.session_router.adopt_routes_from_manifest().await?;
-        self.restore_remote_sessions_at(self.remote_sessions_path.clone())
-            .await?;
+
+        if handover_from.is_none() {
+            self.restore_remote_sessions_at(self.remote_sessions_path.clone())
+                .await?;
+        }
 
         if let Some(tx) = ready_tx {
             let _ = tx.send(());
@@ -2161,6 +2289,8 @@ impl DaemonServer {
                 Ok(DaemonRequest::GetCapabilities) => {
                     let mut capabilities = vec!["machinePairingV1".into(), "sshPasswordV1".into()];
                     if self.paired_hosts.available().await { capabilities.push("pairedHostInventoryV1".into()); }
+                    #[cfg(unix)]
+                    capabilities.push("sessionOwnershipTransferV1".into());
                     DaemonResponse::CapabilitiesOk { capabilities }
                 },
                 Ok(request @ (DaemonRequest::RemoteCreatePairingCode { .. }
@@ -2350,6 +2480,39 @@ impl DaemonServer {
                     {
                         DaemonResponse::HandoverRejected {
                             reason: "Handover is only supported on Unix platforms".to_string(),
+                        }
+                    }
+                }
+                Ok(DaemonRequest::TransferSessions { handover_socket_path }) => {
+                    #[cfg(unix)]
+                    {
+                        let path = std::path::PathBuf::from(handover_socket_path);
+                        match crate::daemon::handover_socket::connect_handover_socket(&path) {
+                            Ok((stream, _creds)) => {
+                                let sessions = self.terminal_service.list_sessions();
+                                let mut count = 0;
+                                let transfer_id = uuid::Uuid::new_v4().to_string();
+                                let mut seq = 1;
+                                for session_id in sessions {
+                                    if let Ok(export) = self.terminal_service.pty_manager().export_session(&session_id) {
+                                        if crate::daemon::handover_socket::send_session(&stream, &transfer_id, seq, export).is_ok() {
+                                            count += 1;
+                                            seq += 1;
+                                        }
+                                    }
+                                }
+                                let _ = crate::daemon::handover_socket::send_transfer_done(&stream, &transfer_id, seq);
+                                DaemonResponse::TransferSessionsOk {
+                                    transferred_count: count,
+                                }
+                            }
+                            Err(e) => daemon_error(format!("Failed to connect to handover socket: {e}")),
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        DaemonResponse::HandoverRejected {
+                            reason: "Session transfer unsupported on non-Unix".to_string(),
                         }
                     }
                 }

@@ -2,6 +2,12 @@ pub mod agent_extension;
 pub(crate) mod agent_state;
 pub mod client;
 pub mod handover;
+#[cfg(unix)]
+pub mod handover_socket;
+#[cfg(unix)]
+pub mod handover_transaction;
+#[cfg(unix)]
+pub mod handover_wire;
 pub mod launchd;
 pub(crate) mod logging;
 pub mod manifest;
@@ -20,9 +26,16 @@ pub struct MachineServices {
 
 pub use client::*;
 pub use handover::*;
+#[cfg(unix)]
+pub use handover_socket::*;
+#[cfg(unix)]
+pub use handover_transaction::*;
+#[cfg(unix)]
+pub use handover_wire::*;
 pub use launchd::*;
 pub use manifest::*;
 pub use protocol::*;
 pub use proxy::*;
 pub use server::*;
 pub use session_lifecycle::*;
+
