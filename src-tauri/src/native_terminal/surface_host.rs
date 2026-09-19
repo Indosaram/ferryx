@@ -2472,6 +2472,7 @@ impl NativeTerminalSurfaceHostState {
         host.update_config(renderer_config)?;
         host.layout = Some(layout);
         host.logical_bounds = Some(logical_bounds);
+        host.update_viewport(Some(logical_bounds));
 
         let receipt = host.render_snapshot(
             window,
@@ -2529,6 +2530,7 @@ impl NativeTerminalSurfaceHostState {
         if let Some(host) = hosts.get_mut(session_id) {
             host.layout = Some(layout);
             host.logical_bounds = Some(logical_bounds);
+            host.update_viewport(Some(logical_bounds));
             let receipt = host.render_snapshot(
                 window,
                 layout,
@@ -2851,7 +2853,6 @@ impl NativeSurfaceFrameTarget {
         attention_frame: bool,
     ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
         if let Some(bounds) = logical_bounds {
-            self.target.update_viewport(Some(bounds));
             let scale_factor = bounds.scale_factor;
             let cell_metrics = font_manager::derived_cell_metrics_for_scale(scale_factor);
             let renderer_config = RendererConfig {
