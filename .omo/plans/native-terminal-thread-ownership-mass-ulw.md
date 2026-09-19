@@ -220,3 +220,28 @@ GPU 작업 전에 드롭되고, 렌더 클로저 전체가 `run_on_main_thread` 
 다른 스레드에서 도는 것 증명 → 진짜 wgpu는 **맨 마지막**. 현재 테스트 하네스는 dispatch를
 가로채므로 real wgpu/AppKit을 전혀 건드리지 않는다. **green이어도 실제 터미널에 대해서는
 아무것도 증명하지 못한다.** 실기 확인 없이 기본 활성화로 내보내지 말 것.
+
+
+## R4 진척 갱신 (이 세션에서 실제로 착수함)
+
+앞의 "R4 재개 지점"은 **미착수 기준**으로 쓰였다. 그 뒤 두 증분이 실제로 들어갔다.
+
+| 커밋 | 내용 | 검증 |
+|---|---|---|
+| `dfef209c` | `finish_presentation` 분리 → 안쪽 `render_snapshot`에서 `Window`/`<R: Runtime>` 제거 | 204 lib + 20 contract green |
+| `4877939e` | `update_viewport`를 호출자 3곳으로 호이스트 → 안쪽 `self.target.*` **0개** | 312 tests green (8 스위트 전부) |
+
+**결과: 막힘 C 해소.** 안쪽 `render_snapshot`은 이제 `Window`도 플랫폼 호출도 없는 **순수
+GPU**다. GPU 레그를 떼어낼 수 있는 상태가 처음으로 만들어졌다.
+
+**남은 단계는 정확히 하나:** 그 순수 GPU 레그를 `GpuWorker`로 보내고, 완료 콜백에서 UI
+스레드에 `finish_presentation`/`update_viewport`를 태우며, `finish_render`를 함께 옮긴다
+(막힘 B). 그리고 `render_snapshot` 금지 규칙을 게이트에 추가한다(§12.15).
+
+**두 증분이 안전했던 이유를 마지막 단계에 적용하지 말 것.** 둘 다 **동작 보존**이었다 — 모든
+반환 지점을 열거해 순서가 동일함을 증명할 수 있었다. 마지막 단계는 동작 보존이 아니라 **동작
+변경 그 자체**이고, `HostFrameTarget::Native`는 실제 `tauri::Window`가 필요해 **어떤 테스트
+바이너리에서도 도달할 수 없다.** 실기 확인 없이 기본 활성화로 내보내지 말 것.
+
+또한 §12.16 정정 확인: 프레임 전체를 잡고 있는 락은 `sessions`가 아니라 `hosts`(:410)다.
+`hosts` 맵을 `GpuThread` 소유로 옮기면 이 락도 함께 사라진다.
