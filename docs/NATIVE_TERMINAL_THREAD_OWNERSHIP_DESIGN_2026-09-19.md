@@ -693,3 +693,59 @@ AppKit을 건드린다:
 결론: 12.5의 2홉 구조는 최적화가 아니라 **정확성 요구사항**이다. 지오메트리 레그는 AppKit을
 읽기 때문에 UiThread에 남아야 하고, GpuThread로 넘어가는 것은 acquire/encode/present 구간
 뿐이다. 래치가 줄여준 것은 AppKit *쓰기*(setFrame, 레이어 재구성, setHidden)이지 *읽기*가 아니다.
+
+### 12.7 3단계의 진짜 난점: `&mut host` 빌림과 영수증 되돌리기
+
+12.5/12.6이 "어느 구간이 어느 스레드인가"를 정했다면, 실제 구현을 막는 것은 그 다음 두 가지다.
+둘 다 현재 코드를 읽어야만 보이고, 옮기기 시작한 뒤에 발견하면 되돌리기 비싸다.
+
+#### 난점 A — GPU 호출이 `&mut host` 빌림 한가운데에 있다
+
+```
+:449  if let Some(host) = host {            // hosts 맵에서 꺼낸 &mut 빌림
+:453      host.layout = Some(layout);        // UI leg: 호스트 상태 변경
+:454      host.logical_bounds = Some(effective_bounds);
+:455      host.update_viewport(Some(effective_bounds));   // UI leg: AppKit
+:456      match host.render_snapshot(…)                   // <-- GPU leg
+```
+
+`render_snapshot`은 `&mut host` 를 필요로 하고, 그 빌림은 UI leg의 상태 변경과 **연속**돼
+있다. 따라서 "GPU 호출만 워커로 보낸다"는 표현은 빌림 검사기에서 성립하지 않는다. 선택지는
+사실상 셋이다.
+
+1. **호스트를 워커로 이동시켰다가 돌려받기** — 잡에 `host`를 `move`로 넘기고 완료 시 맵에
+   되돌린다. 이동 중 그 세션 키는 비어 있으므로, 그 사이 도착한 요청을 어떻게 처리할지
+   (합치기/버리기) 정해야 한다.
+2. **hosts 맵 자체를 GpuThread 소유로 옮기기** — UI leg는 지오메트리 계산에 필요한 값만 미리
+   뽑아 명령으로 보낸다. 2절 C4가 지적한 뮤텍스가 렌더 경로에서 자연히 사라진다는 점에서
+   **12.1과 가장 잘 맞는 선택지이며 권장안**이다.
+3. 호스트를 GPU 부분과 UI 부분으로 쪼개기 — 가장 깨끗하지만 가장 큰 변경이다.
+
+#### 난점 B — 재예약 결정이 영수증에 동기적으로 의존한다
+
+```
+Ok(receipt) => {
+    if !receipt.presented && !receipt.render_deferred && !receipt.render_suspended {
+        coordinator.schedule_render();
+    }
+}
+```
+
+지금은 렌더가 끝난 **그 자리에서** 영수증을 보고 재예약 여부를 정한다. GPU leg가 워커로
+가면 영수증은 **비동기로** 도착하므로, 이 분기는 워커 잡의 완료 경로로 옮겨야 한다. 같이
+움직여야 하는 것들:
+
+- `coordinator.finish_render()` — 프레임 종료 표시. 워커 완료 시점으로 가야 한다. 지금처럼
+  디스패치 직후에 호출하면 **프레임이 끝나기 전에 끝났다고 표시**되어 유휴 0프레임 불변식이
+  깨진다.
+- `FrameClock::mark_frame_started` — 프레임 **시작** 기준이므로 UI leg에 남는다.
+- `reveal_after_present` — present 성공 후의 AppKit 변형이므로 **UI 스레드로 되돌아와야**
+  한다. 다만 노출 가드가 생긴 뒤로는 첫 프레임 이후 조기 반환하므로, 이 복귀 홉은 매 프레임이
+  아니라 가시성 전이 때만 실제 일을 한다.
+
+#### 검증 순서 권고
+
+하네스는 `RenderDispatch`로 디스패치를 가로채므로 실제 wgpu/AppKit을 타지 않는다. 그래서
+**먼저 스케줄링 수준에서** 위 구조를 만들고, 주입된 가짜 GPU로 "GPU leg가 디스패치 스레드와
+다른 스레드에서 실행된다"를 스레드 ID로 검증한 뒤, 마지막에 실제 wgpu 호출을 옮긴다.
+실제 표면 검증은 변경분이 포함된 빌드를 띄워야만 가능하다.
