@@ -12,6 +12,7 @@
     "ui:test": "bun run --cwd ui test"
   },
   "devDependencies": {
+    "@ast-grep/cli": "^0.45.3",
     "@tauri-apps/cli": "^2.0.0"
   }
 }
