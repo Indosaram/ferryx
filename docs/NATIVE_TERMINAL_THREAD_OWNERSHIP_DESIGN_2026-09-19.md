@@ -902,3 +902,31 @@ AppKit 호출 두 개가 **연속**이고 `present` 바로 뒤에 있으며, 그
 이 상태가 되면 3단계는 "`render_snapshot`을 GpuWorker로 보내고, `finish_presentation`을
 완료 콜백에서 UI 스레드에 태운다"가 된다. 막힘 B(영수증 되돌리기, §12.7)가 바로 이 지점에서
 만난다: `finish_render`도 완료 경로로 같이 가야 한다.
+
+### 12.14 GPU 레그에 남은 마지막 AppKit 호출 — 호출자 3곳을 함께 고쳐야 한다
+
+`finish_presentation` 분리(커밋 dfef209c) 후, 안쪽 `render_snapshot`에 남은 플랫폼 호출은
+**하나뿐이다.**
+
+```rust
+if let Some(bounds) = logical_bounds {
+    self.target.update_viewport(Some(bounds));   // 함수의 첫 문장, AppKit
+```
+
+디스패치 경로(:455)는 바로 직전에 `host.update_viewport(Some(effective_bounds))`를 부르고,
+:454에서 `host.logical_bounds`에 같은 값을 넣는다. 그래서 안쪽 호출은 **같은 값으로 두 번째**다
+— 래치가 no-op으로 삼켜 왔을 뿐 실제로 중복이다.
+
+**그런데 지우면 안 된다.** `host.render_snapshot` 호출자는 셋이다:
+- `:457` 디스패치 경로 — 앞서 `update_viewport`를 부른다
+- `:2476` — `host.logical_bounds`만 세팅하고 바로 호출 (**update_viewport 없음**)
+- `:2532` — 동일 (**update_viewport 없음**)
+
+즉 안쪽의 `update_viewport`는 뒤의 두 경로에서 **유일하게 뷰포트를 세우는 호출**이다. "중복이니
+제거"하면 그 두 경로에서 뷰포트가 설정되지 않아 패널이 잘못된 크기/위치로 그려진다. 그리고 두
+경로 모두 **테스트 커버리지가 0이다**(`HostFrameTarget::Native`는 실제 `tauri::Window`가 필요해
+테스트에서 도달 불가).
+
+따라서 GPU 레그를 깨끗이 떼려면 `update_viewport`를 **호출자 3곳 모두로 올리는** 변경이
+선행돼야 한다. 그때 :455의 중복도 자연히 사라진다. 기하 관련 변경이고 검증 수단이 없으므로
+**실기 확인과 함께** 진행할 것.
