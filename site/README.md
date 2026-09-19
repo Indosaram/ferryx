@@ -12,7 +12,13 @@ This repository hosts the unified Ferryx public web presence and documentation e
 
 ## Deployment
 
-GitHub Pages injects the production base path in Actions. Local development keeps the site at `http://localhost:14173/`.
+Production is `https://ferryx.dev`, served by Cloudflare Workers Static Assets.
+Run `bun run --cwd site deploy` after checking the production build. The command
+sets the production origin and deploys both the apex site and the `www` redirect.
+Local development keeps the site at `http://localhost:14173/`.
+
+See [the hosting runbook](../docs/SITE_DOMAIN_MIGRATION.md) for routing and
+[the measurement runbook](../docs/SITE_MEASUREMENT.md) for analytics and search registration.
 
 ## Route Structure
 

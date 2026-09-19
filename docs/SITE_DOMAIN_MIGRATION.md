@@ -107,21 +107,12 @@ The apex returns 200, `robots.txt` carries an absolute `Sitemap:` line on `ferry
 sitemap lists 15 URLs with no `/ferryx` segment, and `www` returns 301 to the apex with the
 path preserved.
 
-## Analytics and Search Console
+## Analytics and search registration
 
-Both are wired but inert until configured, in `site/src/components/SiteAnalytics.astro`.
-They render nothing unless the corresponding build-time environment variables are set, so
-forks and local builds ship no third-party requests:
+Analytics and verification settings are build-time inputs to
+`site/src/components/SiteAnalytics.astro`. They must be present when the local
+Astro build runs; there is no hosted deployment workflow that injects repository
+secrets. Worker runtime variables do not change already-built HTML.
 
-- `PUBLIC_GSC_VERIFICATION` emits the `google-site-verification` meta tag. Only needed if
-  you verify by HTML tag rather than by DNS. DNS verification is preferable now that the
-  domain is on Cloudflare, because it is a single TXT record and survives a host move.
-- `PUBLIC_ANALYTICS_SRC` and `PUBLIC_ANALYTICS_DOMAIN` together emit a deferred analytics
-  script, shaped for the script-plus-data-domain convention used by privacy-friendly hosts
-  such as Plausible and Umami. Set both or neither.
-
-Both are already passed through in the Build static site step of
-`.github/workflows/deploy-cloudflare.yml`, sourced from repository secrets. Setting the
-secrets is all that is needed to activate them.
-
-Submit `https://ferryx.dev/sitemap-index.xml` in Google Search Console.
+See [SITE_MEASUREMENT.md](SITE_MEASUREMENT.md) for the GA4 and webmaster settings,
+UTM conventions, report interpretation, and sitemap submission procedure.

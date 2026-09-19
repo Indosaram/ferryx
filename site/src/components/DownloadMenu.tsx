@@ -66,6 +66,7 @@ export function DownloadMenu({ variant = 'hero', className }: DownloadMenuProps)
         <div className="inline-flex items-stretch rounded-full bg-ink text-page hover:bg-ink-hover transition-colors duration-150 shadow-sm">
           <a
             href={primaryAsset.url}
+            data-ferryx-location="hero_primary"
             className="inline-flex items-center gap-2.5 px-5 h-11 text-[15px] font-medium text-page rounded-l-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/30"
           >
             <PlatformIcon platform={detectedPlatform} className="h-5 w-5" />
@@ -88,6 +89,7 @@ export function DownloadMenu({ variant = 'hero', className }: DownloadMenuProps)
         <div className="inline-flex items-center rounded-lg bg-ink text-page hover:bg-ink-hover transition-colors duration-150 shadow-sm">
           <a
             href={primaryAsset.url}
+            data-ferryx-location="navbar_primary"
             className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-page rounded-l-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/30"
           >
             <Download className="h-3.5 w-3.5" />
@@ -118,6 +120,7 @@ export function DownloadMenu({ variant = 'hero', className }: DownloadMenuProps)
 
       {isOpen && (
         <div
+          data-ferryx-location="download_menu"
           className={cn(
             'absolute top-full z-50 mt-2 w-80 sm:w-96 rounded-2xl border border-line bg-surface p-3 shadow-menu transition-all text-left animate-in fade-in zoom-in-95 flex flex-col',
             variant === 'navbar' ? 'right-0' : 'left-1/2 -translate-x-1/2 sm:left-0 sm:translate-x-0'
