@@ -664,3 +664,32 @@ UiThread : update_viewport (지오메트리 확정)
 옮긴다. 현재 테스트 하네스는 `RenderDispatch`로 디스패치를 가로채므로 실제 wgpu/AppKit
 경로는 타지 않는다는 점을 유념할 것. 실제 표면 검증은 변경분이 포함된 빌드를 실행해야만
 가능하다.
+
+### 12.6 "래치가 걸렸으니 이제 GPU 스레드로 옮겨도 된다"는 함정
+
+12.5의 2홉 구조를 보고 다음과 같이 단축하고 싶어질 수 있다:
+
+> 지오메트리 래치와 reveal 멱등성 가드를 넣었으니, 정상 상태(기하 불변 + 이미 노출됨)에서는
+> 두 AppKit 호출이 모두 조기 반환한다. 그러면 정상 상태 프레임은 순수 GPU 작업이므로
+> 통째로 GpuThread로 옮겨도 된다.
+
+**틀렸다.** 코드를 확인하면 `macos.rs`의 `apply_viewport`는 래치를 확인하기 **전에** 이미
+AppKit을 건드린다:
+
+```
+:240  let superview_bounds = superview.bounds();     // AppKit read
+:241  let is_flipped       = superview.isFlipped();  // AppKit read
+:242  let appkit_frame     = bounds.to_appkit_frame(superview_bounds.size.height, is_flipped);
+:245  if !latch.needs_apply(AppKitFrameLatch::key(appkit_frame …)) { return; }   // 여기서 단락
+```
+
+이 순서는 실수가 아니라 필수다. 래치 키는 들어온 `LogicalBounds`가 아니라 **계산된 AppKit
+프레임**이어야 하고(창 크기가 바뀌면 논리 좌표는 그대로여도 실제 프레임은 움직인다), 그
+프레임을 계산하려면 superview의 높이와 flipped 여부를 먼저 읽어야 한다.
+
+따라서 정상 상태 프레임도 여전히 **프레임당 2회의 AppKit 읽기**를 수행한다. NSView 지오메트리
+읽기도 메인 스레드 전용이므로, 래치가 있다고 해서 이 구간을 워커로 옮길 수는 없다.
+
+결론: 12.5의 2홉 구조는 최적화가 아니라 **정확성 요구사항**이다. 지오메트리 레그는 AppKit을
+읽기 때문에 UiThread에 남아야 하고, GpuThread로 넘어가는 것은 acquire/encode/present 구간
+뿐이다. 래치가 줄여준 것은 AppKit *쓰기*(setFrame, 레이어 재구성, setHidden)이지 *읽기*가 아니다.
