@@ -629,3 +629,38 @@ ast-grep 규칙은 **어휘적(lexical)** 이다. 실제 위반은 `render_snaps
 재예약하지 않는다. 즉 이 항목은 RED를 만들 수 없고, 회귀 방지용 특성화 테스트로만 의미가
 있다. 유휴 CPU를 태우는 실제 원인은 "재예약"이 아니라 **합침이 시간 기반이 아니었던 것**이며,
 이는 `FrameClock`(프레임 시작 기준 페이싱)으로 처리했다.
+
+### 12.5 3단계(GpuThread)는 "클로저를 옮기는 것"이 아니다 — 프레임당 2회 스레드 홉이 필요하다
+
+실측으로 확인한 두 가지 사실:
+
+1. **`NativeTerminalSurfaceHost`는 이미 `Send`다.** 컴파일 프로브
+   (`fn require_send<T: Send>(); require_send::<NativeTerminalSurfaceHost>();`)가 통과한다.
+   즉 호스트를 워커 스레드로 옮기는 것 자체는 타입 수준에서 가능하다.
+
+2. **그러나 렌더 경로는 GPU 작업과 AppKit 변형을 번갈아 수행한다.**
+   - `surface_host.rs:456` — 렌더 직전 `host.update_viewport(...)` (플랫폼 뷰 변형)
+   - 이어서 acquire / encode / present (GPU)
+   - `surface_host.rs:2937` — present 직후 `self.target.reveal_after_present()` (AppKit 변형)
+
+따라서 클로저 전체를 워커로 옮기면 **AppKit 변형이 메인 스레드 밖에서 실행된다.** macOS에서
+이는 정의되지 않은 동작이며 크래시나 화면 깨짐으로 나타난다.
+
+올바른 구조는 프레임당 두 번의 홉이다:
+
+```
+UiThread : update_viewport (지오메트리 확정)
+   -> GpuThread : acquire -> encode -> present
+   -> UiThread : reveal_after_present (첫 present 후 노출)
+```
+
+이것이 4.1절의 3분할 소유권이 옳다는 근거이자, 3단계가 단순 이동이 아니라 **프레임 상태
+머신**을 필요로 하는 이유다. `UiThread` / `GpuThread` 토큰은 바로 이 두 홉의 경계를
+타입으로 고정하기 위한 것이므로, 토큰 없이 이 이행을 시도하면 어느 구간이 어느 스레드에
+속하는지 사람이 눈으로 추적해야 한다.
+
+구현 순서 권고: 먼저 위 3단 구조를 스케줄링 수준에서 만들고(주입된 가짜 GPU로 홉이
+실제로 다른 스레드에서 실행되는지 검증), 그 다음 실제 wgpu 호출을 GpuThread 구간으로
+옮긴다. 현재 테스트 하네스는 `RenderDispatch`로 디스패치를 가로채므로 실제 wgpu/AppKit
+경로는 타지 않는다는 점을 유념할 것. 실제 표면 검증은 변경분이 포함된 빌드를 실행해야만
+가능하다.
