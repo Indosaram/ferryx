@@ -980,3 +980,44 @@ C1에 해당하는 부분. 나머지(C2 페이싱, C3 래치, 토큰의 `!Send`)
 스레드 깔때기가 여전히 직렬화하기 때문이다. 하지만 근거는 바뀐다: "락이 이미 풀려 있어서"가
 아니라 "락을 풀어도 더 큰 직렬화가 남아서"다. 12.7이 권하는 대로 호스트 맵을 `GpuThread`
 소유로 옮기면 이 락은 자연히 사라진다.
+
+
+### 12.17 Phase 3의 진짜 블로커: 드롭 순서가 곧 안전 장치다
+
+앞 절들은 Phase 3의 장애물을 빌림 검사와 `Window` 결합으로 봤다. 둘 다 해소했는데
+(`dfef209c`, `4877939e`) 정작 남은 벽은 다른 것이었다. `NativeSurfaceFrameTarget`은 이렇게
+생겼다:
+
+```rust
+/// 1. `surface` MUST drop before `target` ...
+struct NativeSurfaceFrameTarget {
+    surface: wgpu::Surface<'static>,
+    target: PlatformCompositorTarget,
+    renderer: NativeTerminalRenderer,
+    format: wgpu::TextureFormat,
+    size: PhysicalSize<u32>,
+}
+```
+
+Rust는 필드를 **선언 순서대로** 드롭한다. 즉 이 구조체는 "surface가 NSView보다 먼저 죽는다"는
+use-after-free 방지 규칙을 **필드 순서로 강제**하고 있다. 주석이 아니라 타입 레이아웃이 안전
+장치다.
+
+**충돌:** GPU 잡은 `surface`가 있어야 한다(`get_current_texture`가 surface의 메서드다). 반면
+`target`은 NSView라 워커 스레드로 보낼 수 없다. `surface`를 워커로 보내는 순간 두 값의 드롭
+순서를 필드 순서가 더 이상 보장하지 못한다. 렌더가 떠 있는 동안 패널을 닫으면 `target`이 먼저
+파괴되고 `surface`가 나중에 파괴된다 — 정확히 금지된 순서다.
+
+**그래서 Phase 3은 "GPU 호출을 옮기는 작업"이 아니라 "필드 순서로 세워둔 불변식을 명시적
+수명 관리로 다시 세우는 작업"이다.** 최소 요구사항:
+
+1. 호스트 Drop이 인플라이트 GPU 잡을 **회수한 뒤에** 타깃을 파괴할 것(완료 신호 대기).
+2. 그 대기는 한 프레임 이내로 끝나야 하므로 잡은 프레임 단위로 잘게 유지할 것.
+3. `Arc<Surface>`로 회피하지 말 것 — 드롭 순서가 비결정적이 되어 문제가 더 나빠진다.
+
+**검증 불가 구간과 겹친다는 점이 핵심이다.** 이 경로(`HostFrameTarget::Native`)는 실제
+`tauri::Window`가 있어야 도달하므로 어떤 테스트 바이너리도 못 간다(§12.6). 즉 드롭 순서 회귀는
+**실행 중인 앱에서 패널을 닫아봐야만** 드러난다. 증상은 조용한 오동작이 아니라 크래시다.
+
+완화 요인: PTY는 전부 데몬이 소유하므로 GUI가 죽어도 **터미널 세션은 살아남는다.** 실패
+비용은 "앱 재시작 + 커밋 되돌리기"이지 작업 유실이 아니다.
