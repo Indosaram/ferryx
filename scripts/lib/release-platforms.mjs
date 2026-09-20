@@ -178,6 +178,7 @@ BUN_V="$(bun --version 2>/dev/null || true)"
 ZIG_V="$(zig version 2>/dev/null || true)"
 RUST_V="$(rustc --version 2>/dev/null | awk '{print $2}' || true)"
 CARGO_V="$(cargo --version 2>/dev/null | awk '{print $2}' || true)"
+TAURI_V="$(cargo tauri --version 2>/dev/null | awk '{print $2}' || true)"
 NODE_V="$(node --version 2>/dev/null || true)"
 
 # Linux Packages
@@ -195,6 +196,7 @@ cat <<EOF
     "zig": "$ZIG_V",
     "rust": "$RUST_V",
     "cargo": "$CARGO_V",
+    "tauri": "$TAURI_V",
     "node": "$NODE_V"
   },
   "packages": {
