@@ -534,8 +534,8 @@ export function runHostScript(host, scripts = {}, options = {}) {
     const args = [
       "-o", "BatchMode=yes",
       "-o", "ConnectTimeout=10",
-      "-o", "ServerAliveInterval=5",
-      "-o", "ServerAliveCountMax=2",
+      "-o", "ServerAliveInterval=30",
+      "-o", "ServerAliveCountMax=20",
       host.ssh,
       "bash",
       "-s",
@@ -571,8 +571,8 @@ export function runHostScript(host, scripts = {}, options = {}) {
     const args = [
       "-o", "BatchMode=yes",
       "-o", "ConnectTimeout=10",
-      "-o", "ServerAliveInterval=5",
-      "-o", "ServerAliveCountMax=2",
+      "-o", "ServerAliveInterval=30",
+      "-o", "ServerAliveCountMax=20",
       host.ssh,
       "powershell",
       "-NoProfile",
