@@ -1165,7 +1165,15 @@ export async function buildHost({
       }
     } else {
       const scpCommand = process.env.FERRYX_SCP_COMMAND || "scp";
-      const sshArgs = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"];
+      // Bundle transfer and artifact retrieval can be silent for minutes on a
+      // busy remote host. Keep the SSH transport alive rather than letting a
+      // quiet build look like a dead connection.
+      const sshArgs = [
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=30",
+        "-o", "ServerAliveInterval=15",
+        "-o", "ServerAliveCountMax=6",
+      ];
       const bundleTarget = hostConfig.platform === "win32"
         ? `${hostConfig.ssh}:${workspaceDir.replaceAll("\\", "/")}/`
         : `${hostConfig.ssh}:${workspaceDir}/`;

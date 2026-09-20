@@ -38,6 +38,13 @@ test("release-platforms: exports required APIs", () => {
   assert.equal(typeof finalizeMacosBundle, "function");
 });
 
+test("buildHost: remote artifact transport uses keepalive options", async () => {
+  const source = readFileSync(new URL("./lib/release-platforms.mjs", import.meta.url), "utf8");
+  assert.match(source, /ConnectTimeout=30/);
+  assert.match(source, /ServerAliveInterval=15/);
+  assert.match(source, /ServerAliveCountMax=6/);
+});
+
 test("probeMacbook: correctly inspects disk budget and detects insufficiency", async () => {
   const hostConfig = {
     platform: "darwin",
