@@ -13,41 +13,70 @@ pub(super) async fn exercise(daemon: &DaemonServer, workspace: &str, session: &s
     let state = daemon.remote_state();
     *state.ssh_store_path.write() = Some(store.to_path_buf());
     state.clear_active_selection();
-    let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
-    let (token, _) = state.auth_manager.exchange_pairing_code(&pin, "SSH gateway QA").unwrap();
+    let pin = state
+        .auth_manager
+        .create_pairing_code(DevicePermission::Control);
+    let (token, _) = state
+        .auth_manager
+        .exchange_pairing_code(&pin, "SSH gateway QA")
+        .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let gateway = Arc::clone(state);
     let _server = Server(tokio::spawn(async move {
-        axum::serve(listener, crate::remote::create_remote_router(gateway)).await.unwrap();
+        axum::serve(listener, crate::remote::create_remote_router(gateway))
+            .await
+            .unwrap();
     }));
-    let client = reqwest::Client::builder().timeout(Duration::from_secs(10)).build().unwrap();
-    let response = client.get(format!("http://{addr}/api/v1/workspace/state"))
-        .bearer_auth(&token).send().await.unwrap();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let response = client
+        .get(format!("http://{addr}/api/v1/workspace/state"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
     assert!(response.status().is_success());
     let body = response.text().await.unwrap();
     let inventory: RemoteWorkspaceState = serde_json::from_str(&body).unwrap();
-    assert!(inventory.projects.iter().any(|project| project.workspace_id == workspace));
-    assert!(inventory.sessions.iter().any(|item| item.session_id == session
-        && item.workspace_id.as_deref() == Some(workspace)));
+    assert!(inventory
+        .projects
+        .iter()
+        .any(|project| project.workspace_id == workspace));
+    assert!(inventory
+        .sessions
+        .iter()
+        .any(|item| item.session_id == session && item.workspace_id.as_deref() == Some(workspace)));
 
     let url = format!("http://{addr}/api/v1/terminal/{session}");
-    let handshake = || client.get(&url).bearer_auth(&token)
-        .header("connection", "upgrade").header("upgrade", "websocket")
-        .header("sec-websocket-version", "13")
-        .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==");
+    let handshake = || {
+        client
+            .get(&url)
+            .bearer_auth(&token)
+            .header("connection", "upgrade")
+            .header("upgrade", "websocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+    };
     assert_eq!(handshake().send().await.unwrap().status().as_u16(), 403);
     let mut events = state.event_tx.subscribe();
-    let response = client.post(format!("http://{addr}/api/v1/workspace/select"))
-        .bearer_auth(&token).header("content-type", "application/json")
+    let response = client
+        .post(format!("http://{addr}/api/v1/workspace/select"))
+        .bearer_auth(&token)
+        .header("content-type", "application/json")
         .body(serde_json::json!({ "workspaceId": workspace, "sessionId": session }).to_string())
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert!(response.status().is_success());
     let event: crate::remote::protocol::RemoteEventMessage =
         serde_json::from_str(&events.try_recv().unwrap()).unwrap();
     assert_eq!(event.payload["sessionId"], session);
     state.set_active_selection(RemoteActiveDesktopSelection {
-        workspace_id: Some(workspace.to_owned()), session_id: Some(session.to_owned()),
+        workspace_id: Some(workspace.to_owned()),
+        session_id: Some(session.to_owned()),
         ..Default::default()
     });
     let response = handshake().send().await.unwrap();
@@ -73,13 +102,15 @@ pub(super) async fn exercise(daemon: &DaemonServer, workspace: &str, session: &s
                 if let crate::remote::protocol::ServerControlMessage::RemoteStatus {
                     state: crate::terminal::remote::RemoteConnectionState::Connected,
                     generation,
-                } = serde_json::from_slice(&payload).unwrap() {
+                } = serde_json::from_slice(&payload).unwrap()
+                {
                     let message = serde_json::to_vec(
                         &crate::remote::protocol::ClientControlMessage::RemoteWrite {
                             generation,
                             data: std::str::from_utf8(input).unwrap().to_owned(),
                         },
-                    ).unwrap();
+                    )
+                    .unwrap();
                     let mut frame = vec![0x81, 0x80 | 126];
                     frame.extend_from_slice(&u16::try_from(message.len()).unwrap().to_be_bytes());
                     frame.extend_from_slice(&[0; 4]);
@@ -90,9 +121,13 @@ pub(super) async fn exercise(daemon: &DaemonServer, workspace: &str, session: &s
             }
             if header[0] & 15 == 2 {
                 output.extend(payload);
-                if String::from_utf8_lossy(&output).contains("FERRYX-REMOTE-OK") { break; }
+                if String::from_utf8_lossy(&output).contains("FERRYX-REMOTE-OK") {
+                    break;
+                }
             }
         }
-    }).await.expect("actual SSH output through remote WebSocket");
+    })
+    .await
+    .expect("actual SSH output through remote WebSocket");
     println!("FERRYX_REMOTE_SSH_QA_OK inventory selection active-lock websocket-input-output");
 }

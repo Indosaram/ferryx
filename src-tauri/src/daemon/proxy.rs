@@ -92,13 +92,7 @@ impl LegacyPeer {
 
     async fn connect_and_handshake(
         &self,
-    ) -> Result<
-        (
-            BufReader<LegacyReadHalf>,
-            LegacyWriteHalf,
-        ),
-        String,
-    > {
+    ) -> Result<(BufReader<LegacyReadHalf>, LegacyWriteHalf), String> {
         let stream = self.connect_stream().await?;
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
@@ -123,7 +117,9 @@ impl LegacyPeer {
             serde_json::from_str(line.trim()).map_err(|e| e.to_string())?;
         match hs_resp {
             DaemonResponse::HandshakeOk { .. } => Ok((reader, write_half)),
-            DaemonResponse::ProtocolMismatch { expected_version, .. } => {
+            DaemonResponse::ProtocolMismatch {
+                expected_version, ..
+            } => {
                 // The legacy daemon is running an older protocol version and closed the connection.
                 // Reconnect with a fresh socket stream and send the handshake with expected_version.
                 *self.protocol_version.write() = expected_version;
@@ -539,21 +535,37 @@ impl LegacyPeer {
                             metrics_read_unix_micros,
                             ..
                         } => {
-                            if tx.send(OutputChunk {
-                                sequence,
-                                bytes: data.into_owned().into(),
-                                metrics_read_unix_micros,
-                                replay_gap: None,
-                            }).is_err() || tx.receiver_count() == 0 {
+                            if tx
+                                .send(OutputChunk {
+                                    sequence,
+                                    bytes: data.into_owned().into(),
+                                    metrics_read_unix_micros,
+                                    replay_gap: None,
+                                })
+                                .is_err()
+                                || tx.receiver_count() == 0
+                            {
                                 break;
                             }
                         }
-                        DaemonStreamMessage::Gap { requested_after_sequence, available_from_sequence, .. } => {
-                            if tx.send(OutputChunk {
-                                sequence: available_from_sequence.saturating_sub(1),
-                                bytes: Vec::new().into(), metrics_read_unix_micros: None,
-                                replay_gap: Some(crate::terminal::output_hub::ReplayGap { requested_after_sequence, available_from_sequence }),
-                            }).is_err() || tx.receiver_count() == 0 {
+                        DaemonStreamMessage::Gap {
+                            requested_after_sequence,
+                            available_from_sequence,
+                            ..
+                        } => {
+                            if tx
+                                .send(OutputChunk {
+                                    sequence: available_from_sequence.saturating_sub(1),
+                                    bytes: Vec::new().into(),
+                                    metrics_read_unix_micros: None,
+                                    replay_gap: Some(crate::terminal::output_hub::ReplayGap {
+                                        requested_after_sequence,
+                                        available_from_sequence,
+                                    }),
+                                })
+                                .is_err()
+                                || tx.receiver_count() == 0
+                            {
                                 break;
                             }
                         }
@@ -576,24 +588,39 @@ impl LegacyPeer {
         })
     }
 
-    async fn recovery(&self, id: &str) -> Result<Option<crate::remote::backend::RecoveryStream>, String> {
+    async fn recovery(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::remote::backend::RecoveryStream>, String> {
         use crate::remote::backend::RemoteRecoveryStatus;
-        let details = match self.send_request(&DaemonRequest::RemoteSessionDetails { session_id: id.into() }).await? {
+        let details = match self
+            .send_request(&DaemonRequest::RemoteSessionDetails {
+                session_id: id.into(),
+            })
+            .await?
+        {
             DaemonResponse::RemoteSessionDetailsOk { details, .. } => details,
             // A pre-recovery daemon cannot own a preserved SSH target. Do not
             // fall back on arbitrary errors: fail closed when classification fails.
             _ => return Err("Remote recovery status unavailable".into()),
         };
-        if details.is_none() { return Ok(None); }
+        if details.is_none() {
+            return Ok(None);
+        }
         let (mut reader, mut write) = self.connect_and_handshake().await?;
 
-        let request = DaemonRequest::Attach { session_id: id.into(), after_sequence: None };
+        let request = DaemonRequest::Attach {
+            session_id: id.into(),
+            after_sequence: None,
+        };
         let mut wire = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
         wire.push(b'\n');
         write.write_all(&wire).await.map_err(|e| e.to_string())?;
         let mut line = String::new();
-        tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut line)).await
-            .map_err(|_| "Recovery attach timed out")?.map_err(|e| e.to_string())?;
+        tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut line))
+            .await
+            .map_err(|_| "Recovery attach timed out")?
+            .map_err(|e| e.to_string())?;
         let response: DaemonResponse = serde_json::from_str(&line).map_err(|e| e.to_string())?;
         if !matches!(response, DaemonResponse::AttachOk { .. }) {
             return Err("Recovery attach rejected".into());
@@ -601,22 +628,30 @@ impl LegacyPeer {
         // The attach stream supplies its own initial status, avoiding a stale
         // independent Describe snapshot racing the subscription. Own both halves
         // in the stream so socket cancellation closes the daemon subscription.
-        Ok(Some(Box::pin(futures_util::stream::unfold((reader, write), |(mut reader, write)| async move {
-            loop {
-                let mut line = String::new();
-                match reader.read_line(&mut line).await {
-                    Ok(0) | Err(_) => return None,
-                    Ok(_) => {}
-                }
-                match serde_json::from_str::<DaemonStreamMessage<'_>>(&line) {
-                    Ok(DaemonStreamMessage::RemoteStatus { state, generation, .. }) => {
-                        return Some((RemoteRecoveryStatus { state, generation }, (reader, write)));
+        Ok(Some(Box::pin(futures_util::stream::unfold(
+            (reader, write),
+            |(mut reader, write)| async move {
+                loop {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line).await {
+                        Ok(0) | Err(_) => return None,
+                        Ok(_) => {}
                     }
-                    Ok(DaemonStreamMessage::Exit { .. }) | Err(_) => return None,
-                    _ => {}
+                    match serde_json::from_str::<DaemonStreamMessage<'_>>(&line) {
+                        Ok(DaemonStreamMessage::RemoteStatus {
+                            state, generation, ..
+                        }) => {
+                            return Some((
+                                RemoteRecoveryStatus { state, generation },
+                                (reader, write),
+                            ));
+                        }
+                        Ok(DaemonStreamMessage::Exit { .. }) | Err(_) => return None,
+                        _ => {}
+                    }
                 }
-            }
-        }))))
+            },
+        ))))
     }
 }
 
@@ -635,8 +670,15 @@ impl SessionRouter {
         }
     }
 
-    pub(crate) fn register_workspace(&self, session_id: &str, workspace_id: &str, ssh_store: Option<PathBuf>) {
-        self.workspace_ids.write().insert(session_id.to_owned(), (workspace_id.to_owned(), ssh_store));
+    pub(crate) fn register_workspace(
+        &self,
+        session_id: &str,
+        workspace_id: &str,
+        ssh_store: Option<PathBuf>,
+    ) {
+        self.workspace_ids
+            .write()
+            .insert(session_id.to_owned(), (workspace_id.to_owned(), ssh_store));
     }
 
     pub(crate) fn remove_workspace(&self, session_id: &str) {
@@ -647,7 +689,8 @@ impl SessionRouter {
         let target = self.workspace_ids.read().get(session_id).cloned();
         if let Some((id, Some(path))) = target {
             crate::ipc::run_blocking(move || crate::ssh::projects::resolve(&path, &id))
-                .await.map_err(|error| error.to_string())?;
+                .await
+                .map_err(|error| error.to_string())?;
         }
         Ok(())
     }
@@ -723,7 +766,9 @@ impl SessionRouter {
     }
 
     pub fn find_legacy_peer_for_session(&self, session_id: &str) -> Option<Arc<LegacyPeer>> {
-        if crate::terminal::paired_runtime::Runtime::owns(session_id) { return None; }
+        if crate::terminal::paired_runtime::Runtime::owns(session_id) {
+            return None;
+        }
         let peers = self.legacy_peers.read();
         peers
             .iter()
@@ -748,7 +793,10 @@ impl SessionRouter {
 }
 
 impl RemoteSessionBackend for SessionRouter {
-    fn recovery<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Option<crate::remote::backend::RecoveryStream>, String>> {
+    fn recovery<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> BoxFuture<'a, Result<Option<crate::remote::backend::RecoveryStream>, String>> {
         Box::pin(async move {
             self.validate_ssh_workspace(id).await?;
             if self.is_local_session(id) {
@@ -760,27 +808,70 @@ impl RemoteSessionBackend for SessionRouter {
             Err("Session unavailable".into())
         })
     }
-    fn write_generation<'a>(&'a self, id: &'a str, generation: u64, data: &'a [u8]) -> BoxFuture<'a, Result<(), String>> {
+    fn write_generation<'a>(
+        &'a self,
+        id: &'a str,
+        generation: u64,
+        data: &'a [u8],
+    ) -> BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
             self.validate_ssh_workspace(id).await?;
             if self.is_local_session(id) {
-                return RemoteSessionBackend::write_generation(self.terminal_service.as_ref(), id, generation, data).await;
+                return RemoteSessionBackend::write_generation(
+                    self.terminal_service.as_ref(),
+                    id,
+                    generation,
+                    data,
+                )
+                .await;
             }
-            let peer = self.find_legacy_peer_for_session(id).ok_or("Session unavailable")?;
-            match peer.send_request(&DaemonRequest::RemoteWrite { session_id: id.into(), generation, data: data.to_vec() }).await? {
+            let peer = self
+                .find_legacy_peer_for_session(id)
+                .ok_or("Session unavailable")?;
+            match peer
+                .send_request(&DaemonRequest::RemoteWrite {
+                    session_id: id.into(),
+                    generation,
+                    data: data.to_vec(),
+                })
+                .await?
+            {
                 DaemonResponse::WriteOk => Ok(()),
                 _ => Err("Remote input rejected".into()),
             }
         })
     }
-    fn resize_generation<'a>(&'a self, id: &'a str, generation: u64, cols: u16, rows: u16) -> BoxFuture<'a, Result<(), String>> {
+    fn resize_generation<'a>(
+        &'a self,
+        id: &'a str,
+        generation: u64,
+        cols: u16,
+        rows: u16,
+    ) -> BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
             self.validate_ssh_workspace(id).await?;
             if self.is_local_session(id) {
-                return RemoteSessionBackend::resize_generation(self.terminal_service.as_ref(), id, generation, cols, rows).await;
+                return RemoteSessionBackend::resize_generation(
+                    self.terminal_service.as_ref(),
+                    id,
+                    generation,
+                    cols,
+                    rows,
+                )
+                .await;
             }
-            let peer = self.find_legacy_peer_for_session(id).ok_or("Session unavailable")?;
-            match peer.send_request(&DaemonRequest::RemoteResize { session_id: id.into(), generation, cols, rows }).await? {
+            let peer = self
+                .find_legacy_peer_for_session(id)
+                .ok_or("Session unavailable")?;
+            match peer
+                .send_request(&DaemonRequest::RemoteResize {
+                    session_id: id.into(),
+                    generation,
+                    cols,
+                    rows,
+                })
+                .await?
+            {
                 DaemonResponse::ResizeOk => Ok(()),
                 _ => Err("Remote resize rejected".into()),
             }
@@ -798,7 +889,16 @@ impl RemoteSessionBackend for SessionRouter {
         Box::pin(async move {
             self.validate_ssh_workspace(&session_id).await?;
             if let Some(details) = self.terminal_service.remote().details(&session_id) {
-                return Ok(RemoteSessionDetails { session_id, workspace_id: Some(details.descriptor.config.project_id), worktree_label: None, worktree_path: Some(PathBuf::from(details.descriptor.config.project_path)), running: details.state == crate::terminal::remote::RemoteConnectionState::Connected, cols: details.descriptor.cols, rows: details.descriptor.rows });
+                return Ok(RemoteSessionDetails {
+                    session_id,
+                    workspace_id: Some(details.descriptor.config.project_id),
+                    worktree_label: None,
+                    worktree_path: Some(PathBuf::from(details.descriptor.config.project_path)),
+                    running: details.state
+                        == crate::terminal::remote::RemoteConnectionState::Connected,
+                    cols: details.descriptor.cols,
+                    rows: details.descriptor.rows,
+                });
             }
             if self.is_local_session(&session_id) {
                 let session = self
@@ -811,7 +911,11 @@ impl RemoteSessionBackend for SessionRouter {
                     PtySessionState::Running | PtySessionState::Starting
                 );
                 let worktree_path = session.worktree_path();
-                let workspace_id = self.workspace_ids.read().get(&session_id).map(|(id, _)| id.clone());
+                let workspace_id = self
+                    .workspace_ids
+                    .read()
+                    .get(&session_id)
+                    .map(|(id, _)| id.clone());
                 Ok(RemoteSessionDetails {
                     session_id,
                     workspace_id,
@@ -864,8 +968,17 @@ impl RemoteSessionBackend for SessionRouter {
         Box::pin(async move {
             self.validate_ssh_workspace(&session_id).await?;
             if self.is_local_session(&session_id) {
-                let generation = self.terminal_service.remote().details(&session_id).map(|d| d.generation).unwrap_or(0);
-                self.terminal_service.write_input_operation(&session_id, generation, data).map_err(|e| e.to_string())?.await.map_err(|e| e.to_string())
+                let generation = self
+                    .terminal_service
+                    .remote()
+                    .details(&session_id)
+                    .map(|d| d.generation)
+                    .unwrap_or(0);
+                self.terminal_service
+                    .write_input_operation(&session_id, generation, data)
+                    .map_err(|e| e.to_string())?
+                    .await
+                    .map_err(|e| e.to_string())
             } else if let Some(peer) = self.find_legacy_peer_for_session(&session_id) {
                 peer.write_input(&session_id, &data).await
             } else {
@@ -879,8 +992,17 @@ impl RemoteSessionBackend for SessionRouter {
         Box::pin(async move {
             self.validate_ssh_workspace(&session_id).await?;
             if self.is_local_session(&session_id) {
-                let generation = self.terminal_service.remote().details(&session_id).map(|d| d.generation).unwrap_or(0);
-                self.terminal_service.resize_operation(&session_id, generation, cols, rows).map_err(|e| e.to_string())?.await.map_err(|e| e.to_string())
+                let generation = self
+                    .terminal_service
+                    .remote()
+                    .details(&session_id)
+                    .map(|d| d.generation)
+                    .unwrap_or(0);
+                self.terminal_service
+                    .resize_operation(&session_id, generation, cols, rows)
+                    .map_err(|e| e.to_string())?
+                    .await
+                    .map_err(|e| e.to_string())
             } else if let Some(peer) = self.find_legacy_peer_for_session(&session_id) {
                 peer.resize(&session_id, cols, rows).await
             } else {

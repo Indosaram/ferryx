@@ -69,7 +69,10 @@ impl AgentStateHub {
             previous_state = ?previous.as_ref().map(|s| &s.state),
             "agent activity released");
         retained.insert(session_id.to_string(), state.clone());
-        let _ = self.tx.send(AgentStateUpdate { state, is_snapshot: false });
+        let _ = self.tx.send(AgentStateUpdate {
+            state,
+            is_snapshot: false,
+        });
     }
 
     pub(crate) fn release_foreground(&self, session_id: &str) {
@@ -86,7 +89,10 @@ impl AgentStateHub {
             previous_state = ?previous.as_ref().map(|s| &s.state),
             "agent activity released");
         retained.insert(session_id.to_string(), state.clone());
-        let _ = self.tx.send(AgentStateUpdate { state, is_snapshot: false });
+        let _ = self.tx.send(AgentStateUpdate {
+            state,
+            is_snapshot: false,
+        });
     }
 
     /// Publishes the positive evidence that an agent process owns this PTY again.
@@ -127,7 +133,10 @@ impl AgentStateHub {
             return false;
         }
         retained.insert(state.session_id.clone(), state.clone());
-        let _ = self.tx.send(AgentStateUpdate { state, is_snapshot: true });
+        let _ = self.tx.send(AgentStateUpdate {
+            state,
+            is_snapshot: true,
+        });
         true
     }
 
@@ -145,10 +154,7 @@ impl AgentStateHub {
     }
 
     pub fn current(&self, session_id: &str) -> Option<AgentState> {
-        self.retained
-            .lock()
-            .get(session_id)
-            .cloned()
+        self.retained.lock().get(session_id).cloned()
     }
 
     pub fn remove(&self, session_id: &str) {
@@ -189,16 +195,24 @@ mod tests {
         hub.release_manual("s1");
 
         let update = tokio::time::timeout(
-            std::time::Duration::from_secs(1), subscription.receiver.recv()
-        ).await.expect("manual reset event").expect("state stream");
+            std::time::Duration::from_secs(1),
+            subscription.receiver.recv(),
+        )
+        .await
+        .expect("manual reset event")
+        .expect("state stream");
         assert_eq!(update.state.state, "idle");
         assert!(!update.is_snapshot);
         assert_eq!(hub.current("s1").unwrap().state, "idle");
 
         hub.publish_canonical(state("s1", "working"));
         let next_update = tokio::time::timeout(
-            std::time::Duration::from_secs(1), subscription.receiver.recv()
-        ).await.expect("next transition event").expect("state stream");
+            std::time::Duration::from_secs(1),
+            subscription.receiver.recv(),
+        )
+        .await
+        .expect("next transition event")
+        .expect("state stream");
         assert_eq!(next_update.state.state, "working");
         assert_eq!(hub.current("s1").unwrap().state, "working");
     }
@@ -218,8 +232,12 @@ mod tests {
             hub.release_foreground("s1");
         }
         let update = tokio::time::timeout(
-            std::time::Duration::from_secs(1), subscription.receiver.recv()
-        ).await.expect("release event").expect("state stream");
+            std::time::Duration::from_secs(1),
+            subscription.receiver.recv(),
+        )
+        .await
+        .expect("release event")
+        .expect("state stream");
         assert_eq!(update.state.state, "idle");
         assert!(!update.is_snapshot);
         assert_eq!(hub.current("s1").unwrap().state, "idle");
@@ -295,13 +313,20 @@ mod tests {
         hub.publish_canonical(state("s1", "working"));
         let mut subscription = hub.subscribe("s1");
         let mut transition = ProcessTransition::default();
-        for observation in [Some(Foreground::Agent(42)), None, Some(Foreground::Agent(42))] {
+        for observation in [
+            Some(Foreground::Agent(42)),
+            None,
+            Some(Foreground::Agent(42)),
+        ] {
             if transition.observe(observation) == Some(AgentProcessEdge::Released) {
                 hub.release_foreground("s1");
             }
         }
         assert_eq!(hub.current("s1"), Some(state("s1", "working")));
-        assert!(matches!(subscription.receiver.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+        assert!(matches!(
+            subscription.receiver.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
     }
 
     #[test]

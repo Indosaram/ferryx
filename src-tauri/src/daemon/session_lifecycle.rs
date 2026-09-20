@@ -51,7 +51,8 @@ pub struct SessionLifecycleRegistry {
 
 impl SessionLifecycleRegistry {
     pub fn insert_standby(&mut self, session_id: impl Into<String>) {
-        self.records.insert(session_id.into(), SessionLifecycleRecord::default());
+        self.records
+            .insert(session_id.into(), SessionLifecycleRecord::default());
     }
 
     pub fn mark_running(&mut self, session_id: impl Into<String>) {
@@ -98,11 +99,7 @@ impl SessionLifecycleRegistry {
         self.records.remove(session_id)
     }
 
-    pub fn hibernation_candidates_at(
-        &self,
-        now: Instant,
-        idle_timeout: Duration,
-    ) -> Vec<String> {
+    pub fn hibernation_candidates_at(&self, now: Instant, idle_timeout: Duration) -> Vec<String> {
         self.records
             .iter()
             .filter_map(|(session_id, record)| {
@@ -124,16 +121,28 @@ mod tests {
     fn lifecycle_transitions_standby_running_hibernated() {
         let mut registry = SessionLifecycleRegistry::default();
         registry.insert_standby("session-a");
-        assert_eq!(registry.state("session-a"), Some(SessionProcessState::Standby));
+        assert_eq!(
+            registry.state("session-a"),
+            Some(SessionProcessState::Standby)
+        );
 
         registry.mark_running("session-a");
-        assert_eq!(registry.state("session-a"), Some(SessionProcessState::Running));
+        assert_eq!(
+            registry.state("session-a"),
+            Some(SessionProcessState::Running)
+        );
 
         registry.mark_hibernated("session-a");
-        assert_eq!(registry.state("session-a"), Some(SessionProcessState::Hibernated));
+        assert_eq!(
+            registry.state("session-a"),
+            Some(SessionProcessState::Hibernated)
+        );
 
         registry.mark_suspended("session-a");
-        assert_eq!(registry.state("session-a"), Some(SessionProcessState::Suspended));
+        assert_eq!(
+            registry.state("session-a"),
+            Some(SessionProcessState::Suspended)
+        );
     }
 
     #[test]

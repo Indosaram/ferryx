@@ -36,7 +36,10 @@ async fn direct_ssh_real_transport_registration_and_pty() {
         exercise_child(Path::new(&root)).await;
         return;
     }
-    let dir = tempfile::Builder::new().prefix("fx").tempdir_in("/tmp").unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("fx")
+        .tempdir_in("/tmp")
+        .unwrap();
     for name in ["host_key", "user_key"] {
         let output = std::process::Command::new("ssh-keygen")
             .args(["-q", "-t", "ed25519", "-N", "", "-f"])
@@ -157,10 +160,16 @@ async fn wait_remote_connected(daemon: &DaemonServer, id: &str) {
     let mut updates = daemon.terminal_service.remote().subscribe(id).unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if updates.borrow_and_update().state == crate::terminal::remote::RemoteConnectionState::Connected { break; }
+            if updates.borrow_and_update().state
+                == crate::terminal::remote::RemoteConnectionState::Connected
+            {
+                break;
+            }
             updates.changed().await.unwrap();
         }
-    }).await.expect("helper target connected");
+    })
+    .await
+    .expect("helper target connected");
 }
 
 struct OwnedTestHelper(std::process::Child);
@@ -178,24 +187,36 @@ async fn install_test_helper(host: &SshHost, home: &Path) -> OwnedTestHelper {
     let mut environment = crate::ssh::runtime::detect(host).await.unwrap();
     environment.home = home.to_string_lossy().into_owned();
     let location = crate::ssh::helper_setup::default_location(host, &environment).unwrap();
-    let binary = Path::new(env!("CARGO_MANIFEST_DIR")).join("../remote-helper/target/debug/ferryx-remote-helper");
-    assert!(binary.is_file(), "Explicit test prerequisite: build remote-helper before SSH daemon tests");
-    crate::ssh::helper_setup::install(host, &environment, &location, &binary).await.unwrap();
+    let binary = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../remote-helper/target/debug/ferryx-remote-helper");
+    assert!(
+        binary.is_file(),
+        "Explicit test prerequisite: build remote-helper before SSH daemon tests"
+    );
+    crate::ssh::helper_setup::install(host, &environment, &location, &binary)
+        .await
+        .unwrap();
     let mut child = std::process::Command::new(&location.executable)
         .args(["daemon", "--root", &location.root, "--host-id", &host.id])
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
-        .spawn().expect("owned foreground helper");
+        .spawn()
+        .expect("owned foreground helper");
     let stdout = child.stdout.take().unwrap();
     let helper = OwnedTestHelper(child);
     let (sender, ready) = std::sync::mpsc::channel();
     let reader = std::thread::spawn(move || {
         use std::io::BufRead;
         let mut line = String::new();
-        let result = std::io::BufReader::new(stdout).read_line(&mut line).map(|_| line);
+        let result = std::io::BufReader::new(stdout)
+            .read_line(&mut line)
+            .map(|_| line);
         let _ = sender.send(result);
     });
-    let line = ready.recv_timeout(Duration::from_secs(5)).expect("helper readiness event").unwrap();
+    let line = ready
+        .recv_timeout(Duration::from_secs(5))
+        .expect("helper readiness event")
+        .unwrap();
     reader.join().unwrap();
     let ready: serde_json::Value = serde_json::from_str(&line).unwrap();
     assert_eq!(ready["event"], "ready");
@@ -272,7 +293,10 @@ async fn exercise_child(root: &Path) {
     assert_eq!(repeated.git_root, Some(response.repo_root.clone()));
     // A fresh daemon and fresh disk lookup model GUI restart; no local workspace
     // registration exists, and no local placeholder is needed for either tab.
-    let daemon = DaemonServer::new_with_paths(Some(root.join("gateway.json")), Some(root.join("auth.json")));
+    let daemon = DaemonServer::new_with_paths(
+        Some(root.join("gateway.json")),
+        Some(root.join("auth.json")),
+    );
     let _helper = install_test_helper(&host, root).await;
     assert!(daemon
         .handle_register_workspace(&response.workspace_id, &response.repo_root)
@@ -308,7 +332,13 @@ async fn exercise_child(root: &Path) {
         let (mut history, mut events) = daemon.terminal_service.attach(&id).unwrap();
         // Subscribe before writing; octal marker is absent from PTY input echo.
         wait_remote_connected(&daemon, &id).await;
-        daemon.write_session_input(&id, b"printf '\\136\\123\\123\\110\\055\\117\\113\\072'; pwd -P\n".to_vec()).await.unwrap();
+        daemon
+            .write_session_input(
+                &id,
+                b"printf '\\136\\123\\123\\110\\055\\117\\113\\072'; pwd -P\n".to_vec(),
+            )
+            .await
+            .unwrap();
         let expected = format!("^SSH-OK:{}", response.repo_root);
         tokio::time::timeout(Duration::from_secs(10), async {
             while !String::from_utf8_lossy(&history).contains(&expected) {
@@ -334,7 +364,9 @@ async fn exercise_child(root: &Path) {
             retained = Some(id);
         }
     }
-    let wt_dir = Path::new(&response.repo_root).join(".orca-worktrees").join("wt-feature");
+    let wt_dir = Path::new(&response.repo_root)
+        .join(".orca-worktrees")
+        .join("wt-feature");
     std::fs::create_dir_all(&wt_dir).unwrap();
     let wt_identity = crate::worktree::WorktreeIdentity {
         ws_id: "agent".into(),
@@ -355,7 +387,13 @@ async fn exercise_child(root: &Path) {
         .expect("SSH PTY spawn in remote worktree");
     let (mut wt_history, mut wt_events) = daemon.terminal_service.attach(&wt_session_id).unwrap();
     wait_remote_connected(&daemon, &wt_session_id).await;
-    daemon.write_session_input(&wt_session_id, b"printf '\\136\\123\\123\\110\\055\\117\\113\\072'; pwd -P\n".to_vec()).await.unwrap();
+    daemon
+        .write_session_input(
+            &wt_session_id,
+            b"printf '\\136\\123\\123\\110\\055\\117\\113\\072'; pwd -P\n".to_vec(),
+        )
+        .await
+        .unwrap();
     let expected_wt = format!("^SSH-OK:{}", wt_dir.to_str().unwrap());
     tokio::time::timeout(Duration::from_secs(10), async {
         while !String::from_utf8_lossy(&wt_history).contains(&expected_wt) {
@@ -364,8 +402,9 @@ async fn exercise_child(root: &Path) {
     })
     .await
     .expect("remote command produced exact worktree root through real SSH PTY");
-    let DaemonResponse::DescribeSessionOk { session: wt_session } =
-        daemon.handle_describe_session(&wt_session_id)
+    let DaemonResponse::DescribeSessionOk {
+        session: wt_session,
+    } = daemon.handle_describe_session(&wt_session_id)
     else {
         panic!("session details")
     };
@@ -387,7 +426,9 @@ async fn exercise_child(root: &Path) {
         .await
         .unwrap_err();
     assert!(
-        shell_err.to_string().contains("shell overrides are unsupported"),
+        shell_err
+            .to_string()
+            .contains("shell overrides are unsupported"),
         "unexpected error message: {shell_err}"
     );
 
@@ -395,17 +436,35 @@ async fn exercise_child(root: &Path) {
     let before = daemon.terminal_service.remote().details(&retained).unwrap();
     assert!(before.pid.is_some());
     let identity_path = daemon.remote_sessions_path.clone();
-    daemon.persist_remote_sessions_at(identity_path.clone()).await.unwrap();
+    daemon
+        .persist_remote_sessions_at(identity_path.clone())
+        .await
+        .unwrap();
     let old_runtime = Arc::downgrade(daemon.terminal_service.remote());
     drop(daemon);
-    assert!(old_runtime.upgrade().is_none(), "old runtime must be dropped, not retained by watchers");
-    let daemon = DaemonServer::new_with_paths(Some(root.join("gateway.json")), Some(root.join("auth.json")));
-    daemon.restore_remote_sessions_at(identity_path).await.unwrap();
+    assert!(
+        old_runtime.upgrade().is_none(),
+        "old runtime must be dropped, not retained by watchers"
+    );
+    let daemon = DaemonServer::new_with_paths(
+        Some(root.join("gateway.json")),
+        Some(root.join("auth.json")),
+    );
+    daemon
+        .restore_remote_sessions_at(identity_path)
+        .await
+        .unwrap();
     wait_remote_connected(&daemon, &retained).await;
     let after = daemon.terminal_service.remote().details(&retained).unwrap();
     assert_eq!(after.descriptor.target, before.descriptor.target);
-    assert_eq!(after.pid, before.pid, "restart reattaches the original remote process");
-    assert_eq!(after.descriptor.backend_session_id, before.descriptor.backend_session_id);
+    assert_eq!(
+        after.pid, before.pid,
+        "restart reattaches the original remote process"
+    );
+    assert_eq!(
+        after.descriptor.backend_session_id,
+        before.descriptor.backend_session_id
+    );
     assert!(daemon.terminal_service.get_session(&retained).is_none());
     let (mut replay, mut output) = daemon.terminal_service.attach(&retained).unwrap();
     let expected = format!("^SSH-OK:{}", response.repo_root);
@@ -413,14 +472,20 @@ async fn exercise_child(root: &Path) {
         while !String::from_utf8_lossy(&replay).contains(&expected) {
             replay.extend(output.recv().await.unwrap());
         }
-    }).await.expect("restart replays original retained output without rerunning command");
+    })
+    .await
+    .expect("restart replays original retained output without rerunning command");
     daemon.validate_session_ssh_target(&retained).await.unwrap();
     host.disabled = Some(true);
     write_hosts(&host_store, vec![host]);
     assert!(daemon.validate_session_ssh_target(&retained).await.is_err());
     assert!(crate::remote::RemoteSessionBackend::write_input(
-        &*daemon.session_router, &retained, b"\n"
-    ).await.is_err());
+        &*daemon.session_router,
+        &retained,
+        b"\n"
+    )
+    .await
+    .is_err());
     daemon.handle_close(&retained).await.unwrap();
     assert!(daemon
         .handle_spawn(

@@ -121,7 +121,9 @@ mod tests {
         .expect("serialized update");
 
         assert_eq!(HandoverManifest::load_from_path(&path).routes.len(), 1);
-        competing_writer.try_lock().expect("transaction released lock");
+        competing_writer
+            .try_lock()
+            .expect("transaction released lock");
     }
 
     #[test]
@@ -134,8 +136,14 @@ mod tests {
             manifest.prune_dead_routes();
         });
 
-        assert!(result.is_err(), "corrupt routes must not become an empty manifest");
-        assert_eq!(fs::read(&path).expect("preserved bytes"), b"{broken manifest");
+        assert!(
+            result.is_err(),
+            "corrupt routes must not become an empty manifest"
+        );
+        assert_eq!(
+            fs::read(&path).expect("preserved bytes"),
+            b"{broken manifest"
+        );
     }
 
     #[test]

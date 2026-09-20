@@ -19,7 +19,8 @@ fn extension_dirs_with_env(get_env: impl Fn(&str) -> Option<std::ffi::OsString>)
     let Some(home) = get_env("HOME")
         .filter(|value| !value.is_empty())
         .or_else(|| get_env("USERPROFILE").filter(|value| !value.is_empty()))
-        .map(PathBuf::from) else {
+        .map(PathBuf::from)
+    else {
         return Vec::new();
     };
     ["\u{2e}omo", ".pi", ".omp"]
@@ -148,18 +149,28 @@ mod p09_tests {
         let root = std::env::temp_dir().join(format!("p09-home-{}", std::process::id()));
         std::fs::create_dir(&root).unwrap();
         let result = std::panic::catch_unwind(|| {
-            let expected = [".omo", ".pi", ".omp"].map(|agent| root.join(agent).join("agent/extensions"));
-            for dir in &expected { std::fs::create_dir_all(dir).unwrap(); }
-            let dirs = extension_dirs_with_env(|key| (key == "USERPROFILE").then(|| root.clone().into_os_string()));
+            let expected =
+                [".omo", ".pi", ".omp"].map(|agent| root.join(agent).join("agent/extensions"));
+            for dir in &expected {
+                std::fs::create_dir_all(dir).unwrap();
+            }
+            let dirs = extension_dirs_with_env(|key| {
+                (key == "USERPROFILE").then(|| root.clone().into_os_string())
+            });
             assert_eq!(dirs, expected);
             for dir in dirs {
                 assert!(install_into(&dir).unwrap());
-                assert_eq!(std::fs::read_to_string(dir.join(EXTENSION_FILE_NAME)).unwrap(), EXTENSION_SOURCE);
+                assert_eq!(
+                    std::fs::read_to_string(dir.join(EXTENSION_FILE_NAME)).unwrap(),
+                    EXTENSION_SOURCE
+                );
                 assert!(!install_into(&dir).unwrap());
             }
             assert!(extension_dirs_with_env(|_| None).is_empty());
         });
         std::fs::remove_dir_all(&root).unwrap();
-        if let Err(error) = result { std::panic::resume_unwind(error); }
+        if let Err(error) = result {
+            std::panic::resume_unwind(error);
+        }
     }
 }

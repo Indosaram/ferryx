@@ -11,11 +11,110 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, oneshot};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpgradeAction {
+    /// Session-preserving handover or an idle re-exec may proceed.
+    Proceed,
+    /// The platform cannot upgrade without ending live sessions.
+    Refuse { live_sessions: usize },
+}
+
+impl UpgradeAction {
+    pub(crate) fn is_proceed(self) -> bool {
+        matches!(self, Self::Proceed)
+    }
+}
+
+/// Opt-in gate for the non-unix idle restart. Default OFF: without it the platform keeps the
+/// refusal-only behavior, so a defect in the Windows-only restart wiring cannot cost a daemon.
+pub(crate) fn idle_upgrade_enabled(value: Option<&str>) -> bool {
+    matches!(value, Some(v) if v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
+pub(crate) fn idle_upgrade_requested() -> bool {
+    let value = std::env::var("FERRYX_DAEMON_IDLE_UPGRADE").ok();
+    idle_upgrade_enabled(value.as_deref())
+}
+
+/// A successor inherits the wait window so it can outlast the predecessor's instance lock
+/// instead of failing fast and leaving the machine without a daemon.
+pub(crate) fn successor_lock_wait(value: Option<&str>) -> Option<std::time::Duration> {
+    if matches!(value, Some(v) if v == "1" || v.eq_ignore_ascii_case("true")) {
+        Some(std::time::Duration::from_secs(15))
+    } else {
+        None
+    }
+}
+
+pub(crate) fn successor_wait_from_env() -> Option<std::time::Duration> {
+    let value = std::env::var("FERRYX_DAEMON_SUCCESSOR").ok();
+    successor_lock_wait(value.as_deref())
+}
+
+/// Platform-neutral upgrade admission. Unix keeps its handover/re-exec behavior; a platform
+/// without session transfer must never upgrade while sessions are live, because the only
+/// alternative is terminating them. Deliberately pure so the invariant is testable without a
+/// daemon, a socket, or a PTY.
+pub(crate) fn upgrade_action(live_sessions: usize, session_transfer_supported: bool) -> UpgradeAction {
+    if session_transfer_supported || live_sessions == 0 {
+        UpgradeAction::Proceed
+    } else {
+        UpgradeAction::Refuse { live_sessions }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandoverStatus {
     Active,
     Prepared,
     Draining,
     Retired,
+}
+
+#[cfg(test)]
+mod upgrade_action_tests {
+    use super::{
+        idle_upgrade_enabled, successor_lock_wait, upgrade_action, UpgradeAction,
+    };
+
+    #[test]
+    fn platform_without_session_transfer_must_refuse_while_sessions_are_live() {
+        let decision = upgrade_action(3, false);
+        assert_eq!(decision, UpgradeAction::Refuse { live_sessions: 3 });
+        assert!(!decision.is_proceed());
+        assert_eq!(
+            upgrade_action(1, false),
+            UpgradeAction::Refuse { live_sessions: 1 }
+        );
+    }
+
+    #[test]
+    fn platform_without_session_transfer_may_proceed_when_no_session_is_live() {
+        assert!(upgrade_action(0, false).is_proceed());
+    }
+
+    #[test]
+    fn unix_session_transfer_keeps_proceeding_with_live_sessions() {
+        assert!(upgrade_action(7, true).is_proceed());
+        assert!(upgrade_action(0, true).is_proceed());
+    }
+
+    #[test]
+    fn idle_restart_is_opt_in_only() {
+        assert!(idle_upgrade_enabled(Some("1")));
+        assert!(idle_upgrade_enabled(Some("true")));
+        assert!(idle_upgrade_enabled(Some("TRUE")));
+        assert!(!idle_upgrade_enabled(None));
+        assert!(!idle_upgrade_enabled(Some("0")));
+        assert!(!idle_upgrade_enabled(Some("yes")));
+    }
+
+    #[test]
+    fn only_declared_successors_wait_for_the_instance_lock() {
+        assert_eq!(successor_lock_wait(Some("1")), Some(std::time::Duration::from_secs(15)));
+        assert_eq!(successor_lock_wait(Some("true")), Some(std::time::Duration::from_secs(15)));
+        assert_eq!(successor_lock_wait(None), None);
+        assert_eq!(successor_lock_wait(Some("no")), None);
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -31,8 +130,12 @@ mod tests {
         let root = tempfile::tempdir().expect("private fixture");
         let manager = Arc::new(HandoverManager::new(root.path().join("daemon.sock")));
         let terminals = Arc::new(TerminalService::default());
-        let connection = manager.retain_request(terminals.clone()).expect("connection guard");
-        let operation = manager.retain_request(terminals.clone()).expect("operation guard");
+        let connection = manager
+            .retain_request(terminals.clone())
+            .expect("connection guard");
+        let operation = manager
+            .retain_request(terminals.clone())
+            .expect("operation guard");
         let (finish, finished) = tokio::sync::oneshot::channel();
         let operation_task = tokio::spawn(async move {
             finished.await.expect("release operation");
@@ -362,16 +465,26 @@ impl HandoverManager {
         Ok(())
     }
 
-    pub(crate) fn retain_request(self: &Arc<Self>, terminals: Arc<TerminalService>) -> Result<RetirementGuard, String> {
+    pub(crate) fn retain_request(
+        self: &Arc<Self>,
+        terminals: Arc<TerminalService>,
+    ) -> Result<RetirementGuard, String> {
         let mut requests = self.in_flight.lock();
-        if self.status() == HandoverStatus::Retired { return Err("HOST_UNAVAILABLE".into()); }
+        if self.status() == HandoverStatus::Retired {
+            return Err("HOST_UNAVAILABLE".into());
+        }
         *requests = requests.checked_add(1).ok_or("CAPACITY_EXCEEDED")?;
-        Ok(RetirementGuard { manager: self.clone(), terminals })
+        Ok(RetirementGuard {
+            manager: self.clone(),
+            terminals,
+        })
     }
 
     pub fn check_retirement_if_empty(&self, terminal_service: &Arc<TerminalService>) {
         let requests = self.in_flight.lock();
-        if *requests == 0 { self.check_retirement_locked(terminal_service); }
+        if *requests == 0 {
+            self.check_retirement_locked(terminal_service);
+        }
     }
 
     fn check_retirement_locked(&self, terminal_service: &Arc<TerminalService>) {
@@ -389,13 +502,17 @@ impl HandoverManager {
             let cleanup = crate::ipc::run_blocking(move || {
                 if let Some(path) = legacy_path {
                     fs::remove_file(&path).map_err(|error| {
-                        crate::ipc::IpcError::internal(format!("Legacy socket cleanup failed: {error}"))
+                        crate::ipc::IpcError::internal(format!(
+                            "Legacy socket cleanup failed: {error}"
+                        ))
                     })?;
                     HandoverManifest::update_at_path(&get_manifest_path(), |manifest| {
                         manifest.remove_route(&path);
                     })
                     .map_err(|error| {
-                        crate::ipc::IpcError::internal(format!("Legacy route cleanup failed: {error}"))
+                        crate::ipc::IpcError::internal(format!(
+                            "Legacy route cleanup failed: {error}"
+                        ))
                     })?;
                 }
                 Ok(())

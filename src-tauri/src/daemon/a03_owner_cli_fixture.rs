@@ -34,41 +34,60 @@ impl OwnedGroup {
     fn cleanup(&self) -> std::io::Result<()> {
         let group = format!("-{}", self.0);
         let alive = std::process::Command::new("/bin/kill")
-            .args(["-0", "--", &group]).stdout(Stdio::null()).stderr(Stdio::null()).status()?;
+            .args(["-0", "--", &group])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
         if alive.success() {
             let killed = std::process::Command::new("/bin/kill")
-                .args(["-KILL", "--", &group]).status()?;
-            if !killed.success() { return Err(std::io::Error::other("owned group cleanup failed")); }
+                .args(["-KILL", "--", &group])
+                .status()?;
+            if !killed.success() {
+                return Err(std::io::Error::other("owned group cleanup failed"));
+            }
         }
         Ok(())
     }
 }
 impl Drop for OwnedGroup {
     fn drop(&mut self) {
-        if let Err(error) = self.cleanup() { eprintln!("A03 CLEANUP ERROR: {error}"); }
+        if let Err(error) = self.cleanup() {
+            eprintln!("A03 CLEANUP ERROR: {error}");
+        }
     }
 }
 
 async fn owner_cli(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<CliOutput> {
     let mut command = tokio::process::Command::new(binary);
     command.arg("pair").arg("generate");
-    if machine { command.args(["--access", "machine"]); }
-    command.env("HOME", root.join("home"))
+    if machine {
+        command.args(["--access", "machine"]);
+    }
+    command
+        .env("HOME", root.join("home"))
         .env("FERRYX_DATA_DIR", root.join("data"))
         .env("FERRYX_RUNTIME_DIR", root.join("runtime"))
         .env_remove("FERRYX_MACHINE_TOKEN")
         .env_remove("FERRYX_RELAY_URL")
-        .stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
     let child = command.spawn().context("launch private owner CLI")?;
     let pid = child.id().context("owned CLI PID")?;
     let output = tokio::time::timeout(Duration::from_secs(20), child.wait_with_output()).await;
 
     let output = output.context("bounded CLI completion")??;
-    ensure!(output.status.success(), "owner CLI failed (output withheld)");
+    ensure!(
+        output.status.success(),
+        "owner CLI failed (output withheld)"
+    );
     let stdout = String::from_utf8(output.stdout).context("CLI stdout encoding")?;
     let authority = String::from_utf8(output.stderr).context("CLI stderr encoding")?;
     let pin = stdout.lines().next().context("CLI PIN missing")?.to_owned();
-    ensure!(pin.len() == 6 && pin.bytes().all(|b| b.is_ascii_digit()), "invalid CLI PIN shape");
+    ensure!(
+        pin.len() == 6 && pin.bytes().all(|b| b.is_ascii_digit()),
+        "invalid CLI PIN shape"
+    );
     println!("A03 CLI pid={pid} exited=0 reaped=true");
     Ok(CliOutput { pin, authority })
 }
@@ -76,24 +95,41 @@ async fn owner_cli(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<
 async fn handshake(socket: &Path, expected_capabilities: &[&str]) -> anyhow::Result<()> {
     let stream = tokio::net::UnixStream::connect(socket).await?;
     let (read, mut write) = stream.into_split();
-    write.write_all(format!("{{\"type\":\"handshake\",\"version\":{}}}\n", DAEMON_PROTOCOL_VERSION).as_bytes()).await?;
+    write
+        .write_all(
+            format!(
+                "{{\"type\":\"handshake\",\"version\":{}}}\n",
+                DAEMON_PROTOCOL_VERSION
+            )
+            .as_bytes(),
+        )
+        .await?;
     let mut reader = tokio::io::BufReader::new(read);
     let mut line = String::new();
     tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line)).await??;
     let response: DaemonResponse = serde_json::from_str(&line)?;
-    ensure!(matches!(response, DaemonResponse::HandshakeOk { version: DAEMON_PROTOCOL_VERSION, pid, .. }
-        if pid == std::process::id()), "fixture PID handshake mismatch");
+    ensure!(
+        matches!(response, DaemonResponse::HandshakeOk { version: DAEMON_PROTOCOL_VERSION, pid, .. }
+        if pid == std::process::id()),
+        "fixture PID handshake mismatch"
+    );
     write.write_all(b"{\"type\":\"getCapabilities\"}\n").await?;
     line.clear();
     tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line)).await??;
     let response: DaemonResponse = serde_json::from_str(&line)?;
-    ensure!(matches!(response, DaemonResponse::CapabilitiesOk { ref capabilities }
-        if capabilities.as_slice() == expected_capabilities), "local capabilities mismatch");
+    ensure!(
+        matches!(response, DaemonResponse::CapabilitiesOk { ref capabilities }
+        if capabilities.as_slice() == expected_capabilities),
+        "local capabilities mismatch"
+    );
     write.write_all(b"{\"type\":\"ping\"}\n").await?;
     line.clear();
     tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line)).await??;
     let response: DaemonResponse = serde_json::from_str(&line)?;
-    ensure!(matches!(response, DaemonResponse::Pong), "legacy ping refused");
+    ensure!(
+        matches!(response, DaemonResponse::Pong),
+        "legacy ping refused"
+    );
     println!("A03 UDS protocol={DAEMON_PROTOCOL_VERSION} exact_owner_pid={} capabilities={} legacy_ping=pong", std::process::id(), expected_capabilities.join(","));
     Ok(())
 }
@@ -130,15 +166,23 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
         Ok::<_, std::io::Error>(())
     });
     let relay_state = crate::remote::relay_server::RelayState::new_with_key_store(
-        vec![], root.join("relay-keys.json"),
-    ).map_err(anyhow::Error::msg)?;
+        vec![],
+        root.join("relay-keys.json"),
+    )
+    .map_err(anyhow::Error::msg)?;
     let relay_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let relay_url = format!("http://{}", relay_listener.local_addr()?);
     let (relay_stop, relay_shutdown) = tokio::sync::oneshot::channel();
     let relay = tokio::spawn(async move {
-        axum::serve(relay_listener, crate::remote::relay_server::relay_router(relay_state)
-            .into_make_service_with_connect_info::<std::net::SocketAddr>())
-            .with_graceful_shutdown(async { let _ = relay_shutdown.await; }).await
+        axum::serve(
+            relay_listener,
+            crate::remote::relay_server::relay_router(relay_state)
+                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async {
+            let _ = relay_shutdown.await;
+        })
+        .await
     });
     let result = async {
         server.configure_gateway(RemoteGatewayConfig {
@@ -146,7 +190,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             relay_url: Some(relay_url.clone()), ..Default::default()
         }).await.map_err(anyhow::Error::msg)?;
         let local_capabilities = {
-            let mut capabilities = vec!["machinePairingV1", "sshPasswordV1"];
+            let mut capabilities = vec!["machinePairingV1", "sshPasswordV1", "dagStreamingV1"];
             if server.paired_hosts.available().await { capabilities.push("pairedHostInventoryV1"); }
             capabilities
         };
@@ -183,8 +227,13 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
         ensure!(value["accessScope"] == serde_json::to_value(expected)?, "capability scope mismatch");
         let machine_terminal_ready = server.remote_state.machine_services.as_ref().is_some_and(|services| services.workspaces.catalog().is_ok() && services.workspaces.journal.session_revision().is_ok());
         let expected_capabilities = if machine {
-            let mut capabilities = vec!["directoryBrowseV1", "machineWorkspaceV1", "managedWorktreesV1"];
+            let mut capabilities = vec!["directoryBrowseV1", "machineWorkspaceV1", "managedWorktreesV1", "pairedPasteUploadV1"];
             if machine_terminal_ready { capabilities.push("terminalCreateV1"); capabilities.push("terminalStreamV1"); }
+            // DAG streaming is advertised whenever the catalog that resolves remote
+            // roots is readable, independent of terminal readiness.
+            if server.remote_state.machine_services.as_ref().is_some_and(|services| services.workspaces.catalog().is_ok()) {
+                capabilities.push(crate::remote::dag_api::DAG_STREAM_CAPABILITY);
+            }
             serde_json::json!(capabilities)
         } else { serde_json::json!([]) };
         ensure!(value["capabilities"] == expected_capabilities, "machine capability contract mismatch");
@@ -234,13 +283,18 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
         println!("A03 SURFACE scope={expected:?} permission=Control relay_exchange=200 capabilities=200 anonymous=401 revoked=401 machine_capabilities={expected_capabilities}");
         Ok::<_, anyhow::Error>(())
     }.await;
-    let stopped = server.configure_gateway(RemoteGatewayConfig::default()).await;
+    let stopped = server
+        .configure_gateway(RemoteGatewayConfig::default())
+        .await;
     let uds_signalled = stop_tx.send(());
     let relay_signalled = relay_stop.send(());
     let uds_joined = tokio::time::timeout(Duration::from_secs(5), uds).await;
     let relay_joined = tokio::time::timeout(Duration::from_secs(5), relay).await;
     stopped.map_err(anyhow::Error::msg)?;
-    ensure!(uds_signalled.is_ok() && relay_signalled.is_ok(), "listener shutdown channel failed");
+    ensure!(
+        uds_signalled.is_ok() && relay_signalled.is_ok(),
+        "listener shutdown channel failed"
+    );
     uds_joined???;
     relay_joined???;
     std::fs::remove_file(socket)?;
@@ -252,22 +306,52 @@ fn a03_private_owner_cli_surface() -> anyhow::Result<()> {
     // This entry must be explicitly invoked in an isolated process, not skipped
     // into a falsely green normal suite when fixture prerequisites are absent.
     let Some(root) = std::env::var_os("A03_PRIVATE_ROOT") else {
-        let root = tempfile::Builder::new().prefix("a03-cli-").tempdir_in("/tmp")?;
+        let root = tempfile::Builder::new()
+            .prefix("a03-cli-")
+            .tempdir_in("/tmp")?;
         let private_root = root.path().canonicalize()?;
-        for directory in ["home", "sessions", "runtime", "data", "xdg-config", "xdg-cache", "xdg-data", "tmp"] {
+        for directory in [
+            "home",
+            "sessions",
+            "runtime",
+            "data",
+            "xdg-config",
+            "xdg-cache",
+            "xdg-data",
+            "tmp",
+        ] {
             std::fs::create_dir(private_root.join(directory))?;
         }
         let exe = std::env::current_exe()?;
-        let binary = exe.parent().and_then(Path::parent).context("target debug directory")?.join("ferryx-cli");
-        ensure!(binary.is_file(), "build ferryx-cli before the owner fixture");
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        let binary = exe
+            .parent()
+            .and_then(Path::parent)
+            .context("target debug directory")?
+            .join("ferryx-cli");
+        ensure!(
+            binary.is_file(),
+            "build ferryx-cli before the owner fixture"
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
         let result = runtime.block_on(async {
             let mut command = tokio::process::Command::new(exe);
-            command.args(["daemon::server::a03_owner_cli_fixture::a03_private_owner_cli_surface", "--exact", "--nocapture"])
-                .env_clear().env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-                .env("A03_PRIVATE_ROOT", &private_root).env("A03_CLI_BINARY", binary)
+            command
+                .args([
+                    "daemon::server::a03_owner_cli_fixture::a03_private_owner_cli_surface",
+                    "--exact",
+                    "--nocapture",
+                ])
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+                .env("A03_PRIVATE_ROOT", &private_root)
+                .env("A03_CLI_BINARY", binary)
                 .env("FERRYX_SESSION_DIR", private_root.join("sessions"))
-                .env("FERRYX_AGENT_STATE_SOCKET", private_root.join("runtime/agent.sock"))
+                .env(
+                    "FERRYX_AGENT_STATE_SOCKET",
+                    private_root.join("runtime/agent.sock"),
+                )
                 .env("XDG_CONFIG_HOME", private_root.join("xdg-config"))
                 .env("XDG_CACHE_HOME", private_root.join("xdg-cache"))
                 .env("XDG_DATA_HOME", private_root.join("xdg-data"))
@@ -278,7 +362,8 @@ fn a03_private_owner_cli_surface() -> anyhow::Result<()> {
                 .env("HOME", private_root.join("home"))
                 .env("FERRYX_DATA_DIR", private_root.join("data"))
                 .env("FERRYX_RUNTIME_DIR", private_root.join("runtime"))
-                .env_remove("FERRYX_MACHINE_TOKEN").env_remove("FERRYX_RELAY_URL")
+                .env_remove("FERRYX_MACHINE_TOKEN")
+                .env_remove("FERRYX_RELAY_URL")
                 .kill_on_drop(true);
             if let Some(libraries) = std::env::var_os("DYLD_FALLBACK_LIBRARY_PATH") {
                 command.env("DYLD_FALLBACK_LIBRARY_PATH", libraries);
@@ -289,7 +374,11 @@ fn a03_private_owner_cli_surface() -> anyhow::Result<()> {
             let group = OwnedGroup(pid);
             let status = match tokio::time::timeout(Duration::from_secs(90), child.wait()).await {
                 Ok(status) => status?,
-                Err(error) => { group.cleanup()?; child.wait().await?; return Err(error.into()); }
+                Err(error) => {
+                    group.cleanup()?;
+                    child.wait().await?;
+                    return Err(error.into());
+                }
             };
             group.cleanup()?;
             println!("A03 CLEANUP exact_fixture_pid={pid} reaped=true exit={status}");
@@ -303,17 +392,30 @@ fn a03_private_owner_cli_surface() -> anyhow::Result<()> {
     let root = PathBuf::from(root).canonicalize()?;
     for key in ["HOME", "FERRYX_DATA_DIR", "FERRYX_RUNTIME_DIR"] {
         let value = PathBuf::from(std::env::var_os(key).with_context(|| format!("missing {key}"))?);
-        ensure!(value.starts_with(&root) && value != root, "ambient fixture path refused");
+        ensure!(
+            value.starts_with(&root) && value != root,
+            "ambient fixture path refused"
+        );
     }
-    ensure!(std::env::var_os("FERRYX_MACHINE_TOKEN").is_none(), "ambient relay credential refused");
-    let binary = PathBuf::from(std::env::var_os("A03_CLI_BINARY").context("fresh CLI binary required")?);
+    ensure!(
+        std::env::var_os("FERRYX_MACHINE_TOKEN").is_none(),
+        "ambient relay credential refused"
+    );
+    let binary =
+        PathBuf::from(std::env::var_os("A03_CLI_BINARY").context("fresh CLI binary required")?);
     for machine in [false, true] {
-        let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()?;
         let result = runtime.block_on(scenario(&binary, &root, machine));
         // Drops all otherwise detached gateway tasks before removing private data.
         runtime.shutdown_timeout(Duration::from_secs(5));
         result?;
     }
-    println!("A03 CLEANUP fixture_pid={} runtimes_stopped=true sockets_removed=true", std::process::id());
+    println!(
+        "A03 CLEANUP fixture_pid={} runtimes_stopped=true sockets_removed=true",
+        std::process::id()
+    );
     Ok(())
 }

@@ -44,10 +44,10 @@ pub(crate) fn normalize_process_cwd(path: &Path) -> PathBuf {
 mod machine_owner;
 #[path = "session_metadata_events.rs"]
 mod session_metadata_events;
-#[path = "session_metadata_provider.rs"]
-mod session_metadata_provider;
 #[path = "session_metadata_forward.rs"]
 mod session_metadata_forward;
+#[path = "session_metadata_provider.rs"]
+mod session_metadata_provider;
 
 const SPAWN_REQUEST_TTL: Duration = Duration::from_secs(30);
 
@@ -178,8 +178,12 @@ pub(crate) struct MachineController {
 
 impl From<&str> for MachineController {
     fn from(device: &str) -> Self {
-        Self { device: device.into(), generation: 0, cancelled: tokio::sync::watch::channel(false).0,
-            disconnected: Arc::new(Mutex::new(None)) }
+        Self {
+            device: device.into(),
+            generation: 0,
+            cancelled: tokio::sync::watch::channel(false).0,
+            disconnected: Arc::new(Mutex::new(None)),
+        }
     }
 }
 
@@ -189,7 +193,9 @@ impl MachineController {
     }
 
     pub(crate) fn reserved_at(&self, now: tokio::time::Instant) -> bool {
-        self.disconnected.lock().is_none_or(|at| now.duration_since(at) < Duration::from_secs(15))
+        self.disconnected
+            .lock()
+            .is_none_or(|at| now.duration_since(at) < Duration::from_secs(15))
     }
 }
 
@@ -200,7 +206,9 @@ pub(crate) struct MachineSocketLease {
 }
 
 impl Drop for MachineSocketLease {
-    fn drop(&mut self) { *self.disconnected.lock() = Some(tokio::time::Instant::now()); }
+    fn drop(&mut self) {
+        *self.disconnected.lock() = Some(tokio::time::Instant::now());
+    }
 }
 
 /// Headless session authority; owns metadata, claims and spawn idempotency.
@@ -239,7 +247,9 @@ impl DaemonSessionService {
     }
 
     #[cfg(test)]
-    pub(crate) fn journal_spawn_probe_handles(&self) -> (Arc<tokio::sync::Mutex<()>>, Arc<TerminalService>) {
+    pub(crate) fn journal_spawn_probe_handles(
+        &self,
+    ) -> (Arc<tokio::sync::Mutex<()>>, Arc<TerminalService>) {
         (self.spawn_lock.clone(), self.terminal_service.clone())
     }
 
@@ -247,51 +257,106 @@ impl DaemonSessionService {
         &self,
         session_id: &str,
         after_sequence: Option<u64>,
-    ) -> Option<Result<crate::terminal::output_hub::machine_output::MachineAttachment,
-        crate::terminal::output_hub::machine_output::MachineOutputError>> {
-        self.terminal_service.output_hub().subscribe_machine(session_id, after_sequence)
+    ) -> Option<
+        Result<
+            crate::terminal::output_hub::machine_output::MachineAttachment,
+            crate::terminal::output_hub::machine_output::MachineOutputError,
+        >,
+    > {
+        self.terminal_service
+            .output_hub()
+            .subscribe_machine(session_id, after_sequence)
     }
 
-    pub(crate) async fn validate_machine_target(self: &Arc<Self>, target: &crate::remote::machine_protocol::RemoteTerminalTarget)
-        -> Result<crate::remote::machine_protocol::Session, String> {
+    pub(crate) async fn validate_machine_target(
+        self: &Arc<Self>,
+        target: &crate::remote::machine_protocol::RemoteTerminalTarget,
+    ) -> Result<crate::remote::machine_protocol::Session, String> {
         let service = Arc::clone(self);
         let target = target.clone();
         tokio::task::spawn_blocking(move || service.validate_machine_target_blocking(&target))
-            .await.map_err(|error| format!("Machine target validation task failed: {error}"))?
+            .await
+            .map_err(|error| format!("Machine target validation task failed: {error}"))?
     }
 
-    fn validate_machine_target_blocking(&self, target: &crate::remote::machine_protocol::RemoteTerminalTarget)
-        -> Result<crate::remote::machine_protocol::Session, String> {
+    fn validate_machine_target_blocking(
+        &self,
+        target: &crate::remote::machine_protocol::RemoteTerminalTarget,
+    ) -> Result<crate::remote::machine_protocol::Session, String> {
         // Metadata publication is not loss of authority. Wait off-runtime with
         // a bounded lock deadline; socket revocation/fencing remains cancellable.
         let deadline = Instant::now() + Duration::from_secs(10);
-        let metadata = self.session_metadata.try_read_until(deadline).ok_or("MACHINE_SERVICE_UNAVAILABLE")?;
+        let metadata = self
+            .session_metadata
+            .try_read_until(deadline)
+            .ok_or("MACHINE_SERVICE_UNAVAILABLE")?;
         let meta = metadata.get(&target.session_id).ok_or("SESSION_EXPIRED")?;
         let session = meta.machine_session.as_ref().ok_or("SESSION_NOT_FOUND")?;
-        if session.target != *target { return Err("STALE_EPOCH".into()); }
+        if session.target != *target {
+            return Err("STALE_EPOCH".into());
+        }
         if meta.workspace_id != session.workspace_id
-            || meta.worktree.as_ref().map(|w| (&w.ws_id, &w.slug)) != session.worktree.as_ref().map(|w| (&w.ws_id, &w.slug))
-            || !self.workspace_service.catalog.try_lock_until(deadline).ok_or("MACHINE_SERVICE_UNAVAILABLE")?.as_ref().map_err(|_| "MACHINE_SERVICE_UNAVAILABLE")?.workspaces.contains_key(&meta.workspace_id) {
+            || meta.worktree.as_ref().map(|w| (&w.ws_id, &w.slug))
+                != session.worktree.as_ref().map(|w| (&w.ws_id, &w.slug))
+            || !self
+                .workspace_service
+                .catalog
+                .try_lock_until(deadline)
+                .ok_or("MACHINE_SERVICE_UNAVAILABLE")?
+                .as_ref()
+                .map_err(|_| "MACHINE_SERVICE_UNAVAILABLE")?
+                .workspaces
+                .contains_key(&meta.workspace_id)
+        {
             return Err("SESSION_OWNERSHIP_CHANGED".into());
         }
-        let pty = self.terminal_service.get_session(&target.session_id).ok_or("SESSION_EXPIRED")?;
-        if !matches!(pty.state(), PtySessionState::Starting | PtySessionState::Running) { return Err("SESSION_EXPIRED".into()); }
+        let pty = self
+            .terminal_service
+            .get_session(&target.session_id)
+            .ok_or("SESSION_EXPIRED")?;
+        if !matches!(
+            pty.state(),
+            PtySessionState::Starting | PtySessionState::Running
+        ) {
+            return Err("SESSION_EXPIRED".into());
+        }
         let mut session = session.clone();
         (session.cols, session.rows) = pty.get_size();
         Ok(session)
     }
 
-    pub(crate) fn acquire_machine_controller(controllers: &mut HashMap<String, MachineController>, id: &str, device: &str)
-        -> Result<MachineSocketLease, String> {
+    pub(crate) fn acquire_machine_controller(
+        controllers: &mut HashMap<String, MachineController>,
+        id: &str,
+        device: &str,
+    ) -> Result<MachineSocketLease, String> {
         let generation = if let Some(previous) = controllers.get(id) {
-            if previous.device != device && previous.reserved() { return Err("CONTROL_CONFLICT".into()); }
-            previous.generation.checked_add(1).ok_or("CAPACITY_EXCEEDED")?
-        } else { 1 };
+            if previous.device != device && previous.reserved() {
+                return Err("CONTROL_CONFLICT".into());
+            }
+            previous
+                .generation
+                .checked_add(1)
+                .ok_or("CAPACITY_EXCEEDED")?
+        } else {
+            1
+        };
         let (cancelled, receiver) = tokio::sync::watch::channel(false);
         let disconnected = Arc::new(Mutex::new(None));
-        let entry = MachineController { device: device.into(), generation, cancelled, disconnected: disconnected.clone() };
-        if let Some(previous) = controllers.insert(id.into(), entry) { previous.cancelled.send_replace(true); }
-        Ok(MachineSocketLease { generation, cancelled: receiver, disconnected })
+        let entry = MachineController {
+            device: device.into(),
+            generation,
+            cancelled,
+            disconnected: disconnected.clone(),
+        };
+        if let Some(previous) = controllers.insert(id.into(), entry) {
+            previous.cancelled.send_replace(true);
+        }
+        Ok(MachineSocketLease {
+            generation,
+            cancelled: receiver,
+            disconnected,
+        })
     }
 
     pub(crate) fn machine_only(&self, id: &str) -> bool {
@@ -306,133 +371,304 @@ impl DaemonSessionService {
         let receiver = self.machine_lifecycles.lock().get(id).cloned();
         if let Some(mut receiver) = receiver {
             tokio::time::timeout(Duration::from_secs(10), receiver.wait_for(|done| *done))
-                .await.map_err(|_| "OPERATION_OUTCOME_UNKNOWN")?.map_err(|_| "OPERATION_OUTCOME_UNKNOWN")?;
+                .await
+                .map_err(|_| "OPERATION_OUTCOME_UNKNOWN")?
+                .map_err(|_| "OPERATION_OUTCOME_UNKNOWN")?;
         }
         Ok(())
     }
 
     pub(crate) async fn spawn_machine(
-        &self, request: crate::remote::machine_protocol::CreateSessionRequest, device: String,
-        digest: String, target: crate::remote::machine_protocol::RemoteTerminalTarget,
-        deadline: Instant, check: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
+        &self,
+        request: crate::remote::machine_protocol::CreateSessionRequest,
+        device: String,
+        digest: String,
+        target: crate::remote::machine_protocol::RemoteTerminalTarget,
+        deadline: Instant,
+        check: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
     ) -> Result<String, String> {
         use crate::remote::machine_protocol::Startup;
         let startup = match &request.startup {
             Startup::Shell => None,
-            Startup::AgentResume { agent_type, provider_session } => {
+            Startup::AgentResume {
+                agent_type,
+                provider_session,
+            } => {
                 // Only OMO currently has an ID-based authoritative transcript/CWD resolver.
                 // Other providers' argv support alone cannot prove transcript ownership.
                 if agent_type != "omo" || provider_session.transcript_path.is_some() {
                     return Err("AGENT_RESUME_UNSUPPORTED".into());
                 }
-                Some(TerminalStartup::AgentResume { agent_type: agent_type.clone(), provider_session: provider_session.clone() })
+                Some(TerminalStartup::AgentResume {
+                    agent_type: agent_type.clone(),
+                    provider_session: provider_session.clone(),
+                })
             }
         };
-        let worktree = request.worktree.as_ref().map(|w| WorktreeIdentity { ws_id: w.ws_id.clone(), slug: w.slug.clone() });
-        let cache_key = serde_json::to_string(&("machine", &device, &request.request_id)).expect("request identity");
-        let context = Arc::new(MachineSpawn { request: request.clone(), device: device.clone(), digest, target, deadline, check });
-        let result = MACHINE_SPAWN.scope(context, self.handle_spawn(&cache_key, &request.workspace_id, worktree, None,
-            request.cols, request.rows, None, startup, #[cfg(test)] None)).await;
+        let worktree = request.worktree.as_ref().map(|w| WorktreeIdentity {
+            ws_id: w.ws_id.clone(),
+            slug: w.slug.clone(),
+        });
+        let cache_key = serde_json::to_string(&("machine", &device, &request.request_id))
+            .expect("request identity");
+        let context = Arc::new(MachineSpawn {
+            request: request.clone(),
+            device: device.clone(),
+            digest,
+            target,
+            deadline,
+            check,
+        });
+        let result = MACHINE_SPAWN
+            .scope(
+                context,
+                self.handle_spawn(
+                    &cache_key,
+                    &request.workspace_id,
+                    worktree,
+                    None,
+                    request.cols,
+                    request.rows,
+                    None,
+                    startup,
+                    #[cfg(test)]
+                    None,
+                ),
+            )
+            .await;
         if result.is_err() {
             let workspaces = self.workspace_service.clone();
             let request_id = request.request_id.clone();
             let ambiguous = crate::ipc::run_blocking(move || {
-                if workspaces.journal.reconcile(&device, &request_id).map_err(crate::ipc::IpcError::internal)?
-                    .is_some_and(|r| matches!(r.operation, crate::remote::machine_protocol::Operation::Pending { .. })) {
-                    workspaces.journal.mark_unknown(&device, &request_id).map_err(crate::ipc::IpcError::internal)?;
+                if workspaces
+                    .journal
+                    .reconcile(&device, &request_id)
+                    .map_err(crate::ipc::IpcError::internal)?
+                    .is_some_and(|r| {
+                        matches!(
+                            r.operation,
+                            crate::remote::machine_protocol::Operation::Pending { .. }
+                        )
+                    })
+                {
+                    workspaces
+                        .journal
+                        .mark_unknown(&device, &request_id)
+                        .map_err(crate::ipc::IpcError::internal)?;
                     return Ok(true);
                 }
                 Ok(false)
-            }).await.map_err(|_| "OPERATION_OUTCOME_UNKNOWN")?;
-            if ambiguous { return Err("OPERATION_OUTCOME_UNKNOWN".into()); }
+            })
+            .await
+            .map_err(|_| "OPERATION_OUTCOME_UNKNOWN")?;
+            if ambiguous {
+                return Err("OPERATION_OUTCOME_UNKNOWN".into());
+            }
         }
         result.map_err(|e| match e {
-                SpawnError::AgentSessionConflict { .. } => "AGENT_SESSION_CONFLICT".into(),
-                SpawnError::InvalidAgentResume(_) => "AGENT_RESUME_INVALID".into(),
-                SpawnError::Other(code) => match code.as_str() {
-                    "UNAUTHORIZED" | "TIMEOUT" | "PROJECT_NOT_FOUND" | "WORKTREE_NOT_FOUND" | "SESSION_NOT_FOUND" | "SESSION_EXPIRED" |
-                    "PARENT_SESSION_MISMATCH" | "CAPACITY_EXCEEDED" | "MACHINE_SERVICE_UNAVAILABLE" |
-                    "OPERATION_OUTCOME_UNKNOWN" | "REQUEST_CONFLICT" | "AGENT_RESUME_UNSUPPORTED" => code,
-                    _ => "INVALID_PATH".into(),
-                },
-            })
+            SpawnError::AgentSessionConflict { .. } => "AGENT_SESSION_CONFLICT".into(),
+            SpawnError::InvalidAgentResume(_) => "AGENT_RESUME_INVALID".into(),
+            SpawnError::Other(code) => match code.as_str() {
+                "UNAUTHORIZED"
+                | "TIMEOUT"
+                | "PROJECT_NOT_FOUND"
+                | "WORKTREE_NOT_FOUND"
+                | "SESSION_NOT_FOUND"
+                | "SESSION_EXPIRED"
+                | "PARENT_SESSION_MISMATCH"
+                | "CAPACITY_EXCEEDED"
+                | "MACHINE_SERVICE_UNAVAILABLE"
+                | "OPERATION_OUTCOME_UNKNOWN"
+                | "REQUEST_CONFLICT"
+                | "AGENT_RESUME_UNSUPPORTED" => code,
+                _ => "INVALID_PATH".into(),
+            },
+        })
     }
 
-    pub(crate) fn machine_detail(&self, id: &str, epoch: crate::scoped_contracts::Epoch) -> Result<crate::remote::machine_protocol::SessionDetail, String> {
+    pub(crate) fn machine_detail(
+        &self,
+        id: &str,
+        epoch: crate::scoped_contracts::Epoch,
+    ) -> Result<crate::remote::machine_protocol::SessionDetail, String> {
         use crate::remote::machine_protocol::SessionDetail;
-        let mut record = self.workspace_service.journal.session(id)?.ok_or("SESSION_NOT_FOUND")?;
-        if let Some(exit) = record.exit { record.session.running = false; return Ok(SessionDetail::Exited { session: record.session, exit }); }
-        if record.session.target.daemon_epoch != epoch { return Ok(SessionDetail::Expired { target: record.session.target }); }
-        let Some(pty) = self.terminal_service.get_session(id) else { return Ok(SessionDetail::Expired { target: record.session.target }); };
+        let mut record = self
+            .workspace_service
+            .journal
+            .session(id)?
+            .ok_or("SESSION_NOT_FOUND")?;
+        if let Some(exit) = record.exit {
+            record.session.running = false;
+            return Ok(SessionDetail::Exited {
+                session: record.session,
+                exit,
+            });
+        }
+        if record.session.target.daemon_epoch != epoch {
+            return Ok(SessionDetail::Expired {
+                target: record.session.target,
+            });
+        }
+        let Some(pty) = self.terminal_service.get_session(id) else {
+            return Ok(SessionDetail::Expired {
+                target: record.session.target,
+            });
+        };
         if let PtySessionState::Exited { code } = pty.state() {
             record.session.running = false;
-            return Ok(SessionDetail::Exited { session: record.session, exit: crate::remote::machine_protocol::ExitMetadata { code, signal: None } });
+            return Ok(SessionDetail::Exited {
+                session: record.session,
+                exit: crate::remote::machine_protocol::ExitMetadata { code, signal: None },
+            });
         }
-        if matches!(pty.state(), PtySessionState::Failed { .. }) { return Ok(SessionDetail::Expired { target: record.session.target }); }
+        if matches!(pty.state(), PtySessionState::Failed { .. }) {
+            return Ok(SessionDetail::Expired {
+                target: record.session.target,
+            });
+        }
         (record.session.cols, record.session.rows) = pty.get_size();
-        let (start, end) = self.terminal_service.output_hub().session_sequence_range(id).unwrap_or_default();
+        let (start, end) = self
+            .terminal_service
+            .output_hub()
+            .session_sequence_range(id)
+            .unwrap_or_default();
         record.session.start_sequence = crate::scoped_contracts::Epoch(start.unwrap_or(0));
         record.session.end_sequence = crate::scoped_contracts::Epoch(end.unwrap_or(0));
-        Ok(SessionDetail::Running { session: record.session })
+        Ok(SessionDetail::Running {
+            session: record.session,
+        })
     }
 
-    pub(crate) fn machine_sessions(&self, epoch: crate::scoped_contracts::Epoch) -> Result<crate::remote::machine_protocol::Sessions, String> {
+    pub(crate) fn machine_sessions(
+        &self,
+        epoch: crate::scoped_contracts::Epoch,
+    ) -> Result<crate::remote::machine_protocol::Sessions, String> {
         use crate::remote::machine_protocol::*;
         let mut sessions = Vec::new();
         for record in self.workspace_service.journal.sessions()? {
             let mut session = record.session;
             match self.machine_detail(&session.target.session_id, epoch)? {
-                SessionDetail::Running { session: live } | SessionDetail::Exited { session: live, .. } => session = live,
+                SessionDetail::Running { session: live }
+                | SessionDetail::Exited { session: live, .. } => session = live,
                 SessionDetail::Expired { .. } => session.running = false,
             }
             sessions.push(session);
         }
-        Ok(Sessions { revision: self.workspace_service.journal.session_revision()?, completeness: Completeness::Complete, sessions, unavailable_workspace_ids: Vec::new() })
+        Ok(Sessions {
+            revision: self.workspace_service.journal.session_revision()?,
+            completeness: Completeness::Complete,
+            sessions,
+            unavailable_workspace_ids: Vec::new(),
+        })
     }
 
-    pub(crate) async fn close_machine(&self, device: &str, request: &str, digest: &str, id: &str,
-        expected_epoch: crate::scoped_contracts::Epoch, owner_epoch: crate::scoped_contracts::Epoch,
-        check: Arc<dyn Fn() -> Result<(), String> + Send + Sync>) -> Result<(), String> {
+    pub(crate) async fn close_machine(
+        &self,
+        device: &str,
+        request: &str,
+        digest: &str,
+        id: &str,
+        expected_epoch: crate::scoped_contracts::Epoch,
+        owner_epoch: crate::scoped_contracts::Epoch,
+        check: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
+    ) -> Result<(), String> {
         use crate::remote::{machine_operation_journal::Begin, machine_protocol::*};
         let _retirement = self.retain_machine_request()?;
         let _spawn = self.spawn_lock.lock().await;
         let controllers = self.machine_controllers.lock().await;
         check()?;
-        let mut record = self.workspace_service.journal.session(id)?.ok_or("SESSION_NOT_FOUND")?;
-        if record.session.target.daemon_epoch != expected_epoch { return Err("STALE_EPOCH".into()); }
-        let controller = controllers.get(id).filter(|c| c.reserved()).map(|c| &c.device).unwrap_or(&record.creator_device);
-        if controller != device { return Err("CONTROL_CONFLICT".into()); }
-        if record.exit.is_none() && expected_epoch != owner_epoch { return Err("SESSION_EXPIRED".into()); }
+        let mut record = self
+            .workspace_service
+            .journal
+            .session(id)?
+            .ok_or("SESSION_NOT_FOUND")?;
+        if record.session.target.daemon_epoch != expected_epoch {
+            return Err("STALE_EPOCH".into());
+        }
+        let controller = controllers
+            .get(id)
+            .filter(|c| c.reserved())
+            .map(|c| &c.device)
+            .unwrap_or(&record.creator_device);
+        if controller != device {
+            return Err("CONTROL_CONFLICT".into());
+        }
+        if record.exit.is_none() && expected_epoch != owner_epoch {
+            return Err("SESSION_EXPIRED".into());
+        }
         let services = self.workspace_service.clone();
-        let device_owned = device.to_owned(); let request_owned = request.to_owned(); let digest = digest.to_owned();
+        let device_owned = device.to_owned();
+        let request_owned = request.to_owned();
+        let digest = digest.to_owned();
         let resource = serde_json::to_string(&record.session.target).expect("target");
         let check_begin = check.clone();
         let begin = crate::ipc::run_blocking(move || {
             check_begin().map_err(crate::ipc::IpcError::internal)?;
-            services.journal.begin(&device_owned, &request_owned, "closeSession", &digest, &resource).map_err(crate::ipc::IpcError::internal)
-        }).await.map_err(|_| "MACHINE_SERVICE_UNAVAILABLE")?;
-        if let Begin::Existing(_) = begin { return Ok(()); }
+            services
+                .journal
+                .begin(
+                    &device_owned,
+                    &request_owned,
+                    "closeSession",
+                    &digest,
+                    &resource,
+                )
+                .map_err(crate::ipc::IpcError::internal)
+        })
+        .await
+        .map_err(|_| "MACHINE_SERVICE_UNAVAILABLE")?;
+        if let Begin::Existing(_) = begin {
+            return Ok(());
+        }
         let pty = self.terminal_service.get_session(id);
         if record.exit.is_none() {
-            if pty.is_none() { return Err("OPERATION_OUTCOME_UNKNOWN".into()); }
+            if pty.is_none() {
+                return Err("OPERATION_OUTCOME_UNKNOWN".into());
+            }
             check()?;
-            self.terminal_service.close_machine_session(id, check.clone()).await.map_err(|_| "OPERATION_OUTCOME_UNKNOWN")?;
-            if !pty.as_ref().is_some_and(|p| p.is_reaped()) { return Err("OPERATION_OUTCOME_UNKNOWN".into()); }
+            self.terminal_service
+                .close_machine_session(id, check.clone())
+                .await
+                .map_err(|_| "OPERATION_OUTCOME_UNKNOWN")?;
+            if !pty.as_ref().is_some_and(|p| p.is_reaped()) {
+                return Err("OPERATION_OUTCOME_UNKNOWN".into());
+            }
             record.session.running = false;
-            record.exit = Some(ExitMetadata { code: pty.and_then(|p| match p.state() { PtySessionState::Exited { code } => code, _ => None }), signal: None });
+            record.exit = Some(ExitMetadata {
+                code: pty.and_then(|p| match p.state() {
+                    PtySessionState::Exited { code } => code,
+                    _ => None,
+                }),
+                signal: None,
+            });
         }
         self.release_session_ownership(id);
-        let services = self.workspace_service.clone(); let device = device.to_owned(); let request = request.to_owned();
+        let services = self.workspace_service.clone();
+        let device = device.to_owned();
+        let request = request.to_owned();
         self.wait_machine_lifecycle(id).await?;
         crate::ipc::run_blocking(move || {
-            services.journal.save_session(record).map_err(crate::ipc::IpcError::internal)?;
-            services.journal.complete(&device, &request, 204, OperationOutcome::NoContent).map_err(crate::ipc::IpcError::internal)?;
+            services
+                .journal
+                .save_session(record)
+                .map_err(crate::ipc::IpcError::internal)?;
+            services
+                .journal
+                .complete(&device, &request, 204, OperationOutcome::NoContent)
+                .map_err(crate::ipc::IpcError::internal)?;
             Ok(())
-        }).await.map_err(|_| "OPERATION_OUTCOME_UNKNOWN".into())
+        })
+        .await
+        .map_err(|_| "OPERATION_OUTCOME_UNKNOWN".into())
     }
 
-    pub(crate) fn retain_machine_request(&self) -> Result<Option<super::handover::RetirementGuard>, String> {
-        self.handover_manager.upgrade().map(|manager| manager.retain_request(self.terminal_service.clone())).transpose()
+    pub(crate) fn retain_machine_request(
+        &self,
+    ) -> Result<Option<super::handover::RetirementGuard>, String> {
+        self.handover_manager
+            .upgrade()
+            .map(|manager| manager.retain_request(self.terminal_service.clone()))
+            .transpose()
     }
 
     pub(crate) fn router(&self) -> &super::proxy::SessionRouter {
@@ -571,9 +807,21 @@ impl DaemonSessionService {
         let metadata = self.session_metadata.clone();
         let path = self.remote_sessions_path.clone();
         let lock = self.remote_persistence_lock.clone();
+        let cleanup_session_id = id.to_string();
         tokio::spawn(async move {
             loop {
                 let details = rx.borrow_and_update().clone();
+                // A naturally expired session keeps the subscription sender alive, so the
+                // loop would never reach the teardown below without this explicit check.
+                let expired =
+                    details.state == crate::terminal::remote::RemoteConnectionState::Expired;
+                let vanished = match runtime.upgrade() {
+                    Some(runtime) => runtime.details(cleanup_session_id.as_str()).is_none(),
+                    None => true,
+                };
+                if expired || vanished {
+                    break;
+                }
                 {
                     let _guard = lock.lock().await;
                     let Some(runtime) = runtime.upgrade() else {
@@ -611,6 +859,9 @@ impl DaemonSessionService {
                     break;
                 }
             }
+            // The remote session ended (or its runtime was dropped): a forwarding child must
+            // never outlive its session, whether or not a close/hibernate path ran.
+            crate::ssh::agent_forward::detach(&cleanup_session_id).await;
         });
         Ok(())
     }
@@ -718,20 +969,74 @@ impl DaemonSessionService {
             session.extra.insert("request".into(), request_value);
             save_session_to_path(&request_path, &session)
         }).await.map_err(|e| e.to_string())?;
-        let descriptor = self
-            .terminal_service
-            .remote()
-            .create(
-                config,
-                crate::ssh::bridge::SpawnParams {
-                    cols: Some(cols),
-                    rows: Some(rows),
-                    ..Default::default()
-                },
-                request.into(),
-            )
-            .await
-            .map_err(|e| e.to_string())?;
+        let descriptor = {
+            let ingress = crate::ssh::agent_forward::AgentStateIngress::global();
+            let mut agent_channel = None;
+            let agent_env = match ingress {
+                Some(ingress) => {
+                    let (token, remote_session_id) =
+                        ingress.register(Arc::clone(&self.agent_states)).await;
+                    match crate::ssh::agent_forward::start_forward(&config.host, ingress.port())
+                        .await
+                    {
+                        Ok(forward) => {
+                            let env = std::collections::HashMap::from([
+                                ("FERRYX_SESSION_ID".to_string(), remote_session_id),
+                                (
+                                    "FERRYX_AGENT_STATE_PORT".to_string(),
+                                    forward.remote_port.to_string(),
+                                ),
+                                ("FERRYX_AGENT_STATE_TOKEN".to_string(), token.clone()),
+                            ]);
+                            agent_channel = Some((forward, token));
+                            Some(env)
+                        }
+                        Err(error) => {
+                            ingress.revoke(&token).await;
+                            tracing::warn!(
+                                stage = "agent_state_forward",
+                                %error,
+                                "Remote agent state unavailable for this session; terminal continues"
+                            );
+                            None
+                        }
+                    }
+                }
+                None => None,
+            };
+            let created = self
+                .terminal_service
+                .remote()
+                .create(
+                    config,
+                    crate::ssh::bridge::SpawnParams {
+                        cols: Some(cols),
+                        rows: Some(rows),
+                        env: agent_env,
+                        ..Default::default()
+                    },
+                    request.into(),
+                )
+                .await;
+            let descriptor = match created {
+                Ok(descriptor) => descriptor,
+                Err(error) => {
+                    if let (Some(ingress), Some((forward, token))) = (ingress, agent_channel) {
+                        ingress.revoke(&token).await;
+                        forward.close().await;
+                    }
+                    return Err(SpawnError::Other(error.to_string()));
+                }
+            };
+            if let (Some(ingress), Some((forward, token))) = (ingress, agent_channel) {
+                ingress
+                    .bind_local(&token, &descriptor.backend_session_id)
+                    .await;
+                crate::ssh::agent_forward::attach(&descriptor.backend_session_id, token, forward)
+                    .await;
+            }
+            descriptor
+        };
         let id = descriptor.backend_session_id.clone();
         self.session_metadata.write().insert(
             id.clone(),
@@ -768,8 +1073,12 @@ impl DaemonSessionService {
             let workspaces = Arc::clone(&self.workspace_service);
             let workspace = workspace_id.to_string();
             crate::ipc::run_blocking(move || {
-                workspaces.unregister(&workspace).map_err(crate::ipc::IpcError::internal)
-            }).await.map_err(|error| error.to_string())?;
+                workspaces
+                    .unregister(&workspace)
+                    .map_err(crate::ipc::IpcError::internal)
+            })
+            .await
+            .map_err(|error| error.to_string())?;
         }
 
         let owned_sessions: Vec<String> = self
@@ -810,7 +1119,9 @@ impl DaemonSessionService {
         #[cfg(test)] helper_home: Option<String>,
     ) -> Result<String, SpawnError> {
         let machine = MACHINE_SPAWN.try_with(Arc::clone).ok();
-        if let Some(machine) = &machine { (machine.check)()?; }
+        if let Some(machine) = &machine {
+            (machine.check)()?;
+        }
         if self
             .handover_manager
             .upgrade()
@@ -858,12 +1169,20 @@ impl DaemonSessionService {
         #[cfg(test)]
         if machine.is_some() {
             let probe = self.workspace_service.transaction_probe.read().clone();
-            if let Some(probe) = probe { probe("sessionBeforeSpawnGate"); }
+            if let Some(probe) = probe {
+                probe("sessionBeforeSpawnGate");
+            }
         }
         let _spawn_guard = if let Some(machine) = &machine {
-            tokio::time::timeout_at(tokio::time::Instant::from_std(machine.deadline), Arc::clone(&self.spawn_lock).lock_owned())
-                .await.map_err(|_| SpawnError::Other("TIMEOUT".into()))?
-        } else { Arc::clone(&self.spawn_lock).lock_owned().await };
+            tokio::time::timeout_at(
+                tokio::time::Instant::from_std(machine.deadline),
+                Arc::clone(&self.spawn_lock).lock_owned(),
+            )
+            .await
+            .map_err(|_| SpawnError::Other("TIMEOUT".into()))?
+        } else {
+            Arc::clone(&self.spawn_lock).lock_owned().await
+        };
 
         let (_spawn_guard, previous) = if let Some(machine) = &machine {
             (machine.check)()?;
@@ -871,17 +1190,29 @@ impl DaemonSessionService {
             let workspaces = self.workspace_service.clone();
             crate::ipc::run_blocking(move || {
                 // The worker owns the spawn gate until the journal wait really drains.
-                let record = workspaces.journal.reconcile(&context.device, &context.request.request_id);
+                let record = workspaces
+                    .journal
+                    .reconcile(&context.device, &context.request.request_id);
                 Ok((_spawn_guard, record))
-            }).await.map_err(|_| SpawnError::Other("MACHINE_SERVICE_UNAVAILABLE".into()))?
-        } else { (_spawn_guard, Ok(None)) };
+            })
+            .await
+            .map_err(|_| SpawnError::Other("MACHINE_SERVICE_UNAVAILABLE".into()))?
+        } else {
+            (_spawn_guard, Ok(None))
+        };
         let now = Instant::now();
         if let Some(machine) = &machine {
             (machine.check)()?;
             if let Some(record) = previous? {
-                if record.digest != machine.digest || record.kind != "createSession" { return Err("REQUEST_CONFLICT".to_string().into()); }
+                if record.digest != machine.digest || record.kind != "createSession" {
+                    return Err("REQUEST_CONFLICT".to_string().into());
+                }
                 return match record.operation {
-                    crate::remote::machine_protocol::Operation::Completed { outcome: crate::remote::machine_protocol::OperationOutcome::Session { session }, .. } => Ok(session.target.session_id),
+                    crate::remote::machine_protocol::Operation::Completed {
+                        outcome:
+                            crate::remote::machine_protocol::OperationOutcome::Session { session },
+                        ..
+                    } => Ok(session.target.session_id),
                     _ => Err("OPERATION_OUTCOME_UNKNOWN".to_string().into()),
                 };
             }
@@ -952,11 +1283,15 @@ impl DaemonSessionService {
                 )
                 .await;
         }
-        if let Some(machine) = &machine { (machine.check)()?; }
+        if let Some(machine) = &machine {
+            (machine.check)()?;
+        }
         let resume_startup = startup.clone();
         let machine_resume = machine.is_some();
         let resume_cwd = crate::ipc::run_blocking(move || {
-            if machine_resume { return Ok(None); }
+            if machine_resume {
+                return Ok(None);
+            }
             crate::terminal::resume_cwd::resolve_agent_resume_cwd(resume_startup.as_ref()).map_err(
                 |error| {
                     crate::ipc::IpcError::new(
@@ -990,41 +1325,74 @@ impl DaemonSessionService {
             let workspace_gate = workspace_service.worktree_gate(&workspace_id_owned);
             let deadline = machine.as_ref().map(|m| m.deadline);
             let _workspace_gate = match deadline {
-                Some(deadline) => workspace_gate.try_lock_until(deadline).ok_or_else(|| crate::ipc::IpcError::internal("TIMEOUT"))?,
+                Some(deadline) => workspace_gate
+                    .try_lock_until(deadline)
+                    .ok_or_else(|| crate::ipc::IpcError::internal("TIMEOUT"))?,
                 None => workspace_gate.lock(),
             };
             let _gate = match deadline {
-                Some(deadline) => workspace_service.mutation_gate.try_lock_until(deadline).ok_or_else(|| crate::ipc::IpcError::internal("TIMEOUT"))?,
+                Some(deadline) => workspace_service
+                    .mutation_gate
+                    .try_lock_until(deadline)
+                    .ok_or_else(|| crate::ipc::IpcError::internal("TIMEOUT"))?,
                 None => workspace_service.mutation_gate.lock(),
             };
             let result = (|| -> Result<_, SpawnError> {
-                if let Some(machine) = &machine { (machine.check)()?; }
+                if let Some(machine) = &machine {
+                    (machine.check)()?;
+                }
                 // Machine roots stay out of the shared mirror registry.
                 let (mgr, default_cwd) = if machine.is_some() {
                     let manager = workspace_service.worktree_manager(&workspace_id_owned, false)?;
                     let private_registry = crate::worktree::WorkspaceRegistry::new();
                     private_registry.publish(workspace_id_owned.clone(), manager);
-                    private_registry.resolve_terminal_target(&workspace_id_owned, spawn_worktree.as_ref())
-                } else { workspace_service.registry.resolve_terminal_target(&workspace_id_owned, spawn_worktree.as_ref()) }
-                    .map_err(|e| {
-                        if machine.is_some() && matches!(e, crate::worktree::WorktreeError::WorktreeIdentityNotFound { .. }) {
-                            SpawnError::Other("WORKTREE_NOT_FOUND".into())
-                        } else { SpawnError::Other(e.to_string()) }
-                    })?;
+                    private_registry
+                        .resolve_terminal_target(&workspace_id_owned, spawn_worktree.as_ref())
+                } else {
+                    workspace_service
+                        .registry
+                        .resolve_terminal_target(&workspace_id_owned, spawn_worktree.as_ref())
+                }
+                .map_err(|e| {
+                    if machine.is_some()
+                        && matches!(
+                            e,
+                            crate::worktree::WorktreeError::WorktreeIdentityNotFound { .. }
+                        )
+                    {
+                        SpawnError::Other("WORKTREE_NOT_FOUND".into())
+                    } else {
+                        SpawnError::Other(e.to_string())
+                    }
+                })?;
 
                 let cwd = if let Some(machine) = &machine {
                     if let Some(parent) = &machine.request.inherit_from_session_id {
-                        let record = workspace_service.journal.session(parent)?.ok_or("SESSION_NOT_FOUND".to_string())?;
+                        let record = workspace_service
+                            .journal
+                            .session(parent)?
+                            .ok_or("SESSION_NOT_FOUND".to_string())?;
                         if record.session.target.daemon_epoch != machine.target.daemon_epoch
                             || record.session.target.machine_id != machine.target.machine_id
                             || record.session.workspace_id != workspace_id_owned
-                            || record.session.worktree != machine.request.worktree {
+                            || record.session.worktree != machine.request.worktree
+                        {
                             return Err("PARENT_SESSION_MISMATCH".to_string().into());
                         }
-                        let parent = terminal_service.get_session(parent).ok_or("SESSION_EXPIRED".to_string())?;
-                        if !matches!(parent.state(), PtySessionState::Running) { return Err("SESSION_EXPIRED".to_string().into()); }
+                        let parent = terminal_service
+                            .get_session(parent)
+                            .ok_or("SESSION_EXPIRED".to_string())?;
+                        if !matches!(parent.state(), PtySessionState::Running) {
+                            return Err("SESSION_EXPIRED".to_string().into());
+                        }
                         let pid = parent.pid().ok_or("SESSION_EXPIRED".to_string())?;
-                        Some(crate::ipc::terminal::process_cwd(pid).ok_or("CWD_UNAVAILABLE".to_string())?.to_str().ok_or("INVALID_PATH".to_string())?.to_owned())
+                        Some(
+                            crate::ipc::terminal::process_cwd(pid)
+                                .ok_or("CWD_UNAVAILABLE".to_string())?
+                                .to_str()
+                                .ok_or("INVALID_PATH".to_string())?
+                                .to_owned(),
+                        )
                     } else {
                         machine.request.cwd_relative.as_ref().map(|relative| {
                             let rel_norm = relative.replace('\\', "/");
@@ -1032,38 +1400,73 @@ impl DaemonSessionService {
                                 let expected_wt_rel = format!(".orca-worktrees/wt-{}", w.slug);
                                 if rel_norm == expected_wt_rel {
                                     default_cwd.to_string_lossy().into_owned()
-                                } else if let Some(sub) = rel_norm.strip_prefix(&format!("{}/", expected_wt_rel)) {
+                                } else if let Some(sub) =
+                                    rel_norm.strip_prefix(&format!("{}/", expected_wt_rel))
+                                {
                                     default_cwd.join(sub).to_string_lossy().into_owned()
-                                } else if default_cwd.to_string_lossy().replace('\\', "/").ends_with(&rel_norm) {
+                                } else if default_cwd
+                                    .to_string_lossy()
+                                    .replace('\\', "/")
+                                    .ends_with(&rel_norm)
+                                {
                                     default_cwd.to_string_lossy().into_owned()
                                 } else {
                                     default_cwd.join(relative).to_string_lossy().into_owned()
                                 }
-                            } else if default_cwd.to_string_lossy().replace('\\', "/").ends_with(&rel_norm) {
+                            } else if default_cwd
+                                .to_string_lossy()
+                                .replace('\\', "/")
+                                .ends_with(&rel_norm)
+                            {
                                 default_cwd.to_string_lossy().into_owned()
                             } else {
                                 default_cwd.join(relative).to_string_lossy().into_owned()
                             }
                         })
                     }
-                } else { cwd };
+                } else {
+                    cwd
+                };
                 let resume_cwd = if machine.is_some() {
-                    if let Some(TerminalStartup::AgentResume { agent_type, provider_session }) = &spawn_startup {
-                        let plan = crate::terminal::shell::resolve_agent_resume_plan(agent_type, provider_session)
-                            .map_err(|e| SpawnError::InvalidAgentResume(e.to_string()))?;
-                        if crate::ipc::agents::resolve_binary(&plan.program, &crate::ipc::agents::search_paths()).is_none() {
+                    if let Some(TerminalStartup::AgentResume {
+                        agent_type,
+                        provider_session,
+                    }) = &spawn_startup
+                    {
+                        let plan = crate::terminal::shell::resolve_agent_resume_plan(
+                            agent_type,
+                            provider_session,
+                        )
+                        .map_err(|e| SpawnError::InvalidAgentResume(e.to_string()))?;
+                        if crate::ipc::agents::resolve_binary(
+                            &plan.program,
+                            &crate::ipc::agents::search_paths(),
+                        )
+                        .is_none()
+                        {
                             return Err("AGENT_RESUME_UNSUPPORTED".to_string().into());
                         }
                     }
                     crate::terminal::resume_cwd::resolve_agent_resume_cwd(spawn_startup.as_ref())
                         .map_err(|e| SpawnError::InvalidAgentResume(e.to_string()))?
-                } else { resume_cwd };
+                } else {
+                    resume_cwd
+                };
                 if machine.is_some() {
                     if let Some(resume) = &resume_cwd {
-                        let requested = cwd.as_ref().map(PathBuf::from).unwrap_or_else(|| default_cwd.clone());
-                        let requested = fs::canonicalize(requested).map_err(|e| SpawnError::InvalidAgentResume(e.to_string()))?;
-                        let resume = fs::canonicalize(resume).map_err(|e| SpawnError::InvalidAgentResume(e.to_string()))?;
-                        if resume != requested { return Err(SpawnError::InvalidAgentResume("Provider CWD does not match the selected target".into())); }
+                        let requested = cwd
+                            .as_ref()
+                            .map(PathBuf::from)
+                            .unwrap_or_else(|| default_cwd.clone());
+                        let requested = fs::canonicalize(requested)
+                            .map_err(|e| SpawnError::InvalidAgentResume(e.to_string()))?;
+                        let resume = fs::canonicalize(resume)
+                            .map_err(|e| SpawnError::InvalidAgentResume(e.to_string()))?;
+                        if resume != requested {
+                            return Err(SpawnError::InvalidAgentResume(
+                                "Provider CWD does not match the selected target".into(),
+                            ));
+                        }
                     }
                 }
                 let cwd = resume_cwd
@@ -1122,19 +1525,37 @@ impl DaemonSessionService {
 
                 let raw_id = if let Some(machine) = &machine {
                     (machine.check)()?;
-                    if terminal_service.list_sessions().iter().filter(|id| workspace_service.journal.owns_session(id)).count() >= max_machine_sessions {
+                    if terminal_service
+                        .list_sessions()
+                        .iter()
+                        .filter(|id| workspace_service.journal.owns_session(id))
+                        .count()
+                        >= max_machine_sessions
+                    {
                         return Err("CAPACITY_EXCEEDED".to_string().into());
                     }
-                    match workspace_service.journal.begin(&machine.device, &machine.request.request_id, "createSession", &machine.digest, &serde_json::to_string(&machine.target).expect("target"))? {
-                        crate::remote::machine_operation_journal::Begin::New => {},
-                        crate::remote::machine_operation_journal::Begin::Existing(_) => return Err("OPERATION_OUTCOME_UNKNOWN".to_string().into()),
+                    match workspace_service.journal.begin(
+                        &machine.device,
+                        &machine.request.request_id,
+                        "createSession",
+                        &machine.digest,
+                        &serde_json::to_string(&machine.target).expect("target"),
+                    )? {
+                        crate::remote::machine_operation_journal::Begin::New => {}
+                        crate::remote::machine_operation_journal::Begin::Existing(_) => {
+                            return Err("OPERATION_OUTCOME_UNKNOWN".to_string().into())
+                        }
                     }
                     machine.target.session_id.clone()
-                } else { uuid::Uuid::new_v4().to_string() };
+                } else {
+                    uuid::Uuid::new_v4().to_string()
+                };
                 #[cfg(test)]
                 if machine.is_some() {
                     let probe = workspace_service.transaction_probe.read().clone();
-                    if let Some(probe) = probe { probe("sessionIntent"); }
+                    if let Some(probe) = probe {
+                        probe("sessionIntent");
+                    }
                 }
                 let (session_id, mut lifecycle_rx) = terminal_service
                     .spawn_in_worktree_with_id(raw_id, cmd, cols, rows, &mgr, &resolved_cwd)
@@ -1142,19 +1563,47 @@ impl DaemonSessionService {
                 #[cfg(test)]
                 if machine.is_some() {
                     let probe = workspace_service.transaction_probe.read().clone();
-                    if let Some(probe) = probe { probe("sessionSpawned"); }
+                    if let Some(probe) = probe {
+                        probe("sessionSpawned");
+                    }
                 }
-                let (start_sequence, end_sequence) = terminal_service.output_hub().session_sequence_range(&session_id).unwrap_or_default();
-                let durable = machine.as_ref().map(|machine| crate::remote::machine_operation_journal::MachineSession {
-                    creator_device: machine.device.clone(),
-                    session: crate::remote::machine_protocol::Session {
-                        target: machine.target.clone(), workspace_id: workspace_id_owned.clone(),
-                        worktree: machine.request.worktree.clone(), cwd: resolved_cwd.to_string_lossy().into_owned(),
-                        cols, rows, running: true, title: None,
-                        agent_type: match &machine.request.startup { crate::remote::machine_protocol::Startup::Shell => None, crate::remote::machine_protocol::Startup::AgentResume { agent_type, .. } => Some(agent_type.clone()) },
-                        provider_session: match &machine.request.startup { crate::remote::machine_protocol::Startup::Shell => None, crate::remote::machine_protocol::Startup::AgentResume { provider_session, .. } => Some(provider_session.clone()) },
-                        start_sequence: crate::scoped_contracts::Epoch(start_sequence.unwrap_or(0)), end_sequence: crate::scoped_contracts::Epoch(end_sequence.unwrap_or(0)),
-                    }, exit: None,
+                let (start_sequence, end_sequence) = terminal_service
+                    .output_hub()
+                    .session_sequence_range(&session_id)
+                    .unwrap_or_default();
+                let durable = machine.as_ref().map(|machine| {
+                    crate::remote::machine_operation_journal::MachineSession {
+                        creator_device: machine.device.clone(),
+                        session: crate::remote::machine_protocol::Session {
+                            target: machine.target.clone(),
+                            workspace_id: workspace_id_owned.clone(),
+                            worktree: machine.request.worktree.clone(),
+                            cwd: resolved_cwd.to_string_lossy().into_owned(),
+                            cols,
+                            rows,
+                            running: true,
+                            title: None,
+                            agent_type: match &machine.request.startup {
+                                crate::remote::machine_protocol::Startup::Shell => None,
+                                crate::remote::machine_protocol::Startup::AgentResume {
+                                    agent_type,
+                                    ..
+                                } => Some(agent_type.clone()),
+                            },
+                            provider_session: match &machine.request.startup {
+                                crate::remote::machine_protocol::Startup::Shell => None,
+                                crate::remote::machine_protocol::Startup::AgentResume {
+                                    provider_session,
+                                    ..
+                                } => Some(provider_session.clone()),
+                            },
+                            start_sequence: crate::scoped_contracts::Epoch(
+                                start_sequence.unwrap_or(0),
+                            ),
+                            end_sequence: crate::scoped_contracts::Epoch(end_sequence.unwrap_or(0)),
+                        },
+                        exit: None,
+                    }
                 });
                 // Store idempotency entry and session metadata before releasing the request lock.
                 let ssh_store = match startup.as_ref() {
@@ -1204,31 +1653,55 @@ impl DaemonSessionService {
                 let metadata_target = durable.as_ref().map(|record| record.session.target.clone());
                 let lifecycle_done = if machine.is_some() {
                     let (done, receiver) = tokio::sync::watch::channel(false);
-                    machine_lifecycles.lock().insert(session_id.clone(), receiver);
+                    machine_lifecycles
+                        .lock()
+                        .insert(session_id.clone(), receiver);
                     Some(done)
-                } else { None };
+                } else {
+                    None
+                };
                 // Persist before starting exit publication, so a fast exit cannot be overwritten
                 // by the initial running record. Even on failure, install lifecycle cleanup.
                 let persisted = match (&machine, durable) {
                     (Some(machine), Some(record)) => {
-                        let result = workspace_service.journal.commit_spawn(&machine.device, &machine.request.request_id, record.clone());
+                        let result = workspace_service.journal.commit_spawn(
+                            &machine.device,
+                            &machine.request.request_id,
+                            record.clone(),
+                        );
                         if result.is_ok() {
-                            workspace_service.machine_events.publish("sessionStarted", Some(&record.session.workspace_id), Some(&record.session.target.session_id), serde_json::json!(record.session));
+                            workspace_service.machine_events.publish(
+                                "sessionStarted",
+                                Some(&record.session.workspace_id),
+                                Some(&record.session.target.session_id),
+                                serde_json::json!(record.session),
+                            );
                         }
                         result
-                    },
+                    }
                     _ => Ok(()),
                 };
                 #[cfg(test)]
                 if machine.is_some() && persisted.is_ok() {
                     let probe = workspace_service.transaction_probe.read().clone();
-                    if let Some(probe) = probe { probe("sessionCommitted"); }
+                    if let Some(probe) = probe {
+                        probe("sessionCommitted");
+                    }
                 }
                 let metadata_task = if persisted.is_ok() {
-                    metadata_target.map(|target| session_metadata_events::MetadataOwner {
-                        workspaces: workspace_service.clone(), terminals: terminal_service.clone(), metadata: session_metadata.clone(),
-                    }.subscribe(target)).transpose()
-                } else { Ok(None) };
+                    metadata_target
+                        .map(|target| {
+                            session_metadata_events::MetadataOwner {
+                                workspaces: workspace_service.clone(),
+                                terminals: terminal_service.clone(),
+                                metadata: session_metadata.clone(),
+                            }
+                            .subscribe(target)
+                        })
+                        .transpose()
+                } else {
+                    Ok(None)
+                };
                 tokio::spawn(async move {
                     loop {
                         match lifecycle_rx.recv().await {
@@ -1237,21 +1710,47 @@ impl DaemonSessionService {
                         }
                     }
                     match metadata_task {
-                        Ok(Some(task)) => if let Err(error) = task.await { tracing::warn!(%error, "Machine metadata task failed"); },
-                        Ok(None) => {},
-                        Err(error) => tracing::warn!(%error, "Machine metadata subscription failed"),
+                        Ok(Some(task)) => {
+                            if let Err(error) = task.await {
+                                tracing::warn!(%error, "Machine metadata task failed");
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            tracing::warn!(%error, "Machine metadata subscription failed")
+                        }
                     }
                     if let Some(mut record) = durable_exit {
                         record.session.running = false;
                         record.exit = Some(crate::remote::machine_protocol::ExitMetadata {
-                            code: exited_pty.as_ref().and_then(|p| match p.state() { PtySessionState::Exited { code } => code, _ => None }), signal: None,
+                            code: exited_pty.as_ref().and_then(|p| match p.state() {
+                                PtySessionState::Exited { code } => code,
+                                _ => None,
+                            }),
+                            signal: None,
                         });
                         if let Err(error) = crate::ipc::run_blocking(move || {
-                            lifecycle_workspaces.journal.save_session(record.clone()).map_err(crate::ipc::IpcError::internal)?;
-                            let record = lifecycle_workspaces.journal.session(&record.session.target.session_id).map_err(crate::ipc::IpcError::internal)?.ok_or_else(|| crate::ipc::IpcError::internal("SESSION_NOT_FOUND"))?;
-                            lifecycle_workspaces.machine_events.publish("sessionExited", Some(&record.session.workspace_id), Some(&record.session.target.session_id), serde_json::json!({"session":record.session,"exit":record.exit}));
+                            lifecycle_workspaces
+                                .journal
+                                .save_session(record.clone())
+                                .map_err(crate::ipc::IpcError::internal)?;
+                            let record = lifecycle_workspaces
+                                .journal
+                                .session(&record.session.target.session_id)
+                                .map_err(crate::ipc::IpcError::internal)?
+                                .ok_or_else(|| {
+                                    crate::ipc::IpcError::internal("SESSION_NOT_FOUND")
+                                })?;
+                            lifecycle_workspaces.machine_events.publish(
+                                "sessionExited",
+                                Some(&record.session.workspace_id),
+                                Some(&record.session.target.session_id),
+                                serde_json::json!({"session":record.session,"exit":record.exit}),
+                            );
                             Ok(())
-                        }).await {
+                        })
+                        .await
+                        {
                             tracing::error!(%error, "Machine exit persistence failed");
                         }
                     }
@@ -1310,6 +1809,7 @@ impl DaemonSessionService {
         self.terminal_service.close_session(session_id).await?;
         self.release_session_ownership(session_id);
         self.agent_states.remove(session_id);
+        crate::ssh::agent_forward::detach(session_id).await;
         if remote {
             self.persist_remote_sessions_at(self.remote_sessions_path.clone())
                 .await
@@ -1325,6 +1825,7 @@ impl DaemonSessionService {
         self.terminal_service.hibernate_session(session_id).await?;
         self.release_session_ownership(session_id);
         self.agent_states.remove(session_id);
+        crate::ssh::agent_forward::detach(session_id).await;
         Ok(())
     }
 

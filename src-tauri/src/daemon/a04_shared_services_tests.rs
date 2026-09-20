@@ -55,12 +55,34 @@ async fn scenario(root: &Path, injection: Injection) -> anyhow::Result<()> {
         Some(root.join("config.json")),
         Some(root.join("auth.json")),
     ));
-    let services = server.remote_state.machine_services.as_ref().context("machine services")?;
-    ensure!(Arc::ptr_eq(&services.sessions, &server.session_service), "session authority differs");
-    ensure!(Arc::ptr_eq(&services.workspaces, &server.session_service.workspace_service), "workspace authority differs");
-    let backend: Arc<dyn crate::remote::backend::RemoteSessionBackend> = server.session_service.clone();
-    ensure!(Arc::ptr_eq(&backend, &server.remote_state.session_backend), "HTTP backend differs");
-    println!("A04 AUTHORITY session={:p} workspace={:p} backend={:p}", Arc::as_ptr(&services.sessions), Arc::as_ptr(&services.workspaces), Arc::as_ptr(&backend));
+    let services = server
+        .remote_state
+        .machine_services
+        .as_ref()
+        .context("machine services")?;
+    ensure!(
+        Arc::ptr_eq(&services.sessions, &server.session_service),
+        "session authority differs"
+    );
+    ensure!(
+        Arc::ptr_eq(
+            &services.workspaces,
+            &server.session_service.workspace_service
+        ),
+        "workspace authority differs"
+    );
+    let backend: Arc<dyn crate::remote::backend::RemoteSessionBackend> =
+        server.session_service.clone();
+    ensure!(
+        Arc::ptr_eq(&backend, &server.remote_state.session_backend),
+        "HTTP backend differs"
+    );
+    println!(
+        "A04 AUTHORITY session={:p} workspace={:p} backend={:p}",
+        Arc::as_ptr(&services.sessions),
+        Arc::as_ptr(&services.workspaces),
+        Arc::as_ptr(&backend)
+    );
     let socket = root.join("fixture.sock");
     let mut ipc_resource = None;
     let mut http_resource = None;
@@ -387,7 +409,10 @@ async fn scenario(root: &Path, injection: Injection) -> anyhow::Result<()> {
         Injection::Cleanup => Some(2),
     };
     if let Some(expected) = expected_closed {
-        ensure!(closed == expected, "expected {expected} owned PTYs, closed {closed}");
+        ensure!(
+            closed == expected,
+            "expected {expected} owned PTYs, closed {closed}"
+        );
     }
     if injection == Injection::Cleanup {
         ensure!(
@@ -485,7 +510,10 @@ fn run_private_fixture(injection: Injection) -> anyhow::Result<()> {
 #[test]
 fn a04_services_have_no_strong_owner_cycle() {
     let root = tempfile::tempdir().unwrap();
-    let server = DaemonServer::new_with_paths(Some(root.path().join("config.json")), Some(root.path().join("auth.json")));
+    let server = DaemonServer::new_with_paths(
+        Some(root.path().join("config.json")),
+        Some(root.path().join("auth.json")),
+    );
     let sessions = Arc::downgrade(&server.session_service);
     let workspaces = Arc::downgrade(&server.session_service.workspace_service);
     let gateway = Arc::downgrade(server.remote_state());
@@ -505,7 +533,8 @@ fn a04_legacy_constructors_have_no_machine_authority() {
     let registry = WorkspaceRegistry::new();
     let state = RemoteGatewayState::new(Arc::clone(&terminal), registry.clone());
     assert!(state.machine_services.is_none());
-    let state = RemoteGatewayState::new_with_paths(Arc::clone(&terminal), registry.clone(), None, None);
+    let state =
+        RemoteGatewayState::new_with_paths(Arc::clone(&terminal), registry.clone(), None, None);
     assert!(state.machine_services.is_none());
     let state = RemoteGatewayState::new_with_backend(terminal, registry);
     assert!(state.machine_services.is_none());

@@ -1,31 +1,53 @@
 use super::*;
+use std::os::fd::{AsRawFd, FromRawFd};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use std::os::fd::{FromRawFd, AsRawFd};
 
 #[tokio::test]
 async fn child() {
-    let Some(root) = std::env::var_os("A09_PRIVATE_CRASH_ROOT") else { return; };
+    let Some(root) = std::env::var_os("A09_PRIVATE_CRASH_ROOT") else {
+        return;
+    };
     let root = PathBuf::from(root);
-    let request: CreateSessionRequest = serde_json::from_slice(&std::fs::read(root.join("request.json")).unwrap()).unwrap();
-    let target: RemoteTerminalTarget = serde_json::from_slice(&std::fs::read(root.join("target.json")).unwrap()).unwrap();
+    let request: CreateSessionRequest =
+        serde_json::from_slice(&std::fs::read(root.join("request.json")).unwrap()).unwrap();
+    let target: RemoteTerminalTarget =
+        serde_json::from_slice(&std::fs::read(root.join("target.json")).unwrap()).unwrap();
     let owner = DaemonServer::new_with_paths(Some(root.join("config")), Some(root.join("auth")));
     let phase = std::env::var("A09_PRIVATE_CRASH_PHASE").unwrap();
     let address = std::env::var("A09_PRIVATE_CRASH_ADDRESS").unwrap();
     let backend = owner.terminal_service().clone();
     let id = target.session_id.clone();
-    *owner.session_service.workspace_service.transaction_probe.write() = Some(Arc::new(move |event| {
-        if event != phase { return; }
+    *owner
+        .session_service
+        .workspace_service
+        .transaction_probe
+        .write() = Some(Arc::new(move |event| {
+        if event != phase {
+            return;
+        }
         use std::io::{Read, Write};
         let mut socket = std::net::TcpStream::connect(&address).unwrap();
-        socket.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
         let pid = backend.get_session(&id).and_then(|p| p.pid());
         writeln!(socket, "{}", serde_json::json!({"pid":pid,"target":id})).unwrap();
-        let mut acknowledgement = [0]; socket.read_exact(&mut acknowledgement).unwrap();
+        let mut acknowledgement = [0];
+        socket.read_exact(&mut acknowledgement).unwrap();
         assert_eq!(acknowledgement, [1]);
         std::process::exit(73);
     }));
-    let _ = owner.session_service.spawn_machine(request, "device".into(), "digest".into(), target,
-        Instant::now() + Duration::from_secs(20), Arc::new(|| Ok(()))).await;
+    let _ = owner
+        .session_service
+        .spawn_machine(
+            request,
+            "device".into(),
+            "digest".into(),
+            target,
+            Instant::now() + Duration::from_secs(20),
+            Arc::new(|| Ok(())),
+        )
+        .await;
     panic!("crash probe did not terminate the private owner");
 }
 
@@ -34,14 +56,32 @@ async fn actual_owner_crash_reconciles_without_respawn() {
     for phase in ["sessionIntent", "sessionSpawned", "sessionCommitted"] {
         let (root, owner, request) = fixture().await;
         let target = target();
-        std::fs::write(root.path().join("request.json"), serde_json::to_vec(&request).unwrap()).unwrap();
-        std::fs::write(root.path().join("target.json"), serde_json::to_vec(&target).unwrap()).unwrap();
+        std::fs::write(
+            root.path().join("request.json"),
+            serde_json::to_vec(&request).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("target.json"),
+            serde_json::to_vec(&target).unwrap(),
+        )
+        .unwrap();
         drop(owner);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
-        command.args(["--exact", "daemon::session_service::machine_tests::crash::child", "--nocapture"])
-            .env("A09_PRIVATE_CRASH_ROOT", root.path()).env("A09_PRIVATE_CRASH_PHASE", phase)
-            .env("A09_PRIVATE_CRASH_ADDRESS", listener.local_addr().unwrap().to_string()).kill_on_drop(true);
+        command
+            .args([
+                "--exact",
+                "daemon::session_service::machine_tests::crash::child",
+                "--nocapture",
+            ])
+            .env("A09_PRIVATE_CRASH_ROOT", root.path())
+            .env("A09_PRIVATE_CRASH_PHASE", phase)
+            .env(
+                "A09_PRIVATE_CRASH_ADDRESS",
+                listener.local_addr().unwrap().to_string(),
+            )
+            .kill_on_drop(true);
         let mut child = command.spawn().unwrap();
         let result = std::panic::AssertUnwindSafe(async {
             let (socket, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept()).await.unwrap().unwrap();
@@ -92,10 +132,17 @@ async fn actual_owner_crash_reconciles_without_respawn() {
             drop(restored);
             eprintln!("A09 actual-owner-crash phase={phase} exit=73 original_pty_pid={pid:?} kernel-exit-observed={} original-intent-restored=true no-respawn=true", pid.is_some());
         }).catch_unwind().await;
-        if child.try_wait().unwrap().is_none() { child.kill().await.unwrap(); }
-        child.wait().await.unwrap(); drop(listener);
-        tokio::task::spawn_blocking(move || root.close().unwrap()).await.unwrap();
+        if child.try_wait().unwrap().is_none() {
+            child.kill().await.unwrap();
+        }
+        child.wait().await.unwrap();
+        drop(listener);
+        tokio::task::spawn_blocking(move || root.close().unwrap())
+            .await
+            .unwrap();
         eprintln!("A09 crash cleanup: private owner waited, listener dropped, root removed");
-        if let Err(panic) = result { std::panic::resume_unwind(panic); }
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
     }
 }
