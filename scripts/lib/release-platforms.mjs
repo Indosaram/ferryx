@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 
 import { runHostScript, runProcess, quoteSh, quotePowerShell } from "./release-hosts.mjs";
 import { verifyMinisign } from "./minisign-verify.mjs";
@@ -637,12 +638,7 @@ printf '%s\\n' '---BUILD_RESULT---' "{\\"node\\":\\"$(node --version | sed 's/^v
 `;
 }
 
-export function createWindowsBuildScript({ workspaceDir, plan, hostConfig }) {
-  const signingKey = process.env.TAURI_SIGNING_PRIVATE_KEY;
-  const signingPassword = process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD;
-  const signingEnv = signingKey
-    ? `$env:TAURI_SIGNING_PRIVATE_KEY = ${quotePowerShell(signingKey)}\n$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ${quotePowerShell(signingPassword ?? "")}`
-    : "";
+export function createWindowsBuildScript({ workspaceDir, plan, hostConfig, signingSecretFile = null }) {
   const pathPrefix = hostConfig.path
     ? `$env:PATH = ${quotePowerShell(`${hostConfig.path};`)} + $env:PATH\n`
     : "";
@@ -659,7 +655,13 @@ Copy-Item -LiteralPath $nsis[0].FullName -Destination (Join-Path $outDir 'Ferryx
     : "";
   return `$ErrorActionPreference = 'Stop'
 ${pathPrefix}$workspace = ${quotePowerShell(workspaceDir)}
-${signingEnv}
+$signingSecretFile = ${signingSecretFile ? `Join-Path $workspace ${quotePowerShell(signingSecretFile)}` : "$null"}
+try {
+if ($signingSecretFile -and (Test-Path $signingSecretFile)) {
+  $signingSecret = Get-Content -LiteralPath $signingSecretFile -Raw | ConvertFrom-Json
+  $env:TAURI_SIGNING_PRIVATE_KEY = $signingSecret.key
+  $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = $signingSecret.password
+}
 $sourceDir = Join-Path $workspace 'source'
 $ghosttyDir = Join-Path $workspace 'ghostty'
 $outDir = Join-Path $workspace 'out'
@@ -699,6 +701,11 @@ if ($msix[0].Name -ne 'Ferryx_x64.msix') { Move-Item $msix[0].FullName (Join-Pat
 $versions = [ordered]@{ node = ((node --version) -replace '^v',''); bun = (bun --version); zig = (zig version); rust = ((rustc --version) -split ' ')[1] }
 Write-Output '---BUILD_RESULT---'
 Write-Output ($versions | ConvertTo-Json -Compress)
+} finally {
+  Remove-Item -LiteralPath $signingSecretFile -Force -ErrorAction SilentlyContinue
+  Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY -ErrorAction SilentlyContinue
+  Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue
+}
 `;
 }
 
@@ -1211,13 +1218,32 @@ export async function buildHost({
           await runProcess(scpCommand, [...sshArgs, `${hostConfig.ssh}:${workspaceDir}/out/${name}`, artifactsOutDir], { timeoutMs });
         }
       } else {
-        const script = createWindowsBuildScript({ workspaceDir, plan, hostConfig });
-        const result = await runHostScript(hostConfig, { powershell: script }, { timeoutMs });
-        toolchains = parseBuildResult(result.stdout);
-        const names = ["Ferryx_x64.msix"];
-        if (plan.channels.nsisMigration) names.push("Ferryx_x64-setup.exe");
-        for (const name of names) {
-          await runProcess(scpCommand, [...sshArgs, `${hostConfig.ssh}:${workspaceDir.replaceAll("\\", "/")}/out/${name}`, artifactsOutDir], { timeoutMs });
+        const signingKey = process.env.TAURI_SIGNING_PRIVATE_KEY;
+        const signingPassword = process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD;
+        const secretDir = mkdtempSync(join(tmpdir(), "ferryx-release-secret-"));
+        const secretPath = join(secretDir, "tauri-signing-secret.json");
+        try {
+          if (signingKey) {
+            writeFileSync(secretPath, JSON.stringify({ key: signingKey, password: signingPassword ?? "" }), {
+              mode: 0o600,
+            });
+            await runProcess(scpCommand, [...sshArgs, secretPath, `${bundleTarget}tauri-signing-secret.json`], { timeoutMs });
+          }
+          const script = createWindowsBuildScript({
+            workspaceDir,
+            plan,
+            hostConfig,
+            signingSecretFile: signingKey ? "tauri-signing-secret.json" : null,
+          });
+          const result = await runHostScript(hostConfig, { powershell: script }, { timeoutMs });
+          toolchains = parseBuildResult(result.stdout);
+          const names = ["Ferryx_x64.msix"];
+          if (plan.channels.nsisMigration) names.push("Ferryx_x64-setup.exe");
+          for (const name of names) {
+            await runProcess(scpCommand, [...sshArgs, `${hostConfig.ssh}:${workspaceDir.replaceAll("\\", "/")}/out/${name}`, artifactsOutDir], { timeoutMs });
+          }
+        } finally {
+          rmSync(secretDir, { recursive: true, force: true });
         }
       }
     }

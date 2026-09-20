@@ -45,6 +45,22 @@ test("buildHost: remote artifact transport uses keepalive options", async () => 
   assert.match(source, /ServerAliveCountMax=6/);
 });
 
+test("createWindowsBuildScript: reads signing secret from a remote file", () => {
+  const script = createWindowsBuildScript({
+    workspaceDir: "C:/Users/sook/ferryx-releases/test",
+    plan: {
+      tag: "v2026.09.20.7",
+      msixVersion: "2026.920.7.0",
+      channels: { nsisMigration: true },
+    },
+    hostConfig: { root: "C:/Users/sook/ferryx-releases" },
+    signingSecretFile: "tauri-signing-secret.json",
+  });
+  assert.match(script, /ConvertFrom-Json/);
+  assert.match(script, /Remove-Item -LiteralPath \$signingSecretFile/);
+  assert.doesNotMatch(script, /TAURI_SIGNING_PRIVATE_KEY\s*=\s*['\"]/);
+});
+
 test("probeMacbook: correctly inspects disk budget and detects insufficiency", async () => {
   const hostConfig = {
     platform: "darwin",
