@@ -609,6 +609,7 @@ mkdir "$out_dir"
 ${targetDirCode}
 export SOURCE_DATE_EPOCH=${quoteSh(String(plan.sourceDateEpoch))}
 export NO_STRIP=true
+rm -rf "$CARGO_TARGET_DIR/release/bundle"
 cd "$source_dir"
 bun tauri build --bundles appimage,deb
 appimages=()
@@ -636,7 +637,8 @@ export function createWindowsBuildScript({ workspaceDir, plan, hostConfig }) {
     ? `$cargoTarget = Join-Path ${quotePowerShell(hostConfig.root)} 'cargo-target'\nif (-not (Test-Path $cargoTarget)) { New-Item -ItemType Directory -Path $cargoTarget -Force | Out-Null }\n$env:CARGO_TARGET_DIR = $cargoTarget`
     : `$cargoTarget = Join-Path $workspace 'cargo-target'\n$env:CARGO_TARGET_DIR = $cargoTarget`;
   const nsisBuild = plan.channels.nsisMigration
-    ? `bun tauri build --bundles nsis
+    ? `Remove-Item -Path (Join-Path $cargoTarget 'release\\bundle') -Recurse -Force -ErrorAction SilentlyContinue
+bun tauri build --bundles nsis
 $nsis = @(Get-ChildItem -Path $cargoTarget -Filter '*-setup.exe' -File -Recurse)
 if ($nsis.Count -ne 1) { throw "Expected exactly one NSIS installer, found $($nsis.Count)" }
 Copy-Item -LiteralPath $nsis[0].FullName -Destination (Join-Path $outDir 'Ferryx_x64-setup.exe')
@@ -965,22 +967,25 @@ export async function buildHost({
         throw new Error(`Info.plist version does not match plan version '${plan.appVersion}'`);
       }
 
-      // 3. Verify and re-sign codesign (ensuring all subcomponents in Contents/MacOS have hardened runtime)
+      // 3. Verify and re-sign codesign (ensuring all Mach-O binaries have hardened runtime & timestamps)
       if (hostConfig.signingIdentity) {
-        const macosBinDir = join(appPath, "Contents", "MacOS");
-        if (existsSync(macosBinDir)) {
-          for (const item of readdirSync(macosBinDir)) {
-            const itemPath = join(macosBinDir, item);
-            if (statSync(itemPath).isFile()) {
-              execFileSync("codesign", ["--force", "--options", "runtime", "--sign", hostConfig.signingIdentity, itemPath], {
-                stdio: "pipe",
-              });
-            }
+        const findOut = execFileSync("find", [appPath, "-type", "f"], { encoding: "utf8" });
+        for (const itemPath of findOut.trim().split("\n")) {
+          if (!itemPath) continue;
+          const fileType = execFileSync("file", ["-b", itemPath], { encoding: "utf8" });
+          if (fileType.includes("Mach-O")) {
+            execFileSync(
+              "codesign",
+              ["--force", "--options", "runtime", "--timestamp", "--sign", hostConfig.signingIdentity, itemPath],
+              { stdio: "pipe" },
+            );
           }
         }
-        execFileSync("codesign", ["--force", "--options", "runtime", "--sign", hostConfig.signingIdentity, appPath], {
-          stdio: "pipe",
-        });
+        execFileSync(
+          "codesign",
+          ["--force", "--options", "runtime", "--timestamp", "--sign", hostConfig.signingIdentity, appPath],
+          { stdio: "pipe" },
+        );
       }
 
       execFileSync("codesign", ["--verify", "--deep", "--strict", "--verbose=2", appPath], {
@@ -1027,7 +1032,7 @@ export async function buildHost({
 
         if (dmgPath && existsSync(dmgPath)) {
           if (hostConfig.signingIdentity) {
-            execFileSync("codesign", ["--force", "--sign", hostConfig.signingIdentity, dmgPath], { stdio: "pipe" });
+            execFileSync("codesign", ["--force", "--timestamp", "--sign", hostConfig.signingIdentity, dmgPath], { stdio: "pipe" });
           }
           execFileSync(
             "xcrun",
