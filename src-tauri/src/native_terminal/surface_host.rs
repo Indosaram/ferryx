@@ -438,6 +438,7 @@ fn dispatch_scheduled_render<R: Runtime>(
         let layout = frame.layout;
         let logical_bounds = frame.logical_bounds;
         let frame_epoch = frame.attachment_epoch;
+        let frame_generation = frame.generation;
         let render_input = frame.input.clone();
 
         let mut hosts_guard = hosts.lock();
@@ -561,6 +562,18 @@ fn dispatch_scheduled_render<R: Runtime>(
                             }
                         }
 
+                        if receipt.presented {
+                            // The only place a caller can learn that this frame actually reached
+                            // the screen: the direct render path always defers. Stale completions
+                            // are rejected inside the slot by generation/epoch, so a detached or
+                            // superseded attachment can never be marked presented.
+                            completion_snapshot_slot.publish_presentation(
+                                frame_generation,
+                                frame_epoch,
+                                receipt,
+                            );
+                        }
+
                         if retry {
                             completion_coordinator.schedule_render();
                         }
@@ -594,6 +607,9 @@ fn dispatch_scheduled_render<R: Runtime>(
                 drop(hosts_guard);
                 match receipt {
                     Ok(receipt) => {
+                        if receipt.presented {
+                            slot.publish_presentation(frame_generation, frame_epoch, receipt);
+                        }
                         if !receipt.presented
                             && !receipt.render_deferred
                             && !receipt.render_suspended
@@ -1765,6 +1781,10 @@ impl NativeTerminalSurfaceHostState {
                     .terminal
                     .scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
                 session.last_sequence = attachment.end_sequence;
+                // The re-fed history is the session's whole visible state. Cancelling the
+                // scheduled render without republishing would leave the slot holding the
+                // pre-attach frame, so the first paint after attach shows stale content.
+                session.publish_frame();
                 session.render_coordinator.consume_render();
                 (
                     session.update_sender.clone(),
@@ -2763,6 +2783,12 @@ impl NativeTerminalSurfaceHostState {
             let logical_bounds = session.logical_bounds.ok_or(NativeTerminalError::NoValue)?;
             let cell_metrics = session.cell_metrics.ok_or(NativeTerminalError::NoValue)?;
             let render_input = session_render_snapshot(session)?;
+            // The native host defers this frame to the GPU worker, which paints whatever the
+            // slot holds. Publishing the snapshot that was just computed is what makes the
+            // deferred pass paint THIS frame instead of the last one the pump happened to leave.
+            session
+                .snapshot_slot
+                .publish(layout, logical_bounds, render_input.clone());
             (layout, logical_bounds, cell_metrics, render_input)
         };
 
@@ -3046,7 +3072,23 @@ impl NativeTerminalSurfaceHost {
                 })
             }
             #[cfg(test)]
-            HostFrameTarget::Injected(target) => target.render_snapshot(layout, snapshot),
+            HostFrameTarget::Injected(target) => {
+                if target.defer_direct {
+                    let cell_metrics = target.cell_metrics;
+                    return Ok(NativeTerminalSurfaceReceipt {
+                        render_deferred: true,
+                        ..NativeTerminalSurfaceReceipt::from_snapshot(
+                            layout,
+                            snapshot,
+                            0,
+                            0,
+                            cell_metrics,
+                            self.logical_bounds,
+                        )
+                    });
+                }
+                target.render_snapshot(layout, snapshot)
+            }
         }
     }
 }
@@ -3477,6 +3519,10 @@ mod tests {
         pub cell_metrics: CellMetrics,
         events: Arc<Mutex<Vec<FrameEvent>>>,
         assert_host_locked: Box<dyn Fn() + Send>,
+        /// Mirrors the production native target, which never paints inline: the direct render
+        /// call only reports `render_deferred` and the frame is painted by the scheduled GPU
+        /// pass. Off by default so the existing direct-path tests keep their inline semantics.
+        pub defer_direct: bool,
     }
 
     impl InjectedFrameTarget {
@@ -3598,6 +3644,7 @@ mod tests {
                     acquisitions: acquisitions.into(),
                     cell_metrics: font_manager::derived_cell_metrics(),
                     events: Arc::clone(&events),
+                    defer_direct: false,
                     assert_host_locked: Box::new(move || {
                         assert!(
                             hosts.upgrade().unwrap().try_lock().is_none(),
@@ -3623,6 +3670,26 @@ mod tests {
                 dispatched,
                 events,
             }
+        }
+
+        /// Harness whose injected target defers the direct render exactly like the production
+        /// native target: nothing is painted inline, and the only paint comes from the scheduled
+        /// GPU pass.
+        fn with_deferred_direct_frames(acquisitions: Vec<SimulatedAcquisition>) -> Self {
+            let harness = Self::new(acquisitions);
+            {
+                let mut hosts = harness.state.hosts.lock();
+                let host = hosts
+                    .get_mut(&harness.request.session_id)
+                    .expect("harness installs an injected host");
+                match &mut host.frame_target {
+                    HostFrameTarget::Injected(target) => target.defer_direct = true,
+                    HostFrameTarget::Native(_) => {
+                        unreachable!("harness installs an injected frame target")
+                    }
+                }
+            }
+            harness
         }
 
         fn scroll_once(&self) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
@@ -3722,6 +3789,118 @@ mod tests {
             );
         }
         harness._app.unlisten(listener);
+    }
+
+    #[tokio::test]
+    async fn bounds_ipc_resolves_on_the_deferred_gpu_presentation() {
+        // The blank-screen regression: a native surface defers EVERY direct render, so a bounds
+        // IPC that only re-rendered while `render_deferred` stayed true never resolved, and the
+        // frontend never marked the pane presented. The GPU completion is the only presentation
+        // evidence, so it must be what ends the wait.
+        let mut harness =
+            DirectRenderHarness::with_deferred_direct_frames(vec![SimulatedAcquisition::Frame]);
+        harness._app.manage(harness.state.clone());
+        harness
+            .window
+            .state::<RenderDispatch>()
+            .require_deferred
+            .store(false, Ordering::SeqCst);
+        let bounds = harness.request.bounds;
+
+        let app_handle = harness._app.handle().clone();
+        let mut command = Box::pin(crate::ipc::native_terminal::cmd_native_terminal_set_bounds(
+            app_handle.clone(),
+            app_handle.state::<NativeTerminalSurfaceHostState>(),
+            harness.request.session_id.clone(),
+            crate::ipc::native_terminal::NativeTerminalLogicalRect {
+                x: bounds.x,
+                y: bounds.y,
+                width: bounds.width,
+                height: bounds.height,
+            },
+            bounds.scale_factor,
+        ));
+        assert!(
+            futures_util::poll!(command.as_mut()).is_pending(),
+            "a deferred frame has not reached the screen yet"
+        );
+        assert!(
+            harness.events.lock().is_empty(),
+            "the direct path must not paint inline; the GPU pass owns presentation"
+        );
+
+        // The deferred GPU pass is the only paint, and its completion is the signal.
+        harness.execute_dispatched().await;
+
+        let receipt = tokio::time::timeout(std::time::Duration::from_secs(5), command)
+            .await
+            .expect("a deferred bounds render must be acknowledged by its GPU presentation")
+            .expect("bounds IPC must succeed once the frame is presented");
+
+        assert!(
+            receipt.presented,
+            "the acknowledged receipt must carry the actual presentation"
+        );
+        assert!(!receipt.render_deferred);
+        assert_eq!(
+            *harness.events.lock(),
+            vec![FrameEvent::Acquire, FrameEvent::Presented]
+        );
+    }
+
+    #[tokio::test]
+    async fn detached_presentation_cannot_acknowledge_a_later_attachment() {
+        // A completion that belongs to a retired attachment must never mark the live one
+        // presented: the slot rejects it on epoch, so the pending bounds wait stays open.
+        let harness = DirectRenderHarness::new(vec![]);
+        let slot = harness
+            .state
+            .session_snapshot_slot(&harness.request.session_id)
+            .expect("attached session owns a snapshot slot");
+        let stale_epoch = slot.current_epoch();
+        let mut presentations = slot.subscribe_presentations();
+        presentations.borrow_and_update();
+
+        let stale_receipt = NativeTerminalSurfaceReceipt {
+            presented: true,
+            ..NativeTerminalSurfaceReceipt::from_snapshot(
+                harness
+                    .state
+                    .session_layout(&harness.request.session_id)
+                    .expect("prepared layout"),
+                &harness
+                    .state
+                    .snapshot_for_session(&harness.request.session_id)
+                    .unwrap()
+                    .unwrap(),
+                0,
+                0,
+                font_manager::derived_cell_metrics(),
+                Some(harness.request.bounds),
+            )
+        };
+
+        // Reattaching rotates the epoch, retiring the in-flight frame above.
+        let live_epoch = slot.set_attached(true);
+        assert_ne!(stale_epoch, live_epoch);
+
+        assert!(
+            !slot.publish_presentation(1, stale_epoch, stale_receipt),
+            "a completion from a retired attachment must be rejected"
+        );
+        assert!(
+            presentations.borrow_and_update().is_none(),
+            "no waiter may observe a presentation for an attachment that is gone"
+        );
+
+        assert!(
+            slot.publish_presentation(2, live_epoch, stale_receipt),
+            "the live attachment's own completion must be accepted"
+        );
+        let observed =
+            (*presentations.borrow_and_update()).expect("live completion reaches the waiter");
+        assert_eq!(observed.attachment_epoch, live_epoch);
+        assert_eq!(observed.generation, 2);
     }
 
     #[tokio::test]
@@ -5024,6 +5203,7 @@ mod tests {
                 acquisitions: vec![SimulatedAcquisition::Frame].into(),
                 cell_metrics,
                 events: Arc::new(Mutex::new(Vec::new())),
+                defer_direct: false,
                 assert_host_locked: Box::new(|| {}),
             }),
             layout: state.session_layout(session_b),

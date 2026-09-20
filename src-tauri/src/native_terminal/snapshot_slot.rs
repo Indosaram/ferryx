@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use super::composition::{LogicalBounds, SurfaceCompositionLayout};
-use super::surface_host::SessionRenderInput;
+use super::surface_host::{NativeTerminalSurfaceReceipt, SessionRenderInput};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PublishedFrame {
@@ -14,9 +14,23 @@ pub(crate) struct PublishedFrame {
     pub input: SessionRenderInput,
 }
 
+/// Receipt of a frame the GPU actually presented, tagged with the frame and attachment it
+/// belongs to.
+///
+/// The native host defers every frame, so a bounds IPC cannot learn from its own return value
+/// whether the surface was painted. This is the completion signal it waits on instead, and the
+/// tags are what keep a late or detached completion from acknowledging a different attachment.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PresentedFrame {
+    pub generation: u64,
+    pub attachment_epoch: u64,
+    pub receipt: NativeTerminalSurfaceReceipt,
+}
+
 #[derive(Debug)]
 pub struct SnapshotSlot {
     ready: Mutex<Option<Arc<PublishedFrame>>>,
+    presented: tokio::sync::watch::Sender<Option<PresentedFrame>>,
     generation: AtomicU64,
     attached: AtomicBool,
     attachment_epoch: AtomicU64,
@@ -32,6 +46,7 @@ impl SnapshotSlot {
     pub fn new() -> Self {
         Self {
             ready: Mutex::new(None),
+            presented: tokio::sync::watch::channel(None).0,
             generation: AtomicU64::new(0),
             attached: AtomicBool::new(false),
             attachment_epoch: AtomicU64::new(1),
@@ -39,11 +54,17 @@ impl SnapshotSlot {
     }
 
     pub fn set_attached(&self, attached: bool) -> u64 {
+        // Held across the whole transition so a presentation cannot be validated against the old
+        // epoch and then land in the channel after this attachment is gone.
+        let mut ready = self.ready.lock();
         let epoch = self.attachment_epoch.fetch_add(1, Ordering::SeqCst) + 1;
         self.attached.store(attached, Ordering::SeqCst);
         if !attached {
-            *self.ready.lock() = None;
+            *ready = None;
         }
+        // The previous attachment's presentation must never satisfy a waiter that belongs to this
+        // one, and clearing it also wakes anybody parked on the old attachment.
+        self.presented.send_replace(None);
         epoch
     }
 
@@ -88,6 +109,37 @@ impl SnapshotSlot {
         } else {
             None
         }
+    }
+
+    /// Records a frame the GPU presented. Rejected (returning `false`) when the attachment the
+    /// frame was rendered for is gone, so a detached or superseded completion cannot mark the
+    /// current attachment painted.
+    ///
+    /// The validity check and the publish share [`Self::set_attached`]'s lock: without that, a
+    /// detach landing between them would push a retired frame into the channel after the channel
+    /// had already been cleared, and the next attachment's waiter would read it as its own.
+    pub(crate) fn publish_presentation(
+        &self,
+        generation: u64,
+        attachment_epoch: u64,
+        receipt: NativeTerminalSurfaceReceipt,
+    ) -> bool {
+        let _guard = self.ready.lock();
+        if !self.is_attached_with_epoch(attachment_epoch) {
+            return false;
+        }
+        self.presented.send_replace(Some(PresentedFrame {
+            generation,
+            attachment_epoch,
+            receipt,
+        }));
+        true
+    }
+
+    pub(crate) fn subscribe_presentations(
+        &self,
+    ) -> tokio::sync::watch::Receiver<Option<PresentedFrame>> {
+        self.presented.subscribe()
     }
 
     pub fn generation(&self) -> u64 {

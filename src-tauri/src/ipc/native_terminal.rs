@@ -6,6 +6,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::daemon::DaemonClient;
 use crate::ipc::IpcError;
 use crate::native_terminal::composition::{CellMetrics, LogicalBounds, SurfaceCompositionLayout};
+use crate::native_terminal::snapshot_slot::{PresentedFrame, SnapshotSlot};
 use crate::native_terminal::surface_host::{
     NativeTerminalBoundsRequest, NativeTerminalSurfaceHostState, NativeTerminalSurfaceReceipt,
 };
@@ -572,6 +573,15 @@ pub async fn cmd_native_terminal_set_bounds<R: Runtime>(
     let mut detached = state
         .subscribe_session_detach(&session_id)
         .map_err(IpcError::from)?;
+    // A native surface defers every frame to the GPU worker, so the render call itself can never
+    // report presentation. Subscribe to the session's presentation receipts before the first
+    // dispatch so a frame that finishes early cannot be missed, and let the GPU completion —
+    // rejected inside the slot when its attachment is gone — be what ends the wait.
+    let slot = state
+        .session_snapshot_slot(&session_id)
+        .ok_or_else(|| IpcError::from(NativeTerminalError::SessionDetached(session_id.clone())))?;
+    let mut presentations = slot.subscribe_presentations();
+    presentations.borrow_and_update();
     let mut initial_request = Some(request);
     loop {
         let state_inner = state.inner().clone();
@@ -579,6 +589,11 @@ pub async fn cmd_native_terminal_set_bounds<R: Runtime>(
         let (sender, receiver) = oneshot::channel();
         let session_id_clone = session_id.clone();
         let request = initial_request.take();
+        // Every render path publishes the frame it just computed, so the frame carrying this
+        // geometry is strictly newer than the generation observed here. Capturing it before
+        // dispatch means a paint that completes while the render is still on the main thread
+        // still counts, and a paint of an older frame never does.
+        let awaited_generation = slot.generation();
         window
             .run_on_main_thread(move || {
                 let result = match request {
@@ -600,17 +615,57 @@ pub async fn cmd_native_terminal_set_bounds<R: Runtime>(
         if !receipt.render_deferred {
             return Ok(receipt);
         }
-        // Subscribe before dispatch so a completed redraw cannot race the readiness wait.
-        tokio::select! {
-            biased;
-            _ = detached.changed() => {
-                return Err(IpcError::from(NativeTerminalError::SessionDetached(session_id)));
+        if let Some(presented) = presented_after(&slot, &mut presentations, awaited_generation) {
+            return Ok(into_ipc_receipt(session_id, presented));
+        }
+        loop {
+            tokio::select! {
+                biased;
+                _ = detached.changed() => {
+                    return Err(IpcError::from(NativeTerminalError::SessionDetached(session_id)));
+                }
+                result = presentations.changed() => {
+                    result.map_err(|_| {
+                        IpcError::from(NativeTerminalError::SessionDetached(session_id.clone()))
+                    })?;
+                    if let Some(presented) = presented_after(&slot, &mut presentations, awaited_generation) {
+                        return Ok(into_ipc_receipt(session_id, presented));
+                    }
+                }
+                // Terminal state moved on without a presentation (a suspended surface stops
+                // retrying); re-render so the pane cannot get stuck on an obsolete frame.
+                result = updates.changed() => {
+                    result.map_err(|_| {
+                        IpcError::from(NativeTerminalError::SessionDetached(session_id.clone()))
+                    })?;
+                    break;
+                }
             }
-            result = updates.changed() => result.map_err(|_| {
-                IpcError::from(NativeTerminalError::SessionDetached(session_id.clone()))
-            })?,
         }
     }
+}
+
+/// Receipt of a presented frame newer than `awaited_generation`, if one already landed for the
+/// attachment that is live right now.
+///
+/// Both ends are checked: `publish_presentation` rejects a completion whose attachment is already
+/// gone, and this rejects a value that was valid when published but whose attachment has since
+/// been retired, so a reader can never inherit the previous attachment's paint.
+///
+/// Any frame newer than the generation captured before dispatch is proof enough. Geometry is
+/// applied synchronously inside the render call, so every later frame - including one the output
+/// pump published - already carries this request's layout.
+fn presented_after(
+    slot: &SnapshotSlot,
+    presentations: &mut tokio::sync::watch::Receiver<Option<PresentedFrame>>,
+    awaited_generation: u64,
+) -> Option<NativeTerminalSurfaceReceipt> {
+    (*presentations.borrow_and_update())
+        .filter(|presented| {
+            presented.generation > awaited_generation
+                && slot.is_attached_with_epoch(presented.attachment_epoch)
+        })
+        .map(|presented| presented.receipt)
 }
 
 #[tauri::command]
