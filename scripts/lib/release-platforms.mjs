@@ -723,6 +723,167 @@ export async function signUpdaterArtifact({ artifactPath, repoDir }) {
 }
 
 /**
+ * Default command executor used by the macOS finalization phase.
+ * Returns captured stdio; throws on nonzero exit unless `allowFailure` is set.
+ */
+export function macExec(command, args, { allowFailure = false } = {}) {
+  const res = spawnSync(command, args, { encoding: "utf8" });
+  if (res.error) throw res.error;
+  const stdout = res.stdout || "";
+  const stderr = res.stderr || "";
+  if (res.status !== 0 && !allowFailure) {
+    throw new Error(
+      `Command failed (exit ${res.status}): ${command} ${args.join(" ")}\n${(stderr || stdout).trim()}`,
+    );
+  }
+  return { status: res.status ?? 0, stdout, stderr };
+}
+
+/**
+ * Submits a path to Apple's notary service and fails closed unless the returned
+ * status is "Accepted". `notarytool submit --wait` exits 0 even when the
+ * submission comes back Invalid, so the JSON result must be inspected.
+ */
+export function submitForNotarization({ path, notaryProfile, exec = macExec }) {
+  const { stdout, stderr } = exec(
+    "xcrun",
+    ["notarytool", "submit", path, "--keychain-profile", notaryProfile, "--wait", "--output-format", "json"],
+    { allowFailure: true },
+  );
+  const raw = `${stdout}\n${stderr}`;
+  const jsonMatch = raw.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) {
+    throw new Error(`Notarization returned no JSON result for '${basename(path)}': ${raw.trim()}`);
+  }
+  let result;
+  try {
+    result = JSON.parse(jsonMatch[0]);
+  } catch (err) {
+    throw new Error(`Notarization returned unparsable result for '${basename(path)}': ${err.message}`);
+  }
+  if (result.status !== "Accepted") {
+    throw new Error(
+      `Notarization status '${result.status ?? "unknown"}' for '${basename(path)}' (submission ${result.id ?? "unknown"}): ${result.message ?? raw.trim()}`,
+    );
+  }
+  return result;
+}
+
+/**
+ * Rebuilds the disk image from a specific .app bundle, replacing any image the
+ * Tauri bundler produced before the app was re-signed, notarized, and stapled.
+ */
+export function recreateDmgFromApp({ appPath, dmgPath, stagingDir, exec = macExec }) {
+  const appName = basename(appPath);
+  const volumeName = appName.replace(/\.app$/, "");
+  exec("rm", ["-rf", stagingDir]);
+  exec("mkdir", ["-p", stagingDir]);
+  exec("ditto", [appPath, join(stagingDir, appName)]);
+  exec("ln", ["-s", "/Applications", join(stagingDir, "Applications")]);
+  exec("rm", ["-f", dmgPath]);
+  exec("hdiutil", [
+    "create",
+    "-volname",
+    volumeName,
+    "-srcfolder",
+    stagingDir,
+    "-fs",
+    "HFS+",
+    "-format",
+    "UDZO",
+    "-ov",
+    dmgPath,
+  ]);
+  exec("rm", ["-rf", stagingDir]);
+  return { dmgPath, volumeName };
+}
+
+/**
+ * Re-signs, notarizes, and staples the macOS app bundle, then rebuilds and
+ * notarizes the DMG from that final app so the image never ships the bundler's
+ * pre-signing copy of the embedded helpers.
+ */
+export function finalizeMacosBundle({
+  appPath,
+  dmgPath = null,
+  workspaceDir,
+  signingIdentity = null,
+  notaryProfile = null,
+  approveNotarization = false,
+  exec = macExec,
+}) {
+  // Re-sign every Mach-O binary (including embedded helpers) with hardened
+  // runtime and a secure timestamp, then seal the bundle.
+  if (signingIdentity) {
+    const findOut = exec("find", [appPath, "-type", "f"]).stdout;
+    for (const itemPath of findOut.trim().split("\n")) {
+      if (!itemPath) continue;
+      const fileType = exec("file", ["-b", itemPath]).stdout;
+      if (fileType.includes("Mach-O")) {
+        exec("codesign", ["--force", "--options", "runtime", "--timestamp", "--sign", signingIdentity, itemPath]);
+      }
+    }
+    exec("codesign", ["--force", "--options", "runtime", "--timestamp", "--sign", signingIdentity, appPath]);
+  }
+
+  exec("codesign", ["--verify", "--deep", "--strict", "--verbose=2", appPath]);
+  if (signingIdentity) {
+    const signInfo = exec("codesign", ["-dv", "--verbose=4", appPath], { allowFailure: true });
+    const combined = `${signInfo.stdout}\n${signInfo.stderr}`;
+    if (!combined.includes(signingIdentity)) {
+      throw new Error(`App bundle is not signed with expected identity '${signingIdentity}'`);
+    }
+  }
+
+  const notarizations = [];
+  if (approveNotarization && notaryProfile) {
+    const appZipPath = join(workspaceDir, "Ferryx-notary.zip");
+    exec("rm", ["-f", appZipPath]);
+    exec("ditto", ["-c", "-k", "--keepParent", appPath, appZipPath]);
+    notarizations.push({
+      target: "app",
+      ...submitForNotarization({ path: appZipPath, notaryProfile, exec }),
+    });
+    exec("rm", ["-f", appZipPath]);
+
+    exec("xcrun", ["stapler", "staple", appPath]);
+    exec("xcrun", ["stapler", "validate", appPath]);
+
+    if (dmgPath) {
+      // The bundler built this DMG from the app as it existed before the
+      // helper re-sign/notarize/staple pass, so rebuild it from the final app.
+      recreateDmgFromApp({ appPath, dmgPath, stagingDir: join(workspaceDir, "dmg-staging"), exec });
+      if (signingIdentity) {
+        exec("codesign", ["--force", "--timestamp", "--sign", signingIdentity, dmgPath]);
+      }
+      notarizations.push({
+        target: "dmg",
+        ...submitForNotarization({ path: dmgPath, notaryProfile, exec }),
+      });
+      exec("xcrun", ["stapler", "staple", dmgPath]);
+      exec("xcrun", ["stapler", "validate", dmgPath]);
+    }
+
+    // Validate Gatekeeper assessment with spctl
+    const spctlApp = exec("spctl", ["-a", "-vvv", "-t", "install", appPath], { allowFailure: true });
+    const spctlAppOut = `${spctlApp.stdout}\n${spctlApp.stderr}`;
+    if (spctlApp.status !== 0 || !spctlAppOut.includes("Notarized Developer ID")) {
+      throw new Error(`Gatekeeper spctl validation failed for ${appPath}: ${spctlAppOut.trim()}`);
+    }
+
+    if (dmgPath) {
+      const spctlDmg = exec("spctl", ["-a", "-vvv", "-t", "install", dmgPath], { allowFailure: true });
+      const spctlDmgOut = `${spctlDmg.stdout}\n${spctlDmg.stderr}`;
+      if (spctlDmg.status !== 0 || !spctlDmgOut.includes("Notarized Developer ID")) {
+        throw new Error(`Gatekeeper spctl validation failed for ${dmgPath}: ${spctlDmgOut.trim()}`);
+      }
+    }
+  }
+
+  return { appPath, dmgPath, notarizations };
+}
+
+/**
  * Orchestrates an isolated platform build for a specific host.
  */
 export async function buildHost({
@@ -967,43 +1128,8 @@ export async function buildHost({
         throw new Error(`Info.plist version does not match plan version '${plan.appVersion}'`);
       }
 
-      // 3. Verify and re-sign codesign (ensuring all Mach-O binaries have hardened runtime & timestamps)
-      if (hostConfig.signingIdentity) {
-        const findOut = execFileSync("find", [appPath, "-type", "f"], { encoding: "utf8" });
-        for (const itemPath of findOut.trim().split("\n")) {
-          if (!itemPath) continue;
-          const fileType = execFileSync("file", ["-b", itemPath], { encoding: "utf8" });
-          if (fileType.includes("Mach-O")) {
-            execFileSync(
-              "codesign",
-              ["--force", "--options", "runtime", "--timestamp", "--sign", hostConfig.signingIdentity, itemPath],
-              { stdio: "pipe" },
-            );
-          }
-        }
-        execFileSync(
-          "codesign",
-          ["--force", "--options", "runtime", "--timestamp", "--sign", hostConfig.signingIdentity, appPath],
-          { stdio: "pipe" },
-        );
-      }
-
-      execFileSync("codesign", ["--verify", "--deep", "--strict", "--verbose=2", appPath], {
-        stdio: "pipe",
-      });
-      if (hostConfig.signingIdentity) {
-        const signInfo = spawnSync("codesign", ["-dv", "--verbose=4", appPath], {
-          encoding: "utf8",
-        });
-        const combined = (signInfo.stdout || "") + "\n" + (signInfo.stderr || "");
-        if (!combined.includes(hostConfig.signingIdentity)) {
-          throw new Error(
-            `App bundle is not signed with expected identity '${hostConfig.signingIdentity}'`,
-          );
-        }
-      }
-
-      // 4. Notarization and stapling (when approved)
+      // 3-4. Re-sign all Mach-O binaries, notarize/staple the app, then rebuild
+      // and notarize the DMG from that final signed + stapled app.
       const dmgDir = join(bundleDir, "dmg");
       let dmgPath = null;
       if (existsSync(dmgDir)) {
@@ -1015,49 +1141,14 @@ export async function buildHost({
         }
       }
 
-      if (approveNotarization && hostConfig.notaryProfile) {
-        const appZipPath = join(workspaceDir, "Ferryx-notary.zip");
-        rmSync(appZipPath, { force: true });
-        execFileSync("ditto", ["-c", "-k", "--keepParent", appPath, appZipPath], { stdio: "pipe" });
-
-        execFileSync(
-          "xcrun",
-          ["notarytool", "submit", appZipPath, "--keychain-profile", hostConfig.notaryProfile, "--wait"],
-          { stdio: "pipe" },
-        );
-        rmSync(appZipPath, { force: true });
-
-        execFileSync("xcrun", ["stapler", "staple", appPath], { stdio: "pipe" });
-        execFileSync("xcrun", ["stapler", "validate", appPath], { stdio: "pipe" });
-
-        if (dmgPath && existsSync(dmgPath)) {
-          if (hostConfig.signingIdentity) {
-            execFileSync("codesign", ["--force", "--timestamp", "--sign", hostConfig.signingIdentity, dmgPath], { stdio: "pipe" });
-          }
-          execFileSync(
-            "xcrun",
-            ["notarytool", "submit", dmgPath, "--keychain-profile", hostConfig.notaryProfile, "--wait"],
-            { stdio: "pipe" },
-          );
-          execFileSync("xcrun", ["stapler", "staple", dmgPath], { stdio: "pipe" });
-          execFileSync("xcrun", ["stapler", "validate", dmgPath], { stdio: "pipe" });
-        }
-
-        // Validate Gatekeeper assessment with spctl
-        const spctlApp = spawnSync("spctl", ["-a", "-vvv", "-t", "install", appPath], { encoding: "utf8" });
-        const spctlAppOut = `${spctlApp.stdout || ""}\n${spctlApp.stderr || ""}`;
-        if (spctlApp.status !== 0 || !spctlAppOut.includes("Notarized Developer ID")) {
-          throw new Error(`Gatekeeper spctl validation failed for ${appPath}: ${spctlAppOut.trim()}`);
-        }
-
-        if (dmgPath && existsSync(dmgPath)) {
-          const spctlDmg = spawnSync("spctl", ["-a", "-vvv", "-t", "install", dmgPath], { encoding: "utf8" });
-          const spctlDmgOut = `${spctlDmg.stdout || ""}\n${spctlDmg.stderr || ""}`;
-          if (spctlDmg.status !== 0 || !spctlDmgOut.includes("Notarized Developer ID")) {
-            throw new Error(`Gatekeeper spctl validation failed for ${dmgPath}: ${spctlDmgOut.trim()}`);
-          }
-        }
-      }
+      finalizeMacosBundle({
+        appPath,
+        dmgPath,
+        workspaceDir,
+        signingIdentity: hostConfig.signingIdentity ?? null,
+        notaryProfile: hostConfig.notaryProfile ?? null,
+        approveNotarization,
+      });
 
       // 5. Create updater tar from verified (and stapled) .app, excluding AppleDouble
       const updaterTarPath = join(artifactsOutDir, "Ferryx.app.tar.gz");

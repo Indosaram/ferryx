@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync, chmodSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync, chmodSync, readdirSync, statSync, cpSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -17,6 +17,9 @@ import {
   createWindowsBuildScript,
   buildHost,
   signUpdaterArtifact,
+  submitForNotarization,
+  recreateDmgFromApp,
+  finalizeMacosBundle,
 } from "./lib/release-platforms.mjs";
 import { parseReceipt } from "./lib/release-contract.mjs";
 
@@ -30,6 +33,9 @@ test("release-platforms: exports required APIs", () => {
   assert.equal(typeof createLinuxBuildScript, "function");
   assert.equal(typeof createWindowsBuildScript, "function");
   assert.equal(typeof buildHost, "function");
+  assert.equal(typeof submitForNotarization, "function");
+  assert.equal(typeof recreateDmgFromApp, "function");
+  assert.equal(typeof finalizeMacosBundle, "function");
 });
 
 test("probeMacbook: correctly inspects disk budget and detects insufficiency", async () => {
@@ -512,6 +518,281 @@ fi
     assert.equal(readFileSync(debFile, "utf8"), "DEB_MOCK_BYTES");
     assert.equal(existsSync(tarGzFile), false, "AppImage.tar.gz must NOT be created");
     assert.match(runRes, /---BUILD_RESULT---/);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Builds a fixture .app tree plus a stale bundler DMG, and a fake exec that
+ * models the real commands (codesign mutates file contents, ditto copies,
+ * hdiutil snapshots the staging folder) so DMG contents can be inspected.
+ */
+function createMacFinalizeFixture(tmp, { notaryStatus = "Accepted" } = {}) {
+  const macosDir = join(tmp, "bundle", "macos");
+  const appPath = join(macosDir, "Ferryx.app");
+  const helperDir = join(appPath, "Contents", "Resources", "helpers");
+  mkdirSync(join(appPath, "Contents", "MacOS"), { recursive: true });
+  mkdirSync(join(helperDir, "aarch64-apple-darwin"), { recursive: true });
+  mkdirSync(join(helperDir, "x86_64-apple-darwin"), { recursive: true });
+  writeFileSync(join(appPath, "Contents", "MacOS", "ferryx"), "macho:main");
+  writeFileSync(join(helperDir, "aarch64-apple-darwin", "ferryx-remote-helper"), "macho:helper-arm");
+  writeFileSync(join(helperDir, "x86_64-apple-darwin", "ferryx-remote-helper"), "macho:helper-x86");
+
+  const dmgDir = join(tmp, "bundle", "dmg");
+  mkdirSync(dmgDir, { recursive: true });
+  const dmgPath = join(dmgDir, "Ferryx_2026.920.3_universal.dmg");
+  // Simulates the Tauri bundler's DMG: a snapshot of the app taken before the
+  // coordinator's re-sign pass, so its helpers are unsigned.
+  writeFileSync(dmgPath, JSON.stringify(snapshotTree(appPath)));
+
+  const workspaceDir = join(tmp, "workspace");
+  mkdirSync(workspaceDir, { recursive: true });
+
+  const calls = [];
+  const exec = (command, args) => {
+    calls.push([command, ...args].join(" "));
+    if (command === "find") {
+      return { status: 0, stdout: listFiles(args[0]).join("\n") + "\n", stderr: "" };
+    }
+    if (command === "file") {
+      return { status: 0, stdout: "Mach-O 64-bit executable\n", stderr: "" };
+    }
+    if (command === "codesign") {
+      const target = args[args.length - 1];
+      // Model codesign mutating the Mach-O it seals, so a DMG built from a
+      // pre-signing copy of the app is distinguishable from one built after.
+      // Sealing the DMG itself leaves its payload readable for assertions.
+      if (
+        args[0] === "--force" &&
+        !target.endsWith(".dmg") &&
+        existsSync(target) &&
+        !statSync(target).isDirectory()
+      ) {
+        writeFileSync(target, `${readFileSync(target, "utf8")}+signed`);
+      }
+      return { status: 0, stdout: "", stderr: "Authority=Developer ID Application: Indo Yoon (5DUM8WPB4C)\n" };
+    }
+    if (command === "rm") {
+      rmSync(args[args.length - 1], { recursive: true, force: true });
+      return { status: 0, stdout: "", stderr: "" };
+    }
+    if (command === "mkdir") {
+      mkdirSync(args[args.length - 1], { recursive: true });
+      return { status: 0, stdout: "", stderr: "" };
+    }
+    if (command === "ln") {
+      writeFileSync(args[args.length - 1], "symlink:/Applications");
+      return { status: 0, stdout: "", stderr: "" };
+    }
+    if (command === "ditto") {
+      const src = args[args.length - 2];
+      const dst = args[args.length - 1];
+      if (args.includes("-c")) {
+        writeFileSync(dst, JSON.stringify(snapshotTree(src)));
+      } else {
+        cpSync(src, dst, { recursive: true });
+      }
+      return { status: 0, stdout: "", stderr: "" };
+    }
+    if (command === "hdiutil") {
+      const srcFolder = args[args.indexOf("-srcfolder") + 1];
+      writeFileSync(args[args.length - 1], JSON.stringify(snapshotTree(srcFolder)));
+      return { status: 0, stdout: "", stderr: "" };
+    }
+    if (command === "xcrun" && args[0] === "notarytool") {
+      return {
+        status: 0,
+        stdout: JSON.stringify({ id: "87be4dc7-95e6-460a-a8bf-7e9e4360935d", status: notaryStatus, message: "Processing complete" }),
+        stderr: "",
+      };
+    }
+    if (command === "spctl") {
+      return { status: 0, stdout: "", stderr: "source=Notarized Developer ID\n" };
+    }
+    return { status: 0, stdout: "", stderr: "" };
+  };
+
+  return { appPath, dmgPath, workspaceDir, calls, exec };
+}
+
+function listFiles(root) {
+  const out = [];
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else out.push(full);
+    }
+  };
+  walk(root);
+  return out;
+}
+
+function snapshotTree(root) {
+  const snapshot = {};
+  for (const file of listFiles(root)) {
+    snapshot[file.slice(root.length + 1)] = readFileSync(file, "utf8");
+  }
+  return snapshot;
+}
+
+test("finalizeMacosBundle: DMG is rebuilt from the signed+stapled app, so helpers inside it are signed", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "ferryx-dmg-order-"));
+  try {
+    const fixture = createMacFinalizeFixture(tmp);
+    const staleDmg = JSON.parse(readFileSync(fixture.dmgPath, "utf8"));
+    assert.equal(
+      staleDmg["Contents/Resources/helpers/aarch64-apple-darwin/ferryx-remote-helper"],
+      "macho:helper-arm",
+      "fixture precondition: bundler DMG starts with unsigned helpers",
+    );
+
+    finalizeMacosBundle({
+      appPath: fixture.appPath,
+      dmgPath: fixture.dmgPath,
+      workspaceDir: fixture.workspaceDir,
+      signingIdentity: "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
+      notaryProfile: "FerryxNotary",
+      approveNotarization: true,
+      exec: fixture.exec,
+    });
+
+    const shippedDmg = JSON.parse(readFileSync(fixture.dmgPath, "utf8"));
+    for (const arch of ["aarch64-apple-darwin", "x86_64-apple-darwin"]) {
+      const key = `Ferryx.app/Contents/Resources/helpers/${arch}/ferryx-remote-helper`;
+      assert.ok(key in shippedDmg, `DMG must contain the embedded helper for ${arch}`);
+      assert.match(
+        shippedDmg[key],
+        /\+signed$/,
+        `helper for ${arch} inside the DMG must come from the re-signed app`,
+      );
+    }
+    assert.match(shippedDmg["Ferryx.app/Contents/MacOS/ferryx"], /\+signed$/);
+    assert.ok("Applications" in shippedDmg, "DMG must keep the /Applications drop target");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("finalizeMacosBundle: orders DMG creation after app staple and before DMG notarization", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "ferryx-dmg-sequence-"));
+  try {
+    const fixture = createMacFinalizeFixture(tmp);
+    finalizeMacosBundle({
+      appPath: fixture.appPath,
+      dmgPath: fixture.dmgPath,
+      workspaceDir: fixture.workspaceDir,
+      signingIdentity: "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
+      notaryProfile: "FerryxNotary",
+      approveNotarization: true,
+      exec: fixture.exec,
+    });
+
+    const calls = fixture.calls;
+    const indexOf = (predicate, label) => {
+      const idx = calls.findIndex(predicate);
+      assert.notEqual(idx, -1, `expected command not issued: ${label}`);
+      return idx;
+    };
+
+    const helperSign = indexOf(
+      (c) => c.startsWith("codesign --force") && c.includes("--timestamp") && c.includes("ferryx-remote-helper"),
+      "codesign of embedded helper with --timestamp",
+    );
+    const appStaple = indexOf((c) => c.startsWith("xcrun stapler staple") && c.endsWith(".app"), "stapler staple app");
+    const dmgCreate = indexOf((c) => c.startsWith("hdiutil create"), "hdiutil create for DMG");
+    const dmgSubmit = indexOf(
+      (c) => c.startsWith("xcrun notarytool submit") && c.includes(".dmg"),
+      "notarytool submit for DMG",
+    );
+    const dmgStaple = indexOf((c) => c.startsWith("xcrun stapler staple") && c.includes(".dmg"), "stapler staple DMG");
+
+    assert.ok(helperSign < appStaple, "helpers must be re-signed before the app is stapled");
+    assert.ok(appStaple < dmgCreate, "DMG must be created after the app is notarized and stapled");
+    assert.ok(dmgCreate < dmgSubmit, "DMG must be recreated before it is submitted for notarization");
+    assert.ok(dmgSubmit < dmgStaple, "DMG staple must follow its notarization");
+
+    const dittoIntoStaging = indexOf(
+      (c) => c.startsWith("ditto ") && !c.includes(" -c ") && c.includes("dmg-staging"),
+      "ditto of final app into DMG staging",
+    );
+    assert.ok(appStaple < dittoIntoStaging, "staging copy must be taken from the stapled app");
+    assert.ok(dittoIntoStaging < dmgCreate, "staging copy must precede hdiutil create");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("submitForNotarization: fails closed on an Invalid submission instead of proceeding to staple", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "ferryx-notary-invalid-"));
+  try {
+    const fixture = createMacFinalizeFixture(tmp, { notaryStatus: "Invalid" });
+    assert.throws(
+      () =>
+        finalizeMacosBundle({
+          appPath: fixture.appPath,
+          dmgPath: fixture.dmgPath,
+          workspaceDir: fixture.workspaceDir,
+          signingIdentity: "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
+          notaryProfile: "FerryxNotary",
+          approveNotarization: true,
+          exec: fixture.exec,
+        }),
+      /Notarization status 'Invalid'.*87be4dc7-95e6-460a-a8bf-7e9e4360935d/s,
+    );
+    assert.equal(
+      fixture.calls.some((c) => c.startsWith("xcrun stapler staple")),
+      false,
+      "no artifact may be stapled after an Invalid notarization result",
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("submitForNotarization: returns the parsed Accepted result and requests JSON output", () => {
+  const calls = [];
+  const result = submitForNotarization({
+    path: "/tmp/Ferryx-notary.zip",
+    notaryProfile: "FerryxNotary",
+    exec: (command, args) => {
+      calls.push([command, ...args].join(" "));
+      return {
+        status: 0,
+        stdout: `Submission ID received\n${JSON.stringify({ id: "abc", status: "Accepted" })}\n`,
+        stderr: "",
+      };
+    },
+  });
+  assert.equal(result.status, "Accepted");
+  assert.equal(result.id, "abc");
+  assert.match(calls[0], /--output-format json/);
+  assert.match(calls[0], /--wait/);
+});
+
+test("recreateDmgFromApp: replaces the existing image with one built from the given app", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "ferryx-dmg-recreate-"));
+  try {
+    const fixture = createMacFinalizeFixture(tmp);
+    writeFileSync(join(fixture.appPath, "Contents", "MacOS", "ferryx"), "macho:main+signed");
+    const stagingDir = join(fixture.workspaceDir, "dmg-staging");
+
+    const { volumeName } = recreateDmgFromApp({
+      appPath: fixture.appPath,
+      dmgPath: fixture.dmgPath,
+      stagingDir,
+      exec: fixture.exec,
+    });
+
+    assert.equal(volumeName, "Ferryx");
+    const snapshot = JSON.parse(readFileSync(fixture.dmgPath, "utf8"));
+    assert.equal(snapshot["Ferryx.app/Contents/MacOS/ferryx"], "macho:main+signed");
+    assert.equal(existsSync(stagingDir), false, "staging directory must be cleaned up");
+    assert.match(
+      fixture.calls.find((c) => c.startsWith("hdiutil create")),
+      /-volname Ferryx .*-srcfolder .*dmg-staging/,
+    );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
