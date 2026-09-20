@@ -1,7 +1,7 @@
 ---
 title: Ferryx Privacy Declaration
-description: "Plain declaration of Ferryx data handling: local-first storage, remote gateway transmissions, pairing tokens, and scoped telemetry checks."
-lastUpdated: 2026-09-13
+description: "How Ferryx handles data: local-first storage, remote gateway traffic, pairing tokens, consent-gated website analytics, and zero desktop telemetry."
+lastUpdated: 2026-09-19
 prev: false
 next: false
 ---
@@ -28,7 +28,9 @@ Local state lives in predictable paths:
 
 Terminal output stays in an in-memory ring buffer with a default capacity of 512 KiB per session (`src-tauri/src/terminal/output_hub.rs:7,100-154`). Monotonic sequence numbers let reattaching clients catch up on retained chunks without writing raw terminal streams to persistent logs (`src-tauri/src/daemon/server.rs:2890-2953`). Chunks evicted past the buffer capacity can't be replayed, and this in-memory buffer doesn't prevent running tools or agents from keeping their own logs.
 
-## Zero telemetry
+## Zero desktop telemetry
+
+The desktop application and the project website are separate: the sections below describe the app, and [Website analytics](#website-analytics) describes the site. The desktop app contains no analytics of any kind, and nothing on the website changes that.
 
 Inspecting `src-tauri` and `ui` source code confirms the absence of desktop analytics tooling:
 
@@ -36,7 +38,33 @@ Inspecting `src-tauri` and `ui` source code confirms the absence of desktop anal
 - The desktop shell Content Security Policy permits local dev endpoints, internal IPC, and hardcoded `checka.cc` relay domains (`src-tauri/tauri.conf.json:30`). It doesn't dynamically adapt to arbitrary custom relays, nor does it govern native Rust requests or external webviews.
 - Software update checks: In native desktop builds, Ferryx periodically queries GitHub release metadata on startup and on an hourly schedule (`ui/src/App.tsx:260-262`, `ui/src/lib/updater.ts:54-63,154-178`). When an update is downloaded, the updater verifies the artifact signature against the configured public key (`src-tauri/tauri.conf.json:34-40`, `ui/src/lib/updater.ts:108-134`). Builds running from `WindowsApps` paths skip these updater checks (`src-tauri/src/ipc/updater.rs:5-18`), leaving delivery to the Microsoft Store.
 
-On the project website, an analytics script renders only when both `PUBLIC_ANALYTICS_SRC` and `PUBLIC_ANALYTICS_DOMAIN` build environment variables are set (`site/src/components/SiteAnalytics.astro:4-11`).
+## Website analytics
+
+This section covers `https://ferryx.dev` only. The desktop application is unaffected by every choice described here and sends no analytics either way.
+
+The website can use Google Analytics 4, and only with your explicit permission:
+
+- **Off until you choose:** The page ships an inert `<template>` with the consent choice and nothing else. No Google script is requested, no `dataLayer` is created, and nothing is written to `localStorage` before you press a button (`site/src/lib/analyticsRuntime.ts:100-137,230-244`).
+- **Equal choice, reversible:** "Allow analytics" and "Decline analytics" are the same control with the same styling and size. Your answer is stored under `ferryx.site.analytics-consent` in `localStorage`, and an "Analytics choice" button at the end of every page reopens the panel so you can change your mind. Withdrawing consent sets `ga-disable-<measurement id>` and sends a `denied` consent update, which stops further measurement for the page (`site/src/lib/analyticsRuntime.ts:186-220`).
+- **Declining costs you nothing:** Every part of the site behaves identically with analytics declined.
+- **Builds without an ID measure nothing:** The tag only exists when the site is built with a valid `PUBLIC_GA_MEASUREMENT_ID` (format `G-XXXXXXXXXX`). Local development builds, forks, and previews without that variable ship no consent panel and make no Google requests (`site/src/lib/analytics.ts:53-56`, `site/src/components/SiteAnalytics.astro:11-13,112-119`).
+
+When you allow analytics, the site records:
+
+- **`page_view`:** Sent once per page load, replacing the automatic page view so the reported URL can be sanitized first (`site/src/lib/analyticsRuntime.ts:161-184`).
+- **`download_click`:** Sent when you click a release artifact link (including `.dmg`, `.exe`, `.AppImage`, `.deb`, and versioned `ferryx-cli` artifacts), with the parameters `platform`, `asset_id`, `destination`, and `link_location` (`site/src/lib/analytics.ts`). The classifier also recognises Microsoft Store links, but the current menu offers the GitHub Windows installer, not a Store listing. Opening the GitHub releases listing page is not recorded as a download.
+
+What is deliberately not collected:
+
+- **URL query strings:** Before any measurement is sent, the page URL is rebuilt with only the campaign parameters `utm_source`, `utm_medium`, `utm_campaign`, `utm_term`, `utm_content`, and `utm_id`. Every other query parameter is discarded, so search terms, e-mail addresses, or tokens that ride along in a link never reach Google (`site/src/lib/analytics.ts:19-26,88-104`).
+- **Advertising and cross-site signals:** Consent defaults deny `ad_storage`, `ad_user_data`, `ad_personalization`, and `analytics_storage`; accepting grants `analytics_storage` only. The tag is configured with `allow_google_signals: false` and `allow_ad_personalization_signals: false` (`site/src/lib/analyticsRuntime.ts:152-176`).
+- **Outbound link rewriting:** Download links are never rewritten with tracking parameters; the URL you click is the URL in the page.
+
+Google Analytics receives the request metadata any web request carries, including your IP address, which Google uses for coarse geolocation before discarding it, and a first-party cookie identifier set only after you accept. Clearing site data for `ferryx.dev` removes both the cookie and your stored choice, and the panel will ask again.
+
+A self-hosted, cookieless analytics script is also supported for forks: it renders only when both `PUBLIC_ANALYTICS_SRC` and `PUBLIC_ANALYTICS_DOMAIN` build environment variables are set (`site/src/components/SiteAnalytics.astro:106-110`). Neither variable is required by, nor related to, the Google Analytics path above.
+
+Search engine verification meta tags (`google-site-verification`, `msvalidate.01`) render only when `PUBLIC_GSC_VERIFICATION` or `PUBLIC_BING_VERIFICATION` are set at build time (`site/src/components/SiteAnalytics.astro:104-105`). They are static ownership tokens and collect nothing.
 
 ## Remote gateway and network modes
 
@@ -103,6 +131,7 @@ Setting the gateway mode to Off does not block SSH connections, external web vie
 
 You retain control over the data Ferryx stores:
 
+- You can change or withdraw the website analytics choice at any time using the "Analytics choice" button at the end of any page on `https://ferryx.dev`. This affects the website only; the desktop application never sends analytics.
 - You can stop remote access by switching the gateway mode to Off (`src-tauri/src/remote/server.rs:2266-2268`, `src-tauri/src/daemon/server.rs:2376-2389`). This stops the listener and aborts relay tasks, using graceful shutdown that doesn't forcibly sever active local WebSocket streams immediately.
 - Paired devices can be revoked through the desktop settings interface (`ui/src/components/settings/RemoteAccessSection.tsx:252-263`) or HTTP API (`src-tauri/src/ipc/remote.rs:354`, `src-tauri/src/remote/server.rs:1175-1208`). The CLI tool lets you list, generate, and approve pairings (`src-tauri/src/cli.rs:152-170,221-289`), but doesn't include a revoke command.
 - Clearing browsing history removes the application history list (`ui/src/lib/browserHistory.ts:90-98`, `ui/src/components/settings/BrowserSection.tsx:239-242`), but doesn't erase webview cookies or site storage.
@@ -111,5 +140,5 @@ You retain control over the data Ferryx stores:
   - macOS: `~/Library/Application Support/rorca`, `~/Library/Application Support/com.ferryx.app` (SSH hosts), `~/.ferryx`, and `/tmp/rorca-<UID>` (`src-tauri/src/daemon/server.rs:341,867`, `src-tauri/src/remote/auth.rs:55`).
   - Windows: `%LOCALAPPDATA%\Ferryx` (remote auth), `%APPDATA%\rorca` (sessions), `%APPDATA%\Ferryx` (persistent lock), `%APPDATA%\com.ferryx.app` (SSH hosts), `%USERPROFILE%\.ferryx`, and `%LOCALAPPDATA%\Ferryx\runtime` (`src-tauri/src/daemon/server.rs:284,348,867`, `src-tauri/src/remote/auth.rs:49`).
   - Custom overrides: Check any directories configured by `FERRYX_DATA_DIR` (`src-tauri/src/cli.rs:191`, `src-tauri/src/daemon/server.rs:863`), `FERRYX_SESSION_DIR` (`src-tauri/src/daemon/server.rs:44`), or `FERRYX_RUNTIME_DIR` (`src-tauri/src/daemon/server.rs:128`).
-  - Web storage: Clear webview or browser `localStorage` (`ui/src/App.tsx:2826`, `ui/src/lib/remoteClient.ts:17`) to purge interface preferences and cached client tokens.
+  - Web storage: Clear webview or browser `localStorage` (`ui/src/App.tsx:2826`, `ui/src/lib/remoteClient.ts:17`) to purge interface preferences and cached client tokens. Clearing site data for `ferryx.dev` also removes the website analytics choice stored under `ferryx.site.analytics-consent` and any Google Analytics cookie set after you accepted.
   - This cleanup list is non-exhaustive. External assets like Git worktrees created inside project directories (`.orca-worktrees`), shell command logs, and browser profile cookies remain subject to their own storage locations.

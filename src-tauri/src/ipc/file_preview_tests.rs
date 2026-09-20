@@ -155,16 +155,31 @@ fn range_header_rejects_multi_malformed_and_unsatisfiable_forms() {
         );
     }
     // Zero suffix-length is unsatisfiable
-    assert_eq!(parse_range_header("bytes=-0", 10), RangeOutcome::Unsatisfiable);
+    assert_eq!(
+        parse_range_header("bytes=-0", 10),
+        RangeOutcome::Unsatisfiable
+    );
     // start at or past EOF is unsatisfiable, including on an empty file
-    assert_eq!(parse_range_header("bytes=10-", 10), RangeOutcome::Unsatisfiable);
-    assert_eq!(parse_range_header("bytes=0-", 0), RangeOutcome::Unsatisfiable);
+    assert_eq!(
+        parse_range_header("bytes=10-", 10),
+        RangeOutcome::Unsatisfiable
+    );
+    assert_eq!(
+        parse_range_header("bytes=0-", 0),
+        RangeOutcome::Unsatisfiable
+    );
 }
 
 #[test]
 fn preview_kind_and_media_type_follow_the_frozen_extension_allowlist() {
-    assert_eq!(classify_extension("notes.md"), Some(FilePreviewKind::Markdown));
-    assert_eq!(classify_extension("NOTES.MARKDOWN"), Some(FilePreviewKind::Markdown));
+    assert_eq!(
+        classify_extension("notes.md"),
+        Some(FilePreviewKind::Markdown)
+    );
+    assert_eq!(
+        classify_extension("NOTES.MARKDOWN"),
+        Some(FilePreviewKind::Markdown)
+    );
     assert_eq!(classify_extension("a.png"), Some(FilePreviewKind::Image));
     assert_eq!(classify_extension("a.jpeg"), Some(FilePreviewKind::Image));
     assert_eq!(classify_extension("a.webp"), Some(FilePreviewKind::Image));
@@ -185,19 +200,35 @@ fn preview_kind_and_media_type_follow_the_frozen_extension_allowlist() {
 fn image_dimensions_come_from_real_signatures_not_extensions() {
     assert_eq!(
         image_signature(&png_bytes(7, 5)),
-        Some(ImageSignature { media_type: "image/png", width: 7, height: 5 })
+        Some(ImageSignature {
+            media_type: "image/png",
+            width: 7,
+            height: 5
+        })
     );
     assert_eq!(
         image_signature(&gif_bytes(12, 9)),
-        Some(ImageSignature { media_type: "image/gif", width: 12, height: 9 })
+        Some(ImageSignature {
+            media_type: "image/gif",
+            width: 12,
+            height: 9
+        })
     );
     assert_eq!(
         image_signature(&webp_vp8x_bytes(640, 480)),
-        Some(ImageSignature { media_type: "image/webp", width: 640, height: 480 })
+        Some(ImageSignature {
+            media_type: "image/webp",
+            width: 640,
+            height: 480
+        })
     );
     assert_eq!(
         image_signature(&jpeg_bytes(300, 200)),
-        Some(ImageSignature { media_type: "image/jpeg", width: 300, height: 200 })
+        Some(ImageSignature {
+            media_type: "image/jpeg",
+            width: 300,
+            height: 200
+        })
     );
     assert_eq!(image_signature(b"not an image at all"), None);
     // a PNG renamed to .jpg is still a PNG; the signature decides the MIME
@@ -254,15 +285,42 @@ fn line_counting_ignores_a_single_trailing_newline() {
 #[test]
 fn caret_target_is_one_based_and_clamped_to_unicode_scalars() {
     let document = "가나다\nsecond line\n";
-    assert_eq!(clamp_target(document, Some(2), Some(3)), Some(FilePreviewTarget { line: 2, col: Some(3) }));
+    assert_eq!(
+        clamp_target(document, Some(2), Some(3)),
+        Some(FilePreviewTarget {
+            line: 2,
+            col: Some(3)
+        })
+    );
     // line past EOF clamps to the last line
-    assert_eq!(clamp_target(document, Some(99), None), Some(FilePreviewTarget { line: 2, col: None }));
+    assert_eq!(
+        clamp_target(document, Some(99), None),
+        Some(FilePreviewTarget { line: 2, col: None })
+    );
     // column counts scalars, not bytes: "가나다" is 3 scalars, so col clamps to 4
-    assert_eq!(clamp_target(document, Some(1), Some(50)), Some(FilePreviewTarget { line: 1, col: Some(4) }));
+    assert_eq!(
+        clamp_target(document, Some(1), Some(50)),
+        Some(FilePreviewTarget {
+            line: 1,
+            col: Some(4)
+        })
+    );
     // zero/absent inputs
-    assert_eq!(clamp_target(document, Some(0), Some(0)), Some(FilePreviewTarget { line: 1, col: Some(1) }));
+    assert_eq!(
+        clamp_target(document, Some(0), Some(0)),
+        Some(FilePreviewTarget {
+            line: 1,
+            col: Some(1)
+        })
+    );
     assert_eq!(clamp_target(document, None, Some(4)), None);
-    assert_eq!(clamp_target("", Some(3), Some(3)), Some(FilePreviewTarget { line: 1, col: Some(1) }));
+    assert_eq!(
+        clamp_target("", Some(3), Some(3)),
+        Some(FilePreviewTarget {
+            line: 1,
+            col: Some(1)
+        })
+    );
 }
 
 #[test]
@@ -280,7 +338,13 @@ fn allowed_origins_never_include_a_wildcard() {
     assert!(is_allowed_origin("http://localhost:5173"));
     assert!(is_allowed_origin("tauri://localhost"));
     assert!(is_allowed_origin("http://tauri.localhost"));
-    for denied in ["*", "null", "http://evil.test", "https://127.0.0.1:5173", "http://127.0.0.1"] {
+    for denied in [
+        "*",
+        "null",
+        "http://evil.test",
+        "https://127.0.0.1:5173",
+        "http://127.0.0.1",
+    ] {
         assert!(!is_allowed_origin(denied), "{denied} must be refused");
     }
 }
@@ -294,7 +358,11 @@ async fn open_decodes_bounded_text_without_a_media_capability() {
     let service = service().await;
 
     let payload = service
-        .open(FilePreviewOpenRequest { line: Some(2), col: Some(3), ..request(dir.path(), "notes.txt") })
+        .open(FilePreviewOpenRequest {
+            line: Some(2),
+            col: Some(3),
+            ..request(dir.path(), "notes.txt")
+        })
         .await
         .expect("text payload");
 
@@ -304,11 +372,20 @@ async fn open_decodes_bounded_text_without_a_media_capability() {
     assert_eq!(payload.encoding, Some(FilePreviewEncoding::Utf8));
     assert_eq!(payload.text.as_deref(), Some("안녕하세요\nsecond\n"));
     assert_eq!(payload.line_count, Some(2));
-    assert_eq!(payload.target, Some(FilePreviewTarget { line: 2, col: Some(3) }));
+    assert_eq!(
+        payload.target,
+        Some(FilePreviewTarget {
+            line: 2,
+            col: Some(3)
+        })
+    );
     assert_eq!(payload.media_url, None);
     assert_eq!(payload.media_type, None);
     assert_eq!(payload.handle.len(), 64);
-    assert!(payload.handle.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    assert!(payload
+        .handle
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     // the opaque handle leaks no filesystem path
     assert!(!payload.handle.contains("notes"));
 }
@@ -324,7 +401,10 @@ async fn open_offloads_file_io_off_the_async_reactor() {
     let observed = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&observed);
     tokio::spawn(async move { flag.store(true, Ordering::SeqCst) });
-    service.open(request(dir.path(), "a.txt")).await.expect("payload");
+    service
+        .open(request(dir.path(), "a.txt"))
+        .await
+        .expect("payload");
     assert!(
         observed.load(Ordering::SeqCst),
         "open must await a blocking-pool task instead of reading on the reactor"
@@ -337,10 +417,16 @@ async fn open_refuses_non_regular_and_missing_paths() {
     std::fs::create_dir(dir.path().join("subdir")).expect("mkdir");
     let service = service().await;
 
-    let missing = service.open(request(dir.path(), "nope.txt")).await.expect_err("missing");
+    let missing = service
+        .open(request(dir.path(), "nope.txt"))
+        .await
+        .expect_err("missing");
     assert_eq!(reason_of(&missing), "MissingFile");
 
-    let directory = service.open(request(dir.path(), "subdir")).await.expect_err("directory");
+    let directory = service
+        .open(request(dir.path(), "subdir"))
+        .await
+        .expect_err("directory");
     assert_eq!(reason_of(&directory), "NotRegularFile");
 
     #[cfg(unix)]
@@ -348,10 +434,16 @@ async fn open_refuses_non_regular_and_missing_paths() {
         let fifo = dir.path().join("pipe.txt");
         let c_path = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).expect("cstring");
         assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0, "mkfifo");
-        let error = service.open(request(dir.path(), "pipe.txt")).await.expect_err("fifo");
+        let error = service
+            .open(request(dir.path(), "pipe.txt"))
+            .await
+            .expect_err("fifo");
         assert_eq!(reason_of(&error), "NotRegularFile");
 
-        let device = service.open(request(dir.path(), "/dev/zero")).await.expect_err("device");
+        let device = service
+            .open(request(dir.path(), "/dev/zero"))
+            .await
+            .expect_err("device");
         assert_eq!(reason_of(&device), "NotRegularFile");
     }
 }
@@ -361,11 +453,21 @@ async fn open_refuses_remote_specs_urls_and_nul_bytes() {
     let dir = TempDir::new().expect("tempdir");
     let service = service().await;
 
-    for token in ["https://example.test/a.txt", "user@host:/etc/passwd", "ssh://box/a.txt"] {
-        let error = service.open(request(dir.path(), token)).await.expect_err("remote refused");
+    for token in [
+        "https://example.test/a.txt",
+        "user@host:/etc/passwd",
+        "ssh://box/a.txt",
+    ] {
+        let error = service
+            .open(request(dir.path(), token))
+            .await
+            .expect_err("remote refused");
         assert_eq!(reason_of(&error), "RemoteUnsupported", "token {token}");
     }
-    let nul = service.open(request(dir.path(), "a\0b.txt")).await.expect_err("nul refused");
+    let nul = service
+        .open(request(dir.path(), "a\0b.txt"))
+        .await
+        .expect_err("nul refused");
     assert_eq!(nul.code, crate::ipc::error::IpcErrorCode::InvalidArgument);
 }
 
@@ -377,19 +479,38 @@ async fn text_bounds_report_too_large_without_truncating() {
     let mut many_lines = "x\n".repeat(limits::MAX_RENDERED_LINES);
     many_lines.push('x');
     write_file(dir.path(), "lines.txt", many_lines.as_bytes());
-    write_file(dir.path(), "edge.txt", "x\n".repeat(limits::MAX_RENDERED_LINES).as_bytes());
+    write_file(
+        dir.path(),
+        "edge.txt",
+        "x\n".repeat(limits::MAX_RENDERED_LINES).as_bytes(),
+    );
     let service = service().await;
 
-    let big = service.open(request(dir.path(), "big.txt")).await.expect_err("2 MiB + 1");
+    let big = service
+        .open(request(dir.path(), "big.txt"))
+        .await
+        .expect_err("2 MiB + 1");
     assert_eq!(reason_of(&big), "TooLarge");
     let details = big.details.as_ref().expect("machine details");
-    assert_eq!(details.get("byteLength").and_then(|v| v.as_u64()), Some(limits::TEXT_MAX_BYTES + 1));
-    assert_eq!(details.get("limit").and_then(|v| v.as_u64()), Some(limits::TEXT_MAX_BYTES));
+    assert_eq!(
+        details.get("byteLength").and_then(|v| v.as_u64()),
+        Some(limits::TEXT_MAX_BYTES + 1)
+    );
+    assert_eq!(
+        details.get("limit").and_then(|v| v.as_u64()),
+        Some(limits::TEXT_MAX_BYTES)
+    );
 
-    let lines = service.open(request(dir.path(), "lines.txt")).await.expect_err("50_001 lines");
+    let lines = service
+        .open(request(dir.path(), "lines.txt"))
+        .await
+        .expect_err("50_001 lines");
     assert_eq!(reason_of(&lines), "TooLarge");
 
-    let edge = service.open(request(dir.path(), "edge.txt")).await.expect("exactly 50_000 lines");
+    let edge = service
+        .open(request(dir.path(), "edge.txt"))
+        .await
+        .expect("exactly 50_000 lines");
     assert_eq!(edge.line_count, Some(limits::MAX_RENDERED_LINES));
 }
 
@@ -401,7 +522,10 @@ async fn undecodable_text_reports_unsupported_encoding() {
     let service = service().await;
 
     for name in ["latin.txt", "binary.txt"] {
-        let error = service.open(request(dir.path(), name)).await.expect_err("undecodable");
+        let error = service
+            .open(request(dir.path(), name))
+            .await
+            .expect_err("undecodable");
         assert_eq!(reason_of(&error), "UnsupportedEncoding", "{name}");
     }
 }
@@ -414,7 +538,10 @@ async fn image_open_checks_signature_and_pixel_bounds_before_the_client_decodes(
     write_file(dir.path(), "huge.png", &png_bytes(10_000, 4_001));
     let service = service().await;
 
-    let payload = service.open(request(dir.path(), "ok.png")).await.expect("png payload");
+    let payload = service
+        .open(request(dir.path(), "ok.png"))
+        .await
+        .expect("png payload");
     assert_eq!(payload.kind, FilePreviewKind::Image);
     assert_eq!(payload.media_type.as_deref(), Some("image/png"));
     assert_eq!(payload.text, None);
@@ -422,15 +549,27 @@ async fn image_open_checks_signature_and_pixel_bounds_before_the_client_decodes(
     let url = payload.media_url.clone().expect("capability url");
     assert!(url.starts_with("http://127.0.0.1:"), "{url}");
     assert!(url.ends_with(&payload.handle), "{url}");
-    assert!(!url.contains("ok.png"), "capability url must not expose the path: {url}");
+    assert!(
+        !url.contains("ok.png"),
+        "capability url must not expose the path: {url}"
+    );
 
-    let lying = service.open(request(dir.path(), "lying.png")).await.expect_err("bad signature");
+    let lying = service
+        .open(request(dir.path(), "lying.png"))
+        .await
+        .expect_err("bad signature");
     assert_eq!(reason_of(&lying), "UnsupportedFormat");
 
-    let huge = service.open(request(dir.path(), "huge.png")).await.expect_err("40 megapixels");
+    let huge = service
+        .open(request(dir.path(), "huge.png"))
+        .await
+        .expect_err("40 megapixels");
     assert_eq!(reason_of(&huge), "TooLarge");
     assert_eq!(
-        huge.details.as_ref().and_then(|d| d.get("limit")).and_then(|v| v.as_u64()),
+        huge.details
+            .as_ref()
+            .and_then(|d| d.get("limit"))
+            .and_then(|v| v.as_u64()),
         Some(limits::IMAGE_MAX_PIXELS)
     );
 }
@@ -442,14 +581,20 @@ async fn video_open_exposes_a_streaming_capability_not_a_body() {
     write_file(dir.path(), "clip.mkv", &mp4_bytes(64));
     let service = service().await;
 
-    let payload = service.open(request(dir.path(), "clip.mp4")).await.expect("video payload");
+    let payload = service
+        .open(request(dir.path(), "clip.mp4"))
+        .await
+        .expect("video payload");
     assert_eq!(payload.kind, FilePreviewKind::Video);
     assert_eq!(payload.media_type.as_deref(), Some("video/mp4"));
     assert_eq!(payload.byte_length, 4096);
     assert_eq!(payload.text, None);
     assert!(payload.media_url.is_some());
 
-    let unknown = service.open(request(dir.path(), "clip.mkv")).await.expect_err("unknown container");
+    let unknown = service
+        .open(request(dir.path(), "clip.mkv"))
+        .await
+        .expect_err("unknown container");
     assert_eq!(reason_of(&unknown), "UnsupportedFormat");
 }
 
@@ -465,9 +610,17 @@ async fn opening_b_revokes_a_for_the_same_window() {
     let second = service.open(request(dir.path(), "b.png")).await.expect("b");
     assert_ne!(first.handle, second.handle);
 
-    let stale = client.get(first.media_url.clone().unwrap()).send().await.expect("request a");
+    let stale = client
+        .get(first.media_url.clone().unwrap())
+        .send()
+        .await
+        .expect("request a");
     assert_eq!(stale.status(), reqwest::StatusCode::NOT_FOUND);
-    let live = client.get(second.media_url.clone().unwrap()).send().await.expect("request b");
+    let live = client
+        .get(second.media_url.clone().unwrap())
+        .send()
+        .await
+        .expect("request b");
     assert_eq!(live.status(), reqwest::StatusCode::OK);
 }
 
@@ -477,17 +630,26 @@ async fn close_is_idempotent_and_scoped_to_the_owning_window() {
     write_file(dir.path(), "a.png", &png_bytes(2, 2));
     let service = service().await;
     let client = http();
-    let payload = service.open(request(dir.path(), "a.png")).await.expect("payload");
+    let payload = service
+        .open(request(dir.path(), "a.png"))
+        .await
+        .expect("payload");
     let url = payload.media_url.clone().unwrap();
 
     // another window cannot revoke this window's capability
     service.close("browser-6f1c", &payload.handle);
-    assert_eq!(client.get(&url).send().await.expect("still live").status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        client.get(&url).send().await.expect("still live").status(),
+        reqwest::StatusCode::OK
+    );
 
     service.close(WINDOW, &payload.handle);
     service.close(WINDOW, &payload.handle);
     service.close(WINDOW, "deadbeef");
-    assert_eq!(client.get(&url).send().await.expect("revoked").status(), reqwest::StatusCode::NOT_FOUND);
+    assert_eq!(
+        client.get(&url).send().await.expect("revoked").status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
 }
 
 #[tokio::test]
@@ -498,16 +660,32 @@ async fn destroying_a_window_revokes_every_capability_it_owns() {
     let service = service().await;
     let client = http();
 
-    let parent = service.open(request(dir.path(), "doc.md")).await.expect("markdown");
+    let parent = service
+        .open(request(dir.path(), "doc.md"))
+        .await
+        .expect("markdown");
     let child = service
         .open_child_image(WINDOW, &parent.handle, "img.png")
         .await
         .expect("child image");
-    assert_eq!(client.get(&child.media_url).send().await.expect("live").status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        client
+            .get(&child.media_url)
+            .send()
+            .await
+            .expect("live")
+            .status(),
+        reqwest::StatusCode::OK
+    );
 
     service.close_window(WINDOW);
     assert_eq!(
-        client.get(&child.media_url).send().await.expect("revoked").status(),
+        client
+            .get(&child.media_url)
+            .send()
+            .await
+            .expect("revoked")
+            .status(),
         reqwest::StatusCode::NOT_FOUND
     );
 }
@@ -525,7 +703,10 @@ async fn a_replaced_path_never_redirects_the_retained_handle() {
     let service = service().await;
     let client = http();
 
-    let payload = service.open(request(dir.path(), "link.png")).await.expect("via symlink");
+    let payload = service
+        .open(request(dir.path(), "link.png"))
+        .await
+        .expect("via symlink");
     let url = payload.media_url.clone().unwrap();
     let original = std::fs::read(&real).expect("original bytes");
     assert_eq!(payload.byte_length, original.len() as u64);
@@ -537,7 +718,10 @@ async fn a_replaced_path_never_redirects_the_retained_handle() {
 
     let response = client.get(&url).send().await.expect("still served");
     assert_eq!(response.status(), reqwest::StatusCode::OK);
-    assert_eq!(response.bytes().await.expect("body").as_ref(), original.as_slice());
+    assert_eq!(
+        response.bytes().await.expect("body").as_ref(),
+        original.as_slice()
+    );
 }
 
 #[tokio::test]
@@ -546,14 +730,25 @@ async fn truncating_the_open_inode_requires_an_explicit_reload() {
     let path = write_file(dir.path(), "clip.mp4", &mp4_bytes(8192));
     let service = service().await;
     let client = http();
-    let payload = service.open(request(dir.path(), "clip.mp4")).await.expect("payload");
+    let payload = service
+        .open(request(dir.path(), "clip.mp4"))
+        .await
+        .expect("payload");
     let url = payload.media_url.clone().unwrap();
 
-    std::fs::OpenOptions::new().write(true).open(&path).expect("open rw").set_len(16).expect("truncate");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .expect("open rw")
+        .set_len(16)
+        .expect("truncate");
 
     let response = client.get(&url).send().await.expect("changed");
     assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
-    assert_eq!(response.headers().get("x-preview-reason").unwrap(), "FileChanged");
+    assert_eq!(
+        response.headers().get("x-preview-reason").unwrap(),
+        "FileChanged"
+    );
 }
 
 // ------------------------------------------------------------ HTTP semantics
@@ -564,19 +759,31 @@ async fn full_get_returns_the_exact_body_and_frozen_headers() {
     let bytes = png_bytes(3, 3);
     write_file(dir.path(), "a.png", &bytes);
     let service = service().await;
-    let payload = service.open(request(dir.path(), "a.png")).await.expect("payload");
+    let payload = service
+        .open(request(dir.path(), "a.png"))
+        .await
+        .expect("payload");
     let url = payload.media_url.clone().unwrap();
 
     let response = http().get(&url).send().await.expect("GET");
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let headers = response.headers().clone();
     assert_eq!(headers.get("content-type").unwrap(), "image/png");
-    assert_eq!(headers.get("content-length").unwrap(), bytes.len().to_string().as_str());
+    assert_eq!(
+        headers.get("content-length").unwrap(),
+        bytes.len().to_string().as_str()
+    );
     assert_eq!(headers.get("accept-ranges").unwrap(), "bytes");
     assert_eq!(headers.get("cache-control").unwrap(), "no-store");
     assert_eq!(headers.get("x-content-type-options").unwrap(), "nosniff");
-    assert!(headers.get("access-control-allow-origin").is_none(), "no CORS header without Origin");
-    assert_eq!(response.bytes().await.expect("body").as_ref(), bytes.as_slice());
+    assert!(
+        headers.get("access-control-allow-origin").is_none(),
+        "no CORS header without Origin"
+    );
+    assert_eq!(
+        response.bytes().await.expect("body").as_ref(),
+        bytes.as_slice()
+    );
 }
 
 #[tokio::test]
@@ -585,11 +792,21 @@ async fn head_has_no_body_but_advertises_the_full_length() {
     let bytes = png_bytes(3, 3);
     write_file(dir.path(), "a.png", &bytes);
     let service = service().await;
-    let payload = service.open(request(dir.path(), "a.png")).await.expect("payload");
+    let payload = service
+        .open(request(dir.path(), "a.png"))
+        .await
+        .expect("payload");
 
-    let response = http().head(payload.media_url.clone().unwrap()).send().await.expect("HEAD");
+    let response = http()
+        .head(payload.media_url.clone().unwrap())
+        .send()
+        .await
+        .expect("HEAD");
     assert_eq!(response.status(), reqwest::StatusCode::OK);
-    assert_eq!(response.headers().get("content-length").unwrap(), bytes.len().to_string().as_str());
+    assert_eq!(
+        response.headers().get("content-length").unwrap(),
+        bytes.len().to_string().as_str()
+    );
     assert_eq!(response.headers().get("accept-ranges").unwrap(), "bytes");
     assert!(response.bytes().await.expect("body").is_empty());
 }
@@ -601,27 +818,68 @@ async fn single_ranges_return_206_with_exact_bytes() {
     write_file(dir.path(), "clip.mp4", &bytes);
     let service = service().await;
     let client = http();
-    let payload = service.open(request(dir.path(), "clip.mp4")).await.expect("payload");
+    let payload = service
+        .open(request(dir.path(), "clip.mp4"))
+        .await
+        .expect("payload");
     let url = payload.media_url.clone().unwrap();
 
-    let response = client.get(&url).header("Range", "bytes=2-5").send().await.expect("range");
+    let response = client
+        .get(&url)
+        .header("Range", "bytes=2-5")
+        .send()
+        .await
+        .expect("range");
     assert_eq!(response.status(), reqwest::StatusCode::PARTIAL_CONTENT);
-    assert_eq!(response.headers().get("content-range").unwrap(), "bytes 2-5/64");
+    assert_eq!(
+        response.headers().get("content-range").unwrap(),
+        "bytes 2-5/64"
+    );
     assert_eq!(response.headers().get("content-length").unwrap(), "4");
-    assert_eq!(response.bytes().await.expect("body").as_ref(), &bytes[2..=5]);
+    assert_eq!(
+        response.bytes().await.expect("body").as_ref(),
+        &bytes[2..=5]
+    );
 
-    let response = client.get(&url).header("Range", "bytes=-3").send().await.expect("suffix");
+    let response = client
+        .get(&url)
+        .header("Range", "bytes=-3")
+        .send()
+        .await
+        .expect("suffix");
     assert_eq!(response.status(), reqwest::StatusCode::PARTIAL_CONTENT);
-    assert_eq!(response.headers().get("content-range").unwrap(), "bytes 61-63/64");
-    assert_eq!(response.bytes().await.expect("body").as_ref(), &bytes[61..64]);
+    assert_eq!(
+        response.headers().get("content-range").unwrap(),
+        "bytes 61-63/64"
+    );
+    assert_eq!(
+        response.bytes().await.expect("body").as_ref(),
+        &bytes[61..64]
+    );
 
-    let response = client.get(&url).header("Range", "bytes=60-").send().await.expect("open end");
+    let response = client
+        .get(&url)
+        .header("Range", "bytes=60-")
+        .send()
+        .await
+        .expect("open end");
     assert_eq!(response.status(), reqwest::StatusCode::PARTIAL_CONTENT);
-    assert_eq!(response.headers().get("content-range").unwrap(), "bytes 60-63/64");
-    assert_eq!(response.bytes().await.expect("body").as_ref(), &bytes[60..64]);
+    assert_eq!(
+        response.headers().get("content-range").unwrap(),
+        "bytes 60-63/64"
+    );
+    assert_eq!(
+        response.bytes().await.expect("body").as_ref(),
+        &bytes[60..64]
+    );
 
     // R11: HEAD ignores Range per RFC 9110 §14.2; returns 200 with full content-length
-    let response = client.head(&url).header("Range", "bytes=2-5").send().await.expect("range head");
+    let response = client
+        .head(&url)
+        .header("Range", "bytes=2-5")
+        .send()
+        .await
+        .expect("range head");
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     assert_eq!(response.headers().get("content-length").unwrap(), "64");
     assert!(response.bytes().await.expect("body").is_empty());
@@ -642,19 +900,32 @@ async fn unsatisfiable_and_multi_ranges_return_416_with_the_length() {
 
     // R11: Unsatisfiable single ranges return 416
     for raw in ["bytes=64-70", "bytes=-0", "bytes=100-"] {
-        let response = client.get(&url).header("Range", raw).send().await.expect("range");
+        let response = client
+            .get(&url)
+            .header("Range", raw)
+            .send()
+            .await
+            .expect("range");
         assert_eq!(
             response.status(),
             reqwest::StatusCode::RANGE_NOT_SATISFIABLE,
             "range {raw} must be 416"
         );
-        assert_eq!(response.headers().get("content-range").unwrap(), "bytes */64");
+        assert_eq!(
+            response.headers().get("content-range").unwrap(),
+            "bytes */64"
+        );
         assert!(response.bytes().await.expect("body").is_empty());
     }
 
     // R11: Unsupported multi-range and malformed units are ignored per RFC 9110 (200 with full body)
     for raw in ["bytes=0-1,4-5", "items=0-1", "bytes=xyz", "bytes=5-2"] {
-        let response = client.get(&url).header("Range", raw).send().await.expect("range");
+        let response = client
+            .get(&url)
+            .header("Range", raw)
+            .send()
+            .await
+            .expect("range");
         assert_eq!(
             response.status(),
             reqwest::StatusCode::OK,
@@ -670,7 +941,10 @@ async fn a_zero_length_file_serves_an_empty_200_and_refuses_ranges() {
     write_file(dir.path(), "empty.mp4", b"");
     let service = service().await;
     let client = http();
-    let payload = service.open(request(dir.path(), "empty.mp4")).await.expect("payload");
+    let payload = service
+        .open(request(dir.path(), "empty.mp4"))
+        .await
+        .expect("payload");
     let url = payload.media_url.clone().unwrap();
     assert_eq!(payload.byte_length, 0);
 
@@ -679,9 +953,20 @@ async fn a_zero_length_file_serves_an_empty_200_and_refuses_ranges() {
     assert_eq!(response.headers().get("content-length").unwrap(), "0");
     assert!(response.bytes().await.expect("body").is_empty());
 
-    let response = client.get(&url).header("Range", "bytes=0-").send().await.expect("range");
-    assert_eq!(response.status(), reqwest::StatusCode::RANGE_NOT_SATISFIABLE);
-    assert_eq!(response.headers().get("content-range").unwrap(), "bytes */0");
+    let response = client
+        .get(&url)
+        .header("Range", "bytes=0-")
+        .send()
+        .await
+        .expect("range");
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::RANGE_NOT_SATISFIABLE
+    );
+    assert_eq!(
+        response.headers().get("content-range").unwrap(),
+        "bytes */0"
+    );
 }
 
 #[tokio::test]
@@ -690,9 +975,19 @@ async fn host_and_origin_are_checked_and_cors_is_never_wildcarded() {
     write_file(dir.path(), "a.png", &png_bytes(2, 2));
     let service = service().await;
     let client = http();
-    let url = service.open(request(dir.path(), "a.png")).await.expect("payload").media_url.unwrap();
+    let url = service
+        .open(request(dir.path(), "a.png"))
+        .await
+        .expect("payload")
+        .media_url
+        .unwrap();
 
-    let forged = client.get(&url).header("Host", "evil.test").send().await.expect("forged host");
+    let forged = client
+        .get(&url)
+        .header("Host", "evil.test")
+        .send()
+        .await
+        .expect("forged host");
     assert_eq!(forged.status(), reqwest::StatusCode::FORBIDDEN);
 
     let hostile = client
@@ -711,7 +1006,10 @@ async fn host_and_origin_are_checked_and_cors_is_never_wildcarded() {
         .expect("desktop origin");
     assert_eq!(allowed.status(), reqwest::StatusCode::OK);
     assert_eq!(
-        allowed.headers().get("access-control-allow-origin").unwrap(),
+        allowed
+            .headers()
+            .get("access-control-allow-origin")
+            .unwrap(),
         "http://127.0.0.1:5173"
     );
 
@@ -726,17 +1024,42 @@ async fn only_get_and_head_are_routed_and_unknown_handles_404() {
     write_file(dir.path(), "a.png", &png_bytes(2, 2));
     let service = service().await;
     let client = http();
-    let url = service.open(request(dir.path(), "a.png")).await.expect("payload").media_url.unwrap();
+    let url = service
+        .open(request(dir.path(), "a.png"))
+        .await
+        .expect("payload")
+        .media_url
+        .unwrap();
 
-    for method in [reqwest::Method::POST, reqwest::Method::PUT, reqwest::Method::DELETE] {
-        let response = client.request(method.clone(), &url).send().await.expect("method");
-        assert_eq!(response.status(), reqwest::StatusCode::METHOD_NOT_ALLOWED, "{method}");
+    for method in [
+        reqwest::Method::POST,
+        reqwest::Method::PUT,
+        reqwest::Method::DELETE,
+    ] {
+        let response = client
+            .request(method.clone(), &url)
+            .send()
+            .await
+            .expect("method");
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::METHOD_NOT_ALLOWED,
+            "{method}"
+        );
     }
     let unknown = format!("{}/{}", service.origin(), "0".repeat(64));
-    assert_eq!(client.get(&unknown).send().await.expect("unknown").status(), reqwest::StatusCode::NOT_FOUND);
+    assert_eq!(
+        client.get(&unknown).send().await.expect("unknown").status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
     // no directory listing at the capability root
     assert_eq!(
-        client.get(service.origin()).send().await.expect("root").status(),
+        client
+            .get(service.origin())
+            .send()
+            .await
+            .expect("root")
+            .status(),
         reqwest::StatusCode::NOT_FOUND
     );
 }
@@ -747,7 +1070,12 @@ async fn concurrent_media_requests_are_capped_with_429() {
     write_file(dir.path(), "a.png", &png_bytes(2, 2));
     let service = service().await;
     let client = http();
-    let url = service.open(request(dir.path(), "a.png")).await.expect("payload").media_url.unwrap();
+    let url = service
+        .open(request(dir.path(), "a.png"))
+        .await
+        .expect("payload")
+        .media_url
+        .unwrap();
 
     let gate = service.media_gate();
     let held = gate
@@ -757,7 +1085,10 @@ async fn concurrent_media_requests_are_capped_with_429() {
     assert_eq!(overloaded.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
 
     drop(held);
-    assert_eq!(client.get(&url).send().await.expect("recovered").status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        client.get(&url).send().await.expect("recovered").status(),
+        reqwest::StatusCode::OK
+    );
 }
 
 #[tokio::test]
@@ -768,7 +1099,10 @@ async fn closing_mid_stream_stops_delivery_at_the_next_chunk() {
     let total = limits::STREAM_CHUNK_BYTES * 128; // 8 MiB
     write_file(dir.path(), "clip.mp4", &mp4_bytes(total));
     let service = service().await;
-    let payload = service.open(request(dir.path(), "clip.mp4")).await.expect("payload");
+    let payload = service
+        .open(request(dir.path(), "clip.mp4"))
+        .await
+        .expect("payload");
 
     let response = http()
         .get(payload.media_url.clone().unwrap())
@@ -779,7 +1113,11 @@ async fn closing_mid_stream_stops_delivery_at_the_next_chunk() {
     let mut stream = response.bytes_stream();
 
     // subscribe to the first delivered chunk, then revoke: no sleeping
-    let first = stream.next().await.expect("first chunk").expect("chunk bytes");
+    let first = stream
+        .next()
+        .await
+        .expect("first chunk")
+        .expect("chunk bytes");
     assert!(!first.is_empty());
     service.close(WINDOW, &payload.handle);
 
@@ -794,10 +1132,19 @@ async fn closing_mid_stream_stops_delivery_at_the_next_chunk() {
             }
         }
     }
-    assert!(delivered < total, "delivery must stop early, got {delivered} of {total}");
-    assert!(aborted, "an incomplete body must surface as a transport error, not a silent success");
+    assert!(
+        delivered < total,
+        "delivery must stop early, got {delivered} of {total}"
+    );
+    assert!(
+        aborted,
+        "an incomplete body must surface as a transport error, not a silent success"
+    );
     // the permit is released, so the service keeps serving other work
-    assert_eq!(service.media_gate().available_permits(), limits::MAX_CONCURRENT_MEDIA_REQUESTS);
+    assert_eq!(
+        service.media_gate().available_permits(),
+        limits::MAX_CONCURRENT_MEDIA_REQUESTS
+    );
 }
 
 // --------------------------------------------------- Markdown child boundary
@@ -812,7 +1159,10 @@ async fn markdown_children_resolve_only_under_the_document_directory() {
     let service = service().await;
     let client = http();
 
-    let parent = service.open(request(dir.path(), "docs/guide.md")).await.expect("markdown");
+    let parent = service
+        .open(request(dir.path(), "docs/guide.md"))
+        .await
+        .expect("markdown");
     assert_eq!(parent.kind, FilePreviewKind::Markdown);
 
     let child = service
@@ -824,17 +1174,30 @@ async fn markdown_children_resolve_only_under_the_document_directory() {
     assert_eq!(child.display_name, "logo.png");
     assert_eq!(child.byte_length, png_bytes(5, 5).len() as u64);
     assert_eq!(
-        client.get(&child.media_url).send().await.expect("child GET").status(),
+        client
+            .get(&child.media_url)
+            .send()
+            .await
+            .expect("child GET")
+            .status(),
         reqwest::StatusCode::OK
     );
 
-    for escape in ["../outside.png", "/etc/hosts", "assets/../../outside.png", "https://evil.test/a.png"] {
+    for escape in [
+        "../outside.png",
+        "/etc/hosts",
+        "assets/../../outside.png",
+        "https://evil.test/a.png",
+    ] {
         let error = service
             .open_child_image(WINDOW, &parent.handle, escape)
             .await
             .expect_err("escape refused");
         assert!(
-            matches!(reason_of(&error).as_str(), "PermissionDenied" | "RemoteUnsupported"),
+            matches!(
+                reason_of(&error).as_str(),
+                "PermissionDenied" | "RemoteUnsupported"
+            ),
             "{escape} gave {}",
             reason_of(&error)
         );
@@ -850,7 +1213,10 @@ async fn markdown_children_resolve_only_under_the_document_directory() {
 
     // a text handle owns no child boundary at all
     write_file(dir.path(), "plain.txt", b"hi");
-    let plain = service.open(request(dir.path(), "plain.txt")).await.expect("text");
+    let plain = service
+        .open(request(dir.path(), "plain.txt"))
+        .await
+        .expect("text");
     let refused = service
         .open_child_image(WINDOW, &plain.handle, "logo.png")
         .await
@@ -868,7 +1234,10 @@ async fn a_child_symlink_escaping_the_document_directory_is_refused() {
     std::os::unix::fs::symlink(&outside, dir.path().join("docs/evil.png")).expect("symlink");
     let service = service().await;
 
-    let parent = service.open(request(dir.path(), "docs/guide.md")).await.expect("markdown");
+    let parent = service
+        .open(request(dir.path(), "docs/guide.md"))
+        .await
+        .expect("markdown");
     let error = service
         .open_child_image(WINDOW, &parent.handle, "evil.png")
         .await
@@ -882,10 +1251,17 @@ async fn child_handles_are_capped_per_document() {
     std::fs::create_dir_all(dir.path().join("docs")).expect("mkdir");
     write_file(dir.path(), "docs/guide.md", b"# g\n");
     for index in 0..=limits::MAX_CHILD_HANDLES {
-        write_file(dir.path(), &format!("docs/img{index}.png"), &png_bytes(2, 2));
+        write_file(
+            dir.path(),
+            &format!("docs/img{index}.png"),
+            &png_bytes(2, 2),
+        );
     }
     let service = service().await;
-    let parent = service.open(request(dir.path(), "docs/guide.md")).await.expect("markdown");
+    let parent = service
+        .open(request(dir.path(), "docs/guide.md"))
+        .await
+        .expect("markdown");
 
     for index in 0..limits::MAX_CHILD_HANDLES {
         service
@@ -894,12 +1270,20 @@ async fn child_handles_are_capped_per_document() {
             .unwrap_or_else(|error| panic!("child {index} must be granted: {error:?}"));
     }
     let error = service
-        .open_child_image(WINDOW, &parent.handle, &format!("img{}.png", limits::MAX_CHILD_HANDLES))
+        .open_child_image(
+            WINDOW,
+            &parent.handle,
+            &format!("img{}.png", limits::MAX_CHILD_HANDLES),
+        )
         .await
         .expect_err("cap enforced");
     assert_eq!(reason_of(&error), "TooLarge");
     assert_eq!(
-        error.details.as_ref().and_then(|d| d.get("limit")).and_then(|v| v.as_u64()),
+        error
+            .details
+            .as_ref()
+            .and_then(|d| d.get("limit"))
+            .and_then(|v| v.as_u64()),
         Some(limits::MAX_CHILD_HANDLES as u64)
     );
 }
@@ -913,7 +1297,10 @@ async fn markdown_document_links_navigate_only_inside_the_parent_boundary() {
     write_file(dir.path(), "outside.md", b"# outside\n");
     let service = service().await;
 
-    let parent = service.open(request(dir.path(), "docs/guide.md")).await.expect("markdown");
+    let parent = service
+        .open(request(dir.path(), "docs/guide.md"))
+        .await
+        .expect("markdown");
     let navigated = service
         .open_child_document(WINDOW, &parent.handle, "deep/next.md")
         .await
@@ -951,7 +1338,10 @@ async fn expired_handles_report_the_machine_reason() {
     let dir = TempDir::new().expect("tempdir");
     write_file(dir.path(), "docs.md", b"# d\n");
     let service = service().await;
-    let parent = service.open(request(dir.path(), "docs.md")).await.expect("markdown");
+    let parent = service
+        .open(request(dir.path(), "docs.md"))
+        .await
+        .expect("markdown");
     service.close(WINDOW, &parent.handle);
 
     let error = service
@@ -975,7 +1365,10 @@ async fn a_refused_session_resolution_maps_to_remote_unsupported() {
         "session not found",
     );
     let mapped = map_session_error(missing);
-    assert_eq!(mapped.code, crate::ipc::error::IpcErrorCode::SessionNotFound);
+    assert_eq!(
+        mapped.code,
+        crate::ipc::error::IpcErrorCode::SessionNotFound
+    );
 }
 
 #[tokio::test]
@@ -985,7 +1378,10 @@ async fn concurrent_disjoint_ranges_on_same_document_stream_exact_bytes() {
     write_file(dir.path(), "stream.mp4", &bytes);
     let service = service().await;
     let client = http();
-    let payload = service.open(request(dir.path(), "stream.mp4")).await.expect("payload");
+    let payload = service
+        .open(request(dir.path(), "stream.mp4"))
+        .await
+        .expect("payload");
     let url = payload.media_url.clone().unwrap();
 
     // R2: fire multiple concurrent disjoint range requests on the same capability
@@ -1027,12 +1423,17 @@ async fn late_open_completion_does_not_revoke_newer_preview() {
 
     // Attempt to register doc 1 with stale epoch 1
     let opened1 = open_blocking_path(&dir.path().join("first.txt"), None, None).unwrap();
-    let err = service.register_main(ROOT_WINDOW_LABEL, opened1, epoch1).unwrap_err();
+    let err = service
+        .register_main(ROOT_WINDOW_LABEL, opened1, epoch1)
+        .unwrap_err();
     assert_eq!(err.code, IpcErrorCode::InvalidArgument);
 
     // Doc 2's handle is STILL valid and not revoked by stale doc 1
     let reg = service.registry.lock();
-    assert_eq!(reg.windows.get(ROOT_WINDOW_LABEL).unwrap().main.as_deref(), Some(doc2.handle.as_str()));
+    assert_eq!(
+        reg.windows.get(ROOT_WINDOW_LABEL).unwrap().main.as_deref(),
+        Some(doc2.handle.as_str())
+    );
     assert!(reg.handles.contains_key(&doc2.handle));
 }
 
@@ -1053,7 +1454,10 @@ async fn image_exceeding_per_axis_bound_is_rejected() {
     write_file(dir.path(), "wide.png", &png);
 
     let service = service().await;
-    let err = service.open(request(dir.path(), "wide.png")).await.unwrap_err();
+    let err = service
+        .open(request(dir.path(), "wide.png"))
+        .await
+        .unwrap_err();
     assert_eq!(err.code, IpcErrorCode::Unsupported);
     assert_eq!(err.details.unwrap()["reason"], "TooLarge");
 }

@@ -12,6 +12,12 @@ use std::{
 
 use crate::scoped_contracts::{Epoch, TargetRef};
 
+#[path = "../../dag/paths.rs"]
+mod dag_paths;
+
+#[path = "dag_stream.rs"]
+pub mod dag_stream;
+
 pub const MAX_FRAME: usize = 1024 * 1024;
 pub const RING_BYTES: usize = 512 * 1024;
 
@@ -32,14 +38,18 @@ pub fn read_frame(reader: &mut impl Read) -> Result<Option<Value>, String> {
         Ok(_) => (),
         Err(e) => return Err(e.to_string()),
     }
-    reader.read_exact(&mut header[1..]).map_err(|e| e.to_string())?;
+    reader
+        .read_exact(&mut header[1..])
+        .map_err(|e| e.to_string())?;
     let len = u32::from_be_bytes(header) as usize;
     if len > MAX_FRAME {
         return Err("INVALID_REQUEST: frame exceeds 1 MiB".into());
     }
     let mut bytes = vec![0; len];
     reader.read_exact(&mut bytes).map_err(|e| e.to_string())?;
-    serde_json::from_slice(&bytes).map(Some).map_err(|e| e.to_string())
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|e| e.to_string())
 }
 
 pub fn write_frame(writer: &mut impl Write, value: &Value) -> Result<(), String> {
@@ -82,9 +92,7 @@ struct SpawnRecord {
 
 #[derive(Clone)]
 enum SpawnState {
-    InProgress {
-        params: Value,
-    },
+    InProgress { params: Value },
     Completed(SpawnRecord),
 }
 
@@ -99,7 +107,10 @@ impl<'a> Drop for SpawnReservationGuard<'a> {
     fn drop(&mut self) {
         if !self.completed {
             if let Ok(mut spawns) = self.spawns.lock() {
-                if matches!(spawns.get(&self.req_id), Some(SpawnState::InProgress { .. })) {
+                if matches!(
+                    spawns.get(&self.req_id),
+                    Some(SpawnState::InProgress { .. })
+                ) {
                     spawns.remove(&self.req_id);
                     self.cv.notify_all();
                 }
@@ -118,6 +129,7 @@ pub struct Runtime {
     projects: Mutex<HashMap<String, PathBuf>>,
     spawns: Mutex<HashMap<String, SpawnState>>,
     spawns_cv: Condvar,
+    dag_streams: dag_stream::DagStreams,
     #[cfg(test)]
     spawn_hook: Mutex<Option<Arc<dyn Fn(&str) + Send + Sync>>>,
 }
@@ -144,26 +156,49 @@ impl Runtime {
             projects: Mutex::new(HashMap::new()),
             spawns: Mutex::new(HashMap::new()),
             spawns_cv: Condvar::new(),
+            dag_streams: dag_stream::DagStreams::new(),
             #[cfg(test)]
             spawn_hook: Mutex::new(None),
         })
     }
 
     pub fn handle(&self, request: Request) -> Result<Value, String> {
+        self.handle_on_connection(request, dag_stream::DETACHED_CONNECTION)
+    }
+
+    /// Handles a request on behalf of a specific bridge connection. DAG
+    /// subscriptions opened here are released when that connection closes.
+    pub fn handle_on_connection(&self, request: Request, connection: u64) -> Result<Value, String> {
         if request.protocol != 1 {
             return Err("UNSUPPORTED: helper protocol requires version 1".into());
         }
         if request.token != self.token {
             return Err("UNAUTHORIZED".into());
         }
-        self.dispatch(&request.op, &request.params)
+        self.dispatch_on_connection(&request.op, &request.params, connection)
     }
 
-    fn dispatch(&self, op: &str, p: &Value) -> Result<Value, String> {
+    /// Releases every DAG subscription owned by a closed bridge connection.
+    /// PTY sessions are untouched: they outlive their connection by design.
+    pub fn release_connection(&self, connection: u64) {
+        self.dag_streams.close_connection(connection);
+    }
+
+    #[cfg(test)]
+    pub fn dag_streams(&self) -> &dag_stream::DagStreams {
+        &self.dag_streams
+    }
+
+    fn dispatch_on_connection(
+        &self,
+        op: &str,
+        p: &Value,
+        connection: u64,
+    ) -> Result<Value, String> {
         match op {
             "handshake" => Ok(json!({
                 "protocol": 1,
-                "capabilities": ["sshHelperV1"],
+                "capabilities": ["sshHelperV1", "dagStreamingV1", "dagSubscribeV1"],
                 "hostId": self.host,
                 "ownerId": self.owner,
                 "epoch": self.epoch,
@@ -178,7 +213,9 @@ impl Runtime {
                     .canonicalize()
                     .map_err(|e| format!("INVALID_REQUEST: invalid project path: {e}"))?;
                 if !path.is_dir() {
-                    return Err("INVALID_REQUEST: project path must be an existing directory".into());
+                    return Err(
+                        "INVALID_REQUEST: project path must be an existing directory".into(),
+                    );
                 }
                 let mut projects = self.projects.lock().map_err(|e| e.to_string())?;
                 if projects.get(id).is_some_and(|old| old != &path) {
@@ -197,12 +234,17 @@ impl Runtime {
                 let projects = self.projects.lock().map_err(|e| e.to_string())?;
                 let repo = projects.get(text(p, "projectId")?).ok_or("NOT_FOUND")?;
                 let slug = text(p, "slug")?;
-                if slug.is_empty() || !slug.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+                if slug.is_empty() || !slug.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                {
                     return Err("INVALID_REQUEST: invalid slug".into());
                 }
                 let base = repo.join(".orca-worktrees");
                 std::fs::create_dir_all(&base).map_err(|e| e.to_string())?;
-                if !base.canonicalize().map_err(|e| e.to_string())?.starts_with(repo) {
+                if !base
+                    .canonicalize()
+                    .map_err(|e| e.to_string())?
+                    .starts_with(repo)
+                {
                     return Err("FORBIDDEN".into());
                 }
                 let destination = base.join(format!("wt-{slug}"));
@@ -215,11 +257,110 @@ impl Runtime {
                     .output()
                     .map_err(|e| e.to_string())?;
                 if !output.status.success() {
-                    return Err(format!("REMOTE_GIT_FAILED: {}", String::from_utf8_lossy(&output.stderr)));
+                    return Err(format!(
+                        "REMOTE_GIT_FAILED: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
                 }
                 Ok(json!({
                     "projectId": text(p, "projectId")?,
                     "worktree": format!(".orca-worktrees/wt-{slug}"),
+                }))
+            }
+            "dag.subscribe" => {
+                let project_id = text(p, "projectId")?;
+                let root = {
+                    let projects = self.projects.lock().map_err(|e| e.to_string())?;
+                    projects.get(project_id).cloned()
+                };
+                let root = root.ok_or_else(|| "NOT_FOUND".to_string())?;
+                let runs_dir = dag_paths::resolve_dag_runs_dir(&root);
+                let mut frame = self.dag_streams.subscribe(runs_dir, connection)?;
+                frame["projectId"] = json!(project_id);
+                Ok(frame)
+            }
+            "dag.next" => {
+                let id = text(p, "subscriptionId")?;
+                let wait_ms = p.get("waitMs").and_then(Value::as_u64).unwrap_or(0);
+                self.dag_streams.next(id, wait_ms)
+            }
+            "dag.unsubscribe" => {
+                let id = text(p, "subscriptionId")?;
+                self.dag_streams.unsubscribe(id)
+            }
+            "dag.inventory" => {
+                let project_id = text(p, "projectId")?;
+                let root = {
+                    let projects = self.projects.lock().map_err(|e| e.to_string())?;
+                    projects.get(project_id).cloned()
+                };
+                let root = root.ok_or_else(|| "NOT_FOUND".to_string())?;
+                let runs_dir = dag_paths::resolve_dag_runs_dir(&root);
+                let mut runs = Vec::new();
+                if let Ok(entries) = std::fs::read_dir(&runs_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_file() && path.extension().is_some_and(|e| e == "json") {
+                            if let Ok(content) = std::fs::read_to_string(&path) {
+                                if let Ok(val) = serde_json::from_str::<Value>(&content) {
+                                    runs.push(val);
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(json!({
+                    "projectId": project_id,
+                    "runs": runs,
+                }))
+            }
+            "dag.poll" => {
+                let project_id = text(p, "projectId")?;
+                let after_mtime_ms = p.get("afterMtimeMs").and_then(Value::as_u64).unwrap_or(0);
+                let known_runs = p.get("knownRuns").and_then(Value::as_array);
+                let root = {
+                    let projects = self.projects.lock().map_err(|e| e.to_string())?;
+                    projects.get(project_id).cloned()
+                };
+                let root = root.ok_or_else(|| "NOT_FOUND".to_string())?;
+                let runs_dir = dag_paths::resolve_dag_runs_dir(&root);
+                let mut runs = Vec::new();
+                let mut max_mtime = after_mtime_ms;
+                if let Ok(entries) = std::fs::read_dir(&runs_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_file() && path.extension().is_some_and(|e| e == "json") {
+                            if let Ok(meta) = entry.metadata() {
+                                let mtime_ms = meta
+                                    .modified()
+                                    .ok()
+                                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                                    .map(|d| d.as_millis() as u64)
+                                    .unwrap_or(0);
+                                if mtime_ms >= after_mtime_ms {
+                                    if let Ok(content) = std::fs::read_to_string(&path) {
+                                        if let Ok(val) = serde_json::from_str::<Value>(&content) {
+                                            // A known run can change within the cursor's
+                                            // timestamp tick. Replay the boundary rather
+                                            // than treating run identity as a revision.
+                                            if mtime_ms > max_mtime {
+                                                max_mtime = mtime_ms;
+                                            }
+                                            if !known_runs.is_some_and(|known| known.contains(&val))
+                                            {
+                                                runs.push(val);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(json!({
+                    "projectId": project_id,
+                    "maxMtimeMs": max_mtime,
+                    "runs": runs,
                 }))
             }
             "pty.spawn" => {
@@ -242,14 +383,16 @@ impl Runtime {
                                 if !spawn_params_match(params, p) {
                                     return Err("REQUEST_CONFLICT: clientRequestId already used with different parameters".into());
                                 }
-                                spawns = self.spawns_cv.wait_timeout(spawns, std::time::Duration::from_secs(10)).map_err(|e| e.to_string())?.0;
+                                spawns = self
+                                    .spawns_cv
+                                    .wait_timeout(spawns, std::time::Duration::from_secs(10))
+                                    .map_err(|e| e.to_string())?
+                                    .0;
                             }
                             None => {
                                 spawns.insert(
                                     req_id.to_string(),
-                                    SpawnState::InProgress {
-                                        params: p.clone(),
-                                    },
+                                    SpawnState::InProgress { params: p.clone() },
                                 );
                                 break;
                             }
@@ -292,12 +435,14 @@ impl Runtime {
                 let rows = parse_u16_dim(p.get("rows"), 24, "rows")?;
                 let (program, args) = resolve_program_and_args(p)?;
 
-                let pair = portable_pty::native_pty_system().openpty(PtySize {
-                    rows,
-                    cols,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                }).map_err(|e| e.to_string())?;
+                let pair = portable_pty::native_pty_system()
+                    .openpty(PtySize {
+                        rows,
+                        cols,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    })
+                    .map_err(|e| e.to_string())?;
 
                 let id = uuid::Uuid::new_v4().to_string();
                 let mut command = CommandBuilder::new(&program);
@@ -306,7 +451,10 @@ impl Runtime {
                 }
                 command.cwd(&cwd);
                 command.env("FERRYX_SESSION_ID", &id);
-                if std::env::var("TERM").map(|t| t == "dumb" || t.is_empty()).unwrap_or(true) {
+                if std::env::var("TERM")
+                    .map(|t| t == "dumb" || t.is_empty())
+                    .unwrap_or(true)
+                {
                     command.env("TERM", "xterm-256color");
                 }
                 if let Some(env_obj) = p.get("env").and_then(Value::as_object) {
@@ -317,7 +465,10 @@ impl Runtime {
                     }
                 }
 
-                let child = pair.slave.spawn_command(command).map_err(|e| e.to_string())?;
+                let child = pair
+                    .slave
+                    .spawn_command(command)
+                    .map_err(|e| e.to_string())?;
                 drop(pair.slave);
                 let pid = child.process_id().ok_or("REMOTE_SPAWN_FAILED: no PID")?;
 
@@ -438,7 +589,9 @@ impl Runtime {
                 }
 
                 let mut sessions = self.sessions.lock().map_err(|e| e.to_string())?;
-                let session = sessions.get_mut(&target.backend_session_id).ok_or("NOT_FOUND")?;
+                let session = sessions
+                    .get_mut(&target.backend_session_id)
+                    .ok_or("NOT_FOUND")?;
 
                 match op {
                     "pty.describe" => {
@@ -463,7 +616,9 @@ impl Runtime {
                         }))
                     }
                     "pty.write" => {
-                        let bytes: Vec<u8> = if let Some(b64) = p.get("data").and_then(Value::as_str) {
+                        let bytes: Vec<u8> = if let Some(b64) =
+                            p.get("data").and_then(Value::as_str)
+                        {
                             BASE64_STANDARD
                                 .decode(b64)
                                 .map_err(|e| format!("INVALID_REQUEST: invalid base64 data: {e}"))?
@@ -483,7 +638,9 @@ impl Runtime {
                         let cols = parse_u16_dim(p.get("cols"), 0, "cols")?;
                         let rows = parse_u16_dim(p.get("rows"), 0, "rows")?;
                         if cols == 0 || rows == 0 {
-                            return Err("INVALID_REQUEST: cols and rows must be between 1 and 65535".into());
+                            return Err(
+                                "INVALID_REQUEST: cols and rows must be between 1 and 65535".into(),
+                            );
                         }
                         session
                             .master
@@ -499,7 +656,12 @@ impl Runtime {
                         Ok(json!({ "cols": cols, "rows": rows }))
                     }
                     "pty.stop" => {
-                        if session.child.try_wait().map_err(|e| e.to_string())?.is_none() {
+                        if session
+                            .child
+                            .try_wait()
+                            .map_err(|e| e.to_string())?
+                            .is_none()
+                        {
                             session.child.kill().map_err(|e| e.to_string())?;
                             session.child.wait().map_err(|e| e.to_string())?;
                         }
@@ -512,7 +674,11 @@ impl Runtime {
                         drop(sessions);
 
                         let after = parse_cursor(p)?;
-                        let wait = p.get("waitMs").and_then(Value::as_u64).unwrap_or(0).min(10000);
+                        let wait = p
+                            .get("waitMs")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0)
+                            .min(10000);
 
                         let (lock, signal) = &*output;
                         let state = lock.lock().map_err(|e| e.to_string())?;
@@ -524,7 +690,11 @@ impl Runtime {
                             )
                             .map_err(|e| e.to_string())?;
 
-                        let first = state.chunks.front().map(|(seq, _)| *seq).unwrap_or(state.next);
+                        let first = state
+                            .chunks
+                            .front()
+                            .map(|(seq, _)| *seq)
+                            .unwrap_or(state.next);
                         let gap = after.saturating_add(1) < first;
 
                         let max_response_len: usize = 900 * 1024;
@@ -532,10 +702,14 @@ impl Runtime {
                         let mut current_size_estimate = 256;
                         let mut last_seq = after;
 
-                        for (seq, chunk_bytes) in state.chunks.iter().filter(|(seq, _)| *seq > after) {
+                        for (seq, chunk_bytes) in
+                            state.chunks.iter().filter(|(seq, _)| *seq > after)
+                        {
                             let b64 = BASE64_STANDARD.encode(chunk_bytes);
                             let chunk_est = b64.len() + chunk_bytes.len() * 4 + 80;
-                            if !response_chunks.is_empty() && current_size_estimate + chunk_est > max_response_len {
+                            if !response_chunks.is_empty()
+                                && current_size_estimate + chunk_est > max_response_len
+                            {
                                 break;
                             }
                             current_size_estimate += chunk_est;
@@ -566,10 +740,13 @@ impl Runtime {
                             "chunks": response_chunks,
                         });
 
-                        while serde_json::to_vec(&response).map(|v| v.len()).unwrap_or(0) >= MAX_FRAME
+                        while serde_json::to_vec(&response).map(|v| v.len()).unwrap_or(0)
+                            >= MAX_FRAME
                             && !response["chunks"].as_array().unwrap().is_empty()
                         {
-                            if let Some(arr) = response.get_mut("chunks").and_then(Value::as_array_mut) {
+                            if let Some(arr) =
+                                response.get_mut("chunks").and_then(Value::as_array_mut)
+                            {
                                 arr.pop();
                                 let new_cur = arr
                                     .last()
@@ -607,9 +784,13 @@ fn parse_u16_dim(val: Option<&Value>, default: u16, name: &str) -> Result<u16, S
     match val {
         None => Ok(default),
         Some(v) => {
-            let n = v.as_u64().ok_or_else(|| format!("INVALID_REQUEST: {name} must be integer"))?;
+            let n = v
+                .as_u64()
+                .ok_or_else(|| format!("INVALID_REQUEST: {name} must be integer"))?;
             if n == 0 || n > 65535 {
-                return Err(format!("INVALID_REQUEST: {name} must be between 1 and 65535"));
+                return Err(format!(
+                    "INVALID_REQUEST: {name} must be between 1 and 65535"
+                ));
             }
             Ok(n as u16)
         }
@@ -632,11 +813,13 @@ fn parse_cursor(p: &Value) -> Result<u64, String> {
 fn parse_canonical_u64(val: &Value, name: &str) -> Result<u64, String> {
     match val {
         Value::String(s) => {
-            let n = s
-                .parse::<u64>()
-                .map_err(|e| format!("INVALID_REQUEST: {name} must be canonical decimal u64: {e}"))?;
+            let n = s.parse::<u64>().map_err(|e| {
+                format!("INVALID_REQUEST: {name} must be canonical decimal u64: {e}")
+            })?;
             if n.to_string() != *s {
-                return Err(format!("INVALID_REQUEST: {name} must be canonical decimal u64 string"));
+                return Err(format!(
+                    "INVALID_REQUEST: {name} must be canonical decimal u64 string"
+                ));
             }
             Ok(n)
         }
@@ -836,7 +1019,10 @@ mod ferryx_scope {
                 #[test]
                 fn unc_cwd_rejected_with_explicit_error() {
                     let err = ensure_cwd_spawnable(Path::new(r"\\server\share\repo")).unwrap_err();
-                    assert!(err.contains("UNSUPPORTED: UNC cwd"), "expected UNC rejection, got: {err}");
+                    assert!(
+                        err.contains("UNSUPPORTED: UNC cwd"),
+                        "expected UNC rejection, got: {err}"
+                    );
                 }
 
                 #[test]
@@ -844,7 +1030,10 @@ mod ferryx_scope {
                     let normalized = prepare_spawn_cwd(Path::new(r"\\?\UNC\server\share\repo"));
                     assert_eq!(normalized, PathBuf::from(r"\\server\share\repo"));
                     let err = ensure_cwd_spawnable(&normalized).unwrap_err();
-                    assert!(err.contains("UNSUPPORTED: UNC cwd"), "expected UNC rejection after normalization, got: {err}");
+                    assert!(
+                        err.contains("UNSUPPORTED: UNC cwd"),
+                        "expected UNC rejection after normalization, got: {err}"
+                    );
                 }
 
                 #[test]
@@ -857,16 +1046,23 @@ mod ferryx_scope {
                 fn rejection_of_cwd_outside_root_forbidden() {
                     let runtime_dir = tempfile::tempdir().unwrap();
                     let project_dir = tempfile::tempdir().unwrap();
-                    let runtime = Runtime::new(runtime_dir.path().to_path_buf(), "test-host".to_string(), "tok".to_string()).unwrap();
-                    runtime.handle(Request {
-                        protocol: 1,
-                        token: "tok".to_string(),
-                        op: "project.register".to_string(),
-                        params: json!({
-                            "id": "proj-out",
-                            "path": project_dir.path().to_string_lossy(),
-                        }),
-                    }).unwrap();
+                    let runtime = Runtime::new(
+                        runtime_dir.path().to_path_buf(),
+                        "test-host".to_string(),
+                        "tok".to_string(),
+                    )
+                    .unwrap();
+                    runtime
+                        .handle(Request {
+                            protocol: 1,
+                            token: "tok".to_string(),
+                            op: "project.register".to_string(),
+                            params: json!({
+                                "id": "proj-out",
+                                "path": project_dir.path().to_string_lossy(),
+                            }),
+                        })
+                        .unwrap();
 
                     let res = runtime.handle(Request {
                         protocol: 1,
@@ -879,7 +1075,10 @@ mod ferryx_scope {
                     });
                     assert!(res.is_err());
                     let err = res.unwrap_err();
-                    assert!(err.contains("FORBIDDEN: cwd outside project"), "expected FORBIDDEN error, got: {err}");
+                    assert!(
+                        err.contains("FORBIDDEN: cwd outside project"),
+                        "expected FORBIDDEN error, got: {err}"
+                    );
                 }
             }
         }

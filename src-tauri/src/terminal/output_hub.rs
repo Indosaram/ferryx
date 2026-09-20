@@ -484,7 +484,8 @@ impl TerminalOutputHub {
             metrics_read_unix_micros: None,
             replay_gap: Some(gap),
         };
-        hub.machine_senders.retain(|sender| sender.publish(&boundary));
+        hub.machine_senders
+            .retain(|sender| sender.publish(&boundary));
         let _ = hub.sender.send(boundary.clone());
         Some(boundary)
     }

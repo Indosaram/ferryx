@@ -1,5 +1,7 @@
-// Ferryx Remote Service Worker - Offline asset cache
-const CACHE_NAME = 'ferryx-remote-v1';
+// Ferryx Remote Service Worker - offline shell cache.
+// The shell is network-first so a rebuilt client reaches an installed phone on its next load;
+// cached hashed files under /assets are immutable and stay cache-first.
+const CACHE_NAME = 'ferryx-remote-v2';
 const ASSETS_TO_CACHE = [
   '/',
   '/index.html',
@@ -27,6 +29,25 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET' || event.request.url.includes('/api/')) {
+    return;
+  }
+  if (event.request.mode === 'navigate' || event.request.destination === 'document') {
+    event.respondWith(
+      fetch(event.request)
+        .then(async (response) => {
+          if (response && response.ok) {
+            const cached = await caches.open(CACHE_NAME);
+            await cached.put(event.request, response.clone());
+          }
+          return response;
+        })
+        .catch(async () => {
+          const cached = await caches.match(event.request);
+          if (cached) return cached;
+          const shell = await caches.match('/index.html');
+          return shell || Response.error();
+        })
+    );
     return;
   }
   event.respondWith(

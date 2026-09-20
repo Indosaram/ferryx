@@ -3,6 +3,7 @@ import {
   X,
   Copy,
   Check,
+  CloudOff,
   FileText,
   Terminal,
   Activity,
@@ -26,6 +27,18 @@ export type DagNodeInspectorProps = {
 };
 
 type TabType = "artifact" | "prompt" | "stats" | "error";
+
+/**
+ * Remote DAG runs are stored under synthetic keys (`paired:<workspaceId>:<remotePath>`
+ * and `ssh:<workspaceId>:<remotePath>`) that are not filesystem paths. Remote artifact
+ * retrieval is out of scope for the current transport, so the local artifact IPC must
+ * never receive one of these keys. Match on the transport prefix only - the remote path
+ * suffix may itself contain colons and must not be parsed.
+ */
+export function isRemoteDagProjectKey(projectPath?: string | null): boolean {
+  if (!projectPath) return false;
+  return projectPath.startsWith("paired:") || projectPath.startsWith("ssh:");
+}
 
 export function formatDurationMs(ms?: number | null): string {
   if (ms === undefined || ms === null || !Number.isFinite(ms)) return "-";
@@ -56,6 +69,7 @@ export function DagNodeInspector({
   const [artifactLoading, setArtifactLoading] = useState(false);
   const [artifactError, setArtifactError] = useState<string | null>(null);
   const [copiedTab, setCopiedTab] = useState<string | null>(null);
+  const artifactIsRemote = isRemoteDagProjectKey(projectPath);
 
   useEffect(() => {
     if (!node) return;
@@ -69,9 +83,10 @@ export function DagNodeInspector({
   }, [node?.id, node?.state, node?.resultArtifact, node?.error]);
 
   useEffect(() => {
-    if (!node || !node.resultArtifact?.relativePath || !projectPath) {
+    if (!node || !node.resultArtifact?.relativePath || !projectPath || artifactIsRemote) {
       setArtifactContent(null);
       setArtifactError(null);
+      setArtifactLoading(false);
       return;
     }
 
@@ -96,7 +111,7 @@ export function DagNodeInspector({
     return () => {
       active = false;
     };
-  }, [node?.id, node?.resultArtifact?.relativePath, projectPath]);
+  }, [node?.id, node?.resultArtifact?.relativePath, projectPath, artifactIsRemote]);
 
   const copyToClipboard = useCallback((text: string, tabName: string) => {
     if (navigator.clipboard?.writeText) {
@@ -300,7 +315,21 @@ export function DagNodeInspector({
                   )}
                 </div>
 
-                {artifactLoading ? (
+                {artifactIsRemote ? (
+                  <div
+                    data-testid="dag-artifact-remote-unavailable"
+                    className="rounded-md border border-border/60 bg-muted/20 p-3 text-muted-foreground space-y-1"
+                  >
+                    <div className="flex items-center gap-1.5 font-medium text-foreground">
+                      <CloudOff className="size-4 text-muted-foreground/70" />
+                      <span>Artifact stays on the remote machine</span>
+                    </div>
+                    <p className="text-[11px] leading-relaxed">
+                      This run was recorded on a remote session, so its deliverable file is not
+                      reachable from this machine. Graph, prompt and stats remain available.
+                    </p>
+                  </div>
+                ) : artifactLoading ? (
                   <div className="py-8 text-center text-muted-foreground">Loading artifact...</div>
                 ) : artifactError ? (
                   <div className="rounded-md border border-rose-500/30 bg-rose-500/10 p-3 text-rose-400">

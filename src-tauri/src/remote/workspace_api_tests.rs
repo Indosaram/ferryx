@@ -9,17 +9,29 @@ use crate::{
 #[tokio::test]
 async fn r1_topology_after_gate_http() {
     use futures_util::FutureExt;
-    use std::{sync::{Arc, Mutex}, time::Duration};
+    use std::{
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
     for parent_git in [true, false] {
         let root = tempfile::tempdir().unwrap();
         let plain = root.path().join("parent/plain");
         std::fs::create_dir_all(&plain).unwrap();
         let canonical = std::fs::canonicalize(&plain).unwrap();
-        let server = DaemonServer::new_with_paths(Some(root.path().join("data/config")), Some(root.path().join("data/auth")));
+        let server = DaemonServer::new_with_paths(
+            Some(root.path().join("data/config")),
+            Some(root.path().join("data/auth")),
+        );
         let state = server.remote_state().clone();
         let service = &state.machine_services.as_ref().unwrap().workspaces;
-        let pin = state.auth_manager.create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine).unwrap();
-        let (token, _) = state.auth_manager.exchange_pairing_code(&pin, "topology").unwrap();
+        let pin = state
+            .auth_manager
+            .create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine)
+            .unwrap();
+        let (token, _) = state
+            .auth_manager
+            .exchange_pairing_code(&pin, "topology")
+            .unwrap();
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let entered_tx = Mutex::new(Some(entered_tx));
         let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -27,7 +39,11 @@ async fn r1_topology_after_gate_http() {
         *service.transaction_probe.write() = Some(Arc::new(move |phase| {
             if phase == "beforeGate" {
                 entered_tx.lock().unwrap().take().unwrap().send(()).unwrap();
-                release_rx.lock().unwrap().recv_timeout(Duration::from_secs(20)).unwrap();
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(20))
+                    .unwrap();
             }
         }));
         let mut gate = Some(service.mutation_gate.lock());
@@ -36,11 +52,25 @@ async fn r1_topology_after_gate_http() {
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let gateway_state = state.clone();
         let mut gateway = tokio::spawn(async move {
-            axum::serve(listener, create_remote_router(gateway_state)).with_graceful_shutdown(async { let _ = stopped.await; }).await.unwrap();
+            axum::serve(listener, create_remote_router(gateway_state))
+                .with_graceful_shutdown(async {
+                    let _ = stopped.await;
+                })
+                .await
+                .unwrap();
         });
-        let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(15)).build().unwrap();
-        let payload = serde_json::json!({"requestId": uuid::Uuid::new_v4().to_string(), "repoPath": plain}).to_string();
-        let call = client.post(format!("http://{addr}/api/v1/workspace/projects")).bearer_auth(&token).body(payload.clone());
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .unwrap();
+        let payload =
+            serde_json::json!({"requestId": uuid::Uuid::new_v4().to_string(), "repoPath": plain})
+                .to_string();
+        let call = client
+            .post(format!("http://{addr}/api/v1/workspace/projects"))
+            .bearer_auth(&token)
+            .body(payload.clone());
         let mut request = tokio::spawn(async move { call.send().await.unwrap() });
         let outcome = std::panic::AssertUnwindSafe(async {
             tokio::time::timeout(Duration::from_secs(10), entered_rx).await.unwrap().unwrap();
@@ -78,18 +108,33 @@ async fn r1_topology_after_gate_http() {
         }).catch_unwind().await;
         let _ = release_tx.send(());
         drop(gate.take());
-        if !request.is_finished() { request.abort(); let _ = request.await; }
-        let drained = tokio::time::timeout(Duration::from_secs(10), service.project_mutations.clone().acquire_many_owned(8)).await;
+        if !request.is_finished() {
+            request.abort();
+            let _ = request.await;
+        }
+        let drained = tokio::time::timeout(
+            Duration::from_secs(10),
+            service.project_mutations.clone().acquire_many_owned(8),
+        )
+        .await;
         *service.transaction_probe.write() = None;
         let _ = stop.send(());
         let joined = tokio::time::timeout(Duration::from_secs(10), &mut gateway).await;
-        if joined.is_err() { gateway.abort(); let _ = gateway.await; }
+        if joined.is_err() {
+            gateway.abort();
+            let _ = gateway.await;
+        }
         drop(gate);
-        drop(state); drop(server);
-        let receipt = root.path().to_owned(); root.close().unwrap();
+        drop(state);
+        drop(server);
+        let receipt = root.path().to_owned();
+        root.close().unwrap();
         eprintln!("R1 topology cleanup parent_git={parent_git} workers_drained={} gateway_joined={} removed={}", drained.is_ok(), joined.is_ok(), !receipt.exists());
-        drop(drained.unwrap().unwrap()); joined.unwrap().unwrap();
-        if let Err(panic) = outcome { std::panic::resume_unwind(panic); }
+        drop(drained.unwrap().unwrap());
+        joined.unwrap().unwrap();
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
     }
 }
 
@@ -400,54 +445,101 @@ fn a07_journal_restart_and_device_scope() {
 #[tokio::test]
 #[cfg(unix)]
 async fn r12_unreadable_root() {
-    use std::os::unix::fs::PermissionsExt;
     use axum::{extract::State, http::HeaderMap};
+    use std::os::unix::fs::PermissionsExt;
     let (root, plain, server) = crate::ipc::run_blocking(|| {
         let root = tempfile::tempdir().unwrap();
         let plain = root.path().join("plain");
         std::fs::create_dir(&plain).unwrap();
-        let server = DaemonServer::new_with_paths(Some(root.path().join("data/config")), Some(root.path().join("data/auth")));
-        server.remote_state().machine_services.as_ref().unwrap().workspaces.register_machine(plain.to_str().unwrap()).unwrap();
+        let server = DaemonServer::new_with_paths(
+            Some(root.path().join("data/config")),
+            Some(root.path().join("data/auth")),
+        );
+        server
+            .remote_state()
+            .machine_services
+            .as_ref()
+            .unwrap()
+            .workspaces
+            .register_machine(plain.to_str().unwrap())
+            .unwrap();
         Ok((root, plain, server))
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let state = server.remote_state().clone();
-    let pin = state.auth_manager.create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine).unwrap();
-    let (token, _) = state.auth_manager.exchange_pairing_code(&pin, "repair").unwrap();
+    let pin = state
+        .auth_manager
+        .create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine)
+        .unwrap();
+    let (token, _) = state
+        .auth_manager
+        .exchange_pairing_code(&pin, "repair")
+        .unwrap();
     let mut headers = HeaderMap::new();
     headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
     std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o0)).unwrap();
     let response = super::workspace_api::list(State(state.clone()), headers.clone()).await;
-    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
     std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o700)).unwrap();
     let replacement = root.path().join("replacement");
     std::fs::create_dir(&replacement).unwrap();
     std::fs::remove_dir(&plain).unwrap();
     std::os::unix::fs::symlink(&replacement, &plain).unwrap();
     let replaced = super::workspace_api::list(State(state), headers).await;
-    let replaced = axum::body::to_bytes(replaced.into_body(), 1024 * 1024).await.unwrap();
+    let replaced = axum::body::to_bytes(replaced.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
     drop(server);
     let receipt = root.path().to_owned();
     root.close().unwrap();
     eprintln!("R12 cleanup removed={}", !receipt.exists());
     let inventory: super::machine_protocol::Projects = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(inventory.projects[0].availability, super::machine_protocol::Availability::PermissionDenied);
+    assert_eq!(
+        inventory.projects[0].availability,
+        super::machine_protocol::Availability::PermissionDenied
+    );
     let replaced: super::machine_protocol::Projects = serde_json::from_slice(&replaced).unwrap();
-    assert_eq!(replaced.projects[0].availability, super::machine_protocol::Availability::Invalid);
+    assert_eq!(
+        replaced.projects[0].availability,
+        super::machine_protocol::Availability::Invalid
+    );
 }
 
 #[tokio::test]
 async fn r12_revocation_fences() {
-    use axum::{extract::State, http::HeaderMap, body::Bytes};
-    for phase in ["prepare", "beforeGate", "beforeCommit", "beforeResponse", "listProbe"] {
+    use axum::{body::Bytes, extract::State, http::HeaderMap};
+    for phase in [
+        "prepare",
+        "beforeGate",
+        "beforeCommit",
+        "beforeResponse",
+        "listProbe",
+    ] {
         let root = tempfile::tempdir().unwrap();
         let plain = root.path().join("plain");
         std::fs::create_dir(&plain).unwrap();
-        let server = DaemonServer::new_with_paths(Some(root.path().join("data/config")), Some(root.path().join("data/auth")));
+        let server = DaemonServer::new_with_paths(
+            Some(root.path().join("data/config")),
+            Some(root.path().join("data/auth")),
+        );
         let state = server.remote_state().clone();
         let service = &state.machine_services.as_ref().unwrap().workspaces;
-        let gate = if phase == "beforeGate" { Some(service.mutation_gate.lock()) } else { None };
-        let pin = state.auth_manager.create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine).unwrap();
-        let (token, device) = state.auth_manager.exchange_pairing_code(&pin, "repair").unwrap();
+        let gate = if phase == "beforeGate" {
+            Some(service.mutation_gate.lock())
+        } else {
+            None
+        };
+        let pin = state
+            .auth_manager
+            .create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine)
+            .unwrap();
+        let (token, device) = state
+            .auth_manager
+            .exchange_pairing_code(&pin, "repair")
+            .unwrap();
         let mut headers = HeaderMap::new();
         headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
@@ -457,15 +549,25 @@ async fn r12_revocation_fences() {
         *service.transaction_probe.write() = Some(std::sync::Arc::new(move |at| {
             if at == phase {
                 entered_tx.lock().unwrap().take().unwrap().send(()).unwrap();
-                release_rx.lock().unwrap().recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap();
             }
         }));
         let id = uuid::Uuid::new_v4().to_string();
-        let payload = Bytes::from(serde_json::json!({"requestId": id.clone(), "repoPath": plain}).to_string());
+        let payload = Bytes::from(
+            serde_json::json!({"requestId": id.clone(), "repoPath": plain}).to_string(),
+        );
         let task = if phase == "listProbe" {
             tokio::spawn(super::workspace_api::list(State(state.clone()), headers))
         } else {
-            tokio::spawn(super::workspace_api::register(State(state.clone()), headers, payload))
+            tokio::spawn(super::workspace_api::register(
+                State(state.clone()),
+                headers,
+                payload,
+            ))
         };
         let entered = tokio::time::timeout(std::time::Duration::from_secs(10), entered_rx).await;
         let _ = state.auth_manager.revoke_device(&device.id);
@@ -474,29 +576,54 @@ async fn r12_revocation_fences() {
         drop(gate);
         // Acquiring every slot signals that the detached blocking worker really
         // finished; it is not a timing inference from the HTTP response.
-        let budget = if phase == "listProbe" { &service.project_reads } else { &service.project_mutations };
-        let slots = tokio::time::timeout(std::time::Duration::from_secs(10), budget.clone().acquire_many_owned(8)).await.unwrap().unwrap();
+        let budget = if phase == "listProbe" {
+            &service.project_reads
+        } else {
+            &service.project_mutations
+        };
+        let slots = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            budget.clone().acquire_many_owned(8),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         let rows = service.catalog().unwrap().workspaces.len();
         drop(slots);
         *service.transaction_probe.write() = None;
-        drop(state); drop(server);
-        let receipt = root.path().to_owned(); root.close().unwrap();
+        drop(state);
+        drop(server);
+        let receipt = root.path().to_owned();
+        root.close().unwrap();
         assert!(entered.unwrap().is_ok());
         assert_eq!(response.status().as_u16(), 401);
-        let body = axum::body::to_bytes(response.into_body(), 65536).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
         let error: super::machine_protocol::ErrorEnvelope = serde_json::from_slice(&body).unwrap();
-        if phase != "listProbe" { assert_eq!(error.error.request_id, id, "revocation must reconcile the original request"); }
+        if phase != "listProbe" {
+            assert_eq!(
+                error.error.request_id, id,
+                "revocation must reconcile the original request"
+            );
+        }
         assert_eq!(rows, usize::from(phase == "beforeResponse"));
-        eprintln!("R12 phase={phase} revoked=401 rows={rows} workers_finished=true removed={}", !receipt.exists());
+        eprintln!(
+            "R12 phase={phase} revoked=401 rows={rows} workers_finished=true removed={}",
+            !receipt.exists()
+        );
     }
 }
 
 #[test]
 fn r12_crash_owner() {
     use std::io::{BufRead, Write};
-    let Some(root) = std::env::var_os("R12_ROOT") else { return; };
+    let Some(root) = std::env::var_os("R12_ROOT") else {
+        return;
+    };
     let root = std::path::PathBuf::from(root);
-    let server = DaemonServer::new_with_paths(Some(root.join("data/config")), Some(root.join("data/auth")));
+    let server =
+        DaemonServer::new_with_paths(Some(root.join("data/config")), Some(root.join("data/auth")));
     let state = server.remote_state().clone();
     let phase = std::env::var("R12_PHASE").unwrap();
     let request = std::env::var("R12_REQUEST").unwrap();
@@ -504,16 +631,31 @@ fn r12_crash_owner() {
     let token = if credentials.exists() {
         serde_json::from_slice::<String>(&std::fs::read(&credentials).unwrap()).unwrap()
     } else {
-        let pin = state.auth_manager.create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine).unwrap();
-        let (token, _) = state.auth_manager.exchange_pairing_code(&pin, "crash").unwrap();
-        super::auth::write_private_json(&credentials, &token).unwrap(); token
+        let pin = state
+            .auth_manager
+            .create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine)
+            .unwrap();
+        let (token, _) = state
+            .auth_manager
+            .exchange_pairing_code(&pin, "crash")
+            .unwrap();
+        super::auth::write_private_json(&credentials, &token).unwrap();
+        token
     };
     if phase != "replay" {
-        *state.machine_services.as_ref().unwrap().workspaces.transaction_probe.write() = Some(std::sync::Arc::new(move |at| {
+        *state
+            .machine_services
+            .as_ref()
+            .unwrap()
+            .workspaces
+            .transaction_probe
+            .write() = Some(std::sync::Arc::new(move |at| {
             if at == phase {
                 // Serial libtest prints its test-name prefix without a newline.
-                println!("\nR12_WINDOW"); std::io::stdout().flush().unwrap();
-                let mut line = String::new(); std::io::stdin().lock().read_line(&mut line).unwrap();
+                println!("\nR12_WINDOW");
+                std::io::stdout().flush().unwrap();
+                let mut line = String::new();
+                std::io::stdin().lock().read_line(&mut line).unwrap();
                 panic!("kill window unexpectedly released");
             }
         }));
@@ -523,20 +665,36 @@ fn r12_crash_owner() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
-        let gateway = tokio::spawn(async move { axum::serve(listener, create_remote_router(state)).with_graceful_shutdown(async { let _ = stop_rx.await; }).await.unwrap(); });
+        let gateway = tokio::spawn(async move {
+            axum::serve(listener, create_remote_router(state))
+                .with_graceful_shutdown(async {
+                    let _ = stop_rx.await;
+                })
+                .await
+                .unwrap();
+        });
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let deleting = std::env::var_os("R12_DELETE").is_some();
         let call = if deleting {
             let id = std::fs::read_to_string(root.join("workspace-id")).unwrap();
-            client.delete(format!("http://{addr}/api/v1/workspace/projects/{id}"))
-                .body(serde_json::json!({"requestId": request, "expectedRevision": "1"}).to_string())
+            client
+                .delete(format!("http://{addr}/api/v1/workspace/projects/{id}"))
+                .body(
+                    serde_json::json!({"requestId": request, "expectedRevision": "1"}).to_string(),
+                )
         } else {
-            client.post(format!("http://{addr}/api/v1/workspace/projects"))
-                .body(serde_json::json!({"requestId": request, "repoPath": root.join("plain")}).to_string())
+            client
+                .post(format!("http://{addr}/api/v1/workspace/projects"))
+                .body(
+                    serde_json::json!({"requestId": request, "repoPath": root.join("plain")})
+                        .to_string(),
+                )
         };
         let response = call.bearer_auth(token).send().await.unwrap();
-        let status = response.status(); let body = response.bytes().await.unwrap();
-        stop_tx.send(()).unwrap(); gateway.await.unwrap();
+        let status = response.status();
+        let body = response.bytes().await.unwrap();
+        stop_tx.send(()).unwrap();
+        gateway.await.unwrap();
         if deleting {
             assert_eq!(status.as_u16(), 204);
             assert!(root.join("plain").is_dir());
@@ -556,31 +714,65 @@ async fn r12_real_kill_windows() {
     use tokio::io::{AsyncBufReadExt, BufReader};
     for phase in ["afterCatalog", "afterJournal"] {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().to_owned(); std::fs::create_dir(root.join("plain")).unwrap();
+        let root = temp.path().to_owned();
+        std::fs::create_dir(root.join("plain")).unwrap();
         let request = uuid::Uuid::new_v4().to_string();
         let delete_request = uuid::Uuid::new_v4().to_string();
-        for (current, deleting) in [(phase, false), ("replay", false), (phase, true), ("replay", true)] {
+        for (current, deleting) in [
+            (phase, false),
+            ("replay", false),
+            (phase, true),
+            ("replay", true),
+        ] {
             let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
-            command.args(["--exact", "remote::workspace_api_tests::r12_crash_owner", "--nocapture"])
-                .env("R12_ROOT", &root).env("R12_PHASE", current).env("R12_REQUEST", if deleting { &delete_request } else { &request })
-                .env("HOME", &root).env("FERRYX_DATA_DIR", root.join("data")).env("FERRYX_RUNTIME_DIR", root.join("runtime"))
-                .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).kill_on_drop(true);
-            if deleting { command.env("R12_DELETE", "1"); }
-            let mut child = command.spawn().unwrap(); let pid = child.id().unwrap();
+            command
+                .args([
+                    "--exact",
+                    "remote::workspace_api_tests::r12_crash_owner",
+                    "--nocapture",
+                ])
+                .env("R12_ROOT", &root)
+                .env("R12_PHASE", current)
+                .env(
+                    "R12_REQUEST",
+                    if deleting { &delete_request } else { &request },
+                )
+                .env("HOME", &root)
+                .env("FERRYX_DATA_DIR", root.join("data"))
+                .env("FERRYX_RUNTIME_DIR", root.join("runtime"))
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .kill_on_drop(true);
+            if deleting {
+                command.env("R12_DELETE", "1");
+            }
+            let mut child = command.spawn().unwrap();
+            let pid = child.id().unwrap();
             // Child::wait closes its owned stdin before reaping. Keep the barrier
             // writer alive independently so EOF cannot race SIGKILL delivery.
             let barrier_stdin = child.stdin.take().unwrap();
             let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
             let result = tokio::time::timeout(std::time::Duration::from_secs(20), async {
                 while let Some(line) = lines.next_line().await? {
-                    if (current != "replay" && line == "R12_WINDOW") || (current == "replay" && line.starts_with("R12_REPLAY ")) {
-                        eprintln!("R12 signal phase={current} deleting={deleting} pid={pid} {line}");
+                    if (current != "replay" && line == "R12_WINDOW")
+                        || (current == "replay" && line.starts_with("R12_REPLAY "))
+                    {
+                        eprintln!(
+                            "R12 signal phase={current} deleting={deleting} pid={pid} {line}"
+                        );
                         return Ok::<_, std::io::Error>(true);
                     }
-                } Ok(false)
-            }).await;
-            let kill = if current != "replay" || !matches!(result, Ok(Ok(true))) { child.start_kill() } else { Ok(()) };
-            let waited = tokio::time::timeout(std::time::Duration::from_secs(20), child.wait()).await;
+                }
+                Ok(false)
+            })
+            .await;
+            let kill = if current != "replay" || !matches!(result, Ok(Ok(true))) {
+                child.start_kill()
+            } else {
+                Ok(())
+            };
+            let waited =
+                tokio::time::timeout(std::time::Duration::from_secs(20), child.wait()).await;
             let status = match waited {
                 Ok(Ok(status)) => status,
                 failure => {
@@ -594,10 +786,14 @@ async fn r12_real_kill_windows() {
             drop(barrier_stdin);
             eprintln!("R12 process phase={current} deleting={deleting} pid={pid} reaped=true status={status}");
             if kill.is_err() || !matches!(result, Ok(Ok(true))) {
-                temp.close().unwrap(); panic!("child barrier failed: signal={result:?} kill={kill:?}");
+                temp.close().unwrap();
+                panic!("child barrier failed: signal={result:?} kill={kill:?}");
             }
-            if current == "replay" { assert!(status.success()); } else {
-                #[cfg(unix)] {
+            if current == "replay" {
+                assert!(status.success());
+            } else {
+                #[cfg(unix)]
+                {
                     use std::os::unix::process::ExitStatusExt;
                     assert_eq!(status.signal(), Some(libc::SIGKILL), "{status}");
                 }
@@ -606,7 +802,11 @@ async fn r12_real_kill_windows() {
                 assert_eq!(status.code(), Some(1), "{status}");
             }
         }
-        temp.close().unwrap(); eprintln!("R12 kill-window={phase} same_device_request_replay=201 revision=1 removed={}", !root.exists());
+        temp.close().unwrap();
+        eprintln!(
+            "R12 kill-window={phase} same_device_request_replay=201 revision=1 removed={}",
+            !root.exists()
+        );
     }
 }
 
@@ -614,37 +814,97 @@ async fn r12_real_kill_windows() {
 async fn r12_list_gate_and_admission() {
     use axum::{extract::State, http::HeaderMap};
     let temp = tempfile::tempdir().unwrap();
-    let server = DaemonServer::new_with_paths(Some(temp.path().join("data/config")), Some(temp.path().join("data/auth")));
+    let server = DaemonServer::new_with_paths(
+        Some(temp.path().join("data/config")),
+        Some(temp.path().join("data/auth")),
+    );
     let state = server.remote_state().clone();
     let service = &state.machine_services.as_ref().unwrap().workspaces;
-    let pin = state.auth_manager.create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine).unwrap();
-    let (token, _) = state.auth_manager.exchange_pairing_code(&pin, "limits").unwrap();
-    let mut headers = HeaderMap::new(); headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
-    let all = service.project_mutations.clone().acquire_many_owned(8).await.unwrap();
-    let capacity = super::workspace_api::register(State(state.clone()), headers.clone(), axum::body::Bytes::new()).await;
-    assert_eq!(capacity.status().as_u16(), 429); drop(all);
-    let capacity_body = axum::body::to_bytes(capacity.into_body(), 65536).await.unwrap();
-    let capacity_error: super::machine_protocol::ErrorEnvelope = serde_json::from_slice(&capacity_body).unwrap();
-    let reads = service.project_reads.clone().acquire_many_owned(8).await.unwrap();
+    let pin = state
+        .auth_manager
+        .create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine)
+        .unwrap();
+    let (token, _) = state
+        .auth_manager
+        .exchange_pairing_code(&pin, "limits")
+        .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+    let all = service
+        .project_mutations
+        .clone()
+        .acquire_many_owned(8)
+        .await
+        .unwrap();
+    let capacity = super::workspace_api::register(
+        State(state.clone()),
+        headers.clone(),
+        axum::body::Bytes::new(),
+    )
+    .await;
+    assert_eq!(capacity.status().as_u16(), 429);
+    drop(all);
+    let capacity_body = axum::body::to_bytes(capacity.into_body(), 65536)
+        .await
+        .unwrap();
+    let capacity_error: super::machine_protocol::ErrorEnvelope =
+        serde_json::from_slice(&capacity_body).unwrap();
+    let reads = service
+        .project_reads
+        .clone()
+        .acquire_many_owned(8)
+        .await
+        .unwrap();
     let denied = super::workspace_api::list(State(state.clone()), HeaderMap::new()).await;
     assert_eq!(denied.status().as_u16(), 401);
-    let pin = state.auth_manager.create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Mirror).unwrap();
-    let (mirror, _) = state.auth_manager.exchange_pairing_code(&pin, "mirror").unwrap();
-    let mut mirror_headers = HeaderMap::new(); mirror_headers.insert("authorization", format!("Bearer {mirror}").parse().unwrap());
+    let pin = state
+        .auth_manager
+        .create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Mirror)
+        .unwrap();
+    let (mirror, _) = state
+        .auth_manager
+        .exchange_pairing_code(&pin, "mirror")
+        .unwrap();
+    let mut mirror_headers = HeaderMap::new();
+    mirror_headers.insert("authorization", format!("Bearer {mirror}").parse().unwrap());
     let denied = super::workspace_api::list(State(state.clone()), mirror_headers).await;
     assert_eq!(denied.status().as_u16(), 403);
     drop(reads);
     let bare_auth = temp.path().join("service-less/auth.json");
     let bare = std::sync::Arc::new(super::state::RemoteGatewayState::new_with_paths_backend(
-        state.session_backend.clone(), crate::worktree::WorkspaceRegistry::new(),
-        Some(temp.path().join("service-less/config.json")), Some(bare_auth.clone()),
+        state.session_backend.clone(),
+        crate::worktree::WorkspaceRegistry::new(),
+        Some(temp.path().join("service-less/config.json")),
+        Some(bare_auth.clone()),
     ));
-    assert_eq!(super::workspace_api::list(State(bare.clone()), HeaderMap::new()).await.status().as_u16(), 401);
-    for (scope, expected) in [(DeviceAccessScope::Mirror, 403), (DeviceAccessScope::Machine, 503)] {
-        let pin = bare.auth_manager.create_scoped_pairing_code(DevicePermission::Control, scope).unwrap();
-        let (token, _) = bare.auth_manager.exchange_pairing_code(&pin, "service-less").unwrap();
-        let mut auth = HeaderMap::new(); auth.insert("authorization", format!("Bearer {token}").parse().unwrap());
-        assert_eq!(super::workspace_api::list(State(bare.clone()), auth).await.status().as_u16(), expected);
+    assert_eq!(
+        super::workspace_api::list(State(bare.clone()), HeaderMap::new())
+            .await
+            .status()
+            .as_u16(),
+        401
+    );
+    for (scope, expected) in [
+        (DeviceAccessScope::Mirror, 403),
+        (DeviceAccessScope::Machine, 503),
+    ] {
+        let pin = bare
+            .auth_manager
+            .create_scoped_pairing_code(DevicePermission::Control, scope)
+            .unwrap();
+        let (token, _) = bare
+            .auth_manager
+            .exchange_pairing_code(&pin, "service-less")
+            .unwrap();
+        let mut auth = HeaderMap::new();
+        auth.insert("authorization", format!("Bearer {token}").parse().unwrap());
+        assert_eq!(
+            super::workspace_api::list(State(bare.clone()), auth)
+                .await
+                .status()
+                .as_u16(),
+            expected
+        );
     }
     assert!(bare_auth.is_file());
     drop(bare);
@@ -655,60 +915,133 @@ async fn r12_list_gate_and_admission() {
     *service.transaction_probe.write() = Some(std::sync::Arc::new(move |phase| {
         if phase == "listProbe" {
             entered_tx.lock().unwrap().take().unwrap().send(()).unwrap();
-            release_rx.lock().unwrap().recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
         }
     }));
     let request = tokio::spawn(super::workspace_api::list(State(state.clone()), headers));
     let entered = tokio::time::timeout(std::time::Duration::from_secs(10), entered_rx).await;
     let gate_free = service.mutation_gate.try_lock().is_some();
-    request.abort(); let joined = request.await;
+    request.abort();
+    let joined = request.await;
     let retained = service.project_reads.available_permits() == 7;
     release_tx.send(()).unwrap();
-    let finished = tokio::time::timeout(std::time::Duration::from_secs(10), service.project_reads.clone().acquire_many_owned(8)).await.unwrap().unwrap();
-    drop(finished); *service.transaction_probe.write() = None;
-    drop(state); drop(server); let root = temp.path().to_owned(); temp.close().unwrap();
-    assert!(entered.unwrap().is_ok()); assert!(gate_free); assert!(joined.unwrap_err().is_cancelled()); assert!(retained);
+    let finished = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        service.project_reads.clone().acquire_many_owned(8),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    drop(finished);
+    *service.transaction_probe.write() = None;
+    drop(state);
+    drop(server);
+    let root = temp.path().to_owned();
+    temp.close().unwrap();
+    assert!(entered.unwrap().is_ok());
+    assert!(gate_free);
+    assert!(joined.unwrap_err().is_cancelled());
+    assert!(retained);
     eprintln!("R12 mutation_capacity=429 list_probe_global_gate_free=true cancelled_worker_slot_retained=true worker_finished=true removed={}", !root.exists());
     assert_eq!(capacity_error.error.code, "CAPACITY_EXCEEDED");
-    assert!(capacity_error.error.retryable, "capacity refusal must permit retry");
+    assert!(
+        capacity_error.error.retryable,
+        "capacity refusal must permit retry"
+    );
 }
 
 #[tokio::test]
 async fn r12_router_incomplete_body() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let root = tempfile::tempdir().unwrap();
-    let server = DaemonServer::new_with_paths(Some(root.path().join("data/config")), Some(root.path().join("data/auth")));
+    let server = DaemonServer::new_with_paths(
+        Some(root.path().join("data/config")),
+        Some(root.path().join("data/auth")),
+    );
     let state = server.remote_state().clone();
-    let pin = state.auth_manager.create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine).unwrap();
-    let (token, _) = state.auth_manager.exchange_pairing_code(&pin, "body").unwrap();
+    let pin = state
+        .auth_manager
+        .create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine)
+        .unwrap();
+    let (token, _) = state
+        .auth_manager
+        .exchange_pairing_code(&pin, "body")
+        .unwrap();
     let (entry_tx, mut entry_rx) = tokio::sync::mpsc::unbounded_channel();
-    *state.machine_services.as_ref().unwrap().workspaces.transaction_probe.write() = Some(std::sync::Arc::new(move |phase| { if phase == "bodyEntry" { entry_tx.send(()).unwrap(); } }));
+    *state
+        .machine_services
+        .as_ref()
+        .unwrap()
+        .workspaces
+        .transaction_probe
+        .write() = Some(std::sync::Arc::new(move |phase| {
+        if phase == "bodyEntry" {
+            entry_tx.send(()).unwrap();
+        }
+    }));
     let retained_state = state.clone();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (stop, stopped) = tokio::sync::oneshot::channel();
-    let gateway = tokio::spawn(async move { axum::serve(listener, create_remote_router(state)).with_graceful_shutdown(async { let _ = stopped.await; }).await.unwrap(); });
+    let gateway = tokio::spawn(async move {
+        axum::serve(listener, create_remote_router(state))
+            .with_graceful_shutdown(async {
+                let _ = stopped.await;
+            })
+            .await
+            .unwrap();
+    });
     let mut socket = tokio::net::TcpStream::connect(addr).await.unwrap();
     socket.write_all(format!("POST /api/v1/workspace/projects HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{{").as_bytes()).await.unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(5), entry_rx.recv()).await.unwrap().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), entry_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
     let service = &retained_state.machine_services.as_ref().unwrap().workspaces;
     assert_eq!(service.project_mutations.available_permits(), 7);
-    let remaining = service.project_mutations.clone().acquire_many_owned(7).await.unwrap();
-    let capacity = reqwest::Client::builder().no_proxy().build().unwrap().post(format!("http://{addr}/api/v1/workspace/projects")).bearer_auth(&token).body("{}").send().await.unwrap();
+    let remaining = service
+        .project_mutations
+        .clone()
+        .acquire_many_owned(7)
+        .await
+        .unwrap();
+    let capacity = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .post(format!("http://{addr}/api/v1/workspace/projects"))
+        .bearer_auth(&token)
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(capacity.status().as_u16(), 429);
-    drop(capacity); drop(remaining);
+    drop(capacity);
+    drop(remaining);
     let mut bytes = vec![0; 4096];
     // Time is the contract: an unfinished body must have a ten-second read
     // deadline, rather than retaining its request until the peer closes it.
-    let result = tokio::time::timeout(std::time::Duration::from_secs(12), socket.read(&mut bytes)).await;
-    drop(socket); stop.send(()).unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(10), gateway).await.unwrap().unwrap();
+    let result =
+        tokio::time::timeout(std::time::Duration::from_secs(12), socket.read(&mut bytes)).await;
+    drop(socket);
+    stop.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), gateway)
+        .await
+        .unwrap()
+        .unwrap();
     *service.transaction_probe.write() = None;
     assert_eq!(service.project_mutations.available_permits(), 8);
     drop(retained_state);
-    drop(server); root.close().unwrap();
+    drop(server);
+    root.close().unwrap();
     eprintln!("R12 incomplete body sockets_closed=true gateway_joined=true root_removed=true");
-    let length = result.expect("incomplete body exceeded read deadline").unwrap();
+    let length = result
+        .expect("incomplete body exceeded read deadline")
+        .unwrap();
     let response = String::from_utf8_lossy(&bytes[..length]);
     assert!(response.starts_with("HTTP/1.1 504"), "{response}");
     assert!(response.contains("no-store"));
@@ -719,11 +1052,20 @@ async fn r12_router_auth_admission() {
     use futures_util::FutureExt;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let root = tempfile::tempdir().unwrap();
-    let server = DaemonServer::new_with_paths(Some(root.path().join("data/config")), Some(root.path().join("data/auth")));
+    let server = DaemonServer::new_with_paths(
+        Some(root.path().join("data/config")),
+        Some(root.path().join("data/auth")),
+    );
     let state = server.remote_state().clone();
     let service = &state.machine_services.as_ref().unwrap().workspaces;
-    let pin = state.auth_manager.create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine).unwrap();
-    let (token, device) = state.auth_manager.exchange_pairing_code(&pin, "auth-budget").unwrap();
+    let pin = state
+        .auth_manager
+        .create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine)
+        .unwrap();
+    let (token, device) = state
+        .auth_manager
+        .exchange_pairing_code(&pin, "auth-budget")
+        .unwrap();
     let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
     let release = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
     let hook_release = release.clone();
@@ -732,13 +1074,24 @@ async fn r12_router_auth_admission() {
             entered_tx.send(()).unwrap();
             let (lock, condition) = &*hook_release;
             let released = lock.lock().unwrap();
-            let result = condition.wait_timeout_while(released, std::time::Duration::from_secs(15), |v| !*v).unwrap();
+            let result = condition
+                .wait_timeout_while(released, std::time::Duration::from_secs(15), |v| !*v)
+                .unwrap();
             assert!(*result.0, "auth fixture release timed out");
         }
     }));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); let addr = listener.local_addr().unwrap();
-    let (stop, stopped) = tokio::sync::oneshot::channel(); let gateway_state = state.clone();
-    let gateway = tokio::spawn(async move { axum::serve(listener, create_remote_router(gateway_state)).with_graceful_shutdown(async { let _ = stopped.await; }).await.unwrap(); });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let gateway_state = state.clone();
+    let gateway = tokio::spawn(async move {
+        axum::serve(listener, create_remote_router(gateway_state))
+            .with_graceful_shutdown(async {
+                let _ = stopped.await;
+            })
+            .await
+            .unwrap();
+    });
     let mut sockets = Vec::new();
     let result = std::panic::AssertUnwindSafe(async {
         for _ in 0..16 {
@@ -754,17 +1107,44 @@ async fn r12_router_auth_admission() {
         assert_eq!(health.status().as_u16(), 200);
         let _ = state.auth_manager.revoke_device(&device.id);
     }).catch_unwind().await;
-    { let (lock, condition) = &*release; *lock.lock().unwrap() = true; condition.notify_all(); }
+    {
+        let (lock, condition) = &*release;
+        *lock.lock().unwrap() = true;
+        condition.notify_all();
+    }
     for mut socket in sockets {
         let mut response = Vec::new();
-        let read = tokio::time::timeout(std::time::Duration::from_secs(10), socket.read_to_end(&mut response)).await;
-        if result.is_ok() { assert!(read.unwrap().is_ok()); assert!(response.starts_with(b"HTTP/1.1 401")); }
+        let read = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            socket.read_to_end(&mut response),
+        )
+        .await;
+        if result.is_ok() {
+            assert!(read.unwrap().is_ok());
+            assert!(response.starts_with(b"HTTP/1.1 401"));
+        }
     }
-    let auth_finished = tokio::time::timeout(std::time::Duration::from_secs(10), super::workspace_api::AUTH_SLOTS.clone().acquire_many_owned(16)).await.unwrap().unwrap();
+    let auth_finished = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        super::workspace_api::AUTH_SLOTS
+            .clone()
+            .acquire_many_owned(16),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     drop(auth_finished);
     *service.transaction_probe.write() = None;
-    stop.send(()).unwrap(); tokio::time::timeout(std::time::Duration::from_secs(10), gateway).await.unwrap().unwrap();
-    drop(state); drop(server); root.close().unwrap();
+    stop.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), gateway)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(state);
+    drop(server);
+    root.close().unwrap();
     eprintln!("R12 real router auth_entries=16 health=200 revoked=401 sockets_closed=true listener_joined=true root_removed=true");
-    if let Err(panic) = result { std::panic::resume_unwind(panic); }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }

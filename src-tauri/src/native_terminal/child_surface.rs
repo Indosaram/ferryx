@@ -174,24 +174,41 @@ mod geometry_latch_tests {
     use super::{ChildSurfaceGeometry, GeometryLatch};
 
     fn geometry(x: i32, width: u32) -> ChildSurfaceGeometry {
-        ChildSurfaceGeometry { x, y: 0, width, height: 600 }
+        ChildSurfaceGeometry {
+            x,
+            y: 0,
+            width,
+            height: 600,
+        }
     }
 
     #[test]
     fn repeated_identical_geometry_applies_exactly_once() {
         let latch = GeometryLatch::default();
         let bounds = geometry(10, 800);
-        assert!(latch.needs_apply(bounds), "first placement must reach the compositor");
+        assert!(
+            latch.needs_apply(bounds),
+            "first placement must reach the compositor"
+        );
         let extra = (0..64).filter(|_| latch.needs_apply(bounds)).count();
-        assert_eq!(extra, 0, "re-sending identical bounds must not mutate the platform surface");
+        assert_eq!(
+            extra, 0,
+            "re-sending identical bounds must not mutate the platform surface"
+        );
     }
 
     #[test]
     fn a_changed_rectangle_applies_again() {
         let latch = GeometryLatch::default();
         assert!(latch.needs_apply(geometry(10, 800)));
-        assert!(latch.needs_apply(geometry(10, 801)), "a resize must reach the compositor");
-        assert!(latch.needs_apply(geometry(11, 801)), "a move must reach the compositor");
+        assert!(
+            latch.needs_apply(geometry(10, 801)),
+            "a resize must reach the compositor"
+        );
+        assert!(
+            latch.needs_apply(geometry(11, 801)),
+            "a move must reach the compositor"
+        );
         assert!(!latch.needs_apply(geometry(11, 801)), "and then settle");
     }
 
@@ -202,7 +219,10 @@ mod geometry_latch_tests {
         assert!(latch.needs_apply(bounds));
         assert!(!latch.needs_apply(bounds));
         latch.invalidate();
-        assert!(latch.needs_apply(bounds), "after reattach the compositor no longer holds our geometry");
+        assert!(
+            latch.needs_apply(bounds),
+            "after reattach the compositor no longer holds our geometry"
+        );
     }
     #[test]
     fn wayland_subsurface_geometry_latches_on_its_own_type() {
@@ -217,14 +237,31 @@ mod geometry_latch_tests {
             physical_width: 1600,
             physical_height: 960,
         };
-        assert!(latch.needs_apply(geometry), "first geometry must reach the compositor");
+        assert!(
+            latch.needs_apply(geometry),
+            "first geometry must reach the compositor"
+        );
         for tick in 0..32 {
-            assert!(!latch.needs_apply(geometry), "identical geometry {tick} must not re-apply");
+            assert!(
+                !latch.needs_apply(geometry),
+                "identical geometry {tick} must not re-apply"
+            );
         }
-        let moved = WaylandSubsurfaceGeometry { position_x: 25, ..geometry };
-        assert!(latch.needs_apply(moved), "a one-pixel move must reach the compositor");
-        let rescaled = WaylandSubsurfaceGeometry { buffer_scale: 1, ..moved };
-        assert!(latch.needs_apply(rescaled), "an output scale change must reach the compositor");
+        let moved = WaylandSubsurfaceGeometry {
+            position_x: 25,
+            ..geometry
+        };
+        assert!(
+            latch.needs_apply(moved),
+            "a one-pixel move must reach the compositor"
+        );
+        let rescaled = WaylandSubsurfaceGeometry {
+            buffer_scale: 1,
+            ..moved
+        };
+        assert!(
+            latch.needs_apply(rescaled),
+            "an output scale change must reach the compositor"
+        );
     }
-
 }

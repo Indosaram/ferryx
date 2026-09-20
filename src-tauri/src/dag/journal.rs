@@ -396,3 +396,7 @@ pub fn parse_events(jsonl: &str) -> Result<Vec<DagJournalEvent>, DagJournalError
     }
     Ok(events)
 }
+
+#[path = "paths.rs"]
+mod paths;
+pub use paths::resolve_dag_runs_dir;

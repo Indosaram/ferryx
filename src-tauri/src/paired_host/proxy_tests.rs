@@ -1,6 +1,20 @@
 use super::client::*;
-use crate::{remote::{machine_protocol as m, terminal_wire::{encode_frame, Metadata}}, scoped_contracts::Epoch, terminal::{output_hub::TerminalOutputHub, paired_daemon::{Descriptor, Proxy}}};
-use axum::{Router, routing::{get, post}, Json, extract::ws::{WebSocketUpgrade, Message}};
+use crate::{
+    remote::{
+        machine_protocol as m,
+        terminal_wire::{encode_frame, Metadata},
+    },
+    scoped_contracts::Epoch,
+    terminal::{
+        output_hub::TerminalOutputHub,
+        paired_daemon::{Descriptor, Proxy},
+    },
+};
+use axum::{
+    extract::ws::{Message, WebSocketUpgrade},
+    routing::{get, post},
+    Json, Router,
+};
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
 
@@ -74,15 +88,47 @@ async fn socket_fixture(native: bool, drop_connected: bool, spontaneous: Option<
             }
         }));
     let (shutdown, stopped) = tokio::sync::oneshot::channel::<()>();
-    let server = tokio::spawn(async move { axum::serve(listener, router).with_graceful_shutdown(async { let _ = stopped.await; }).await.unwrap(); });
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async {
+                let _ = stopped.await;
+            })
+            .await
+            .unwrap();
+    });
     let service = super::service::PairedHostService::open_test_loopback(path.join("data"));
-    let host = service.pair(super::service::PairRequest { relay_origin: format!("http://{address}"), pin: super::service::Secret("fixture".into()), display_label: "fixture".into() }).await.unwrap();
-    let descriptor = Descriptor { host_id: host.host_id.clone(), generation: host.generation, target: m::RemoteTerminalTarget { machine_id: "a".into(), daemon_epoch: Epoch(1), session_id: "s".into() }, after_sequence: None };
+    let host = service
+        .pair(super::service::PairRequest {
+            relay_origin: format!("http://{address}"),
+            pin: super::service::Secret("fixture".into()),
+            display_label: "fixture".into(),
+        })
+        .await
+        .unwrap();
+    let descriptor = Descriptor {
+        host_id: host.host_id.clone(),
+        generation: host.generation,
+        target: m::RemoteTerminalTarget {
+            machine_id: "a".into(),
+            daemon_epoch: Epoch(1),
+            session_id: "s".into(),
+        },
+        after_sequence: None,
+    };
     let hub = Arc::new(TerminalOutputHub::new(32));
     let mut proxy = Proxy::new(descriptor, hub.clone()).unwrap();
-    let mut output = hub.subscribe_with_sequence(proxy.id(), None).unwrap().receiver;
-    proxy.reattach(&MachineClient::new(), &service).await.unwrap();
-    let terminal = crate::terminal::TerminalService::new(Arc::new(crate::terminal::PtyManager::new()), hub.clone());
+    let mut output = hub
+        .subscribe_with_sequence(proxy.id(), None)
+        .unwrap()
+        .receiver;
+    proxy
+        .reattach(&MachineClient::new(), &service)
+        .await
+        .unwrap();
+    let terminal = crate::terminal::TerminalService::new(
+        Arc::new(crate::terminal::PtyManager::new()),
+        hub.clone(),
+    );
     let id = proxy.id().to_owned();
     let mut proxy = if native {
         terminal.paired().install(proxy).unwrap();
@@ -90,59 +136,122 @@ async fn socket_fixture(native: bool, drop_connected: bool, spontaneous: Option<
         assert!(router.is_local_session(&id));
         assert!(terminal.attach_with_sequence(&id, None).is_ok());
         assert!(terminal.write_input(&id, b"unfenced").is_err());
-        assert!(terminal.write_input_operation(&id, 6, b"wrong".to_vec()).unwrap().await.is_err());
-        terminal.write_input_operation(&id, 7, b"input".to_vec()).unwrap().await.unwrap();
-        terminal.resize_operation(&id, 7, 100, 40).unwrap().await.unwrap();
+        assert!(terminal
+            .write_input_operation(&id, 6, b"wrong".to_vec())
+            .unwrap()
+            .await
+            .is_err());
+        terminal
+            .write_input_operation(&id, 7, b"input".to_vec())
+            .unwrap()
+            .await
+            .unwrap();
+        terminal
+            .resize_operation(&id, 7, 100, 40)
+            .unwrap()
+            .await
+            .unwrap();
         terminal.paired().interrupt(&id, 7).unwrap().await.unwrap();
         None
     } else {
         assert!(proxy.write(Epoch(6), b"wrong").await.is_err());
-        assert_eq!(proxy.write(Epoch(7), &vec![0; 64 * 1024 + 1]).await.unwrap_err().code, "PAYLOAD_TOO_LARGE");
+        assert_eq!(
+            proxy
+                .write(Epoch(7), &vec![0; 64 * 1024 + 1])
+                .await
+                .unwrap_err()
+                .code,
+            "PAYLOAD_TOO_LARGE"
+        );
         proxy.write(Epoch(7), b"input").await.unwrap();
         proxy.resize(Epoch(7), 100, 40).await.unwrap();
         proxy.interrupt(Epoch(7)).await.unwrap();
         Some(proxy)
     };
-    let input = tokio::time::timeout(Duration::from_secs(5), input_rx).await.unwrap().unwrap();
+    let input = tokio::time::timeout(Duration::from_secs(5), input_rx)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(input[0], Message::Binary(b"input".to_vec().into()));
-    for (message, expected) in input[1..].iter().zip([json!({"type":"resize","generation":"7","cols":100,"rows":40}), json!({"type":"signal","generation":"7","signal":"interrupt"})]) {
-        let Message::Text(text) = message else { panic!("expected control"); };
-        assert_eq!(serde_json::from_str::<serde_json::Value>(text).unwrap(), expected);
+    for (message, expected) in input[1..].iter().zip([
+        json!({"type":"resize","generation":"7","cols":100,"rows":40}),
+        json!({"type":"signal","generation":"7","signal":"interrupt"}),
+    ]) {
+        let Message::Text(text) = message else {
+            panic!("expected control");
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(text).unwrap(),
+            expected
+        );
     }
-    if let Some(proxy) = proxy.as_mut() { proxy.receive().await.unwrap(); }
-    let first = tokio::time::timeout(Duration::from_secs(5), output.recv()).await.unwrap().unwrap();
+    if let Some(proxy) = proxy.as_mut() {
+        proxy.receive().await.unwrap();
+    }
+    let first = tokio::time::timeout(Duration::from_secs(5), output.recv())
+        .await
+        .unwrap()
+        .unwrap();
     let observed = first.bytes.clone();
     if let Some(proxy) = proxy.as_mut() {
         assert_eq!(first.sequence, 2);
         assert_eq!(proxy.descriptor().after_sequence, Some(Epoch(10)));
         proxy.receive().await.unwrap();
         assert_eq!(proxy.descriptor().after_sequence, Some(Epoch(11)));
-        if !drop_connected { proxy.detach().await.unwrap(); }
+        if !drop_connected {
+            proxy.detach().await.unwrap();
+        }
     } else {
-        let live = tokio::time::timeout(Duration::from_secs(5), output.recv()).await.unwrap().unwrap();
+        let live = tokio::time::timeout(Duration::from_secs(5), output.recv())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(&*live.bytes, b"world");
         assert!(live.sequence > first.sequence);
         if spontaneous.is_some() {
-            let pending = terminal.write_input_operation(&id, 7, b"racing".to_vec()).unwrap();
+            let pending = terminal
+                .write_input_operation(&id, 7, b"racing".to_vec())
+                .unwrap();
             let completed = terminal.paired().completion_probe(&id, pending);
             terminate_tx.send(()).unwrap();
-            tokio::time::timeout(Duration::from_secs(5), completed).await.unwrap();
-            assert!(matches!(terminal.write_input_operation(&id, 7, b"dead".to_vec()), Err(crate::terminal::PtyError::Other(code)) if code == "PAIRED_PROXY_MISSING"));
+            tokio::time::timeout(Duration::from_secs(5), completed)
+                .await
+                .unwrap();
+            assert!(
+                matches!(terminal.write_input_operation(&id, 7, b"dead".to_vec()), Err(crate::terminal::PtyError::Other(code)) if code == "PAIRED_PROXY_MISSING")
+            );
         } else {
             terminal.paired().detach(&id).await.unwrap();
         }
-        assert!(terminal.write_input_operation(&id, 7, b"detached".to_vec()).is_err());
+        assert!(terminal
+            .write_input_operation(&id, 7, b"detached".to_vec())
+            .is_err());
         assert!(terminal.list_sessions().is_empty());
         assert!(terminal.pty_manager().list_sessions().is_empty());
     }
     drop(proxy);
     assert_eq!(hub.has_session(&id), spontaneous != Some(true));
     assert!(!hub.transport_owner(&id));
-    let reattach_descriptor = Descriptor { host_id: host.host_id.clone(), generation: host.generation, target: m::RemoteTerminalTarget { machine_id: "a".into(), daemon_epoch: Epoch(1), session_id: "s".into() }, after_sequence: None };
+    let reattach_descriptor = Descriptor {
+        host_id: host.host_id.clone(),
+        generation: host.generation,
+        target: m::RemoteTerminalTarget {
+            machine_id: "a".into(),
+            daemon_epoch: Epoch(1),
+            session_id: "s".into(),
+        },
+        after_sequence: None,
+    };
     assert!(Proxy::new(reattach_descriptor, hub.clone()).is_ok());
-    tokio::time::timeout(Duration::from_secs(5), closed_rx).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), closed_rx)
+        .await
+        .unwrap()
+        .unwrap();
     shutdown.send(()).unwrap();
-    tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(tokio::net::TcpStream::connect(address).await.is_err());
     drop(service);
     root.close().unwrap();
@@ -153,7 +262,16 @@ async fn socket_fixture(native: bool, drop_connected: bool, spontaneous: Option<
 #[tokio::test]
 async fn native_registry_routes_paired_ids_without_local_fallback() {
     let terminal = crate::terminal::TerminalService::default();
-    let descriptor = Descriptor { host_id: "host-a".into(), generation: Epoch(1), target: m::RemoteTerminalTarget { machine_id: "a".into(), daemon_epoch: Epoch(1), session_id: "same".into() }, after_sequence: None };
+    let descriptor = Descriptor {
+        host_id: "host-a".into(),
+        generation: Epoch(1),
+        target: m::RemoteTerminalTarget {
+            machine_id: "a".into(),
+            daemon_epoch: Epoch(1),
+            session_id: "same".into(),
+        },
+        after_sequence: None,
+    };
     let proxy = Proxy::new(descriptor.clone(), terminal.output_hub().clone()).unwrap();
     let id = proxy.id().to_owned();
     let mut other = descriptor;
@@ -163,7 +281,11 @@ async fn native_registry_routes_paired_ids_without_local_fallback() {
     terminal.paired().install(proxy).unwrap();
     assert!(terminal.list_sessions().contains(&id));
     assert!(terminal.attach_with_sequence(&id, None).is_ok());
-    assert!(terminal.write_input_operation(&id, 7, b"detached".to_vec()).unwrap().await.is_err());
+    assert!(terminal
+        .write_input_operation(&id, 7, b"detached".to_vec())
+        .unwrap()
+        .await
+        .is_err());
     assert!(terminal.close_session(&id).await.is_ok());
     drop(other);
     assert!(!terminal.output_hub().has_session(&id));

@@ -199,22 +199,13 @@ where
 #[serde(tag = "operation", rename_all = "camelCase")]
 pub enum RemoteBrowserOperation {
     #[serde(rename_all = "camelCase")]
-    Navigate {
-        browser_id: String,
-        url: String,
-    },
+    Navigate { browser_id: String, url: String },
     #[serde(rename_all = "camelCase")]
-    Back {
-        browser_id: String,
-    },
+    Back { browser_id: String },
     #[serde(rename_all = "camelCase")]
-    Forward {
-        browser_id: String,
-    },
+    Forward { browser_id: String },
     #[serde(rename_all = "camelCase")]
-    Reload {
-        browser_id: String,
-    },
+    Reload { browser_id: String },
     #[serde(rename_all = "camelCase")]
     Click {
         browser_id: String,
@@ -256,10 +247,7 @@ pub enum RemoteBrowserOperation {
         map_revision: Option<u64>,
     },
     #[serde(rename_all = "camelCase")]
-    Keypress {
-        browser_id: String,
-        key: String,
-    },
+    Keypress { browser_id: String, key: String },
     #[serde(rename_all = "camelCase")]
     Wait {
         browser_id: String,
@@ -277,13 +265,9 @@ pub enum RemoteBrowserOperation {
         has_approval: bool,
     },
     #[serde(rename_all = "camelCase")]
-    GetState {
-        browser_id: String,
-    },
+    GetState { browser_id: String },
     #[serde(rename_all = "camelCase")]
-    Snapshot {
-        browser_id: String,
-    },
+    Snapshot { browser_id: String },
     #[serde(rename_all = "camelCase")]
     List {
         #[serde(default)]
@@ -352,24 +336,40 @@ impl RemoteBrowserOperation {
     pub fn validate(&self) -> Result<(), IpcError> {
         match self {
             Self::List { .. } => Ok(()),
-            Self::Execute { browser_id, command, .. } => {
+            Self::Execute {
+                browser_id,
+                command,
+                ..
+            } => {
                 if browser_id.trim().is_empty() {
-                    return Err(IpcError::new(IpcErrorCode::InvalidArgument, "browserId required"));
+                    return Err(IpcError::new(
+                        IpcErrorCode::InvalidArgument,
+                        "browserId required",
+                    ));
                 }
                 if command.trim().is_empty() {
-                    return Err(IpcError::new(IpcErrorCode::InvalidArgument, "command required"));
+                    return Err(IpcError::new(
+                        IpcErrorCode::InvalidArgument,
+                        "command required",
+                    ));
                 }
                 Ok(())
             }
             Self::SubscribeViewer { browser_id, .. } => {
                 if browser_id.trim().is_empty() {
-                    return Err(IpcError::new(IpcErrorCode::InvalidArgument, "browserId required"));
+                    return Err(IpcError::new(
+                        IpcErrorCode::InvalidArgument,
+                        "browserId required",
+                    ));
                 }
                 Ok(())
             }
             Self::UnsubscribeViewer { browser_id, .. } => {
                 if browser_id.trim().is_empty() {
-                    return Err(IpcError::new(IpcErrorCode::InvalidArgument, "browserId required"));
+                    return Err(IpcError::new(
+                        IpcErrorCode::InvalidArgument,
+                        "browserId required",
+                    ));
                 }
                 Ok(())
             }
@@ -586,16 +586,15 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                     .verify_remote_target(&browser_id, &snap_id, map_rev, &ref_str)
                     .map_err(|e| match e {
                         BrowserError::AutomationSnapshotStale
-                        | BrowserError::AutomationTargetNotFound(_) => {
-                            IpcError::new(
-                                IpcErrorCode::Custom("BROWSER_INVALID_SNAPSHOT".into()),
-                                "remote snapshot reference missing, stale, or target not found",
-                            )
-                        }
+                        | BrowserError::AutomationTargetNotFound(_) => IpcError::new(
+                            IpcErrorCode::Custom("BROWSER_INVALID_SNAPSHOT".into()),
+                            "remote snapshot reference missing, stale, or target not found",
+                        ),
                         other => IpcError::from(other),
                     })?;
-                let selector_json = serde_json::to_string(&selector)
-                    .map_err(|e| IpcError::new(IpcErrorCode::BrowserAutomationFailed, e.to_string()))?;
+                let selector_json = serde_json::to_string(&selector).map_err(|e| {
+                    IpcError::new(IpcErrorCode::BrowserAutomationFailed, e.to_string())
+                })?;
                 (
                     format!(
                         r#"(function() {{
@@ -624,12 +623,14 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                     Some(py),
                 )
             } else if let (Some(u_val), Some(v_val)) = (u, v) {
-                let rect = capture_rect.or(bounds).unwrap_or(crate::browser::model::LogicalRect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: 1024.0,
-                    height: 768.0,
-                });
+                let rect = capture_rect
+                    .or(bounds)
+                    .unwrap_or(crate::browser::model::LogicalRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 1024.0,
+                        height: 768.0,
+                    });
                 let pt = crate::browser::remote_input::map_point_mainframe(
                     u_val, v_val, &rect, false, false, false,
                 )
@@ -672,7 +673,10 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
             if let Some(seq) = sequence_number {
                 res_map.insert("sequenceNumber".into(), serde_json::json!(seq));
             }
-            res_map.insert("documentGeneration".into(), serde_json::json!(state.generation));
+            res_map.insert(
+                "documentGeneration".into(),
+                serde_json::json!(state.generation),
+            );
             res_map.insert("viewportRevision".into(), serde_json::json!(current_vp_rev));
             if let Some(gs) = geometry_source {
                 res_map.insert("geometrySource".into(), serde_json::Value::String(gs));
@@ -706,12 +710,10 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                 .verify_remote_target(&browser_id, &snap_id, map_rev, &reference)
                 .map_err(|e| match e {
                     BrowserError::AutomationSnapshotStale
-                    | BrowserError::AutomationTargetNotFound(_) => {
-                        IpcError::new(
-                            IpcErrorCode::Custom("BROWSER_INVALID_SNAPSHOT".into()),
-                            "remote snapshot reference missing, stale, or target not found",
-                        )
-                    }
+                    | BrowserError::AutomationTargetNotFound(_) => IpcError::new(
+                        IpcErrorCode::Custom("BROWSER_INVALID_SNAPSHOT".into()),
+                        "remote snapshot reference missing, stale, or target not found",
+                    ),
                     other => IpcError::from(other),
                 })?;
             let webview = app
@@ -767,7 +769,14 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
             ..
         } => {
             let timeout = timeout_ms.map(std::time::Duration::from_millis);
-            crate::ipc::browser::wait_browser_session_with_timeout(app, manager, &browser_id, condition, timeout).await?;
+            crate::ipc::browser::wait_browser_session_with_timeout(
+                app,
+                manager,
+                &browser_id,
+                condition,
+                timeout,
+            )
+            .await?;
             Ok(serde_json::json!({ "conditionMet": true }))
         }
         RemoteBrowserOperation::Eval {
@@ -790,13 +799,26 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
             let instance_id = manager.get_instance_id(&browser_id).unwrap_or_default();
             let (bounds, _, viewport_revision) =
                 manager.get_geometry(&browser_id).unwrap_or((None, 1.0, 1));
-            let (service_epoch, desktop_epoch) = if let Some(svc) = app.try_state::<Arc<crate::browser::remote_service::BrowserRemoteService>>() {
+            let (service_epoch, desktop_epoch) = if let Some(svc) =
+                app.try_state::<Arc<crate::browser::remote_service::BrowserRemoteService>>()
+            {
                 (svc.service_epoch(), svc.desktop_epoch())
-            } else if let Some(backend) = app.try_state::<Arc<crate::remote::browser_backend::InProcessBrowserServiceBackend>>() {
-                (backend.remote_service.service_epoch(), backend.remote_service.desktop_epoch())
-            } else if let Some(mgr) = app.try_state::<Arc<crate::ipc::remote::RemoteGatewayManager>>() {
+            } else if let Some(backend) = app
+                .try_state::<Arc<crate::remote::browser_backend::InProcessBrowserServiceBackend>>()
+            {
+                (
+                    backend.remote_service.service_epoch(),
+                    backend.remote_service.desktop_epoch(),
+                )
+            } else if let Some(mgr) =
+                app.try_state::<Arc<crate::ipc::remote::RemoteGatewayManager>>()
+            {
                 if let Some(st) = mgr.state() {
-                    (st.browser_service_epoch.load(std::sync::atomic::Ordering::Relaxed), 1)
+                    (
+                        st.browser_service_epoch
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                        1,
+                    )
                 } else {
                     (1, 1)
                 }
@@ -817,7 +839,10 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                 "bounds": bounds,
             }))
         }
-        RemoteBrowserOperation::List { workspace_id, worktree_slug } => {
+        RemoteBrowserOperation::List {
+            workspace_id,
+            worktree_slug,
+        } => {
             let sessions = manager.list_sessions();
             let filtered: Vec<_> = sessions
                 .into_iter()
@@ -826,7 +851,10 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                         Some(ws) if !ws.is_empty() => s.workspace_id.as_deref() == Some(ws),
                         _ => true,
                     };
-                    let wt_path = manager.get_state(&s.browser_id).ok().and_then(|st| st.worktree_path);
+                    let wt_path = manager
+                        .get_state(&s.browser_id)
+                        .ok()
+                        .and_then(|st| st.worktree_path);
                     let wt_match = match &worktree_slug {
                         Some(wt) if !wt.is_empty() => {
                             crate::remote::browser_backend::matches_worktree_slug(
@@ -839,7 +867,10 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                     ws_match && wt_match
                 })
                 .map(|s| {
-                    let wt_path = manager.get_state(&s.browser_id).ok().and_then(|st| st.worktree_path);
+                    let wt_path = manager
+                        .get_state(&s.browser_id)
+                        .ok()
+                        .and_then(|st| st.worktree_path);
                     serde_json::json!({
                         "browserId": s.browser_id,
                         "title": s.title,
@@ -873,9 +904,18 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
 
             if is_mutation {
                 if let Some(service) = service {
-                    let lease_ep = lease_epoch.as_deref().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-                    let dt_ep = desktop_epoch.as_deref().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-                    let gen = document_generation.as_deref().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+                    let lease_ep = lease_epoch
+                        .as_deref()
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(0);
+                    let dt_ep = desktop_epoch
+                        .as_deref()
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(0);
+                    let gen = document_generation
+                        .as_deref()
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(0);
                     let dev = device_id.as_deref().unwrap_or("");
                     let conn = connection_id.as_deref().unwrap_or("");
                     let inst = browser_instance_id.as_deref().unwrap_or("");
@@ -896,8 +936,12 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                             other => IpcError::new(IpcErrorCode::Custom("BROWSER_EXECUTION_FAILED".into()), other.to_string()),
                         })?;
                 } else {
-                    let broker = app.try_state::<Arc<crate::browser::remote_driver::RemoteDriverBroker>>();
-                    let lease_ep = lease_epoch.as_deref().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+                    let broker =
+                        app.try_state::<Arc<crate::browser::remote_driver::RemoteDriverBroker>>();
+                    let lease_ep = lease_epoch
+                        .as_deref()
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(0);
                     let dev = device_id.as_deref().unwrap_or("");
                     let conn = connection_id.as_deref().unwrap_or("");
                     if let Some(broker) = broker {
@@ -931,7 +975,10 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                 if gen_str != &state.generation.to_string() {
                     return Err(IpcError::new(
                         IpcErrorCode::Custom("BROWSER_STALE_IDENTITY".into()),
-                        format!("Stale document generation: expected {}, got {gen_str}", state.generation),
+                        format!(
+                            "Stale document generation: expected {}, got {gen_str}",
+                            state.generation
+                        ),
                     ));
                 }
             }
@@ -952,9 +999,13 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                 device_id,
                 connection_id,
             };
-            let exec_res = crate::remote::browser_backend::BrowserCommandExecutor::execute(&executor, ctx).await;
+            let exec_res =
+                crate::remote::browser_backend::BrowserCommandExecutor::execute(&executor, ctx)
+                    .await;
             match exec_res {
-                Ok(result) => Ok(result.value.unwrap_or_else(|| serde_json::json!({ "success": true }))),
+                Ok(result) => Ok(result
+                    .value
+                    .unwrap_or_else(|| serde_json::json!({ "success": true }))),
                 Err(e) => {
                     let err_msg = e.to_string();
                     if err_msg.contains("BROWSER_TARGET_NOT_FOUND")
@@ -966,7 +1017,9 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                             IpcErrorCode::Custom("BROWSER_TARGET_NOT_FOUND".into()),
                             err_msg,
                         ))
-                    } else if err_msg.contains("BROWSER_STALE_FRAME") || err_msg.contains("viewport revision changed") {
+                    } else if err_msg.contains("BROWSER_STALE_FRAME")
+                        || err_msg.contains("viewport revision changed")
+                    {
                         Err(IpcError::new(
                             IpcErrorCode::Custom("BROWSER_STALE_FRAME".into()),
                             err_msg,
@@ -974,23 +1027,41 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                     } else {
                         match e {
                             crate::remote::browser_backend::RemoteBrowserError::Forbidden(msg) => {
-                                Err(IpcError::new(IpcErrorCode::Custom("BROWSER_FORBIDDEN".into()), msg))
+                                Err(IpcError::new(
+                                    IpcErrorCode::Custom("BROWSER_FORBIDDEN".into()),
+                                    msg,
+                                ))
                             }
                             crate::remote::browser_backend::RemoteBrowserError::NotFound(msg) => {
-                                Err(IpcError::new(IpcErrorCode::Custom("BROWSER_NOT_FOUND".into()), msg))
+                                Err(IpcError::new(
+                                    IpcErrorCode::Custom("BROWSER_NOT_FOUND".into()),
+                                    msg,
+                                ))
                             }
-                            crate::remote::browser_backend::RemoteBrowserError::InvalidRequest(msg) => {
-                                Err(IpcError::new(IpcErrorCode::Custom("BROWSER_INVALID_REQUEST".into()), msg))
-                            }
+                            crate::remote::browser_backend::RemoteBrowserError::InvalidRequest(
+                                msg,
+                            ) => Err(IpcError::new(
+                                IpcErrorCode::Custom("BROWSER_INVALID_REQUEST".into()),
+                                msg,
+                            )),
                             crate::remote::browser_backend::RemoteBrowserError::WaitTimeout => {
-                                Err(IpcError::new(IpcErrorCode::BrowserWaitTimeout, "wait timeout expired"))
+                                Err(IpcError::new(
+                                    IpcErrorCode::BrowserWaitTimeout,
+                                    "wait timeout expired",
+                                ))
                             }
-                            crate::remote::browser_backend::RemoteBrowserError::Unavailable(msg) => {
-                                Err(IpcError::new(IpcErrorCode::Custom("BROWSER_UNAVAILABLE".into()), msg))
-                            }
-                            crate::remote::browser_backend::RemoteBrowserError::ExecutionFailed(msg) => {
-                                Err(IpcError::new(IpcErrorCode::Custom("BROWSER_EXECUTION_FAILED".into()), msg))
-                            }
+                            crate::remote::browser_backend::RemoteBrowserError::Unavailable(
+                                msg,
+                            ) => Err(IpcError::new(
+                                IpcErrorCode::Custom("BROWSER_UNAVAILABLE".into()),
+                                msg,
+                            )),
+                            crate::remote::browser_backend::RemoteBrowserError::ExecutionFailed(
+                                msg,
+                            ) => Err(IpcError::new(
+                                IpcErrorCode::Custom("BROWSER_EXECUTION_FAILED".into()),
+                                msg,
+                            )),
                         }
                     }
                 }
@@ -1029,8 +1100,18 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                 });
 
                 let (sub_id, negotiated_prof) = service
-                    .subscribe_with_profile(&browser_id, &device_id, &viewer_instance_id, requested_profile)
-                    .map_err(|e| IpcError::new(IpcErrorCode::Custom("BROWSER_SUBSCRIPTION_FAILED".into()), e.to_string()))?;
+                    .subscribe_with_profile(
+                        &browser_id,
+                        &device_id,
+                        &viewer_instance_id,
+                        requested_profile,
+                    )
+                    .map_err(|e| {
+                        IpcError::new(
+                            IpcErrorCode::Custom("BROWSER_SUBSCRIPTION_FAILED".into()),
+                            e.to_string(),
+                        )
+                    })?;
                 let stream_id = service.active_stream_id(&browser_id).unwrap_or(1);
                 let state = manager.get_state(&browser_id)?;
                 let instance_id = manager.get_instance_id(&browser_id).unwrap_or_default();
@@ -1045,7 +1126,9 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                         }
                     },
                     quality: match negotiated_prof.format {
-                        crate::browser::snapshot_source::SnapshotFormat::Jpeg { quality } => Some(quality),
+                        crate::browser::snapshot_source::SnapshotFormat::Jpeg { quality } => {
+                            Some(quality)
+                        }
                         _ => None,
                     },
                     interval_ms: Some(negotiated_prof.interval_ms),
@@ -1104,21 +1187,29 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
             subscription_id,
             lease_epoch,
         } => {
-            let broker = app.try_state::<Arc<crate::browser::remote_driver::RemoteDriverBroker>>()
+            let broker = app
+                .try_state::<Arc<crate::browser::remote_driver::RemoteDriverBroker>>()
                 .map(|b| Arc::clone(&b))
                 .or_else(|| {
                     app.try_state::<Arc<crate::browser::remote_service::BrowserRemoteService>>()
                         .map(|s| s.driver_broker().clone())
                 });
             if let Some(broker) = broker {
-                let lease = broker.claim_with_epoch(
-                    &device_id,
-                    &connection_id,
-                    &subscription_id,
-                    &browser_id,
-                    true,
-                    lease_epoch.unwrap_or(0),
-                ).map_err(|e| IpcError::new(IpcErrorCode::Custom("BROWSER_FORBIDDEN".into()), e.to_string()))?;
+                let lease = broker
+                    .claim_with_epoch(
+                        &device_id,
+                        &connection_id,
+                        &subscription_id,
+                        &browser_id,
+                        true,
+                        lease_epoch.unwrap_or(0),
+                    )
+                    .map_err(|e| {
+                        IpcError::new(
+                            IpcErrorCode::Custom("BROWSER_FORBIDDEN".into()),
+                            e.to_string(),
+                        )
+                    })?;
                 Ok(serde_json::json!({
                     "leaseEpoch": lease.lease_epoch.to_string(),
                     "expiresAt": lease.expires_at.elapsed().as_secs_f64(),
@@ -1131,7 +1222,8 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
             subscription_id,
             lease_epoch,
         } => {
-            let broker = app.try_state::<Arc<crate::browser::remote_driver::RemoteDriverBroker>>()
+            let broker = app
+                .try_state::<Arc<crate::browser::remote_driver::RemoteDriverBroker>>()
                 .map(|b| Arc::clone(&b))
                 .or_else(|| {
                     app.try_state::<Arc<crate::browser::remote_service::BrowserRemoteService>>()
@@ -1148,15 +1240,27 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
             subscription_id,
             lease_epoch,
         } => {
-            let broker = app.try_state::<Arc<crate::browser::remote_driver::RemoteDriverBroker>>()
+            let broker = app
+                .try_state::<Arc<crate::browser::remote_driver::RemoteDriverBroker>>()
                 .map(|b| Arc::clone(&b))
                 .or_else(|| {
                     app.try_state::<Arc<crate::browser::remote_service::BrowserRemoteService>>()
                         .map(|s| s.driver_broker().clone())
                 });
             if let Some(broker) = broker {
-                let _ = broker.heartbeat(&device_id, &connection_id, &subscription_id, lease_epoch.unwrap_or(0))
-                    .map_err(|e| IpcError::new(IpcErrorCode::Custom("BROWSER_INVALID_REQUEST".into()), e.to_string()))?;
+                let _ = broker
+                    .heartbeat(
+                        &device_id,
+                        &connection_id,
+                        &subscription_id,
+                        lease_epoch.unwrap_or(0),
+                    )
+                    .map_err(|e| {
+                        IpcError::new(
+                            IpcErrorCode::Custom("BROWSER_INVALID_REQUEST".into()),
+                            e.to_string(),
+                        )
+                    })?;
             }
             Ok(serde_json::json!({ "status": "ok" }))
         }
@@ -1729,12 +1833,17 @@ where
         let payload_len = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
         let content_type = header[4];
 
-        let max_len = if content_type == crate::browser::remote_bridge_protocol::IPC_CONTENT_TYPE_JSON {
+        let max_len = if content_type
+            == crate::browser::remote_bridge_protocol::IPC_CONTENT_TYPE_JSON
+        {
             crate::browser::remote_bridge_protocol::MAX_JSON_PAYLOAD_BYTES
         } else if content_type == crate::browser::remote_bridge_protocol::IPC_CONTENT_TYPE_IMAGE {
             crate::browser::remote_bridge_protocol::MAX_FRAME_PAYLOAD_BYTES
         } else {
-            return Err(BrowserError::Internal(format!("Invalid IPC content type: 0x{:02x}", content_type)));
+            return Err(BrowserError::Internal(format!(
+                "Invalid IPC content type: 0x{:02x}",
+                content_type
+            )));
         };
 
         if payload_len > max_len {
@@ -1746,13 +1855,18 @@ where
 
         let mut payload = vec![0u8; payload_len];
         if payload_len > 0 {
-            reader.read_exact(&mut payload).await.map_err(|e| BrowserError::Internal(e.to_string()))?;
+            reader
+                .read_exact(&mut payload)
+                .await
+                .map_err(|e| BrowserError::Internal(e.to_string()))?;
         }
 
         if content_type == crate::browser::remote_bridge_protocol::IPC_CONTENT_TYPE_JSON {
             let parsed_op = serde_json::from_slice::<RemoteBrowserOperation>(&payload);
             let subscribed_browser_id = match &parsed_op {
-                Ok(RemoteBrowserOperation::SubscribeViewer { browser_id, .. }) => Some(browser_id.clone()),
+                Ok(RemoteBrowserOperation::SubscribeViewer { browser_id, .. }) => {
+                    Some(browser_id.clone())
+                }
                 _ => None,
             };
 
@@ -1768,7 +1882,9 @@ where
                     }
                     Err(e) => {
                         let code_str = match e.code {
-                            IpcErrorCode::InvalidArgument => "BROWSER_CLI_REQUEST_INVALID".to_string(),
+                            IpcErrorCode::InvalidArgument => {
+                                "BROWSER_CLI_REQUEST_INVALID".to_string()
+                            }
                             other => ipc_error_code_string(other),
                         };
                         let resp = BrowserCliResponse::Error {
@@ -1793,21 +1909,33 @@ where
             )
             .map_err(|e| BrowserError::Internal(e.to_string()))?;
 
-            writer.write_all(&frame).await.map_err(|e| BrowserError::Internal(e.to_string()))?;
-            writer.flush().await.map_err(|e| BrowserError::Internal(e.to_string()))?;
+            writer
+                .write_all(&frame)
+                .await
+                .map_err(|e| BrowserError::Internal(e.to_string()))?;
+            writer
+                .flush()
+                .await
+                .map_err(|e| BrowserError::Internal(e.to_string()))?;
 
             // R6-1: If this was a successful SubscribeViewer operation, enter persistent frame-forwarding loop
             if let Some(b_id) = subscribed_browser_id {
-                if let Ok(serde_json::Value::Object(ref res_obj)) = serde_json::from_slice::<serde_json::Value>(&resp_payload)
-                    .map(|v| v.get("result").cloned().unwrap_or(v))
+                if let Ok(serde_json::Value::Object(ref res_obj)) =
+                    serde_json::from_slice::<serde_json::Value>(&resp_payload)
+                        .map(|v| v.get("result").cloned().unwrap_or(v))
                 {
-                    if let Some(sub_id_val) = res_obj.get("subscriptionId").and_then(|v| v.as_str()) {
+                    if let Some(sub_id_val) = res_obj.get("subscriptionId").and_then(|v| v.as_str())
+                    {
                         let sub_id = sub_id_val.to_string();
-                        let service = app.try_state::<Arc<crate::browser::remote_service::BrowserRemoteService>>()
+                        let service = app
+                            .try_state::<Arc<crate::browser::remote_service::BrowserRemoteService>>(
+                            )
                             .map(|s| Arc::clone(&s))
                             .or_else(|| {
-                                app.try_state::<Arc<crate::remote::browser_backend::InProcessBrowserServiceBackend>>()
-                                    .map(|b| Arc::clone(&b.remote_service))
+                                app.try_state::<Arc<
+                                    crate::remote::browser_backend::InProcessBrowserServiceBackend,
+                                >>()
+                                .map(|b| Arc::clone(&b.remote_service))
                             });
 
                         if let Some(service) = service {
@@ -1908,7 +2036,10 @@ async fn execute_request<R: tauri::Runtime>(
                         browser: state.clone(),
                         workspace_id,
                     };
-                    let _ = app.emit(crate::browser::guest::BROWSER_SESSION_CREATED_EVENT, payload);
+                    let _ = app.emit(
+                        crate::browser::guest::BROWSER_SESSION_CREATED_EVENT,
+                        payload,
+                    );
                     BrowserCliResponse::Opened {
                         browser: BrowserSessionSummary::from(state),
                     }
@@ -1944,13 +2075,13 @@ async fn execute_request<R: tauri::Runtime>(
                 },
             }
         }
-        BrowserCliRequest::Identify => {
-            BrowserCliResponse::Identified {
-                browser: identify_browser_session(manager),
-            }
-        }
+        BrowserCliRequest::Identify => BrowserCliResponse::Identified {
+            browser: identify_browser_session(manager),
+        },
         BrowserCliRequest::Eval { browser_id, script } => {
-            match crate::ipc::browser::eval_browser_session(app, manager, &browser_id, &script).await {
+            match crate::ipc::browser::eval_browser_session(app, manager, &browser_id, &script)
+                .await
+            {
                 Ok((result, truncated)) => BrowserCliResponse::Evaluated { result, truncated },
                 Err(error) => BrowserCliResponse::Error {
                     code: ipc_error_code_string(error.code),
@@ -1962,7 +2093,9 @@ async fn execute_request<R: tauri::Runtime>(
             browser_id,
             condition,
         } => {
-            match crate::ipc::browser::wait_browser_session(app, manager, &browser_id, condition).await {
+            match crate::ipc::browser::wait_browser_session(app, manager, &browser_id, condition)
+                .await
+            {
                 Ok(()) => BrowserCliResponse::Waited,
                 Err(error) => BrowserCliResponse::Error {
                     code: ipc_error_code_string(error.code),
@@ -2206,7 +2339,6 @@ mod tests {
     // This fixture uses the production connection handler over an actual owned
     // TCP socket on every platform. No desktop, daemon or global runtime path.
     async fn p12_raw_tcp_request(request: serde_json::Value) -> BrowserCliResponse {
-
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
         let app = tauri::test::mock_builder()
@@ -2817,7 +2949,10 @@ mod tests {
         let (client_reader, mut client_writer) = tokio::io::split(client_stream);
         let mut line = raw_json.as_bytes().to_vec();
         line.push(b'\n');
-        client_writer.write_all(&line).await.expect("write raw json line");
+        client_writer
+            .write_all(&line)
+            .await
+            .expect("write raw json line");
         client_writer.flush().await.expect("flush raw json line");
 
         let mut response_line = String::new();
@@ -2866,12 +3001,16 @@ mod tests {
         let opened_id = resp["browser"]["browserId"].as_str().expect("browserId");
 
         let list_req = format!("{{\"command\":\"list\",\"token\":\"{token}\"}}");
-        let list_resp = send_raw_line(app.handle().clone(), Arc::clone(&manager), token, &list_req).await;
+        let list_resp =
+            send_raw_line(app.handle().clone(), Arc::clone(&manager), token, &list_req).await;
         assert_eq!(list_resp["type"], "list");
         let sessions = list_resp["sessions"].as_array().expect("sessions array");
-        assert!(sessions.iter().any(|s| s["browserId"] == opened_id && (s["url"] == "https://example.com" || s["url"] == "https://example.com/")));
+        assert!(sessions.iter().any(|s| s["browserId"] == opened_id
+            && (s["url"] == "https://example.com" || s["url"] == "https://example.com/")));
 
-        let event_payload = event_rx.try_recv().expect("received browser_session_created event");
+        let event_payload = event_rx
+            .try_recv()
+            .expect("received browser_session_created event");
         assert_eq!(event_payload["browser"]["browserId"], opened_id);
         assert_eq!(event_payload["workspaceId"], "ws-a");
     }
@@ -2890,7 +3029,10 @@ mod tests {
         let resp = send_raw_line(app.handle().clone(), Arc::clone(&manager), token, &raw_req).await;
 
         assert_eq!(resp["type"], "error", "unexpected response: {resp:?}");
-        assert_eq!(resp["code"], "BROWSER_URL_SCHEME_DENIED", "unexpected response: {resp:?}");
+        assert_eq!(
+            resp["code"], "BROWSER_URL_SCHEME_DENIED",
+            "unexpected response: {resp:?}"
+        );
     }
 
     #[tokio::test]
@@ -2907,7 +3049,10 @@ mod tests {
         let resp = send_raw_line(app.handle().clone(), Arc::clone(&manager), token, &raw_req).await;
 
         assert_eq!(resp["type"], "error", "unexpected response: {resp:?}");
-        assert_eq!(resp["code"], "BROWSER_URL_SCHEME_DENIED", "unexpected response: {resp:?}");
+        assert_eq!(
+            resp["code"], "BROWSER_URL_SCHEME_DENIED",
+            "unexpected response: {resp:?}"
+        );
     }
 
     #[tokio::test]
@@ -2929,8 +3074,14 @@ mod tests {
             &raw_req_unknown,
         )
         .await;
-        assert_eq!(resp_unknown["type"], "error", "unexpected response: {resp_unknown:?}");
-        assert_eq!(resp_unknown["code"], "BROWSER_NOT_FOUND", "unexpected response: {resp_unknown:?}");
+        assert_eq!(
+            resp_unknown["type"], "error",
+            "unexpected response: {resp_unknown:?}"
+        );
+        assert_eq!(
+            resp_unknown["code"], "BROWSER_NOT_FOUND",
+            "unexpected response: {resp_unknown:?}"
+        );
 
         // Navigate existing (register one via manager.register_session) -> Navigated and url updates in list
         let registered = manager
@@ -2957,13 +3108,19 @@ mod tests {
             &raw_req_existing,
         )
         .await;
-        assert_eq!(resp_existing["type"], "navigated", "unexpected response: {resp_existing:?}");
+        assert_eq!(
+            resp_existing["type"], "navigated",
+            "unexpected response: {resp_existing:?}"
+        );
 
         // List confirms updated url
         let list_req = format!("{{\"command\":\"list\",\"token\":\"{token}\"}}");
-        let list_resp = send_raw_line(app.handle().clone(), Arc::clone(&manager), token, &list_req).await;
+        let list_resp =
+            send_raw_line(app.handle().clone(), Arc::clone(&manager), token, &list_req).await;
         let sessions = list_resp["sessions"].as_array().expect("sessions array");
-        let found = sessions.iter().find(|s| s["browserId"] == registered.browser_id);
+        let found = sessions
+            .iter()
+            .find(|s| s["browserId"] == registered.browser_id);
         assert!(found.is_some(), "session not found in list");
         assert!(
             found.unwrap()["url"] == "https://updated.example.com"
@@ -3006,12 +3163,19 @@ mod tests {
             &raw_req_close,
         )
         .await;
-        assert_eq!(resp_close["type"], "closed", "unexpected response: {resp_close:?}");
+        assert_eq!(
+            resp_close["type"], "closed",
+            "unexpected response: {resp_close:?}"
+        );
 
         let list_req = format!("{{\"command\":\"list\",\"token\":\"{token}\"}}");
-        let list_resp = send_raw_line(app.handle().clone(), Arc::clone(&manager), token, &list_req).await;
+        let list_resp =
+            send_raw_line(app.handle().clone(), Arc::clone(&manager), token, &list_req).await;
         let sessions = list_resp["sessions"].as_array().expect("sessions array");
-        assert!(sessions.is_empty(), "expected empty list after close, got: {sessions:?}");
+        assert!(
+            sessions.is_empty(),
+            "expected empty list after close, got: {sessions:?}"
+        );
 
         // Close again -> Error BROWSER_NOT_FOUND
         let resp_close_again = send_raw_line(
@@ -3021,8 +3185,14 @@ mod tests {
             &raw_req_close,
         )
         .await;
-        assert_eq!(resp_close_again["type"], "error", "unexpected response: {resp_close_again:?}");
-        assert_eq!(resp_close_again["code"], "BROWSER_NOT_FOUND", "unexpected response: {resp_close_again:?}");
+        assert_eq!(
+            resp_close_again["type"], "error",
+            "unexpected response: {resp_close_again:?}"
+        );
+        assert_eq!(
+            resp_close_again["code"], "BROWSER_NOT_FOUND",
+            "unexpected response: {resp_close_again:?}"
+        );
     }
 
     #[tokio::test]
@@ -3042,8 +3212,14 @@ mod tests {
             &raw_req_identify,
         )
         .await;
-        assert_eq!(resp_empty["type"], "identified", "unexpected response: {resp_empty:?}");
-        assert!(resp_empty["browser"].is_null(), "expected null browser for empty manager");
+        assert_eq!(
+            resp_empty["type"], "identified",
+            "unexpected response: {resp_empty:?}"
+        );
+        assert!(
+            resp_empty["browser"].is_null(),
+            "expected null browser for empty manager"
+        );
 
         // Identify with a registered visible session -> Identified with Some
         let registered = manager
@@ -3066,14 +3242,22 @@ mod tests {
             &raw_req_identify,
         )
         .await;
-        assert_eq!(resp_visible["type"], "identified", "unexpected response: {resp_visible:?}");
-        assert!(!resp_visible["browser"].is_null(), "expected Some browser for visible session");
+        assert_eq!(
+            resp_visible["type"], "identified",
+            "unexpected response: {resp_visible:?}"
+        );
+        assert!(
+            !resp_visible["browser"].is_null(),
+            "expected Some browser for visible session"
+        );
         assert_eq!(resp_visible["browser"]["browserId"], registered.browser_id);
     }
 
     #[test]
     fn test_browser_cli_phase3_wire_serialization() {
-        use crate::browser::model::{BrowserConsoleEntry, BrowserCookieEntry, BrowserWaitCondition};
+        use crate::browser::model::{
+            BrowserConsoleEntry, BrowserCookieEntry, BrowserWaitCondition,
+        };
 
         // Eval
         let req = BrowserCliRequest::Eval {
@@ -3245,17 +3429,15 @@ mod tests {
         assert!(resp["code"] == "WEBVIEW_NOT_FOUND" || resp["code"] == "BROWSER_WEBVIEW_NOT_FOUND");
 
         // Console on registered session without webview -> WEBVIEW_NOT_FOUND
-        let raw = format!(
-            "{{\"command\":\"console\",\"browserId\":\"{b_id}\",\"token\":\"{token}\"}}"
-        );
+        let raw =
+            format!("{{\"command\":\"console\",\"browserId\":\"{b_id}\",\"token\":\"{token}\"}}");
         let resp = send_raw_line(app.handle().clone(), Arc::clone(&manager), token, &raw).await;
         assert_eq!(resp["type"], "error");
         assert!(resp["code"] == "WEBVIEW_NOT_FOUND" || resp["code"] == "BROWSER_WEBVIEW_NOT_FOUND");
 
         // Focus on registered session without webview -> WEBVIEW_NOT_FOUND
-        let raw = format!(
-            "{{\"command\":\"focus\",\"browserId\":\"{b_id}\",\"token\":\"{token}\"}}"
-        );
+        let raw =
+            format!("{{\"command\":\"focus\",\"browserId\":\"{b_id}\",\"token\":\"{token}\"}}");
         let resp = send_raw_line(app.handle().clone(), Arc::clone(&manager), token, &raw).await;
         assert_eq!(resp["type"], "error");
         assert!(resp["code"] == "WEBVIEW_NOT_FOUND" || resp["code"] == "BROWSER_WEBVIEW_NOT_FOUND");
@@ -3312,9 +3494,10 @@ mod tests {
         let app_handle = app.handle().clone();
         let mgr = Arc::clone(&manager);
         let tok = Arc::new(token.to_string());
-        let _server_task = tokio::spawn(async move {
-            handle_connection(server_stream, app_handle, mgr, tok).await
-        });
+        let _server_task =
+            tokio::spawn(
+                async move { handle_connection(server_stream, app_handle, mgr, tok).await },
+            );
 
         let (mut client_reader, mut client_writer) = tokio::io::split(client_stream);
 
@@ -3322,14 +3505,24 @@ mod tests {
         let handshake_raw = format!(r#"{{"command":"remoteAttach","token":"{token}"}}"#);
         let mut line = handshake_raw.into_bytes();
         line.push(b'\n');
-        client_writer.write_all(&line).await.expect("write handshake");
+        client_writer
+            .write_all(&line)
+            .await
+            .expect("write handshake");
         client_writer.flush().await.expect("flush handshake");
 
         let mut resp_line = String::new();
         let mut buf_reader = BufReader::new(&mut client_reader);
-        buf_reader.read_line(&mut resp_line).await.expect("read handshake response");
-        let resp_json: serde_json::Value = serde_json::from_str(resp_line.trim()).expect("parse handshake json");
-        assert_eq!(resp_json["type"], "remoteAttached", "handshake must respond with remoteAttached");
+        buf_reader
+            .read_line(&mut resp_line)
+            .await
+            .expect("read handshake response");
+        let resp_json: serde_json::Value =
+            serde_json::from_str(resp_line.trim()).expect("parse handshake json");
+        assert_eq!(
+            resp_json["type"], "remoteAttached",
+            "handshake must respond with remoteAttached"
+        );
         assert_eq!(resp_json["protocolVersion"], 1);
 
         // Under R4: legacy BrowserCliRequest::List over framed IPC must be rejected with BROWSER_CLI_REQUEST_INVALID!
@@ -3339,19 +3532,37 @@ mod tests {
             &list_req_bytes,
         )
         .expect("encode framed request");
-        client_writer.write_all(&framed_req).await.expect("send framed request");
+        client_writer
+            .write_all(&framed_req)
+            .await
+            .expect("send framed request");
         client_writer.flush().await.expect("flush framed request");
 
         // Read framed response
         let mut resp_header = [0u8; 5];
-        buf_reader.read_exact(&mut resp_header).await.expect("read framed response header");
-        let resp_payload_len = u32::from_le_bytes([resp_header[0], resp_header[1], resp_header[2], resp_header[3]]) as usize;
+        buf_reader
+            .read_exact(&mut resp_header)
+            .await
+            .expect("read framed response header");
+        let resp_payload_len = u32::from_le_bytes([
+            resp_header[0],
+            resp_header[1],
+            resp_header[2],
+            resp_header[3],
+        ]) as usize;
         let resp_content_type = resp_header[4];
-        assert_eq!(resp_content_type, crate::browser::remote_bridge_protocol::IPC_CONTENT_TYPE_JSON);
+        assert_eq!(
+            resp_content_type,
+            crate::browser::remote_bridge_protocol::IPC_CONTENT_TYPE_JSON
+        );
 
         let mut resp_payload = vec![0u8; resp_payload_len];
-        buf_reader.read_exact(&mut resp_payload).await.expect("read framed payload");
-        let framed_resp: BrowserCliResponse = serde_json::from_slice(&resp_payload).expect("parse framed response");
+        buf_reader
+            .read_exact(&mut resp_payload)
+            .await
+            .expect("read framed payload");
+        let framed_resp: BrowserCliResponse =
+            serde_json::from_slice(&resp_payload).expect("parse framed response");
         assert!(matches!(
             framed_resp,
             BrowserCliResponse::Error {
@@ -3374,7 +3585,12 @@ mod tests {
         client_writer.flush().await.unwrap();
 
         buf_reader.read_exact(&mut resp_header).await.unwrap();
-        let len = u32::from_le_bytes([resp_header[0], resp_header[1], resp_header[2], resp_header[3]]) as usize;
+        let len = u32::from_le_bytes([
+            resp_header[0],
+            resp_header[1],
+            resp_header[2],
+            resp_header[3],
+        ]) as usize;
         let mut resp_buf = vec![0u8; len];
         buf_reader.read_exact(&mut resp_buf).await.unwrap();
         let resp_val: serde_json::Value = serde_json::from_slice(&resp_buf).unwrap();
@@ -3501,7 +3717,8 @@ mod tests {
         client_io.write_all(&frame2).await.unwrap();
 
         client_io.read_exact(&mut header).await.unwrap();
-        let payload_len2 = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
+        let payload_len2 =
+            u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
         let mut resp_payload2 = vec![0u8; payload_len2];
         client_io.read_exact(&mut resp_payload2).await.unwrap();
         let resp2: serde_json::Value = serde_json::from_slice(&resp_payload2).unwrap();
@@ -3519,7 +3736,8 @@ mod tests {
         client_io.write_all(&frame3).await.unwrap();
 
         client_io.read_exact(&mut header).await.unwrap();
-        let payload_len3 = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
+        let payload_len3 =
+            u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
         let mut resp_payload3 = vec![0u8; payload_len3];
         client_io.read_exact(&mut resp_payload3).await.unwrap();
         let resp3: serde_json::Value = serde_json::from_slice(&resp_payload3).unwrap();
@@ -3579,7 +3797,10 @@ mod tests {
             y: None,
         };
         let err_click = click_no_snap.validate().unwrap_err();
-        assert_eq!(ipc_error_code_string(err_click.code), "BROWSER_INVALID_SNAPSHOT");
+        assert_eq!(
+            ipc_error_code_string(err_click.code),
+            "BROWSER_INVALID_SNAPSHOT"
+        );
 
         // 2. Fill with missing snapshot_id -> validation returns BROWSER_INVALID_SNAPSHOT
         let fill_no_snap = RemoteBrowserOperation::Fill {
@@ -3590,7 +3811,10 @@ mod tests {
             map_revision: None,
         };
         let err_fill = fill_no_snap.validate().unwrap_err();
-        assert_eq!(ipc_error_code_string(err_fill.code), "BROWSER_INVALID_SNAPSHOT");
+        assert_eq!(
+            ipc_error_code_string(err_fill.code),
+            "BROWSER_INVALID_SNAPSHOT"
+        );
 
         // 3. Execution of Click or Fill with reference pointing to legacy target (not in remote_targets)
         // must fail with BROWSER_INVALID_SNAPSHOT (NEVER falling back to legacy automation_targets)
@@ -3613,7 +3837,10 @@ mod tests {
         let exec_err = execute_remote_operation(&app.handle().clone(), &manager, click_fake_snap)
             .await
             .unwrap_err();
-        assert_eq!(ipc_error_code_string(exec_err.code), "BROWSER_INVALID_SNAPSHOT");
+        assert_eq!(
+            ipc_error_code_string(exec_err.code),
+            "BROWSER_INVALID_SNAPSHOT"
+        );
 
         let fill_fake_snap = RemoteBrowserOperation::Fill {
             browser_id: b.browser_id.clone(),
@@ -3625,7 +3852,10 @@ mod tests {
         let exec_err2 = execute_remote_operation(&app.handle().clone(), &manager, fill_fake_snap)
             .await
             .unwrap_err();
-        assert_eq!(ipc_error_code_string(exec_err2.code), "BROWSER_INVALID_SNAPSHOT");
+        assert_eq!(
+            ipc_error_code_string(exec_err2.code),
+            "BROWSER_INVALID_SNAPSHOT"
+        );
     }
 
     #[tokio::test]
@@ -3757,7 +3987,10 @@ mod tests {
         let err_gen = execute_remote_operation(&app.handle().clone(), &manager, stale_gen_click)
             .await
             .unwrap_err();
-        assert_eq!(ipc_error_code_string(err_gen.code), "BROWSER_STALE_GENERATION");
+        assert_eq!(
+            ipc_error_code_string(err_gen.code),
+            "BROWSER_STALE_GENERATION"
+        );
 
         // Stale viewport revision must fail with BROWSER_STALE_VIEWPORT
         let stale_vp_click = RemoteBrowserOperation::Click {
@@ -3949,7 +4182,10 @@ mod tests {
             "hasApproval": true
         });
         let eval_op: RemoteBrowserOperation = serde_json::from_value(eval_json_untrusted).unwrap();
-        assert!(eval_op.validate().is_err(), "Client-supplied hasApproval boolean must not grant approval");
+        assert!(
+            eval_op.validate().is_err(),
+            "Client-supplied hasApproval boolean must not grant approval"
+        );
 
         // 2. Direct Rust construction with has_approval: true succeeds
         let eval_trusted = RemoteBrowserOperation::Eval {
@@ -3968,7 +4204,11 @@ mod tests {
         });
         let wait_op: RemoteBrowserOperation = serde_json::from_value(wait_json).unwrap();
         match wait_op {
-            RemoteBrowserOperation::Wait { condition, timeout_ms, .. } => {
+            RemoteBrowserOperation::Wait {
+                condition,
+                timeout_ms,
+                ..
+            } => {
                 assert_eq!(
                     condition,
                     BrowserWaitCondition::Function {
@@ -3989,7 +4229,10 @@ mod tests {
             .expect("mock app");
         let manager = Arc::new(BrowserManager::new());
         let broker = Arc::new(crate::browser::remote_driver::RemoteDriverBroker::new());
-        let service = Arc::new(BrowserRemoteService::new((*manager).clone(), Arc::clone(&broker)));
+        let service = Arc::new(BrowserRemoteService::new(
+            (*manager).clone(),
+            Arc::clone(&broker),
+        ));
         use tauri::Manager;
         app.manage(Arc::clone(&service));
         app.manage(Arc::clone(&broker));
@@ -4020,7 +4263,10 @@ mod tests {
             connection_id: None,
         };
         let res_state = execute_remote_operation(&app.handle().clone(), &manager, snap_op).await;
-        assert!(res_state.is_ok(), "getState/read-only must not require a driver lease");
+        assert!(
+            res_state.is_ok(),
+            "getState/read-only must not require a driver lease"
+        );
 
         // 2. Click (mutation) WITHOUT a driver lease must fail with BROWSER_FORBIDDEN
         let click_no_lease = RemoteBrowserOperation::Execute {
@@ -4034,7 +4280,9 @@ mod tests {
             device_id: None,
             connection_id: None,
         };
-        let err_click = execute_remote_operation(&app.handle().clone(), &manager, click_no_lease).await.unwrap_err();
+        let err_click = execute_remote_operation(&app.handle().clone(), &manager, click_no_lease)
+            .await
+            .unwrap_err();
         assert_ne!(
             err_click.message, "unsupported bridge execute command: click",
             "click must be routed through guarded executor, not rejected as unsupported"
@@ -4050,7 +4298,10 @@ mod tests {
             .expect("mock app");
         let manager = Arc::new(BrowserManager::new());
         let broker = Arc::new(crate::browser::remote_driver::RemoteDriverBroker::new());
-        let service = Arc::new(BrowserRemoteService::new((*manager).clone(), Arc::clone(&broker)));
+        let service = Arc::new(BrowserRemoteService::new(
+            (*manager).clone(),
+            Arc::clone(&broker),
+        ));
         use tauri::Manager;
         app.manage(Arc::clone(&service));
         app.manage(Arc::clone(&broker));
@@ -4069,7 +4320,9 @@ mod tests {
             .unwrap();
 
         // Claim lease so mutation guard passes
-        let lease = broker.claim("dev1", "conn1", "sub1", "b-err-test", true).unwrap();
+        let lease = broker
+            .claim("dev1", "conn1", "sub1", "b-err-test", true)
+            .unwrap();
         let lease_epoch_str = lease.lease_epoch.to_string();
         let instance_id = manager.get_instance_id("b-err-test").unwrap();
 
@@ -4085,14 +4338,18 @@ mod tests {
             device_id: Some("dev1".into()),
             connection_id: Some("conn1".into()),
         };
-        let err_stale = execute_remote_operation(&app.handle().clone(), &manager, stale_click).await.unwrap_err();
+        let err_stale = execute_remote_operation(&app.handle().clone(), &manager, stale_click)
+            .await
+            .unwrap_err();
         assert_eq!(ipc_error_code_string(err_stale.code), "BROWSER_STALE_FRAME");
 
         // 2. Snapshot target missing -> must produce BROWSER_TARGET_NOT_FOUND
         let missing_target_click = RemoteBrowserOperation::Execute {
             browser_id: "b-err-test".into(),
             command: "click".into(),
-            params: Some(serde_json::json!({ "reference": "missing-ref", "snapshotId": "snap1", "mapRevision": 1 })),
+            params: Some(
+                serde_json::json!({ "reference": "missing-ref", "snapshotId": "snap1", "mapRevision": 1 }),
+            ),
             document_generation: Some("1".into()),
             browser_instance_id: Some(instance_id),
             desktop_epoch: Some("1".into()),
@@ -4100,7 +4357,10 @@ mod tests {
             device_id: Some("dev1".into()),
             connection_id: Some("conn1".into()),
         };
-        let err_target = execute_remote_operation(&app.handle().clone(), &manager, missing_target_click).await.unwrap_err();
+        let err_target =
+            execute_remote_operation(&app.handle().clone(), &manager, missing_target_click)
+                .await
+                .unwrap_err();
         let target_code = ipc_error_code_string(err_target.code);
         assert!(
             target_code == "BROWSER_TARGET_NOT_FOUND" || target_code == "BROWSER_INVALID_REQUEST",
@@ -4120,7 +4380,10 @@ mod tests {
             .expect("mock app");
         let manager = Arc::new(BrowserManager::new());
         let broker = Arc::new(crate::browser::remote_driver::RemoteDriverBroker::new());
-        let service = Arc::new(BrowserRemoteService::new((*manager).clone(), Arc::clone(&broker)));
+        let service = Arc::new(BrowserRemoteService::new(
+            (*manager).clone(),
+            Arc::clone(&broker),
+        ));
         use tauri::Manager;
         app.manage(Arc::clone(&service));
         app.manage(Arc::clone(&broker));
@@ -4161,7 +4424,13 @@ mod tests {
         writer.flush().await.unwrap();
 
         let mut hs_line = String::new();
-        tokio::time::timeout(std::time::Duration::from_secs(3), reader.read_line(&mut hs_line)).await.unwrap().unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            reader.read_line(&mut hs_line),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(hs_line.contains("remoteAttached"));
 
         // 2. Send SubscribeViewer
@@ -4175,46 +4444,84 @@ mod tests {
         let frame = crate::browser::remote_bridge_protocol::encode_ipc_frame(
             crate::browser::remote_bridge_protocol::IPC_CONTENT_TYPE_JSON,
             &sub_bytes,
-        ).unwrap();
+        )
+        .unwrap();
         writer.write_all(&frame).await.unwrap();
         writer.flush().await.unwrap();
 
         // 3. Read SubscribeViewer response JSON
         let mut header = [0u8; 5];
-        tokio::time::timeout(std::time::Duration::from_secs(3), reader.read_exact(&mut header)).await.unwrap().unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            reader.read_exact(&mut header),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         let p_len = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
         let mut p_buf = vec![0u8; p_len];
-        tokio::time::timeout(std::time::Duration::from_secs(3), reader.read_exact(&mut p_buf)).await.unwrap().unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            reader.read_exact(&mut p_buf),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         let resp_val: serde_json::Value = serde_json::from_slice(&p_buf).unwrap();
         assert_eq!(resp_val["status"], "ok");
 
         // 4. Producer is now active. Wait for server task to subscribe to frames broadcaster
         assert!(service.is_producer_active("b-gui-stream"));
-        let sender = service.frame_broadcaster().lock().get("b-gui-stream").cloned().unwrap();
+        let sender = service
+            .frame_broadcaster()
+            .lock()
+            .get("b-gui-stream")
+            .cloned()
+            .unwrap();
         for _ in 0..50 {
             if sender.receiver_count() > 0 {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        assert!(sender.receiver_count() > 0, "Server must have subscribed to frames broadcaster");
+        assert!(
+            sender.receiver_count() > 0,
+            "Server must have subscribed to frames broadcaster"
+        );
 
         let dummy_frame = vec![0xCA, 0xFE, 0xBA, 0xBE];
         sender.send(dummy_frame.clone()).unwrap();
 
         // 5. Client receives the image frame over the persistent connection
-        tokio::time::timeout(std::time::Duration::from_secs(3), reader.read_exact(&mut header)).await.unwrap().unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            reader.read_exact(&mut header),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         let img_len = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
-        assert_eq!(header[4], crate::browser::remote_bridge_protocol::IPC_CONTENT_TYPE_IMAGE);
+        assert_eq!(
+            header[4],
+            crate::browser::remote_bridge_protocol::IPC_CONTENT_TYPE_IMAGE
+        );
         let mut img_buf = vec![0u8; img_len];
-        tokio::time::timeout(std::time::Duration::from_secs(3), reader.read_exact(&mut img_buf)).await.unwrap().unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            reader.read_exact(&mut img_buf),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(img_buf, dummy_frame);
 
         // 6. Client shuts down and drops connection
         let _ = writer.shutdown().await;
         drop(writer);
         drop(reader);
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), server_task).await.unwrap();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), server_task)
+            .await
+            .unwrap();
 
         // Producer pauses on disconnect cleanup
         assert!(!service.is_producer_active("b-gui-stream"));

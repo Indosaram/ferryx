@@ -40,26 +40,55 @@ pub enum RemoteProtocolError {
 impl std::fmt::Display for RemoteProtocolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::HeaderTooShort { actual } => write!(f, "header too short: {} bytes (min 16)", actual),
-            Self::InvalidKind { actual } => write!(f, "invalid kind: 0x{:02x}, expected 0x62", actual),
+            Self::HeaderTooShort { actual } => {
+                write!(f, "header too short: {} bytes (min 16)", actual)
+            }
+            Self::InvalidKind { actual } => {
+                write!(f, "invalid kind: 0x{:02x}, expected 0x62", actual)
+            }
             Self::InvalidVersion { actual } => write!(f, "invalid version: {}, expected 1", actual),
             Self::InvalidOpcode { actual } => write!(f, "invalid opcode: {}, expected 1", actual),
-            Self::InvalidFormat { actual } => write!(f, "invalid format: {}, expected 1 (jpeg) or 2 (png)", actual),
+            Self::InvalidFormat { actual } => write!(
+                f,
+                "invalid format: {}, expected 1 (jpeg) or 2 (png)",
+                actual
+            ),
             Self::ReservedNonZero { actual } => write!(f, "reserved field is non-zero: {}", actual),
-            Self::MetadataTooLarge { actual, max } => write!(f, "metadata too large: {} bytes (max {})", actual, max),
-            Self::FrameTooLarge { actual, max } => write!(f, "frame too large: {} bytes (max {})", actual, max),
+            Self::MetadataTooLarge { actual, max } => {
+                write!(f, "metadata too large: {} bytes (max {})", actual, max)
+            }
+            Self::FrameTooLarge { actual, max } => {
+                write!(f, "frame too large: {} bytes (max {})", actual, max)
+            }
             Self::InvalidJsonMetadata(msg) => write!(f, "invalid JSON metadata: {}", msg),
-            Self::MissingRequiredExtension(field) => write!(f, "missing required extension field: {}", field),
+            Self::MissingRequiredExtension(field) => {
+                write!(f, "missing required extension field: {}", field)
+            }
             Self::NonFiniteCoordinate(field) => write!(f, "non-finite coordinate in: {}", field),
             Self::InvalidCaptureRect => write!(f, "invalid capture_rect"),
             Self::EmptyImagePayload => write!(f, "empty image payload"),
             Self::ImageDimensionsTooLarge { width, height } => {
-                write!(f, "image dimensions exceed {}px: {}x{}", MAX_IMAGE_EDGE, width, height)
+                write!(
+                    f,
+                    "image dimensions exceed {}px: {}x{}",
+                    MAX_IMAGE_EDGE, width, height
+                )
             }
-            Self::ImagePixelsTooLarge { pixels, max } => write!(f, "image total pixels {} exceed max {}", pixels, max),
-            Self::IpcPayloadTooLarge { actual, max } => write!(f, "IPC payload too large: {} bytes (max {})", actual, max),
-            Self::IpcFrameIncomplete { expected, available } => {
-                write!(f, "IPC frame incomplete: need {} bytes, available {}", expected, available)
+            Self::ImagePixelsTooLarge { pixels, max } => {
+                write!(f, "image total pixels {} exceed max {}", pixels, max)
+            }
+            Self::IpcPayloadTooLarge { actual, max } => {
+                write!(f, "IPC payload too large: {} bytes (max {})", actual, max)
+            }
+            Self::IpcFrameIncomplete {
+                expected,
+                available,
+            } => {
+                write!(
+                    f,
+                    "IPC frame incomplete: need {} bytes, available {}",
+                    expected, available
+                )
             }
             Self::InvalidIpcContentType(ct) => write!(f, "invalid IPC content type: 0x{:02x}", ct),
         }
@@ -89,21 +118,35 @@ impl From<crate::remote::browser_protocol::ProtocolCodecError> for RemoteProtoco
         use crate::remote::browser_protocol::ProtocolCodecError;
         match err {
             ProtocolCodecError::BufferTooShort { actual, .. } => Self::HeaderTooShort { actual },
-            ProtocolCodecError::BufferTooLarge { actual, max } => Self::FrameTooLarge { actual, max },
+            ProtocolCodecError::BufferTooLarge { actual, max } => {
+                Self::FrameTooLarge { actual, max }
+            }
             ProtocolCodecError::InvalidKind(k) => Self::InvalidKind { actual: k },
             ProtocolCodecError::InvalidVersion(v) => Self::InvalidVersion { actual: v },
             ProtocolCodecError::InvalidOpcode(o) => Self::InvalidOpcode { actual: o },
             ProtocolCodecError::InvalidFormat(f) => Self::InvalidFormat { actual: f },
             ProtocolCodecError::ReservedNonZero(r) => Self::ReservedNonZero { actual: r },
-            ProtocolCodecError::MetadataTooLarge { actual, max } => Self::MetadataTooLarge { actual, max },
-            ProtocolCodecError::TruncatedFrame { actual, .. } => Self::IpcFrameIncomplete { expected: 0, available: actual },
+            ProtocolCodecError::MetadataTooLarge { actual, max } => {
+                Self::MetadataTooLarge { actual, max }
+            }
+            ProtocolCodecError::TruncatedFrame { actual, .. } => Self::IpcFrameIncomplete {
+                expected: 0,
+                available: actual,
+            },
             ProtocolCodecError::EmptyImagePayload => Self::EmptyImagePayload,
             ProtocolCodecError::InvalidMetadataJson(m) => Self::InvalidJsonMetadata(m),
             ProtocolCodecError::NonFiniteNumeric(f) => Self::NonFiniteCoordinate(f),
-            ProtocolCodecError::ImageEdgeExceeded { width, height } => Self::ImageDimensionsTooLarge { width, height },
-            ProtocolCodecError::ImagePixelsExceeded { pixels } => Self::ImagePixelsTooLarge { pixels, max: crate::remote::browser_protocol::MAX_IMAGE_PIXELS },
+            ProtocolCodecError::ImageEdgeExceeded { width, height } => {
+                Self::ImageDimensionsTooLarge { width, height }
+            }
+            ProtocolCodecError::ImagePixelsExceeded { pixels } => Self::ImagePixelsTooLarge {
+                pixels,
+                max: crate::remote::browser_protocol::MAX_IMAGE_PIXELS,
+            },
             ProtocolCodecError::InvalidDecimalString(s) => Self::MissingRequiredExtension(s),
-            ProtocolCodecError::InvalidGeometrySource(_) => Self::MissingRequiredExtension("geometrySource"),
+            ProtocolCodecError::InvalidGeometrySource(_) => {
+                Self::MissingRequiredExtension("geometrySource")
+            }
             other => Self::InvalidJsonMetadata(other.to_string()),
         }
     }
@@ -150,22 +193,34 @@ pub fn validate_frame_metadata(meta: &BrowserFrameMetadata) -> Result<(), Remote
     }
 
     if meta.browser_instance_id.trim().is_empty() {
-        return Err(RemoteProtocolError::MissingRequiredExtension("browserInstanceId"));
+        return Err(RemoteProtocolError::MissingRequiredExtension(
+            "browserInstanceId",
+        ));
     }
     if meta.browser_service_epoch.trim().is_empty() {
-        return Err(RemoteProtocolError::MissingRequiredExtension("browserServiceEpoch"));
+        return Err(RemoteProtocolError::MissingRequiredExtension(
+            "browserServiceEpoch",
+        ));
     }
     if meta.desktop_epoch.trim().is_empty() {
-        return Err(RemoteProtocolError::MissingRequiredExtension("desktopEpoch"));
+        return Err(RemoteProtocolError::MissingRequiredExtension(
+            "desktopEpoch",
+        ));
     }
     if meta.document_generation.trim().is_empty() {
-        return Err(RemoteProtocolError::MissingRequiredExtension("documentGeneration"));
+        return Err(RemoteProtocolError::MissingRequiredExtension(
+            "documentGeneration",
+        ));
     }
     if meta.viewport_revision.trim().is_empty() {
-        return Err(RemoteProtocolError::MissingRequiredExtension("viewportRevision"));
+        return Err(RemoteProtocolError::MissingRequiredExtension(
+            "viewportRevision",
+        ));
     }
     if meta.geometry_source.trim().is_empty() {
-        return Err(RemoteProtocolError::MissingRequiredExtension("geometrySource"));
+        return Err(RemoteProtocolError::MissingRequiredExtension(
+            "geometrySource",
+        ));
     }
     if !meta.capture_rect.x.is_finite()
         || !meta.capture_rect.y.is_finite()
@@ -237,7 +292,9 @@ pub fn decode_frame(
     bytes: &[u8],
 ) -> Result<(FrameHeader, BrowserFrameMetadata, Vec<u8>), RemoteProtocolError> {
     if bytes.len() < HEADER_BYTE_LENGTH {
-        return Err(RemoteProtocolError::HeaderTooShort { actual: bytes.len() });
+        return Err(RemoteProtocolError::HeaderTooShort {
+            actual: bytes.len(),
+        });
     }
     if bytes.len() > MAX_FRAME_PAYLOAD_BYTES {
         return Err(RemoteProtocolError::FrameTooLarge {
@@ -337,7 +394,9 @@ pub fn encode_ipc_frame(content_type: u8, payload: &[u8]) -> Result<Vec<u8>, Rem
     Ok(out)
 }
 
-pub fn decode_ipc_frame(cursor: &[u8]) -> Result<Option<(u8, Vec<u8>, usize)>, RemoteProtocolError> {
+pub fn decode_ipc_frame(
+    cursor: &[u8],
+) -> Result<Option<(u8, Vec<u8>, usize)>, RemoteProtocolError> {
     if cursor.len() < 5 {
         return Ok(None);
     }
@@ -619,7 +678,8 @@ mod tests {
         let meta = sample_metadata();
         let dummy_jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46];
 
-        let encoded = encode_frame(FRAME_FORMAT_JPEG, 101, &meta, &dummy_jpeg).expect("encode frame");
+        let encoded =
+            encode_frame(FRAME_FORMAT_JPEG, 101, &meta, &dummy_jpeg).expect("encode frame");
         assert!(encoded.len() > HEADER_BYTE_LENGTH);
 
         // Verify header layout
@@ -725,13 +785,16 @@ mod tests {
         missing_meta.browser_instance_id = "".to_string();
         assert!(matches!(
             encode_frame(FRAME_FORMAT_JPEG, 1, &missing_meta, &dummy_jpeg),
-            Err(RemoteProtocolError::MissingRequiredExtension("browserInstanceId"))
+            Err(RemoteProtocolError::MissingRequiredExtension(
+                "browserInstanceId"
+            ))
         ));
     }
 
     #[test]
     fn test_framed_ipc_codec() {
-        let json_payload = b"{\"type\":\"browserHeartbeat\",\"subscriptionId\":\"s1\",\"timestamp\":1000}";
+        let json_payload =
+            b"{\"type\":\"browserHeartbeat\",\"subscriptionId\":\"s1\",\"timestamp\":1000}";
         let framed = encode_ipc_frame(IPC_CONTENT_TYPE_JSON, json_payload).expect("encode ipc");
         assert_eq!(framed.len(), 5 + json_payload.len());
 
@@ -766,7 +829,8 @@ mod tests {
             "documentGeneration": "15",
             "elements": [{ "ref": "e1", "role": "button", "name": "Send" }]
         }"#;
-        let parsed: BrowserSnapshotResult = serde_json::from_str(json).expect("snapshot DTO parses");
+        let parsed: BrowserSnapshotResult =
+            serde_json::from_str(json).expect("snapshot DTO parses");
         assert_eq!(parsed.map_revision, "12");
         assert_eq!(parsed.elements.len(), 1);
         assert_eq!(parsed.elements[0].r#ref, "e1");

@@ -52,8 +52,14 @@ fn editor_argument_parses_supported_values_and_rejects_others() {
 
 #[test]
 fn path_token_is_trimmed_and_empty_or_nul_tokens_are_rejected() {
-    assert_eq!(sanitize_path_token("  'src/app.rs'  ").unwrap(), "src/app.rs");
-    assert_eq!(sanitize_path_token("\"C:\\a b\\x.rs\"").unwrap(), "C:\\a b\\x.rs");
+    assert_eq!(
+        sanitize_path_token("  'src/app.rs'  ").unwrap(),
+        "src/app.rs"
+    );
+    assert_eq!(
+        sanitize_path_token("\"C:\\a b\\x.rs\"").unwrap(),
+        "C:\\a b\\x.rs"
+    );
     assert_eq!(
         sanitize_path_token("   ").expect_err("empty token").code,
         IpcErrorCode::InvalidArgument
@@ -142,15 +148,21 @@ fn position_validation_requires_one_based_line_before_column() {
         Some((42, Some(10)))
     );
     assert_eq!(
-        validate_position(None, Some(10)).expect_err("col without line").code,
+        validate_position(None, Some(10))
+            .expect_err("col without line")
+            .code,
         IpcErrorCode::InvalidArgument
     );
     assert_eq!(
-        validate_position(Some(0), None).expect_err("zero line").code,
+        validate_position(Some(0), None)
+            .expect_err("zero line")
+            .code,
         IpcErrorCode::InvalidArgument
     );
     assert_eq!(
-        validate_position(Some(1), Some(0)).expect_err("zero col").code,
+        validate_position(Some(1), Some(0))
+            .expect_err("zero col")
+            .code,
         IpcErrorCode::InvalidArgument
     );
 }
@@ -216,7 +228,10 @@ fn path_lookup_expands_windows_pathext_and_reports_absence() {
         Some(pathext.as_os_str()),
         &|candidate: &Path| candidate == Path::new("/usr/local/bin/code.cmd"),
     );
-    assert_eq!(windows_found, Some(PathBuf::from("/usr/local/bin/code.cmd")));
+    assert_eq!(
+        windows_found,
+        Some(PathBuf::from("/usr/local/bin/code.cmd"))
+    );
 
     assert_eq!(
         which_in_path("code", Some(path_var.as_os_str()), None, &|_| false),
@@ -298,7 +313,12 @@ fn editor_cli_plans_pass_position_through_argv_without_shell_interpretation() {
 #[test]
 fn editor_url_fallback_encodes_paths_and_refuses_unc() {
     assert_eq!(
-        editor_url("vscode", Path::new("C:\\proj\\a b & c\\app.rs"), Some((5, Some(10)))).unwrap(),
+        editor_url(
+            "vscode",
+            Path::new("C:\\proj\\a b & c\\app.rs"),
+            Some((5, Some(10)))
+        )
+        .unwrap(),
         "vscode://file/C:/proj/a%20b%20%26%20c/app.rs:5:10"
     );
     assert_eq!(
@@ -405,7 +425,8 @@ fn failing_editor_exit_is_reported() {
     let error = execute(LaunchPlan::Cli {
         program: PathBuf::from("/usr/bin/false"),
         args: vec![],
-    }).expect_err("an unsuccessful launcher must not report success");
+    })
+    .expect_err("an unsuccessful launcher must not report success");
     assert_eq!(error.code, IpcErrorCode::IoError);
 }
 
@@ -541,7 +562,10 @@ async fn session_id_resolves_the_live_local_terminal_cwd() {
 
     let nested = repo.path().join("changed-directory");
     std::fs::create_dir(&nested).expect("nested directory");
-    let mut attachment = daemon_client.attach(&spawned.session_id, None).await.expect("subscribe before cd");
+    let mut attachment = daemon_client
+        .attach(&spawned.session_id, None)
+        .await
+        .expect("subscribe before cd");
     daemon_client.write_terminal(&spawned.session_id,
         b"cd changed-directory && printf '\\106\\111\\114\\105\\137\\103\\127\\104\\137\\122\\105\\101\\104\\131\\n'\n".to_vec())
         .await.expect("change directory");
@@ -550,11 +574,18 @@ async fn session_id_resolves_the_live_local_terminal_cwd() {
         while let Some(message) = attachment.messages.recv().await {
             if let crate::daemon::DaemonStreamMessage::Output { data, .. } = message {
                 output.extend_from_slice(&data);
-                if output.windows(b"FILE_CWD_READY".len()).any(|w| w == b"FILE_CWD_READY") { return; }
+                if output
+                    .windows(b"FILE_CWD_READY".len())
+                    .any(|w| w == b"FILE_CWD_READY")
+                {
+                    return;
+                }
             }
         }
         panic!("output stream closed before cd completed");
-    }).await.expect("cd completion signal");
+    })
+    .await
+    .expect("cd completion signal");
 
     let error = open_file_path_request(
         Some(&daemon_client),

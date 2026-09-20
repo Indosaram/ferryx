@@ -10,8 +10,8 @@ pub mod font_manager;
 #[cfg(target_os = "linux")]
 pub mod freetype_raster;
 pub mod gpu_context;
-pub mod instances;
 pub mod images;
+pub mod instances;
 pub mod pass;
 pub mod pipeline;
 pub mod rasterizer;

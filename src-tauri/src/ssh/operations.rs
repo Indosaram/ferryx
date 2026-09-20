@@ -160,8 +160,11 @@ pub async fn upload(
         ),
     };
     let output = data_output(host, environment, &script, bytes, Duration::from_secs(60))
-        .await.map_err(|mut err| {
-            if let Some(details) = err.details.as_mut() { details["stage"] = "upload".into(); }
+        .await
+        .map_err(|mut err| {
+            if let Some(details) = err.details.as_mut() {
+                details["stage"] = "upload".into();
+            }
             err
         })?;
     let fields = parse_fields(&output, &marker, 1)?;
@@ -216,8 +219,11 @@ pub async fn prepare_integration(
             .to_vec(),
         Duration::from_secs(20),
     )
-    .await.map_err(|mut err| {
-        if let Some(details) = err.details.as_mut() { details["stage"] = "integration".into(); }
+    .await
+    .map_err(|mut err| {
+        if let Some(details) = err.details.as_mut() {
+            details["stage"] = "integration".into();
+        }
         err
     })?;
     Ok(())
@@ -242,20 +248,37 @@ mod installer_tests {
         let target = extensions.join("ferryx-agent-state.ts");
         std::fs::write(&target, b"original").unwrap();
         let cp = bin.join("cp");
-        std::fs::write(&cp, "#!/bin/sh\ncase \"$2\" in \"$HOME\"/.omo/*) exit 17;; esac\nexec /bin/cp \"$@\"\n").unwrap();
+        std::fs::write(
+            &cp,
+            "#!/bin/sh\ncase \"$2\" in \"$HOME\"/.omo/*) exit 17;; esac\nexec /bin/cp \"$@\"\n",
+        )
+        .unwrap();
         std::fs::set_permissions(&cp, std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut child = Command::new("sh")
             .args(["-c", POSIX_INTEGRATION_SCRIPT])
             .env("HOME", &home)
             .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
-            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-            .spawn().unwrap();
-        child.stdin.take().unwrap().write_all(b"replacement").unwrap();
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"replacement")
+            .unwrap();
         let output = child.wait_with_output().unwrap();
-        assert!(!output.status.success(), "a failed copy must not report success");
+        assert!(
+            !output.status.success(),
+            "a failed copy must not report success"
+        );
         assert_eq!(std::fs::read(&target).unwrap(), b"original");
         assert_eq!(std::fs::read_dir(&extensions).unwrap().count(), 1);
-        assert!(!home.join(".pi/agent/extensions/ferryx-agent-state.ts").exists());
+        assert!(!home
+            .join(".pi/agent/extensions/ferryx-agent-state.ts")
+            .exists());
     }
 
     #[test]
@@ -267,14 +290,24 @@ mod installer_tests {
         let mut child = Command::new("sh")
             .args(["-c", POSIX_INTEGRATION_SCRIPT])
             .env("HOME", fixture.path())
-            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-            .spawn().unwrap();
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
         child.stdin.take().unwrap().write_all(b"extension").unwrap();
         let output = child.wait_with_output().unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         for name in [".omo", ".pi", ".omp"] {
             let directory = fixture.path().join(name).join("agent/extensions");
-            assert_eq!(std::fs::read(directory.join("ferryx-agent-state.ts")).unwrap(), b"extension");
+            assert_eq!(
+                std::fs::read(directory.join("ferryx-agent-state.ts")).unwrap(),
+                b"extension"
+            );
             assert_eq!(std::fs::read_dir(directory).unwrap().count(), 1);
         }
     }
@@ -298,8 +331,13 @@ async fn data_output(
                  catch {{ [Console]::Error.Write($_.Exception.Message); exit 1 }}\n",
                 STANDARD.encode(&bytes)
             );
-            (format!("{} -NoLogo -NoProfile -NonInteractive -Command -", environment.executor.program()),
-                input.into_bytes())
+            (
+                format!(
+                    "{} -NoLogo -NoProfile -NonInteractive -Command -",
+                    environment.executor.program()
+                ),
+                input.into_bytes(),
+            )
         }
     };
     let plan = direct::ssh_plan(host, command, false)?;

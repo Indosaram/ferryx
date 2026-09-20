@@ -8,7 +8,11 @@ import path from "node:path";
 // pass against a stale dist/.
 
 const SITE_ROOT = path.resolve(import.meta.dir, "..");
-const DIST = path.join(SITE_ROOT, "dist");
+// CI builds into dist/, but a concurrent session may own that directory, so the
+// suite's build target is overridable without changing what CI verifies.
+const DIST = process.env.SEO_TEST_DIST
+  ? path.resolve(SITE_ROOT, process.env.SEO_TEST_DIST)
+  : path.join(SITE_ROOT, "dist");
 const PUBLIC_DIR = path.join(SITE_ROOT, "public");
 const BASE_PATH = "/ferryx/";
 const ORIGIN = "https://indosaram.github.io";
@@ -16,10 +20,17 @@ const SITE_URL = `${ORIGIN}${BASE_PATH}`;
 
 const BUILD_TIMEOUT_MS = 300_000;
 
-async function buildSite(env: Record<string, string>, extraArgs: string[] = []) {
+async function buildSite(env: Record<string, string | undefined>, extraArgs: string[] = []) {
+  // A key set to undefined is removed, so a test can exercise the config defaults
+  // rather than whatever the surrounding shell exported.
+  const merged = { ...process.env } as Record<string, string>;
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) delete merged[key];
+    else merged[key] = value;
+  }
   const proc = Bun.spawn(["bun", "run", "build", ...extraArgs], {
     cwd: SITE_ROOT,
-    env: { ...process.env, ...env },
+    env: merged,
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -32,10 +43,10 @@ async function buildSite(env: Record<string, string>, extraArgs: string[] = []) 
 }
 
 beforeAll(async () => {
-  const { code, output } = await buildSite({
-    BASE_URL: "/ferryx",
-    SITE_URL: ORIGIN,
-  });
+  const { code, output } = await buildSite(
+    { BASE_URL: "/ferryx", SITE_URL: ORIGIN },
+    process.env.SEO_TEST_DIST ? ["--outDir", DIST] : [],
+  );
   if (code !== 0) throw new Error(`astro build failed (exit ${code}):\n${output}`);
 }, BUILD_TIMEOUT_MS);
 
@@ -98,6 +109,7 @@ const DOC_PAGES = [
   "/docs/introduction/index.html",
   "/docs/shortcuts/index.html",
   "/docs/architecture/index.html",
+  "/docs/facts/index.html",
   "/privacy/index.html",
   "/compare/index.html",
   "/compare/warp/index.html",
@@ -245,6 +257,25 @@ describe("SEO — structured data", () => {
     expect(offers?.priceCurrency).toBe("USD");
   });
 
+  test("SoftwareApplication states the license, price freedom, and concrete capabilities", () => {
+    const html = readFileSync(path.join(DIST, "index.html"), "utf8");
+    const app = nodesOfType(html, "SoftwareApplication")[0]!;
+    // The offer says free; without an explicit license a crawler cannot tell whether
+    // that means open source, and SUL-1.0 is emphatically not OSI open source.
+    expect(String(app.license)).toBe("https://github.com/Indosaram/ferryx/blob/main/LICENSE");
+    expect(app.isAccessibleForFree).toBe(true);
+    expect(String(app.downloadUrl)).toMatch(/^https:\/\/github\.com\/Indosaram\/ferryx\/releases/);
+    expect(String(app.softwareHelp)).toBe(`${SITE_URL}docs/introduction/`);
+
+    const featureList = app.featureList as string[] | undefined;
+    expect(Array.isArray(featureList)).toBe(true);
+    expect(featureList!.length).toBeGreaterThanOrEqual(4);
+    const features = featureList!.join(" ").toLowerCase();
+    for (const term of ["claude code", "codex", "worktree", "daemon"]) {
+      expect(features, `featureList never mentions ${term}`).toContain(term);
+    }
+  });
+
   test("landing page declares WebSite and Organization identity", () => {
     const html = readFileSync(path.join(DIST, "index.html"), "utf8");
     const sites = nodesOfType(html, "WebSite");
@@ -254,8 +285,15 @@ describe("SEO — structured data", () => {
 
     const orgs = nodesOfType(html, "Organization");
     expect(orgs.length).toBe(1);
-    expect(orgs[0]!.name).toBeTruthy();
+    expect(orgs[0]!.name).toBe("Ferryx");
     expect(String(orgs[0]!.url ?? "")).toMatch(/^https:\/\//);
+    // The graph is only useful if the SoftwareApplication and WebSite publishers
+    // actually resolve to this node instead of dangling.
+    const orgId = String(orgs[0]!["@id"]);
+    for (const type of ["SoftwareApplication", "WebSite"]) {
+      const publisher = nodesOfType(html, type)[0]!.publisher as Record<string, unknown>;
+      expect(publisher?.["@id"], `${type} publisher does not reference the Organization node`).toBe(orgId);
+    }
   });
 
   test("docs and policy pages expose an ordered BreadcrumbList", () => {
@@ -420,12 +458,59 @@ describe("SEO — crawlable content and internal linking", () => {
       landingLinks.some((href) => href.includes("docs/architecture")),
       "landing page does not link to /docs/architecture/",
     ).toBe(true);
-
     for (const route of ["/docs/introduction/index.html", "/docs/shortcuts/index.html"]) {
       const html = readFileSync(path.join(DIST, route), "utf8");
       const sidebar = html.match(/<nav\b[^>]*\bclass="[^"]*\bsidebar\b[^"]*"[^>]*>[\s\S]*?<\/nav>/)?.[0] ?? "";
       expect(sidebar, `${route} has no sidebar nav`).toBeTruthy();
       expect(sidebar.includes("docs/architecture"), `${route} sidebar omits the architecture page`).toBe(true);
+    }
+  });
+
+  test("the hero server-renders its heading, product copy, and factual entry points", () => {
+    const html = readFileSync(path.join(DIST, "index.html"), "utf8");
+    const hero = html.slice(0, html.indexOf('<section id="preview"'));
+    expect(hero, "no markup precedes the preview section").toBeTruthy();
+    expect(hero, "the hero ships no server-rendered <h1>").toMatch(/<h1[\s>]/);
+    const paragraphs = [...hero.matchAll(/<p\b[^>]*>([\s\S]*?)<\/p>/g)].map(([, body]) =>
+      body!.replace(/<[^>]+>/g, "").trim(),
+    );
+    // Hydration-only hero copy is invisible to a crawler that does not run JS.
+    expect(
+      paragraphs.reduce((max, text) => Math.max(max, text.length), 0),
+      "the hero has no server-rendered descriptive paragraph",
+    ).toBeGreaterThanOrEqual(120);
+
+    const heroLinks = tags(hero, "a").map((tag) => attr(tag, "href") ?? "");
+    expect(
+      heroLinks.some((href) => href.endsWith("/blob/main/LICENSE")),
+      "the hero does not link the license the free offer refers to",
+    ).toBe(true);
+    expect(
+      heroLinks.some((href) => href.includes("docs/facts")),
+      "the hero does not link the product facts page",
+    ).toBe(true);
+  });
+
+  test("the product facts page is reachable and cites repository sources", () => {
+    const html = readFileSync(path.join(DIST, "docs/facts/index.html"), "utf8");
+    const links = tags(html, "a").map((tag) => attr(tag, "href") ?? "");
+    expect(
+      links.some((href) => href === "https://github.com/Indosaram/ferryx/blob/main/LICENSE"),
+      "the facts page states a license without linking it",
+    ).toBe(true);
+    // The page's value is being checkable, so it has to point at the repository.
+    expect(
+      links.filter((href) => href.startsWith("https://github.com/Indosaram/ferryx")).length,
+      "the facts page cites too few repository sources",
+    ).toBeGreaterThanOrEqual(3);
+
+    for (const route of ["/docs/introduction/index.html", "/use-cases/parallel-ai-agents/index.html"]) {
+      const page = readFileSync(path.join(DIST, route), "utf8");
+      const hrefs = tags(page, "a").map((tag) => attr(tag, "href") ?? "");
+      expect(
+        hrefs.some((href) => href.includes("docs/facts")),
+        `${route} does not link the product facts page`,
+      ).toBe(true);
     }
   });
 
@@ -451,6 +536,27 @@ describe("SEO — crawlable content and internal linking", () => {
 });
 
 describe("SEO — deployment portability", () => {
+  test(
+    "the configured default origin is the production domain",
+    async () => {
+      const outDir = path.join(SITE_ROOT, "node_modules/.cache/seo-default-dist");
+      // No SITE_URL at all: a plain `astro build` must not publish canonicals that
+      // point at a host the production site does not serve.
+      const { code, output } = await buildSite(
+        { BASE_URL: "", SITE_URL: undefined },
+        ["--outDir", outDir],
+      );
+      expect(code, `default-origin build failed:\n${output}`).toBe(0);
+
+      const html = readFileSync(path.join(outDir, "index.html"), "utf8");
+      expect(linksWithRel(html, "canonical").map((tag) => attr(tag, "href"))).toEqual(["https://ferryx.dev/"]);
+      expect(readFileSync(path.join(outDir, "robots.txt"), "utf8")).toContain(
+        "Sitemap: https://ferryx.dev/sitemap-index.xml",
+      );
+    },
+    BUILD_TIMEOUT_MS,
+  );
+
   test(
     "a root-origin build still emits absolute, non-doubled URLs",
     async () => {

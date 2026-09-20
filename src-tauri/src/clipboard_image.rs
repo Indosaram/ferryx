@@ -61,7 +61,10 @@ pub fn read_clipboard_image() -> Option<ClipboardImage> {
             // Runtime invariant: `rep` is a live NSBitmapImageRep decoded from pasteboard TIFF and the
             // property dictionary is a valid empty NSDictionary, which is what PNG encoding accepts.
             let png = unsafe {
-                rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new())
+                rep.representationUsingType_properties(
+                    NSBitmapImageFileType::PNG,
+                    &NSDictionary::new(),
+                )
             };
             if let Some(png) = png {
                 if let Some(image) = ClipboardImage::new(png.to_vec(), "png") {
@@ -365,7 +368,10 @@ pub fn validate_upload_id(upload_id: &str) -> Result<(), IpcError> {
     if upload_id.is_empty() || upload_id.len() > 64 {
         return Err(invalid_arg("Invalid upload ID length"));
     }
-    if !upload_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+    if !upload_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
         return Err(invalid_arg("Invalid characters in upload ID"));
     }
     Ok(())
@@ -485,14 +491,7 @@ pub fn save_paste_chunk(
     data: &[u8],
 ) -> Result<Option<std::path::PathBuf>, IpcError> {
     let dir = default_paste_dir();
-    save_paste_chunk_in_dir(
-        &dir,
-        upload_id,
-        file_name,
-        chunk_index,
-        total_chunks,
-        data,
-    )
+    save_paste_chunk_in_dir(&dir, upload_id, file_name, chunk_index, total_chunks, data)
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -674,7 +673,10 @@ mod tests {
             .expect("chunk 1 succeeds");
         let final_path = res2.expect("chunk 1 finalizes");
         assert_eq!(final_path, dir.join(file_name));
-        assert_eq!(std::fs::read(&final_path).expect("read final"), b"Hello, world!");
+        assert_eq!(
+            std::fs::read(&final_path).expect("read final"),
+            b"Hello, world!"
+        );
     }
 
     #[test]

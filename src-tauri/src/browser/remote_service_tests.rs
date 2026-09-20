@@ -132,13 +132,19 @@ fn test_concurrency_budget_single_global_driver() {
     let err_dev2 = broker
         .claim("device-2", "conn-2", &sub2, &b1, true)
         .expect_err("Device 2 claim should be rejected");
-    assert!(matches!(err_dev2, RemoteDriverError::BrowserDriverBusy { .. }));
+    assert!(matches!(
+        err_dev2,
+        RemoteDriverError::BrowserDriverBusy { .. }
+    ));
 
     // Even attempting to claim on a different browser (browser 2) must be rejected because driver is GLOBAL
     let err_diff_browser = broker
         .claim("device-2", "conn-2", "sub-diff", &b2, true)
         .expect_err("Claiming another browser must be rejected: global driver is busy");
-    assert!(matches!(err_diff_browser, RemoteDriverError::BrowserDriverBusy { .. }));
+    assert!(matches!(
+        err_diff_browser,
+        RemoteDriverError::BrowserDriverBusy { .. }
+    ));
 
     // Releasing device 1 lease frees the global driver slot
     assert!(broker.release(&sub1, lease1.lease_epoch).unwrap());
@@ -175,12 +181,18 @@ fn test_producer_lifecycle_pause_on_zero_subscribers_and_resume() {
 
     // 2nd subscriber leaves -> 0 subscribers remain: producer immediately pauses
     assert!(service.unsubscribe(&b1, &sub2));
-    assert!(!service.is_producer_active(&b1), "0 subscribers must immediately pause capture");
+    assert!(
+        !service.is_producer_active(&b1),
+        "0 subscribers must immediately pause capture"
+    );
     assert_eq!(service.active_capture_count(), 0);
 
     // Re-subscribing a new viewer resumes producer capture
     let sub3 = service.subscribe(&b1, "dev3", "v3").unwrap();
-    assert!(service.is_producer_active(&b1), "New subscriber must resume capture");
+    assert!(
+        service.is_producer_active(&b1),
+        "New subscriber must resume capture"
+    );
     assert_eq!(service.active_capture_count(), 1);
 
     assert!(service.unsubscribe(&b1, &sub3));
@@ -200,7 +212,10 @@ fn test_latest_only_frame_admission_and_oversized_drop() {
     // 2. While Frame 1 is unacknowledged, Frame 2 arrives -> queued in pending slot
     let frame2 = vec![0x44, 0x55, 0x66];
     let immediate2 = service.admit_frame(&b1, 102, frame2.clone()).unwrap();
-    assert!(immediate2.is_empty(), "Busy viewer should not get immediate delivery");
+    assert!(
+        immediate2.is_empty(),
+        "Busy viewer should not get immediate delivery"
+    );
 
     // 3. Frame 3 arrives before Frame 1 is acknowledged -> displaces Frame 2 (latest-only)
     let frame3 = vec![0x77, 0x88, 0x99];
@@ -209,12 +224,19 @@ fn test_latest_only_frame_admission_and_oversized_drop() {
 
     // 4. Viewer acknowledges Frame 1 -> pending Frame 3 is returned (Frame 2 was dropped)
     let next_frame = service.acknowledge_frame(&b1, &sub1, 101);
-    assert_eq!(next_frame, Some(frame3), "Viewer must receive the latest pending frame (frame 3)");
+    assert_eq!(
+        next_frame,
+        Some(frame3),
+        "Viewer must receive the latest pending frame (frame 3)"
+    );
 
     // 5. Oversized frame (> 2 MiB) is permanently dropped
     let oversized = vec![0xAA; MAX_FRAME_PAYLOAD_BYTES + 1];
     let oversized_admitted = service.admit_frame(&b1, 104, oversized).unwrap();
-    assert!(oversized_admitted.is_empty(), "Oversized frame must be permanently dropped");
+    assert!(
+        oversized_admitted.is_empty(),
+        "Oversized frame must be permanently dropped"
+    );
 }
 
 #[test]
@@ -303,7 +325,10 @@ fn test_guard_verification_rejections() {
         valid_desktop_epoch,
         valid_gen,
     );
-    assert_eq!(reclaimed_guard_err, Err(RemoteServiceError::DesktopReclaimed));
+    assert_eq!(
+        reclaimed_guard_err,
+        Err(RemoteServiceError::DesktopReclaimed)
+    );
 }
 
 #[test]
@@ -365,7 +390,12 @@ fn test_dom_snapshot_map_revision_url_change_increments_revision() {
         .expect("Snapshot on new URL should succeed");
 
     assert_ne!(snap1_id, snap2_id, "Snapshot IDs must differ");
-    assert!(rev2 > rev1, "URL change must increment snapshot map revision ({} > {})", rev2, rev1);
+    assert!(
+        rev2 > rev1,
+        "URL change must increment snapshot map revision ({} > {})",
+        rev2,
+        rev1
+    );
 
     // New reference resolves correctly
     let new_selector = service
@@ -438,12 +468,10 @@ fn test_remote_snapshot_reference_namespace_isolation() {
     let initial_gen = manager.get_state(&b.browser_id).unwrap().generation;
 
     // 1. Record remote snapshot targets
-    let remote_targets = vec![
-        BrowserAutomationTarget {
-            reference: "btn-primary".into(),
-            selector: "#remote-button".into(),
-        },
-    ];
+    let remote_targets = vec![BrowserAutomationTarget {
+        reference: "btn-primary".into(),
+        selector: "#remote-button".into(),
+    }];
     let (snap_id, map_rev) = manager
         .record_remote_snapshot(&b.browser_id, initial_gen, remote_targets)
         .unwrap();
@@ -455,12 +483,10 @@ fn test_remote_snapshot_reference_namespace_isolation() {
     assert_eq!(remote_sel, "#remote-button");
 
     // 2. Perform a legacy DOM scan that writes into legacy automation_targets
-    let legacy_targets = vec![
-        BrowserAutomationTarget {
-            reference: "btn-primary".into(),
-            selector: "#legacy-button-overwritten".into(),
-        },
-    ];
+    let legacy_targets = vec![BrowserAutomationTarget {
+        reference: "btn-primary".into(),
+        selector: "#legacy-button-overwritten".into(),
+    }];
     manager
         .record_automation_targets(&b.browser_id, initial_gen, legacy_targets)
         .unwrap();
@@ -476,8 +502,7 @@ fn test_remote_snapshot_reference_namespace_isolation() {
         .verify_remote_target(&b.browser_id, &snap_id, map_rev, "btn-primary")
         .unwrap();
     assert_eq!(
-        remote_sel_after_legacy_scan,
-        "#remote-button",
+        remote_sel_after_legacy_scan, "#remote-button",
         "Legacy DOM scan must not overwrite remote snapshot targets"
     );
 }
@@ -613,15 +638,24 @@ fn test_remote_browser_operation_validation_and_legacy_isolation() {
     // 3. Legacy CLI commands fail deserialization as RemoteBrowserOperation
     let legacy_list_json = r#"{"command":"list"}"#;
     let list_deser = serde_json::from_str::<RemoteBrowserOperation>(legacy_list_json);
-    assert!(list_deser.is_err(), "Legacy CLI List command must not deserialize into RemoteBrowserOperation");
+    assert!(
+        list_deser.is_err(),
+        "Legacy CLI List command must not deserialize into RemoteBrowserOperation"
+    );
 
     let legacy_open_json = r#"{"command":"open","url":"https://example.com"}"#;
     let open_deser = serde_json::from_str::<RemoteBrowserOperation>(legacy_open_json);
-    assert!(open_deser.is_err(), "Legacy CLI Open command must not deserialize into RemoteBrowserOperation");
+    assert!(
+        open_deser.is_err(),
+        "Legacy CLI Open command must not deserialize into RemoteBrowserOperation"
+    );
 
     let legacy_close_json = r#"{"command":"close","browserId":"b1"}"#;
     let close_deser = serde_json::from_str::<RemoteBrowserOperation>(legacy_close_json);
-    assert!(close_deser.is_err(), "Legacy CLI Close command must not deserialize into RemoteBrowserOperation");
+    assert!(
+        close_deser.is_err(),
+        "Legacy CLI Close command must not deserialize into RemoteBrowserOperation"
+    );
 }
 
 #[tokio::test]
@@ -655,7 +689,9 @@ async fn test_r1_r2_codec_unification_and_public_protocol_acceptance() {
     service.set_snapshot_source(fake_source.clone());
 
     let mut frame_rx = service.subscribe_frames(&b_1x1.browser_id);
-    let sub = service.subscribe(&b_1x1.browser_id, "dev-codec", "v-codec").unwrap();
+    let sub = service
+        .subscribe(&b_1x1.browser_id, "dev-codec", "v-codec")
+        .unwrap();
 
     let frame_bytes = tokio::time::timeout(std::time::Duration::from_millis(500), frame_rx.recv())
         .await
@@ -768,7 +804,10 @@ fn test_r9_remote_reference_operations_require_snapshot_and_revision() {
         y: None,
     };
     let err = click_missing_snap.validate().unwrap_err();
-    assert_eq!(format!("{:?}", err.code), "Custom(\"BROWSER_INVALID_SNAPSHOT\")");
+    assert_eq!(
+        format!("{:?}", err.code),
+        "Custom(\"BROWSER_INVALID_SNAPSHOT\")"
+    );
 
     let click_empty_snap = RemoteBrowserOperation::Click {
         browser_id: "b1".into(),
@@ -787,7 +826,10 @@ fn test_r9_remote_reference_operations_require_snapshot_and_revision() {
         y: None,
     };
     let err2 = click_empty_snap.validate().unwrap_err();
-    assert_eq!(format!("{:?}", err2.code), "Custom(\"BROWSER_INVALID_SNAPSHOT\")");
+    assert_eq!(
+        format!("{:?}", err2.code),
+        "Custom(\"BROWSER_INVALID_SNAPSHOT\")"
+    );
 
     let click_missing_rev = RemoteBrowserOperation::Click {
         browser_id: "b1".into(),
@@ -806,7 +848,10 @@ fn test_r9_remote_reference_operations_require_snapshot_and_revision() {
         y: None,
     };
     let err3 = click_missing_rev.validate().unwrap_err();
-    assert_eq!(format!("{:?}", err3.code), "Custom(\"BROWSER_INVALID_SNAPSHOT\")");
+    assert_eq!(
+        format!("{:?}", err3.code),
+        "Custom(\"BROWSER_INVALID_SNAPSHOT\")"
+    );
 
     // 2. Coordinate click does NOT require snapshot_id
     let click_coord = RemoteBrowserOperation::Click {
@@ -845,7 +890,10 @@ fn test_r9_remote_reference_operations_require_snapshot_and_revision() {
         map_revision: Some(1),
     };
     let err4 = fill_missing_snap.validate().unwrap_err();
-    assert_eq!(format!("{:?}", err4.code), "Custom(\"BROWSER_INVALID_SNAPSHOT\")");
+    assert_eq!(
+        format!("{:?}", err4.code),
+        "Custom(\"BROWSER_INVALID_SNAPSHOT\")"
+    );
 }
 
 #[tokio::test]
@@ -853,9 +901,10 @@ async fn test_r7_native_capture_permit_retention_across_producer_restart_on_time
     let (service, _manager, b1, _) = setup_test_environment();
 
     // Source that times out initially
-    let fake_source = Arc::new(FakeBrowserSnapshotSource::new(
-        FakeSnapshotBehavior::Timeout,
-    ).with_timeout(std::time::Duration::from_millis(50)));
+    let fake_source = Arc::new(
+        FakeBrowserSnapshotSource::new(FakeSnapshotBehavior::Timeout)
+            .with_timeout(std::time::Duration::from_millis(50)),
+    );
     service.set_snapshot_source(fake_source.clone());
 
     assert_eq!(service.native_capture_semaphore().available_permits(), 1);
@@ -915,7 +964,9 @@ async fn test_r4_7_producer_frame_sampled_before_generation_bump_is_dropped() {
     tokio::time::sleep(std::time::Duration::from_millis(15)).await;
 
     // Bump generation while snapshot is in-flight
-    manager.update_url(&b1, "https://example.com/bumped").unwrap();
+    manager
+        .update_url(&b1, "https://example.com/bumped")
+        .unwrap();
     let state_after_bump = manager.get_state(&b1).unwrap();
     assert_eq!(state_after_bump.generation, 2);
 
@@ -963,7 +1014,8 @@ async fn test_r4_7_producer_visibility_loss_halts_publication() {
     manager.set_visible(&b1, false).unwrap();
 
     // Publication must halt: no frame emitted while hidden
-    let recv_res = tokio::time::timeout(std::time::Duration::from_millis(250), frame_rx.recv()).await;
+    let recv_res =
+        tokio::time::timeout(std::time::Duration::from_millis(250), frame_rx.recv()).await;
     assert!(
         recv_res.is_err(),
         "Frame must not be published after visibility loss"
@@ -971,4 +1023,3 @@ async fn test_r4_7_producer_visibility_loss_halts_publication() {
 
     service.unsubscribe(&b1, &sub);
 }
-

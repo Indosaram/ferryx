@@ -264,7 +264,11 @@ impl BrowserManager {
             // platform code could run `goBack()`, which stranded every entry the
             // vector never saw. The real URL arrives with the load callback, so
             // nothing is updated optimistically.
-            let can_navigate = if forward { s.can_go_forward } else { s.can_go_back };
+            let can_navigate = if forward {
+                s.can_go_forward
+            } else {
+                s.can_go_back
+            };
             if !can_navigate {
                 s.loading = false;
                 return Ok(browser_state(s));

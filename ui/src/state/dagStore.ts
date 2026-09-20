@@ -1,12 +1,17 @@
 import type { DagRunSnapshot } from "../lib/dagTypes";
+import type { DagWatchStatusEvent } from "../lib/tauri";
 
 export type DagStoreState = {
   readonly runsByProject: Readonly<Record<string, Readonly<Record<string, DagRunSnapshot>>>>;
+  /** Terminal DAG-watch failures per project path, so the UI can surface an unavailable stream. */
+  readonly watchFailures: Readonly<Record<string, DagWatchStatusEvent>>;
 };
 
 export type DagStoreActions = {
   applySnapshot: (projectPath: string, snapshot: DagRunSnapshot) => void;
   removeRun: (projectPath: string, runId: string) => void;
+  setWatchFailure: (projectPath: string, failure: DagWatchStatusEvent | null) => void;
+  watchFailure: (projectPath: string) => DagWatchStatusEvent | null;
   activeRunIds: (projectPath: string) => readonly DagRunSnapshot["runId"][];
   runSummaries: (projectPath: string) => readonly DagRunSnapshot[];
 };
@@ -20,6 +25,7 @@ export type DagStore = DagStoreActions & {
 
 const INITIAL_STATE: DagStoreState = {
   runsByProject: {},
+  watchFailures: {},
 };
 
 export function selectActiveRunIds(
@@ -120,6 +126,33 @@ export function createDagStore(initialState: DagStoreState = INITIAL_STATE): Dag
     return selectRunSummaries(getState(), projectPath);
   }
 
+  function setWatchFailure(projectPath: string, failure: DagWatchStatusEvent | null): void {
+    setState((prev) => {
+      const existing = prev.watchFailures[projectPath];
+      if (failure === null) {
+        if (!existing) return prev;
+        const { [projectPath]: _cleared, ...rest } = prev.watchFailures;
+        return { ...prev, watchFailures: rest };
+      }
+      if (
+        existing &&
+        existing.code === failure.code &&
+        existing.message === failure.message &&
+        existing.generation === failure.generation
+      ) {
+        return prev;
+      }
+      return {
+        ...prev,
+        watchFailures: { ...prev.watchFailures, [projectPath]: failure },
+      };
+    });
+  }
+
+  function watchFailure(projectPath: string): DagWatchStatusEvent | null {
+    return getState().watchFailures[projectPath] ?? null;
+  }
+
   function reset(): void {
     setState(() => INITIAL_STATE);
   }
@@ -130,6 +163,8 @@ export function createDagStore(initialState: DagStoreState = INITIAL_STATE): Dag
     subscribe,
     applySnapshot,
     removeRun,
+    setWatchFailure,
+    watchFailure,
     activeRunIds,
     runSummaries,
     reset,

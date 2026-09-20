@@ -304,11 +304,16 @@ fn verify_overlay_with_interface(iface_name: Option<&str>, addr: &std::net::Ipv4
     {
         let _ = iface_name;
         let target_str = addr.to_string();
-        if let Ok(output) = std::process::Command::new("ipconfig").args(["/all"]).output() {
+        if let Ok(output) = std::process::Command::new("ipconfig")
+            .args(["/all"])
+            .output()
+        {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let sections = stdout.split("\n\n");
             for sec in sections {
-                if (sec.contains("Tailscale") || sec.contains("tailscale")) && sec.contains(&target_str) {
+                if (sec.contains("Tailscale") || sec.contains("tailscale"))
+                    && sec.contains(&target_str)
+                {
                     return true;
                 }
             }
@@ -739,8 +744,7 @@ pub struct PublishedPairing {
 }
 
 /// Monotonic source for PublishedPairing::epoch.
-pub static RELAY_PAIRING_EPOCH: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(1);
+pub static RELAY_PAIRING_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 pub struct RemoteGatewayState {
     pub config: RwLock<RemoteGatewayConfig>,
@@ -785,7 +789,8 @@ pub struct RemoteGatewayState {
     /// [`SOCKET_TICKET_TTL_SECS`], and is removed on first use.
     ///
     /// Maps ticket -> (device token, target, expiry unix seconds).
-    pub socket_tickets: parking_lot::Mutex<std::collections::HashMap<String, (String, String, u64)>>,
+    pub socket_tickets:
+        parking_lot::Mutex<std::collections::HashMap<String, (String, String, u64)>>,
     pub browser_backend: parking_lot::RwLock<Arc<dyn RemoteBrowserBackend>>,
     pub admission_controller: Arc<AdmissionController>,
     pub browser_service_epoch: AtomicU64,
@@ -808,7 +813,10 @@ impl RemoteGatewayState {
         let workspaces = Arc::clone(&sessions.workspace_service);
         self.workspace_registry = workspaces.registry.clone();
         self.session_backend = sessions.clone();
-        self.machine_services = Some(Arc::new(crate::daemon::MachineServices { sessions, workspaces }));
+        self.machine_services = Some(Arc::new(crate::daemon::MachineServices {
+            sessions,
+            workspaces,
+        }));
         self
     }
 
@@ -929,7 +937,10 @@ impl RemoteGatewayState {
             .unwrap_or_default();
         Self {
             config: RwLock::new(config),
-            identity_dir: auth_path.as_deref().and_then(|path| path.parent()).map(PathBuf::from),
+            identity_dir: auth_path
+                .as_deref()
+                .and_then(|path| path.parent())
+                .map(PathBuf::from),
             #[cfg(test)]
             identity_probe: RwLock::new(None),
             #[cfg(test)]
@@ -1117,18 +1128,37 @@ impl RemoteGatewayState {
                 self.clear_active_selection();
                 return;
             };
-            let private_workspace = |id: &str| catalog.workspaces.get(id).is_some_and(|row| !row.mirror_exposed);
-            if selection.session_id.as_deref().is_some_and(|id| services.sessions.machine_only(id))
-                || selection.workspace_id.as_deref().is_some_and(private_workspace) {
+            let private_workspace = |id: &str| {
+                catalog
+                    .workspaces
+                    .get(id)
+                    .is_some_and(|row| !row.mirror_exposed)
+            };
+            if selection
+                .session_id
+                .as_deref()
+                .is_some_and(|id| services.sessions.machine_only(id))
+                || selection
+                    .workspace_id
+                    .as_deref()
+                    .is_some_and(private_workspace)
+            {
                 self.clear_active_selection();
                 return;
             }
-            selection.terminal_tabs.retain(|tab| !tab.session_id.as_deref().is_some_and(|id| services.sessions.machine_only(id)));
-            selection.attention_inventory.retain(|entry| !private_workspace(&entry.workspace_id));
+            selection.terminal_tabs.retain(|tab| {
+                !tab.session_id
+                    .as_deref()
+                    .is_some_and(|id| services.sessions.machine_only(id))
+            });
+            selection
+                .attention_inventory
+                .retain(|entry| !private_workspace(&entry.workspace_id));
         }
         let session_id = selection.session_id.clone();
         let payload = serde_json::to_value(&selection).unwrap_or(serde_json::Value::Null);
-        self.active_selection_tx.send_replace(Some(selection.clone()));
+        self.active_selection_tx
+            .send_replace(Some(selection.clone()));
         *self.active_selection.write() = Some(selection);
         // `send` fails and discards the value when no receiver is alive, which is the normal
         // state before any remote client attaches. `send_replace` stores it regardless so a
@@ -1151,7 +1181,9 @@ impl RemoteGatewayState {
         }
     }
 
-    pub fn active_selection_watch_rx(&self) -> watch::Receiver<Option<RemoteActiveDesktopSelection>> {
+    pub fn active_selection_watch_rx(
+        &self,
+    ) -> watch::Receiver<Option<RemoteActiveDesktopSelection>> {
         self.active_selection_tx.subscribe()
     }
 
@@ -1293,8 +1325,7 @@ mod tests {
         for permission in [DevicePermission::View, DevicePermission::Control] {
             let (tx, mut rx) = tokio::sync::mpsc::channel(1);
             let auth = AuthManager::with_persistence(None);
-            let coordinator =
-                PairingCoordinator::new_with_auth("perm-machine", tx, auth.clone());
+            let coordinator = PairingCoordinator::new_with_auth("perm-machine", tx, auth.clone());
 
             let relay = tokio::spawn(async move {
                 let request = rx.recv().await.expect("registration reaches the relay");
@@ -1384,17 +1415,20 @@ mod tests {
 
         // Answer the registration the way a connected relay control channel would.
         let relay = tokio::spawn(async move {
-            let request = rx.recv().await.expect("pairing must be registered with the relay");
+            let request = rx
+                .recv()
+                .await
+                .expect("pairing must be registered with the relay");
             let pin = request.registration.pin.clone();
             let machine = request.registration.machine_id.clone();
-            let _ = request.ack.send(Ok(
-                crate::remote::protocol::RegisterPairingPinAck {
+            let _ = request
+                .ack
+                .send(Ok(crate::remote::protocol::RegisterPairingPinAck {
                     generation: request.registration.generation,
                     pin: pin.clone(),
                     machine_id: machine.clone(),
                     status: "ready".into(),
-                },
-            ));
+                }));
             (pin, machine)
         });
 
@@ -1884,9 +1918,7 @@ mod tests {
 
         // Within refresh interval: served from cache (still without external-change)
         let before_interval = state
-            .workspace_snapshot_at(
-                initial_time + WORKSPACE_SNAPSHOT_REFRESH_INTERVAL / 2,
-            )
+            .workspace_snapshot_at(initial_time + WORKSPACE_SNAPSHOT_REFRESH_INTERVAL / 2)
             .await
             .expect("cached snapshot before expiry");
         assert!(!before_interval
@@ -1899,9 +1931,7 @@ mod tests {
         // P16 remediation: an explicit list request must immediately reflect the external change
         // rather than returning an intentionally stale snapshot and postponing freshness to the next request.
         let after_interval = state
-            .workspace_snapshot_at(
-                initial_time + WORKSPACE_SNAPSHOT_REFRESH_INTERVAL,
-            )
+            .workspace_snapshot_at(initial_time + WORKSPACE_SNAPSHOT_REFRESH_INTERVAL)
             .await
             .expect("snapshot after refresh interval");
         assert!(
@@ -1922,9 +1952,7 @@ mod tests {
 
         // After another refresh interval, removal must be immediately reflected
         let after_removal = state
-            .workspace_snapshot_at(
-                initial_time + WORKSPACE_SNAPSHOT_REFRESH_INTERVAL * 2,
-            )
+            .workspace_snapshot_at(initial_time + WORKSPACE_SNAPSHOT_REFRESH_INTERVAL * 2)
             .await
             .expect("snapshot after removal interval");
         assert!(
@@ -1960,7 +1988,11 @@ mod tests {
             workspace_id: "ws1".into(),
             worktree_slug: "main".into(),
         };
-        let sessions = state.browser_backend().list_sessions(&scope).await.expect("list sessions");
+        let sessions = state
+            .browser_backend()
+            .list_sessions(&scope)
+            .await
+            .expect("list sessions");
         assert!(sessions.is_empty());
     }
 }

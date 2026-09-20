@@ -18,7 +18,9 @@ use tauri::State;
 #[derive(Clone)]
 pub struct RemoteGatewayManager {
     inner: RemoteGatewayManagerInner,
-    browser_backend: Arc<parking_lot::RwLock<Option<Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>>>>,
+    browser_backend: Arc<
+        parking_lot::RwLock<Option<Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>>>,
+    >,
 }
 
 #[derive(Clone)]
@@ -71,7 +73,9 @@ impl RemoteGatewayManager {
         }
     }
 
-    pub fn browser_backend(&self) -> Option<Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>> {
+    pub fn browser_backend(
+        &self,
+    ) -> Option<Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>> {
         if let Some(backend) = self.browser_backend.read().clone() {
             return Some(backend);
         }
@@ -197,7 +201,11 @@ pub async fn cmd_remote_status(
                 gate_reason: status.gate_reason,
             })
         }
-        RemoteGatewayManagerInner::State { state, server_handle, .. } => {
+        RemoteGatewayManagerInner::State {
+            state,
+            server_handle,
+            ..
+        } => {
             let config = state.config.read().clone();
             let is_running = *state.is_running.read();
             let bound_address = state.bound_address.read().clone();
@@ -229,7 +237,10 @@ pub async fn cmd_remote_status(
                 gate_reason: {
                     let handle_guard = server_handle.lock();
                     handle_guard.as_ref().and_then(|h| match h.gate_status() {
-                        crate::remote::server::DirectGatewayGateStatus::InsecureLanGated { reason, .. } => Some(reason),
+                        crate::remote::server::DirectGatewayGateStatus::InsecureLanGated {
+                            reason,
+                            ..
+                        } => Some(reason),
                         _ => None,
                     })
                 },
@@ -327,7 +338,9 @@ pub async fn cmd_remote_pairing_create(
     let perm = permission.unwrap_or(DevicePermission::Control);
     match &manager.inner {
         RemoteGatewayManagerInner::Daemon(client) => {
-            let (code, pairing_token, machine_id, relay_url) = client.remote_create_pairing_code_detailed(Some(perm)).await?;
+            let (code, pairing_token, machine_id, relay_url) = client
+                .remote_create_pairing_code_detailed(Some(perm))
+                .await?;
             Ok(CreatePairingCodeResponse {
                 code,
                 expires_in_seconds: 60,
@@ -344,10 +357,7 @@ pub async fn cmd_remote_pairing_create(
                 .map(|published| published.coordinator.clone());
             if let Some(coordinator) = coordinator {
                 let info = coordinator
-                    .generate_pairing_with_permission(
-                        std::time::Duration::from_secs(60),
-                        perm,
-                    )
+                    .generate_pairing_with_permission(std::time::Duration::from_secs(60), perm)
                     .await
                     .map_err(|e| IpcError::internal(e))?;
                 let effective_relay = state
@@ -355,7 +365,11 @@ pub async fn cmd_remote_pairing_create(
                     .read()
                     .relay_url
                     .clone()
-                    .or_else(|| std::env::var("FERRYX_RELAY_URL").ok().filter(|s| !s.trim().is_empty()))
+                    .or_else(|| {
+                        std::env::var("FERRYX_RELAY_URL")
+                            .ok()
+                            .filter(|s| !s.trim().is_empty())
+                    })
                     .or_else(|| Some(crate::remote::relay_server::DEFAULT_RELAY_URL.to_string()));
                 Ok(CreatePairingCodeResponse {
                     code: info.pin,
@@ -368,7 +382,9 @@ pub async fn cmd_remote_pairing_create(
                 let code = state.auth_manager.create_pairing_code(perm);
                 let machine_id = crate::remote::auth::canonical_identity_dir()
                     .ok()
-                    .and_then(|dir| crate::remote::auth::load_or_generate_machine_identity(&dir).ok())
+                    .and_then(|dir| {
+                        crate::remote::auth::load_or_generate_machine_identity(&dir).ok()
+                    })
                     .map(|id| id.machine_id);
                 Ok(CreatePairingCodeResponse {
                     code,
@@ -404,12 +420,10 @@ pub async fn cmd_remote_device_revoke(
                 Err(_) => Ok(false),
             }
         }
-        RemoteGatewayManagerInner::State { state, .. } => {
-            state
-                .auth_manager
-                .revoke_device(&device_id)
-                .map_err(|e| IpcError::internal(e.to_string()))
-        }
+        RemoteGatewayManagerInner::State { state, .. } => state
+            .auth_manager
+            .revoke_device(&device_id)
+            .map_err(|e| IpcError::internal(e.to_string())),
     }
 }
 
@@ -558,7 +572,9 @@ pub async fn cmd_remote_set_active_selection<R: tauri::Runtime>(
     match &manager.inner {
         RemoteGatewayManagerInner::Daemon(client) => {
             let path = crate::ipc::ssh::get_ssh_store_path(&app)?;
-            client.remote_set_active_selection_with_ssh_store(selection, Some(path)).await
+            client
+                .remote_set_active_selection_with_ssh_store(selection, Some(path))
+                .await
         }
         RemoteGatewayManagerInner::State { state, .. } => {
             *state.ssh_store_path.write() = Some(crate::ipc::ssh::get_ssh_store_path(&app)?);

@@ -122,4 +122,19 @@ impl PlatformCompositorTarget {
     pub fn surface_target(&self) -> Arc<NativeChildViewHandle> {
         self.inner.surface_target()
     }
+
+    /// Raw pointer of a platform-owned render layer, when the platform provides one.
+    ///
+    /// `Some` on macOS, where the terminal owns its CAMetalLayer and wgpu should wrap it
+    /// directly instead of creating an observer layer against the view's backing layer.
+    pub fn surface_layer_ptr(&self) -> Option<*mut std::ffi::c_void> {
+        #[cfg(target_os = "macos")]
+        {
+            Some(self.inner.surface_layer_ptr())
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            None
+        }
+    }
 }

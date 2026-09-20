@@ -1,12 +1,18 @@
 use crate::{
     daemon::server::DaemonServer,
-    remote::{auth::{DeviceAccessScope, DevicePermission}, server::create_remote_router},
+    remote::{
+        auth::{DeviceAccessScope, DevicePermission},
+        server::create_remote_router,
+    },
 };
 #[path = "journal_spawn_contention_tests.rs"]
 mod spawn;
 
 use futures_util::FutureExt;
-use std::{sync::{Arc, Mutex}, time::Duration};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 #[tokio::test]
 async fn journal_writer_preserves_real_machine_socket_attachment() {
@@ -16,13 +22,30 @@ async fn journal_writer_preserves_real_machine_socket_attachment() {
         let root = tempfile::tempdir().unwrap();
         let project = root.path().join("project");
         std::fs::create_dir(&project).unwrap();
-        let owner = DaemonServer::new_with_paths(Some(root.path().join("config")), Some(root.path().join("auth")));
+        let owner = DaemonServer::new_with_paths(
+            Some(root.path().join("config")),
+            Some(root.path().join("auth")),
+        );
         let state = owner.remote_state();
-        let workspace = state.machine_services.as_ref().unwrap().workspaces.register_machine(project.to_str().unwrap()).unwrap();
-        let pin = state.auth_manager.create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine).unwrap();
-        let (token, _) = state.auth_manager.exchange_pairing_code(&pin, "journal-socket").unwrap();
+        let workspace = state
+            .machine_services
+            .as_ref()
+            .unwrap()
+            .workspaces
+            .register_machine(project.to_str().unwrap())
+            .unwrap();
+        let pin = state
+            .auth_manager
+            .create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine)
+            .unwrap();
+        let (token, _) = state
+            .auth_manager
+            .exchange_pairing_code(&pin, "journal-socket")
+            .unwrap();
         Ok((root, owner, token, workspace))
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let state = owner.remote_state().clone();
     let service = state.machine_services.as_ref().unwrap().workspaces.clone();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -32,13 +55,28 @@ async fn journal_writer_preserves_real_machine_socket_attachment() {
     let (joined_tx, joined_rx) = tokio::sync::oneshot::channel();
     let gateway_state = state.clone();
     let gateway = std::thread::spawn(move || {
-        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
-            axum::serve(tokio::net::TcpListener::from_std(listener).unwrap(), create_remote_router(gateway_state))
-                .with_graceful_shutdown(async { let _ = stop_rx.await; }).await.unwrap();
-        });
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                axum::serve(
+                    tokio::net::TcpListener::from_std(listener).unwrap(),
+                    create_remote_router(gateway_state),
+                )
+                .with_graceful_shutdown(async {
+                    let _ = stop_rx.await;
+                })
+                .await
+                .unwrap();
+            });
         let _ = joined_tx.send(());
     });
-    let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(10)).build().unwrap();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let mut writer = None;
     let outcome = std::panic::AssertUnwindSafe(async {
@@ -94,19 +132,31 @@ async fn journal_writer_preserves_real_machine_socket_attachment() {
         eprintln!("A09_SOCKET writer_held=true attached_exact_owner=true real_pty_echo=true independent_http=true detach_preserved_pty=true");
     }).catch_unwind().await;
     let _ = release_tx.send(());
-    if let Some(writer) = writer { writer.join().unwrap(); }
+    if let Some(writer) = writer {
+        writer.join().unwrap();
+    }
     *service.journal.probe.write() = None;
     for id in owner.terminal_service().list_sessions() {
         owner.terminal_service().close_session(&id).await.unwrap();
     }
     let _ = stop_tx.send(());
-    tokio::time::timeout(Duration::from_secs(10), joined_rx).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(10), joined_rx)
+        .await
+        .unwrap()
+        .unwrap();
     gateway.join().unwrap();
     assert!(tokio::net::TcpStream::connect(address).await.is_err());
     drop((service, state, owner));
-    crate::ipc::run_blocking(move || { root.close().unwrap(); Ok(()) }).await.unwrap();
+    crate::ipc::run_blocking(move || {
+        root.close().unwrap();
+        Ok(())
+    })
+    .await
+    .unwrap();
     eprintln!("A09_SOCKET cleanup writer_joined=true gateway_joined=true listener_refused=true ptys_closed=true root_removed=true");
-    if let Err(panic) = outcome { std::panic::resume_unwind(panic); }
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 #[test]
@@ -116,13 +166,18 @@ fn reopened_pending_operation_remains_outcome_unknown_after_refresh() {
     let path = root.path().join("operations.json");
     let request = uuid::Uuid::new_v4().to_string();
     let original = super::MachineOperationJournal::open(path.clone());
-    original.begin("device", &request, "fixture", "digest", "resource").unwrap();
+    original
+        .begin("device", &request, "fixture", "digest", "resource")
+        .unwrap();
     drop(original);
     // When the replacement reconciles through the durable refresh path.
     let replacement = super::MachineOperationJournal::open(path);
     let record = replacement.reconcile("device", &request).unwrap().unwrap();
     // Then startup uncertainty must not revert to a live pending operation.
-    assert!(matches!(record.operation, crate::remote::machine_protocol::Operation::OutcomeUnknown { .. }));
+    assert!(matches!(
+        record.operation,
+        crate::remote::machine_protocol::Operation::OutcomeUnknown { .. }
+    ));
 }
 
 #[tokio::test]
@@ -160,15 +215,27 @@ async fn contention(mutation: bool, revoke: bool, expire: bool) {
     let (root, server, token, device_id) = crate::ipc::run_blocking(|| {
         let root = tempfile::tempdir().unwrap();
         let server = DaemonServer::new_with_paths(
-            Some(root.path().join("config")), Some(root.path().join("auth")));
+            Some(root.path().join("config")),
+            Some(root.path().join("auth")),
+        );
         let auth = &server.remote_state().auth_manager;
-        let pin = auth.create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine).unwrap();
-        let (token, device) = auth.exchange_pairing_code(&pin, "journal-contention").unwrap();
+        let pin = auth
+            .create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine)
+            .unwrap();
+        let (token, device) = auth
+            .exchange_pairing_code(&pin, "journal-contention")
+            .unwrap();
         Ok((root, server, token, device.id))
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let state = server.remote_state().clone();
     let service = state.machine_services.as_ref().unwrap().workspaces.clone();
-    let slots = if mutation { service.project_mutations.clone() } else { service.project_reads.clone() };
+    let slots = if mutation {
+        service.project_mutations.clone()
+    } else {
+        service.project_reads.clone()
+    };
     let capacity = slots.available_permits();
     let auth_state = state.clone();
     let (held_tx, held_rx) = tokio::sync::oneshot::channel();
@@ -181,18 +248,32 @@ async fn contention(mutation: bool, revoke: bool, expire: bool) {
         "persist" => {
             if let Some(tx) = held_tx.lock().unwrap().take() {
                 tx.send(()).unwrap();
-                release_rx.lock().unwrap().recv_timeout(Duration::from_secs(60)).unwrap();
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(60))
+                    .unwrap();
             }
         }
         phase if phase == if mutation { "reconcile" } else { "sessions" } => {
-            if let Some(tx) = read_tx.lock().unwrap().take() { let _ = tx.send(()); }
+            if let Some(tx) = read_tx.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
         }
         _ => {}
     }));
     let writer_service = service.clone();
     let writer = std::thread::spawn(move || {
-        writer_service.journal.begin("fixture", &uuid::Uuid::new_v4().to_string(),
-            "fixture", "digest", "no-resource").unwrap();
+        writer_service
+            .journal
+            .begin(
+                "fixture",
+                &uuid::Uuid::new_v4().to_string(),
+                "fixture",
+                "digest",
+                "no-resource",
+            )
+            .unwrap();
     });
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -200,14 +281,28 @@ async fn contention(mutation: bool, revoke: bool, expire: bool) {
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
     let (joined_tx, joined_rx) = tokio::sync::oneshot::channel();
     let gateway = std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         runtime.block_on(async {
-            axum::serve(tokio::net::TcpListener::from_std(listener).unwrap(), create_remote_router(state))
-                .with_graceful_shutdown(async { let _ = stop_rx.await; }).await.unwrap();
+            axum::serve(
+                tokio::net::TcpListener::from_std(listener).unwrap(),
+                create_remote_router(state),
+            )
+            .with_graceful_shutdown(async {
+                let _ = stop_rx.await;
+            })
+            .await
+            .unwrap();
         });
         joined_tx.send(()).unwrap();
     });
-    let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(50)).build().unwrap();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(50))
+        .build()
+        .unwrap();
     let mut list = None;
     let mut revoked_response = None;
     let outcome = std::panic::AssertUnwindSafe(async {
@@ -255,11 +350,19 @@ async fn contention(mutation: bool, revoke: bool, expire: bool) {
         Some(list) => Some(tokio::time::timeout(Duration::from_secs(10), list).await),
         None => None,
     };
-    let drained = tokio::time::timeout(Duration::from_secs(10),
-        slots.clone().acquire_many_owned(u32::try_from(capacity).unwrap())).await;
+    let drained = tokio::time::timeout(
+        Duration::from_secs(10),
+        slots
+            .clone()
+            .acquire_many_owned(u32::try_from(capacity).unwrap()),
+    )
+    .await;
     *service.journal.probe.write() = None;
     let _ = stop_tx.send(());
-    tokio::time::timeout(Duration::from_secs(10), joined_rx).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(10), joined_rx)
+        .await
+        .unwrap()
+        .unwrap();
     gateway.join().unwrap();
     assert!(tokio::net::TcpStream::connect(address).await.is_err());
     drop(service);
@@ -268,12 +371,26 @@ async fn contention(mutation: bool, revoke: bool, expire: bool) {
     eprintln!("JOURNAL_CONTENTION cleanup writer_joined=true gateway_joined=true listener_refused=true root_removed=true");
     writer_joined.unwrap();
     drop(drained.unwrap().unwrap());
-    if let Err(panic) = outcome { std::panic::resume_unwind(panic); }
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
     let response = match revoked_response {
         Some(response) => response,
         None => response.unwrap().unwrap().unwrap().unwrap(),
     };
     let status = response.status().as_u16();
     let body = response.text().await.unwrap();
-    assert_eq!(status, if revoke { 401 } else if expire { 504 } else if mutation { 404 } else { 200 }, "{body}");
+    assert_eq!(
+        status,
+        if revoke {
+            401
+        } else if expire {
+            504
+        } else if mutation {
+            404
+        } else {
+            200
+        },
+        "{body}"
+    );
 }

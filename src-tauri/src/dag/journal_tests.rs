@@ -208,10 +208,16 @@ fn test_parse_run_checkpoint_full_information_fields() {
     assert_eq!(snapshot.run_id, "dag_sample_123");
     assert_eq!(snapshot.amend_count, 1);
 
-    let amend_history = snapshot.amend_history.as_ref().expect("amend history present");
+    let amend_history = snapshot
+        .amend_history
+        .as_ref()
+        .expect("amend history present");
     assert_eq!(amend_history.len(), 1);
     assert_eq!(amend_history[0].changed_node_ids, vec!["step_1"]);
-    assert_eq!(amend_history[0].invalidated_node_ids, vec!["step_1", "step_2"]);
+    assert_eq!(
+        amend_history[0].invalidated_node_ids,
+        vec!["step_1", "step_2"]
+    );
 
     let diagnostics = snapshot.diagnostics.as_ref().expect("diagnostics present");
     assert_eq!(diagnostics.len(), 1);
@@ -234,8 +240,14 @@ fn test_parse_run_checkpoint_full_information_fields() {
     assert_eq!(stats.cost_usd, Some(0.0025));
     assert_eq!(stats.cache_read_tokens, Some(8000));
 
-    let artifact = node.result_artifact.as_ref().expect("resultArtifact present");
-    assert_eq!(artifact.relative_path, "dag/results/dag_sample_123/step_1.txt");
+    let artifact = node
+        .result_artifact
+        .as_ref()
+        .expect("resultArtifact present");
+    assert_eq!(
+        artifact.relative_path,
+        "dag/results/dag_sample_123/step_1.txt"
+    );
     assert_eq!(artifact.sha256.as_deref(), Some("abcdef123456"));
     assert_eq!(artifact.bytes, Some(2048));
 }

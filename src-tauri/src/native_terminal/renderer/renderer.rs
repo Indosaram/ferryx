@@ -4,8 +4,8 @@ use wgpu::util::DeviceExt;
 
 use super::atlas::GlyphAtlas;
 use super::gpu_context::GpuContext;
+use super::images::{image_background_occluders, ImageTextures};
 use super::instances::prepare_visible_glyphs;
-use super::images::{ImageTextures, image_background_occluders};
 use super::pass::encode_terminal_passes_with_surface_options;
 use super::pipeline::{GlyphInstance, RectInstance, RenderPipelines, ScreenUniform};
 use super::render_target::{RenderTarget, TARGET_FORMAT};
@@ -42,6 +42,16 @@ mod tests {
     use crate::native_terminal::cursor::{CursorSnapshot, CursorVisualStyle};
     use crate::native_terminal::renderer::rasterizer::rasterize_glyph_with_scale;
     use crate::native_terminal::snapshot::{CellSnapshot, CellWide};
+
+    #[test]
+    fn surface_renderers_share_the_gpu_device_and_queue() {
+        let first = NativeTerminalRenderer::with_shared_surface_gpu(RendererConfig::default())
+            .unwrap();
+        let second = NativeTerminalRenderer::with_shared_surface_gpu(RendererConfig::default())
+            .unwrap();
+        assert!(std::sync::Arc::ptr_eq(&first.gpu.device, &second.gpu.device));
+        assert!(std::sync::Arc::ptr_eq(&first.gpu.queue, &second.gpu.queue));
+    }
 
     fn dense_config() -> RendererConfig {
         RendererConfig {
@@ -413,39 +423,82 @@ mod tests {
     #[test]
     fn kitty_images_reach_each_surface_entry_and_reuse_texture_uploads() {
         use crate::native_terminal::{NativeTerminal, TerminalEngine};
-        let config = RendererConfig { cell_width_px: 8, cell_height_px: 8, ..Default::default() };
+        let config = RendererConfig {
+            cell_width_px: 8,
+            cell_height_px: 8,
+            ..Default::default()
+        };
         let mut terminal = NativeTerminal::new(8, 6).unwrap();
         terminal.resize(8, 6, 8, 8).unwrap();
-        terminal.feed(b"\x1b[?25l\x1b[2;2H\x1b_Ga=T,f=32,s=1,v=1,i=1,c=2,r=2,C=1;/wAAgA==\x1b\\").unwrap();
+        terminal
+            .feed(b"\x1b[?25l\x1b[2;2H\x1b_Ga=T,f=32,s=1,v=1,i=1,c=2,r=2,C=1;/wAAgA==\x1b\\")
+            .unwrap();
         let snapshot = terminal.render_snapshot().unwrap();
         let mut reference = NativeTerminalRenderer::new(config).unwrap();
         let expected = reference.render_snapshot(&snapshot, None).unwrap();
         let repeated = reference.render_snapshot(&snapshot, None).unwrap();
         assert_eq!(expected.pixels, repeated.pixels);
         assert_eq!(reference.image_textures.upload_count, 1);
-        assert_eq!((repeated.rebuilt_row_count, repeated.reused_row_count), (0, 6));
+        assert_eq!(
+            (repeated.rebuilt_row_count, repeated.reused_row_count),
+            (0, 6)
+        );
         let pixel = tile(&expected, 12, 12, 1, 1);
         let bg = config.theme.background;
         for channel in 0..3 {
             let foreground = if channel == 0 { 255.0 } else { 0.0 };
             let blended = (foreground * 128.0 / 255.0 + bg[channel] * 127.0).round() as i16;
-            assert!((pixel[channel] as i16 - blended).abs() <= 1, "straight alpha channel {channel}");
+            assert!(
+                (pixel[channel] as i16 - blended).abs() <= 1,
+                "straight alpha channel {channel}"
+            );
         }
         for viewport in [false, true] {
             let mut renderer = NativeTerminalRenderer::new(config).unwrap();
             let (x, y) = if viewport { (8, 8) } else { (0, 0) };
             let target = RenderTarget::new(&renderer.gpu.device, 64 + x * 2, 48 + y * 2);
             if viewport {
-                renderer.render_to_surface_viewport(&snapshot, None, &target.view, target.width, target.height, TARGET_FORMAT,
-                    PhysicalBounds { x, y, width: 64, height: 48 }, None, false).unwrap();
+                renderer
+                    .render_to_surface_viewport(
+                        &snapshot,
+                        None,
+                        &target.view,
+                        target.width,
+                        target.height,
+                        TARGET_FORMAT,
+                        PhysicalBounds {
+                            x,
+                            y,
+                            width: 64,
+                            height: 48,
+                        },
+                        None,
+                        false,
+                    )
+                    .unwrap();
             } else {
-                renderer.render_to_surface_view(&snapshot, None, &target.view, target.width, target.height, TARGET_FORMAT).unwrap();
+                renderer
+                    .render_to_surface_view(
+                        &snapshot,
+                        None,
+                        &target.view,
+                        target.width,
+                        target.height,
+                        TARGET_FORMAT,
+                    )
+                    .unwrap();
             }
-            let mut encoder = renderer.gpu.device.create_command_encoder(&Default::default());
+            let mut encoder = renderer
+                .gpu
+                .device
+                .create_command_encoder(&Default::default());
             target.copy_to_staging(&mut encoder);
             renderer.gpu.queue.submit(Some(encoder.finish()));
             let frame = target.readback_frame(&renderer.gpu.device, 6).unwrap();
-            assert_eq!(tile(&frame, x as usize, y as usize, 64, 48), expected.pixels);
+            assert_eq!(
+                tile(&frame, x as usize, y as usize, 64, 48),
+                expected.pixels
+            );
             assert_eq!(renderer.image_textures.upload_count, 1);
         }
     }
@@ -453,18 +506,42 @@ mod tests {
     #[test]
     fn kitty_z_layers_preserve_explicit_background_and_text() {
         use crate::native_terminal::{NativeTerminal, TerminalEngine};
-        let config = RendererConfig { cell_width_px: 8, cell_height_px: 16, ..Default::default() };
+        let config = RendererConfig {
+            cell_width_px: 8,
+            cell_height_px: 16,
+            ..Default::default()
+        };
         let mut terminal = NativeTerminal::new(4, 2).unwrap();
         terminal.resize(4, 2, 8, 16).unwrap();
-        terminal.feed(b"\x1b[?25l\x1b[48;2;0;255;0m \x1b[0m\x1b[38;2;255;255;255mM\x1b[H").unwrap();
+        terminal
+            .feed(b"\x1b[?25l\x1b[48;2;0;255;0m \x1b[0m\x1b[38;2;255;255;255mM\x1b[H")
+            .unwrap();
         let mut renderer = NativeTerminalRenderer::new(config).unwrap();
         for z in [-2147483648i32, -1, 0] {
-            terminal.feed(format!("\x1b[H\x1b_Ga=T,f=24,s=1,v=1,i=1,c=3,r=1,C=1,z={z};/wAA\x1b\\").as_bytes()).unwrap();
-            let frame = renderer.render_snapshot(&terminal.render_snapshot().unwrap(), None).unwrap();
-            assert_eq!(tile(&frame, 4, 8, 1, 1), if z == i32::MIN { vec![0,255,0,255] } else { vec![255,0,0,255] });
-            assert_eq!(tile(&frame, 20, 8, 1, 1), [255,0,0,255]);
+            terminal
+                .feed(
+                    format!("\x1b[H\x1b_Ga=T,f=24,s=1,v=1,i=1,c=3,r=1,C=1,z={z};/wAA\x1b\\")
+                        .as_bytes(),
+                )
+                .unwrap();
+            let frame = renderer
+                .render_snapshot(&terminal.render_snapshot().unwrap(), None)
+                .unwrap();
+            assert_eq!(
+                tile(&frame, 4, 8, 1, 1),
+                if z == i32::MIN {
+                    vec![0, 255, 0, 255]
+                } else {
+                    vec![255, 0, 0, 255]
+                }
+            );
+            assert_eq!(tile(&frame, 20, 8, 1, 1), [255, 0, 0, 255]);
             let text_cell = tile(&frame, 8, 0, 8, 16);
-            assert_eq!(text_cell.chunks_exact(4).any(|p| p[1] != 0), z < 0, "text z={z}");
+            assert_eq!(
+                text_cell.chunks_exact(4).any(|p| p[1] != 0),
+                z < 0,
+                "text z={z}"
+            );
         }
     }
 
@@ -571,6 +648,17 @@ impl NativeTerminalRenderer {
         config.validate()?;
 
         let gpu = GpuContext::new()?;
+        Self::with_gpu(config, gpu)
+    }
+
+    pub(crate) fn with_shared_surface_gpu(
+        config: RendererConfig,
+    ) -> Result<Self, NativeTerminalError> {
+        config.validate()?;
+        Self::with_gpu(config, GpuContext::shared_surface_context()?)
+    }
+
+    fn with_gpu(config: RendererConfig, gpu: GpuContext) -> Result<Self, NativeTerminalError> {
         let pipelines = RenderPipelines::new(&gpu.device);
         let atlas = GlyphAtlas::new(&gpu.device);
 
@@ -752,7 +840,14 @@ impl NativeTerminalRenderer {
     ) -> Result<OffscreenFrame, NativeTerminalError> {
         let (width_px, height_px) = self.validate_and_dims(snapshot)?;
         let (bg, glyph, rebuilt, reused) = self.prepare_frame_instances(snapshot, selection)?;
-        let images = self.image_textures.prepare(&self.gpu.device, &self.gpu.queue, &self.pipelines, snapshot, &self.config, [0.0; 2])?;
+        let images = self.image_textures.prepare(
+            &self.gpu.device,
+            &self.gpu.queue,
+            &self.pipelines,
+            snapshot,
+            &self.config,
+            [0.0; 2],
+        )?;
         let occluders = image_background_occluders(snapshot, &self.config, selection, &bg);
 
         if self
@@ -825,7 +920,14 @@ impl NativeTerminalRenderer {
     ) -> Result<(u16, u16), NativeTerminalError> {
         let (_, _) = self.validate_and_dims(snapshot)?;
         let (bg, glyph, rebuilt, reused) = self.prepare_frame_instances(snapshot, selection)?;
-        let images = self.image_textures.prepare(&self.gpu.device, &self.gpu.queue, &self.pipelines, snapshot, &self.config, [0.0; 2])?;
+        let images = self.image_textures.prepare(
+            &self.gpu.device,
+            &self.gpu.queue,
+            &self.pipelines,
+            snapshot,
+            &self.config,
+            [0.0; 2],
+        )?;
         let occluders = image_background_occluders(snapshot, &self.config, selection, &bg);
 
         let mut encoder = self
@@ -927,7 +1029,14 @@ impl NativeTerminalRenderer {
         }
 
         let (bg, mut glyph, rebuilt, reused) = self.prepare_frame_instances(snapshot, selection)?;
-        let images = self.image_textures.prepare(&self.gpu.device, &self.gpu.queue, &self.pipelines, snapshot, &self.config, [viewport.x as f32, viewport.y as f32])?;
+        let images = self.image_textures.prepare(
+            &self.gpu.device,
+            &self.gpu.queue,
+            &self.pipelines,
+            snapshot,
+            &self.config,
+            [viewport.x as f32, viewport.y as f32],
+        )?;
         let mut occluders = image_background_occluders(snapshot, &self.config, selection, &bg);
         for rect in &mut occluders {
             rect.rect[0] += viewport.x as f32;

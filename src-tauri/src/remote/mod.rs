@@ -5,23 +5,24 @@ pub mod browser_backend;
 pub mod browser_protocol;
 pub mod browser_security;
 pub mod browser_ws;
+pub mod dag_api;
 pub mod discovery;
 pub(crate) mod filesystem;
-pub mod machine_protocol;
 pub mod machine_events;
-pub mod workspace_catalog;
-pub mod workspace_api;
 pub mod machine_operation_journal;
+pub mod machine_protocol;
 pub mod mirror;
 pub mod protocol;
 pub mod push;
 pub mod relay_client;
 pub mod relay_server;
 pub mod server;
-pub mod terminal_wire;
 pub(crate) mod session_api;
 mod ssh;
 pub mod state;
+pub mod terminal_wire;
+pub mod workspace_api;
+pub mod workspace_catalog;
 
 pub use auth::*;
 pub use backend::*;
@@ -39,9 +40,7 @@ pub use browser_protocol::{
     BinaryFrameHeader, BrowserCaptureRect, BrowserFrameMetadata, BrowserImageFormat,
     BrowserSubscribeOptions, ClientMessage, DecodedBrowserFrame, ProtocolCodecError, ServerMessage,
 };
-pub use browser_security::{
-    require_permission, sanitize_url, RequestDeduplicator, SecurityError,
-};
+pub use browser_security::{require_permission, sanitize_url, RequestDeduplicator, SecurityError};
 pub use browser_ws::{BrowserWsSession, WsConnectionState};
 pub use mirror::*;
 pub use protocol::*;
@@ -58,6 +57,10 @@ mod filesystem_tests;
 
 #[cfg(test)]
 mod workspace_api_tests;
+
+#[cfg(all(test, unix))]
+#[path = "dag_paired_tests.rs"]
+mod dag_paired_tests;
 
 #[cfg(test)]
 mod browser_protocol_tests;

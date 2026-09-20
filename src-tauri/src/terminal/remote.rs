@@ -70,7 +70,9 @@ impl RemoteFailure {
             BridgeError::ProcessExited { stderr, .. } => ssh_stderr_failure_kind(stderr),
             BridgeError::SshSetup(error) => {
                 let details = error.details.as_ref();
-                let stage = details.and_then(|d| d.get("stage")).and_then(|v| v.as_str());
+                let stage = details
+                    .and_then(|d| d.get("stage"))
+                    .and_then(|v| v.as_str());
                 if stage == Some("helper_missing")
                     || error.code == crate::ipc::IpcErrorCode::CliExecutableNotFound
                 {
@@ -80,7 +82,10 @@ impl RemoteFailure {
                 } else if stage == Some("transport") {
                     RemoteFailureKind::Transport
                 } else if stage == Some("execution")
-                    && details.and_then(|d| d.get("exitCode")).and_then(|v| v.as_i64()) == Some(255)
+                    && details
+                        .and_then(|d| d.get("exitCode"))
+                        .and_then(|v| v.as_i64())
+                        == Some(255)
                 {
                     details
                         .and_then(|d| d.get("stderr"))
@@ -319,7 +324,10 @@ impl RemoteRuntime {
                 "Backend session ID already registered",
             ));
         }
-        if map.values().any(|entry| entry.state.lock().details.descriptor.target == d.target) {
+        if map
+            .values()
+            .any(|entry| entry.state.lock().details.descriptor.target == d.target)
+        {
             return Err(RemoteFailure::new(
                 RemoteFailureKind::Protocol,
                 "Remote target already has a session controller",
@@ -389,7 +397,9 @@ impl RemoteRuntime {
         let attachment = self
             .hub
             .subscribe_with_sequence(id, after_sequence)
-            .ok_or_else(|| RemoteFailure::new(RemoteFailureKind::Missing, "Session not found in hub"))?;
+            .ok_or_else(|| {
+                RemoteFailure::new(RemoteFailureKind::Missing, "Session not found in hub")
+            })?;
         Ok((attachment, generation))
     }
 
@@ -668,10 +678,11 @@ async fn run(
                 s.details.pid = Some(info.pid);
                 s.details.state = RemoteConnectionState::Connected;
                 s.details.failure = None;
-                desired_size = Some(s.pending_size.take().unwrap_or((
-                    s.details.descriptor.cols,
-                    s.details.descriptor.rows,
-                )));
+                desired_size = Some(
+                    s.pending_size
+                        .take()
+                        .unwrap_or((s.details.descriptor.cols, s.details.descriptor.rows)),
+                );
                 Entry::notify(&s);
             }
             // Converge the remote PTY onto the last size the daemon knows about

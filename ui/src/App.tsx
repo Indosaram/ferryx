@@ -35,7 +35,7 @@ import { IconButton } from "./components/ui/IconButton";
 import { copyTextToClipboard } from "./lib/clipboard";
 import { useApplyAppearanceSettings } from "./lib/appearanceSettings";
 import { workspaceName } from "./lib/branchFilter";
-import { collectDagWatchRoots } from "./lib/dagWatchRoots";
+import { collectDagWatchRoots, isLocalDagProject, remoteProjectsWatchKey } from "./lib/dagWatchRoots";
 import { newBrowserTabUrl } from "./lib/browserSettings";
 import { BROWSER_SHORTCUT_EVENT, onBrowserOpenRequested, onBrowserSessionCreated, onBrowserShortcutRequested, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
 import { registerBuiltInBrowserLinkOpener } from "./lib/linkRouting";
@@ -103,14 +103,14 @@ import {
   writeTerminal,
   bootTrace,
   browserRemoteReclaim,
-  listenDagRunUpdated,
-  watchDagProject,
+  discoverDagWatchRoots,
   type AgentDetection,
   type FocusedTerminalPayload,
   type RegisteredProject,
   type RemoteSelectionRequestedPayload,
 } from "./lib/tauri";
 import { safeRandomUUID } from "./lib/uuid";
+import { dagRemoteWatchTargets, useDagWatchLifecycle } from "./lib/useDagWatchLifecycle";
 import { getCachedSshHosts } from "./lib/sshHosts";
 import { reconnectAgentSession } from "./lib/agentReconnect";
 import { isPairedWorkspaceId, isRemoteWorkspaceId, registerRemoteProject, toRegisteredProject } from "./lib/remoteProject";
@@ -124,7 +124,6 @@ import { createAppReconnectDependencies } from "./lib/appReconnectDependencies";
 import { replaceExitedShellSession } from "./lib/shellReplacement";
 import { enqueueStrictPersistence } from "./lib/persistenceQueue";
 import { workspaceReducer } from "./state/workspaceStore";
-import { dagStore } from "./state/dagStore";
 import type { NotificationTarget, PersistedWorkspaceSession } from "./lib/types";
 import { subscribeNotificationActivations } from "./lib/notificationActivation";
 import { ensureTerminalEvents } from "./lib/terminalEvents";
@@ -146,7 +145,7 @@ import { useBrowserSessionHydration } from "./state/browserSessionHydration";
 import { preloadWorkspaceSnapshots, useWorkspaceRestore } from "./state/workspaceRestore";
 import { clearHmrWorkspaceState, getHmrWorkspaceState } from "./state/hmrWorkspaceState";
 import { clearWorkspaceSnapshot, getWorkspaceSnapshot, listWorkspaceSnapshots } from "./state/workspaceSnapshotCache";
-import { emptySidebarWorkspaceIds } from "./state/sidebarWorkspaceState";
+import { emptySidebarWorkspaceIds, worktreeHasOpenTabs } from "./state/sidebarWorkspaceState";
 import { useWorkspaceRuntime } from "./state/workspaceRuntime";
 import { listPairedProjectWorktrees } from "./state/pairedProjectWorktrees";
 import { getTabSessionIds, hasNavigableSession, selectGlobalUnreadBadgeCount, selectNotificationWorkspaceLabel, selectWorktreeActivitySummaries, useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
@@ -957,11 +956,11 @@ function WorkspaceApp({
 
   // Dag journals: watch every known project root, worktree and live session root so any omo
   // graph run anywhere lights up the activity badge, regardless of which cwd the app started in.
-  const dagWatchedPathsRef = useRef<Set<string>>(new Set());
   const stateProject = projects.find((project) => project.workspaceId === (state.workspaceId ?? activeProject.workspaceId));
-  const isRemoteState = stateProject?.target?.kind === "ssh";
+  const isRemoteState = !isLocalDagProject(stateProject);
   const activeWorktreePathsKey = isRemoteState ? "" : state.worktrees.map((worktree) => worktree.path).join("\n");
-  const projectRootsKey = projects.filter((project) => project.target?.kind !== "ssh").map((project) => project.repoRoot).join("\n");
+  const projectRootsKey = projects.filter(isLocalDagProject).map((project) => project.repoRoot).join("\n");
+  const remoteProjectsKey = useMemo(() => remoteProjectsWatchKey(projects), [projects]);
   const sessionDagRootsKey = useMemo(
     () =>
       isRemoteState ? "" : collectDagWatchRoots({ projectRoots: [], worktreePaths: [], sessions: state.sessions })
@@ -969,48 +968,47 @@ function WorkspaceApp({
         .join("\n"),
     [isRemoteState, state.sessions],
   );
+  const discoveredDagRootsRef = useRef<string[]>([]);
+  const [discoveredDagRootsKey, setDiscoveredDagRootsKey] = useState("");
   useEffect(() => {
-    const paths = collectDagWatchRoots({
-      projectRoots: projectRootsKey.split("\n"),
-      worktreePaths: [
-        ...Object.entries(inactiveProjectWorktreesRef.current).flatMap(([workspaceId, worktrees]) =>
-          projectsRef.current.some((project) => project.workspaceId === workspaceId && project.target?.kind !== "ssh")
-            ? worktrees.map((worktree) => worktree.path) : [],
-        ),
-        ...activeWorktreePathsKey.split("\n"),
-        ...sessionDagRootsKey.split("\n"),
-      ],
-      sessions: [],
-    });
-    for (const path of paths) {
-      if (dagWatchedPathsRef.current.has(path)) continue;
-      dagWatchedPathsRef.current.add(path);
-      void watchDagProject(path)
-        // Events are tagged with the backend's canonical path, so hydrate under
-        // that same key or the pane lookup would never find these runs.
-        .then(({ projectPath, runs }) => {
-          for (const snapshot of runs) dagStore.applySnapshot(projectPath, snapshot);
-        })
-        .catch(() => {
-          dagWatchedPathsRef.current.delete(path);
-        });
-    }
-  }, [inactiveProjectWorktrees, activeWorktreePathsKey, projectRootsKey, sessionDagRootsKey]);
-
-  useEffect(() => {
+    if (isRemoteState || projectRootsKey === "") return;
     let disposed = false;
-    let unlisten: (() => void) | undefined;
-    void listenDagRunUpdated((event) => {
-      dagStore.applySnapshot(event.projectPath, event.snapshot);
-    }).then((fn) => {
-      if (disposed) fn();
-      else unlisten = fn;
-    });
+    void discoverDagWatchRoots(projectRootsKey.split("\n").filter(Boolean))
+      .then((roots) => {
+        if (disposed) return;
+        discoveredDagRootsRef.current = roots;
+        setDiscoveredDagRootsKey(roots.slice().sort().join("\n"));
+      })
+      .catch(() => undefined);
     return () => {
       disposed = true;
-      unlisten?.();
     };
-  }, []);
+  }, [isRemoteState, projectRootsKey]);
+  const dagLocalRoots = useMemo(
+    () => [
+      ...collectDagWatchRoots({
+        projectRoots: projectRootsKey.split("\n"),
+        worktreePaths: [
+          ...Object.entries(inactiveProjectWorktrees).flatMap(([workspaceId, worktrees]) =>
+            projects.some((project) => project.workspaceId === workspaceId && isLocalDagProject(project))
+              ? worktrees.map((worktree) => worktree.path) : [],
+          ),
+          ...activeWorktreePathsKey.split("\n"),
+          ...sessionDagRootsKey.split("\n"),
+        ],
+        sessions: [],
+      }),
+      ...discoveredDagRootsRef.current,
+    ],
+    // discoveredDagRootsKey tracks the ref's content; the ref itself holds the exact roots.
+    [projects, inactiveProjectWorktrees, projectRootsKey, activeWorktreePathsKey, sessionDagRootsKey, discoveredDagRootsKey],
+  );
+  const dagRemoteTargets = useMemo(() => dagRemoteWatchTargets(projects), [projects]);
+  useDagWatchLifecycle({
+    localRoots: dagLocalRoots,
+    remoteTargets: dagRemoteTargets,
+    watchKey: `${dagLocalRoots.join("\n")}\u0001${remoteProjectsKey}`,
+  });
   inactiveProjectWorktreesRef.current = inactiveProjectWorktrees;
 
   useEffect(() => {
@@ -2179,17 +2177,13 @@ function WorkspaceApp({
   const handleSelectWorktreeByIndex = useCallback(
     (index: number) => {
       if (activeRemoteHostRef.current) return;
-      const visible = listVisibleWorktrees(
+      const visible = listShortcutWorktrees(
         projectsRef.current,
         stateRef.current.worktrees,
         activeProjectRef.current.workspaceId,
         inactiveProjectWorktreesRef.current,
-        emptySidebarWorkspaceIds(
-          projectsRef.current,
-          activeProjectRef.current.workspaceId,
-          stateRef.current,
-          listWorkspaceSnapshots(),
-        ),
+        stateRef.current,
+        listWorkspaceSnapshots(),
       );
       const target = visible[index];
       if (target) handleSelectWorktree(target);
@@ -2801,10 +2795,11 @@ function WorkspaceApp({
           return {
             tabIds: Array.from({ length: 9 }, (_, index) => group?.tabIds[index] ?? current.layout.tabs[index]?.id ?? ""),
             closeTabId: activeTab && !activeTab.pinned && (!paneLayout || paneLayout.root.type === "leaf") ? activeTab.id : null,
-            worktrees: listVisibleWorktrees(
+            worktrees: listShortcutWorktrees(
               projectsRef.current, current.worktrees, activeProjectRef.current.workspaceId,
               inactiveProjectWorktreesRef.current,
-              emptySidebarWorkspaceIds(projectsRef.current, activeProjectRef.current.workspaceId, current, listWorkspaceSnapshots()),
+              current,
+              listWorkspaceSnapshots(),
             ),
           };
         }}
@@ -3190,6 +3185,33 @@ function listVisibleWorktrees(
   }
 
   return visible;
+}
+
+/**
+ * Shortcut navigation (Cmd+1..9) targets only worktrees whose layouts currently
+ * own tabs; tabless worktrees stay listed in the sidebar but off the shortcut
+ * ladder so a digit never lands on an empty workspace.
+ */
+function listShortcutWorktrees(
+  projects: RegisteredProject[],
+  worktrees: Worktree[],
+  activeProjectId: string,
+  inactiveProjectWorktrees: Record<string, Worktree[]>,
+  liveState: WorkspaceState,
+  snapshots: ReadonlyArray<readonly [string, WorkspaceState]>,
+): Worktree[] {
+  const visible = listVisibleWorktrees(
+    projects, worktrees, activeProjectId, inactiveProjectWorktrees,
+    emptySidebarWorkspaceIds(projects, activeProjectId, liveState, snapshots),
+  );
+  const states = new Map(snapshots);
+  states.set(liveState.workspaceId ?? activeProjectId, liveState);
+  return visible.filter((row) =>
+    worktreeHasOpenTabs(
+      states.get(resolveWorktreeOwnerId(row, projects, activeProjectId) ?? (liveState.workspaceId ?? activeProjectId)),
+      row.path,
+    ),
+  );
 }
 
 function loadCollapsedProjectIds(projects: RegisteredProject[], activeProjectId: string): Set<string> {

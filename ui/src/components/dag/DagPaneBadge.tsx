@@ -16,42 +16,18 @@ export type DagPaneBadgeProps = {
   readonly retainSettled?: boolean;
 };
 
-function cleanPath(p: string): string {
-  let norm = p.replace(/\\/g, "/").trim();
-  if (norm.startsWith("/private/")) norm = norm.slice("/private".length);
-  if (norm.length > 1 && norm.endsWith("/")) norm = norm.replace(/\/+$/, "");
-  return norm;
-}
-
-function matchesPathBoundary(panePath: string, projectKey: string): boolean {
-  if (!panePath || !projectKey) return false;
-  if (panePath === projectKey) return true;
-  if (projectKey === "/") return panePath.startsWith("/");
-  return panePath.startsWith(`${projectKey}/`);
-}
-
-function resolveProjectRuns(
+function collectSessionOwnedRuns(
   state: ReturnType<typeof dagStore.getState>,
-  projectPath: string | undefined,
+  providerSessionId: string | null | undefined,
 ): DagRunSnapshot[] {
-  if (!projectPath) return [];
-  const normalizedPane = cleanPath(projectPath);
-  if (!normalizedPane) return [];
-
-  let bestKey: string | null = null;
-  let bestKeyLength = -1;
-  for (const key of Object.keys(state.runsByProject)) {
-    const cleanedKey = cleanPath(key);
-    if (
-      matchesPathBoundary(normalizedPane, cleanedKey) &&
-      cleanedKey.length > bestKeyLength
-    ) {
-      bestKey = key;
-      bestKeyLength = cleanedKey.length;
+  if (!providerSessionId) return [];
+  const owned: DagRunSnapshot[] = [];
+  for (const projectRuns of Object.values(state.runsByProject)) {
+    for (const run of Object.values(projectRuns)) {
+      if (run.rootSessionId === providerSessionId) owned.push(run);
     }
   }
-
-  return bestKey === null ? [] : Object.values(state.runsByProject[bestKey]);
+  return owned;
 }
 
 function runUpdatedAt(run: DagRunSnapshot): number {
@@ -90,8 +66,8 @@ export function DagPaneBadge({
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
 
   const runs = useMemo(
-    () => resolveProjectRuns(storeState, projectPath),
-    [storeState, projectPath],
+    () => collectSessionOwnedRuns(storeState, providerSessionId),
+    [storeState, providerSessionId],
   );
   const eligibleRuns = useMemo(
     () =>
@@ -111,6 +87,7 @@ export function DagPaneBadge({
   );
 
   const run = paneRuns.length > 0 ? paneRuns[0] : null;
+  const watchFailure = projectPath ? (storeState.watchFailures?.[projectPath] ?? null) : null;
   const activeRun = (selectedRunId ? paneRuns.find((r) => r.runId === selectedRunId) : null) ?? run;
 
   const visible = run !== null;
@@ -159,13 +136,43 @@ export function DagPaneBadge({
     };
   }, [open, visible]);
 
-  if (run === null) return null;
+  if (run === null) {
+    if (!watchFailure) return null;
+    // The stream stopped for good (helper/capability/auth/unavailable) - say so instead of
+    // showing nothing, which is indistinguishable from "no runs yet".
+    return (
+      <div className="no-drag absolute bottom-0 right-5 z-30" data-testid="dag-pane-badge">
+        <span
+          role="status"
+          data-testid="dag-watch-failure"
+          data-code={watchFailure.code}
+          aria-label={`DAG stream unavailable: ${watchFailure.code}`}
+          title={watchFailure.message}
+          className="flex size-5 items-center justify-center rounded-md border border-amber-400/50 bg-zinc-900/85 text-[11px] font-semibold text-amber-300 shadow-[0_0_10px_rgb(251_191_36_/_0.30)] backdrop-blur-sm"
+        >
+          !
+        </span>
+      </div>
+    );
+  }
 
   return (
     <div
       className="no-drag absolute bottom-0 right-5 z-30"
       data-testid="dag-pane-badge"
     >
+      {watchFailure ? (
+        <span
+          role="status"
+          data-testid="dag-watch-failure"
+          data-code={watchFailure.code}
+          aria-label={`DAG stream unavailable: ${watchFailure.code}`}
+          title={watchFailure.message}
+          className="mr-1 inline-flex size-5 items-center justify-center rounded-md border border-amber-400/50 bg-zinc-900/85 text-[11px] font-semibold text-amber-300 shadow-[0_0_10px_rgb(251_191_36_/_0.30)] backdrop-blur-sm"
+        >
+          !
+        </span>
+      ) : null}
       <button
         type="button"
         data-testid="dag-pane-badge-button"

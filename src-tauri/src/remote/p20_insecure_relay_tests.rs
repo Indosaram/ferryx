@@ -23,7 +23,10 @@ fn test_p20_non_loopback_http_relay_url_rejected_with_typed_error() {
         .expect_err("non-loopback public http relay URL must be rejected");
     assert_eq!(err_public.code(), "INSECURE_PUBLIC_RELAY_FORBIDDEN");
     assert!(
-        matches!(err_public, RelayUrlSecurityError::InsecurePublicRelayForbidden { .. }),
+        matches!(
+            err_public,
+            RelayUrlSecurityError::InsecurePublicRelayForbidden { .. }
+        ),
         "expected InsecurePublicRelayForbidden, got {err_public:?}"
     );
 
@@ -37,7 +40,10 @@ fn test_p20_non_loopback_http_relay_url_rejected_with_typed_error() {
         .expect_err("RFC1918 http relay without opt-in must be rejected");
     assert_eq!(err_private.code(), "INSECURE_RELAY_OPT_IN_REQUIRED");
     assert!(
-        matches!(err_private, RelayUrlSecurityError::InsecureDevelopmentRelayRequiresOptIn { .. }),
+        matches!(
+            err_private,
+            RelayUrlSecurityError::InsecureDevelopmentRelayRequiresOptIn { .. }
+        ),
         "expected InsecureDevelopmentRelayRequiresOptIn, got {err_private:?}"
     );
 
@@ -59,8 +65,8 @@ fn test_p20_loopback_http_and_non_loopback_https_allowed() {
         .expect("127.0.0.1 http:// must be allowed");
     assert_eq!(loopback_v4, "ws://127.0.0.1:8787");
 
-    let loopback_v6 = validate_relay_url("http://[::1]:8787", false)
-        .expect("::1 http:// must be allowed");
+    let loopback_v6 =
+        validate_relay_url("http://[::1]:8787", false).expect("::1 http:// must be allowed");
     assert_eq!(loopback_v6, "ws://[::1]:8787");
 
     // Non-loopback https:// must be allowed

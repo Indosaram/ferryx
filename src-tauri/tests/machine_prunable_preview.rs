@@ -42,18 +42,22 @@ async fn missing_checkout_rich_preview_http() {
             let mut expected_sessions: Vec<String> = Vec::new();
             #[cfg(unix)] {
                 let terminal = owner.terminal_service().clone();
-                let (id, mut output) = tokio::task::spawn_blocking({ let repo = repo.clone(); let path = path.clone(); move || {
+                let term = terminal.clone();
+                let (id, _lifecycle) = tokio::task::spawn_blocking({ let repo = repo.clone(); let path = path.clone(); move || {
                     let manager = ferryx_lib::worktree::WorktreeManager::try_new(&repo).unwrap();
                     let mut cmd = portable_pty::CommandBuilder::new("/bin/sh");
                     cmd.args(["-c", "printf 'A08_READY\\n'; read value"]);
                     cmd.cwd(&path);
-                    terminal.spawn_in_worktree(cmd, 80, 24, &manager, &path).unwrap()
+                    term.spawn_in_worktree(cmd, 80, 24, &manager, &path).unwrap()
                 }}).await.unwrap();
+                let (initial, mut output) = terminal.attach(&id).unwrap();
                 owned_sessions.push(id.clone());
                 expected_sessions.push(id);
                 tokio::time::timeout(Duration::from_secs(10), async {
-                    let mut bytes = Vec::new();
-                    loop { bytes.extend(output.recv().await.unwrap()); if String::from_utf8_lossy(&bytes).contains("A08_READY") { break; } }
+                    let mut bytes = initial;
+                    while !String::from_utf8_lossy(&bytes).contains("A08_READY") {
+                        bytes.extend(output.recv().await.unwrap());
+                    }
                 }).await.unwrap();
             }
             let expected_head = tokio::task::spawn_blocking({ let repo = repo.clone(); let path = path.clone(); move || {

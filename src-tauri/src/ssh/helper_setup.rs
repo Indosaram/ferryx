@@ -97,19 +97,30 @@ pub async fn install(
         let metadata = std::fs::metadata(&local_path).map_err(|e| {
             IpcError::new(
                 IpcErrorCode::IoError,
-                format!("Local helper binary not accessible at {}: {}", local_path.display(), e),
+                format!(
+                    "Local helper binary not accessible at {}: {}",
+                    local_path.display(),
+                    e
+                ),
             )
         })?;
         if !metadata.is_file() {
             return Err(IpcError::new(
                 IpcErrorCode::InvalidPath,
-                format!("Local helper binary path {} is not a regular file", local_path.display()),
+                format!(
+                    "Local helper binary path {} is not a regular file",
+                    local_path.display()
+                ),
             ));
         }
         let bytes = std::fs::read(&local_path).map_err(|e| {
             IpcError::new(
                 IpcErrorCode::IoError,
-                format!("Failed to read local helper binary from {}: {}", local_path.display(), e),
+                format!(
+                    "Failed to read local helper binary from {}: {}",
+                    local_path.display(),
+                    e
+                ),
             )
         })?;
         if bytes.is_empty() {
@@ -121,8 +132,12 @@ pub async fn install(
         Ok(bytes)
     })
     .await
-    .map_err(|e| IpcError::new(IpcErrorCode::InternalError, format!("Join error in blocking offload: {e}")))?
-    ?;
+    .map_err(|e| {
+        IpcError::new(
+            IpcErrorCode::InternalError,
+            format!("Join error in blocking offload: {e}"),
+        )
+    })??;
 
     let (cmd, input_bytes) = match env.platform {
         RemotePlatform::Posix => {
@@ -350,7 +365,11 @@ fn classify_probe_error(err: &IpcError) -> HelperProbeState {
     // Windows sshd.exe normalizes child exit codes to 1, so the explicit
     // stderr sentinels are the reliable signal there; POSIX adds 127/126.
     // Both sentinels mean the helper is not usable at its default location.
-    if has_missing_marker || has_not_executable_marker || exit_code == Some(127) || exit_code == Some(126) {
+    if has_missing_marker
+        || has_not_executable_marker
+        || exit_code == Some(127)
+        || exit_code == Some(126)
+    {
         HelperProbeState::Missing
     } else {
         HelperProbeState::Unknown
@@ -411,7 +430,9 @@ pub fn parse_installed_version_output(stdout: &[u8]) -> Option<String> {
         let token = trimmed.split_whitespace().last()?;
         if token.contains('.')
             && token.chars().next().map_or(false, |c| c.is_ascii_digit())
-            && token.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '+')
+            && token
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '+')
         {
             return Some(token.to_string());
         }
@@ -419,10 +440,7 @@ pub fn parse_installed_version_output(stdout: &[u8]) -> Option<String> {
     None
 }
 
-pub async fn installed_version(
-    host: &SshHost,
-    env: &RemoteEnvironment,
-) -> Option<String> {
+pub async fn installed_version(host: &SshHost, env: &RemoteEnvironment) -> Option<String> {
     let location = default_location(host, env).ok()?;
     let script = match env.platform {
         RemotePlatform::Posix => format!(
@@ -471,7 +489,10 @@ pub fn decide_helper_upgrade(
         Some(remote) => {
             // Calver ordering: a remote already newer than (or equal to) the
             // local bundle must never be offered a downgrade.
-            match (parse_calver_version(remote), parse_calver_version(bundled_version)) {
+            match (
+                parse_calver_version(remote),
+                parse_calver_version(bundled_version),
+            ) {
                 (Some(remote_cal), Some(bundled_cal)) if remote_cal >= bundled_cal => {
                     HelperUpgradeDecision::NoOp
                 }

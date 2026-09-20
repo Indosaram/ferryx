@@ -25,9 +25,9 @@ mod lifecycle;
 mod mouse;
 mod mouse_encoder;
 mod paste;
-mod png_decoder;
 #[cfg(feature = "native-terminal")]
 pub mod platform;
+mod png_decoder;
 mod queries;
 mod render_pass;
 #[cfg(feature = "native-terminal")]
@@ -38,14 +38,16 @@ mod search;
 mod selection;
 mod snapshot;
 #[cfg(feature = "native-terminal")]
+pub mod snapshot_slot;
+#[cfg(feature = "native-terminal")]
 mod surface_error;
 #[cfg(feature = "native-terminal")]
 pub mod surface_host;
-pub mod thread_ownership;
 #[cfg(feature = "native-terminal")]
 mod surface_snapshot;
 mod sys;
 mod terminal;
+pub mod thread_ownership;
 mod url;
 mod viewport;
 #[cfg(feature = "native-terminal")]
@@ -60,9 +62,9 @@ pub use composition::{
 pub use cursor::{CursorSnapshot, CursorState, CursorVisualStyle};
 pub use engine::TerminalEngine;
 pub use error::NativeTerminalError;
+pub use images::{ImagePlacementSnapshot, TerminalImage};
 #[cfg(feature = "native-terminal")]
 pub use input::NativeTerminalInput;
-pub use images::{ImagePlacementSnapshot, TerminalImage};
 pub use key::{KeyAction, KeyCode, KeyEvent, KeyModifiers};
 pub use mouse::{MouseAction, MouseButton, MouseEvent, MousePosition, MouseRendererSize};
 #[cfg(feature = "native-terminal")]
@@ -73,8 +75,8 @@ pub use renderer::{
 #[cfg(feature = "native-terminal")]
 pub use scroll::{
     compute_attention_frame_rects, compute_scrollbar_overlay_rect, macos_wheel_scroll_rows,
-    ScrollbarOverlayState, ATTENTION_FRAME_COLOR,
-    ATTENTION_FRAME_THICKNESS_LOGICAL_PX, ATTENTION_HALO_COLOR,
+    ScrollbarOverlayState, ATTENTION_FRAME_COLOR, ATTENTION_FRAME_THICKNESS_LOGICAL_PX,
+    ATTENTION_HALO_COLOR,
 };
 pub use snapshot::{CellSnapshot, CellWide, RenderSnapshot};
 pub use terminal::NativeTerminal;

@@ -20,7 +20,10 @@ fn host() -> SshHost {
 fn ssh_reconnect_safety_plan_does_not_update_host_keys() {
     for interactive in [false, true] {
         let plan = ssh_plan(&host(), "true".into(), interactive).unwrap();
-        assert!(plan.args.windows(2).any(|args| args == ["-o", "UpdateHostKeys=no"]));
+        assert!(plan
+            .args
+            .windows(2)
+            .any(|args| args == ["-o", "UpdateHostKeys=no"]));
     }
 }
 
@@ -150,6 +153,13 @@ fn unsafe_connection_tokens_and_paths_are_rejected() {
     }
 }
 
+#[test]
+fn red_identity_file_accepts_windows_tilde_path() {
+    let mut h = host();
+    h.identity_file = Some(r"~\.ssh\id_ed25519".into());
+    assert!(validate_host(&h).is_ok(), "Expected ~\\.ssh\\id_ed25519 to be accepted by validate_host");
+}
+
 #[cfg(unix)]
 #[test]
 fn remote_shell_probe_canonicalizes_quoted_directory_and_reports_plain_or_git() {
@@ -164,7 +174,11 @@ fn remote_shell_probe_canonicalizes_quoted_directory_and_reports_plain_or_git() 
     assert!(output.status.success());
     assert_eq!(
         parse_probe(&output.stdout).unwrap(),
-        (root.canonicalize().unwrap().to_str().unwrap().into(), None, None)
+        (
+            root.canonicalize().unwrap().to_str().unwrap().into(),
+            None,
+            None
+        )
     );
     assert!(std::process::Command::new("git")
         .arg("init")
@@ -174,7 +188,12 @@ fn remote_shell_probe_canonicalizes_quoted_directory_and_reports_plain_or_git() 
         .status
         .success());
     assert!(std::process::Command::new("git")
-        .args(["remote", "add", "origin", "https://github.com/example/test.git"])
+        .args([
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/test.git"
+        ])
         .current_dir(&root)
         .output()
         .unwrap()
@@ -186,7 +205,10 @@ fn remote_shell_probe_canonicalizes_quoted_directory_and_reports_plain_or_git() 
         .unwrap();
     let (actual, git, remote) = parse_probe(&output.stdout).unwrap();
     assert_eq!(git, Some(actual));
-    assert_eq!(remote, Some("https://github.com/example/test.git".to_string()));
+    assert_eq!(
+        remote,
+        Some("https://github.com/example/test.git".to_string())
+    );
 }
 
 #[test]
@@ -275,8 +297,15 @@ fn shell_plan_with_session_forwards_agent_state_socket_and_exports_env() {
     .expect("plan");
 
     assert_eq!(plan.program, "ssh");
-    assert!(plan.args.windows(2).any(|pair| pair == ["-o", "StreamLocalBindUnlink=yes"]));
-    assert!(plan.args.windows(2).any(|pair| pair == ["-R", "/tmp/ferryx-agent-session-123.sock:/tmp/local-agent.sock"]));
+    assert!(plan
+        .args
+        .windows(2)
+        .any(|pair| pair == ["-o", "StreamLocalBindUnlink=yes"]));
+    assert!(plan.args.windows(2).any(|pair| pair
+        == [
+            "-R",
+            "/tmp/ferryx-agent-session-123.sock:/tmp/local-agent.sock"
+        ]));
 
     let remote_cmd = plan.args.last().unwrap();
     assert!(remote_cmd.contains("export FERRYX_SESSION_ID='session-123'"));
@@ -299,7 +328,11 @@ fn install_remote_extension_script_creates_and_populates_extension() {
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "script stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "script stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let installed_file = home.join(".omo/agent/extensions/ferryx-agent-state.ts");
     assert!(installed_file.is_file(), "extension file must be installed");
@@ -325,10 +358,22 @@ fn ssh_bridge_plan_options_disable_tty_and_enforce_strict_host_keys() {
     assert_eq!(plan.program, "ssh");
     assert!(plan.args.iter().any(|v| v == "-T"));
     assert!(!plan.args.iter().any(|v| v == "-tt"));
-    assert!(plan.args.windows(2).any(|pair| pair == ["-o", "UpdateHostKeys=no"]));
-    assert!(plan.args.windows(2).any(|pair| pair == ["-o", "StrictHostKeyChecking=yes"]));
-    assert!(plan.args.windows(2).any(|pair| pair == ["-o", "BatchMode=yes"]));
-    assert!(plan.args.windows(2).any(|pair| pair == ["-o", "ClearAllForwardings=yes"]));
+    assert!(plan
+        .args
+        .windows(2)
+        .any(|pair| pair == ["-o", "UpdateHostKeys=no"]));
+    assert!(plan
+        .args
+        .windows(2)
+        .any(|pair| pair == ["-o", "StrictHostKeyChecking=yes"]));
+    assert!(plan
+        .args
+        .windows(2)
+        .any(|pair| pair == ["-o", "BatchMode=yes"]));
+    assert!(plan
+        .args
+        .windows(2)
+        .any(|pair| pair == ["-o", "ClearAllForwardings=yes"]));
     let remote_cmd = plan.args.last().unwrap();
     assert!(remote_cmd.contains("bridge --stdio --root"));
 }
@@ -353,25 +398,51 @@ public class Recorder {
     );
     let powershell = |script: String| ShellCommandPlan {
         program: "powershell.exe".into(),
-        args: vec!["-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), script],
+        args: vec![
+            "-NoProfile".into(),
+            "-NonInteractive".into(),
+            "-Command".into(),
+            script,
+        ],
     };
-    bounded_output(&powershell(compile), Duration::from_secs(30)).await.unwrap();
+    bounded_output(&powershell(compile), Duration::from_secs(30))
+        .await
+        .unwrap();
     assert!(exe.is_file());
     let env = crate::ssh::runtime::RemoteEnvironment {
         platform: crate::ssh::runtime::RemotePlatform::Windows,
         executor: crate::ssh::runtime::RemoteExecutor::Powershell,
-        version: "fixture".into(), home: dir.path().display().to_string(),
-        temp: dir.path().display().to_string(), git: false,
+        version: "fixture".into(),
+        home: dir.path().display().to_string(),
+        temp: dir.path().display().to_string(),
+        git: false,
     };
-    for root in [r"C:\Users\QA Person\项目\.ferryx\helper\h", r"C:\Users\QA Person\项目\"] {
+    for root in [
+        r"C:\Users\QA Person\项目\.ferryx\helper\h",
+        r"C:\Users\QA Person\项目\",
+    ] {
         let location = crate::ssh::helper_setup::HelperLocation {
-            executable: exe.to_str().unwrap().into(), root: root.into(),
+            executable: exe.to_str().unwrap().into(),
+            root: root.into(),
         };
-        let output = bounded_output(&powershell(bridge_command(&env, &location)), Duration::from_secs(10))
-            .await.unwrap();
-        let actual: Vec<String> = std::str::from_utf8(&output).unwrap().lines().map(|line| {
-            String::from_utf8(base64::engine::general_purpose::STANDARD.decode(line).unwrap()).unwrap()
-        }).collect();
+        let output = bounded_output(
+            &powershell(bridge_command(&env, &location)),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+        let actual: Vec<String> = std::str::from_utf8(&output)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                String::from_utf8(
+                    base64::engine::general_purpose::STANDARD
+                        .decode(line)
+                        .unwrap(),
+                )
+                .unwrap()
+            })
+            .collect();
         assert_eq!(actual, vec!["bridge", "--stdio", "--root", root]);
     }
 }
@@ -393,13 +464,16 @@ fn ssh_bridge_plan_windows_uses_raw_child_stdio_forwarding() {
     let plan = bridge_plan(&host(), &env, &location).expect("bridge_plan");
     assert_eq!(plan.program, "ssh");
     assert!(plan.args.iter().any(|v| v == "-T"));
-    assert!(plan.args.windows(2).any(|pair| pair == ["-o", "UpdateHostKeys=no"]));
-    assert!(plan.args.windows(2).any(|pair| pair == ["-o", "StrictHostKeyChecking=yes"]));
+    assert!(plan
+        .args
+        .windows(2)
+        .any(|pair| pair == ["-o", "UpdateHostKeys=no"]));
+    assert!(plan
+        .args
+        .windows(2)
+        .any(|pair| pair == ["-o", "StrictHostKeyChecking=yes"]));
     let cmd = bridge_command(&env, &location);
-    assert!(cmd.contains("System.Diagnostics.Process"));
-    assert!(cmd.contains("RedirectStandardInput = $false"));
-    assert!(cmd.contains("RedirectStandardOutput = $false"));
-    assert!(cmd.contains("RedirectStandardError = $false"));
+    assert!(cmd.starts_with("& "));
     assert!(cmd.contains("bridge --stdio --root"));
 }
 
@@ -411,15 +485,26 @@ async fn failed_probe_distinguishes_non_utf8_and_empty_stderr() {
         program: "/bin/sh".into(),
         args: vec!["-c".into(), "printf '\\xff\\xfe\\xfd' >&2; exit 1".into()],
     };
-    let err = bounded_output(&plan, Duration::from_secs(2)).await.unwrap_err();
-    assert!(err.message.contains("contained non-UTF-8 data"), "got: {}", err.message);
+    let err = bounded_output(&plan, Duration::from_secs(2))
+        .await
+        .unwrap_err();
+    assert!(
+        err.message.contains("contained non-UTF-8 data"),
+        "got: {}",
+        err.message
+    );
 
     // Empty stderr
     let plan_empty = ShellCommandPlan {
         program: "/bin/sh".into(),
         args: vec!["-c".into(), "exit 1".into()],
     };
-    let err_empty = bounded_output(&plan_empty, Duration::from_secs(2)).await.unwrap_err();
-    assert!(err_empty.message.contains("was empty"), "got: {}", err_empty.message);
+    let err_empty = bounded_output(&plan_empty, Duration::from_secs(2))
+        .await
+        .unwrap_err();
+    assert!(
+        err_empty.message.contains("was empty"),
+        "got: {}",
+        err_empty.message
+    );
 }
-

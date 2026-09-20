@@ -2,6 +2,7 @@ import { Cable, Check, Laptop, Radio, Server, Wifi, X } from "lucide-react";
 import { useEffect, useMemo, useSyncExternalStore } from "react";
 
 import { cn } from "../lib/cn";
+import { BUILD_STAMP } from "../lib/buildStamp";
 import {
   remoteHostStore,
   selectHostList,
@@ -246,6 +247,14 @@ export function MobileHostDrawer({ open, onOpenChange }: MobileHostDrawerProps) 
             </div>
           )}
         </div>
+        {/* Build identity of the client this phone is actually running; a stamp older than the host
+            serves means a cached bundle. */}
+        <p
+          data-testid="mobile-host-drawer-build"
+          className="border-t border-border px-3 py-2 text-center font-mono text-[10px] leading-tight text-muted-foreground"
+        >
+          {BUILD_STAMP}
+        </p>
       </div>
     </div>
   );

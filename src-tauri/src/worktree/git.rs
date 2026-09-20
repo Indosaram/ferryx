@@ -113,25 +113,44 @@ thread_local! { static EXCEPTIONAL_CLEANUP: std::cell::RefCell<Option<tokio::syn
 /// Local IPC mutations have no remote grant. Retain the sender for the whole
 /// transaction so a closed watch channel cannot masquerade as revocation.
 pub(crate) fn with_local_worktree_budget<T>(work: impl FnOnce() -> T) -> T {
-    if GIT_BUDGET.with(|slot| slot.borrow().is_some()) { return work(); }
+    if GIT_BUDGET.with(|slot| slot.borrow().is_some()) {
+        return work();
+    }
     let (_grant, revoked) = tokio::sync::watch::channel(false);
-    with_git_budget(GitBudget {
-        deadline: std::time::Instant::now() + std::time::Duration::from_secs(40),
-        revoked,
-        cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        cancellation: None,
-    }, work)
+    with_git_budget(
+        GitBudget {
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(40),
+            revoked,
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cancellation: None,
+        },
+        work,
+    )
 }
 pub(crate) fn with_git_budget<T>(budget: GitBudget, work: impl FnOnce() -> T) -> T {
     struct Restore(Option<GitBudget>);
-    impl Drop for Restore { fn drop(&mut self) { GIT_BUDGET.with(|slot| *slot.borrow_mut() = self.0.take()); } }
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            GIT_BUDGET.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
     let _restore = Restore(GIT_BUDGET.with(|slot| slot.replace(Some(budget))));
     work()
 }
-fn bounded_output(cwd: &Path, args: &[&str], budget: GitBudget) -> Result<std::process::Output, WorktreeError> {
+fn bounded_output(
+    cwd: &Path,
+    args: &[&str],
+    budget: GitBudget,
+) -> Result<std::process::Output, WorktreeError> {
     let fail = |code: &str| WorktreeError::ParseError(code.into());
-    if *budget.revoked.borrow() { return Err(fail("UNAUTHORIZED")); }
-    if budget.cancelled.load(std::sync::atomic::Ordering::Acquire) || std::time::Instant::now() >= budget.deadline { return Err(fail("TIMEOUT")); }
+    if *budget.revoked.borrow() {
+        return Err(fail("UNAUTHORIZED"));
+    }
+    if budget.cancelled.load(std::sync::atomic::Ordering::Acquire)
+        || std::time::Instant::now() >= budget.deadline
+    {
+        return Err(fail("TIMEOUT"));
+    }
     tokio::runtime::Handle::current().block_on(async {
         use tokio::io::AsyncReadExt;
         let mut command = crate::util::no_window_tokio_command("git");
@@ -245,18 +264,34 @@ mod local_budget_tests {
         let valid = " leading \u{fffd} trailing ";
         std::fs::write(root.path().join(valid), b"valid").unwrap();
         let manager = crate::worktree::WorktreeManager::new(root.path());
-        assert_eq!(manager.check_dirty(root.path()).unwrap().files[0].path, valid);
+        assert_eq!(
+            manager.check_dirty(root.path()).unwrap().files[0].path,
+            valid
+        );
         let invalid = std::ffi::OsString::from_vec(b" leading \xff trailing ".to_vec());
         #[cfg(target_os = "linux")]
         std::fs::write(root.path().join(&invalid), b"invalid").unwrap();
         let object = run_git(root.path(), &["hash-object", "-w", valid]).unwrap();
-        let mut index = crate::util::no_window_command("git").args(["update-index", "--add", "--cacheinfo", "100644", object.trim()])
-            .arg(&invalid).current_dir(root.path()).spawn().unwrap();
+        let mut index = crate::util::no_window_command("git")
+            .args([
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "100644",
+                object.trim(),
+            ])
+            .arg(&invalid)
+            .current_dir(root.path())
+            .spawn()
+            .unwrap();
         assert!(index.wait().unwrap().success());
         let result = run_git(root.path(), &["ls-files", "-z"]);
         eprintln!("A08 byte fixture cwd={:?} result={result:?}", root.path());
         root.close().unwrap();
-        assert!(matches!(result, Err(WorktreeError::ParseError(_))), "invalid native bytes aliased: {result:?}");
+        assert!(
+            matches!(result, Err(WorktreeError::ParseError(_))),
+            "invalid native bytes aliased: {result:?}"
+        );
     }
 
     #[test]
@@ -271,8 +306,25 @@ mod local_budget_tests {
     fn a08_git_real_legacy_worktree_path() {
         let root = tempfile::tempdir().unwrap();
         run_git(root.path(), &["init", "--quiet"]).unwrap();
-        run_git(root.path(), &["-c", "user.name=A08", "-c", "user.email=a08@example.invalid", "commit", "--allow-empty", "-m", "base"]).unwrap();
-        let path = root.path().join(if cfg!(windows) { " leading '\u{fffd} trailing" } else { " leading \"\u{fffd} trailing " });
+        run_git(
+            root.path(),
+            &[
+                "-c",
+                "user.name=A08",
+                "-c",
+                "user.email=a08@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "base",
+            ],
+        )
+        .unwrap();
+        let path = root.path().join(if cfg!(windows) {
+            " leading '\u{fffd} trailing"
+        } else {
+            " leading \"\u{fffd} trailing "
+        });
         git_worktree_add(root.path(), &path, "feature", None).unwrap();
         let expected = std::fs::canonicalize(&path).unwrap();
         let rows = git_worktree_list(root.path()).unwrap();
@@ -290,28 +342,45 @@ mod local_budget_tests {
             let (started, observed) = tokio::sync::oneshot::channel();
             CHILD_STARTED.with(|slot| *slot.borrow_mut() = Some(started));
             EXCEPTIONAL_CLEANUP.with(|slot| *slot.borrow_mut() = Some(sent));
-            let result = bounded_output(root.path(), &["--version"], GitBudget {
-                deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
-                revoked, cancelled: Default::default(), cancellation: None,
-            });
+            let result = bounded_output(
+                root.path(),
+                &["--version"],
+                GitBudget {
+                    deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+                    revoked,
+                    cancelled: Default::default(),
+                    cancellation: None,
+                },
+            );
             root.close().unwrap();
             let pid = observed.blocking_recv().unwrap();
             eprintln!("A08 exceptional Git pid={pid} root_removed=true result={result:?}");
             assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
-            assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH)
+            );
             result
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert!(result.is_err());
-        assert_eq!(receipt.await, Ok(true), "drain JoinError bypassed explicit child wait");
+        assert_eq!(
+            receipt.await,
+            Ok(true),
+            "drain JoinError bypassed explicit child wait"
+        );
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn git_hook_descendant_containment() {
-        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
-        use std::os::unix::fs::PermissionsExt;
         use futures_util::FutureExt;
-        for mode in ["cancel", "revoke", "deadline", "output", "success", "failure", "injected"] {
+        use std::os::unix::fs::PermissionsExt;
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+        for mode in [
+            "cancel", "revoke", "deadline", "output", "success", "failure", "injected",
+        ] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let port = listener.local_addr().unwrap().port();
             let root = tokio::task::spawn_blocking(move || {
@@ -346,10 +415,30 @@ elif action == b'f':
             let notify = cancellation.clone();
             let mut worker = tokio::task::spawn_blocking(move || {
                 CHILD_STARTED.with(|signal| *signal.borrow_mut() = Some(started));
-                bounded_output(&cwd, &["-c", "user.name=A08", "-c", "user.email=a08@example.invalid", "commit", "--allow-empty", "-m", "fixture"], GitBudget {
-                    deadline: std::time::Instant::now() + std::time::Duration::from_secs(if mode == "deadline" { 3 } else { 30 }),
-                    revoked, cancelled: Default::default(), cancellation: Some(cancellation),
-                })
+                bounded_output(
+                    &cwd,
+                    &[
+                        "-c",
+                        "user.name=A08",
+                        "-c",
+                        "user.email=a08@example.invalid",
+                        "commit",
+                        "--allow-empty",
+                        "-m",
+                        "fixture",
+                    ],
+                    GitBudget {
+                        deadline: std::time::Instant::now()
+                            + std::time::Duration::from_secs(if mode == "deadline" {
+                                3
+                            } else {
+                                30
+                            }),
+                        revoked,
+                        cancelled: Default::default(),
+                        cancellation: Some(cancellation),
+                    },
+                )
             });
             let mut socket = None;
             let mut sibling: Option<tokio::process::Child> = None;
@@ -423,7 +512,12 @@ elif action == b'f':
             let mut cleanup_errors = Vec::new();
             if let Some(socket) = socket.as_mut() {
                 if let Err(error) = socket.shutdown().await {
-                    if !matches!(error.kind(), std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::NotConnected | std::io::ErrorKind::ConnectionReset) {
+                    if !matches!(
+                        error.kind(),
+                        std::io::ErrorKind::BrokenPipe
+                            | std::io::ErrorKind::NotConnected
+                            | std::io::ErrorKind::ConnectionReset
+                    ) {
                         cleanup_errors.push(format!("socket release: {error}"));
                     }
                 }
@@ -431,54 +525,77 @@ elif action == b'f':
             notify.notify_one();
             if !worker_joined {
                 match tokio::time::timeout(std::time::Duration::from_secs(40), &mut worker).await {
-                    Ok(Ok(_)) => {},
+                    Ok(Ok(_)) => {}
                     Ok(Err(error)) => cleanup_errors.push(format!("Git worker: {error}")),
                     Err(error) => {
                         cleanup_errors.push(format!("Git worker timeout: {error}"));
                         // Blocking workers cannot be aborted. Join before deleting their root.
-                        if let Err(error) = worker.await { cleanup_errors.push(format!("Git join: {error}")); }
+                        if let Err(error) = worker.await {
+                            cleanup_errors.push(format!("Git join: {error}"));
+                        }
                     }
                 }
             }
             if let Some(socket) = socket.as_mut() {
                 let mut tail = Vec::new();
-                match tokio::time::timeout(std::time::Duration::from_secs(5), socket.read_to_end(&mut tail)).await {
-                    Ok(Ok(_)) => {},
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    socket.read_to_end(&mut tail),
+                )
+                .await
+                {
+                    Ok(Ok(_)) => {}
                     result => cleanup_errors.push(format!("socket EOF: {result:?}")),
                 }
             }
             drop(socket);
             #[cfg(target_os = "macos")]
             if let Some(mut descendant) = descendant_exited {
-                match tokio::time::timeout(std::time::Duration::from_secs(12), &mut descendant).await {
-                    Ok(Ok(())) => {},
+                match tokio::time::timeout(std::time::Duration::from_secs(12), &mut descendant)
+                    .await
+                {
+                    Ok(Ok(())) => {}
                     Ok(Err(error)) => cleanup_errors.push(format!("descendant exit: {error}")),
                     Err(error) => {
                         cleanup_errors.push(format!("descendant timeout: {error}"));
-                        if let Err(error) = descendant.await { cleanup_errors.push(format!("descendant join: {error}")); }
+                        if let Err(error) = descendant.await {
+                            cleanup_errors.push(format!("descendant join: {error}"));
+                        }
                     }
                 }
             }
             if let Some(mut sibling) = sibling {
                 drop(sibling.stdin.take());
-                match tokio::time::timeout(std::time::Duration::from_secs(5), sibling.wait()).await {
-                    Ok(Ok(status)) if status.success() => {},
+                match tokio::time::timeout(std::time::Duration::from_secs(5), sibling.wait()).await
+                {
+                    Ok(Ok(status)) if status.success() => {}
                     Ok(result) => cleanup_errors.push(format!("sibling exit: {result:?}")),
                     Err(error) => {
                         cleanup_errors.push(format!("sibling timeout: {error}"));
-                        if let Err(error) = sibling.start_kill() { cleanup_errors.push(format!("sibling cleanup kill: {error}")); }
-                        if let Err(error) = sibling.wait().await { cleanup_errors.push(format!("sibling reap: {error}")); }
+                        if let Err(error) = sibling.start_kill() {
+                            cleanup_errors.push(format!("sibling cleanup kill: {error}"));
+                        }
+                        if let Err(error) = sibling.wait().await {
+                            cleanup_errors.push(format!("sibling reap: {error}"));
+                        }
                     }
                 }
             }
             drop(listener);
             let closed = tokio::task::spawn_blocking(move || root.close()).await;
-            if !matches!(closed, Ok(Ok(()))) { cleanup_errors.push(format!("root close: {closed:?}")); }
+            if !matches!(closed, Ok(Ok(()))) {
+                cleanup_errors.push(format!("root close: {closed:?}"));
+            }
             eprintln!("A08 mode={mode} cleanup worker_joined=true descendant_joined=true sibling_waited=true root_removed={} errors={cleanup_errors:?}", matches!(closed, Ok(Ok(()))));
             assert!(cleanup_errors.is_empty(), "{cleanup_errors:?}");
             if mode == "injected" {
-                assert_eq!(outcome.unwrap_err().downcast_ref::<&str>(), Some(&"A08_INJECTED_READY_FAILURE"));
-            } else if let Err(panic) = outcome { std::panic::resume_unwind(panic); }
+                assert_eq!(
+                    outcome.unwrap_err().downcast_ref::<&str>(),
+                    Some(&"A08_INJECTED_READY_FAILURE")
+                );
+            } else if let Err(panic) = outcome {
+                std::panic::resume_unwind(panic);
+            }
         }
     }
 
@@ -489,10 +606,13 @@ elif action == b'f':
             let revoke = mode == "revoke";
             let root = tokio::task::spawn_blocking(|| {
                 let root = tempfile::tempdir().unwrap();
-                let fifo = std::ffi::CString::new(root.path().join("blocked").to_str().unwrap()).unwrap();
+                let fifo =
+                    std::ffi::CString::new(root.path().join("blocked").to_str().unwrap()).unwrap();
                 assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
                 root
-            }).await.unwrap();
+            })
+            .await
+            .unwrap();
             let cwd = root.path().to_owned();
             let (grant, revoked) = tokio::sync::watch::channel(false);
             let (started, observed) = tokio::sync::oneshot::channel();
@@ -503,27 +623,49 @@ elif action == b'f':
             let worker = tokio::task::spawn_blocking(move || {
                 CHILD_STARTED.with(|signal| *signal.borrow_mut() = Some(started));
                 let budget = GitBudget {
-                    deadline: std::time::Instant::now() + std::time::Duration::from_millis(if mode == "deadline" { 500 } else { 30000 }),
+                    deadline: std::time::Instant::now()
+                        + std::time::Duration::from_millis(if mode == "deadline" {
+                            500
+                        } else {
+                            30000
+                        }),
                     revoked,
                     cancelled,
                     cancellation: Some(cancellation),
                 };
                 bounded_output(&cwd, &["hash-object", "blocked"], budget)
             });
-            let pid = tokio::time::timeout(std::time::Duration::from_secs(5), observed).await.unwrap().unwrap();
-            if revoke { grant.send(true).unwrap(); }
-            if mode == "cancel" { flag.store(true, std::sync::atomic::Ordering::Release); notify.notify_one(); }
-            let result = tokio::time::timeout(std::time::Duration::from_secs(5), worker).await.unwrap().unwrap();
+            let pid = tokio::time::timeout(std::time::Duration::from_secs(5), observed)
+                .await
+                .unwrap()
+                .unwrap();
+            if revoke {
+                grant.send(true).unwrap();
+            }
+            if mode == "cancel" {
+                flag.store(true, std::sync::atomic::Ordering::Release);
+                notify.notify_one();
+            }
+            let result = tokio::time::timeout(std::time::Duration::from_secs(5), worker)
+                .await
+                .unwrap()
+                .unwrap();
             let mut status = 0;
             let waited = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
             let wait_error = std::io::Error::last_os_error().raw_os_error();
             let alive = unsafe { libc::kill(pid as libc::pid_t, 0) };
             let alive_error = std::io::Error::last_os_error().raw_os_error();
-            tokio::task::spawn_blocking(move || root.close().unwrap()).await.unwrap();
-            assert!(matches!(result, Err(WorktreeError::ParseError(ref code)) if code == if revoke { "UNAUTHORIZED" } else { "TIMEOUT" }));
+            tokio::task::spawn_blocking(move || root.close().unwrap())
+                .await
+                .unwrap();
+            assert!(
+                matches!(result, Err(WorktreeError::ParseError(ref code)) if code == if revoke { "UNAUTHORIZED" } else { "TIMEOUT" })
+            );
             assert_eq!((waited, wait_error), (-1, Some(libc::ECHILD)));
             assert_eq!((alive, alive_error), (-1, Some(libc::ESRCH)));
-            eprintln!("A08 Git pid={pid} mode={mode} killed=true reaped=true private_root_removed=true");
+            eprintln!(
+                "A08 Git pid={pid} mode={mode} killed=true reaped=true private_root_removed=true"
+            );
         }
     }
 
@@ -535,15 +677,31 @@ elif action == b'f':
             assert!(!*local.revoked.borrow());
             assert!(local.deadline > std::time::Instant::now());
             with_local_worktree_budget(|| {
-                assert_eq!(GIT_BUDGET.with(|slot| slot.borrow().as_ref().unwrap().deadline), local.deadline);
+                assert_eq!(
+                    GIT_BUDGET.with(|slot| slot.borrow().as_ref().unwrap().deadline),
+                    local.deadline
+                );
             });
         });
         assert!(GIT_BUDGET.with(|slot| slot.borrow().is_none()));
         let (_grant, revoked) = tokio::sync::watch::channel(false);
         let deadline = std::time::Instant::now();
-        with_git_budget(GitBudget { deadline, revoked, cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)), cancellation: None }, || {
-            with_local_worktree_budget(|| assert_eq!(GIT_BUDGET.with(|slot| slot.borrow().as_ref().unwrap().deadline), deadline));
-        });
+        with_git_budget(
+            GitBudget {
+                deadline,
+                revoked,
+                cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                cancellation: None,
+            },
+            || {
+                with_local_worktree_budget(|| {
+                    assert_eq!(
+                        GIT_BUDGET.with(|slot| slot.borrow().as_ref().unwrap().deadline),
+                        deadline
+                    )
+                });
+            },
+        );
         assert!(GIT_BUDGET.with(|slot| slot.borrow().is_none()));
     }
 
@@ -552,18 +710,41 @@ elif action == b'f':
         crate::ipc::run_blocking(|| {
             let root = tempfile::tempdir().unwrap();
             run_git(root.path(), &["init", "--quiet"]).unwrap();
-            run_git(root.path(), &["-c", "user.name=A08", "-c", "user.email=a08@example.invalid", "commit", "--allow-empty", "-m", "base"]).unwrap();
+            run_git(
+                root.path(),
+                &[
+                    "-c",
+                    "user.name=A08",
+                    "-c",
+                    "user.email=a08@example.invalid",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "base",
+                ],
+            )
+            .unwrap();
             let manager = crate::worktree::WorktreeManager::new(root.path());
-            let path = manager.worktree_path_for("local-budget", "feature").unwrap();
+            let path = manager
+                .worktree_path_for("local-budget", "feature")
+                .unwrap();
             with_local_worktree_budget(|| {
-                manager.create_worktree(crate::worktree::CreateWorktreeOptions::new("local-budget", "feature", &path)).unwrap();
+                manager
+                    .create_worktree(crate::worktree::CreateWorktreeOptions::new(
+                        "local-budget",
+                        "feature",
+                        &path,
+                    ))
+                    .unwrap();
                 manager.delete_worktree_and_branch(&path, true).unwrap();
             });
             assert!(!path.exists());
             assert!(GIT_BUDGET.with(|slot| slot.borrow().is_none()));
             root.close().unwrap();
             Ok(())
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -605,7 +786,10 @@ pub fn run_git<P: AsRef<Path>, S: AsRef<str>>(cwd: P, args: &[S]) -> Result<Stri
         bounded_output(&normalized_cwd, &arg_strs, budget)?
     } else {
         crate::util::no_window_command("git")
-            .args(&arg_strs).current_dir(&normalized_cwd).output().map_err(WorktreeError::Io)?
+            .args(&arg_strs)
+            .current_dir(&normalized_cwd)
+            .output()
+            .map_err(WorktreeError::Io)?
     };
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -625,20 +809,40 @@ pub fn run_git<P: AsRef<Path>, S: AsRef<str>>(cwd: P, args: &[S]) -> Result<Stri
 }
 
 fn decode_git_quoted_path(path: &str) -> Result<String, WorktreeError> {
-    if !path.starts_with('"') { return Ok(path.to_owned()); }
+    if !path.starts_with('"') {
+        return Ok(path.to_owned());
+    }
     let invalid = || WorktreeError::ParseError("Invalid Git quoted path".into());
-    let body = path.strip_prefix('"').and_then(|s| s.strip_suffix('"')).ok_or_else(invalid)?;
+    let body = path
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .ok_or_else(invalid)?;
     let mut input = body.bytes();
     let mut bytes = Vec::new();
     while let Some(byte) = input.next() {
-        if byte != b'\\' { bytes.push(byte); continue; }
+        if byte != b'\\' {
+            bytes.push(byte);
+            continue;
+        }
         let escaped = input.next().ok_or_else(invalid)?;
         bytes.push(match escaped {
-            b'a' => 7, b'b' => 8, b't' => 9, b'n' => 10, b'v' => 11, b'f' => 12, b'r' => 13,
+            b'a' => 7,
+            b'b' => 8,
+            b't' => 9,
+            b'n' => 10,
+            b'v' => 11,
+            b'f' => 12,
+            b'r' => 13,
             b'\\' | b'"' => escaped,
             b'0'..=b'3' => {
-                let second = input.next().filter(|b| (b'0'..=b'7').contains(b)).ok_or_else(invalid)?;
-                let third = input.next().filter(|b| (b'0'..=b'7').contains(b)).ok_or_else(invalid)?;
+                let second = input
+                    .next()
+                    .filter(|b| (b'0'..=b'7').contains(b))
+                    .ok_or_else(invalid)?;
+                let third = input
+                    .next()
+                    .filter(|b| (b'0'..=b'7').contains(b))
+                    .ok_or_else(invalid)?;
                 (escaped - b'0') * 64 + (second - b'0') * 8 + (third - b'0')
             }
             _ => return Err(invalid()),
@@ -649,7 +853,8 @@ fn decode_git_quoted_path(path: &str) -> Result<String, WorktreeError> {
 
 pub(crate) fn native_git_path(path: &str) -> PathBuf {
     #[cfg(windows)]
-    if matches!(Path::new(path).components().next(), Some(std::path::Component::Prefix(p)) if matches!(p.kind(), std::path::Prefix::Disk(_))) {
+    if matches!(Path::new(path).components().next(), Some(std::path::Component::Prefix(p)) if matches!(p.kind(), std::path::Prefix::Disk(_)))
+    {
         return PathBuf::from(format!(r"\\?\{}", path.replace('/', r"\")));
     }
     PathBuf::from(path)

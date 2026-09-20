@@ -22,3 +22,6 @@ Thumbs.db
 # Local secrets (updater signing key)
 .env
 .env.local
+
+# Git worktrees
+.orca-worktrees/

@@ -66,6 +66,7 @@ export function DownloadMenu({ variant = 'hero', className }: DownloadMenuProps)
         <div className="inline-flex items-stretch rounded-full bg-ink text-page hover:bg-ink-hover transition-colors duration-150 shadow-sm">
           <a
             href={primaryAsset.url}
+            data-ferryx-location="hero_primary"
             className="inline-flex items-center gap-2.5 px-5 h-11 text-[15px] font-medium text-page rounded-l-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/30"
           >
             <PlatformIcon platform={detectedPlatform} className="h-5 w-5" />
@@ -88,6 +89,7 @@ export function DownloadMenu({ variant = 'hero', className }: DownloadMenuProps)
         <div className="inline-flex items-center rounded-lg bg-ink text-page hover:bg-ink-hover transition-colors duration-150 shadow-sm">
           <a
             href={primaryAsset.url}
+            data-ferryx-location="navbar_primary"
             className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-page rounded-l-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/30"
           >
             <Download className="h-3.5 w-3.5" />
@@ -118,17 +120,23 @@ export function DownloadMenu({ variant = 'hero', className }: DownloadMenuProps)
 
       {isOpen && (
         <div
+          data-ferryx-location="download_menu"
           className={cn(
-            'absolute top-full z-50 mt-2 w-80 sm:w-96 rounded-2xl border border-line bg-surface p-3 shadow-menu transition-all text-left animate-in fade-in zoom-in-95 flex flex-col',
+            // The panel is a fixed 20/24rem by design, but at 320px that is the whole viewport:
+            // right-anchored in the navbar it used to start at x=-29. Capping the width against
+            // the viewport keeps a gutter on both sides at any width without moving the anchor.
+            'absolute top-full z-50 mt-2 w-80 sm:w-96 max-w-[calc(100vw-2rem)] rounded-2xl border border-line bg-surface p-3 shadow-menu transition-all text-left animate-in fade-in zoom-in-95 flex flex-col',
             variant === 'navbar' ? 'right-0' : 'left-1/2 -translate-x-1/2 sm:left-0 sm:translate-x-0'
           )}
           style={maxPanelHeight ? { maxHeight: `${maxPanelHeight}px` } : undefined}
         >
           <div className="px-2 py-1.5 border-b border-line mb-2 flex items-center justify-between">
             <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-faint">
-              Download Ferryx Latest
+              Download Ferryx
             </span>
-            <span className="text-[10px] text-ink-faint font-mono">v0.1.0-alpha</span>
+            {/* Releases are calendar-versioned and published often, so the label names the
+                channel these links resolve against rather than a number that goes stale. */}
+            <span className="text-[10px] text-ink-faint font-mono">latest release</span>
           </div>
 
           <div className="space-y-3 min-h-0 flex-1 overflow-y-auto pr-1">

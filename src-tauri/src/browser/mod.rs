@@ -10,15 +10,15 @@ pub mod remote_bridge_protocol;
 pub mod remote_driver;
 pub mod remote_input;
 pub mod remote_service;
+#[cfg(test)]
+mod remote_service_tests;
 pub mod screenshot;
 pub mod security;
 pub mod snapshot_source;
 #[cfg(test)]
-pub mod tests;
-#[cfg(test)]
 mod snapshot_source_tests;
 #[cfg(test)]
-mod remote_service_tests;
+pub mod tests;
 
 pub use cookies::{cookie_from_imported, parse_cookie_file, ImportedCookie};
 pub use download::download_url_to_path;

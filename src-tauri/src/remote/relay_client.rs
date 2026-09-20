@@ -130,7 +130,12 @@ impl PairingCoordinator {
         timeout: Duration,
         permission: DevicePermission,
     ) -> Result<PairingSessionInfo, String> {
-        self.generate_scoped_pairing(timeout, permission, crate::remote::auth::DeviceAccessScope::Mirror).await
+        self.generate_scoped_pairing(
+            timeout,
+            permission,
+            crate::remote::auth::DeviceAccessScope::Mirror,
+        )
+        .await
     }
 
     pub async fn generate_scoped_pairing(
@@ -139,7 +144,9 @@ impl PairingCoordinator {
         permission: DevicePermission,
         scope: crate::remote::auth::DeviceAccessScope,
     ) -> Result<PairingSessionInfo, String> {
-        if scope == crate::remote::auth::DeviceAccessScope::Machine && permission != DevicePermission::Control {
+        if scope == crate::remote::auth::DeviceAccessScope::Machine
+            && permission != DevicePermission::Control
+        {
             return Err("Machine access requires Control permission".into());
         }
         // Gateway (phone mirror) pairing codes are typed into the paired browser
@@ -169,8 +176,10 @@ impl PairingCoordinator {
                 PairingState::Ready | PairingState::Claimed | PairingState::Cancelled => {
                     self.transition(PairingState::Expired)?;
                 }
-                PairingState::Created | PairingState::Registering
-                | PairingState::Consumed | PairingState::Expired => {}
+                PairingState::Created
+                | PairingState::Registering
+                | PairingState::Consumed
+                | PairingState::Expired => {}
             }
             self.transition(PairingState::Registering)?;
             *generation = generation
@@ -429,11 +438,18 @@ impl RelayClient {
     }
 
     fn control_url(&self) -> String {
-        format!("{}/tunnel/control", to_ws_base(&self.relay_url).unwrap_or_else(|_| self.relay_url.clone()))
+        format!(
+            "{}/tunnel/control",
+            to_ws_base(&self.relay_url).unwrap_or_else(|_| self.relay_url.clone())
+        )
     }
 
     fn data_url(&self, session_id: &str) -> String {
-        format!("{}/tunnel/data/{}", to_ws_base(&self.relay_url).unwrap_or_else(|_| self.relay_url.clone()), session_id)
+        format!(
+            "{}/tunnel/data/{}",
+            to_ws_base(&self.relay_url).unwrap_or_else(|_| self.relay_url.clone()),
+            session_id
+        )
     }
 
     /// Runs the reverse tunnel client forever: connects the control
@@ -682,18 +698,17 @@ pub fn validate_relay_url(
         });
     }
 
-    let host = parsed.host_str().ok_or_else(|| RelayUrlSecurityError::InvalidUrl {
-        url: url_str.to_string(),
-        reason: "missing host in relay URL".to_string(),
-    })?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| RelayUrlSecurityError::InvalidUrl {
+            url: url_str.to_string(),
+            reason: "missing host in relay URL".to_string(),
+        })?;
 
     let is_loopback = is_loopback_host(host);
     let is_rfc1918 = is_rfc1918_private_host(host);
 
-    let rest = url_str
-        .split_once("://")
-        .map(|(_, r)| r)
-        .unwrap_or(url_str);
+    let rest = url_str.split_once("://").map(|(_, r)| r).unwrap_or(url_str);
     let trimmed_rest = rest.trim_end_matches('/');
 
     match scheme {
@@ -708,9 +723,11 @@ pub fn validate_relay_url(
                     );
                     Ok(format!("ws://{trimmed_rest}"))
                 } else {
-                    Err(RelayUrlSecurityError::InsecureDevelopmentRelayRequiresOptIn {
-                        url: url_str.to_string(),
-                    })
+                    Err(
+                        RelayUrlSecurityError::InsecureDevelopmentRelayRequiresOptIn {
+                            url: url_str.to_string(),
+                        },
+                    )
                 }
             } else {
                 Err(RelayUrlSecurityError::InsecurePublicRelayForbidden {
@@ -982,8 +999,14 @@ mod tests {
                 .await
                 .unwrap();
             if let Some(old) = previous {
-                assert!(coordinator.auth.exchange_pairing_code(&old.pin, "stale").is_err());
-                assert!(coordinator.auth.exchange_pairing_code(&old.pairing_token, "stale").is_err());
+                assert!(coordinator
+                    .auth
+                    .exchange_pairing_code(&old.pin, "stale")
+                    .is_err());
+                assert!(coordinator
+                    .auth
+                    .exchange_pairing_code(&old.pairing_token, "stale")
+                    .is_err());
             }
             previous = Some(session);
             assert_eq!(*coordinator.generation_id.read(), generation);
@@ -1074,9 +1097,11 @@ mod tests {
             .await
             .unwrap();
         // The PIN itself is registered with the local auth authority for direct LAN redemption
-        let exchanged = coordinator
-            .auth
-            .exchange_pairing_code_with_installation(&session.pin, "DirectPhone", None);
+        let exchanged = coordinator.auth.exchange_pairing_code_with_installation(
+            &session.pin,
+            "DirectPhone",
+            None,
+        );
         assert!(exchanged.is_ok(), "Direct pairing with PIN must succeed");
         coordinator.transition(PairingState::Claimed).unwrap();
         coordinator.transition(PairingState::Consumed).unwrap();
@@ -1112,7 +1137,10 @@ mod tests {
             to_ws_base("https://relay.example.com/").unwrap(),
             "wss://relay.example.com"
         );
-        assert_eq!(to_ws_base("http://localhost:8787").unwrap(), "ws://localhost:8787");
+        assert_eq!(
+            to_ws_base("http://localhost:8787").unwrap(),
+            "ws://localhost:8787"
+        );
         assert_eq!(
             to_ws_base("wss://relay.example.com").unwrap(),
             "wss://relay.example.com"

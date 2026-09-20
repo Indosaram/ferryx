@@ -24,11 +24,11 @@
 //! All filesystem work happens on the blocking pool via `crate::ipc::run_blocking`;
 //! nothing here reads a file on the async reactor.
 use crate::ipc::error::{IpcError, IpcErrorCode};
+pub use crate::ipc::file_preview_contract::FilePreviewTarget;
 use crate::ipc::file_preview_contract::{
     limits, preview_error, FilePreviewChildAsset, FilePreviewEncoding, FilePreviewErrorReason,
     FilePreviewKind, FilePreviewPayload,
 };
-pub use crate::ipc::file_preview_contract::FilePreviewTarget;
 use axum::body::{Body, Bytes};
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
@@ -36,11 +36,11 @@ use axum::response::Response;
 use axum::routing::{on, MethodFilter};
 use axum::Router;
 use parking_lot::Mutex;
-#[cfg(unix)]
-use std::os::unix::fs::MetadataExt as _;
 use serde_json::json;
 use std::collections::HashMap;
 use std::io::Read;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -203,9 +203,7 @@ fn le16(bytes: &[u8], at: usize) -> Option<u64> {
 }
 
 fn le24(bytes: &[u8], at: usize) -> Option<u64> {
-    Some(
-        u32::from_le_bytes([*bytes.get(at)?, *bytes.get(at + 1)?, *bytes.get(at + 2)?, 0]) as u64,
-    )
+    Some(u32::from_le_bytes([*bytes.get(at)?, *bytes.get(at + 1)?, *bytes.get(at + 2)?, 0]) as u64)
 }
 
 /// Identifies PNG/JPEG/GIF/WebP from the header bytes and extracts the frame
@@ -311,9 +309,15 @@ fn jpeg_signature(bytes: &[u8]) -> Option<ImageSignature> {
 /// control-heavy binary - is refused rather than lossily decoded.
 pub fn decode_text(bytes: &[u8]) -> Option<(String, FilePreviewEncoding)> {
     let (text, encoding) = if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
-        (decode_utf16(rest, u16::from_le_bytes)?, FilePreviewEncoding::Utf16Le)
+        (
+            decode_utf16(rest, u16::from_le_bytes)?,
+            FilePreviewEncoding::Utf16Le,
+        )
     } else if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
-        (decode_utf16(rest, u16::from_be_bytes)?, FilePreviewEncoding::Utf16Be)
+        (
+            decode_utf16(rest, u16::from_be_bytes)?,
+            FilePreviewEncoding::Utf16Be,
+        )
     } else {
         let rest = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
         (
@@ -424,7 +428,11 @@ pub fn is_allowed_origin(origin: &str) -> bool {
 /// reason, leaving every other failure (missing session, IO) untouched.
 pub fn map_session_error(error: IpcError) -> IpcError {
     if error.code == IpcErrorCode::Unsupported {
-        return preview_error(FilePreviewErrorReason::RemoteUnsupported, error.message, None);
+        return preview_error(
+            FilePreviewErrorReason::RemoteUnsupported,
+            error.message,
+            None,
+        );
     }
     error
 }
@@ -525,10 +533,12 @@ impl FilePreviewService {
     pub async fn start() -> Result<Arc<Self>, IpcError> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .map_err(|error| IpcError::internal(format!("preview listener bind failed: {error}")))?;
-        let addr = listener
-            .local_addr()
-            .map_err(|error| IpcError::internal(format!("preview listener addr failed: {error}")))?;
+            .map_err(|error| {
+                IpcError::internal(format!("preview listener bind failed: {error}"))
+            })?;
+        let addr = listener.local_addr().map_err(|error| {
+            IpcError::internal(format!("preview listener addr failed: {error}"))
+        })?;
         let started_at = std::time::Instant::now();
         let service = Arc::new(Self {
             registry: Mutex::new(Registry::default()),
@@ -575,15 +585,25 @@ impl FilePreviewService {
 
     /// Opens a previewable file for a window, replacing and revoking whatever
     /// that window previewed before.
-    pub async fn open(&self, request: FilePreviewOpenRequest) -> Result<FilePreviewPayload, IpcError> {
+    pub async fn open(
+        &self,
+        request: FilePreviewOpenRequest,
+    ) -> Result<FilePreviewPayload, IpcError> {
         ensure_trusted_window(&request.window_label)?;
-        let FilePreviewOpenRequest { window_label, path, cwd, line, col } = request;
+        let FilePreviewOpenRequest {
+            window_label,
+            path,
+            cwd,
+            line,
+            col,
+        } = request;
         // R3: take the open epoch BEFORE awaited I/O. If a newer open for the
         // same window completes first, this registration is stale and must be
         // discarded instead of revoking the newer preview.
         let epoch = self.begin_main_open(&window_label);
         let opened =
-            crate::ipc::run_blocking(move || open_blocking(&path, cwd.as_deref(), line, col)).await?;
+            crate::ipc::run_blocking(move || open_blocking(&path, cwd.as_deref(), line, col))
+                .await?;
         self.register_main(&window_label, opened, epoch)
     }
 
@@ -660,7 +680,10 @@ impl FilePreviewService {
         let opened = crate::ipc::run_blocking(move || {
             let path = resolve_contained_child(&boundary_for_io, &relative)?;
             let opened = open_blocking_path(&path, None, None)?;
-            if !matches!(opened.kind, FilePreviewKind::Markdown | FilePreviewKind::Text) {
+            if !matches!(
+                opened.kind,
+                FilePreviewKind::Markdown | FilePreviewKind::Text
+            ) {
                 return Err(preview_error(
                     FilePreviewErrorReason::UnsupportedFormat,
                     "markdown document links must target a text or markdown document",
@@ -710,7 +733,11 @@ impl FilePreviewService {
         }
     }
 
-    fn markdown_parent_dir(&self, window_label: &str, parent_handle: &str) -> Result<ChildBoundary, IpcError> {
+    fn markdown_parent_dir(
+        &self,
+        window_label: &str,
+        parent_handle: &str,
+    ) -> Result<ChildBoundary, IpcError> {
         let registry = self.registry.lock();
         let is_current_main = registry
             .windows
@@ -746,7 +773,10 @@ impl FilePreviewService {
     /// refunded on failure and consumed at registration.
     fn reserve_child_slot(&self, window_label: &str) -> Result<ChildReservation, IpcError> {
         let mut registry = self.registry.lock();
-        let slot = registry.windows.entry(window_label.to_string()).or_default();
+        let slot = registry
+            .windows
+            .entry(window_label.to_string())
+            .or_default();
         let used = slot.children.len() + slot.pending_children;
         if used >= limits::MAX_CHILD_HANDLES {
             return Err(preview_error(
@@ -769,7 +799,10 @@ impl FilePreviewService {
 
     fn begin_main_open(&self, window_label: &str) -> u64 {
         let mut registry = self.registry.lock();
-        let slot = registry.windows.entry(window_label.to_string()).or_default();
+        let slot = registry
+            .windows
+            .entry(window_label.to_string())
+            .or_default();
         slot.epoch += 1;
         slot.epoch
     }
@@ -818,7 +851,9 @@ impl FilePreviewService {
         for stale in stale_children.into_iter().chain(stale_main) {
             registry.revoke(&stale);
         }
-        registry.handles.insert(handle, record_of(opened, self.started_at));
+        registry
+            .handles
+            .insert(handle, record_of(opened, self.started_at));
         Ok(payload)
     }
 
@@ -831,7 +866,10 @@ impl FilePreviewService {
     ) -> Result<String, IpcError> {
         let handle = new_handle();
         let mut registry = self.registry.lock();
-        let slot = registry.windows.entry(window_label.to_string()).or_default();
+        let slot = registry
+            .windows
+            .entry(window_label.to_string())
+            .or_default();
         // R4: consume the reservation and re-verify the parent is still the
         // window's current main; a late child never attaches to a replaced
         // document.
@@ -847,7 +885,9 @@ impl FilePreviewService {
         slot.pending_children = slot.pending_children.saturating_sub(1);
         let _ = reservation;
         slot.children.push(handle.clone());
-        registry.handles.insert(handle.clone(), record_of(opened, self.started_at));
+        registry
+            .handles
+            .insert(handle.clone(), record_of(opened, self.started_at));
         Ok(handle)
     }
 
@@ -858,7 +898,9 @@ impl FilePreviewService {
         {
             let registry = self.registry.lock();
             for (handle, record) in registry.handles.iter() {
-                if now_ms.saturating_sub(record.last_access_ms.load(Ordering::Relaxed)) > HANDLE_TTL.as_millis() as u64 {
+                if now_ms.saturating_sub(record.last_access_ms.load(Ordering::Relaxed))
+                    > HANDLE_TTL.as_millis() as u64
+                {
                     expired.push(handle.clone());
                 }
             }
@@ -1025,7 +1067,11 @@ fn open_blocking_path(
     match kind {
         FilePreviewKind::Text | FilePreviewKind::Markdown => {
             if byte_length > limits::TEXT_MAX_BYTES {
-                return Err(too_large(&display_name, byte_length, limits::TEXT_MAX_BYTES));
+                return Err(too_large(
+                    &display_name,
+                    byte_length,
+                    limits::TEXT_MAX_BYTES,
+                ));
             }
             // R7: the read itself is capped at the ceiling plus one byte, so a
             // file that GROWS between the stat above and this read can never
@@ -1077,9 +1123,7 @@ fn open_blocking_path(
                 // R5: retain the boundary directory's (dev, inode) identity
                 // so later child resolution can detect a swapped path.
                 parent_identity: match kind {
-                    FilePreviewKind::Markdown => canonical
-                        .parent()
-                        .and_then(directory_identity),
+                    FilePreviewKind::Markdown => canonical.parent().and_then(directory_identity),
                     _ => None,
                 },
                 text: Some(text),
@@ -1090,7 +1134,11 @@ fn open_blocking_path(
         }
         FilePreviewKind::Image => {
             if byte_length > limits::IMAGE_MAX_BYTES {
-                return Err(too_large(&display_name, byte_length, limits::IMAGE_MAX_BYTES));
+                return Err(too_large(
+                    &display_name,
+                    byte_length,
+                    limits::IMAGE_MAX_BYTES,
+                ));
             }
             // R12: probe up to IMAGE_HEADER_PROBE bytes with a full read
             // loop, so a JPEG whose SOF marker sits behind large EXIF/ICC
@@ -1117,7 +1165,9 @@ fn open_blocking_path(
             })?;
             // R12: width and height are bounded per axis as well as by the
             // total pixel product.
-            if signature.width > limits::IMAGE_MAX_AXIS as u64 || signature.height > limits::IMAGE_MAX_AXIS as u64 {
+            if signature.width > limits::IMAGE_MAX_AXIS as u64
+                || signature.height > limits::IMAGE_MAX_AXIS as u64
+            {
                 return Err(preview_error(
                     FilePreviewErrorReason::TooLarge,
                     "this image exceeds the supported per-axis pixel bound",
@@ -1245,7 +1295,8 @@ fn base_headers(media_type: &str) -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_str(media_type).unwrap_or(HeaderValue::from_static("application/octet-stream")),
+        HeaderValue::from_str(media_type)
+            .unwrap_or(HeaderValue::from_static("application/octet-stream")),
     );
     headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -1269,12 +1320,16 @@ async fn serve_capability(
     headers: HeaderMap,
 ) -> Response {
     // 1. exact Host authority - a forged Host never reaches a capability
-    let host = headers.get(header::HOST).and_then(|value| value.to_str().ok());
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok());
     if host != Some(service.authority.as_str()) {
         return status_only(StatusCode::FORBIDDEN);
     }
     // 2. allowlisted Origin; absent Origin stays allowed for native media
-    let origin = headers.get(header::ORIGIN).and_then(|value| value.to_str().ok());
+    let origin = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok());
     if let Some(origin) = origin {
         if !is_allowed_origin(origin) {
             return status_only(StatusCode::FORBIDDEN);
@@ -1289,9 +1344,10 @@ async fn serve_capability(
         return status_only(StatusCode::NOT_FOUND);
     }
     // R6: every capability request refreshes the idle lease.
-    record
-        .last_access_ms
-        .store(service.started_at.elapsed().as_millis() as u64, Ordering::Relaxed);
+    record.last_access_ms.store(
+        service.started_at.elapsed().as_millis() as u64,
+        Ordering::Relaxed,
+    );
     // 4. the retained inode must still be the file we measured. R10: the
     // metadata probe runs on the blocking pool, never on the async reactor.
     let probe = record.file.try_clone();
@@ -1453,7 +1509,11 @@ fn chunk_stream(
                 ));
             }
             if !state.started {
-                if let Err(error) = state.file.seek(std::io::SeekFrom::Start(state.offset)).await {
+                if let Err(error) = state
+                    .file
+                    .seek(std::io::SeekFrom::Start(state.offset))
+                    .await
+                {
                     state.permit.take();
                     return Some((Err(error), state));
                 }
@@ -1512,10 +1572,7 @@ pub async fn cmd_file_preview_open<R: tauri::Runtime>(
     )
     .await
     .map_err(map_session_error)?;
-    if cwd.is_none()
-        && !crate::ipc::file_link::is_absolute_token(&path)
-        && !path.starts_with('~')
-    {
+    if cwd.is_none() && !crate::ipc::file_link::is_absolute_token(&path) && !path.starts_with('~') {
         return Err(preview_error(
             FilePreviewErrorReason::MissingFile,
             "The terminal's current directory could not be read. Use an absolute file path.",
@@ -1523,7 +1580,13 @@ pub async fn cmd_file_preview_open<R: tauri::Runtime>(
         ));
     }
     service
-        .open(FilePreviewOpenRequest { window_label, path, cwd, line, col })
+        .open(FilePreviewOpenRequest {
+            window_label,
+            path,
+            cwd,
+            line,
+            col,
+        })
         .await
 }
 

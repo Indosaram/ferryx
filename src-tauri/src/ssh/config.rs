@@ -1,8 +1,10 @@
 use super::SshAuthMethod;
 use super::SshHost;
 use super::SshHostSource;
+use std::path::{Path, PathBuf};
 
 const IMPORT_CAP: usize = 100;
+const MAX_INCLUDE_DEPTH: usize = 8;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConfigHost {
@@ -15,7 +17,30 @@ pub struct ConfigHost {
 }
 
 pub fn parse_ssh_config(text: &str) -> Vec<ConfigHost> {
-    let mut hosts: Vec<ConfigHost> = Vec::new();
+    let default_dir = dirs_fallback_ssh_dir();
+    parse_ssh_config_with_dir(text, default_dir.as_deref())
+}
+
+pub fn parse_ssh_config_with_dir(text: &str, config_dir: Option<&Path>) -> Vec<ConfigHost> {
+    let mut visited = Vec::new();
+    let mut hosts = Vec::new();
+    parse_ssh_config_internal(text, config_dir, 0, &mut visited, &mut hosts);
+    hosts
+}
+
+fn dirs_fallback_ssh_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|h| PathBuf::from(h).join(".ssh"))
+}
+
+fn parse_ssh_config_internal(
+    text: &str,
+    config_dir: Option<&Path>,
+    depth: usize,
+    visited: &mut Vec<PathBuf>,
+    hosts: &mut Vec<ConfigHost>,
+) {
     let mut current: Option<ConfigHost> = None;
 
     for raw in text.lines() {
@@ -28,10 +53,17 @@ pub fn parse_ssh_config(text: &str) -> Vec<ConfigHost> {
         };
         let keyword = keyword.to_ascii_lowercase();
         match keyword.as_str() {
-            "host" => {
-                if let Some(previous) = current.take() {
-                    hosts.push(previous);
+            "include" => {
+                flush_host(&mut current, config_dir, hosts);
+                if depth < MAX_INCLUDE_DEPTH {
+                    let parsed_path = parse_ssh_value(value);
+                    if !parsed_path.is_empty() {
+                        include_files(&parsed_path, config_dir, depth, visited, hosts);
+                    }
                 }
+            }
+            "host" => {
+                flush_host(&mut current, config_dir, hosts);
                 let alias = value
                     .split_whitespace()
                     .next()
@@ -88,10 +120,259 @@ pub fn parse_ssh_config(text: &str) -> Vec<ConfigHost> {
         }
     }
 
-    if let Some(previous) = current.take() {
-        hosts.push(previous);
+    flush_host(&mut current, config_dir, hosts);
+}
+
+fn flush_host(
+    current: &mut Option<ConfigHost>,
+    config_dir: Option<&Path>,
+    hosts: &mut Vec<ConfigHost>,
+) {
+    if let Some(mut host) = current.take() {
+        finalize_host(&mut host, config_dir);
+        merge_host(hosts, host);
     }
-    hosts
+}
+
+fn finalize_host(host: &mut ConfigHost, _config_dir: Option<&Path>) {
+    let local_user = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_default();
+    // OpenSSH expands %d to the local user's home directory, not the config directory.
+    let local_home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok();
+
+    if let Some(ref user) = host.username {
+        let expanded = expand_tokens(user, None, None, Some(&local_user), local_home.as_deref());
+        host.username = Some(expanded);
+    }
+
+    let hostname = host.hostname.as_deref().unwrap_or(&host.alias);
+    let remote_user = host.username.as_deref();
+
+    if let Some(ref id_file) = host.identity_file {
+        let expanded = expand_tokens(
+            id_file,
+            Some(hostname),
+            remote_user,
+            Some(&local_user),
+            local_home.as_deref(),
+        );
+        host.identity_file = Some(expanded);
+    }
+
+    if let Some(ref jump) = host.jump_host {
+        let expanded = expand_tokens(
+            jump,
+            Some(hostname),
+            remote_user,
+            Some(&local_user),
+            local_home.as_deref(),
+        );
+        host.jump_host = Some(expanded);
+    }
+}
+
+fn merge_host(hosts: &mut Vec<ConfigHost>, host: ConfigHost) {
+    if let Some(existing) = hosts.iter_mut().find(|h| h.alias == host.alias) {
+        if existing.hostname.is_none() {
+            existing.hostname = host.hostname;
+        }
+        if existing.username.is_none() {
+            existing.username = host.username;
+        }
+        if existing.port.is_none() {
+            existing.port = host.port;
+        }
+        if existing.identity_file.is_none() {
+            existing.identity_file = host.identity_file;
+        }
+        if existing.jump_host.is_none() {
+            existing.jump_host = host.jump_host;
+        }
+    } else {
+        hosts.push(host);
+    }
+}
+
+fn include_files(
+    pattern: &str,
+    config_dir: Option<&Path>,
+    depth: usize,
+    visited: &mut Vec<PathBuf>,
+    hosts: &mut Vec<ConfigHost>,
+) {
+    let resolved_pattern = expand_include_path(pattern, config_dir);
+    let matched_files = resolve_glob_files(&resolved_pattern);
+
+    for file_path in matched_files {
+        let canonical = file_path.canonicalize().unwrap_or_else(|_| file_path.clone());
+        if visited.contains(&canonical) {
+            continue;
+        }
+        visited.push(canonical);
+
+        if let Ok(content) = std::fs::read_to_string(&file_path) {
+            parse_ssh_config_internal(
+                &content,
+                file_path.parent(),
+                depth + 1,
+                visited,
+                hosts,
+            );
+        }
+    }
+}
+
+fn expand_include_path(pattern: &str, config_dir: Option<&Path>) -> PathBuf {
+    if let Some(rest) = pattern.strip_prefix("~/").or_else(|| pattern.strip_prefix(r"~\")) {
+        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+            return PathBuf::from(home).join(rest);
+        }
+        return PathBuf::from(pattern);
+    }
+    let p = Path::new(pattern);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else if let Some(base) = config_dir {
+        base.join(pattern)
+    } else if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        PathBuf::from(home).join(".ssh").join(pattern)
+    } else {
+        PathBuf::from("~/.ssh").join(pattern)
+    }
+}
+
+fn resolve_glob_files(path: &Path) -> Vec<PathBuf> {
+    let path_str = path.to_string_lossy();
+    if !path_str.contains('*') {
+        if path.is_file() {
+            return vec![path.to_path_buf()];
+        }
+        return Vec::new();
+    }
+
+    let Some(parent) = path.parent() else {
+        return Vec::new();
+    };
+    let Some(file_pattern) = path.file_name().and_then(|n| n.to_str()) else {
+        return Vec::new();
+    };
+
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return Vec::new();
+    };
+
+    let mut matches = Vec::new();
+    for entry in entries.flatten() {
+        let entry_path = entry.path();
+        if !entry_path.is_file() {
+            continue;
+        }
+        if let Some(name) = entry_path.file_name().and_then(|n| n.to_str()) {
+            if simple_wildcard_match(file_pattern, name) {
+                matches.push(entry_path);
+            }
+        }
+    }
+    matches.sort();
+    matches
+}
+
+fn simple_wildcard_match(pattern: &str, text: &str) -> bool {
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() == 1 {
+        return pattern == text;
+    }
+    let mut current = text;
+    if !parts[0].is_empty() {
+        if !current.starts_with(parts[0]) {
+            return false;
+        }
+        current = &current[parts[0].len()..];
+    }
+    for &part in &parts[1..parts.len() - 1] {
+        if part.is_empty() {
+            continue;
+        }
+        let Some(pos) = current.find(part) else {
+            return false;
+        };
+        current = &current[pos + part.len()..];
+    }
+    let last = parts[parts.len() - 1];
+    if !last.is_empty() {
+        current.ends_with(last)
+    } else {
+        true
+    }
+}
+
+fn expand_tokens(
+    template: &str,
+    hostname: Option<&str>,
+    remote_user: Option<&str>,
+    local_user: Option<&str>,
+    home_dir: Option<&str>,
+) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut chars = template.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            match chars.peek() {
+                Some('%') => {
+                    chars.next();
+                    out.push('%');
+                }
+                Some('d') => {
+                    chars.next();
+                    if let Some(home) = home_dir {
+                        out.push_str(home);
+                    } else {
+                        out.push_str("%d");
+                    }
+                }
+                Some('h') => {
+                    chars.next();
+                    if let Some(h) = hostname {
+                        out.push_str(h);
+                    } else {
+                        out.push_str("%h");
+                    }
+                }
+                Some('r') => {
+                    chars.next();
+                    if let Some(r) = remote_user {
+                        out.push_str(r);
+                    } else if let Some(u) = local_user {
+                        out.push_str(u);
+                    } else {
+                        out.push_str("%r");
+                    }
+                }
+                Some('u') => {
+                    chars.next();
+                    if let Some(u) = local_user {
+                        out.push_str(u);
+                    } else {
+                        out.push_str("%u");
+                    }
+                }
+                Some(&other) => {
+                    out.push('%');
+                    out.push(other);
+                    chars.next();
+                }
+                None => {
+                    out.push('%');
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn split_keyword_value(line: &str) -> Option<(&str, &str)> {
@@ -132,15 +413,19 @@ fn parse_ssh_value(input: &str) -> String {
         }
         result
     } else {
-        let end = trimmed.find(|c: char| c.is_whitespace() || c == '#').unwrap_or(trimmed.len());
+        let end = trimmed
+            .find(|c: char| c.is_whitespace() || c == '#')
+            .unwrap_or(trimmed.len());
         trimmed[..end].to_string()
     }
 }
 
 pub fn import_aliases(config_hosts: &[ConfigHost], tombstones: &[String]) -> Vec<SshHost> {
+    let mut seen_aliases = std::collections::HashSet::new();
     config_hosts
         .iter()
         .filter_map(|entry| config_host_to_ssh_host(entry))
+        .filter(|host| seen_aliases.insert(host.label.clone()))
         .filter(|host| !tombstones.iter().any(|tombstone| tombstone == &host.key()))
         .take(IMPORT_CAP)
         .collect()
@@ -176,119 +461,5 @@ fn uuid_like(seed: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn p10_identity_file_import_preserves_semantic_argv() {
-        let key = std::env::temp_dir().join("QA Person's key");
-        let key = key.to_str().unwrap();
-        let text = format!("Host fixture\n IdentityFile \"{key}\" # key comment\n IdentityFile ~/ignored\n");
-        let parsed = parse_ssh_config(&text);
-        assert_eq!(parsed[0].identity_file.as_deref(), Some(key));
-        let imported = import_aliases(&parsed, &[]);
-        let plan = crate::ssh::direct::ssh_plan(&imported[0], "true".into(), false).unwrap();
-        let values: Vec<_> = plan.args.windows(2)
-            .filter(|pair| pair[0] == "-i").map(|pair| pair[1].as_str()).collect();
-        assert_eq!(values, vec![key]);
-    }
-
-    #[test]
-    fn p10_identity_file_config_quoting_grammar() {
-        for (directive, expected) in [
-            (r#"IdentityFile "C:\Users\QA Person\.ssh\id_ed25519""#, r"C:\Users\QA Person\.ssh\id_ed25519"),
-            (r#"IdentityFile="~/.ssh/key with space""#, "~/.ssh/key with space"),
-            (r#"IdentityFile = "/path/with spaces/key""#, "/path/with spaces/key"),
-            (r#"IdentityFile = /path/plain/key"#, "/path/plain/key"),
-            (r#"IdentityFile = ~/.ssh/key # comment"#, "~/.ssh/key"),
-            (r#"IdentityFile "~/.ssh/key\"quote""#, "~/.ssh/key\"quote"),
-            (r#"IdentityFile ~/.ssh/plain # comment"#, "~/.ssh/plain"),
-            (r#"IdentityFile "~/.ssh/key#literal""#, "~/.ssh/key#literal"),
-        ] {
-            let parsed = parse_ssh_config(&format!("Host fixture\n {directive}\n"));
-            assert_eq!(parsed[0].identity_file.as_deref(), Some(expected), "{directive}");
-        }
-    }
-
-    const SAMPLE: &str = "\
-# comment line
-Host win
-    HostName maho-win.example.com
-    User sook
-    Port 2200
-    IdentityFile ~/.ssh/id_ed25519
-    ProxyJump bastion
-
-Host bastion
-    HostName bastion.example.com
-
-Host *.prod
-    User deploy
-
-Host !skip.me *.all
-    User ignored
-";
-
-    #[test]
-    fn red_parse_extracts_named_aliases_only() {
-        let hosts = parse_ssh_config(SAMPLE);
-        let aliases: Vec<&str> = hosts.iter().map(|host| host.alias.as_str()).collect();
-        assert_eq!(aliases, vec!["win", "bastion"]);
-        let win = &hosts[0];
-        assert_eq!(win.hostname.as_deref(), Some("maho-win.example.com"));
-        assert_eq!(win.username.as_deref(), Some("sook"));
-        assert_eq!(win.port, Some(2200));
-        assert!(win.identity_file.as_deref().unwrap().contains("id_ed25519"));
-        assert_eq!(win.jump_host.as_deref(), Some("bastion"));
-    }
-
-    #[test]
-    fn red_malformed_lines_are_skipped() {
-        let text =
-            "Host ok\n  Port not-a-number\n  HostName h\nGARBAGE_LINE_WITHOUT_VALUE\nHost two\n";
-        let hosts = parse_ssh_config(text);
-        assert_eq!(hosts.len(), 2);
-        assert_eq!(hosts[0].port, None);
-    }
-
-    #[test]
-    fn red_import_dedupes_against_tombstones_and_caps() {
-        let hosts = parse_ssh_config(SAMPLE);
-        let tombstones = vec![hosts[0].alias.clone()];
-        let imported = import_aliases(&hosts, &tombstones_of(&tombstones, &hosts));
-        assert_eq!(imported.len(), 1);
-        assert_eq!(imported[0].label, "bastion");
-        assert_eq!(imported[0].source, SshHostSource::Config);
-        // bastion has no IdentityFile ⇒ agent auth
-        assert_eq!(imported[0].auth_method, SshAuthMethod::Agent);
-    }
-
-    fn tombstones_of(aliases: &[String], hosts: &[ConfigHost]) -> Vec<String> {
-        aliases
-            .iter()
-            .filter_map(|alias| {
-                hosts.iter().find(|host| &host.alias == alias).map(|host| {
-                    let user = host.username.clone().unwrap_or_default();
-                    let hostname = host.hostname.clone().unwrap_or_else(|| alias.clone());
-                    let port = host.port.unwrap_or(22);
-                    if user.is_empty() {
-                        format!("{hostname}:{port}")
-                    } else {
-                        format!("{user}@{hostname}:{port}")
-                    }
-                })
-            })
-            .collect()
-    }
-
-    #[test]
-    fn red_import_caps_at_100() {
-        let mut text = String::new();
-        for index in 0..150 {
-            text.push_str(&format!("Host h{index}\n  HostName h{index}.example\n"));
-        }
-        let hosts = parse_ssh_config(&text);
-        let imported = import_aliases(&hosts, &[]);
-        assert_eq!(imported.len(), 100);
-    }
-}
+#[path = "config_tests.rs"]
+mod tests;

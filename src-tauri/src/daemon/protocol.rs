@@ -133,19 +133,29 @@ pub struct DaemonRemoteStatus {
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum DaemonRequest {
     #[serde(rename_all = "camelCase")]
-    SshPassword { host: crate::ssh::SshHost, password: Option<crate::ssh::password::Password> },
+    SshPassword {
+        host: crate::ssh::SshHost,
+        password: Option<crate::ssh::password::Password>,
+    },
     #[serde(rename_all = "camelCase")]
     Handshake {
         version: u32,
     },
     Ping,
     #[serde(rename_all = "camelCase")]
-    MachineSessionDetail { session_id: String },
+    MachineSessionDetail {
+        session_id: String,
+    },
     #[serde(rename_all = "camelCase")]
-    MachineSessionMetadata { target: crate::remote::machine_protocol::RemoteTerminalTarget, report: AgentStateReport },
+    MachineSessionMetadata {
+        target: crate::remote::machine_protocol::RemoteTerminalTarget,
+        report: AgentStateReport,
+    },
     MachineGateway,
     #[serde(rename_all = "camelCase")]
-    MachineMetadataSubscribe { target: crate::remote::machine_protocol::RemoteTerminalTarget },
+    MachineMetadataSubscribe {
+        target: crate::remote::machine_protocol::RemoteTerminalTarget,
+    },
 
     #[serde(rename_all = "camelCase")]
     RegisterWorkspace {
@@ -217,13 +227,27 @@ pub enum DaemonRequest {
         session_id: String,
     },
     #[serde(rename_all = "camelCase")]
-    RetryRemoteSession { session_id: String },
+    RetryRemoteSession {
+        session_id: String,
+    },
     #[serde(rename_all = "camelCase")]
-    RemoteSessionDetails { session_id: String },
+    RemoteSessionDetails {
+        session_id: String,
+    },
     #[serde(rename_all = "camelCase")]
-    RemoteWrite { session_id: String, generation: u64, #[serde(with = "base64_serde")] data: Vec<u8> },
+    RemoteWrite {
+        session_id: String,
+        generation: u64,
+        #[serde(with = "base64_serde")]
+        data: Vec<u8>,
+    },
     #[serde(rename_all = "camelCase")]
-    RemoteResize { session_id: String, generation: u64, cols: u16, rows: u16 },
+    RemoteResize {
+        session_id: String,
+        generation: u64,
+        cols: u16,
+        rows: u16,
+    },
     ListSessions,
     #[serde(rename_all = "camelCase")]
     DescribeSession {
@@ -252,18 +276,38 @@ pub enum DaemonRequest {
     RemoteGetStatus,
     GetCapabilities,
     PairedHostList,
-    PairedTerminalReattach { descriptor: crate::terminal::paired_daemon::Descriptor },
-    PairedTerminalDetach { session_id: String },
+    PairedTerminalReattach {
+        descriptor: crate::terminal::paired_daemon::Descriptor,
+    },
+    PairedTerminalDetach {
+        session_id: String,
+    },
     #[serde(rename_all = "camelCase")]
-    PairedTerminalDescriptor { session_id: String },
-    PairedHostOperation { request: crate::paired_host::client::OperationRequest },
-    PairedHostRead { request: crate::paired_host::inventory::MigrationReceipt },
-    PairedHostPair { request: crate::paired_host::service::PairRequest },
-    PairedHostMigrateLegacy { request: crate::paired_host::service::MigrationRequest },
+    PairedTerminalDescriptor {
+        session_id: String,
+    },
+    PairedHostOperation {
+        request: crate::paired_host::client::OperationRequest,
+    },
+    PairedHostRead {
+        request: crate::paired_host::inventory::MigrationReceipt,
+    },
+    PairedHostPair {
+        request: crate::paired_host::service::PairRequest,
+    },
+    PairedHostMigrateLegacy {
+        request: crate::paired_host::service::MigrationRequest,
+    },
     #[serde(rename_all = "camelCase")]
-    PairedHostForget { host_id: String, expected_generation: crate::scoped_contracts::Epoch },
+    PairedHostForget {
+        host_id: String,
+        expected_generation: crate::scoped_contracts::Epoch,
+    },
     #[serde(rename_all = "camelCase")]
-    PairedHostRevoke { host_id: String, generation: crate::scoped_contracts::Epoch },
+    PairedHostRevoke {
+        host_id: String,
+        generation: crate::scoped_contracts::Epoch,
+    },
     /// Separate variant: an old daemon rejects machine issuance instead of
     /// ignoring an unknown scope field and accidentally issuing a mirror PIN.
     RemoteCreateMachinePairingCode,
@@ -309,23 +353,66 @@ pub enum DaemonRequest {
         #[serde(with = "base64_serde")]
         data: Vec<u8>,
     },
+    #[serde(rename_all = "camelCase")]
+    SubscribeDag {
+        workspace_id: String,
+        project_path: String,
+        /// Present for a paired workspace. When set, the daemon streams from the
+        /// authenticated remote host instead of scanning `project_path` locally.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        paired: Option<PairedDagBinding>,
+    },
+    #[serde(rename_all = "camelCase")]
+    UnsubscribeDag {
+        workspace_id: String,
+        project_path: String,
+    },
     Shutdown,
+}
+
+/// Authenticated identity of a paired DAG subscription. The desktop names the host
+/// and the host's own workspace id; the remote resolves the root itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairedDagBinding {
+    pub host_id: String,
+    pub generation: crate::scoped_contracts::Epoch,
+    pub remote_workspace_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum DaemonResponse {
-    PairedTerminalReattachOk { session_id: String, generation: crate::scoped_contracts::Epoch },
+    PairedTerminalReattachOk {
+        session_id: String,
+        generation: crate::scoped_contracts::Epoch,
+    },
     #[serde(rename_all = "camelCase")]
-    PairedTerminalDescriptorOk { descriptor: Option<crate::terminal::paired_daemon::Descriptor> },
-    PairedHostOperationOk { response: crate::paired_host::client::OperationResponse },
-    PairedHostOperationError { error: crate::paired_host::client::ClientError },
-    PairedHostListOk { hosts: Vec<crate::paired_host::inventory::HostView> },
-    PairedHostPairOk { host: crate::paired_host::inventory::HostView },
-    PairedHostReadOk { host: crate::paired_host::inventory::HostView },
-    PairedHostMigrateLegacyOk { receipt: crate::paired_host::inventory::MigrationReceipt },
+    PairedTerminalDescriptorOk {
+        descriptor: Option<crate::terminal::paired_daemon::Descriptor>,
+    },
+    PairedHostOperationOk {
+        response: crate::paired_host::client::OperationResponse,
+    },
+    PairedHostOperationError {
+        error: crate::paired_host::client::ClientError,
+    },
+    PairedHostListOk {
+        hosts: Vec<crate::paired_host::inventory::HostView>,
+    },
+    PairedHostPairOk {
+        host: crate::paired_host::inventory::HostView,
+    },
+    PairedHostReadOk {
+        host: crate::paired_host::inventory::HostView,
+    },
+    PairedHostMigrateLegacyOk {
+        receipt: crate::paired_host::inventory::MigrationReceipt,
+    },
     PairedHostForgetOk,
-    PairedHostError { error: crate::paired_host::service::ServiceError },
+    PairedHostError {
+        error: crate::paired_host::service::ServiceError,
+    },
     #[serde(rename_all = "camelCase")]
     UploadClipboardImageOk {
         remote_path: String,
@@ -352,11 +439,17 @@ pub enum DaemonResponse {
     RegisterWorkspaceOk,
     UnregisterWorkspaceOk,
     #[serde(rename_all = "camelCase")]
-    CreateWorktreeOk { worktree: crate::worktree::Worktree },
+    CreateWorktreeOk {
+        worktree: crate::worktree::Worktree,
+    },
     #[serde(rename_all = "camelCase")]
-    DeleteWorktreeOk { pruned: bool },
+    DeleteWorktreeOk {
+        pruned: bool,
+    },
     #[serde(rename_all = "camelCase")]
-    WorktreeError { error: crate::ipc::IpcError },
+    WorktreeError {
+        error: crate::ipc::IpcError,
+    },
     #[serde(rename_all = "camelCase")]
     SpawnOk {
         session_id: String,
@@ -375,12 +468,19 @@ pub enum DaemonResponse {
         existing_session_id: String,
     },
     #[serde(rename_all = "camelCase")]
-    RemoteSessionDetailsOk { details: Option<crate::terminal::remote::RemoteSessionDetails>, legacy_direct_ssh: bool },
+    RemoteSessionDetailsOk {
+        details: Option<crate::terminal::remote::RemoteSessionDetails>,
+        legacy_direct_ssh: bool,
+    },
     #[serde(rename_all = "camelCase")]
-    RemoteSessionError { failure: crate::terminal::remote::RemoteFailure },
+    RemoteSessionError {
+        failure: crate::terminal::remote::RemoteFailure,
+    },
     RetryRemoteSessionOk,
     #[serde(rename_all = "camelCase")]
-    MachineSessionDetailOk { detail: crate::remote::machine_protocol::SessionDetail },
+    MachineSessionDetailOk {
+        detail: crate::remote::machine_protocol::SessionDetail,
+    },
     MachineGatewayOk,
     WriteOk,
     ResizeOk,
@@ -472,6 +572,8 @@ pub enum DaemonResponse {
     HandoverRejected {
         reason: String,
     },
+    SubscribeDagOk,
+    UnsubscribeDagOk,
     #[serde(rename_all = "camelCase")]
     Error {
         message: String,
@@ -490,7 +592,7 @@ pub struct DaemonRemoteEvent {
     pub payload: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum DaemonStreamMessage<'a> {
     #[serde(rename_all = "camelCase")]
@@ -545,6 +647,18 @@ pub enum DaemonStreamMessage<'a> {
     Exit {
         session_id: Cow<'a, str>,
         exit_code: Option<i32>,
+    },
+    #[serde(rename_all = "camelCase")]
+    DagRunUpdated {
+        workspace_id: Cow<'a, str>,
+        project_path: Cow<'a, str>,
+        snapshot: Box<crate::dag::journal::DagRunSnapshot>,
+    },
+    #[serde(rename_all = "camelCase")]
+    DagInventory {
+        workspace_id: Cow<'a, str>,
+        project_path: Cow<'a, str>,
+        runs: Vec<crate::dag::journal::DagRunSnapshot>,
     },
 }
 
@@ -1436,5 +1550,133 @@ mod tests {
         };
         let rej_json = serde_json::to_string(&rej_resp).expect("serialize HandoverRejected");
         assert!(rej_json.contains(r#""reason":"Already in progress""#));
+    }
+
+    #[test]
+    fn test_dag_streaming_protocol_serde() {
+        let sub_req = DaemonRequest::SubscribeDag {
+            workspace_id: "ws-dag".to_string(),
+            project_path: "/remote/path".to_string(),
+            paired: None,
+        };
+        let sub_json = serde_json::to_string(&sub_req).expect("serialize SubscribeDag");
+        assert!(sub_json.contains(r#""type":"subscribeDag""#));
+        assert!(sub_json.contains(r#""workspaceId":"ws-dag""#));
+        assert!(sub_json.contains(r#""projectPath":"/remote/path""#));
+        let sub_deser: DaemonRequest =
+            serde_json::from_str(&sub_json).expect("deserialize SubscribeDag");
+        match sub_deser {
+            DaemonRequest::SubscribeDag {
+                workspace_id,
+                project_path,
+                paired,
+            } => {
+                assert_eq!(workspace_id, "ws-dag");
+                assert_eq!(project_path, "/remote/path");
+                assert!(paired.is_none());
+            }
+            _ => panic!("Expected SubscribeDag"),
+        }
+
+        // A paired subscription carries the authenticated host identity end to end.
+        let paired_req = DaemonRequest::SubscribeDag {
+            workspace_id: "daemon:abc".to_string(),
+            project_path: "paired".to_string(),
+            paired: Some(PairedDagBinding {
+                host_id: "https://relay.example/host/m1".to_string(),
+                generation: crate::scoped_contracts::Epoch(7),
+                remote_workspace_id: "project-remote".to_string(),
+            }),
+        };
+        let paired_json = serde_json::to_string(&paired_req).expect("serialize paired SubscribeDag");
+        assert!(paired_json.contains(r#""remoteWorkspaceId":"project-remote""#));
+        match serde_json::from_str::<DaemonRequest>(&paired_json).expect("deserialize paired") {
+            DaemonRequest::SubscribeDag {
+                paired: Some(binding),
+                ..
+            } => {
+                assert_eq!(binding.host_id, "https://relay.example/host/m1");
+                assert_eq!(binding.generation.0, 7);
+                assert_eq!(binding.remote_workspace_id, "project-remote");
+            }
+            _ => panic!("Expected paired SubscribeDag"),
+        }
+
+        let unsub_req = DaemonRequest::UnsubscribeDag {
+            workspace_id: "ws-dag".to_string(),
+            project_path: "/remote/path".to_string(),
+        };
+        let unsub_json = serde_json::to_string(&unsub_req).expect("serialize UnsubscribeDag");
+        assert!(unsub_json.contains(r#""type":"unsubscribeDag""#));
+        let unsub_deser: DaemonRequest =
+            serde_json::from_str(&unsub_json).expect("deserialize UnsubscribeDag");
+        match unsub_deser {
+            DaemonRequest::UnsubscribeDag {
+                workspace_id,
+                project_path,
+            } => {
+                assert_eq!(workspace_id, "ws-dag");
+                assert_eq!(project_path, "/remote/path");
+            }
+            _ => panic!("Expected UnsubscribeDag"),
+        }
+
+        let sub_ok = DaemonResponse::SubscribeDagOk;
+        let sub_ok_json = serde_json::to_string(&sub_ok).expect("serialize SubscribeDagOk");
+        assert_eq!(sub_ok_json, r#"{"type":"subscribeDagOk"}"#);
+
+        let unsub_ok = DaemonResponse::UnsubscribeDagOk;
+        let unsub_ok_json = serde_json::to_string(&unsub_ok).expect("serialize UnsubscribeDagOk");
+        assert_eq!(unsub_ok_json, r#"{"type":"unsubscribeDagOk"}"#);
+
+        let snapshot = crate::dag::journal::DagRunSnapshot {
+            run_id: "run-123".to_string(),
+            run_key: "key-1".to_string(),
+            name: "test-run".to_string(),
+            status: crate::dag::journal::DagRunStatus::Running,
+            started_at: Some("2026-09-19T00:00:00Z".to_string()),
+            completed_at: None,
+            updated_at: None,
+            amend_count: 0,
+            amend_history: None,
+            diagnostics: None,
+            parent_session_id: None,
+            root_session_id: None,
+            nodes: vec![],
+            edges: vec![],
+            waves: vec![],
+            critical_path: vec![],
+            bottlenecks: vec![],
+            counts: crate::dag::journal::DagRunCounts::default(),
+        };
+
+        let updated_msg = DaemonStreamMessage::DagRunUpdated {
+            workspace_id: std::borrow::Cow::Borrowed("ws-dag"),
+            project_path: std::borrow::Cow::Borrowed("/remote/path"),
+            snapshot: Box::new(snapshot.clone()),
+        };
+        let updated_json = serde_json::to_string(&updated_msg).expect("serialize DagRunUpdated");
+        assert!(updated_json.contains(r#""type":"dagRunUpdated""#));
+        assert!(updated_json.contains(r#""workspaceId":"ws-dag""#));
+        assert!(updated_json.contains(r#""projectPath":"/remote/path""#));
+        assert!(updated_json.contains(r#""runId":"run-123""#));
+
+        let updated_deser: DaemonStreamMessage =
+            serde_json::from_str(&updated_json).expect("deserialize DagRunUpdated");
+        assert_eq!(updated_deser, updated_msg);
+
+        let inv_msg = DaemonStreamMessage::DagInventory {
+            workspace_id: std::borrow::Cow::Borrowed("ws-dag"),
+            project_path: std::borrow::Cow::Borrowed("/remote/path"),
+            runs: vec![snapshot],
+        };
+        let inv_json = serde_json::to_string(&inv_msg).expect("serialize DagInventory");
+        assert!(inv_json.contains(r#""type":"dagInventory""#));
+        assert!(inv_json.contains(r#""workspaceId":"ws-dag""#));
+        assert!(inv_json.contains(r#""projectPath":"/remote/path""#));
+
+        let inv_deser: DaemonStreamMessage =
+            serde_json::from_str(&inv_json).expect("deserialize DagInventory");
+        assert_eq!(inv_deser, inv_msg);
     }
 }

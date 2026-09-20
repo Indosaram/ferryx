@@ -79,9 +79,14 @@ pub(super) struct MachineSender {
     budget: Arc<Semaphore>,
 }
 
-fn charge(budget: &Arc<Semaphore>, bytes: usize) -> Result<OwnedSemaphorePermit, MachineOutputError> {
+fn charge(
+    budget: &Arc<Semaphore>,
+    bytes: usize,
+) -> Result<OwnedSemaphorePermit, MachineOutputError> {
     let permits = u32::try_from(bytes).map_err(|_| MachineOutputError::Overflow)?;
-    Arc::clone(budget).try_acquire_many_owned(permits).map_err(|_| MachineOutputError::Overflow)
+    Arc::clone(budget)
+        .try_acquire_many_owned(permits)
+        .map_err(|_| MachineOutputError::Overflow)
 }
 
 impl MachineSender {
@@ -89,12 +94,18 @@ impl MachineSender {
         if self.sender.is_closed() {
             return false;
         }
-        let result = chunk.bytes.len().checked_add(MACHINE_FRAME_OVERHEAD)
+        let result = chunk
+            .bytes
+            .len()
+            .checked_add(MACHINE_FRAME_OVERHEAD)
             .ok_or(MachineOutputError::Overflow)
             .and_then(|size| charge(&self.budget, size));
         match result {
             Ok(permit) => {
-                let output = ChargedOutput { value: chunk.clone(), _charge: permit };
+                let output = ChargedOutput {
+                    value: chunk.clone(),
+                    _charge: permit,
+                };
                 if self.sender.try_send(output).is_ok() {
                     return true;
                 }
@@ -135,32 +146,53 @@ impl TerminalOutputHub {
         let (sender, receiver) = mpsc::channel(MAX_ENTRIES);
         let (status_tx, status) = watch::channel(None);
         // Install before snapshot, under the same publisher lock.
-        hub.machine_senders.retain(|sender| !sender.sender.is_closed());
+        hub.machine_senders
+            .retain(|sender| !sender.sender.is_closed());
         hub.machine_senders.push(MachineSender {
-            sender, status: status_tx, budget: Arc::clone(&budget),
+            sender,
+            status: status_tx,
+            budget: Arc::clone(&budget),
         });
         let build = || {
             let controls = charge(&budget, MACHINE_CONTROL_BYTES)?;
             // Preflight retained bytes before allocating any replay copies.
             // A suffix may be smaller than retained history.
-            let replay_bytes: usize = hub.buffer.chunks.iter()
+            let replay_bytes: usize = hub
+                .buffer
+                .chunks
+                .iter()
                 .filter(|chunk| after_sequence.is_none_or(|after| chunk.sequence > after))
-                .map(|chunk| chunk.bytes.len()).sum();
-            let permit = charge(&budget, replay_bytes.saturating_add(8 + MACHINE_FRAME_OVERHEAD))?;
+                .map(|chunk| chunk.bytes.len())
+                .sum();
+            let permit = charge(
+                &budget,
+                replay_bytes.saturating_add(8 + MACHINE_FRAME_OVERHEAD),
+            )?;
             let (history, history_start_sequence, history_end_sequence, gap) =
                 hub.buffer.snapshot_after(after_sequence);
-            let gap = gap.or_else(|| hub.replay_gap.clone().filter(|gap| {
-                after_sequence.is_none_or(|after| after < gap.available_from_sequence - 1)
-            }));
+            let gap = gap.or_else(|| {
+                hub.replay_gap.clone().filter(|gap| {
+                    after_sequence.is_none_or(|after| after < gap.available_from_sequence - 1)
+                })
+            });
             Ok(MachineAttachment {
                 snapshot: ChargedOutput {
                     value: AttachmentSnapshot {
-                        session_id: session_id.to_owned(), history_start_sequence,
-                        history_end_sequence, history, history_segments: Vec::new(), gap,
+                        session_id: session_id.to_owned(),
+                        history_start_sequence,
+                        history_end_sequence,
+                        history,
+                        history_segments: Vec::new(),
+                        gap,
                     },
                     _charge: permit,
                 },
-                receiver: MachineReceiver { receiver, status, budget: Arc::clone(&budget), _controls: controls },
+                receiver: MachineReceiver {
+                    receiver,
+                    status,
+                    budget: Arc::clone(&budget),
+                    _controls: controls,
+                },
             })
         };
         let result = build();

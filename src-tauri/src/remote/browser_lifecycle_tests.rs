@@ -3,7 +3,8 @@
 
 use super::browser_admission::{AdmissionOutcome, SubscriberQueue};
 use super::browser_backend::{
-    BrowserRemoteState, InProcessTestBackend, RemoteBrowserSessionSummary, UnavailableBrowserBackend,
+    BrowserRemoteState, InProcessTestBackend, RemoteBrowserSessionSummary,
+    UnavailableBrowserBackend,
 };
 use super::browser_protocol::{
     decode_binary_frame, encode_binary_frame, BrowserCaptureRect, BrowserFrameMetadata,
@@ -24,17 +25,12 @@ fn sample_jpeg_frame() -> &'static [u8] {
         0xFF, 0xD8, // SOI
         0xFF, 0xC0, // SOF0
         0x00, 0x11, // length = 17
-        0x08,       // precision = 8
+        0x08, // precision = 8
         0x00, 0x01, // height = 1
         0x00, 0x01, // width = 1
-        0x03,       // 3 components
-        0x01, 0x11, 0x00,
-        0x02, 0x11, 0x00,
-        0x03, 0x11, 0x00,
-        0xFF, 0xDA, // SOS
-        0x00, 0x08,
-        0x01, 0x01, 0x00, 0x00, 0x3F, 0x00,
-        0xFF, 0xD9, // EOI
+        0x03, // 3 components
+        0x01, 0x11, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00, 0xFF, 0xDA, // SOS
+        0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00, 0xFF, 0xD9, // EOI
     ]
 }
 
@@ -60,12 +56,16 @@ async fn test_browser_websocket_full_lifecycle_and_reconnection() {
         .expect("Exchange pairing code");
 
     let test_backend = Arc::new(InProcessTestBackend::new());
-    test_backend.sessions.lock().await.push(RemoteBrowserSessionSummary {
-        browser_id: "b1".into(),
-        title: Some("Example Home".into()),
-        url: Some("https://example.com".into()),
-        visible: true,
-    });
+    test_backend
+        .sessions
+        .lock()
+        .await
+        .push(RemoteBrowserSessionSummary {
+            browser_id: "b1".into(),
+            title: Some("Example Home".into()),
+            url: Some("https://example.com".into()),
+            visible: true,
+        });
     test_backend.states.lock().await.insert(
         "b1".into(),
         BrowserRemoteState {
@@ -114,19 +114,30 @@ async fn test_browser_websocket_full_lifecycle_and_reconnection() {
     assert_eq!(ticket_resp.status(), reqwest::StatusCode::OK);
 
     let ticket_text = ticket_resp.text().await.expect("Read ticket text");
-    let ticket_val: serde_json::Value = serde_json::from_str(&ticket_text).expect("Parse ticket json");
-    let ticket = ticket_val["ticket"].as_str().expect("Ticket string").to_string();
+    let ticket_val: serde_json::Value =
+        serde_json::from_str(&ticket_text).expect("Parse ticket json");
+    let ticket = ticket_val["ticket"]
+        .as_str()
+        .expect("Ticket string")
+        .to_string();
 
     // 4. WebSocket upgrade: connect to ws://{addr}/api/v1/browser/b1?ticket={ticket}
     let ws_url = format!("ws://{addr}/api/v1/browser/b1?ticket={ticket}");
     let (mut ws_stream, upgrade_resp) = tokio_tungstenite::connect_async(&ws_url)
         .await
         .expect("WebSocket handshake must succeed");
-    assert_eq!(upgrade_resp.status(), 101, "Expected HTTP 101 Switching Protocols");
+    assert_eq!(
+        upgrade_resp.status(),
+        101,
+        "Expected HTTP 101 Switching Protocols"
+    );
 
     // 5. Replaying the exact same ticket must be rejected (single-use ticket enforcement)
     let replayed = tokio_tungstenite::connect_async(&ws_url).await;
-    assert!(replayed.is_err(), "Replayed single-use ticket must be rejected with 401");
+    assert!(
+        replayed.is_err(),
+        "Replayed single-use ticket must be rejected with 401"
+    );
 
     // 6. Hello handshake: server immediately sends BrowserHello
     let hello_msg = ws_stream
@@ -165,7 +176,8 @@ async fn test_browser_websocket_full_lifecycle_and_reconnection() {
         .await
         .expect("Receive subscribed")
         .expect("Valid frame");
-    let sub_json: serde_json::Value = serde_json::from_str(&sub_reply.into_text().unwrap()).unwrap();
+    let sub_json: serde_json::Value =
+        serde_json::from_str(&sub_reply.into_text().unwrap()).unwrap();
     assert_eq!(sub_json["type"], "browserSubscribed");
     assert_eq!(sub_json["requestId"], "req-sub-1");
     assert_eq!(sub_json["streamId"], 1);
@@ -445,7 +457,10 @@ async fn test_browser_websocket_full_lifecycle_and_reconnection() {
     let fresh_sub_reply = fresh_ws.next().await.unwrap().unwrap().into_text().unwrap();
     let fresh_sub_json: serde_json::Value = serde_json::from_str(&fresh_sub_reply).unwrap();
     assert_eq!(fresh_sub_json["type"], "browserSubscribed");
-    let fresh_sub_id = fresh_sub_json["subscriptionId"].as_str().unwrap().to_string();
+    let fresh_sub_id = fresh_sub_json["subscriptionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert_ne!(
         fresh_sub_id, subscription_id,
         "New connection must have distinct subscription ID"
@@ -562,7 +577,9 @@ async fn test_view_only_device_driver_claim_rejected_with_typed_error() {
         "viewerInstanceId": "v1",
         "options": { "format": "jpeg" }
     });
-    ws.send(Message::Text(sub_req.to_string().into())).await.unwrap();
+    ws.send(Message::Text(sub_req.to_string().into()))
+        .await
+        .unwrap();
     let sub_reply = ws.next().await.unwrap().unwrap().into_text().unwrap();
     let sub_json: serde_json::Value = serde_json::from_str(&sub_reply).unwrap();
     let sub_id = sub_json["subscriptionId"].as_str().unwrap();
@@ -574,7 +591,9 @@ async fn test_view_only_device_driver_claim_rejected_with_typed_error() {
         "subscriptionId": sub_id,
         "browserId": "b1"
     });
-    ws.send(Message::Text(claim_req.to_string().into())).await.unwrap();
+    ws.send(Message::Text(claim_req.to_string().into()))
+        .await
+        .unwrap();
 
     let claim_reply = ws.next().await.unwrap().unwrap().into_text().unwrap();
     let claim_json: serde_json::Value = serde_json::from_str(&claim_reply).unwrap();
@@ -599,7 +618,9 @@ async fn start_test_gateway_server(
     let router = create_remote_router(state);
     let task = tokio::spawn(async move {
         let _ = axum::serve(listener, router)
-            .with_graceful_shutdown(async { let _ = shutdown_rx.await; })
+            .with_graceful_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
             .await;
     });
     (addr, task)
@@ -611,7 +632,9 @@ async fn test_r3_cmd_browser_remote_reclaim_broadcasts_revoked_via_gateway_manag
     let registry = WorkspaceRegistry::new();
     let state = Arc::new(RemoteGatewayState::new(terminal_service, registry));
 
-    let mgr = Arc::new(crate::ipc::remote::RemoteGatewayManager::new(Arc::clone(&state)));
+    let mgr = Arc::new(crate::ipc::remote::RemoteGatewayManager::new(Arc::clone(
+        &state,
+    )));
     let app = tauri::test::mock_builder()
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("mock app");
@@ -627,12 +650,16 @@ async fn test_r3_cmd_browser_remote_reclaim_broadcasts_revoked_via_gateway_manag
         .expect("Exchange pairing code");
 
     let test_backend = Arc::new(InProcessTestBackend::new());
-    test_backend.sessions.lock().await.push(RemoteBrowserSessionSummary {
-        browser_id: "b1".into(),
-        title: Some("Reclaim Test".into()),
-        url: Some("https://example.com".into()),
-        visible: true,
-    });
+    test_backend
+        .sessions
+        .lock()
+        .await
+        .push(RemoteBrowserSessionSummary {
+            browser_id: "b1".into(),
+            title: Some("Reclaim Test".into()),
+            url: Some("https://example.com".into()),
+            visible: true,
+        });
     test_backend.states.lock().await.insert(
         "b1".into(),
         BrowserRemoteState {
@@ -679,7 +706,9 @@ async fn test_r3_cmd_browser_remote_reclaim_broadcasts_revoked_via_gateway_manag
         "viewerInstanceId": "v1",
         "options": { "format": "jpeg" }
     });
-    ws.send(Message::Text(sub_req.to_string().into())).await.unwrap();
+    ws.send(Message::Text(sub_req.to_string().into()))
+        .await
+        .unwrap();
     let sub_reply = ws.next().await.unwrap().unwrap().into_text().unwrap();
     let sub_json: serde_json::Value = serde_json::from_str(&sub_reply).unwrap();
     let sub_id = sub_json["subscriptionId"].as_str().unwrap();
@@ -691,7 +720,9 @@ async fn test_r3_cmd_browser_remote_reclaim_broadcasts_revoked_via_gateway_manag
         "subscriptionId": sub_id,
         "browserId": "b1"
     });
-    ws.send(Message::Text(claim_req.to_string().into())).await.unwrap();
+    ws.send(Message::Text(claim_req.to_string().into()))
+        .await
+        .unwrap();
     let claim_reply = ws.next().await.unwrap().unwrap().into_text().unwrap();
     let claim_json: serde_json::Value = serde_json::from_str(&claim_reply).unwrap();
     assert_eq!(claim_json["type"], "browserDriverClaimed");
@@ -704,7 +735,10 @@ async fn test_r3_cmd_browser_remote_reclaim_broadcasts_revoked_via_gateway_manag
     });
 
     let reclaim_res = crate::ipc::browser::cmd_browser_remote_reclaim(app.handle().clone()).await;
-    assert!(reclaim_res.is_ok(), "cmd_browser_remote_reclaim must succeed");
+    assert!(
+        reclaim_res.is_ok(),
+        "cmd_browser_remote_reclaim must succeed"
+    );
 
     let event_payload = tokio::time::timeout(std::time::Duration::from_millis(50), event_rx.recv())
         .await

@@ -19,77 +19,140 @@ fn a06_budget_inspected_children_exact_cutoff() {
             }
             assert_eq!(std::fs::read_dir(&path).unwrap().count(), count);
             let listing = filesystem::scan_with_elapsed(
-                "", false, &path, &AtomicBool::new(false), || Duration::ZERO, || {},
-            ).unwrap();
-            assert!(listing.entries.is_empty(), "regular files must not be retained");
-            assert_eq!(listing.truncated, count > 10_000,
-                "inspection cutoff at native child count {count}; elapsed=0, retained=0");
-            println!("A06 inspected: native_children={count} retained=0 elapsed=0 truncated={}", listing.truncated);
+                "",
+                false,
+                &path,
+                &AtomicBool::new(false),
+                || Duration::ZERO,
+                || {},
+            )
+            .unwrap();
+            assert!(
+                listing.entries.is_empty(),
+                "regular files must not be retained"
+            );
+            assert_eq!(
+                listing.truncated,
+                count > 10_000,
+                "inspection cutoff at native child count {count}; elapsed=0, retained=0"
+            );
+            println!(
+                "A06 inspected: native_children={count} retained=0 elapsed=0 truncated={}",
+                listing.truncated
+            );
         }
     });
     root.close().unwrap();
     assert!(!path.exists());
     println!("A06 inspected cleanup: private root removed; no listener or worker created");
-    if let Err(panic) = outcome { std::panic::resume_unwind(panic); }
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 #[tokio::test]
 async fn a06_budget_per_device_burst_and_refill() {
-    async fn rate_limited(limits: &filesystem::BrowseLimits, device: &str, now: std::time::Instant) {
-        let response = limits.acquire_at(device, now).expect_err("exhausted bucket must reject admission");
+    async fn rate_limited(
+        limits: &filesystem::BrowseLimits,
+        device: &str,
+        now: std::time::Instant,
+    ) {
+        let response = limits
+            .acquire_at(device, now)
+            .expect_err("exhausted bucket must reject admission");
         assert_eq!(response.status(), 429);
         assert_eq!(response.headers()["cache-control"], "no-store");
-        let bytes = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
         let error: machine_protocol::ErrorEnvelope = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(error.error.code, "RATE_LIMITED", "not concurrent-slot exhaustion");
+        assert_eq!(
+            error.error.code, "RATE_LIMITED",
+            "not concurrent-slot exhaustion"
+        );
     }
     let limits = filesystem::BrowseLimits::default();
     let start = std::time::Instant::now();
     for device in ["device-a", "device-b"] {
         for admission in 1..=20 {
             // Releasing each permit isolates token accounting from the four slots.
-            drop(limits.acquire_at(device, start).unwrap_or_else(|_| panic!("{device} burst admission {admission} rejected")));
+            drop(
+                limits
+                    .acquire_at(device, start)
+                    .unwrap_or_else(|_| panic!("{device} burst admission {admission} rejected")),
+            );
         }
         rate_limited(&limits, device, start).await;
         println!("A06 rate: {device} admitted=20 same-instant next=429/RATE_LIMITED/no-store");
     }
     // Just below and exactly at one-token refill, using integer nanoseconds.
-    rate_limited(&limits, "device-a", start + Duration::from_nanos(99_999_999)).await;
+    rate_limited(
+        &limits,
+        "device-a",
+        start + Duration::from_nanos(99_999_999),
+    )
+    .await;
     let one_token = start + Duration::from_millis(100);
-    drop(limits.acquire_at("device-a", one_token).expect("100ms must refill one token"));
+    drop(
+        limits
+            .acquire_at("device-a", one_token)
+            .expect("100ms must refill one token"),
+    );
     rate_limited(&limits, "device-a", one_token).await;
     println!("A06 rate: 99,999,999ns rejected; 100ms admitted exactly one");
     let one_second = one_token + Duration::from_secs(1);
     for admission in 1..=10 {
-        drop(limits.acquire_at("device-a", one_second).unwrap_or_else(|_| panic!("one-second refill admission {admission} rejected")));
+        drop(
+            limits
+                .acquire_at("device-a", one_second)
+                .unwrap_or_else(|_| panic!("one-second refill admission {admission} rejected")),
+        );
     }
     rate_limited(&limits, "device-a", one_second).await;
     println!("A06 rate: one-second refill admitted=10 next=429/RATE_LIMITED");
     let saturated = one_second + Duration::from_secs(3);
     for admission in 1..=20 {
-        drop(limits.acquire_at("device-a", saturated).unwrap_or_else(|_| panic!("saturated refill admission {admission} rejected")));
+        drop(
+            limits
+                .acquire_at("device-a", saturated)
+                .unwrap_or_else(|_| panic!("saturated refill admission {admission} rejected")),
+        );
     }
     rate_limited(&limits, "device-a", saturated).await;
     println!("A06 rate: three-second refill capped at 20; permits released; private limiter dropped; no roots/listeners");
 }
 
 #[tokio::test]
-async fn r6_auth_routed_deadline_admission() { auth_boundary_fixture(false, false).await; }
+async fn r6_auth_routed_deadline_admission() {
+    auth_boundary_fixture(false, false).await;
+}
 #[tokio::test]
-async fn r6_auth_routed_revocation() { auth_boundary_fixture(true, false).await; }
+async fn r6_auth_routed_revocation() {
+    auth_boundary_fixture(true, false).await;
+}
 #[tokio::test]
-async fn r6_auth_routed_failure_cleanup() { auth_boundary_fixture(true, true).await; }
+async fn r6_auth_routed_failure_cleanup() {
+    auth_boundary_fixture(true, true).await;
+}
 
 async fn auth_boundary_fixture(revoke: bool, inject: bool) {
     let root = tempfile::tempdir().unwrap();
     let root_path = root.path().to_owned();
     let daemon = crate::daemon::server::DaemonServer::new_with_paths(
-        Some(root.path().join("config.json")), Some(root.path().join("auth.json")));
+        Some(root.path().join("config.json")),
+        Some(root.path().join("auth.json")),
+    );
     let state = daemon.remote_state().clone();
     *state.browse_home.write() = Some(root.path().to_owned());
     *state.browse_probe.write() = Some(Arc::new(|| panic!("expired/revoked auth must not scan")));
-    let pin = state.auth_manager.create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine).unwrap();
-    let (token, device) = state.auth_manager.exchange_pairing_code(&pin, "auth-boundary").unwrap();
+    let pin = state
+        .auth_manager
+        .create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine)
+        .unwrap();
+    let (token, device) = state
+        .auth_manager
+        .exchange_pairing_code(&pin, "auth-boundary")
+        .unwrap();
     let limits = Arc::new(filesystem::BrowseLimits::default());
     let (entry_tx, mut entry_rx) = tokio::sync::mpsc::unbounded_channel();
     let entries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -105,98 +168,195 @@ async fn auth_boundary_fixture(revoke: bool, inject: bool) {
         entry_tx.send(()).unwrap();
         let (lock, signal) = &*worker_gate;
         let released = lock.lock().unwrap();
-        let (_released, timeout) = signal.wait_timeout_while(released, Duration::from_secs(30), |released| !*released).unwrap();
+        let (_released, timeout) = signal
+            .wait_timeout_while(released, Duration::from_secs(30), |released| !*released)
+            .unwrap();
         assert!(!timeout.timed_out(), "fixture release missing");
     }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     // Same production handler/extractors over real TCP, with a private limiter.
     let router = axum::Router::new()
-        .route("/api/v1/fs/directories", axum::routing::get(filesystem::directories))
-        .layer(axum::Extension(limits.clone())).with_state(state.clone())
+        .route(
+            "/api/v1/fs/directories",
+            axum::routing::get(filesystem::directories),
+        )
+        .layer(axum::Extension(limits.clone()))
+        .with_state(state.clone())
         .fallback_service(create_remote_router(state.clone()));
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
-        axum::serve(listener, router).with_graceful_shutdown(async { let _ = stop_rx.await; }).await.unwrap();
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async {
+                let _ = stop_rx.await;
+            })
+            .await
+            .unwrap();
     });
     let count = if revoke { 1 } else { 16 };
     let mut requests = Vec::new();
     let mut completed = 0;
     let outcome = std::panic::AssertUnwindSafe(async {
-        let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(20)).build().unwrap();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(20))
+            .build()
+            .unwrap();
         let url = format!("http://{addr}/api/v1/fs/directories?path=relative");
         for _ in 0..count {
             let request = client.get(&url).bearer_auth(&token);
             requests.push(tokio::spawn(async move { request.send().await.unwrap() }));
         }
-        for _ in 0..count { tokio::time::timeout(Duration::from_secs(5), entry_rx.recv()).await.unwrap().unwrap(); }
-        let health = tokio::time::timeout(Duration::from_secs(2), client.get(format!("http://{addr}/api/v1/health")).send()).await.unwrap().unwrap();
+        for _ in 0..count {
+            tokio::time::timeout(Duration::from_secs(5), entry_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        let health = tokio::time::timeout(
+            Duration::from_secs(2),
+            client.get(format!("http://{addr}/api/v1/health")).send(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(health.status(), 200);
         println!("R6 auth: {count} real routed workers entered; unrelated health=200");
         assert!(!inject, "injected auth fixture failure");
         if revoke {
             let auth = state.auth_manager.clone();
-            crate::ipc::run_blocking(move || { assert!(auth.revoke_device(&device.id).unwrap()); Ok(()) }).await.unwrap();
-            *gate.0.lock().unwrap() = true; gate.1.notify_all();
+            crate::ipc::run_blocking(move || {
+                assert!(auth.revoke_device(&device.id).unwrap());
+                Ok(())
+            })
+            .await
+            .unwrap();
+            *gate.0.lock().unwrap() = true;
+            gate.1.notify_all();
         } else {
             let response = client.get(&url).bearer_auth(&token).send().await.unwrap();
-            assert_eq!(response.status(), 429, "auth admission must reject before starting worker 17");
+            assert_eq!(
+                response.status(),
+                429,
+                "auth admission must reject before starting worker 17"
+            );
             assert_eq!(response.headers()["cache-control"], "no-store");
         }
         for request in &mut requests {
-            let response = tokio::time::timeout(Duration::from_secs(12), request).await.unwrap().unwrap();
+            let response = tokio::time::timeout(Duration::from_secs(12), request)
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!(response.status(), if revoke { 401 } else { 504 });
             assert_eq!(response.headers()["cache-control"], "no-store");
-            let body: machine_protocol::ErrorEnvelope = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
-            assert_eq!(body.error.code, if revoke { "UNAUTHORIZED" } else { "TIMEOUT" });
+            let body: machine_protocol::ErrorEnvelope =
+                serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+            assert_eq!(
+                body.error.code,
+                if revoke { "UNAUTHORIZED" } else { "TIMEOUT" }
+            );
         }
         if !revoke {
-            assert_eq!(client.get(&url).bearer_auth(&token).send().await.unwrap().status(), 429, "timed out workers retain admission");
+            assert_eq!(
+                client
+                    .get(&url)
+                    .bearer_auth(&token)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                429,
+                "timed out workers retain admission"
+            );
         }
-        println!("R6 auth: expected {}; deadline/retained admission or revoke-before-release verified", if revoke {401} else {504});
-    }).catch_unwind().await;
+        println!(
+            "R6 auth: expected {}; deadline/retained admission or revoke-before-release verified",
+            if revoke { 401 } else { 504 }
+        );
+    })
+    .catch_unwind()
+    .await;
     for request in &mut requests {
-        if !request.is_finished() { request.abort(); let _ = request.await; }
+        if !request.is_finished() {
+            request.abort();
+            let _ = request.await;
+        }
     }
     if inject {
-        let dropped = tokio::time::timeout(Duration::from_secs(5), drop_rx.recv()).await.unwrap().unwrap();
+        let dropped = tokio::time::timeout(Duration::from_secs(5), drop_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(dropped, ("request_dropped", true));
         assert_eq!(limits.auth_slots().available_permits(), 15);
-        println!("R6 auth injected disconnect: cancellation observed; blocked auth permit retained");
+        println!(
+            "R6 auth injected disconnect: cancellation observed; blocked auth permit retained"
+        );
     }
-    *gate.0.lock().unwrap() = true; gate.1.notify_all();
+    *gate.0.lock().unwrap() = true;
+    gate.1.notify_all();
     while completed < count {
-        tokio::time::timeout(Duration::from_secs(5), done_rx.recv()).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), done_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
         completed += 1;
     }
     // Keep the entry observer installed until the listener and all scheduled
     // workers finish; count is only the initial expected cohort, not teardown.
-    let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
-    let mirror = state.auth_manager.exchange_pairing_code(&pin, "mirror").unwrap().0;
-    let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(5)).build().unwrap();
+    let pin = state
+        .auth_manager
+        .create_pairing_code(DevicePermission::Control);
+    let mirror = state
+        .auth_manager
+        .exchange_pairing_code(&pin, "mirror")
+        .unwrap()
+        .0;
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
     for (credential, expected) in [("invalid", 401), (mirror.as_str(), 403)] {
-        let response = client.get(format!("http://{addr}/api/v1/fs/directories?path=relative"))
-            .bearer_auth(credential).send().await.unwrap();
+        let response = client
+            .get(format!("http://{addr}/api/v1/fs/directories?path=relative"))
+            .bearer_auth(credential)
+            .send()
+            .await
+            .unwrap();
         assert_eq!(response.status().as_u16(), expected);
         assert_eq!(response.headers()["cache-control"], "no-store");
     }
     println!("R6 auth recovered admission: invalid=401 mirror=403 before malformed path; no-store");
     stop_tx.send(()).unwrap();
-    tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(tokio::net::TcpStream::connect(addr).await.is_err());
     limits.4.lock().take();
     tokio::time::timeout(Duration::from_secs(5), async {
-        while done_rx.recv().await.is_some() { completed += 1; }
-    }).await.expect("every scheduled auth worker drops its completion sender");
+        while done_rx.recv().await.is_some() {
+            completed += 1;
+        }
+    })
+    .await
+    .expect("every scheduled auth worker drops its completion sender");
     assert_eq!(completed, entries.load(std::sync::atomic::Ordering::SeqCst));
     let recovered_slots = limits.auth_slots().available_permits();
     *limits.3.lock() = None;
     println!("R6 auth exact drain: entered={completed} completed={completed}; completion channel closed before root removal");
-    drop(state); drop(daemon); root.close().unwrap();
+    drop(state);
+    drop(daemon);
+    root.close().unwrap();
     assert!(!root_path.exists());
     println!("R6 auth cleanup: workers={completed} completed; listener joined/refused; root removed; injected={inject}");
     assert_eq!(recovered_slots, 16);
-    if inject { assert!(outcome.is_err()); } else if let Err(panic) = outcome { std::panic::resume_unwind(panic); }
+    if inject {
+        assert!(outcome.is_err());
+    } else if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 #[tokio::test]
@@ -306,19 +466,48 @@ async fn directory_http_fixture(inject_send_failure: bool) {
         assert_eq!(listing.path, listing.home_path);
         #[cfg(windows)]
         {
-            for rejected in [r"\\server\share", r"\\?\UNC\server\share", r"\\.\C:\", r"\\?\C:\"] {
-                let response = client.get(&url).bearer_auth(&token).query(&[("path", rejected)]).send().await.unwrap();
-                assert_eq!(response.status(), 422, "network/device input must remain unsupported");
+            for rejected in [
+                r"\\server\share",
+                r"\\?\UNC\server\share",
+                r"\\.\C:\",
+                r"\\?\C:\",
+            ] {
+                let response = client
+                    .get(&url)
+                    .bearer_auth(&token)
+                    .query(&[("path", rejected)])
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    422,
+                    "network/device input must remain unsupported"
+                );
             }
             let drive = &listing.home_path[..3];
-            let response = client.get(&url).bearer_auth(&token).query(&[("path", drive)]).send().await.unwrap();
+            let response = client
+                .get(&url)
+                .bearer_auth(&token)
+                .query(&[("path", drive)])
+                .send()
+                .await
+                .unwrap();
             assert_eq!(response.status(), 200);
-            let root: machine_protocol::Directories = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+            let root: machine_protocol::Directories =
+                serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
             assert!(root.parent_path.is_none());
-            assert!(std::fs::create_dir(std::path::Path::new(&listing.home_path).join("invalid\"name")).is_err());
+            assert!(std::fs::create_dir(
+                std::path::Path::new(&listing.home_path).join("invalid\"name")
+            )
+            .is_err());
         }
         assert!(!listing.entries.iter().any(|e| e.name == "file" || e.hidden));
-        for name in ["space dir", if cfg!(windows) { "quote'" } else { "quote'\"" }, "日本語"] {
+        for name in [
+            "space dir",
+            if cfg!(windows) { "quote'" } else { "quote'\"" },
+            "日本語",
+        ] {
             assert!(listing.entries.iter().any(|e| e.name == name));
         }
         #[cfg(unix)]
@@ -431,7 +620,15 @@ async fn directory_http_fixture(inject_send_failure: bool) {
             serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
         assert_eq!(
             capabilities["capabilities"],
-            serde_json::json!(["directoryBrowseV1", "machineWorkspaceV1", "managedWorktreesV1", "terminalCreateV1", "terminalStreamV1"])
+            serde_json::json!([
+                "directoryBrowseV1",
+                "machineWorkspaceV1",
+                "managedWorktreesV1",
+                "pairedPasteUploadV1",
+                "terminalCreateV1",
+                "terminalStreamV1",
+                "dagStreamingV1"
+            ])
         );
         // Subscribe before triggering work; revocation must win while enumeration is blocked.
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
@@ -609,11 +806,19 @@ async fn r6_http_disconnect_retains_worker_slot() {
     use tokio::io::AsyncWriteExt;
     let fixture = tempfile::tempdir().unwrap();
     let daemon = crate::daemon::server::DaemonServer::new_with_paths(
-        Some(fixture.path().join("config.json")), Some(fixture.path().join("auth.json")));
+        Some(fixture.path().join("config.json")),
+        Some(fixture.path().join("auth.json")),
+    );
     let state = daemon.remote_state().clone();
     *state.browse_home.write() = Some(fixture.path().to_owned());
-    let pin = state.auth_manager.create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine).unwrap();
-    let (token, device) = state.auth_manager.exchange_pairing_code(&pin, "r6").unwrap();
+    let pin = state
+        .auth_manager
+        .create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine)
+        .unwrap();
+    let (token, device) = state
+        .auth_manager
+        .exchange_pairing_code(&pin, "r6")
+        .unwrap();
     let limits = Arc::new(filesystem::BrowseLimits::default());
     let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
     *limits.1.lock() = Some(events_tx);
@@ -624,15 +829,28 @@ async fn r6_http_disconnect_retains_worker_slot() {
     *state.browse_probe.write() = Some(Arc::new(move || {
         entered_tx.lock().unwrap().take().unwrap().send(()).unwrap();
         // Dropping the sender on an assertion unwind also releases this worker.
-        let _ = release_rx.lock().unwrap().recv_timeout(Duration::from_secs(10));
+        let _ = release_rx
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(10));
     }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let router = axum::Router::new().route("/api/v1/fs/directories", axum::routing::get(filesystem::directories))
-        .layer(axum::Extension(limits.clone())).with_state(state.clone());
+    let router = axum::Router::new()
+        .route(
+            "/api/v1/fs/directories",
+            axum::routing::get(filesystem::directories),
+        )
+        .layer(axum::Extension(limits.clone()))
+        .with_state(state.clone());
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
-        axum::serve(listener, router).with_graceful_shutdown(async { let _ = stop_rx.await; }).await.unwrap();
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async {
+                let _ = stop_rx.await;
+            })
+            .await
+            .unwrap();
     });
     let mut worker_entered = false;
     let mut worker_completed = false;
@@ -659,19 +877,28 @@ async fn r6_http_disconnect_retains_worker_slot() {
     if worker_entered && !worker_completed {
         tokio::time::timeout(Duration::from_secs(10), async {
             while let Some(event) = events_rx.recv().await {
-                if event.0 == "worker_completed" { break; }
+                if event.0 == "worker_completed" {
+                    break;
+                }
             }
-        }).await.expect("released worker completion before fixture removal");
+        })
+        .await
+        .expect("released worker completion before fixture removal");
     }
     *state.browse_probe.write() = None;
     stop_tx.send(()).unwrap();
-    tokio::time::timeout(Duration::from_secs(10), server).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(10), server)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(tokio::net::TcpStream::connect(addr).await.is_err());
     drop(state);
     drop(daemon);
     fixture.close().unwrap();
     println!("R6 HTTP cleanup: listener joined, connection refused, private root removed");
-    if let Err(panic) = outcome { std::panic::resume_unwind(panic); }
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 #[tokio::test]
@@ -747,30 +974,37 @@ async fn service_less_fixture(inject_failure: bool) {
             .unwrap();
     });
     let outcome = std::panic::AssertUnwindSafe(async {
-    let response = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .unwrap()
-        .get(format!("http://{addr}/api/v1/fs/directories"))
-        .bearer_auth(token)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 503);
-    assert_eq!(response.headers()["cache-control"], "no-store");
-    let error: machine_protocol::ErrorEnvelope =
-        serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
-    assert_eq!(error.error.code, "MACHINE_SERVICE_UNAVAILABLE");
-    assert!(!inject_failure, "R6 injected service-less assertion failure");
-    }).catch_unwind().await;
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap()
+            .get(format!("http://{addr}/api/v1/fs/directories"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 503);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let error: machine_protocol::ErrorEnvelope =
+            serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(error.error.code, "MACHINE_SERVICE_UNAVAILABLE");
+        assert!(
+            !inject_failure,
+            "R6 injected service-less assertion failure"
+        );
+    })
+    .catch_unwind()
+    .await;
     tx.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(10), server)
         .await
         .unwrap()
         .unwrap();
     assert!(tokio::net::TcpStream::connect(addr).await.is_err());
-    println!("R6 service-less cleanup: listener joined, connection refused, injected={inject_failure}");
+    println!(
+        "R6 service-less cleanup: listener joined, connection refused, injected={inject_failure}"
+    );
     if inject_failure {
         assert!(outcome.is_err());
     } else if let Err(panic) = outcome {

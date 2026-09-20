@@ -1,5 +1,6 @@
 {
   "name": "ferryx-site",
+  "main": "worker.js",
   "compatibility_date": "2026-09-01",
   "workers_dev": false,
   "preview_urls": false,
@@ -10,6 +11,8 @@
     }
   ],
   "assets": {
+    "binding": "ASSETS",
+    "run_worker_first": true,
     "directory": "./dist",
     "not_found_handling": "404-page"
   }

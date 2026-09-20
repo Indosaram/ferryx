@@ -1,11 +1,16 @@
 //! Machine gateway negotiation is explicit; pre-contract owners fail closed.
 use super::{LegacyPeer, LegacyStream};
 use crate::daemon::protocol::{DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 impl LegacyPeer {
-    pub(crate) async fn close_machine_http(&self, id: &str, token: &str, body: &[u8]) -> Result<(u16, Vec<u8>), String> {
+    pub(crate) async fn close_machine_http(
+        &self,
+        id: &str,
+        token: &str,
+        body: &[u8],
+    ) -> Result<(u16, Vec<u8>), String> {
         use tokio::io::AsyncReadExt;
         tokio::time::timeout(Duration::from_secs(40), async {
             let mut stream = self.machine_gateway().await?;
@@ -47,22 +52,46 @@ impl LegacyPeer {
 
     pub(crate) async fn machine_gateway(&self) -> Result<LegacyStream, String> {
         tokio::time::timeout(Duration::from_secs(10), async {
-            let mut stream = self.connect_stream().await.map_err(|_| "HOST_UNAVAILABLE")?;
-            for request in [DaemonRequest::Handshake { version: DAEMON_PROTOCOL_VERSION }, DaemonRequest::MachineGateway] {
+            let mut stream = self
+                .connect_stream()
+                .await
+                .map_err(|_| "HOST_UNAVAILABLE")?;
+            for request in [
+                DaemonRequest::Handshake {
+                    version: DAEMON_PROTOCOL_VERSION,
+                },
+                DaemonRequest::MachineGateway,
+            ] {
                 let mut bytes = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
                 bytes.push(b'\n');
-                stream.write_all(&bytes).await.map_err(|_| "HOST_UNAVAILABLE")?;
+                stream
+                    .write_all(&bytes)
+                    .await
+                    .map_err(|_| "HOST_UNAVAILABLE")?;
                 let mut line = String::new();
                 // Capacity one leaves every HTTP/WS byte in the underlying stream.
-                BufReader::with_capacity(1, &mut stream).read_line(&mut line).await.map_err(|_| "HOST_UNAVAILABLE")?;
-                let response = serde_json::from_str::<DaemonResponse>(&line).map_err(|_| "MACHINE_OWNER_UNSUPPORTED")?;
-                if !matches!((&request, response),
-                    (DaemonRequest::Handshake { .. }, DaemonResponse::HandshakeOk { .. }) |
-                    (DaemonRequest::MachineGateway, DaemonResponse::MachineGatewayOk)) {
+                BufReader::with_capacity(1, &mut stream)
+                    .read_line(&mut line)
+                    .await
+                    .map_err(|_| "HOST_UNAVAILABLE")?;
+                let response = serde_json::from_str::<DaemonResponse>(&line)
+                    .map_err(|_| "MACHINE_OWNER_UNSUPPORTED")?;
+                if !matches!(
+                    (&request, response),
+                    (
+                        DaemonRequest::Handshake { .. },
+                        DaemonResponse::HandshakeOk { .. }
+                    ) | (
+                        DaemonRequest::MachineGateway,
+                        DaemonResponse::MachineGatewayOk
+                    )
+                ) {
                     return Err("MACHINE_OWNER_UNSUPPORTED".into());
                 }
             }
             Ok(stream)
-        }).await.map_err(|_| "TIMEOUT".to_owned())?
+        })
+        .await
+        .map_err(|_| "TIMEOUT".to_owned())?
     }
 }

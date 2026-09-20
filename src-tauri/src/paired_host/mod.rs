@@ -1,8 +1,8 @@
 //! Local daemon credential authority. Run filesystem methods on a blocking worker.
-pub mod inventory;
-pub mod service;
 pub mod client;
+pub mod inventory;
 pub mod projects;
+pub mod service;
 
 #[cfg(test)]
 mod proxy_tests;

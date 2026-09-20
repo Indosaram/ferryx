@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createLayoutState } from "./layout";
 import type { WorkspaceState } from "./workspaceStore";
-import { emptySidebarWorkspaceIds } from "./sidebarWorkspaceState";
+import { emptySidebarWorkspaceIds, worktreeHasOpenTabs } from "./sidebarWorkspaceState";
 
 const projects = [{ workspaceId: "alpha" }, { workspaceId: "beta" }];
 
@@ -40,5 +40,34 @@ describe("emptySidebarWorkspaceIds", () => {
 
   it("attributes outgoing state to its owner while switching projects", () => {
     expect(emptySidebarWorkspaceIds(projects, "beta", workspace("alpha", true), [])).toEqual(["beta"]);
+  });
+});
+
+describe("worktreeHasOpenTabs", () => {
+  it("treats the active worktree as owning tabs when the live layout has tabs", () => {
+    const state = workspace("alpha", true);
+    expect(worktreeHasOpenTabs(state, "/repo")).toBe(true);
+  });
+
+  it("excludes the active worktree when its live layout has no tabs", () => {
+    const state = workspace("alpha", false);
+    expect(worktreeHasOpenTabs(state, "/repo")).toBe(false);
+  });
+
+  it("identifies parked worktrees with open tabs", () => {
+    const state = workspace("alpha", false);
+    state.worktreeLayouts = { "/feature": workspace("alpha", true).layout };
+
+    expect(worktreeHasOpenTabs(state, "/feature")).toBe(true);
+    expect(worktreeHasOpenTabs(state, "/other")).toBe(false);
+  });
+
+  it("keeps rows navigable when live tabs exist without an attributable active worktree", () => {
+    const state = { ...workspace("alpha", true), activeWorktreePath: null };
+    expect(worktreeHasOpenTabs(state, "/any-path")).toBe(true);
+  });
+
+  it("returns false for missing or unbacked workspace states", () => {
+    expect(worktreeHasOpenTabs(undefined, "/repo")).toBe(false);
   });
 });

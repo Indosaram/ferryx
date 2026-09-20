@@ -19,8 +19,14 @@ pub struct DriverLease {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoteDriverError {
     Unauthorized(String),
-    BrowserDriverBusy { current_owner: String, lease_epoch: u64 },
-    StaleLease { expected: u64, actual: u64 },
+    BrowserDriverBusy {
+        current_owner: String,
+        lease_epoch: u64,
+    },
+    StaleLease {
+        expected: u64,
+        actual: u64,
+    },
     RateLimited,
     DesktopReclaimed,
     InvalidLease(&'static str),
@@ -30,11 +36,22 @@ impl std::fmt::Display for RemoteDriverError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Unauthorized(msg) => write!(f, "unauthorized driver claim: {}", msg),
-            Self::BrowserDriverBusy { current_owner, lease_epoch } => {
-                write!(f, "driver lease busy: owned by {} at epoch {}", current_owner, lease_epoch)
+            Self::BrowserDriverBusy {
+                current_owner,
+                lease_epoch,
+            } => {
+                write!(
+                    f,
+                    "driver lease busy: owned by {} at epoch {}",
+                    current_owner, lease_epoch
+                )
             }
             Self::StaleLease { expected, actual } => {
-                write!(f, "stale driver lease: expected epoch {}, found {}", expected, actual)
+                write!(
+                    f,
+                    "stale driver lease: expected epoch {}, found {}",
+                    expected, actual
+                )
             }
             Self::RateLimited => write!(f, "driver claim rate limit exceeded"),
             Self::DesktopReclaimed => write!(f, "control has been reclaimed by desktop owner"),
@@ -71,7 +88,14 @@ impl RemoteDriverBroker {
         browser_id: &str,
         has_control: bool,
     ) -> Result<DriverLease, RemoteDriverError> {
-        self.claim_with_epoch(device_id, connection_id, subscription_id, browser_id, has_control, 0)
+        self.claim_with_epoch(
+            device_id,
+            connection_id,
+            subscription_id,
+            browser_id,
+            has_control,
+            0,
+        )
     }
 
     pub fn claim_with_epoch(
@@ -206,7 +230,11 @@ impl RemoteDriverBroker {
         })
     }
 
-    pub fn release(&self, subscription_id: &str, lease_epoch: u64) -> Result<bool, RemoteDriverError> {
+    pub fn release(
+        &self,
+        subscription_id: &str,
+        lease_epoch: u64,
+    ) -> Result<bool, RemoteDriverError> {
         let mut guard = self.current_lease.lock();
         if let Some(ref lease) = *guard {
             if lease.subscription_id == subscription_id && lease.lease_epoch == lease_epoch {
@@ -322,7 +350,9 @@ mod tests {
         assert!(matches!(no_ctrl, Err(RemoteDriverError::Unauthorized(_))));
 
         // 2. Claim with control succeeds with 15s TTL
-        let lease = broker.claim("dev1", "conn1", "sub1", "b1", true).expect("claim");
+        let lease = broker
+            .claim("dev1", "conn1", "sub1", "b1", true)
+            .expect("claim");
         assert_eq!(lease.device_id, "dev1");
         assert_eq!(lease.browser_id, "b1");
         assert_eq!(lease.lease_epoch, 1);
@@ -330,18 +360,30 @@ mod tests {
 
         // 3. Busy when another viewer claims before expiry
         let busy = broker.claim("dev2", "conn2", "sub2", "b1", true);
-        assert!(matches!(busy, Err(RemoteDriverError::BrowserDriverBusy { .. })));
+        assert!(matches!(
+            busy,
+            Err(RemoteDriverError::BrowserDriverBusy { .. })
+        ));
 
         // 4. Busy even if targeting a different browser (service-wide single driver lease!)
         let busy_diff_browser = broker.claim("dev2", "conn2", "sub2", "b2", true);
-        assert!(matches!(busy_diff_browser, Err(RemoteDriverError::BrowserDriverBusy { .. })));
+        assert!(matches!(
+            busy_diff_browser,
+            Err(RemoteDriverError::BrowserDriverBusy { .. })
+        ));
 
         // 5. Validation succeeds for valid lease
-        assert!(broker.validate_lease("b1", lease.lease_epoch, "dev1", "conn1").is_ok());
+        assert!(broker
+            .validate_lease("b1", lease.lease_epoch, "dev1", "conn1")
+            .is_ok());
 
         // 6. Validation fails for wrong browser or wrong device
-        assert!(broker.validate_lease("b2", lease.lease_epoch, "dev1", "conn1").is_err());
-        assert!(broker.validate_lease("b1", lease.lease_epoch, "dev2", "conn1").is_err());
+        assert!(broker
+            .validate_lease("b2", lease.lease_epoch, "dev1", "conn1")
+            .is_err());
+        assert!(broker
+            .validate_lease("b1", lease.lease_epoch, "dev2", "conn1")
+            .is_err());
     }
 
     #[test]
@@ -350,7 +392,9 @@ mod tests {
         let lease = broker.claim("dev1", "conn1", "sub1", "b1", true).unwrap();
 
         // Heartbeat by owner succeeds
-        let remaining = broker.heartbeat("dev1", "conn1", "sub1", lease.lease_epoch).unwrap();
+        let remaining = broker
+            .heartbeat("dev1", "conn1", "sub1", lease.lease_epoch)
+            .unwrap();
         assert_eq!(remaining, LEASE_TTL);
 
         // Heartbeat by wrong subscriber fails
@@ -359,7 +403,10 @@ mod tests {
 
         // Heartbeat with wrong epoch fails
         let bad_epoch = broker.heartbeat("dev1", "conn1", "sub1", lease.lease_epoch + 99);
-        assert!(matches!(bad_epoch, Err(RemoteDriverError::StaleLease { .. })));
+        assert!(matches!(
+            bad_epoch,
+            Err(RemoteDriverError::StaleLease { .. })
+        ));
     }
 
     #[test]
@@ -367,14 +414,22 @@ mod tests {
         let broker = RemoteDriverBroker::new();
 
         // 1. Initial claim at forced epoch 42 succeeds
-        let lease = broker.claim_with_epoch("dev1", "conn1", "sub1", "b1", true, 42).unwrap();
+        let lease = broker
+            .claim_with_epoch("dev1", "conn1", "sub1", "b1", true, 42)
+            .unwrap();
         assert_eq!(lease.lease_epoch, 42);
 
         // 2. Same-owner claim with decreasing epoch (1) must be rejected
         broker.claim_history.lock().clear();
         let stale_renewal = broker.claim_with_epoch("dev1", "conn1", "sub1", "b1", true, 1);
         assert!(
-            matches!(stale_renewal, Err(RemoteDriverError::StaleLease { expected: 42, actual: 1 })),
+            matches!(
+                stale_renewal,
+                Err(RemoteDriverError::StaleLease {
+                    expected: 42,
+                    actual: 1
+                })
+            ),
             "Same-owner renewal with decreasing epoch must be rejected with StaleLease"
         );
 
@@ -388,10 +443,14 @@ mod tests {
 
         // 4. Idempotent same-owner renewal with same epoch (42) or 0 succeeds
         broker.claim_history.lock().clear();
-        let idemp_renewal = broker.claim_with_epoch("dev1", "conn1", "sub1", "b1", true, 42).unwrap();
+        let idemp_renewal = broker
+            .claim_with_epoch("dev1", "conn1", "sub1", "b1", true, 42)
+            .unwrap();
         assert_eq!(idemp_renewal.lease_epoch, 42);
         broker.claim_history.lock().clear();
-        let idemp_zero = broker.claim_with_epoch("dev1", "conn1", "sub1", "b1", true, 0).unwrap();
+        let idemp_zero = broker
+            .claim_with_epoch("dev1", "conn1", "sub1", "b1", true, 0)
+            .unwrap();
         assert_eq!(idemp_zero.lease_epoch, 42);
 
         // 5. Release lease
@@ -407,7 +466,9 @@ mod tests {
 
         // 7. Fresh claim with monotonic epoch 50 succeeds (floor becomes 51)
         broker.claim_history.lock().clear();
-        let fresh_ok = broker.claim_with_epoch("dev2", "conn2", "sub2", "b1", true, 50).unwrap();
+        let fresh_ok = broker
+            .claim_with_epoch("dev2", "conn2", "sub2", "b1", true, 50)
+            .unwrap();
         assert_eq!(fresh_ok.lease_epoch, 50);
 
         // 8. Desktop reclaim advances monotonic floor
@@ -418,7 +479,10 @@ mod tests {
         broker.claim_history.lock().clear();
         let replay_after_reclaim = broker.claim_with_epoch("dev3", "conn3", "sub3", "b1", true, 50);
         assert!(
-            matches!(replay_after_reclaim, Err(RemoteDriverError::StaleLease { .. })),
+            matches!(
+                replay_after_reclaim,
+                Err(RemoteDriverError::StaleLease { .. })
+            ),
             "Replayed forced epoch after reclaim must be rejected"
         );
     }
@@ -458,7 +522,10 @@ mod tests {
         }
 
         assert_eq!(successes, 1, "exactly one winner in race");
-        assert_eq!(busy_count, 9, "all other racing claims are rejected as busy");
+        assert_eq!(
+            busy_count, 9,
+            "all other racing claims are rejected as busy"
+        );
     }
 
     #[test]

@@ -30,9 +30,9 @@ pub enum PtyError {
 pub(crate) mod foreground;
 pub(crate) mod metrics;
 pub mod output_hub;
-pub mod preferences;
 pub mod paired_daemon;
 pub mod paired_runtime;
+pub mod preferences;
 pub mod pty;
 pub mod remote;
 #[cfg(test)]

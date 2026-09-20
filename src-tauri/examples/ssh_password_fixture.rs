@@ -127,10 +127,11 @@ async fn run() {
     drop(write); drop(read); serving.await.unwrap();
     helper.kill().await.unwrap();
     let service = Arc::new(ferryx_lib::terminal::service::TerminalService::default());
-    let (sid, mut output) = service.spawn_ssh(&host, &environment, root.to_str().unwrap(), 80, 24, None).unwrap();
+    let (sid, _lifecycle) = service.spawn_ssh(&host, &environment, root.to_str().unwrap(), 80, 24, None).unwrap();
+    let (initial, mut output) = service.attach(&sid).unwrap();
     service.write_input(&sid, b"printf 'PASSWORD_%s_OK\\n' TERMINAL; exit\n").unwrap();
     let bytes = tokio::time::timeout(Duration::from_secs(15), async {
-        let mut all=Vec::new();
+        let mut all=initial;
         while let Ok(bytes)=output.recv().await { all.extend(bytes); }
         all
     }).await.unwrap();

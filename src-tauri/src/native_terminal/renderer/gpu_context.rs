@@ -1,7 +1,7 @@
 //! WGPU device, queue, and GPU context management for terminal rendering.
 
 use parking_lot::Mutex;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::native_terminal::error::NativeTerminalError;
 
@@ -35,6 +35,7 @@ fn preferred_terminal_surface_format(
 }
 
 /// Encapsulated GPU context managing wgpu Instance, Adapter, Device, and Queue.
+#[derive(Clone)]
 pub struct GpuContext {
     pub instance: wgpu::Instance,
     pub adapter: wgpu::Adapter,
@@ -45,6 +46,21 @@ pub struct GpuContext {
 }
 
 impl GpuContext {
+    pub(crate) fn shared_surface_instance() -> wgpu::Instance {
+        static INSTANCE: OnceLock<wgpu::Instance> = OnceLock::new();
+        INSTANCE.get_or_init(|| {
+            wgpu::Instance::new(wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::all(),
+                ..wgpu::InstanceDescriptor::new_without_display_handle()
+            })
+        }).clone()
+    }
+
+    pub(crate) fn shared_surface_context() -> Result<Self, NativeTerminalError> {
+        static CONTEXT: OnceLock<Result<GpuContext, NativeTerminalError>> = OnceLock::new();
+        CONTEXT.get_or_init(|| Self::with_instance(Self::shared_surface_instance())).clone()
+    }
+
     /// Initializes a real wgpu device and queue, selecting the primary native backend.
     pub fn new() -> Result<Self, NativeTerminalError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -54,6 +70,10 @@ impl GpuContext {
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
 
+        Self::with_instance(instance)
+    }
+
+    pub(crate) fn with_instance(instance: wgpu::Instance) -> Result<Self, NativeTerminalError> {
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,
@@ -69,9 +89,9 @@ impl GpuContext {
             }))
         })
         .map_err(|e| {
-            NativeTerminalError::GpuAdapterUnavailable(
-                format!("No compatible GPU adapter found for native terminal renderer: {e}"),
-            )
+            NativeTerminalError::GpuAdapterUnavailable(format!(
+                "No compatible GPU adapter found for native terminal renderer: {e}"
+            ))
         })?;
 
         let adapter_info = adapter.get_info();

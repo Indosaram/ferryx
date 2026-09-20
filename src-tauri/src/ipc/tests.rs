@@ -298,8 +298,8 @@ async fn tauri_mock_worktree_commands_use_identity_contract() {
         registry_state.clone(),
         "workspace-test".into(),
     )
-        .await
-        .expect("initial list");
+    .await
+    .expect("initial list");
     assert_eq!(initial.len(), 1);
 
     let created = cmd_worktree_create(
@@ -348,11 +348,14 @@ async fn tauri_mock_worktree_commands_use_identity_contract() {
         registry_state,
         "workspace-test".into(),
     )
-        .await
-        .expect("final list");
+    .await
+    .expect("final list");
     assert_eq!(final_list.len(), 1);
     server_task.abort();
-    assert!(server_task.await.expect_err("daemon listener aborted").is_cancelled());
+    assert!(server_task
+        .await
+        .expect_err("daemon listener aborted")
+        .is_cancelled());
 }
 
 #[tokio::test]
@@ -1005,47 +1008,41 @@ async fn remote_terminal_spawn_forwards_worktree_and_cwd_to_daemon() {
                     if let Ok(req) = serde_json::from_str::<DaemonRequest>(line.trim()) {
                         let _ = req_tx.send(req.clone()).await;
                         let resp = match req {
-                            DaemonRequest::Handshake { .. } => {
-                                DaemonResponse::HandshakeOk {
-                                    version: crate::daemon::protocol::DAEMON_PROTOCOL_VERSION,
-                                    pid: std::process::id(),
-                                    epoch: 1,
-                                    binary_path: None,
-                                    binary_mtime_ms: None,
-                                    daemon_version: None,
-                                }
-                            }
-                            DaemonRequest::Spawn { .. } => {
-                                DaemonResponse::SpawnOk {
+                            DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+                                version: crate::daemon::protocol::DAEMON_PROTOCOL_VERSION,
+                                pid: std::process::id(),
+                                epoch: 1,
+                                binary_path: None,
+                                binary_mtime_ms: None,
+                                daemon_version: None,
+                            },
+                            DaemonRequest::Spawn { .. } => DaemonResponse::SpawnOk {
+                                session_id: "remote-mock-session".into(),
+                                epoch: 1,
+                                session: DaemonSessionDetails {
                                     session_id: "remote-mock-session".into(),
-                                    epoch: 1,
-                                    session: DaemonSessionDetails {
-                                        session_id: "remote-mock-session".into(),
-                                        workspace_id: None,
-                                        worktree: None,
-                                        cwd: None,
-                                        cols: 90,
-                                        rows: 30,
-                                        running: true,
-                                        start_sequence: None,
-                                        end_sequence: None,
-                                    },
-                                }
-                            }
-                            DaemonRequest::Attach { .. } => {
-                                DaemonResponse::AttachOk {
-                                    epoch: 1,
-                                    session_id: "remote-mock-session".into(),
+                                    workspace_id: None,
+                                    worktree: None,
+                                    cwd: None,
+                                    cols: 90,
+                                    rows: 30,
+                                    running: true,
                                     start_sequence: None,
                                     end_sequence: None,
-                                    gap: None,
-                                    history: bytes::Bytes::new(),
-                                    pty_cols: Some(90),
-                                    pty_rows: Some(30),
-                                    history_segments: vec![],
-                                    remote_generation: None,
-                                }
-                            }
+                                },
+                            },
+                            DaemonRequest::Attach { .. } => DaemonResponse::AttachOk {
+                                epoch: 1,
+                                session_id: "remote-mock-session".into(),
+                                start_sequence: None,
+                                end_sequence: None,
+                                gap: None,
+                                history: bytes::Bytes::new(),
+                                pty_cols: Some(90),
+                                pty_rows: Some(30),
+                                history_segments: vec![],
+                                remote_generation: None,
+                            },
                             _ => DaemonResponse::Pong,
                         };
                         let mut resp_json = serde_json::to_string(&resp).unwrap();
@@ -1181,7 +1178,9 @@ async fn remote_terminal_spawn_rejects_explicit_startup() {
     use crate::ipc::terminal::cmd_terminal_spawn;
 
     let app = tauri::test::mock_builder()
-        .manage(Arc::new(DaemonClient::new_with_socket(PathBuf::from("/unused"))))
+        .manage(Arc::new(DaemonClient::new_with_socket(PathBuf::from(
+            "/unused",
+        ))))
         .manage(WorkspaceRegistry::new())
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("mock app");
@@ -1219,7 +1218,9 @@ async fn remote_terminal_spawn_rejects_explicit_startup() {
 
 #[test]
 fn paired_machine_worktree_spawn_target_resolution() {
-    use crate::ipc::terminal::{effective_paired_repo_root, infer_worktree_slug, resolve_paired_spawn_target};
+    use crate::ipc::terminal::{
+        effective_paired_repo_root, infer_worktree_slug, resolve_paired_spawn_target,
+    };
     use crate::worktree::WorktreeIdentity;
     use std::path::Path;
 
@@ -1234,37 +1235,37 @@ fn paired_machine_worktree_spawn_target_resolution() {
     // 1. Explicit worktree + worktree root cwd: cwd_relative MUST be None (never .orca-worktrees/wt-...)
     let slug = infer_worktree_slug(Some(&explicit_wt), Some(wt_cwd));
     assert_eq!(slug.as_deref(), Some("my-feature"));
-    let (ws, wt_ident, cwd_rel) = resolve_paired_spawn_target(
-        "remote-ws",
-        repo_root,
-        Some(wt_cwd),
-        slug.as_deref(),
-    );
+    let (ws, wt_ident, cwd_rel) =
+        resolve_paired_spawn_target("remote-ws", repo_root, Some(wt_cwd), slug.as_deref());
     assert_eq!(ws, "remote-ws");
-    assert_eq!(wt_ident.as_ref().map(|w| w.slug.as_str()), Some("my-feature"));
-    assert_eq!(cwd_rel, None, "cwd_relative must be None when cwd points to worktree root");
+    assert_eq!(
+        wt_ident.as_ref().map(|w| w.slug.as_str()),
+        Some("my-feature")
+    );
+    assert_eq!(
+        cwd_rel, None,
+        "cwd_relative must be None when cwd points to worktree root"
+    );
 
     // 2. Explicit worktree + subdirectory cwd: cwd_relative is relative to the worktree root
-    let (ws, wt_ident, cwd_rel) = resolve_paired_spawn_target(
-        "remote-ws",
-        repo_root,
-        Some(sub_cwd),
-        slug.as_deref(),
-    );
+    let (ws, wt_ident, cwd_rel) =
+        resolve_paired_spawn_target("remote-ws", repo_root, Some(sub_cwd), slug.as_deref());
     assert_eq!(ws, "remote-ws");
-    assert_eq!(wt_ident.as_ref().map(|w| w.slug.as_str()), Some("my-feature"));
+    assert_eq!(
+        wt_ident.as_ref().map(|w| w.slug.as_str()),
+        Some("my-feature")
+    );
     assert_eq!(cwd_rel.as_deref(), Some("src/lib"));
 
     // 3. Inferred slug from cwd path when request.worktree is None
     let inferred = infer_worktree_slug(None, Some(wt_cwd));
     assert_eq!(inferred.as_deref(), Some("my-feature"));
-    let (_ws, wt_ident, cwd_rel) = resolve_paired_spawn_target(
-        "remote-ws",
-        repo_root,
-        Some(wt_cwd),
-        inferred.as_deref(),
+    let (_ws, wt_ident, cwd_rel) =
+        resolve_paired_spawn_target("remote-ws", repo_root, Some(wt_cwd), inferred.as_deref());
+    assert_eq!(
+        wt_ident.as_ref().map(|w| w.slug.as_str()),
+        Some("my-feature")
     );
-    assert_eq!(wt_ident.as_ref().map(|w| w.slug.as_str()), Some("my-feature"));
     assert_eq!(cwd_rel, None);
 
     // 4. Effective repo root inference when stored repo root was empty
@@ -1282,22 +1283,19 @@ fn paired_machine_worktree_spawn_target_resolution() {
     let win_root = Path::new(r"C:\Users\repo");
     let win_slug = infer_worktree_slug(None, Some(win_cwd));
     assert_eq!(win_slug.as_deref(), Some("win-feature"));
-    let (ws, wt_ident, cwd_rel) = resolve_paired_spawn_target(
-        "remote-ws",
-        win_root,
-        Some(win_cwd),
-        win_slug.as_deref(),
-    );
+    let (ws, wt_ident, cwd_rel) =
+        resolve_paired_spawn_target("remote-ws", win_root, Some(win_cwd), win_slug.as_deref());
     assert_eq!(ws, "remote-ws");
-    assert_eq!(wt_ident.as_ref().map(|w| w.slug.as_str()), Some("win-feature"));
+    assert_eq!(
+        wt_ident.as_ref().map(|w| w.slug.as_str()),
+        Some("win-feature")
+    );
     assert_eq!(cwd_rel.as_deref(), Some("sub"));
 }
 
 #[tokio::test]
 async fn test_p10_ambiguous_create_session_reconciles_via_journal() {
-    use crate::daemon::protocol::{
-        DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION,
-    };
+    use crate::daemon::protocol::{DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION};
     use crate::ipc::terminal::reconcile_ambiguous_create;
     use crate::paired_host::client::{Operation, OperationResponse, OperationResult};
     use crate::remote::machine_protocol as m;
@@ -1346,7 +1344,10 @@ async fn test_p10_ambiguous_create_session_reconciles_via_journal() {
                 while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                     let req: DaemonRequest = match serde_json::from_str(line.trim()) {
                         Ok(r) => r,
-                        Err(_) => { line.clear(); continue; }
+                        Err(_) => {
+                            line.clear();
+                            continue;
+                        }
                     };
                     line.clear();
                     let resp = match req {
@@ -1361,36 +1362,44 @@ async fn test_p10_ambiguous_create_session_reconciles_via_journal() {
                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
                             capabilities: vec!["pairedHostInventoryV1".into()],
                         },
-                        DaemonRequest::PairedHostOperation { request } => {
-                            match request.operation {
-                                Operation::Operation { request_id } => {
-                                    DaemonResponse::PairedHostOperationOk {
-                                        response: OperationResponse {
-                                            host_id: "host-1".into(),
-                                            generation: Epoch(1),
-                                            result: OperationResult::Operation(m::Operation::Completed {
+                        DaemonRequest::PairedHostOperation { request } => match request.operation {
+                            Operation::Operation { request_id } => {
+                                DaemonResponse::PairedHostOperationOk {
+                                    response: OperationResponse {
+                                        host_id: "host-1".into(),
+                                        generation: Epoch(1),
+                                        result: OperationResult::Operation(
+                                            m::Operation::Completed {
                                                 request_id,
                                                 outcome: m::OperationOutcome::Session {
                                                     session: fixture.clone(),
                                                 },
-                                            }),
-                                        },
-                                    }
+                                            },
+                                        ),
+                                    },
                                 }
-                                Operation::CloseSession { .. } => {
-                                    close_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                                    DaemonResponse::PairedHostOperationOk {
-                                        response: OperationResponse {
-                                            host_id: "host-1".into(),
-                                            generation: Epoch(1),
-                                            result: OperationResult::CloseSession(()),
-                                        },
-                                    }
-                                }
-                                _ => DaemonResponse::Error { message: "unexpected op".into(), code: None, details: None },
                             }
-                        }
-                        _ => DaemonResponse::Error { message: "unexpected req".into(), code: None, details: None },
+                            Operation::CloseSession { .. } => {
+                                close_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                                DaemonResponse::PairedHostOperationOk {
+                                    response: OperationResponse {
+                                        host_id: "host-1".into(),
+                                        generation: Epoch(1),
+                                        result: OperationResult::CloseSession(()),
+                                    },
+                                }
+                            }
+                            _ => DaemonResponse::Error {
+                                message: "unexpected op".into(),
+                                code: None,
+                                details: None,
+                            },
+                        },
+                        _ => DaemonResponse::Error {
+                            message: "unexpected req".into(),
+                            code: None,
+                            details: None,
+                        },
                     };
                     let bytes = serde_json::to_vec(&resp).unwrap();
                     let _ = write.write_all(&bytes).await;
@@ -1407,24 +1416,29 @@ async fn test_p10_ambiguous_create_session_reconciles_via_journal() {
     let recovered = reconcile_ambiguous_create(&client, "host-1", Epoch(1), req_id_1, false)
         .await
         .expect("reconcile_ambiguous_create must succeed for Completed session outcome");
-    let session = recovered.expect("recovered session must be returned from journal Completed outcome");
+    let session =
+        recovered.expect("recovered session must be returned from journal Completed outcome");
     assert_eq!(session.target.session_id, "remote-session-p10");
 
     let req_id_2 = "a0000000-0000-0000-0000-000000000002";
     let cancelled = reconcile_ambiguous_create(&client, "host-1", Epoch(1), req_id_2, true)
         .await
         .expect("reconcile_ambiguous_create with cancelled=true must succeed");
-    assert!(cancelled.is_none(), "cancelled reconciliation must return None");
-    assert!(close_called.load(std::sync::atomic::Ordering::SeqCst), "cancelled reconciliation must explicitly close the remote target");
+    assert!(
+        cancelled.is_none(),
+        "cancelled reconciliation must return None"
+    );
+    assert!(
+        close_called.load(std::sync::atomic::Ordering::SeqCst),
+        "cancelled reconciliation must explicitly close the remote target"
+    );
 
     server.abort();
 }
 
 #[tokio::test]
 async fn test_p10_background_reconciler_adopts_delayed_completed_session() {
-    use crate::daemon::protocol::{
-        DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION,
-    };
+    use crate::daemon::protocol::{DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION};
     use crate::ipc::terminal::{
         clear_pending_creates_for_test, get_pending_create, reconcile_ambiguous_create,
         PendingCreateStatus,
@@ -1479,7 +1493,10 @@ async fn test_p10_background_reconciler_adopts_delayed_completed_session() {
                 while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                     let req: DaemonRequest = match serde_json::from_str(line.trim()) {
                         Ok(r) => r,
-                        Err(_) => { line.clear(); continue; }
+                        Err(_) => {
+                            line.clear();
+                            continue;
+                        }
                     };
                     line.clear();
                     let resp = match req {
@@ -1504,9 +1521,9 @@ async fn test_p10_background_reconciler_adopts_delayed_completed_session() {
                                             response: OperationResponse {
                                                 host_id: "host-1".into(),
                                                 generation: Epoch(1),
-                                                result: OperationResult::Operation(m::Operation::Pending {
-                                                    request_id,
-                                                }),
+                                                result: OperationResult::Operation(
+                                                    m::Operation::Pending { request_id },
+                                                ),
                                             },
                                         }
                                     } else {
@@ -1515,17 +1532,23 @@ async fn test_p10_background_reconciler_adopts_delayed_completed_session() {
                                             response: OperationResponse {
                                                 host_id: "host-1".into(),
                                                 generation: Epoch(1),
-                                                result: OperationResult::Operation(m::Operation::Completed {
-                                                    request_id,
-                                                    outcome: m::OperationOutcome::Session {
-                                                        session: fixture.clone(),
+                                                result: OperationResult::Operation(
+                                                    m::Operation::Completed {
+                                                        request_id,
+                                                        outcome: m::OperationOutcome::Session {
+                                                            session: fixture.clone(),
+                                                        },
                                                     },
-                                                }),
+                                                ),
                                             },
                                         }
                                     }
                                 }
-                                _ => DaemonResponse::Error { message: "unexpected op".into(), code: None, details: None },
+                                _ => DaemonResponse::Error {
+                                    message: "unexpected op".into(),
+                                    code: None,
+                                    details: None,
+                                },
                             }
                         }
                         DaemonRequest::PairedTerminalReattach { .. } => {
@@ -1534,7 +1557,11 @@ async fn test_p10_background_reconciler_adopts_delayed_completed_session() {
                                 generation: Epoch(1),
                             }
                         }
-                        _ => DaemonResponse::Error { message: "unexpected req".into(), code: None, details: None },
+                        _ => DaemonResponse::Error {
+                            message: "unexpected req".into(),
+                            code: None,
+                            details: None,
+                        },
                     };
                     let bytes = serde_json::to_vec(&resp).unwrap();
                     let _ = write.write_all(&bytes).await;
@@ -1549,7 +1576,10 @@ async fn test_p10_background_reconciler_adopts_delayed_completed_session() {
     let req_id = "a0000000-0000-0000-0000-000000000099";
 
     let inline_res = reconcile_ambiguous_create(&client, "host-1", Epoch(1), req_id, false).await;
-    assert!(inline_res.is_err(), "Inline reconcile should exhaust attempts and return Err");
+    assert!(
+        inline_res.is_err(),
+        "Inline reconcile should exhaust attempts and return Err"
+    );
 
     // Wait for background reconciler to adopt session
     let mut adopted = false;
@@ -1563,19 +1593,18 @@ async fn test_p10_background_reconciler_adopts_delayed_completed_session() {
             }
         }
     }
-    assert!(adopted, "Delayed Completed create must be adopted by background reconciler");
+    assert!(
+        adopted,
+        "Delayed Completed create must be adopted by background reconciler"
+    );
 
     server.abort();
 }
 
 #[tokio::test]
 async fn test_p10_background_reconciler_closes_cancelled_delayed_completed_session() {
-    use crate::daemon::protocol::{
-        DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION,
-    };
-    use crate::ipc::terminal::{
-        clear_pending_creates_for_test, reconcile_ambiguous_create,
-    };
+    use crate::daemon::protocol::{DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION};
+    use crate::ipc::terminal::{clear_pending_creates_for_test, reconcile_ambiguous_create};
     use crate::paired_host::client::{Operation, OperationResponse, OperationResult};
     use crate::remote::machine_protocol as m;
     use crate::scoped_contracts::Epoch;
@@ -1629,7 +1658,10 @@ async fn test_p10_background_reconciler_closes_cancelled_delayed_completed_sessi
                 while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                     let req: DaemonRequest = match serde_json::from_str(line.trim()) {
                         Ok(r) => r,
-                        Err(_) => { line.clear(); continue; }
+                        Err(_) => {
+                            line.clear();
+                            continue;
+                        }
                     };
                     line.clear();
                     let resp = match req {
@@ -1644,49 +1676,57 @@ async fn test_p10_background_reconciler_closes_cancelled_delayed_completed_sessi
                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
                             capabilities: vec!["pairedHostInventoryV1".into()],
                         },
-                        DaemonRequest::PairedHostOperation { request } => {
-                            match request.operation {
-                                Operation::Operation { request_id } => {
-                                    let current = polls.fetch_add(1, Ordering::SeqCst);
-                                    if current < 5 {
-                                        DaemonResponse::PairedHostOperationOk {
-                                            response: OperationResponse {
-                                                host_id: "host-1".into(),
-                                                generation: Epoch(1),
-                                                result: OperationResult::Operation(m::Operation::Pending {
-                                                    request_id,
-                                                }),
-                                            },
-                                        }
-                                    } else {
-                                        DaemonResponse::PairedHostOperationOk {
-                                            response: OperationResponse {
-                                                host_id: "host-1".into(),
-                                                generation: Epoch(1),
-                                                result: OperationResult::Operation(m::Operation::Completed {
-                                                    request_id,
-                                                    outcome: m::OperationOutcome::Session {
-                                                        session: fixture.clone(),
-                                                    },
-                                                }),
-                                            },
-                                        }
-                                    }
-                                }
-                                Operation::CloseSession { .. } => {
-                                    close_flag.store(true, Ordering::SeqCst);
+                        DaemonRequest::PairedHostOperation { request } => match request.operation {
+                            Operation::Operation { request_id } => {
+                                let current = polls.fetch_add(1, Ordering::SeqCst);
+                                if current < 5 {
                                     DaemonResponse::PairedHostOperationOk {
                                         response: OperationResponse {
                                             host_id: "host-1".into(),
                                             generation: Epoch(1),
-                                            result: OperationResult::CloseSession(()),
+                                            result: OperationResult::Operation(
+                                                m::Operation::Pending { request_id },
+                                            ),
+                                        },
+                                    }
+                                } else {
+                                    DaemonResponse::PairedHostOperationOk {
+                                        response: OperationResponse {
+                                            host_id: "host-1".into(),
+                                            generation: Epoch(1),
+                                            result: OperationResult::Operation(
+                                                m::Operation::Completed {
+                                                    request_id,
+                                                    outcome: m::OperationOutcome::Session {
+                                                        session: fixture.clone(),
+                                                    },
+                                                },
+                                            ),
                                         },
                                     }
                                 }
-                                _ => DaemonResponse::Error { message: "unexpected op".into(), code: None, details: None },
                             }
-                        }
-                        _ => DaemonResponse::Error { message: "unexpected req".into(), code: None, details: None },
+                            Operation::CloseSession { .. } => {
+                                close_flag.store(true, Ordering::SeqCst);
+                                DaemonResponse::PairedHostOperationOk {
+                                    response: OperationResponse {
+                                        host_id: "host-1".into(),
+                                        generation: Epoch(1),
+                                        result: OperationResult::CloseSession(()),
+                                    },
+                                }
+                            }
+                            _ => DaemonResponse::Error {
+                                message: "unexpected op".into(),
+                                code: None,
+                                details: None,
+                            },
+                        },
+                        _ => DaemonResponse::Error {
+                            message: "unexpected req".into(),
+                            code: None,
+                            details: None,
+                        },
                     };
                     let bytes = serde_json::to_vec(&resp).unwrap();
                     let _ = write.write_all(&bytes).await;
@@ -1701,7 +1741,10 @@ async fn test_p10_background_reconciler_closes_cancelled_delayed_completed_sessi
     let req_id = "a0000000-0000-0000-0000-000000000098";
 
     let inline_res = reconcile_ambiguous_create(&client, "host-1", Epoch(1), req_id, true).await;
-    assert!(inline_res.is_err(), "Inline reconcile should exhaust attempts and return Err");
+    assert!(
+        inline_res.is_err(),
+        "Inline reconcile should exhaust attempts and return Err"
+    );
 
     // Wait for background reconciler to close the session
     let mut closed = false;
@@ -1712,16 +1755,17 @@ async fn test_p10_background_reconciler_closes_cancelled_delayed_completed_sessi
             break;
         }
     }
-    assert!(closed, "Cancelled delayed Completed create must be closed by background reconciler");
+    assert!(
+        closed,
+        "Cancelled delayed Completed create must be closed by background reconciler"
+    );
 
     server.abort();
 }
 
 #[tokio::test]
 async fn test_p11_reattach_failure_cleanup_reconciles_and_reaps_unknown() {
-    use crate::daemon::protocol::{
-        DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION,
-    };
+    use crate::daemon::protocol::{DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION};
     use crate::ipc::terminal::{
         clear_pending_cleanups_for_test, execute_cleanup_close, get_pending_cleanups,
         reap_cleanup_unknowns, CleanupOutcome,
@@ -1755,7 +1799,10 @@ async fn test_p11_reattach_failure_cleanup_reconciles_and_reaps_unknown() {
                 while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                     let req: DaemonRequest = match serde_json::from_str(line.trim()) {
                         Ok(r) => r,
-                        Err(_) => { line.clear(); continue; }
+                        Err(_) => {
+                            line.clear();
+                            continue;
+                        }
                     };
                     line.clear();
                     let resp = match req {
@@ -1770,47 +1817,57 @@ async fn test_p11_reattach_failure_cleanup_reconciles_and_reaps_unknown() {
                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
                             capabilities: vec!["pairedHostInventoryV1".into()],
                         },
-                        DaemonRequest::PairedHostOperation { request } => {
-                            match request.operation {
-                                Operation::CloseSession { .. } => {
-                                    DaemonResponse::PairedHostOperationError {
-                                        error: ClientError {
-                                            code: "TIMEOUT".into(),
-                                            machine_error: None,
-                                            ambiguous: true,
-                                            request_id: Some("a0000000-0000-0000-0000-000000000011".into()),
+                        DaemonRequest::PairedHostOperation { request } => match request.operation {
+                            Operation::CloseSession { .. } => {
+                                DaemonResponse::PairedHostOperationError {
+                                    error: ClientError {
+                                        code: "TIMEOUT".into(),
+                                        machine_error: None,
+                                        ambiguous: true,
+                                        request_id: Some(
+                                            "a0000000-0000-0000-0000-000000000011".into(),
+                                        ),
+                                    },
+                                }
+                            }
+                            Operation::Operation { request_id } => {
+                                let q = j_queries.fetch_add(1, Ordering::SeqCst);
+                                if q == 0 {
+                                    DaemonResponse::PairedHostOperationOk {
+                                        response: OperationResponse {
+                                            host_id: "host-1".into(),
+                                            generation: Epoch(1),
+                                            result: OperationResult::Operation(
+                                                m::Operation::Pending { request_id },
+                                            ),
+                                        },
+                                    }
+                                } else {
+                                    DaemonResponse::PairedHostOperationOk {
+                                        response: OperationResponse {
+                                            host_id: "host-1".into(),
+                                            generation: Epoch(1),
+                                            result: OperationResult::Operation(
+                                                m::Operation::Completed {
+                                                    request_id,
+                                                    outcome: m::OperationOutcome::NoContent,
+                                                },
+                                            ),
                                         },
                                     }
                                 }
-                                Operation::Operation { request_id } => {
-                                    let q = j_queries.fetch_add(1, Ordering::SeqCst);
-                                    if q == 0 {
-                                        DaemonResponse::PairedHostOperationOk {
-                                            response: OperationResponse {
-                                                host_id: "host-1".into(),
-                                                generation: Epoch(1),
-                                                result: OperationResult::Operation(m::Operation::Pending {
-                                                    request_id,
-                                                }),
-                                            },
-                                        }
-                                    } else {
-                                        DaemonResponse::PairedHostOperationOk {
-                                            response: OperationResponse {
-                                                host_id: "host-1".into(),
-                                                generation: Epoch(1),
-                                                result: OperationResult::Operation(m::Operation::Completed {
-                                                    request_id,
-                                                    outcome: m::OperationOutcome::NoContent,
-                                                }),
-                                            },
-                                        }
-                                    }
-                                }
-                                _ => DaemonResponse::Error { message: "unexpected op".into(), code: None, details: None },
                             }
-                        }
-                        _ => DaemonResponse::Error { message: "unexpected req".into(), code: None, details: None },
+                            _ => DaemonResponse::Error {
+                                message: "unexpected op".into(),
+                                code: None,
+                                details: None,
+                            },
+                        },
+                        _ => DaemonResponse::Error {
+                            message: "unexpected req".into(),
+                            code: None,
+                            details: None,
+                        },
                     };
                     let bytes = serde_json::to_vec(&resp).unwrap();
                     let _ = write.write_all(&bytes).await;
@@ -1831,29 +1888,41 @@ async fn test_p11_reattach_failure_cleanup_reconciles_and_reaps_unknown() {
         "remote-s1",
         Epoch(1),
         cleanup_req_id.clone(),
-    ).await;
+    )
+    .await;
 
     match outcome {
-        CleanupOutcome::Unknown { ref cleanup_request_id, .. } => {
+        CleanupOutcome::Unknown {
+            ref cleanup_request_id,
+            ..
+        } => {
             assert_eq!(cleanup_request_id, &cleanup_req_id);
         }
         other => panic!("Expected CleanupOutcome::Unknown, got {other:?}"),
     }
 
-    assert_eq!(get_pending_cleanups().len(), 1, "Unknown cleanup must be recorded in pending cleanups");
+    assert_eq!(
+        get_pending_cleanups().len(),
+        1,
+        "Unknown cleanup must be recorded in pending cleanups"
+    );
 
     let resolved = reap_cleanup_unknowns(&client).await;
-    assert_eq!(resolved, 1, "Reaper must resolve exactly 1 pending unknown cleanup");
-    assert!(get_pending_cleanups().is_empty(), "Pending cleanups must be empty after resolution");
+    assert_eq!(
+        resolved, 1,
+        "Reaper must resolve exactly 1 pending unknown cleanup"
+    );
+    assert!(
+        get_pending_cleanups().is_empty(),
+        "Pending cleanups must be empty after resolution"
+    );
 
     server.abort();
 }
 
 #[tokio::test]
 async fn test_p12_close_terminates_remote_session_while_detach_preserves_it() {
-    use crate::daemon::protocol::{
-        DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION,
-    };
+    use crate::daemon::protocol::{DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION};
     use crate::paired_host::client::{Operation, OperationResponse, OperationResult};
     use crate::remote::machine_protocol as m;
     use crate::scoped_contracts::Epoch;
@@ -1888,7 +1957,10 @@ async fn test_p12_close_terminates_remote_session_while_detach_preserves_it() {
                 while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                     let req: DaemonRequest = match serde_json::from_str(line.trim()) {
                         Ok(r) => r,
-                        Err(_) => { line.clear(); continue; }
+                        Err(_) => {
+                            line.clear();
+                            continue;
+                        }
                     };
                     line.clear();
                     let resp = match req {
@@ -1921,22 +1993,24 @@ async fn test_p12_close_terminates_remote_session_while_detach_preserves_it() {
                                 DaemonResponse::PairedTerminalDescriptorOk { descriptor: None }
                             }
                         }
-                        DaemonRequest::PairedHostOperation { request } => {
-                            match request.operation {
-                                Operation::CloseSession { session_id, .. } => {
-                                    assert_eq!(session_id, "remote-pty-p12");
-                                    remote_close.store(true, Ordering::SeqCst);
-                                    DaemonResponse::PairedHostOperationOk {
-                                        response: OperationResponse {
-                                            host_id: "host-1".into(),
-                                            generation: Epoch(1),
-                                            result: OperationResult::CloseSession(()),
-                                        },
-                                    }
+                        DaemonRequest::PairedHostOperation { request } => match request.operation {
+                            Operation::CloseSession { session_id, .. } => {
+                                assert_eq!(session_id, "remote-pty-p12");
+                                remote_close.store(true, Ordering::SeqCst);
+                                DaemonResponse::PairedHostOperationOk {
+                                    response: OperationResponse {
+                                        host_id: "host-1".into(),
+                                        generation: Epoch(1),
+                                        result: OperationResult::CloseSession(()),
+                                    },
                                 }
-                                _ => DaemonResponse::Error { message: "unexpected op".into(), code: None, details: None },
                             }
-                        }
+                            _ => DaemonResponse::Error {
+                                message: "unexpected op".into(),
+                                code: None,
+                                details: None,
+                            },
+                        },
                         DaemonRequest::PairedTerminalDetach { .. } => {
                             detach.store(true, Ordering::SeqCst);
                             DaemonResponse::CloseOk
@@ -1945,7 +2019,11 @@ async fn test_p12_close_terminates_remote_session_while_detach_preserves_it() {
                             local_close.store(true, Ordering::SeqCst);
                             DaemonResponse::CloseOk
                         }
-                        _ => DaemonResponse::Error { message: "unexpected req".into(), code: None, details: None },
+                        _ => DaemonResponse::Error {
+                            message: "unexpected req".into(),
+                            code: None,
+                            details: None,
+                        },
                     };
                     let bytes = serde_json::to_vec(&resp).unwrap();
                     let _ = write.write_all(&bytes).await;
@@ -1959,34 +2037,62 @@ async fn test_p12_close_terminates_remote_session_while_detach_preserves_it() {
     let client = DaemonClient::new_with_socket(socket);
 
     // 1. Detach on paired session: detaches proxy locally but preserves remote PTY session
-    client.detach_terminal("daemon-session:paired-1").await.expect("detach_terminal must succeed for paired session");
-    assert!(detach_called.load(Ordering::SeqCst), "detach_terminal must call PairedTerminalDetach");
-    assert!(!remote_close_called.load(Ordering::SeqCst), "detach_terminal must NOT terminate remote PTY");
+    client
+        .detach_terminal("daemon-session:paired-1")
+        .await
+        .expect("detach_terminal must succeed for paired session");
+    assert!(
+        detach_called.load(Ordering::SeqCst),
+        "detach_terminal must call PairedTerminalDetach"
+    );
+    assert!(
+        !remote_close_called.load(Ordering::SeqCst),
+        "detach_terminal must NOT terminate remote PTY"
+    );
 
     // 2. Detach on local session: must fail with invalid input
     let local_detach = client.detach_terminal("local-pane-1").await;
-    assert!(local_detach.is_err(), "detach_terminal must be rejected for local sessions");
+    assert!(
+        local_detach.is_err(),
+        "detach_terminal must be rejected for local sessions"
+    );
 
     // 3. Close on paired session: terminates remote PTY session with CloseSession and closes local proxy
-    client.close_terminal("daemon-session:paired-1").await.expect("close_terminal must succeed for paired session");
-    assert!(remote_close_called.load(Ordering::SeqCst), "close_terminal must terminate remote PTY with CloseSession");
-    assert!(local_close_called.load(Ordering::SeqCst), "close_terminal must close local session descriptor/proxy");
+    client
+        .close_terminal("daemon-session:paired-1")
+        .await
+        .expect("close_terminal must succeed for paired session");
+    assert!(
+        remote_close_called.load(Ordering::SeqCst),
+        "close_terminal must terminate remote PTY with CloseSession"
+    );
+    assert!(
+        local_close_called.load(Ordering::SeqCst),
+        "close_terminal must close local session descriptor/proxy"
+    );
 
     // 4. Close on local session: closes local session directly, no remote CloseSession
     remote_close_called.store(false, Ordering::SeqCst);
     local_close_called.store(false, Ordering::SeqCst);
-    client.close_terminal("local-pane-1").await.expect("close_terminal must succeed for local session");
-    assert!(!remote_close_called.load(Ordering::SeqCst), "close_terminal for local session must NOT call remote CloseSession");
-    assert!(local_close_called.load(Ordering::SeqCst), "close_terminal for local session must close local PTY");
+    client
+        .close_terminal("local-pane-1")
+        .await
+        .expect("close_terminal must succeed for local session");
+    assert!(
+        !remote_close_called.load(Ordering::SeqCst),
+        "close_terminal for local session must NOT call remote CloseSession"
+    );
+    assert!(
+        local_close_called.load(Ordering::SeqCst),
+        "close_terminal for local session must close local PTY"
+    );
 
     server.abort();
 }
 
 #[tokio::test]
 async fn test_p11_reaper_retains_exhausted_records_in_dead_letter_list() {
-    use crate::daemon::protocol::{
-        DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION,
-    };
+    use crate::daemon::protocol::{DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION};
     use crate::ipc::terminal::{
         clear_pending_cleanups_for_test, execute_cleanup_close, get_exhausted_cleanups,
         get_pending_cleanups, reap_cleanup_unknowns, CleanupOutcome,
@@ -2015,7 +2121,10 @@ async fn test_p11_reaper_retains_exhausted_records_in_dead_letter_list() {
                 while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                     let req: DaemonRequest = match serde_json::from_str(line.trim()) {
                         Ok(r) => r,
-                        Err(_) => { line.clear(); continue; }
+                        Err(_) => {
+                            line.clear();
+                            continue;
+                        }
                     };
                     line.clear();
                     let resp = match req {
@@ -2030,33 +2139,40 @@ async fn test_p11_reaper_retains_exhausted_records_in_dead_letter_list() {
                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
                             capabilities: vec!["pairedHostInventoryV1".into()],
                         },
-                        DaemonRequest::PairedHostOperation { request } => {
-                            match request.operation {
-                                Operation::CloseSession { .. } => {
-                                    DaemonResponse::PairedHostOperationError {
-                                        error: ClientError {
-                                            code: "TIMEOUT".into(),
-                                            machine_error: None,
-                                            ambiguous: true,
-                                            request_id: Some("req-p11-dead".into()),
-                                        },
-                                    }
+                        DaemonRequest::PairedHostOperation { request } => match request.operation {
+                            Operation::CloseSession { .. } => {
+                                DaemonResponse::PairedHostOperationError {
+                                    error: ClientError {
+                                        code: "TIMEOUT".into(),
+                                        machine_error: None,
+                                        ambiguous: true,
+                                        request_id: Some("req-p11-dead".into()),
+                                    },
                                 }
-                                Operation::Operation { request_id } => {
-                                    DaemonResponse::PairedHostOperationOk {
-                                        response: crate::paired_host::client::OperationResponse {
-                                            host_id: "host-1".into(),
-                                            generation: Epoch(1),
-                                            result: crate::paired_host::client::OperationResult::Operation(m::Operation::Pending {
-                                                request_id,
-                                            }),
-                                        },
-                                    }
-                                }
-                                _ => DaemonResponse::Error { message: "unexpected op".into(), code: None, details: None },
                             }
-                        }
-                        _ => DaemonResponse::Error { message: "unexpected req".into(), code: None, details: None },
+                            Operation::Operation { request_id } => {
+                                DaemonResponse::PairedHostOperationOk {
+                                    response: crate::paired_host::client::OperationResponse {
+                                        host_id: "host-1".into(),
+                                        generation: Epoch(1),
+                                        result:
+                                            crate::paired_host::client::OperationResult::Operation(
+                                                m::Operation::Pending { request_id },
+                                            ),
+                                    },
+                                }
+                            }
+                            _ => DaemonResponse::Error {
+                                message: "unexpected op".into(),
+                                code: None,
+                                details: None,
+                            },
+                        },
+                        _ => DaemonResponse::Error {
+                            message: "unexpected req".into(),
+                            code: None,
+                            details: None,
+                        },
                     };
                     let bytes = serde_json::to_vec(&resp).unwrap();
                     let _ = write.write_all(&bytes).await;
@@ -2077,7 +2193,8 @@ async fn test_p11_reaper_retains_exhausted_records_in_dead_letter_list() {
         "remote-s-dead",
         Epoch(1),
         cleanup_req_id.clone(),
-    ).await;
+    )
+    .await;
 
     assert!(matches!(outcome, CleanupOutcome::Unknown { .. }));
     assert_eq!(get_pending_cleanups().len(), 1);
@@ -2092,9 +2209,20 @@ async fn test_p11_reaper_retains_exhausted_records_in_dead_letter_list() {
 
     // Reap attempt 3 (reaches MAX_REAP_ATTEMPTS = 3; must move to exhausted dead-letter list)
     let _ = reap_cleanup_unknowns(&client).await;
-    assert_eq!(get_pending_cleanups().len(), 0, "Pending cleanups must be empty after exhausting attempts");
-    assert_eq!(get_exhausted_cleanups().len(), 1, "Exhausted cleanups must be retained in dead-letter list");
-    assert_eq!(get_exhausted_cleanups()[0].cleanup_request_id, cleanup_req_id);
+    assert_eq!(
+        get_pending_cleanups().len(),
+        0,
+        "Pending cleanups must be empty after exhausting attempts"
+    );
+    assert_eq!(
+        get_exhausted_cleanups().len(),
+        1,
+        "Exhausted cleanups must be retained in dead-letter list"
+    );
+    assert_eq!(
+        get_exhausted_cleanups()[0].cleanup_request_id,
+        cleanup_req_id
+    );
 
     server.abort();
 }
@@ -2105,9 +2233,7 @@ async fn test_p10_pending_create_reaper_resolves_still_pending_records() {
     // after the bounded background reconciler gives up (including records
     // loaded from disk after a restart) and adopt/close a late terminal
     // journal outcome.
-    use crate::daemon::protocol::{
-        DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION,
-    };
+    use crate::daemon::protocol::{DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION};
     use crate::ipc::terminal::{
         clear_pending_creates_for_test, get_pending_create, register_pending_create,
         start_pending_create_reaper, PendingCreateStatus,
@@ -2156,7 +2282,10 @@ async fn test_p10_pending_create_reaper_resolves_still_pending_records() {
                 while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                     let req: DaemonRequest = match serde_json::from_str(line.trim()) {
                         Ok(r) => r,
-                        Err(_) => { line.clear(); continue; }
+                        Err(_) => {
+                            line.clear();
+                            continue;
+                        }
                     };
                     line.clear();
                     let resp = match req {
@@ -2171,32 +2300,40 @@ async fn test_p10_pending_create_reaper_resolves_still_pending_records() {
                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
                             capabilities: vec!["pairedHostInventoryV1".into()],
                         },
-                        DaemonRequest::PairedHostOperation { request } => {
-                            match request.operation {
-                                Operation::Operation { request_id } => {
-                                    DaemonResponse::PairedHostOperationOk {
-                                        response: OperationResponse {
-                                            host_id: "host-1".into(),
-                                            generation: Epoch(1),
-                                            result: OperationResult::Operation(m::Operation::Completed {
+                        DaemonRequest::PairedHostOperation { request } => match request.operation {
+                            Operation::Operation { request_id } => {
+                                DaemonResponse::PairedHostOperationOk {
+                                    response: OperationResponse {
+                                        host_id: "host-1".into(),
+                                        generation: Epoch(1),
+                                        result: OperationResult::Operation(
+                                            m::Operation::Completed {
                                                 request_id,
                                                 outcome: m::OperationOutcome::Session {
                                                     session: fixture.clone(),
                                                 },
-                                            }),
-                                        },
-                                    }
+                                            },
+                                        ),
+                                    },
                                 }
-                                _ => DaemonResponse::Error { message: "unexpected op".into(), code: None, details: None },
                             }
-                        }
+                            _ => DaemonResponse::Error {
+                                message: "unexpected op".into(),
+                                code: None,
+                                details: None,
+                            },
+                        },
                         DaemonRequest::PairedTerminalReattach { .. } => {
                             DaemonResponse::PairedTerminalReattachOk {
                                 session_id: "proxy-p10-reaper".into(),
                                 generation: Epoch(1),
                             }
                         }
-                        _ => DaemonResponse::Error { message: "unexpected req".into(), code: None, details: None },
+                        _ => DaemonResponse::Error {
+                            message: "unexpected req".into(),
+                            code: None,
+                            details: None,
+                        },
                     };
                     let bytes = serde_json::to_vec(&resp).unwrap();
                     let _ = write.write_all(&bytes).await;
@@ -2245,9 +2382,7 @@ async fn test_p10_pending_create_reaper_resolves_still_pending_records() {
 
 #[tokio::test]
 async fn test_p11_start_cleanup_reaper_schedules_background_resolution() {
-    use crate::daemon::protocol::{
-        DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION,
-    };
+    use crate::daemon::protocol::{DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION};
     use crate::ipc::terminal::{
         clear_pending_cleanups_for_test, execute_cleanup_close, get_pending_cleanups,
         start_cleanup_reaper,
@@ -2276,7 +2411,10 @@ async fn test_p11_start_cleanup_reaper_schedules_background_resolution() {
                 while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                     let req: DaemonRequest = match serde_json::from_str(line.trim()) {
                         Ok(r) => r,
-                        Err(_) => { line.clear(); continue; }
+                        Err(_) => {
+                            line.clear();
+                            continue;
+                        }
                     };
                     line.clear();
                     let resp = match req {
@@ -2291,34 +2429,43 @@ async fn test_p11_start_cleanup_reaper_schedules_background_resolution() {
                         DaemonRequest::GetCapabilities => DaemonResponse::CapabilitiesOk {
                             capabilities: vec!["pairedHostInventoryV1".into()],
                         },
-                        DaemonRequest::PairedHostOperation { request } => {
-                            match request.operation {
-                                Operation::CloseSession { .. } => {
-                                    DaemonResponse::PairedHostOperationError {
-                                        error: ClientError {
-                                            code: "TIMEOUT".into(),
-                                            machine_error: None,
-                                            ambiguous: true,
-                                            request_id: Some("req-p11-bg".into()),
-                                        },
-                                    }
+                        DaemonRequest::PairedHostOperation { request } => match request.operation {
+                            Operation::CloseSession { .. } => {
+                                DaemonResponse::PairedHostOperationError {
+                                    error: ClientError {
+                                        code: "TIMEOUT".into(),
+                                        machine_error: None,
+                                        ambiguous: true,
+                                        request_id: Some("req-p11-bg".into()),
+                                    },
                                 }
-                                Operation::Operation { request_id } => {
-                                    DaemonResponse::PairedHostOperationOk {
-                                        response: crate::paired_host::client::OperationResponse {
-                                            host_id: "host-1".into(),
-                                            generation: Epoch(1),
-                                            result: crate::paired_host::client::OperationResult::Operation(m::Operation::Completed {
-                                                request_id,
-                                                outcome: m::OperationOutcome::NoContent,
-                                            }),
-                                        },
-                                    }
-                                }
-                                _ => DaemonResponse::Error { message: "unexpected op".into(), code: None, details: None },
                             }
-                        }
-                        _ => DaemonResponse::Error { message: "unexpected req".into(), code: None, details: None },
+                            Operation::Operation { request_id } => {
+                                DaemonResponse::PairedHostOperationOk {
+                                    response: crate::paired_host::client::OperationResponse {
+                                        host_id: "host-1".into(),
+                                        generation: Epoch(1),
+                                        result:
+                                            crate::paired_host::client::OperationResult::Operation(
+                                                m::Operation::Completed {
+                                                    request_id,
+                                                    outcome: m::OperationOutcome::NoContent,
+                                                },
+                                            ),
+                                    },
+                                }
+                            }
+                            _ => DaemonResponse::Error {
+                                message: "unexpected op".into(),
+                                code: None,
+                                details: None,
+                            },
+                        },
+                        _ => DaemonResponse::Error {
+                            message: "unexpected req".into(),
+                            code: None,
+                            details: None,
+                        },
                     };
                     let bytes = serde_json::to_vec(&resp).unwrap();
                     let _ = write.write_all(&bytes).await;
@@ -2339,7 +2486,8 @@ async fn test_p11_start_cleanup_reaper_schedules_background_resolution() {
         "remote-s-bg",
         Epoch(1),
         cleanup_req_id,
-    ).await;
+    )
+    .await;
 
     assert_eq!(get_pending_cleanups().len(), 1);
 
@@ -2363,9 +2511,7 @@ async fn test_p11_start_cleanup_reaper_schedules_background_resolution() {
 
 #[tokio::test]
 async fn test_p12_close_definitive_remote_error_aborts_local_close() {
-    use crate::daemon::protocol::{
-        DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION,
-    };
+    use crate::daemon::protocol::{DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION};
     use crate::ipc::IpcErrorCode;
     use crate::paired_host::client::{ClientError, Operation};
     use crate::remote::machine_protocol as m;
@@ -2394,7 +2540,10 @@ async fn test_p12_close_definitive_remote_error_aborts_local_close() {
                 while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                     let req: DaemonRequest = match serde_json::from_str(line.trim()) {
                         Ok(r) => r,
-                        Err(_) => { line.clear(); continue; }
+                        Err(_) => {
+                            line.clear();
+                            continue;
+                        }
                     };
                     line.clear();
                     let resp = match req {
@@ -2423,26 +2572,32 @@ async fn test_p12_close_definitive_remote_error_aborts_local_close() {
                                 }),
                             }
                         }
-                        DaemonRequest::PairedHostOperation { request } => {
-                            match request.operation {
-                                Operation::CloseSession { .. } => {
-                                    DaemonResponse::PairedHostOperationError {
-                                        error: ClientError {
-                                            code: "PERMISSION_DENIED".into(),
-                                            machine_error: None,
-                                            ambiguous: false,
-                                            request_id: Some("req-p12-def".into()),
-                                        },
-                                    }
+                        DaemonRequest::PairedHostOperation { request } => match request.operation {
+                            Operation::CloseSession { .. } => {
+                                DaemonResponse::PairedHostOperationError {
+                                    error: ClientError {
+                                        code: "PERMISSION_DENIED".into(),
+                                        machine_error: None,
+                                        ambiguous: false,
+                                        request_id: Some("req-p12-def".into()),
+                                    },
                                 }
-                                _ => DaemonResponse::Error { message: "unexpected op".into(), code: None, details: None },
                             }
-                        }
+                            _ => DaemonResponse::Error {
+                                message: "unexpected op".into(),
+                                code: None,
+                                details: None,
+                            },
+                        },
                         DaemonRequest::Close { .. } => {
                             local_close.store(true, Ordering::SeqCst);
                             DaemonResponse::CloseOk
                         }
-                        _ => DaemonResponse::Error { message: "unexpected req".into(), code: None, details: None },
+                        _ => DaemonResponse::Error {
+                            message: "unexpected req".into(),
+                            code: None,
+                            details: None,
+                        },
                     };
                     let bytes = serde_json::to_vec(&resp).unwrap();
                     let _ = write.write_all(&bytes).await;
@@ -2461,19 +2616,29 @@ async fn test_p12_close_definitive_remote_error_aborts_local_close() {
 
     assert_eq!(err.code, IpcErrorCode::from_code_str("REMOTE_CLOSE_FAILED"));
     let details = err.details.expect("Error details must be present");
-    assert_eq!(details.get("cause").and_then(|v| v.as_str()), Some("PERMISSION_DENIED"));
-    assert_eq!(details.get("hostId").and_then(|v| v.as_str()), Some("host-p12"));
-    assert_eq!(details.get("remoteSessionId").and_then(|v| v.as_str()), Some("remote-pty-def"));
-    assert!(!local_close_called.load(Ordering::SeqCst), "Local close must NOT proceed on definitive remote close failure");
+    assert_eq!(
+        details.get("cause").and_then(|v| v.as_str()),
+        Some("PERMISSION_DENIED")
+    );
+    assert_eq!(
+        details.get("hostId").and_then(|v| v.as_str()),
+        Some("host-p12")
+    );
+    assert_eq!(
+        details.get("remoteSessionId").and_then(|v| v.as_str()),
+        Some("remote-pty-def")
+    );
+    assert!(
+        !local_close_called.load(Ordering::SeqCst),
+        "Local close must NOT proceed on definitive remote close failure"
+    );
 
     server.abort();
 }
 
 #[tokio::test]
 async fn test_p12_close_descriptor_lookup_failure_is_uncertain() {
-    use crate::daemon::protocol::{
-        DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION,
-    };
+    use crate::daemon::protocol::{DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION};
     use crate::ipc::IpcErrorCode;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -2499,7 +2664,10 @@ async fn test_p12_close_descriptor_lookup_failure_is_uncertain() {
                 while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                     let req: DaemonRequest = match serde_json::from_str(line.trim()) {
                         Ok(r) => r,
-                        Err(_) => { line.clear(); continue; }
+                        Err(_) => {
+                            line.clear();
+                            continue;
+                        }
                     };
                     line.clear();
                     let resp = match req {
@@ -2516,18 +2684,20 @@ async fn test_p12_close_descriptor_lookup_failure_is_uncertain() {
                         },
                         // P12 (round 2): a failing descriptor lookup must NOT
                         // silently skip the remote close.
-                        DaemonRequest::PairedTerminalDescriptor { .. } => {
-                            DaemonResponse::Error {
-                                message: "descriptor store unavailable".into(),
-                                code: Some("DESCRIPTOR_IO".into()),
-                                details: None,
-                            }
-                        }
+                        DaemonRequest::PairedTerminalDescriptor { .. } => DaemonResponse::Error {
+                            message: "descriptor store unavailable".into(),
+                            code: Some("DESCRIPTOR_IO".into()),
+                            details: None,
+                        },
                         DaemonRequest::Close { .. } => {
                             local_close.store(true, Ordering::SeqCst);
                             DaemonResponse::CloseOk
                         }
-                        _ => DaemonResponse::Error { message: "unexpected req".into(), code: None, details: None },
+                        _ => DaemonResponse::Error {
+                            message: "unexpected req".into(),
+                            code: None,
+                            details: None,
+                        },
                     };
                     let bytes = serde_json::to_vec(&resp).unwrap();
                     let _ = write.write_all(&bytes).await;
@@ -2544,20 +2714,30 @@ async fn test_p12_close_descriptor_lookup_failure_is_uncertain() {
         .await
         .expect_err("Descriptor lookup failure must surface uncertainty");
 
-    assert_eq!(err.code, IpcErrorCode::from_code_str("REMOTE_CLOSE_UNCERTAIN"));
+    assert_eq!(
+        err.code,
+        IpcErrorCode::from_code_str("REMOTE_CLOSE_UNCERTAIN")
+    );
     let details = err.details.expect("details present");
-    assert_eq!(details.get("cause").and_then(|v| v.as_str()), Some("DESCRIPTOR_IO"));
-    assert_eq!(details.get("remoteCloseUnknown"), Some(&serde_json::json!(true)));
-    assert!(!local_close_called.load(Ordering::SeqCst), "Local close must NOT be acknowledged after an unprovable remote close");
+    assert_eq!(
+        details.get("cause").and_then(|v| v.as_str()),
+        Some("DESCRIPTOR_IO")
+    );
+    assert_eq!(
+        details.get("remoteCloseUnknown"),
+        Some(&serde_json::json!(true))
+    );
+    assert!(
+        !local_close_called.load(Ordering::SeqCst),
+        "Local close must NOT be acknowledged after an unprovable remote close"
+    );
 
     server.abort();
 }
 
 #[tokio::test]
 async fn test_p12_close_operation_not_found_journal_stays_uncertain() {
-    use crate::daemon::protocol::{
-        DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION,
-    };
+    use crate::daemon::protocol::{DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION};
     use crate::ipc::IpcErrorCode;
     use crate::paired_host::client::{ClientError, Operation};
     use crate::remote::machine_protocol as m;
@@ -2586,7 +2766,10 @@ async fn test_p12_close_operation_not_found_journal_stays_uncertain() {
                 while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                     let req: DaemonRequest = match serde_json::from_str(line.trim()) {
                         Ok(r) => r,
-                        Err(_) => { line.clear(); continue; }
+                        Err(_) => {
+                            line.clear();
+                            continue;
+                        }
                     };
                     line.clear();
                     let resp = match req {
@@ -2641,14 +2824,22 @@ async fn test_p12_close_operation_not_found_journal_stays_uncertain() {
                                         },
                                     }
                                 }
-                                _ => DaemonResponse::Error { message: "unexpected op".into(), code: None, details: None },
+                                _ => DaemonResponse::Error {
+                                    message: "unexpected op".into(),
+                                    code: None,
+                                    details: None,
+                                },
                             }
                         }
                         DaemonRequest::Close { .. } => {
                             local_close.store(true, Ordering::SeqCst);
                             DaemonResponse::CloseOk
                         }
-                        _ => DaemonResponse::Error { message: "unexpected req".into(), code: None, details: None },
+                        _ => DaemonResponse::Error {
+                            message: "unexpected req".into(),
+                            code: None,
+                            details: None,
+                        },
                     };
                     let bytes = serde_json::to_vec(&resp).unwrap();
                     let _ = write.write_all(&bytes).await;
@@ -2665,19 +2856,26 @@ async fn test_p12_close_operation_not_found_journal_stays_uncertain() {
         .await
         .expect_err("An uncommitted close must stay uncertain");
 
-    assert_eq!(err.code, IpcErrorCode::from_code_str("REMOTE_CLOSE_UNCERTAIN"));
+    assert_eq!(
+        err.code,
+        IpcErrorCode::from_code_str("REMOTE_CLOSE_UNCERTAIN")
+    );
     let details = err.details.expect("details present");
-    assert_eq!(details.get("remoteSessionId").and_then(|v| v.as_str()), Some("remote-pty-onf"));
-    assert!(!local_close_called.load(Ordering::SeqCst), "Journal OPERATION_NOT_FOUND must not mask a possibly-live remote PTY");
+    assert_eq!(
+        details.get("remoteSessionId").and_then(|v| v.as_str()),
+        Some("remote-pty-onf")
+    );
+    assert!(
+        !local_close_called.load(Ordering::SeqCst),
+        "Journal OPERATION_NOT_FOUND must not mask a possibly-live remote PTY"
+    );
 
     server.abort();
 }
 
 #[tokio::test]
 async fn test_p12_close_ambiguous_remote_error_exhausts_and_aborts_local_close() {
-    use crate::daemon::protocol::{
-        DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION,
-    };
+    use crate::daemon::protocol::{DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION};
     use crate::ipc::IpcErrorCode;
     use crate::paired_host::client::{ClientError, Operation, OperationResponse, OperationResult};
     use crate::remote::machine_protocol as m;
@@ -2706,7 +2904,10 @@ async fn test_p12_close_ambiguous_remote_error_exhausts_and_aborts_local_close()
                 while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                     let req: DaemonRequest = match serde_json::from_str(line.trim()) {
                         Ok(r) => r,
-                        Err(_) => { line.clear(); continue; }
+                        Err(_) => {
+                            line.clear();
+                            continue;
+                        }
                     };
                     line.clear();
                     let resp = match req {
@@ -2735,37 +2936,43 @@ async fn test_p12_close_ambiguous_remote_error_exhausts_and_aborts_local_close()
                                 }),
                             }
                         }
-                        DaemonRequest::PairedHostOperation { request } => {
-                            match request.operation {
-                                Operation::CloseSession { .. } => {
-                                    DaemonResponse::PairedHostOperationError {
-                                        error: ClientError {
-                                            code: "TIMEOUT".into(),
-                                            machine_error: None,
-                                            ambiguous: true,
-                                            request_id: Some("req-p12-amb".into()),
-                                        },
-                                    }
+                        DaemonRequest::PairedHostOperation { request } => match request.operation {
+                            Operation::CloseSession { .. } => {
+                                DaemonResponse::PairedHostOperationError {
+                                    error: ClientError {
+                                        code: "TIMEOUT".into(),
+                                        machine_error: None,
+                                        ambiguous: true,
+                                        request_id: Some("req-p12-amb".into()),
+                                    },
                                 }
-                                Operation::Operation { request_id } => {
-                                    DaemonResponse::PairedHostOperationOk {
-                                        response: OperationResponse {
-                                            host_id: "host-p12".into(),
-                                            generation: Epoch(1),
-                                            result: OperationResult::Operation(m::Operation::Pending {
-                                                request_id,
-                                            }),
-                                        },
-                                    }
-                                }
-                                _ => DaemonResponse::Error { message: "unexpected op".into(), code: None, details: None },
                             }
-                        }
+                            Operation::Operation { request_id } => {
+                                DaemonResponse::PairedHostOperationOk {
+                                    response: OperationResponse {
+                                        host_id: "host-p12".into(),
+                                        generation: Epoch(1),
+                                        result: OperationResult::Operation(m::Operation::Pending {
+                                            request_id,
+                                        }),
+                                    },
+                                }
+                            }
+                            _ => DaemonResponse::Error {
+                                message: "unexpected op".into(),
+                                code: None,
+                                details: None,
+                            },
+                        },
                         DaemonRequest::Close { .. } => {
                             local_close.store(true, Ordering::SeqCst);
                             DaemonResponse::CloseOk
                         }
-                        _ => DaemonResponse::Error { message: "unexpected req".into(), code: None, details: None },
+                        _ => DaemonResponse::Error {
+                            message: "unexpected req".into(),
+                            code: None,
+                            details: None,
+                        },
                     };
                     let bytes = serde_json::to_vec(&resp).unwrap();
                     let _ = write.write_all(&bytes).await;
@@ -2780,24 +2987,39 @@ async fn test_p12_close_ambiguous_remote_error_exhausts_and_aborts_local_close()
     let err = client
         .close_terminal("daemon-session:paired-p12-amb")
         .await
-        .expect_err("Ambiguous remote close with pending journal must cause close_terminal to fail");
+        .expect_err(
+            "Ambiguous remote close with pending journal must cause close_terminal to fail",
+        );
 
-    assert_eq!(err.code, IpcErrorCode::from_code_str("REMOTE_CLOSE_UNCERTAIN"));
+    assert_eq!(
+        err.code,
+        IpcErrorCode::from_code_str("REMOTE_CLOSE_UNCERTAIN")
+    );
     let details = err.details.expect("Error details must be present");
-    assert_eq!(details.get("remoteCloseUnknown").and_then(|v| v.as_bool()), Some(true));
-    assert_eq!(details.get("hostId").and_then(|v| v.as_str()), Some("host-p12"));
-    assert_eq!(details.get("remoteSessionId").and_then(|v| v.as_str()), Some("remote-pty-amb"));
+    assert_eq!(
+        details.get("remoteCloseUnknown").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        details.get("hostId").and_then(|v| v.as_str()),
+        Some("host-p12")
+    );
+    assert_eq!(
+        details.get("remoteSessionId").and_then(|v| v.as_str()),
+        Some("remote-pty-amb")
+    );
     assert!(details.get("cleanupRequestId").is_some());
-    assert!(!local_close_called.load(Ordering::SeqCst), "Local close must NOT proceed on uncertain remote close");
+    assert!(
+        !local_close_called.load(Ordering::SeqCst),
+        "Local close must NOT proceed on uncertain remote close"
+    );
 
     server.abort();
 }
 
 #[tokio::test]
 async fn test_p13_attach_routes_through_descriptor_and_reinstalls_proxy() {
-    use crate::daemon::protocol::{
-        DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION,
-    };
+    use crate::daemon::protocol::{DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION};
     use crate::remote::machine_protocol as m;
     use crate::scoped_contracts::Epoch;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -2832,7 +3054,10 @@ async fn test_p13_attach_routes_through_descriptor_and_reinstalls_proxy() {
                 while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                     let req: DaemonRequest = match serde_json::from_str(line.trim()) {
                         Ok(r) => r,
-                        Err(_) => { line.clear(); continue; }
+                        Err(_) => {
+                            line.clear();
+                            continue;
+                        }
                     };
                     line.clear();
                     let resp = match req {
@@ -2875,7 +3100,10 @@ async fn test_p13_attach_routes_through_descriptor_and_reinstalls_proxy() {
                                 generation: Epoch(2),
                             }
                         }
-                        DaemonRequest::Attach { session_id, after_sequence } => {
+                        DaemonRequest::Attach {
+                            session_id,
+                            after_sequence,
+                        } => {
                             if session_id == "daemon-session:reinstalled-p13-proxy" {
                                 assert_eq!(after_sequence, Some(42));
                                 proxy_attached.store(true, Ordering::SeqCst);
@@ -2899,7 +3127,11 @@ async fn test_p13_attach_routes_through_descriptor_and_reinstalls_proxy() {
                                 }
                             }
                         }
-                        _ => DaemonResponse::Error { message: "unexpected req".into(), code: None, details: None },
+                        _ => DaemonResponse::Error {
+                            message: "unexpected req".into(),
+                            code: None,
+                            details: None,
+                        },
                     };
                     let bytes = serde_json::to_vec(&resp).unwrap();
                     let _ = write.write_all(&bytes).await;
@@ -2926,19 +3158,29 @@ async fn test_p13_attach_routes_through_descriptor_and_reinstalls_proxy() {
     .await
     .expect("attach of paired session must succeed through reinstalled proxy");
 
-    assert_eq!(attach_res.session_id, "daemon-session:reinstalled-p13-proxy");
-    assert!(descriptor_queried.load(Ordering::SeqCst), "descriptor must be queried");
-    assert!(reattach_called.load(Ordering::SeqCst), "reattach must be called");
-    assert!(proxy_attached.load(Ordering::SeqCst), "proxy session must be attached");
+    assert_eq!(
+        attach_res.session_id,
+        "daemon-session:reinstalled-p13-proxy"
+    );
+    assert!(
+        descriptor_queried.load(Ordering::SeqCst),
+        "descriptor must be queried"
+    );
+    assert!(
+        reattach_called.load(Ordering::SeqCst),
+        "reattach must be called"
+    );
+    assert!(
+        proxy_attached.load(Ordering::SeqCst),
+        "proxy session must be attached"
+    );
 
     server.abort();
 }
 
 #[tokio::test]
 async fn test_p13_attach_preserves_ambiguous_reattach_failure() {
-    use crate::daemon::protocol::{
-        DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION,
-    };
+    use crate::daemon::protocol::{DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION};
     use crate::ipc::IpcErrorCode;
     use crate::paired_host::client::ClientError;
     use crate::remote::machine_protocol as m;
@@ -2962,7 +3204,10 @@ async fn test_p13_attach_preserves_ambiguous_reattach_failure() {
                 while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                     let req: DaemonRequest = match serde_json::from_str(line.trim()) {
                         Ok(r) => r,
-                        Err(_) => { line.clear(); continue; }
+                        Err(_) => {
+                            line.clear();
+                            continue;
+                        }
                     };
                     line.clear();
                     let resp = match req {
@@ -3005,14 +3250,16 @@ async fn test_p13_attach_preserves_ambiguous_reattach_failure() {
                                 },
                             }
                         }
-                        DaemonRequest::Attach { session_id, .. } => {
-                            DaemonResponse::Error {
-                                message: format!("Session '{session_id}' not found"),
-                                code: Some("SESSION_NOT_FOUND".into()),
-                                details: None,
-                            }
-                        }
-                        _ => DaemonResponse::Error { message: "unexpected req".into(), code: None, details: None },
+                        DaemonRequest::Attach { session_id, .. } => DaemonResponse::Error {
+                            message: format!("Session '{session_id}' not found"),
+                            code: Some("SESSION_NOT_FOUND".into()),
+                            details: None,
+                        },
+                        _ => DaemonResponse::Error {
+                            message: "unexpected req".into(),
+                            code: None,
+                            details: None,
+                        },
                     };
                     let bytes = serde_json::to_vec(&resp).unwrap();
                     let _ = write.write_all(&bytes).await;
@@ -3039,19 +3286,26 @@ async fn test_p13_attach_preserves_ambiguous_reattach_failure() {
     .await
     .expect_err("ambiguous reattach must fail");
 
-    assert_ne!(err.code, IpcErrorCode::SessionNotFound, "Ambiguous reattach must NOT report remote death (SESSION_NOT_FOUND)");
+    assert_ne!(
+        err.code,
+        IpcErrorCode::SessionNotFound,
+        "Ambiguous reattach must NOT report remote death (SESSION_NOT_FOUND)"
+    );
     assert_eq!(err.code, IpcErrorCode::Timeout);
-    let details = err.details.expect("Structured error details must be present");
-    assert_eq!(details.get("ambiguous").and_then(|v| v.as_bool()), Some(true));
+    let details = err
+        .details
+        .expect("Structured error details must be present");
+    assert_eq!(
+        details.get("ambiguous").and_then(|v| v.as_bool()),
+        Some(true)
+    );
 
     server.abort();
 }
 
 #[tokio::test]
 async fn test_p13_attach_preserves_not_found_when_descriptor_none() {
-    use crate::daemon::protocol::{
-        DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION,
-    };
+    use crate::daemon::protocol::{DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION};
     use crate::ipc::IpcErrorCode;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -3072,7 +3326,10 @@ async fn test_p13_attach_preserves_not_found_when_descriptor_none() {
                 while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                     let req: DaemonRequest = match serde_json::from_str(line.trim()) {
                         Ok(r) => r,
-                        Err(_) => { line.clear(); continue; }
+                        Err(_) => {
+                            line.clear();
+                            continue;
+                        }
                     };
                     line.clear();
                     let resp = match req {
@@ -3090,14 +3347,16 @@ async fn test_p13_attach_preserves_not_found_when_descriptor_none() {
                         DaemonRequest::PairedTerminalDescriptor { .. } => {
                             DaemonResponse::PairedTerminalDescriptorOk { descriptor: None }
                         }
-                        DaemonRequest::Attach { session_id, .. } => {
-                            DaemonResponse::Error {
-                                message: format!("Session '{session_id}' not found"),
-                                code: Some("SESSION_NOT_FOUND".into()),
-                                details: None,
-                            }
-                        }
-                        _ => DaemonResponse::Error { message: "unexpected req".into(), code: None, details: None },
+                        DaemonRequest::Attach { session_id, .. } => DaemonResponse::Error {
+                            message: format!("Session '{session_id}' not found"),
+                            code: Some("SESSION_NOT_FOUND".into()),
+                            details: None,
+                        },
+                        _ => DaemonResponse::Error {
+                            message: "unexpected req".into(),
+                            code: None,
+                            details: None,
+                        },
                     };
                     let bytes = serde_json::to_vec(&resp).unwrap();
                     let _ = write.write_all(&bytes).await;
@@ -3131,9 +3390,7 @@ async fn test_p13_attach_preserves_not_found_when_descriptor_none() {
 
 #[tokio::test]
 async fn test_p13_attach_hub_absence_returns_proxy_pending_unknown() {
-    use crate::daemon::protocol::{
-        DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION,
-    };
+    use crate::daemon::protocol::{DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION};
     use crate::ipc::IpcErrorCode;
     use crate::remote::machine_protocol as m;
     use crate::scoped_contracts::Epoch;
@@ -3156,7 +3413,10 @@ async fn test_p13_attach_hub_absence_returns_proxy_pending_unknown() {
                 while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                     let req: DaemonRequest = match serde_json::from_str(line.trim()) {
                         Ok(r) => r,
-                        Err(_) => { line.clear(); continue; }
+                        Err(_) => {
+                            line.clear();
+                            continue;
+                        }
                     };
                     line.clear();
                     let resp = match req {
@@ -3195,14 +3455,16 @@ async fn test_p13_attach_hub_absence_returns_proxy_pending_unknown() {
                                 generation: Epoch(1),
                             }
                         }
-                        DaemonRequest::Attach { session_id, .. } => {
-                            DaemonResponse::Error {
-                                message: format!("Session '{session_id}' not found"),
-                                code: Some("SESSION_NOT_FOUND".into()),
-                                details: None,
-                            }
-                        }
-                        _ => DaemonResponse::Error { message: "unexpected req".into(), code: None, details: None },
+                        DaemonRequest::Attach { session_id, .. } => DaemonResponse::Error {
+                            message: format!("Session '{session_id}' not found"),
+                            code: Some("SESSION_NOT_FOUND".into()),
+                            details: None,
+                        },
+                        _ => DaemonResponse::Error {
+                            message: "unexpected req".into(),
+                            code: None,
+                            details: None,
+                        },
                     };
                     let bytes = serde_json::to_vec(&resp).unwrap();
                     let _ = write.write_all(&bytes).await;
@@ -3231,11 +3493,20 @@ async fn test_p13_attach_hub_absence_returns_proxy_pending_unknown() {
     .await
     .expect_err("hub absence must return non-terminal error");
 
-    assert_ne!(err.code, IpcErrorCode::SessionNotFound, "Hub absence must NOT return SESSION_NOT_FOUND");
+    assert_ne!(
+        err.code,
+        IpcErrorCode::SessionNotFound,
+        "Hub absence must NOT return SESSION_NOT_FOUND"
+    );
     let details = err.details.expect("Error details must be present");
-    assert_eq!(details.get("pairedProxyPending").and_then(|v| v.as_bool()), Some(true));
-    assert_eq!(details.get("sessionId").and_then(|v| v.as_str()), Some("daemon-session:orig-hub-absent"));
+    assert_eq!(
+        details.get("pairedProxyPending").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        details.get("sessionId").and_then(|v| v.as_str()),
+        Some("daemon-session:orig-hub-absent")
+    );
 
     server.abort();
 }
-

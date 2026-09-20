@@ -975,10 +975,7 @@ scrollback-limit-lines = 25000
         let config = parse_ghostty_config(config_text).expect("parse config");
         assert_eq!(config.scrollback_limit, Some(25_000));
 
-        let imported = TerminalPreferences::imported(
-            config,
-            PathBuf::from("/tmp/config"),
-        );
+        let imported = TerminalPreferences::imported(config, PathBuf::from("/tmp/config"));
         assert_eq!(imported.scrollback, 25_000);
 
         let overrides = TerminalPreferenceOverrides {

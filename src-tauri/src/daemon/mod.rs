@@ -1,6 +1,7 @@
 pub mod agent_extension;
 pub(crate) mod agent_state;
 pub mod client;
+pub mod dag_service;
 pub mod handover;
 pub mod launchd;
 pub(crate) mod logging;

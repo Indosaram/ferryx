@@ -20,6 +20,9 @@ use tokio::sync::Mutex;
 pub const MAX_FRAME: usize = 1024 * 1024;
 pub const PROTOCOL_VERSION: u32 = 1;
 const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(15);
+const DAG_SUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Mirrors the helper's own blocking-wait ceiling.
+pub const MAX_DAG_WAIT_MS: u64 = 10_000;
 const MAX_STDERR_BYTES: usize = 64 * 1024;
 
 /// Remote process identifier on the SSH host.
@@ -218,6 +221,46 @@ pub struct ResizeResult {
 #[serde(rename_all = "camelCase")]
 pub struct StopResult {
     pub stopped: bool,
+}
+
+/// A checkpoint the helper refused to stream verbatim (oversized or unparsable).
+/// Reported explicitly so a damaged graph is never silently substituted for a
+/// truncated one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DagDroppedRun {
+    pub file: String,
+    pub error: String,
+    #[serde(default)]
+    pub bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// One bounded DAG stream frame.
+///
+/// `runs` are **raw journal checkpoints**, exactly as written on the remote
+/// machine. Callers must normalize them with `dag::journal::parse_run_checkpoint`
+/// before treating them as a `DagRunSnapshot`; the transport deliberately does
+/// not pre-decode, so schema evolution stays owned by the journal parser.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DagFrame {
+    pub subscription_id: String,
+    pub sequence: u64,
+    #[serde(default)]
+    pub runs: Vec<Value>,
+    #[serde(default)]
+    pub dropped: Vec<DagDroppedRun>,
+    #[serde(default)]
+    pub resync: bool,
+    /// More changes are already queued on the helper; call `next_frame` again
+    /// without waiting.
+    #[serde(default)]
+    pub more: bool,
+    /// The helper released this subscription; the stream is finished.
+    #[serde(default)]
+    pub closed: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -474,10 +517,9 @@ impl BridgeConnection {
             let stderr = self.check_stderr();
             let _ = self.close().await;
             return Err(match e {
-                BridgeError::Io(_) if !stderr.is_empty() => BridgeError::ProcessExited {
-                    code: None,
-                    stderr,
-                },
+                BridgeError::Io(_) if !stderr.is_empty() => {
+                    BridgeError::ProcessExited { code: None, stderr }
+                }
                 other => other,
             });
         }
@@ -509,19 +551,15 @@ impl BridgeConnection {
                 let stderr = self.check_stderr();
                 let _ = self.close().await;
                 return Err(match e {
-                    BridgeError::Io(_) if !stderr.is_empty() => BridgeError::ProcessExited {
-                        code: None,
-                        stderr,
-                    },
+                    BridgeError::Io(_) if !stderr.is_empty() => {
+                        BridgeError::ProcessExited { code: None, stderr }
+                    }
                     other => other,
                 });
             }
         };
 
-        let ok = response
-            .get("ok")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        let ok = response.get("ok").and_then(Value::as_bool).unwrap_or(false);
         if ok {
             // Restore usability ONLY after a complete, valid response frame is parsed
             self.poisoned = false;
@@ -600,7 +638,10 @@ impl BridgeConnection {
     }
 
     /// Queries the state of an existing PTY session on the remote helper.
-    pub async fn pty_describe(&mut self, target: &TargetRef) -> Result<DescribeResult, BridgeError> {
+    pub async fn pty_describe(
+        &mut self,
+        target: &TargetRef,
+    ) -> Result<DescribeResult, BridgeError> {
         let val = self
             .request(
                 "pty.describe",
@@ -697,11 +738,7 @@ impl BridgeConnection {
     /// Stops the PTY child process. Single-attempt.
     pub async fn pty_stop(&mut self, target: &TargetRef) -> Result<StopResult, BridgeError> {
         let val = self
-            .request(
-                "pty.stop",
-                json!({ "target": target }),
-                DEFAULT_RPC_TIMEOUT,
-            )
+            .request("pty.stop", json!({ "target": target }), DEFAULT_RPC_TIMEOUT)
             .await?;
         serde_json::from_value(val)
             .map_err(|e| BridgeError::Protocol(format!("Invalid stop response: {e}")))
@@ -835,7 +872,11 @@ impl SshBridgeClient {
                 reader_handshake.protocol
             )));
         }
-        if !reader_handshake.capabilities.iter().any(|c| c == "sshHelperV1") {
+        if !reader_handshake
+            .capabilities
+            .iter()
+            .any(|c| c == "sshHelperV1")
+        {
             let _ = control.close().await;
             let _ = reader.close().await;
             return Err(BridgeError::Protocol(
@@ -905,7 +946,11 @@ impl SshBridgeClient {
                 reader_handshake.protocol
             )));
         }
-        if !reader_handshake.capabilities.iter().any(|c| c == "sshHelperV1") {
+        if !reader_handshake
+            .capabilities
+            .iter()
+            .any(|c| c == "sshHelperV1")
+        {
             let _ = control.close().await;
             let _ = reader.close().await;
             return Err(BridgeError::Protocol(
@@ -1070,8 +1115,282 @@ impl SshBridgeClient {
             .into_inner();
         Ok((ctrl, rdr))
     }
+
+    pub fn supports_dag(&self) -> bool {
+        self.handshake
+            .capabilities
+            .iter()
+            .any(|c| c == "dagStreamingV1")
+    }
+
+    /// True when the helper owns journal change watching and can push
+    /// asynchronous frames (`dag.subscribe` / `dag.next` / `dag.unsubscribe`).
+    pub fn supports_dag_stream(&self) -> bool {
+        self.handshake
+            .capabilities
+            .iter()
+            .any(|c| c == "dagSubscribeV1")
+    }
+
+    /// Opens a DAG subscription on a caller-provided, already-spawned bridge
+    /// connection. The subscription owns that connection exclusively, so DAG
+    /// traffic never shares a socket with terminal input, output, or control
+    /// RPC, and dropping it cannot disturb any PTY.
+    pub async fn dag_subscribe_on(
+        &self,
+        connection: BridgeConnection,
+        project_id: &str,
+    ) -> Result<(DagSubscription, DagFrame), BridgeError> {
+        if !self.supports_dag_stream() {
+            return Err(BridgeError::Protocol(
+                "Helper missing required capability 'dagSubscribeV1'".into(),
+            ));
+        }
+        DagSubscription::open(connection, project_id).await
+    }
+
+    /// Opens a DAG subscription over its own dedicated SSH connection.
+    ///
+    /// Cancellation: drop the returned future at any point (while connecting,
+    /// while the helper builds the first inventory, or while parked in
+    /// `next_frame`). The owned SSH child is killed on drop, the helper observes
+    /// EOF, and it releases every subscription owned by that connection.
+    pub async fn dag_subscribe(
+        &self,
+        host: &SshHost,
+        env: &RemoteEnvironment,
+        location: &HelperLocation,
+        project_id: &str,
+    ) -> Result<(DagSubscription, DagFrame), BridgeError> {
+        if !self.supports_dag_stream() {
+            return Err(BridgeError::Protocol(
+                "Helper missing required capability 'dagSubscribeV1'".into(),
+            ));
+        }
+        let mut connection = BridgeConnection::spawn(host, env, location).await?;
+        let handshake = connection.handshake().await?;
+        if let Err(e) = validate_target_handshake(&handshake, &self.host_id, None) {
+            let _ = connection.close().await;
+            return Err(e);
+        }
+        if handshake.owner_id != self.owner_id || handshake.epoch != self.epoch {
+            let _ = connection.close().await;
+            return Err(BridgeError::Protocol(
+                "DAG connection handshake does not match control connection".into(),
+            ));
+        }
+        DagSubscription::open(connection, project_id).await
+    }
+
+    pub async fn dag_inventory(&self, project_id: &str) -> Result<Vec<Value>, BridgeError> {
+        let mut ctrl = self.control.lock().await;
+        let resp = ctrl
+            .request(
+                "dag.inventory",
+                json!({ "projectId": project_id }),
+                Duration::from_secs(5),
+            )
+            .await?;
+        let runs = resp
+            .get("runs")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        Ok(runs)
+    }
+
+    pub async fn dag_poll(
+        &self,
+        project_id: &str,
+        after_mtime_ms: u64,
+        known_runs: &[Value],
+    ) -> Result<(u64, Vec<Value>), BridgeError> {
+        let mut ctrl = self.control.lock().await;
+        let resp = ctrl
+            .request(
+                "dag.poll",
+                json!({
+                    "projectId": project_id,
+                    "afterMtimeMs": after_mtime_ms,
+                    "knownRuns": known_runs,
+                }),
+                Duration::from_secs(5),
+            )
+            .await?;
+        let max_mtime = resp
+            .get("maxMtimeMs")
+            .and_then(Value::as_u64)
+            .unwrap_or(after_mtime_ms);
+        let runs = resp
+            .get("runs")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        Ok((max_mtime, runs))
+    }
 }
 
 #[cfg(test)]
 #[path = "bridge_tests.rs"]
 mod tests;
+
+/// A live, helper-owned DAG stream bound to one project on one connection.
+///
+/// The desktop never sends its known-run set: dedup and change detection live
+/// in the helper, so each frame carries only what actually changed.
+pub struct DagSubscription {
+    connection: BridgeConnection,
+    subscription_id: String,
+    project_id: String,
+    closed: bool,
+    last_sequence: u64,
+}
+
+impl std::fmt::Debug for DagSubscription {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DagSubscription")
+            .field("subscription_id", &self.subscription_id)
+            .field("project_id", &self.project_id)
+            .field("closed", &self.closed)
+            .finish()
+    }
+}
+
+impl DagSubscription {
+    async fn open(
+        mut connection: BridgeConnection,
+        project_id: &str,
+    ) -> Result<(Self, DagFrame), BridgeError> {
+        let value = match connection
+            .request(
+                "dag.subscribe",
+                json!({ "projectId": project_id }),
+                DAG_SUBSCRIBE_TIMEOUT,
+            )
+            .await
+        {
+            Ok(value) => value,
+            Err(e) => {
+                let _ = connection.close().await;
+                return Err(e);
+            }
+        };
+        let frame: DagFrame = match serde_json::from_value(value) {
+            Ok(frame) => frame,
+            Err(e) => {
+                let _ = connection.close().await;
+                return Err(BridgeError::Protocol(format!(
+                    "Invalid dag.subscribe response: {e}"
+                )));
+            }
+        };
+        let subscription = Self {
+            connection,
+            subscription_id: frame.subscription_id.clone(),
+            project_id: project_id.to_string(),
+            closed: frame.closed,
+            last_sequence: frame.sequence,
+        };
+        Ok((subscription, frame))
+    }
+
+    pub fn id(&self) -> &str {
+        &self.subscription_id
+    }
+
+    pub fn project_id(&self) -> &str {
+        &self.project_id
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed
+    }
+
+    /// Waits for the next change frame. Returns an empty (non-closed) frame when
+    /// `wait` elapses with nothing to report.
+    pub async fn next_frame(&mut self, wait: Duration) -> Result<DagFrame, BridgeError> {
+        if self.closed {
+            return Err(BridgeError::ConnectionClosed);
+        }
+        let wait_ms = wait.as_millis().min(MAX_DAG_WAIT_MS as u128) as u64;
+        let value = self
+            .connection
+            .request(
+                "dag.next",
+                json!({ "subscriptionId": self.subscription_id, "waitMs": wait_ms }),
+                Duration::from_millis(wait_ms).saturating_add(DAG_SUBSCRIBE_TIMEOUT),
+            )
+            .await?;
+        let frame: DagFrame = serde_json::from_value(value)
+            .map_err(|e| BridgeError::Protocol(format!("Invalid dag.next response: {e}")))?;
+        self.validate_frame(&frame)?;
+        self.last_sequence = frame.sequence;
+        self.closed = frame.closed;
+        Ok(frame)
+    }
+
+    fn validate_frame(&self, frame: &DagFrame) -> Result<(), BridgeError> {
+        if frame.subscription_id != self.subscription_id {
+            return Err(BridgeError::Protocol(format!(
+                "DAG frame for foreign subscription: expected {}, got {}",
+                self.subscription_id, frame.subscription_id
+            )));
+        }
+        // Sequences are strictly contiguous per subscription. A repeat or a
+        // regression means a stale or replayed frame. A forward gap means
+        // frames were lost, which per design 4.5 must not be silently applied:
+        // only a frame that re-establishes the current inventory (`resync`) may
+        // legally skip ahead; anything else is rejected so the caller drops the
+        // subscription and re-subscribes for a fresh inventory.
+        if frame.sequence <= self.last_sequence {
+            return Err(BridgeError::Protocol(format!(
+                "DAG frame sequence regressed on subscription {}: last {}, got {}",
+                self.subscription_id, self.last_sequence, frame.sequence
+            )));
+        }
+        if frame.sequence != self.last_sequence + 1 && !frame.resync {
+            return Err(BridgeError::Protocol(format!(
+                "DAG frame sequence gap on subscription {}: last {}, got {} without resync",
+                self.subscription_id, self.last_sequence, frame.sequence
+            )));
+        }
+        Ok(())
+    }
+
+    /// Test seam: applies one already-decoded frame through the exact ordering
+    /// rules used by `next_frame`.
+    #[cfg(test)]
+    pub(crate) fn accept_frame_for_test(
+        &mut self,
+        frame: DagFrame,
+    ) -> Result<DagFrame, BridgeError> {
+        self.validate_frame(&frame)?;
+        self.last_sequence = frame.sequence;
+        self.closed = frame.closed;
+        Ok(frame)
+    }
+
+    /// Highest frame sequence accepted on this subscription.
+    pub fn last_sequence(&self) -> u64 {
+        self.last_sequence
+    }
+
+    /// Explicitly releases the subscription and its connection.
+    pub async fn unsubscribe(mut self) -> Result<(), BridgeError> {
+        let result = if self.closed {
+            Ok(())
+        } else {
+            self.connection
+                .request(
+                    "dag.unsubscribe",
+                    json!({ "subscriptionId": self.subscription_id }),
+                    DAG_SUBSCRIBE_TIMEOUT,
+                )
+                .await
+                .map(|_| ())
+        };
+        self.closed = true;
+        let _ = self.connection.close().await;
+        result
+    }
+}

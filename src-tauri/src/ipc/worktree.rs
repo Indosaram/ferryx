@@ -1,12 +1,14 @@
+use crate::daemon::{
+    protocol::{DaemonRequest, DaemonResponse},
+    DaemonClient,
+};
 use crate::ipc::{run_blocking, IpcError};
 use crate::worktree::{
-    BranchDeletionPreview, DirtyState, WorkspaceRegistry, Worktree,
-    WorktreeIdentity,
+    BranchDeletionPreview, DirtyState, WorkspaceRegistry, Worktree, WorktreeIdentity,
 };
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager, Runtime, State};
-use crate::daemon::{DaemonClient, protocol::{DaemonRequest, DaemonResponse}};
 use std::sync::Arc;
+use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 
 pub const WORKTREE_CHANGED_EVENT: &str = "worktree_changed";
 
@@ -134,9 +136,15 @@ pub async fn cmd_worktree_create<R: Runtime>(
     let event_identity = identity.clone();
 
     WorkspaceRegistry::validate_workspace_id(&workspace_id).map_err(IpcError::from)?;
-    let created = match worktree_response(app.state::<Arc<DaemonClient>>().send_request(DaemonRequest::CreateWorktree {
-        workspace_id, worktree: identity, base_ref: request.base_ref,
-    }).await?)? {
+    let created = match worktree_response(
+        app.state::<Arc<DaemonClient>>()
+            .send_request(DaemonRequest::CreateWorktree {
+                workspace_id,
+                worktree: identity,
+                base_ref: request.base_ref,
+            })
+            .await?,
+    )? {
         DaemonResponse::CreateWorktreeOk { worktree } => worktree,
         _ => return Err(IpcError::internal("Unexpected worktree response")),
     };
@@ -171,9 +179,16 @@ async fn delete_worktree<R: Runtime>(
         .map_err(IpcError::from)?
         .worktree_path_for(&identity.ws_id, &identity.slug)
         .map_err(IpcError::from)?;
-    let pruned = match worktree_response(app.state::<Arc<DaemonClient>>().send_request(DaemonRequest::DeleteWorktree {
-        workspace_id, worktree: identity, delete_branch, destructive,
-    }).await?)? {
+    let pruned = match worktree_response(
+        app.state::<Arc<DaemonClient>>()
+            .send_request(DaemonRequest::DeleteWorktree {
+                workspace_id,
+                worktree: identity,
+                delete_branch,
+                destructive,
+            })
+            .await?,
+    )? {
         DaemonResponse::DeleteWorktreeOk { pruned } => pruned,
         _ => return Err(IpcError::internal("Unexpected worktree response")),
     };
@@ -339,13 +354,30 @@ mod deletion_repair_tests {
     async fn deletion_daemon(
         root: &std::path::Path,
         registry: &WorkspaceRegistry,
-    ) -> (Arc<DaemonClient>, tokio::sync::oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+    ) -> (
+        Arc<DaemonClient>,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let owner = Arc::new(crate::daemon::server::DaemonServer::new_with_paths(
             Some(root.join("config.json")),
             Some(root.join("auth.json")),
         ));
-        owner.remote_state().machine_services.as_ref().unwrap().workspaces
-            .register("repair", registry.manager("repair").unwrap().repo_root().to_str().unwrap())
+        owner
+            .remote_state()
+            .machine_services
+            .as_ref()
+            .unwrap()
+            .workspaces
+            .register(
+                "repair",
+                registry
+                    .manager("repair")
+                    .unwrap()
+                    .repo_root()
+                    .to_str()
+                    .unwrap(),
+            )
             .unwrap();
         let socket = root.join("repair.sock");
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
@@ -366,7 +398,10 @@ mod deletion_repair_tests {
         (Arc::new(DaemonClient::new_with_socket(socket)), stop, task)
     }
 
-    async fn stop_deletion_daemon(stop: tokio::sync::oneshot::Sender<()>, mut task: tokio::task::JoinHandle<()>) {
+    async fn stop_deletion_daemon(
+        stop: tokio::sync::oneshot::Sender<()>,
+        mut task: tokio::task::JoinHandle<()>,
+    ) {
         stop.send(()).unwrap();
         match tokio::time::timeout(std::time::Duration::from_secs(10), &mut task).await {
             Ok(result) => result.unwrap(),
@@ -506,11 +541,14 @@ mod deletion_repair_tests {
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .unwrap();
         let (scan_event_tx, mut scan_event_rx) = tokio::sync::mpsc::unbounded_channel();
-        app.listen(crate::ipc::worktree_disk::WORKTREE_DISK_SCAN_PROGRESS_EVENT, move |event: tauri::Event| {
-            let snapshot: crate::ipc::worktree_disk::DiskScanSnapshot =
-                serde_json::from_str(event.payload()).unwrap();
-            scan_event_tx.send(snapshot).unwrap();
-        });
+        app.listen(
+            crate::ipc::worktree_disk::WORKTREE_DISK_SCAN_PROGRESS_EVENT,
+            move |event: tauri::Event| {
+                let snapshot: crate::ipc::worktree_disk::DiskScanSnapshot =
+                    serde_json::from_str(event.payload()).unwrap();
+                scan_event_tx.send(snapshot).unwrap();
+            },
+        );
         cmd_worktree_delete_destructive(
             app.handle().clone(),
             app.state(),
@@ -522,11 +560,15 @@ mod deletion_repair_tests {
         )
         .await
         .unwrap();
-        let cancelled_event = tokio::time::timeout(std::time::Duration::from_secs(5), scan_event_rx.recv())
-            .await
-            .expect("delete must emit scan cancellation event")
-            .expect("event received");
-        assert_eq!(cancelled_event.status, crate::ipc::worktree_disk::DiskScanStatus::Cancelled);
+        let cancelled_event =
+            tokio::time::timeout(std::time::Duration::from_secs(5), scan_event_rx.recv())
+                .await
+                .expect("delete must emit scan cancellation event")
+                .expect("event received");
+        assert_eq!(
+            cancelled_event.status,
+            crate::ipc::worktree_disk::DiskScanStatus::Cancelled
+        );
         assert_eq!(cancelled_event.scan_id, worker.scan_id);
         assert!(!wt.path.exists());
         assert!(

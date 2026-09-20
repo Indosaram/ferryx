@@ -2,8 +2,8 @@
 
 use wgpu::util::DeviceExt;
 
-use super::pipeline::{GlyphInstance, RectInstance, RenderPipelines, ScreenUniform};
 use super::images::ImageDraw;
+use super::pipeline::{GlyphInstance, RectInstance, RenderPipelines, ScreenUniform};
 use crate::native_terminal::composition::PhysicalBounds;
 
 pub fn encode_terminal_passes(
@@ -132,14 +132,18 @@ pub fn encode_terminal_passes_with_surface_options(
     rpass.set_bind_group(0, uniform_bg, &[]);
     rpass.set_vertex_buffer(0, bg_buf.slice(..));
     rpass.draw(0..6, 0..bg.len() as u32);
-    draw_images(&mut rpass, images, glyph_pipe, uniform_bg, |z| z < i32::MIN / 2);
+    draw_images(&mut rpass, images, glyph_pipe, uniform_bg, |z| {
+        z < i32::MIN / 2
+    });
     if !image_occluders.is_empty() {
         rpass.set_pipeline(bg_pipe);
         rpass.set_bind_group(0, uniform_bg, &[]);
         rpass.set_vertex_buffer(0, occluder_buf.slice(..));
         rpass.draw(0..6, 0..image_occluders.len() as u32);
     }
-    draw_images(&mut rpass, images, glyph_pipe, uniform_bg, |z| (i32::MIN / 2..0).contains(&z));
+    draw_images(&mut rpass, images, glyph_pipe, uniform_bg, |z| {
+        (i32::MIN / 2..0).contains(&z)
+    });
     if let Some(buf) = &glyph_buf {
         rpass.set_pipeline(glyph_pipe);
         rpass.set_bind_group(0, uniform_bg, &[]);
@@ -159,8 +163,10 @@ pub fn encode_terminal_passes_with_surface_options(
 }
 
 fn draw_images<'a>(
-    pass: &mut wgpu::RenderPass<'a>, images: &'a [ImageDraw],
-    pipeline: &'a wgpu::RenderPipeline, uniform: &'a wgpu::BindGroup,
+    pass: &mut wgpu::RenderPass<'a>,
+    images: &'a [ImageDraw],
+    pipeline: &'a wgpu::RenderPipeline,
+    uniform: &'a wgpu::BindGroup,
     in_layer: impl Fn(i32) -> bool,
 ) {
     for image in images.iter().filter(|i| in_layer(i.z)) {

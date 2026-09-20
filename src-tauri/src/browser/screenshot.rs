@@ -101,7 +101,10 @@ pub async fn take_browser_screenshot_with_source<S: BrowserSnapshotSource + ?Siz
         std::fs::write(&path_to_write, snapshot.bytes).map_err(|e| {
             IpcError::new(
                 IpcErrorCode::BrowserScreenshotFailed,
-                format!("failed to write screenshot to {}: {e}", path_to_write.display()),
+                format!(
+                    "failed to write screenshot to {}: {e}",
+                    path_to_write.display()
+                ),
             )
         })?;
         Ok(())
@@ -137,9 +140,10 @@ mod tests {
             height: 90,
         });
 
-        let saved_path = take_browser_screenshot_with_source(&source, "main-view", file_path.clone())
-            .await
-            .expect("should save PNG file");
+        let saved_path =
+            take_browser_screenshot_with_source(&source, "main-view", file_path.clone())
+                .await
+                .expect("should save PNG file");
 
         assert_eq!(saved_path, file_path.to_string_lossy().to_string());
         let read_bytes = std::fs::read(&file_path).expect("file should exist");

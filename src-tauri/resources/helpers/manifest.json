@@ -4,16 +4,34 @@
   "protocolVersion": 1,
   "artifacts": [
     {
-      "target": "x86_64-unknown-linux-gnu",
+      "target": "aarch64-apple-darwin",
       "filename": "ferryx-remote-helper",
-      "sha256": "05a09d15ee24d4054eac4d2ca3a3acc0801c056e87aa102e7f0aceede6745c00",
-      "byteLength": 1280568
+      "sha256": "224c287ea3f7b2228fe2272a6f7a288824ba46191f3bbb6f0f5da59dbfa5a28c",
+      "byteLength": 1178528
+    },
+    {
+      "target": "aarch64-unknown-linux-gnu",
+      "filename": "ferryx-remote-helper",
+      "sha256": "ae58c5c0ba4971d917550f806fb0549f96fd7394140528107d12b962000fe2c7",
+      "byteLength": 993256
+    },
+    {
+      "target": "x86_64-apple-darwin",
+      "filename": "ferryx-remote-helper",
+      "sha256": "9dbda7fca2a570e12787348fc552efdbe430ff6b0c44c603770dc0aeaf0fa1db",
+      "byteLength": 1217184
     },
     {
       "target": "x86_64-pc-windows-msvc",
       "filename": "ferryx-remote-helper.exe",
       "sha256": "7d171d960a8e98f0d9665b297e6bc825278670846280896444b6f1d4d70ea70b",
       "byteLength": 823296
+    },
+    {
+      "target": "x86_64-unknown-linux-gnu",
+      "filename": "ferryx-remote-helper",
+      "sha256": "26dbc6bfd0de87ce929fa1da8ddf9f29a0ca66428b6404674c30c54a2fefd2e6",
+      "byteLength": 1109920
     }
   ]
 }

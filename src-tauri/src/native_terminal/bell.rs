@@ -1,8 +1,8 @@
 //! Safe bell, title, and pty write event observation and callback management.
 
+use parking_lot::Mutex;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
-use parking_lot::Mutex;
 
 use super::sys::types::GhosttyTerminal;
 

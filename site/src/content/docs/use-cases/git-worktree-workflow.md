@@ -31,7 +31,7 @@ The friction shows up when worktrees multiply, or when you come back to a projec
 - **Paths and names drift.** One worktree lives in `../feature-x`, the next in `~/code/feature-x-wip`, and the third has a typo in its branch name. Nothing enforces a convention, so `git worktree list` eventually reads like an archaeology dig.
 - **Stale worktrees pile up.** A branch merges and its worktree directory stays behind, or a directory gets deleted and its branch lingers. Reconciling the two is on you.
 - **Every worktree wants its own terminal.** The point is running things side by side, so you open a new tab per directory and retype the path at the start of each session.
-- **Agents amplify all of it.** Hand a coding agent a directory and it works in whatever checkout you gave it. Run several agents and the bookkeeping grows with them.
+- **Agents each bring their own scheme.** Claude Code creates worktrees under `.claude/worktrees/<name>/` on a `worktree-<name>` branch with `claude --worktree` ([docs](https://code.claude.com/docs/en/worktrees)), and Codex creates them in `$CODEX_HOME/worktrees` in a detached HEAD ([docs](https://learn.chatgpt.com/docs/environments/git-worktrees)), both read 2026-09-19. Each is good at isolating its own sessions. Run two vendors on one repository and you're back to reconciling conventions by hand, and git still allows a branch in exactly one worktree at a time.
 
 None of this is hard. It's repeated small decisions, which is exactly the kind of work worth handing to a tool.
 
@@ -43,6 +43,6 @@ What that means inside the workspace:
 
 - **Jailed paths.** Managed worktree paths are constrained to the repository root, so a managed worktree can't escape the repo. Nothing lands in a sibling directory of your home folder unless you put it there yourself.
 - **A terminal per worktree, side by side.** Ferryx provides split terminal panes with drag-and-drop rearrangement, and embedded browser tabs using native web views next to terminal panes. The layout you'd assemble by hand is the default shape of the workspace.
-- **One convention across every repo.** Because the tool owns the path and branch scheme, `git worktree list` stays readable no matter how many worktrees you make.
+- **One convention across every repo and every agent.** Because the tool owns the path and branch scheme, `git worktree list` stays readable no matter how many worktrees you make, and it reads the same whether the pane is running Claude Code, Codex, a test suite, or a plain shell.
 
-If your goal is running several coding agents in parallel, each in its own worktree, that workflow is covered in [parallel AI agents](/use-cases/parallel-ai-agents/). Since sessions live in a daemon rather than a window, you can also check on them away from the desk; see [remote terminal access](/use-cases/remote-terminal-access/). For the workspace as a whole, start with the [introduction](/docs/introduction/).
+If your goal is running several coding agents in parallel, each in its own worktree, that workflow is covered in [parallel AI agents](/use-cases/parallel-ai-agents/). Since sessions live in a daemon rather than a window, you can also check on them away from the desk; see [remote terminal access](/use-cases/remote-terminal-access/). For the workspace as a whole, start with the [introduction](/docs/introduction/), and for the worktree paths, branch scheme, and platform packages stated with their sources, see the [product facts](/docs/facts/).

@@ -251,11 +251,7 @@ fn probe_generic_selection_and_esc_cancel_do_not_fabricate_copilot() {
         "generic enter-to-select / esc-to-cancel prompt must not fabricate copilot"
     );
 
-    let cancel_rows = [
-        "$ fzf",
-        "> search query",
-        "esc to cancel",
-    ];
+    let cancel_rows = ["$ fzf", "> search query", "esc to cancel"];
     assert_eq!(
         detect(&cancel_rows, "", None),
         None,

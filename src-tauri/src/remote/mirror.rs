@@ -460,7 +460,8 @@ pub mod headless {
             if self.primary_grid.len() < rows as usize {
                 let diff = rows as usize - self.primary_grid.len();
                 for _ in 0..diff {
-                    self.primary_grid.push(vec![HeadlessCell::default(); cols as usize]);
+                    self.primary_grid
+                        .push(vec![HeadlessCell::default(); cols as usize]);
                 }
             } else if self.primary_grid.len() > rows as usize {
                 let diff = self.primary_grid.len() - rows as usize;
@@ -476,7 +477,8 @@ pub mod headless {
             if self.alt_grid.len() < rows as usize {
                 let diff = rows as usize - self.alt_grid.len();
                 for _ in 0..diff {
-                    self.alt_grid.push(vec![HeadlessCell::default(); cols as usize]);
+                    self.alt_grid
+                        .push(vec![HeadlessCell::default(); cols as usize]);
                 }
             } else if self.alt_grid.len() > rows as usize {
                 let diff = self.alt_grid.len() - rows as usize;
@@ -1134,10 +1136,11 @@ pub mod headless {
                                 47 | 1049 => {
                                     if !self.alt_screen_active {
                                         self.primary_cursor = (self.cursor_x, self.cursor_y);
-                                        self.alt_grid = vec![
-                                            vec![HeadlessCell::default(); self.cols as usize];
-                                            self.rows as usize
-                                        ];
+                                        self.alt_grid =
+                                            vec![
+                                                vec![HeadlessCell::default(); self.cols as usize];
+                                                self.rows as usize
+                                            ];
                                         self.alt_cursor = (0, 0);
                                         self.cursor_x = 0;
                                         self.cursor_y = 0;
@@ -1659,7 +1662,9 @@ mod headless_tests {
     #[test]
     fn test_decstbm_insert_line_preserves_footer() {
         let mut mirror = RemoteTerminalMirror::new(10, 3).expect("new mirror");
-        mirror.feed(b"line1\r\nline2\r\nfooter").expect("feed initial");
+        mirror
+            .feed(b"line1\r\nline2\r\nfooter")
+            .expect("feed initial");
 
         let frame = mirror.full_frame().expect("full frame");
         assert_eq!(row_text(&frame, 0), "line1");
@@ -1763,7 +1768,9 @@ mod headless_tests {
         // 2. Combining diacritical mark (U+0301) must be retained with width 0 and not consume an extra cell
         let mut mirror2 = RemoteTerminalMirror::new(10, 2).expect("mirror2");
         // 'e' + U+0301 (combining acute) + 'b'
-        mirror2.feed("e\u{0301}b".as_bytes()).expect("feed combining");
+        mirror2
+            .feed("e\u{0301}b".as_bytes())
+            .expect("feed combining");
         assert_eq!(mirror2.cursor_x, 2); // 'e\u{0301}' (cell 0, width 1) + 'b' (cell 1, width 1) = cursor at 2
 
         let frame2 = mirror2.full_frame().expect("full frame 2");

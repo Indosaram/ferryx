@@ -4,6 +4,8 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { MobileKeyDock } from "../components/MobileKeyDock";
 import { useTerminalSettings } from "../lib/terminalSettings";
 import { isTauriRuntime } from "../lib/tauri";
+import { BUILD_STAMP } from "../lib/buildStamp";
+import { composeJamoRuns, isUncomposedJamoRun } from "./hangulComposition";
 import { remoteSocketUrl } from "./remoteClient";
 import {
   applyGridFrame,
@@ -173,6 +175,40 @@ function controlByteForChar(ch: string): number | null {
   }
 }
 
+// Hangul code points an IME can still rewrite in place: compatibility jamo (ㅁ, ㅗ), conjoining
+// jamo, and precomposed syllables (한).
+function isHangulChar(code: number): boolean {
+  return (code >= 0x3131 && code <= 0x318e)
+    || (code >= 0x1100 && code <= 0x11ff)
+    || (code >= 0xac00 && code <= 0xd7a3);
+}
+
+// Index where the trailing Hangul run begins. A Korean IME can rewrite from the last cluster
+// boundary onward - typing ㅏ after 갓 yields 가사, carrying the final consonant into the next
+// syllable - so the whole trailing run counts as mutable until the IME settles it.
+function hangulTailStart(text: string): number {
+  let index = text.length;
+  while (index > 0 && isHangulChar(text.charCodeAt(index - 1))) index -= 1;
+  return index;
+}
+
+function commonPrefixLength(left: string, right: string): number {
+  const limit = Math.min(left.length, right.length);
+  let index = 0;
+  while (index < limit && left.charCodeAt(index) === right.charCodeAt(index)) index += 1;
+  return index;
+}
+
+// An IME reports a commit either as the whole accumulated run or as just the new keystrokes: take the
+// extension beyond what is already held. A repeat of the same length is a new keystroke (ㅋㅋ), never a
+// duplicate of what is held.
+function jamoCommitDelta(held: string, committed: string): string {
+  if (held.length > 0 && committed.startsWith(held) && committed.length > held.length) {
+    return committed.slice(held.length);
+  }
+  return committed;
+}
+
 function terminalSocketUrl(sessionId: string, token: string, geometry: GridGeometry, transportUrl: string, signal: AbortSignal): string | Promise<string> {
   const base = new URL(transportUrl);
   const target = `/api/v1/terminal/${sessionId}`;
@@ -303,6 +339,12 @@ export function RemoteTerminal({
   const inputSinkRef = useRef<HTMLTextAreaElement>(null);
   const isComposingRef = useRef(false);
   const pendingCompositionInputRef = useRef<string | null>(null);
+  const sinkEmittedCharsRef = useRef(0);
+  const sinkValueRef = useRef("");
+  // Text the IME has produced but the client has not sent: the sink's mutable tail, plus jamo handed
+  // over one at a time by keyboards that never compose (see commitComposition).
+  const sinkTailRef = useRef("");
+  const heldJamoRef = useRef("");
   const requestResizeRef = useRef<() => void>(() => {});
   const lastSentGeometryRef = useRef<GridGeometry | null>(null);
   const scheduledSocketRequestRef = useRef<SocketRequest | null>(null);
@@ -340,6 +382,11 @@ export function RemoteTerminal({
   const focusInput = useCallback(() => {
     inputSinkRef.current?.focus({ preventScroll: true });
   }, []);
+
+  useLayoutEffect(() => {
+    // A held tail belongs to the session that was on screen; never leak it into the next one.
+    resetSinkState();
+  }, [sessionId, activeTabId]);
 
   useLayoutEffect(() => {
     // Software keyboards must be opened by an explicit tap, not lifecycle work.
@@ -647,14 +694,127 @@ export function RemoteTerminal({
     socket.send(new TextEncoder().encode(text));
   };
 
+  /// WebKit inserts U+00A0 for typed spaces; a PTY line must never receive one. Jamo the IME never
+  /// composed are folded into syllables here, on the way out (see hangulComposition.ts).
+  const emitText = (text: string) => {
+    if (text.length === 0) return;
+    sendText(composeJamoRuns(text.replace(/\u00a0/g, " ")));
+  };
+
+  const syncPreedit = () => {
+    const pending = composeJamoRuns(heldJamoRef.current + sinkTailRef.current);
+    setPreedit(pending.length > 0 ? pending : null);
+  };
+
+  /// Send settled text, with jamo the IME handed over piecemeal in front of it: those keystrokes were
+  /// typed first, and a jamo run only composes once the text that ended it is known.
+  const emitSettled = (text: string) => {
+    const held = heldJamoRef.current;
+    heldJamoRef.current = "";
+    emitText(held + text);
+    syncPreedit();
+  };
+
+  /// Forget the sink's field and bookkeeping. Jamo the IME committed are the user's typing, so they
+  /// survive; only resetSinkState drops them.
+  const resetSinkField = () => {
+    const sink = inputSinkRef.current;
+    if (sink) sink.value = "";
+    sinkEmittedCharsRef.current = 0;
+    sinkValueRef.current = "";
+    sinkTailRef.current = "";
+    syncPreedit();
+  };
+
+  const resetSinkState = () => {
+    heldJamoRef.current = "";
+    resetSinkField();
+  };
+
+  /// True while the client holds text the IME has not settled or we have not forwarded.
+  const sinkHasPendingText = () => {
+    const sink = inputSinkRef.current;
+    return heldJamoRef.current.length > 0
+      || (sink !== null && sink.value.length > sinkEmittedCharsRef.current);
+  };
+
+  /// Backspace inside a jamo run the sink no longer holds. A keyboard that commits one jamo per
+  /// keystroke removed one jamo, and the field is empty, so the deletion has to happen here.
+  /// Returns false when the field can absorb the keystroke itself.
+  const dropHeldJamo = () => {
+    const sink = inputSinkRef.current;
+    if (heldJamoRef.current.length === 0) return false;
+    if (sink !== null && sink.value.length > sinkEmittedCharsRef.current) return false;
+    heldJamoRef.current = heldJamoRef.current.slice(0, -1);
+    syncPreedit();
+    return true;
+  };
+
+  /// Forward everything the IME can no longer rewrite, holding the trailing Hangul run.
+  ///
+  /// WKWebView's Korean IME (iOS/iPadOS, and Tauri's own webview) fires no composition events at
+  /// all: it rewrites the sink in place through plain `input` events whose `isComposing` is false
+  /// (xtermjs/xterm.js#6084). Emitting the sink value per event therefore ships lone jamo and
+  /// clears the field mid-syllable, which desyncs the IME into committing jamo one keypress at a
+  /// time. The trailing run stays pending instead (rendered as local preedit) until the IME
+  /// settles it: a new non-Hangul insertion, a composition end, or a key we forward ourselves.
+  const settleSinkText = (sink: HTMLTextAreaElement) => {
+    const text = sink.value;
+    // Never re-emit text the IME rewrote behind our back.
+    let emitted = Math.min(sinkEmittedCharsRef.current, commonPrefixLength(sinkValueRef.current, text));
+    const holdFrom = Math.max(emitted, hangulTailStart(text));
+    if (holdFrom > emitted) {
+      emitSettled(text.slice(emitted, holdFrom));
+      emitted = holdFrom;
+    }
+    sinkEmittedCharsRef.current = emitted;
+    sinkValueRef.current = text;
+    if (emitted >= text.length) {
+      // Nothing left the IME can still change: keep the sink pristine.
+      resetSinkField();
+      return;
+    }
+    sinkTailRef.current = text.slice(emitted);
+    syncPreedit();
+  };
+
+  /// Commit a pending IME tail before anything that must not overtake it (keys, paste, blur).
+  const flushSinkText = () => {
+    const sink = inputSinkRef.current;
+    emitSettled(sink ? sink.value.slice(Math.min(sinkEmittedCharsRef.current, sink.value.length)) : "");
+    resetSinkState();
+  };
+
   const commitComposition = (data: string) => {
     isComposingRef.current = false;
-    setPreedit(null);
     const sink = inputSinkRef.current;
     // Empty compositionend is cancellation, never a request to send preedit.
     pendingCompositionInputRef.current = data;
-    if (sink) sink.value = "";
-    sendText(data);
+    const emitted = sink
+      ? Math.min(sinkEmittedCharsRef.current, commonPrefixLength(sinkValueRef.current, sink.value))
+      : 0;
+    const remainder = sink ? sink.value.slice(emitted) : "";
+    if (data.length === 0) {
+      // Cancellation: the IME withdrew its own preedit.
+      resetSinkField();
+      return;
+    }
+    // The sink is authoritative while it still carries the committed text; browsers that clear it
+    // themselves only report the commit through compositionend's payload.
+    const committed = sink && remainder.includes(data) ? remainder : data;
+    if (isUncomposedJamoRun(committed)) {
+      // Jamo-only commits are not composition at all: Android WebKit and Gboard hand over one jamo
+      // per composition and the browser drops the previous keystroke from the field before the next
+      // one arrives, so the run is reassembled and held here until something settles it. Sending a
+      // commit as it arrives ships ㅇㅣㄹㅓㅎㄱㅔ for 이렇게.
+      heldJamoRef.current += jamoCommitDelta(heldJamoRef.current, committed);
+      resetSinkField();
+      return;
+    }
+    // A commit carrying a composed syllable is text the IME will not rewrite: send it now so echo
+    // stays immediate.
+    emitSettled(committed);
+    resetSinkState();
   };
 
   const handleSinkInput = (event: React.FormEvent<HTMLTextAreaElement>) => {
@@ -662,23 +822,31 @@ export function RemoteTerminal({
     const input = event.nativeEvent as InputEvent;
     if (isComposingRef.current || input.isComposing) {
       isComposingRef.current = true;
-      setPreedit(sink.value);
+      sinkTailRef.current = sink.value;
+      syncPreedit();
       return;
     }
     const text = sink.value;
-    sink.value = "";
     const committed = pendingCompositionInputRef.current;
     pendingCompositionInputRef.current = null;
-    // WebKit/Chromium can deliver the final insertion after compositionend.
-    // Consume only that matching insertion, not the next unrelated edit.
-    if (committed !== null && text === committed &&
-        (input.inputType === "insertFromComposition" || input.inputType === "insertText" || input.inputType === "insertCompositionText")) return;
-    sendText(text);
+    // WebKit/Chromium can deliver the final insertion after compositionend. Matching the text alone
+    // is deliberate: an insertion that reproduces exactly what was just committed is that commit's
+    // mirror whatever input type the engine reports (WebKit uses an empty or replacement type for
+    // some of them), and absorbing it twice would double the syllable.
+    if (committed !== null && committed.length > 0 && text === committed) {
+      // The mirror of a commit the client already holds; the held jamo run survives it.
+      resetSinkField();
+      return;
+    }
+    settleSinkText(sink);
   };
 
   const sendKey = (key: string) => {
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
+
+    // A held IME tail was typed first and must reach the PTY before this key.
+    flushSinkText();
 
     if (key === "ctrl-c") {
       socket.send(JSON.stringify({ type: "signal", signal: "interrupt" }));
@@ -715,8 +883,11 @@ export function RemoteTerminal({
             ) : null}
             <span className="truncate font-mono text-xs text-muted-foreground">{title ?? "Desktop terminal"}</span>
           </div>
-          <span role="status" className="font-mono text-[10px] text-muted-foreground">
-            {connected ? "Live" : "Connecting"}
+          <span className="flex items-center gap-2">
+            <span data-testid="remote-terminal-build-stamp" className="font-mono text-[10px] text-muted-foreground/70">{BUILD_STAMP}</span>
+            <span role="status" className="font-mono text-[10px] text-muted-foreground">
+              {connected ? "Live" : "Connecting"}
+            </span>
           </span>
         </div>
       ) : null}
@@ -782,6 +953,13 @@ export function RemoteTerminal({
               event.preventDefault();
               sendKey("\u001b[Z");
             } else if (BROWSER_KEY_NAMES[event.key]) {
+              // Backspace/Delete belongs to the editable while it still holds a pending IME tail;
+              // deleting echoed terminal content instead would lose what the user just typed.
+              if (event.key === "Backspace" && dropHeldJamo()) {
+                event.preventDefault();
+                return;
+              }
+              if ((event.key === "Backspace" || event.key === "Delete") && sinkHasPendingText()) return;
               event.preventDefault();
               sendKey(event.key);
             } else if (event.altKey && !event.ctrlKey) {
@@ -816,6 +994,8 @@ export function RemoteTerminal({
         }}
         onPaste={(event) => {
           event.preventDefault();
+          // Text typed before the paste must not be overtaken by it.
+          flushSinkText();
           const text =
             event.clipboardData?.getData("text/plain") ||
             event.clipboardData?.getData("text") ||
@@ -886,18 +1066,25 @@ export function RemoteTerminal({
             isComposingRef.current = true;
           }}
           onCompositionUpdate={(event) => {
-            setPreedit(event.data);
+            sinkTailRef.current = event.data;
+            syncPreedit();
           }}
           onCompositionEnd={(event) => {
             commitComposition(event.data);
           }}
           onInput={handleSinkInput}
           onBlur={() => {
+            // A live composition is canceled - its preedit was never the user's text. Jamo the IME
+            // already committed are, so they are sent before the next surface (dock key, paste,
+            // tab) takes over the sink.
+            if (isComposingRef.current) {
+              resetSinkField();
+              emitSettled("");
+            } else {
+              flushSinkText();
+            }
             isComposingRef.current = false;
             pendingCompositionInputRef.current = null;
-            setPreedit(null);
-            const sink = inputSinkRef.current;
-            if (sink) sink.value = "";
           }}
         />
         {grid?.lines.map((line) => (

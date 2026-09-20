@@ -163,7 +163,14 @@ pub(super) fn scan_after_resolution(
     started: Instant,
     resolved: impl FnOnce(),
 ) -> FsResult<Directories> {
-    scan_with_elapsed(input, hidden, home, cancelled, || started.elapsed(), resolved)
+    scan_with_elapsed(
+        input,
+        hidden,
+        home,
+        cancelled,
+        || started.elapsed(),
+        resolved,
+    )
 }
 
 // Keep native enumeration and all budget decisions shared; tests freeze only
@@ -292,7 +299,9 @@ struct DeviceBudget {
 }
 pub(crate) struct BrowseLimits(
     parking_lot::Mutex<HashMap<String, DeviceBudget>>,
-    #[cfg(test)] pub(super) parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedSender<(&'static str, bool)>>>,
+    #[cfg(test)]
+    pub(super) 
+        parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedSender<(&'static str, bool)>>>,
     Arc<tokio::sync::Semaphore>,
     #[cfg(test)] pub(super) parking_lot::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(test)] pub(super) parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedSender<bool>>>,
@@ -301,10 +310,13 @@ impl Default for BrowseLimits {
     fn default() -> Self {
         Self(
             parking_lot::Mutex::default(),
-            #[cfg(test)] parking_lot::Mutex::default(),
+            #[cfg(test)]
+            parking_lot::Mutex::default(),
             Arc::new(tokio::sync::Semaphore::new(16)),
-            #[cfg(test)] parking_lot::Mutex::default(),
-            #[cfg(test)] parking_lot::Mutex::default(),
+            #[cfg(test)]
+            parking_lot::Mutex::default(),
+            #[cfg(test)]
+            parking_lot::Mutex::default(),
         )
     }
 }
@@ -319,7 +331,9 @@ struct AuthCompleted(Option<tokio::sync::mpsc::UnboundedSender<bool>>);
 #[cfg(test)]
 impl Drop for AuthCompleted {
     fn drop(&mut self) {
-        if let Some(events) = &self.0 { let _ = events.send(true); }
+        if let Some(events) = &self.0 {
+            let _ = events.send(true);
+        }
     }
 }
 #[cfg(test)]
@@ -333,9 +347,13 @@ impl Drop for RequestCompleted {
 impl BrowseLimits {
     pub(super) fn auth_slots(&self) -> &Arc<tokio::sync::Semaphore> {
         #[cfg(test)]
-        { &self.2 }
+        {
+            &self.2
+        }
         #[cfg(not(test))]
-        { &self.1 }
+        {
+            &self.1
+        }
     }
     pub(super) fn acquire(
         &self,
@@ -363,7 +381,8 @@ impl BrowseLimits {
         let mut budgets = self.0.lock();
         let now = clock();
         budgets.retain(|_, b| {
-            now.duration_since(b.updated) < Duration::from_secs(60) || b.slots.available_permits() != 4
+            now.duration_since(b.updated) < Duration::from_secs(60)
+                || b.slots.available_permits() != 4
         });
         if !budgets.contains_key(device) && budgets.len() >= 4096 {
             return Err(super::server::machine_error(
@@ -378,7 +397,8 @@ impl BrowseLimits {
                 updated: now,
                 slots: Arc::new(tokio::sync::Semaphore::new(4)),
             });
-        budget.tokens = (budget.tokens + now.duration_since(budget.updated).as_secs_f64() * 10.0).min(20.0);
+        budget.tokens =
+            (budget.tokens + now.duration_since(budget.updated).as_secs_f64() * 10.0).min(20.0);
         budget.updated = now;
         if budget.tokens < 1.0 {
             return Err(super::server::machine_error(
@@ -412,12 +432,19 @@ pub(crate) async fn directories(
     #[cfg(test)]
     let events = limits.1.lock().clone();
     #[cfg(test)]
-    let _completed = RequestCompleted { events: events.clone(), flag: flag.clone() };
+    let _completed = RequestCompleted {
+        events: events.clone(),
+        flag: flag.clone(),
+    };
     let cancel = CancelOnDrop(flag);
     let auth_flag = cancel.0.clone();
-    let auth_permit = limits.auth_slots().clone().try_acquire_owned().map_err(|_| {
-        super::server::machine_error(StatusCode::TOO_MANY_REQUESTS, "CAPACITY_EXCEEDED")
-    })?;
+    let auth_permit = limits
+        .auth_slots()
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            super::server::machine_error(StatusCode::TOO_MANY_REQUESTS, "CAPACITY_EXCEEDED")
+        })?;
     let auth_state = state.clone();
     let auth_headers = headers.clone();
     #[cfg(test)]
@@ -433,20 +460,22 @@ pub(crate) async fn directories(
         #[cfg(test)]
         let probe = auth_limits.3.lock().clone();
         #[cfg(test)]
-        if let Some(probe) = probe { probe(); }
-        let result = if auth_flag.load(Ordering::Acquire) || tokio::time::Instant::now() >= deadline {
+        if let Some(probe) = probe {
+            probe();
+        }
+        let result = if auth_flag.load(Ordering::Acquire) || tokio::time::Instant::now() >= deadline
+        {
             Err(FsError::Timeout.response())
-        } else { super::server::authenticate_machine_request(
-            &auth_state,
-            &auth_headers,
-        ) };
+        } else {
+            super::server::authenticate_machine_request(&auth_state, &auth_headers)
+        };
         drop(permit);
         Ok(result)
     });
     let device = tokio::time::timeout_at(deadline, auth_work)
-    .await
-    .map_err(|_| FsError::Timeout.response())?
-    .map_err(|_| FsError::Unavailable.response())??;
+        .await
+        .map_err(|_| FsError::Timeout.response())?
+        .map_err(|_| FsError::Unavailable.response())??;
     if device.access_scope != DeviceAccessScope::Machine
         || device.permission != DevicePermission::Control
     {

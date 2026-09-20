@@ -9,6 +9,10 @@ pub enum HelperTarget {
     LinuxX86_64,
     #[serde(rename = "aarch64-unknown-linux-gnu")]
     LinuxAarch64,
+    #[serde(rename = "aarch64-apple-darwin")]
+    DarwinAarch64,
+    #[serde(rename = "x86_64-apple-darwin")]
+    DarwinX86_64,
     #[serde(rename = "x86_64-pc-windows-msvc")]
     WindowsX64,
 }
@@ -18,13 +22,18 @@ impl HelperTarget {
         match self {
             Self::LinuxX86_64 => "x86_64-unknown-linux-gnu",
             Self::LinuxAarch64 => "aarch64-unknown-linux-gnu",
+            Self::DarwinAarch64 => "aarch64-apple-darwin",
+            Self::DarwinX86_64 => "x86_64-apple-darwin",
             Self::WindowsX64 => "x86_64-pc-windows-msvc",
         }
     }
 
     pub fn filename(&self) -> &'static str {
         match self {
-            Self::LinuxX86_64 | Self::LinuxAarch64 => "ferryx-remote-helper",
+            Self::LinuxX86_64
+            | Self::LinuxAarch64
+            | Self::DarwinAarch64
+            | Self::DarwinX86_64 => "ferryx-remote-helper",
             Self::WindowsX64 => "ferryx-remote-helper.exe",
         }
     }
@@ -69,10 +78,7 @@ pub fn compute_file_sha256(path: &Path) -> Result<String, std::io::Error> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-pub fn resolve_target_from_probe(
-    platform: &str,
-    arch: &str,
-) -> Result<HelperTarget, IpcError> {
+pub fn resolve_target_from_probe(platform: &str, arch: &str) -> Result<HelperTarget, IpcError> {
     let norm_platform = platform.trim().to_lowercase();
     let norm_arch = arch.trim().to_lowercase();
 
@@ -83,6 +89,14 @@ pub fn resolve_target_from_probe(
             _ => Err(IpcError::new(
                 IpcErrorCode::Unsupported,
                 format!("Unsupported remote CPU architecture for Linux: '{arch}'"),
+            )),
+        },
+        "darwin" => match norm_arch.as_str() {
+            "x86_64" | "amd64" => Ok(HelperTarget::DarwinX86_64),
+            "aarch64" | "arm64" => Ok(HelperTarget::DarwinAarch64),
+            _ => Err(IpcError::new(
+                IpcErrorCode::Unsupported,
+                format!("Unsupported remote CPU architecture for macOS: '{arch}'"),
             )),
         },
         "windows" => match norm_arch.as_str() {
@@ -304,13 +318,56 @@ mod tests {
     }
 
     #[test]
+    fn resolve_target_normalizes_darwin() {
+        assert_eq!(
+            resolve_target_from_probe("darwin", "arm64").unwrap(),
+            HelperTarget::DarwinAarch64
+        );
+        assert_eq!(
+            resolve_target_from_probe("Darwin", "aarch64").unwrap(),
+            HelperTarget::DarwinAarch64
+        );
+        assert_eq!(
+            resolve_target_from_probe("darwin", "x86_64").unwrap(),
+            HelperTarget::DarwinX86_64
+        );
+        assert_eq!(
+            resolve_target_from_probe("  DARWIN ", "amd64").unwrap(),
+            HelperTarget::DarwinX86_64
+        );
+    }
+
+    #[test]
+    fn darwin_targets_expose_triples_and_unsuffixed_filename() {
+        assert_eq!(
+            HelperTarget::DarwinAarch64.triple(),
+            "aarch64-apple-darwin"
+        );
+        assert_eq!(HelperTarget::DarwinX86_64.triple(), "x86_64-apple-darwin");
+        assert_eq!(
+            HelperTarget::DarwinAarch64.filename(),
+            "ferryx-remote-helper"
+        );
+        assert_eq!(
+            HelperTarget::DarwinX86_64.filename(),
+            "ferryx-remote-helper"
+        );
+        assert_eq!(
+            serde_json::to_value(HelperTarget::DarwinAarch64).unwrap(),
+            serde_json::json!("aarch64-apple-darwin")
+        );
+        assert_eq!(
+            serde_json::to_value(HelperTarget::DarwinX86_64).unwrap(),
+            serde_json::json!("x86_64-apple-darwin")
+        );
+    }
+
+    #[test]
     fn resolve_target_rejects_ambiguous_posix_and_unsupported_os() {
         for (os, arch) in [
             ("posix", "x86_64"),
             ("posix", "arm64"),
             ("posix", "mips"),
-            ("darwin", "arm64"),
-            ("Darwin", "x86_64"),
             ("freebsd", "x86_64"),
             ("OpenBSD", "amd64"),
             ("solaris", "x86_64"),
@@ -343,7 +400,8 @@ mod tests {
             ("posix", "mips"),
             ("posix", "armv7l"),
             ("posix", "i686"),
-            ("darwin", "arm64"),
+            ("darwin", "i386"),
+            ("darwin", "ppc"),
             ("freebsd", "x86_64"),
             ("windows", "arm64"),
             ("windows", "x86"),
@@ -381,7 +439,9 @@ mod tests {
         assert_eq!(manifest.helper_version, "2026.908.1");
         assert_eq!(manifest.protocol_version, 1);
 
-        let linux = manifest.find_artifact(HelperTarget::LinuxX86_64).expect("linux asset");
+        let linux = manifest
+            .find_artifact(HelperTarget::LinuxX86_64)
+            .expect("linux asset");
         assert_eq!(linux.filename, "ferryx-remote-helper");
         assert_eq!(linux.byte_length, 123456);
 

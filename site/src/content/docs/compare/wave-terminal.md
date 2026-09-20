@@ -11,8 +11,8 @@ This page sticks to verifiable facts: license, language, documented features, an
 
 - License: Wave Terminal is Apache-2.0. Ferryx is SUL-1.0, a source-available license; its source is public and free for personal and non-commercial use.
 - Implementation: Wave is written in Go. Ferryx is built with Rust and Tauri v2, contains no Electron, and renders through WGPU on a native child surface.
-- Platforms: Wave runs on macOS, Linux, and Windows. Ferryx ships a macOS universal DMG, a Windows build through the Microsoft Store, and Linux AppImage and .deb packages.
-- Maturity: Wave is an established project with a large user base. Ferryx is at v0.1.0-alpha.
+- Platforms: Wave runs on macOS, Linux, and Windows. Ferryx ships a macOS universal DMG, an x64 Windows installer, and Linux AppImage and .deb packages.
+- Maturity: Wave is an established project with a large user base. Ferryx is early software.
 - Popularity: Wave's repository had 22,258 GitHub stars as of September 2026. Star counts and feature sets change, so check both projects for the current picture.
 
 ## What Wave Terminal does
@@ -46,7 +46,7 @@ The [technical architecture](/docs/architecture/) page goes deeper on the intern
 - You want a mature, full-featured terminal. Wave combines shells, remote machines, file editing, and browsing in one workspace, and the breadth of what's built in is the mark of a mature project.
 - You work on remote machines. Wave's SSH connection manager, its remote directory navigation with markdown and image preview, and its built-in VSCode-like editor cover a workflow Ferryx doesn't attempt yet.
 - Dashboards matter to you. Wave's layouts arrange terminals, editors, and web views into workspaces and dashboards, a broader canvas than Ferryx's agent-focused model.
-- You'd rather use a tool with a large, established user base. Wave has one. Ferryx is a v0.1.0-alpha release with a narrow focus and a much smaller feature surface.
+- You'd rather use a tool with a large, established user base. Wave has one. Ferryx is early software with a narrow focus and a much smaller feature surface.
 
 ## Where Ferryx differs
 
@@ -59,4 +59,4 @@ The differences come down to architecture and scope, not to one tool being bette
 
 ## The short version
 
-If you want a mature workspace terminal with SSH, remote file editing, and dashboards, Wave Terminal is the stronger choice today. But if your daily loop is several coding agents running in parallel across git worktrees, with processes that survive GUI restarts, that's the job Ferryx is built for, though it's still at v0.1.0-alpha. Both projects are open source and worth a look; the links above lead to each one.
+If you want a mature workspace terminal with SSH, remote file editing, and dashboards, Wave Terminal is the stronger choice today. But if your daily loop is several coding agents running in parallel across git worktrees, with processes that survive GUI restarts, that's the job Ferryx is built for, though it's still early software. Both projects are open source and worth a look; the links above lead to each one.

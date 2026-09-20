@@ -218,22 +218,27 @@ impl From<WorktreeError> for IpcError {
     fn from(error: WorktreeError) -> Self {
         let message = error.to_string();
         match error {
-            WorktreeError::WorktreeBusy { path, live_session_ids } => {
-                Self::new(IpcErrorCode::WorktreeBusy, message).with_details(json!({
-                    "path": path, "liveSessionIds": live_session_ids,
-                }))
-            }
+            WorktreeError::WorktreeBusy {
+                path,
+                live_session_ids,
+            } => Self::new(IpcErrorCode::WorktreeBusy, message).with_details(json!({
+                "path": path, "liveSessionIds": live_session_ids,
+            })),
             WorktreeError::WorktreeLocked { path, reason } => {
                 Self::new(IpcErrorCode::WorktreeLocked, message).with_details(json!({
                     "path": path, "reason": reason,
                 }))
             }
-            WorktreeError::WorktreeRemovedBranchRetained { path, branch, source } => {
-                Self::new(IpcErrorCode::WorktreeRemovedBranchRetained, message).with_details(json!({
+            WorktreeError::WorktreeRemovedBranchRetained {
+                path,
+                branch,
+                source,
+            } => Self::new(IpcErrorCode::WorktreeRemovedBranchRetained, message).with_details(
+                json!({
                     "path": path, "branch": branch, "worktreeRemoved": true,
                     "branchDeleted": false, "cause": Self::from(*source),
-                }))
-            }
+                }),
+            ),
             WorktreeError::WorktreeRemovedPruneFailed { path, source } => {
                 Self::new(IpcErrorCode::WorktreeRemovedPruneFailed, message).with_details(json!({
                     "path": path, "worktreeRemoved": true, "pruned": false,
@@ -473,6 +478,9 @@ mod tests {
         assert_eq!(deserialized_known, known);
 
         let from_str = IpcErrorCode::from_code_str("CUSTOM_CODE_123");
-        assert_eq!(from_str, IpcErrorCode::Custom("CUSTOM_CODE_123".to_string()));
+        assert_eq!(
+            from_str,
+            IpcErrorCode::Custom("CUSTOM_CODE_123".to_string())
+        );
     }
 }

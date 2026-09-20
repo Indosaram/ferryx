@@ -230,26 +230,41 @@ impl PtyManager {
         // synchronous callers before creating a child, rather than panicking in
         // AsyncFd and bypassing the fallible spawn API.
         #[cfg(unix)]
-        let _runtime = tokio::runtime::Handle::try_current().map_err(|error| {
-            PtyError::SpawnError(format!("Failed to spawn command: {error}"))
-        })?;
+        let _runtime = tokio::runtime::Handle::try_current()
+            .map_err(|error| PtyError::SpawnError(format!("Failed to spawn command: {error}")))?;
 
         #[cfg(unix)]
         let input = {
-            use std::os::fd::{FromRawFd, AsRawFd};
-            let raw = pair.master.as_raw_fd().ok_or_else(|| PtyError::IoError("PTY descriptor unavailable".into()))?;
+            use std::os::fd::{AsRawFd, FromRawFd};
+            let raw = pair
+                .master
+                .as_raw_fd()
+                .ok_or_else(|| PtyError::IoError("PTY descriptor unavailable".into()))?;
             let duplicate = unsafe { libc::fcntl(raw, libc::F_DUPFD_CLOEXEC, 0) };
-            if duplicate < 0 { return Err(PtyError::IoError(std::io::Error::last_os_error().to_string())); }
+            if duplicate < 0 {
+                return Err(PtyError::IoError(
+                    std::io::Error::last_os_error().to_string(),
+                ));
+            }
             let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(duplicate) };
             let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
-            if flags < 0 || unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-                return Err(PtyError::IoError(std::io::Error::last_os_error().to_string()));
+            if flags < 0
+                || unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) }
+                    < 0
+            {
+                return Err(PtyError::IoError(
+                    std::io::Error::last_os_error().to_string(),
+                ));
             }
             tokio::io::unix::AsyncFd::new(fd).map_err(|e| PtyError::IoError(e.to_string()))?
         };
 
         #[cfg(windows)]
-        let input = super::session::windows_input::WindowsInput(pair.master.try_clone_input_handle().map_err(|e| PtyError::IoError(e.to_string()))?);
+        let input = super::session::windows_input::WindowsInput(
+            pair.master
+                .try_clone_input_handle()
+                .map_err(|e| PtyError::IoError(e.to_string()))?,
+        );
         let reader = pair
             .master
             .try_clone_reader()
@@ -407,11 +422,16 @@ impl PtyManager {
     }
 
     pub async fn close_session(&self, session_id: &str) -> Result<(), PtyError> {
-        self.close_authorized(session_id, TERM_GRACE_TIMEOUT, Arc::new(|| Ok(()))).await
+        self.close_authorized(session_id, TERM_GRACE_TIMEOUT, Arc::new(|| Ok(())))
+            .await
     }
 
-    pub(crate) async fn close_authorized(&self, session_id: &str, grace: Duration,
-        authorize: Arc<dyn Fn() -> Result<(), String> + Send + Sync>) -> Result<(), PtyError> {
+    pub(crate) async fn close_authorized(
+        &self,
+        session_id: &str,
+        grace: Duration,
+        authorize: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
+    ) -> Result<(), PtyError> {
         authorize().map_err(PtyError::Other)?;
         let Some(session) = self.get_session(session_id) else {
             return Ok(());
@@ -700,7 +720,12 @@ mod tests {
     #[test]
     fn apply_session_env_sets_worktree_and_session_variables() {
         let mut cmd = CommandBuilder::new("/bin/sh");
-        apply_session_env(&mut cmd, "session-test-42", "/path/to/worktree", Some("ws-42"));
+        apply_session_env(
+            &mut cmd,
+            "session-test-42",
+            "/path/to/worktree",
+            Some("ws-42"),
+        );
         assert_eq!(
             cmd.get_env("FERRYX_SESSION_ID").and_then(|s| s.to_str()),
             Some("session-test-42")
@@ -719,7 +744,12 @@ mod tests {
         assert_eq!(cmd_no_ws.get_env("FERRYX_WORKSPACE_ID"), None);
 
         let mut cmd_empty_ws = CommandBuilder::new("/bin/sh");
-        apply_session_env(&mut cmd_empty_ws, "session-test-42", "/path/to/worktree", Some(""));
+        apply_session_env(
+            &mut cmd_empty_ws,
+            "session-test-42",
+            "/path/to/worktree",
+            Some(""),
+        );
         assert_eq!(cmd_empty_ws.get_env("FERRYX_WORKSPACE_ID"), None);
     }
 }

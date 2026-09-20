@@ -45,23 +45,48 @@ mod paired_host_compatibility_tests {
             let (stream, _) = listener.accept().await.unwrap();
             let (reader, mut writer) = stream.into_split();
             let mut reader = BufReader::new(reader);
-            let mut line = String::new(); reader.read_line(&mut line).await.unwrap();
-            assert!(matches!(serde_json::from_str::<DaemonRequest>(&line).unwrap(), DaemonRequest::Handshake { .. }));
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonRequest>(&line).unwrap(),
+                DaemonRequest::Handshake { .. }
+            ));
             writer.write_all(format!("{{\"type\":\"handshakeOk\",\"version\":{},\"pid\":1,\"epoch\":1,\"daemonVersion\":\"old\"}}\n", DAEMON_PROTOCOL_VERSION).as_bytes()).await.unwrap();
-            line.clear(); reader.read_line(&mut line).await.unwrap();
-            assert!(matches!(serde_json::from_str::<DaemonRequest>(&line).unwrap(), DaemonRequest::GetCapabilities));
-            writer.write_all(b"{\"type\":\"error\",\"message\":\"unknown request\"}\n").await.unwrap();
-            line.clear(); assert_eq!(reader.read_line(&mut line).await.unwrap(), 0, "client sent request after capability refusal");
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonRequest>(&line).unwrap(),
+                DaemonRequest::GetCapabilities
+            ));
+            writer
+                .write_all(b"{\"type\":\"error\",\"message\":\"unknown request\"}\n")
+                .await
+                .unwrap();
+            line.clear();
+            assert_eq!(
+                reader.read_line(&mut line).await.unwrap(),
+                0,
+                "client sent request after capability refusal"
+            );
         };
         let client = DaemonClient::new_with_socket(socket);
         let action = client.paired_host_pair(crate::paired_host::service::PairRequest {
-            relay_origin: "https://relay.example".into(), pin: crate::paired_host::service::Secret("private-pin".into()), display_label: "host".into(),
+            relay_origin: "https://relay.example".into(),
+            pin: crate::paired_host::service::Secret("private-pin".into()),
+            display_label: "host".into(),
         });
-        let (_, result) = tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(peer, action) }).await.unwrap();
+        let (_, result) =
+            tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(peer, action) })
+                .await
+                .unwrap();
         assert_eq!(result.unwrap_err().code, "PAIRED_HOST_UNAVAILABLE");
         assert!(!client.upgrade_requested.load(Ordering::SeqCst));
-        let path = root.path().to_owned(); root.close().unwrap();
-        eprintln!("A13 old_daemon_unavailable=true no_upgrade=true no_secret_sent=true cleanup={}", !path.exists());
+        let path = root.path().to_owned();
+        root.close().unwrap();
+        eprintln!(
+            "A13 old_daemon_unavailable=true no_upgrade=true no_secret_sent=true cleanup={}",
+            !path.exists()
+        );
     }
 }
 
@@ -211,6 +236,8 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::CommitHandover { .. } => "commitHandover",
         DaemonRequest::AbortHandover => "abortHandover",
         DaemonRequest::UploadClipboardImage { .. } => "uploadClipboardImage",
+        DaemonRequest::SubscribeDag { .. } => "subscribeDag",
+        DaemonRequest::UnsubscribeDag { .. } => "unsubscribeDag",
         DaemonRequest::Shutdown => "shutdown",
     }
 }
@@ -398,10 +425,7 @@ pub(crate) fn parse_attach_error_response(
             .is_some_and(|id| id == session_id));
 
     if is_session_not_found {
-        IpcError::new(
-            IpcErrorCode::SessionNotFound,
-            message,
-        ).with_details(serde_json::json!({
+        IpcError::new(IpcErrorCode::SessionNotFound, message).with_details(serde_json::json!({
             "source": "daemon_attach",
             "kind": "session_not_found",
             "sessionId": session_id,
@@ -453,18 +477,37 @@ impl DaemonClient {
         }
     }
 
-    async fn paired_host_exchange(connection: &mut ActiveConnection, request: &DaemonRequest) -> crate::paired_host::service::Result<DaemonResponse> {
+    async fn paired_host_exchange(
+        connection: &mut ActiveConnection,
+        request: &DaemonRequest,
+    ) -> crate::paired_host::service::Result<DaemonResponse> {
         use crate::paired_host::service::ServiceError;
         use tokio::io::AsyncReadExt;
         let mut bytes = serde_json::to_vec(request).map_err(|_| ServiceError::unavailable())?;
-        if bytes.len() > 32 * 1024 { return Err(ServiceError::unavailable()); }
+        if bytes.len() > 32 * 1024 {
+            return Err(ServiceError::unavailable());
+        }
         bytes.push(b'\n');
-        connection.writer.write_all(&bytes).await.map_err(|_| ServiceError::unavailable())?;
-        connection.writer.flush().await.map_err(|_| ServiceError::unavailable())?;
+        connection
+            .writer
+            .write_all(&bytes)
+            .await
+            .map_err(|_| ServiceError::unavailable())?;
+        connection
+            .writer
+            .flush()
+            .await
+            .map_err(|_| ServiceError::unavailable())?;
         let mut response = Vec::new();
         const LIMIT: usize = 1024 * 1024;
-        (&mut connection.reader).take((LIMIT + 1) as u64).read_until(b'\n', &mut response).await.map_err(|_| ServiceError::unavailable())?;
-        if response.len() > LIMIT || response.last() != Some(&b'\n') { return Err(ServiceError::unavailable()); }
+        (&mut connection.reader)
+            .take((LIMIT + 1) as u64)
+            .read_until(b'\n', &mut response)
+            .await
+            .map_err(|_| ServiceError::unavailable())?;
+        if response.len() > LIMIT || response.last() != Some(&b'\n') {
+            return Err(ServiceError::unavailable());
+        }
         serde_json::from_slice(&response).map_err(|_| ServiceError::unavailable())
     }
     pub const PAIRED_MUTATION_BUDGET_SECS: u64 = 60;
@@ -508,12 +551,20 @@ impl DaemonClient {
     }
 
     /// Connect only: capability absence never triggers spawn, upgrade, or retry.
-    async fn paired_host_request(&self, request: DaemonRequest) -> crate::paired_host::service::Result<DaemonResponse> {
+    async fn paired_host_request(
+        &self,
+        request: DaemonRequest,
+    ) -> crate::paired_host::service::Result<DaemonResponse> {
         let timeout = Self::outer_deadline_for_request(&request);
-        self.paired_host_request_with_timeout(request, timeout).await
+        self.paired_host_request_with_timeout(request, timeout)
+            .await
     }
 
-    async fn paired_host_request_with_timeout(&self, request: DaemonRequest, timeout: Duration) -> crate::paired_host::service::Result<DaemonResponse> {
+    async fn paired_host_request_with_timeout(
+        &self,
+        request: DaemonRequest,
+        timeout: Duration,
+    ) -> crate::paired_host::service::Result<DaemonResponse> {
         use crate::paired_host::service::ServiceError;
         tokio::time::timeout(timeout, async {
             let socket_path = self.socket_path.clone();
@@ -531,27 +582,58 @@ impl DaemonClient {
             }
         }).await.map_err(|_| ServiceError::new("TIMEOUT", "operation timed out"))?
     }
-    pub async fn paired_terminal_reattach(&self, descriptor: crate::terminal::paired_daemon::Descriptor) -> Result<(String, crate::scoped_contracts::Epoch), crate::paired_host::client::ClientError> {
+    pub async fn paired_terminal_reattach(
+        &self,
+        descriptor: crate::terminal::paired_daemon::Descriptor,
+    ) -> Result<(String, crate::scoped_contracts::Epoch), crate::paired_host::client::ClientError>
+    {
         use crate::paired_host::client::ClientError;
-        match self.paired_host_request(DaemonRequest::PairedTerminalReattach { descriptor }).await.map_err(|e| ClientError::local(&e.code))? {
-            DaemonResponse::PairedTerminalReattachOk { session_id, generation } => Ok((session_id, generation)),
+        match self
+            .paired_host_request(DaemonRequest::PairedTerminalReattach { descriptor })
+            .await
+            .map_err(|e| ClientError::local(&e.code))?
+        {
+            DaemonResponse::PairedTerminalReattachOk {
+                session_id,
+                generation,
+            } => Ok((session_id, generation)),
             DaemonResponse::PairedHostOperationError { error } => Err(error),
             _ => Err(ClientError::local("PAIRED_PROXY_UNAVAILABLE")),
         }
     }
-    pub async fn paired_terminal_detach(&self, session_id: String) -> crate::paired_host::service::Result<()> {
-        match self.paired_host_request(DaemonRequest::PairedTerminalDetach { session_id }).await? {
+    pub async fn paired_terminal_detach(
+        &self,
+        session_id: String,
+    ) -> crate::paired_host::service::Result<()> {
+        match self
+            .paired_host_request(DaemonRequest::PairedTerminalDetach { session_id })
+            .await?
+        {
             DaemonResponse::CloseOk => Ok(()),
             _ => Err(crate::paired_host::service::ServiceError::unavailable()),
         }
     }
-    pub async fn paired_terminal_descriptor(&self, session_id: String) -> Result<Option<crate::terminal::paired_daemon::Descriptor>, crate::paired_host::client::ClientError> {
-        match self.paired_host_request(DaemonRequest::PairedTerminalDescriptor { session_id: session_id.clone() }).await.map_err(|e| crate::paired_host::client::ClientError::local(&e.code))? {
+    pub async fn paired_terminal_descriptor(
+        &self,
+        session_id: String,
+    ) -> Result<
+        Option<crate::terminal::paired_daemon::Descriptor>,
+        crate::paired_host::client::ClientError,
+    > {
+        match self
+            .paired_host_request(DaemonRequest::PairedTerminalDescriptor {
+                session_id: session_id.clone(),
+            })
+            .await
+            .map_err(|e| crate::paired_host::client::ClientError::local(&e.code))?
+        {
             DaemonResponse::PairedTerminalDescriptorOk { descriptor } => Ok(descriptor),
             // P12 (round 2 & 3): daemon errors and unexpected response variants
             // are NOT "no descriptor" — propagate them so close_terminal cannot
             // silently skip the remote close on a lookup failure.
-            DaemonResponse::Error { message: _, code, .. } => Err(crate::paired_host::client::ClientError {
+            DaemonResponse::Error {
+                message: _, code, ..
+            } => Err(crate::paired_host::client::ClientError {
                 code: code.unwrap_or_else(|| "DESCRIPTOR_LOOKUP_FAILED".into()),
                 machine_error: None,
                 ambiguous: false,
@@ -565,13 +647,24 @@ impl DaemonClient {
             }),
         }
     }
-    pub async fn paired_host_list(&self) -> crate::paired_host::service::Result<Vec<crate::paired_host::inventory::HostView>> {
-        match self.paired_host_request(DaemonRequest::PairedHostList).await? {
+    pub async fn paired_host_list(
+        &self,
+    ) -> crate::paired_host::service::Result<Vec<crate::paired_host::inventory::HostView>> {
+        match self
+            .paired_host_request(DaemonRequest::PairedHostList)
+            .await?
+        {
             DaemonResponse::PairedHostListOk { hosts } => Ok(hosts),
             _ => Err(crate::paired_host::service::ServiceError::unavailable()),
         }
     }
-    pub async fn paired_host_operation(&self, request: crate::paired_host::client::OperationRequest) -> Result<crate::paired_host::client::OperationResponse, crate::paired_host::client::ClientError> {
+    pub async fn paired_host_operation(
+        &self,
+        request: crate::paired_host::client::OperationRequest,
+    ) -> Result<
+        crate::paired_host::client::OperationResponse,
+        crate::paired_host::client::ClientError,
+    > {
         use crate::paired_host::client::{ClientError, Operation};
         let request_id = match &request.operation {
             Operation::RegisterProject { request } => Some(request.request_id.clone()),
@@ -581,9 +674,15 @@ impl DaemonClient {
             Operation::CreateSession { request } => Some(request.request_id.clone()),
             Operation::CloseSession { request, .. } => Some(request.request_id.clone()),
             Operation::PasteUploadChunk { request } => Some(request.request_id.clone()),
-            Operation::Capabilities | Operation::Directories { .. } | Operation::Projects
-            | Operation::Worktrees { .. } | Operation::WorktreeStatus { .. }
-            | Operation::Sessions { .. } | Operation::Session { .. } | Operation::Operation { .. } => None,
+            Operation::Capabilities
+            | Operation::Directories { .. }
+            | Operation::Projects
+            | Operation::Worktrees { .. }
+            | Operation::WorktreeStatus { .. }
+            | Operation::Sessions { .. }
+            | Operation::Session { .. }
+            | Operation::DagStream { .. }
+            | Operation::Operation { .. } => None,
         };
         let transport_error = |error: crate::paired_host::service::ServiceError| ClientError {
             code: error.code,
@@ -596,10 +695,16 @@ impl DaemonClient {
         // Preserve reconciliation identity without retrying or changing daemon errors.
         let host_id = request.host_id.clone();
         let generation = request.generation;
-        let result = match self.paired_host_request(DaemonRequest::PairedHostOperation { request }).await.map_err(&transport_error)? {
+        let result = match self
+            .paired_host_request(DaemonRequest::PairedHostOperation { request })
+            .await
+            .map_err(&transport_error)?
+        {
             DaemonResponse::PairedHostOperationOk { response } => Ok(response),
             DaemonResponse::PairedHostOperationError { error } => Err(error),
-            _ => Err(transport_error(crate::paired_host::service::ServiceError::unavailable())),
+            _ => Err(transport_error(
+                crate::paired_host::service::ServiceError::unavailable(),
+            )),
         };
         match result {
             Ok(response) => Ok(response),
@@ -609,38 +714,72 @@ impl DaemonClient {
                 // event or list resurrects paired UI state without reauthentication.
                 if error.code == "UNAUTHORIZED" {
                     let _ = self
-                        .paired_host_request(DaemonRequest::PairedHostRevoke { host_id, generation })
+                        .paired_host_request(DaemonRequest::PairedHostRevoke {
+                            host_id,
+                            generation,
+                        })
                         .await;
                 }
                 Err(error)
             }
         }
     }
-    pub async fn paired_host_capabilities(&self) -> crate::paired_host::service::Result<serde_json::Value> {
+    pub async fn paired_host_capabilities(
+        &self,
+    ) -> crate::paired_host::service::Result<serde_json::Value> {
         // The connect-only path checks inventory support before forwarding this query.
-        self.paired_host_request(DaemonRequest::GetCapabilities).await?;
+        self.paired_host_request(DaemonRequest::GetCapabilities)
+            .await?;
         Ok(serde_json::json!({"pairedHostInventoryV1": true, "pairedDaemonProxyV1": true}))
     }
-    pub async fn paired_host_read(&self, request: crate::paired_host::inventory::MigrationReceipt) -> crate::paired_host::service::Result<crate::paired_host::inventory::HostView> {
-        match self.paired_host_request(DaemonRequest::PairedHostRead { request }).await? {
+    pub async fn paired_host_read(
+        &self,
+        request: crate::paired_host::inventory::MigrationReceipt,
+    ) -> crate::paired_host::service::Result<crate::paired_host::inventory::HostView> {
+        match self
+            .paired_host_request(DaemonRequest::PairedHostRead { request })
+            .await?
+        {
             DaemonResponse::PairedHostReadOk { host } => Ok(host),
             _ => Err(crate::paired_host::service::ServiceError::unavailable()),
         }
     }
-    pub async fn paired_host_pair(&self, request: crate::paired_host::service::PairRequest) -> crate::paired_host::service::Result<crate::paired_host::inventory::HostView> {
-        match self.paired_host_request(DaemonRequest::PairedHostPair { request }).await? {
+    pub async fn paired_host_pair(
+        &self,
+        request: crate::paired_host::service::PairRequest,
+    ) -> crate::paired_host::service::Result<crate::paired_host::inventory::HostView> {
+        match self
+            .paired_host_request(DaemonRequest::PairedHostPair { request })
+            .await?
+        {
             DaemonResponse::PairedHostPairOk { host } => Ok(host),
             _ => Err(crate::paired_host::service::ServiceError::unavailable()),
         }
     }
-    pub async fn paired_host_migrate_legacy(&self, request: crate::paired_host::service::MigrationRequest) -> crate::paired_host::service::Result<crate::paired_host::inventory::MigrationReceipt> {
-        match self.paired_host_request(DaemonRequest::PairedHostMigrateLegacy { request }).await? {
+    pub async fn paired_host_migrate_legacy(
+        &self,
+        request: crate::paired_host::service::MigrationRequest,
+    ) -> crate::paired_host::service::Result<crate::paired_host::inventory::MigrationReceipt> {
+        match self
+            .paired_host_request(DaemonRequest::PairedHostMigrateLegacy { request })
+            .await?
+        {
             DaemonResponse::PairedHostMigrateLegacyOk { receipt } => Ok(receipt),
             _ => Err(crate::paired_host::service::ServiceError::unavailable()),
         }
     }
-    pub async fn paired_host_forget(&self, host_id: String, expected_generation: crate::scoped_contracts::Epoch) -> crate::paired_host::service::Result<()> {
-        match self.paired_host_request(DaemonRequest::PairedHostForget { host_id, expected_generation }).await? {
+    pub async fn paired_host_forget(
+        &self,
+        host_id: String,
+        expected_generation: crate::scoped_contracts::Epoch,
+    ) -> crate::paired_host::service::Result<()> {
+        match self
+            .paired_host_request(DaemonRequest::PairedHostForget {
+                host_id,
+                expected_generation,
+            })
+            .await?
+        {
             DaemonResponse::PairedHostForgetOk => Ok(()),
             _ => Err(crate::paired_host::service::ServiceError::unavailable()),
         }
@@ -916,7 +1055,10 @@ impl DaemonClient {
         // If the running daemon speaks an older protocol version, it closed the connection
         // after emitting ProtocolMismatch. Reconnect with a fresh stream and perform a compatibility
         // handshake so that we can send UpgradeBinary to trigger rolling handover.
-        if let DaemonResponse::ProtocolMismatch { expected_version, .. } = hs_resp {
+        if let DaemonResponse::ProtocolMismatch {
+            expected_version, ..
+        } = hs_resp
+        {
             if let Ok(stream) = Self::connect_socket(&self.socket_path).await {
                 let (rh, mut wh) = stream.into_split();
                 let mut r = BufReader::new(rh);
@@ -927,9 +1069,16 @@ impl DaemonClient {
                     json.push('\n');
                     if wh.write_all(json.as_bytes()).await.is_ok() && wh.flush().await.is_ok() {
                         let mut compat_line = String::new();
-                        if let Ok(Ok(n)) = tokio::time::timeout(Duration::from_secs(5), r.read_line(&mut compat_line)).await {
+                        if let Ok(Ok(n)) = tokio::time::timeout(
+                            Duration::from_secs(5),
+                            r.read_line(&mut compat_line),
+                        )
+                        .await
+                        {
                             if n > 0 {
-                                if let Ok(compat_resp) = serde_json::from_str::<DaemonResponse>(compat_line.trim()) {
+                                if let Ok(compat_resp) =
+                                    serde_json::from_str::<DaemonResponse>(compat_line.trim())
+                                {
                                     reader = r;
                                     write_half = wh;
                                     hs_resp = compat_resp;
@@ -1001,7 +1150,10 @@ impl DaemonClient {
         &self,
         req: DaemonRequest,
     ) -> Result<DaemonResponse, IpcError> {
-        if matches!(req, DaemonRequest::RemoteWrite { .. } | DaemonRequest::RemoteResize { .. }) {
+        if matches!(
+            req,
+            DaemonRequest::RemoteWrite { .. } | DaemonRequest::RemoteResize { .. }
+        ) {
             // Remote control must never wait in the local interactive queue or
             // retry ambiguous delivery. The request retains the input generation.
             let mut slot = self.interactive_connection.try_lock().map_err(|_| {
@@ -1365,6 +1517,145 @@ impl DaemonClient {
         Ok(rx)
     }
 
+    pub async fn subscribe_dag(
+        &self,
+        workspace_id: &str,
+        project_path: &str,
+    ) -> Result<mpsc::Receiver<DaemonStreamMessage<'static>>, IpcError> {
+        self.subscribe_dag_bound(workspace_id, project_path, None)
+            .await
+    }
+
+    /// Subscribes with an optional paired binding. With a binding the daemon streams
+    /// from the authenticated remote host rather than scanning `project_path` locally.
+    pub async fn subscribe_dag_bound(
+        &self,
+        workspace_id: &str,
+        project_path: &str,
+        paired: Option<crate::daemon::protocol::PairedDagBinding>,
+    ) -> Result<mpsc::Receiver<DaemonStreamMessage<'static>>, IpcError> {
+        let stream = self.connect_or_spawn().await?;
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+
+        for req in [
+            DaemonRequest::Handshake {
+                version: DAEMON_PROTOCOL_VERSION,
+            },
+            DaemonRequest::SubscribeDag {
+                workspace_id: workspace_id.to_string(),
+                project_path: project_path.to_string(),
+                paired: paired.clone(),
+            },
+        ] {
+            let mut json = serde_json::to_string(&req).map_err(|e| {
+                IpcError::new(
+                    IpcErrorCode::ParseError,
+                    format!("DAG subscription serialization failed: {e}"),
+                )
+            })?;
+            json.push('\n');
+            write_half.write_all(json.as_bytes()).await.map_err(|e| {
+                IpcError::new(
+                    IpcErrorCode::IoError,
+                    format!("DAG subscription write failed: {e}"),
+                )
+            })?;
+            write_half.flush().await.map_err(|e| {
+                IpcError::new(
+                    IpcErrorCode::IoError,
+                    format!("DAG subscription flush failed: {e}"),
+                )
+            })?;
+
+            let mut line = String::new();
+            let bytes_read = reader.read_line(&mut line).await.map_err(|e| {
+                IpcError::new(
+                    IpcErrorCode::IoError,
+                    format!("DAG subscription read failed: {e}"),
+                )
+            })?;
+            if bytes_read == 0 {
+                return Err(IpcError::new(
+                    IpcErrorCode::IoError,
+                    "DAG subscription failed: daemon disconnected",
+                ));
+            }
+            let resp: DaemonResponse = serde_json::from_str(line.trim()).map_err(|e| {
+                IpcError::new(
+                    IpcErrorCode::ParseError,
+                    format!("DAG subscription parse failed: {e}"),
+                )
+            })?;
+            match resp {
+                DaemonResponse::HandshakeOk {
+                    version,
+                    binary_mtime_ms,
+                    daemon_version,
+                    ..
+                } if version == DAEMON_PROTOCOL_VERSION => {
+                    self.maybe_trigger_upgrade_if_stale(daemon_version, binary_mtime_ms);
+                }
+                DaemonResponse::SubscribeDagOk => {}
+                DaemonResponse::Error { message, .. } => {
+                    return Err(IpcError::new(IpcErrorCode::InternalError, message));
+                }
+                other => {
+                    return Err(IpcError::new(
+                        IpcErrorCode::InternalError,
+                        format!("Unexpected daemon response for DAG subscription: {other:?}"),
+                    ));
+                }
+            }
+        }
+
+        let (tx, rx) = mpsc::channel(64);
+        let unsubscribe = DaemonRequest::UnsubscribeDag {
+            workspace_id: workspace_id.to_string(),
+            project_path: project_path.to_string(),
+        };
+        tokio::spawn(async move {
+            let mut line = String::new();
+            // Consumer-driven cancellation must not wait for the next stream frame:
+            // `tx.closed()` resolves as soon as the receiver is dropped, even while the
+            // socket is idle.
+            let cancelled = loop {
+                tokio::select! {
+                    biased;
+                    _ = tx.closed() => break true,
+                    read = reader.read_line(&mut line) => {
+                        match read {
+                            Ok(0) | Err(_) => break false,
+                            Ok(_) => {}
+                        }
+                        if let Ok(msg) =
+                            serde_json::from_str::<DaemonStreamMessage<'static>>(line.trim())
+                        {
+                            if tx.send(msg).await.is_err() {
+                                break true;
+                            }
+                        }
+                        line.clear();
+                    }
+                }
+            };
+
+            if cancelled {
+                if let Ok(mut json) = serde_json::to_string(&unsubscribe) {
+                    json.push('\n');
+                    let _ = write_half.write_all(json.as_bytes()).await;
+                    let _ = write_half.flush().await;
+                }
+            }
+            // Dropping both halves closes the owned connection so the daemon side
+            // observes EOF even if the unsubscribe write failed.
+            drop(write_half);
+            drop(reader);
+        });
+
+        Ok(rx)
+    }
+
     pub async fn attach(
         &self,
         session_id: &str,
@@ -1549,9 +1840,13 @@ impl DaemonClient {
                     stream_task: task,
                 })
             }
-            DaemonResponse::Error { message, code, details } => {
-                Err(parse_attach_error_response(message, code, details, session_id))
-            }
+            DaemonResponse::Error {
+                message,
+                code,
+                details,
+            } => Err(parse_attach_error_response(
+                message, code, details, session_id,
+            )),
             _ => Err(IpcError::new(
                 IpcErrorCode::InternalError,
                 "Unexpected daemon response for attach",
@@ -1559,12 +1854,21 @@ impl DaemonClient {
         }
     }
 
-    pub async fn remote_session_status(&self, session_id: &str) -> Result<DaemonResponse, IpcError> {
-        self.send_request(DaemonRequest::RemoteSessionDetails { session_id: session_id.into() }).await
+    pub async fn remote_session_status(
+        &self,
+        session_id: &str,
+    ) -> Result<DaemonResponse, IpcError> {
+        self.send_request(DaemonRequest::RemoteSessionDetails {
+            session_id: session_id.into(),
+        })
+        .await
     }
 
     pub async fn retry_remote_session(&self, session_id: &str) -> Result<DaemonResponse, IpcError> {
-        self.send_request(DaemonRequest::RetryRemoteSession { session_id: session_id.into() }).await
+        self.send_request(DaemonRequest::RetryRemoteSession {
+            session_id: session_id.into(),
+        })
+        .await
     }
 
     // Never infer a remote generation after an await. Generation-less platform
@@ -1572,29 +1876,61 @@ impl DaemonClient {
     async fn require_local_control(&self, session_id: &str) -> Result<(), IpcError> {
         match self.remote_session_status(session_id).await? {
             DaemonResponse::RemoteSessionDetailsOk { details: None, .. } => Ok(()),
-            DaemonResponse::RemoteSessionDetailsOk { details: Some(_), .. } =>
-                Err(IpcError::internal("Remote input requires the generation observed at input time")
-                    .with_details(serde_json::json!({"kind":"staleGeneration", "inputWritten":false}))),
-            DaemonResponse::RemoteSessionError { failure } =>
-                Err(IpcError::internal(failure.to_string()).with_details(serde_json::to_value(failure)
-                    .map_err(|error| IpcError::internal(error.to_string()))?)),
+            DaemonResponse::RemoteSessionDetailsOk {
+                details: Some(_), ..
+            } => Err(IpcError::internal(
+                "Remote input requires the generation observed at input time",
+            )
+            .with_details(serde_json::json!({"kind":"staleGeneration", "inputWritten":false}))),
+            DaemonResponse::RemoteSessionError { failure } => {
+                Err(IpcError::internal(failure.to_string()).with_details(
+                    serde_json::to_value(failure)
+                        .map_err(|error| IpcError::internal(error.to_string()))?,
+                ))
+            }
             DaemonResponse::Error { message, .. } => Err(IpcError::internal(message)),
-            _ => Err(IpcError::internal("Unexpected remote session classification response")),
+            _ => Err(IpcError::internal(
+                "Unexpected remote session classification response",
+            )),
         }
     }
 
-    pub async fn write_terminal_at_generation(&self, session_id: &str, generation: Option<u64>, data: Vec<u8>) -> Result<(), IpcError> {
+    pub async fn write_terminal_at_generation(
+        &self,
+        session_id: &str,
+        generation: Option<u64>,
+        data: Vec<u8>,
+    ) -> Result<(), IpcError> {
         match generation {
-            Some(generation) => crate::ipc::terminal::remote_control_result(self.send_interactive_request(
-                DaemonRequest::RemoteWrite { session_id: session_id.into(), generation, data }).await?),
+            Some(generation) => crate::ipc::terminal::remote_control_result(
+                self.send_interactive_request(DaemonRequest::RemoteWrite {
+                    session_id: session_id.into(),
+                    generation,
+                    data,
+                })
+                .await?,
+            ),
             None => self.write_terminal(session_id, data).await,
         }
     }
 
-    pub async fn resize_terminal_at_generation(&self, session_id: &str, generation: Option<u64>, cols: u16, rows: u16) -> Result<(), IpcError> {
+    pub async fn resize_terminal_at_generation(
+        &self,
+        session_id: &str,
+        generation: Option<u64>,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(), IpcError> {
         match generation {
-            Some(generation) => crate::ipc::terminal::remote_control_result(self.send_interactive_request(
-                DaemonRequest::RemoteResize { session_id: session_id.into(), generation, cols, rows }).await?),
+            Some(generation) => crate::ipc::terminal::remote_control_result(
+                self.send_interactive_request(DaemonRequest::RemoteResize {
+                    session_id: session_id.into(),
+                    generation,
+                    cols,
+                    rows,
+                })
+                .await?,
+            ),
             None => self.resize_terminal(session_id, cols, rows).await,
         }
     }
@@ -1631,19 +1967,25 @@ impl DaemonClient {
         // applies it under its live connection), unlike generation-less writes which
         // must be rejected for remote sessions.
         match self.remote_session_status(session_id).await? {
-            DaemonResponse::RemoteSessionDetailsOk { details: Some(details), .. } => {
-                return crate::ipc::terminal::remote_control_result(self
-                    .send_interactive_request(DaemonRequest::RemoteResize {
+            DaemonResponse::RemoteSessionDetailsOk {
+                details: Some(details),
+                ..
+            } => {
+                return crate::ipc::terminal::remote_control_result(
+                    self.send_interactive_request(DaemonRequest::RemoteResize {
                         session_id: session_id.into(),
                         generation: details.generation,
                         cols,
                         rows,
                     })
-                    .await?);
+                    .await?,
+                );
             }
             DaemonResponse::RemoteSessionError { failure } => {
-                return Err(IpcError::internal(failure.to_string()).with_details(serde_json::to_value(failure)
-                    .map_err(|error| IpcError::internal(error.to_string()))?));
+                return Err(IpcError::internal(failure.to_string()).with_details(
+                    serde_json::to_value(failure)
+                        .map_err(|error| IpcError::internal(error.to_string()))?,
+                ));
             }
             DaemonResponse::Error { message, .. } => return Err(IpcError::internal(message)),
             _ => {}
@@ -1697,37 +2039,46 @@ impl DaemonClient {
             // P12 (round 2): a failed descriptor lookup must not silently skip
             // the remote close — local close is then not proof that the remote
             // PTY terminated, so surface uncertainty instead of masking it.
-            match self.paired_terminal_descriptor(session_id.to_string()).await {
+            match self
+                .paired_terminal_descriptor(session_id.to_string())
+                .await
+            {
                 Ok(Some(descriptor)) => {
-                let cleanup_req_id = uuid::Uuid::new_v4().to_string();
-                let close_op = crate::paired_host::client::OperationRequest {
-                    host_id: descriptor.host_id.clone(),
-                    generation: descriptor.generation,
-                    operation: crate::paired_host::client::Operation::CloseSession {
-                        session_id: descriptor.target.session_id.clone(),
-                        request: crate::remote::machine_protocol::CloseSessionRequest {
-                            request_id: cleanup_req_id.clone(),
-                            daemon_epoch: descriptor.target.daemon_epoch.clone(),
+                    let cleanup_req_id = uuid::Uuid::new_v4().to_string();
+                    let close_op = crate::paired_host::client::OperationRequest {
+                        host_id: descriptor.host_id.clone(),
+                        generation: descriptor.generation,
+                        operation: crate::paired_host::client::Operation::CloseSession {
+                            session_id: descriptor.target.session_id.clone(),
+                            request: crate::remote::machine_protocol::CloseSessionRequest {
+                                request_id: cleanup_req_id.clone(),
+                                daemon_epoch: descriptor.target.daemon_epoch.clone(),
+                            },
                         },
-                    },
-                };
-                match self.paired_host_operation(close_op).await {
-                    Ok(_) => {},
-                    Err(ref e) if e.code == "SESSION_NOT_FOUND" => {},
-                    Err(ref e) if e.ambiguous || matches!(e.code.as_str(), "TIMEOUT" | "OPERATION_OUTCOME_UNKNOWN") => {
-                        // P12: an ambiguous close is not a success. Poll the operation
-                        // journal a bounded number of times for a definitive outcome;
-                        // if it stays unknown, refuse to acknowledge local-only success.
-                        let mut determined = false;
-                        for _attempt in 0..5 {
-                            let journal_req = crate::paired_host::client::OperationRequest {
-                                host_id: descriptor.host_id.clone(),
-                                generation: descriptor.generation,
-                                operation: crate::paired_host::client::Operation::Operation {
-                                    request_id: cleanup_req_id.clone(),
-                                },
-                            };
-                            match self.paired_host_operation(journal_req).await {
+                    };
+                    match self.paired_host_operation(close_op).await {
+                        Ok(_) => {}
+                        Err(ref e) if e.code == "SESSION_NOT_FOUND" => {}
+                        Err(ref e)
+                            if e.ambiguous
+                                || matches!(
+                                    e.code.as_str(),
+                                    "TIMEOUT" | "OPERATION_OUTCOME_UNKNOWN"
+                                ) =>
+                        {
+                            // P12: an ambiguous close is not a success. Poll the operation
+                            // journal a bounded number of times for a definitive outcome;
+                            // if it stays unknown, refuse to acknowledge local-only success.
+                            let mut determined = false;
+                            for _attempt in 0..5 {
+                                let journal_req = crate::paired_host::client::OperationRequest {
+                                    host_id: descriptor.host_id.clone(),
+                                    generation: descriptor.generation,
+                                    operation: crate::paired_host::client::Operation::Operation {
+                                        request_id: cleanup_req_id.clone(),
+                                    },
+                                };
+                                match self.paired_host_operation(journal_req).await {
                                 Ok(op_resp) => match op_resp.result {
                                     crate::paired_host::client::OperationResult::Operation(
                                         crate::remote::machine_protocol::Operation::Completed { outcome, .. },
@@ -1757,10 +2108,10 @@ impl DaemonClient {
                                 // closed session, so stay unresolved.
                                 Err(_) => {}
                             }
-                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                        }
-                        if !determined {
-                            return Err(IpcError::new(
+                                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                            }
+                            if !determined {
+                                return Err(IpcError::new(
                                 IpcErrorCode::Custom("REMOTE_CLOSE_UNCERTAIN".to_string()),
                                 "Remote paired-session close outcome is unknown; the session may still be running on the paired host",
                             )
@@ -1771,23 +2122,23 @@ impl DaemonClient {
                                 "remoteSessionId": descriptor.target.session_id,
                                 "remoteCloseUnknown": true,
                             })));
+                            }
+                        }
+                        Err(e) => {
+                            // P12: a definitive remote failure must not be masked by the
+                            // local daemon close succeeding afterwards.
+                            return Err(IpcError::new(
+                                IpcErrorCode::Custom("REMOTE_CLOSE_FAILED".to_string()),
+                                format!("Remote paired-session close failed: {}", e.code),
+                            )
+                            .with_details(serde_json::json!({
+                                "hostId": descriptor.host_id,
+                                "generation": descriptor.generation,
+                                "remoteSessionId": descriptor.target.session_id,
+                                "cause": e.code,
+                            })));
                         }
                     }
-                    Err(e) => {
-                        // P12: a definitive remote failure must not be masked by the
-                        // local daemon close succeeding afterwards.
-                        return Err(IpcError::new(
-                            IpcErrorCode::Custom("REMOTE_CLOSE_FAILED".to_string()),
-                            format!("Remote paired-session close failed: {}", e.code),
-                        )
-                        .with_details(serde_json::json!({
-                            "hostId": descriptor.host_id,
-                            "generation": descriptor.generation,
-                            "remoteSessionId": descriptor.target.session_id,
-                            "cause": e.code,
-                        })));
-                    },
-                }
                 }
                 Ok(None) => {}
                 Err(descriptor_err) => {
@@ -1815,7 +2166,11 @@ impl DaemonClient {
 
         match resp {
             DaemonResponse::CloseOk => Ok(()),
-            DaemonResponse::Error { message, code, details } => {
+            DaemonResponse::Error {
+                message,
+                code,
+                details,
+            } => {
                 if code.as_deref() == Some("SESSION_NOT_FOUND") {
                     let det = details.unwrap_or_else(|| {
                         serde_json::json!({
@@ -2053,7 +2408,8 @@ impl DaemonClient {
         &self,
         selection: Option<RemoteActiveDesktopSelection>,
     ) -> Result<(), IpcError> {
-        self.remote_set_active_selection_with_ssh_store(selection, None).await
+        self.remote_set_active_selection_with_ssh_store(selection, None)
+            .await
     }
 
     pub async fn remote_set_active_selection_with_ssh_store(
@@ -2062,7 +2418,10 @@ impl DaemonClient {
         ssh_store_path: Option<PathBuf>,
     ) -> Result<(), IpcError> {
         let resp = self
-            .send_request(DaemonRequest::RemoteSetActiveSelection { selection, ssh_store_path })
+            .send_request(DaemonRequest::RemoteSetActiveSelection {
+                selection,
+                ssh_store_path,
+            })
             .await?;
         match resp {
             DaemonResponse::RemoteSetActiveSelectionOk => Ok(()),
@@ -2209,11 +2568,16 @@ mod tests {
         let client = DaemonClient::new_with_socket(PathBuf::from("unused-p08.sock"));
         client.upgrade_requested.store(true, Ordering::SeqCst);
         let rpc = client.upgrade_rpc_client();
-        assert!(Arc::ptr_eq(&client.upgrade_requested, &rpc.upgrade_requested),
-            "internal upgrade RPC must share admission with its originating client");
-        assert!(rpc.upgrade_requested.compare_exchange(false, true,
-            Ordering::SeqCst, Ordering::SeqCst).is_err(),
-            "an internal stale handshake must not admit another upgrade");
+        assert!(
+            Arc::ptr_eq(&client.upgrade_requested, &rpc.upgrade_requested),
+            "internal upgrade RPC must share admission with its originating client"
+        );
+        assert!(
+            rpc.upgrade_requested
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err(),
+            "an internal stale handshake must not admit another upgrade"
+        );
     }
 
     #[tokio::test]
@@ -2238,13 +2602,19 @@ mod tests {
                 binary_mtime_ms: None,
                 daemon_version: None,
             };
-            write.write_all(format!("{}\n", serde_json::to_string(&reply).unwrap()).as_bytes()).await.unwrap();
+            write
+                .write_all(format!("{}\n", serde_json::to_string(&reply).unwrap()).as_bytes())
+                .await
+                .unwrap();
             line.clear();
             reader.read_line(&mut line).await.unwrap();
             let caps_reply = DaemonResponse::CapabilitiesOk {
                 capabilities: vec!["pairedHostInventoryV1".into()],
             };
-            write.write_all(format!("{}\n", serde_json::to_string(&caps_reply).unwrap()).as_bytes()).await.unwrap();
+            write
+                .write_all(format!("{}\n", serde_json::to_string(&caps_reply).unwrap()).as_bytes())
+                .await
+                .unwrap();
             line.clear();
             reader.read_line(&mut line).await.unwrap();
             tokio::time::sleep(Duration::from_secs(300)).await;
@@ -2269,9 +2639,7 @@ mod tests {
             },
         };
 
-        let op_task = tokio::spawn(async move {
-            client.paired_host_operation(op_req).await
-        });
+        let op_task = tokio::spawn(async move { client.paired_host_operation(op_req).await });
 
         // Give the task a moment to connect and do handshake before advancing time
         tokio::task::yield_now().await;
@@ -2287,8 +2655,15 @@ mod tests {
         tokio::time::advance(Duration::from_secs(150)).await;
         let err = op_task.await.unwrap().unwrap_err();
 
-        assert_eq!(err.code, "TIMEOUT", "Expected TIMEOUT error code on deadline expiry, got {}", err.code);
-        assert!(err.ambiguous, "Ambiguous must be true when mutation transport deadline expires");
+        assert_eq!(
+            err.code, "TIMEOUT",
+            "Expected TIMEOUT error code on deadline expiry, got {}",
+            err.code
+        );
+        assert!(
+            err.ambiguous,
+            "Ambiguous must be true when mutation transport deadline expires"
+        );
         assert_eq!(err.request_id, Some(req_id));
 
         server.abort();
@@ -2305,48 +2680,94 @@ mod tests {
             let mut reader = BufReader::new(read);
             let mut line = String::new();
             reader.read_line(&mut line).await.unwrap();
-            let reply = DaemonResponse::HandshakeOk { version: DAEMON_PROTOCOL_VERSION,
-                pid: std::process::id(), epoch: 1, binary_path: None,
-                binary_mtime_ms: None, daemon_version: None };
-            write.write_all(format!("{}\n", serde_json::to_string(&reply).unwrap()).as_bytes()).await.unwrap();
+            let reply = DaemonResponse::HandshakeOk {
+                version: DAEMON_PROTOCOL_VERSION,
+                pid: std::process::id(),
+                epoch: 1,
+                binary_path: None,
+                binary_mtime_ms: None,
+                daemon_version: None,
+            };
+            write
+                .write_all(format!("{}\n", serde_json::to_string(&reply).unwrap()).as_bytes())
+                .await
+                .unwrap();
             line.clear();
             reader.read_line(&mut line).await.unwrap();
             let request: DaemonRequest = serde_json::from_str(line.trim()).unwrap();
-            let reply = DaemonResponse::RemoteSessionError { failure: crate::terminal::remote::RemoteFailure {
-                kind: crate::terminal::remote::RemoteFailureKind::Disconnected, message: "offline".into() } };
-            write.write_all(format!("{}\n", serde_json::to_string(&reply).unwrap()).as_bytes()).await.unwrap();
+            let reply = DaemonResponse::RemoteSessionError {
+                failure: crate::terminal::remote::RemoteFailure {
+                    kind: crate::terminal::remote::RemoteFailureKind::Disconnected,
+                    message: "offline".into(),
+                },
+            };
+            write
+                .write_all(format!("{}\n", serde_json::to_string(&reply).unwrap()).as_bytes())
+                .await
+                .unwrap();
             request
         });
         let client = DaemonClient::new_with_socket(socket);
-        client.write_terminal("remote", b"never replay".to_vec()).await.expect_err("fail closed");
-        let request = tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
-        assert!(matches!(request, DaemonRequest::RemoteSessionDetails { .. }), "must classify before legacy dispatch: {request:?}");
+        client
+            .write_terminal("remote", b"never replay".to_vec())
+            .await
+            .expect_err("fail closed");
+        let request = tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(request, DaemonRequest::RemoteSessionDetails { .. }),
+            "must classify before legacy dispatch: {request:?}"
+        );
     }
 
     #[tokio::test]
     async fn ssh_reconnect_safety_desktop_remote_control_is_not_queued() {
-        let client = DaemonClient::new_with_socket(std::path::PathBuf::from("/unused-desktop-test.sock"));
+        let client =
+            DaemonClient::new_with_socket(std::path::PathBuf::from("/unused-desktop-test.sock"));
         let _busy = client.interactive_connection.lock().await;
-        let error = tokio::time::timeout(Duration::from_secs(1),
-            client.write_terminal_at_generation("remote", Some(7), b"key".to_vec()))
-            .await.expect("remote input must reject immediately, not wait behind control").unwrap_err();
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            client.write_terminal_at_generation("remote", Some(7), b"key".to_vec()),
+        )
+        .await
+        .expect("remote input must reject immediately, not wait behind control")
+        .unwrap_err();
         assert_eq!(error.details.unwrap()["kind"], "busy");
     }
 
     #[tokio::test]
     #[cfg(feature = "native-terminal")]
     async fn ssh_reconnect_safety_desktop_encoded_input_retains_generation_and_typed_failure() {
-        use crate::ipc::native_terminal::{encode_attached_native_input, encode_attached_native_paste, encode_attached_native_mouse};
-        use crate::native_terminal::{NativeTerminalInput, MouseEvent};
+        use crate::ipc::native_terminal::{
+            encode_attached_native_input, encode_attached_native_mouse,
+            encode_attached_native_paste,
+        };
         use crate::native_terminal::surface_host::NativeTerminalSurfaceHostState;
+        use crate::native_terminal::{MouseEvent, NativeTerminalInput};
         let state = NativeTerminalSurfaceHostState::default();
         let (_tx, rx) = mpsc::channel(4);
-        state.attach_daemon_attachment::<tauri::test::MockRuntime>("remote", DaemonAttachment {
-            session_id: "remote".into(), epoch: 1, start_sequence: None, end_sequence: None,
-            gap: None, history: bytes::Bytes::from(b"\x1b[?1000h\x1b[?1006h".to_vec()), history_segments: vec![],
-            pty_cols: Some(80), pty_rows: Some(24), remote_generation: None, messages: rx,
-            stream_task: tokio::spawn(std::future::pending()),
-        }, None).unwrap();
+        state
+            .attach_daemon_attachment::<tauri::test::MockRuntime>(
+                "remote",
+                DaemonAttachment {
+                    session_id: "remote".into(),
+                    epoch: 1,
+                    start_sequence: None,
+                    end_sequence: None,
+                    gap: None,
+                    history: bytes::Bytes::from_static(b"\x1b[?1000h\x1b[?1006h"),
+                    history_segments: vec![],
+                    pty_cols: Some(80),
+                    pty_rows: Some(24),
+                    remote_generation: None,
+                    messages: rx,
+                    stream_task: tokio::spawn(std::future::pending()),
+                },
+                None,
+            )
+            .unwrap();
         let key = serde_json::from_value::<NativeTerminalInput>(serde_json::json!({"keyEvent":{
             "key":"Enter","action":"Press","modifiers":{"shift":false,"ctrl":false,"alt":false,"superKey":false,"capsLock":false,"numLock":false},"utf8":null
         }})).unwrap();
@@ -2356,7 +2777,14 @@ mod tests {
             "modifiers":{"shift":false,"ctrl":false,"alt":false,"superKey":false,"capsLock":false,"numLock":false}
         })).unwrap();
         let payloads = vec![
-            encode_attached_native_input(&state, "remote", &NativeTerminalInput::Text { text: "IME commit".into() }).unwrap(),
+            encode_attached_native_input(
+                &state,
+                "remote",
+                &NativeTerminalInput::Text {
+                    text: "IME commit".into(),
+                },
+            )
+            .unwrap(),
             encode_attached_native_input(&state, "remote", &key).unwrap(),
             encode_attached_native_paste(&state, "remote", "paste\nline").unwrap(),
             encode_attached_native_mouse(&state, "remote", &mouse).unwrap(),
@@ -2372,33 +2800,69 @@ mod tests {
             let mut reader = BufReader::new(read);
             let mut line = String::new();
             reader.read_line(&mut line).await.unwrap();
-            let handshake = DaemonResponse::HandshakeOk { version: DAEMON_PROTOCOL_VERSION,
-                pid: std::process::id(), epoch: 1, binary_path: None, binary_mtime_ms: None, daemon_version: None };
-            write.write_all(format!("{}\n", serde_json::to_string(&handshake).unwrap()).as_bytes()).await.unwrap();
+            let handshake = DaemonResponse::HandshakeOk {
+                version: DAEMON_PROTOCOL_VERSION,
+                pid: std::process::id(),
+                epoch: 1,
+                binary_path: None,
+                binary_mtime_ms: None,
+                daemon_version: None,
+            };
+            write
+                .write_all(format!("{}\n", serde_json::to_string(&handshake).unwrap()).as_bytes())
+                .await
+                .unwrap();
             for bytes in expected {
-                line.clear(); reader.read_line(&mut line).await.unwrap();
+                line.clear();
+                reader.read_line(&mut line).await.unwrap();
                 match serde_json::from_str::<DaemonRequest>(line.trim()).unwrap() {
-                    DaemonRequest::RemoteWrite { session_id, generation, data } => {
-                        assert_eq!(session_id, "remote"); assert_eq!(generation, 7); assert_eq!(data, bytes);
+                    DaemonRequest::RemoteWrite {
+                        session_id,
+                        generation,
+                        data,
+                    } => {
+                        assert_eq!(session_id, "remote");
+                        assert_eq!(generation, 7);
+                        assert_eq!(data, bytes);
                     }
                     other => panic!("generation bypass: {other:?}"),
                 }
                 let reply = serde_json::json!({"type":"remoteSessionError","failure":{"kind":"staleGeneration","message":"generation is now 8"}});
-                write.write_all(format!("{reply}\n").as_bytes()).await.unwrap();
+                write
+                    .write_all(format!("{reply}\n").as_bytes())
+                    .await
+                    .unwrap();
             }
-            line.clear(); reader.read_line(&mut line).await.unwrap();
-            assert!(matches!(serde_json::from_str::<DaemonRequest>(line.trim()).unwrap(),
-                DaemonRequest::RemoteResize { generation: 7, cols: 100, rows: 30, .. }));
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonRequest>(line.trim()).unwrap(),
+                DaemonRequest::RemoteResize {
+                    generation: 7,
+                    cols: 100,
+                    rows: 30,
+                    ..
+                }
+            ));
             write.write_all(b"{\"type\":\"remoteSessionError\",\"failure\":{\"kind\":\"disconnected\",\"message\":\"offline\"}}\n").await.unwrap();
         });
         let client = DaemonClient::new_with_socket(socket);
         for bytes in payloads {
-            let error = client.write_terminal_at_generation("remote", Some(7), bytes).await.unwrap_err();
+            let error = client
+                .write_terminal_at_generation("remote", Some(7), bytes)
+                .await
+                .unwrap_err();
             assert_eq!(error.details.unwrap()["kind"], "staleGeneration");
         }
-        let error = client.resize_terminal_at_generation("remote", Some(7), 100, 30).await.unwrap_err();
+        let error = client
+            .resize_terminal_at_generation("remote", Some(7), 100, 30)
+            .await
+            .unwrap_err();
         assert_eq!(error.details.unwrap()["kind"], "disconnected");
-        tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
         state.close_session("remote");
     }
 
@@ -3132,26 +3596,59 @@ mod tests {
 
     #[test]
     fn test_attach_session_not_found_exact_match() {
-        let err = parse_attach_error_response("Session 'test-id' not found".to_string(), None, None, "test-id");
+        let err = parse_attach_error_response(
+            "Session 'test-id' not found".to_string(),
+            None,
+            None,
+            "test-id",
+        );
         assert_eq!(err.code, IpcErrorCode::SessionNotFound);
         assert_eq!(err.message, "Session 'test-id' not found");
         let details = err.details.expect("expected details");
-        assert_eq!(details.get("source").and_then(|v| v.as_str()), Some("daemon_attach"));
-        assert_eq!(details.get("kind").and_then(|v| v.as_str()), Some("session_not_found"));
-        assert_eq!(details.get("sessionId").and_then(|v| v.as_str()), Some("test-id"));
+        assert_eq!(
+            details.get("source").and_then(|v| v.as_str()),
+            Some("daemon_attach")
+        );
+        assert_eq!(
+            details.get("kind").and_then(|v| v.as_str()),
+            Some("session_not_found")
+        );
+        assert_eq!(
+            details.get("sessionId").and_then(|v| v.as_str()),
+            Some("test-id")
+        );
 
-        let pty_err = parse_attach_error_response("PTY session 'test-id' not found".to_string(), None, None, "test-id");
+        let pty_err = parse_attach_error_response(
+            "PTY session 'test-id' not found".to_string(),
+            None,
+            None,
+            "test-id",
+        );
         assert_eq!(pty_err.code, IpcErrorCode::SessionNotFound);
         assert_eq!(pty_err.message, "PTY session 'test-id' not found");
         let pty_details = pty_err.details.expect("expected details");
-        assert_eq!(pty_details.get("source").and_then(|v| v.as_str()), Some("daemon_attach"));
-        assert_eq!(pty_details.get("kind").and_then(|v| v.as_str()), Some("session_not_found"));
-        assert_eq!(pty_details.get("sessionId").and_then(|v| v.as_str()), Some("test-id"));
+        assert_eq!(
+            pty_details.get("source").and_then(|v| v.as_str()),
+            Some("daemon_attach")
+        );
+        assert_eq!(
+            pty_details.get("kind").and_then(|v| v.as_str()),
+            Some("session_not_found")
+        );
+        assert_eq!(
+            pty_details.get("sessionId").and_then(|v| v.as_str()),
+            Some("test-id")
+        );
     }
 
     #[test]
     fn test_attach_session_not_found_wrong_id() {
-        let err = parse_attach_error_response("Session 'other-id' not found".to_string(), None, None, "test-id");
+        let err = parse_attach_error_response(
+            "Session 'other-id' not found".to_string(),
+            None,
+            None,
+            "test-id",
+        );
         assert_eq!(err.code, IpcErrorCode::InternalError);
         assert_eq!(err.message, "Session 'other-id' not found");
         assert!(err.details.is_none());
@@ -3159,7 +3656,8 @@ mod tests {
 
     #[test]
     fn test_attach_arbitrary_error_not_session_not_found() {
-        let err = parse_attach_error_response("Internal server error".to_string(), None, None, "test-id");
+        let err =
+            parse_attach_error_response("Internal server error".to_string(), None, None, "test-id");
         assert_eq!(err.code, IpcErrorCode::InternalError);
         assert_eq!(err.message, "Internal server error");
         assert!(err.details.is_none());
@@ -3169,7 +3667,8 @@ mod tests {
     fn test_attach_malformed_overlapping_not_found_message_does_not_panic() {
         // "Session ' not found" has length 19; prefix is 9, suffix is 10.
         // In the old code, slicing [9..19-10] was [9..9] or would panic on shorter overlapping messages.
-        let err = parse_attach_error_response("Session ' not found".to_string(), None, None, "test-id");
+        let err =
+            parse_attach_error_response("Session ' not found".to_string(), None, None, "test-id");
         assert_eq!(err.code, IpcErrorCode::InternalError);
         assert!(err.details.is_none());
     }
@@ -3193,20 +3692,41 @@ mod tests {
         assert_ne!(err.code, IpcErrorCode::InternalError);
         assert_eq!(err.message, "Terminal process terminated unexpectedly");
         let details = err.details.expect("expected details");
-        assert_eq!(details.get("source").and_then(|v| v.as_str()), Some("daemon_attach"));
-        assert_eq!(details.get("sessionId").and_then(|v| v.as_str()), Some("test-id"));
+        assert_eq!(
+            details.get("source").and_then(|v| v.as_str()),
+            Some("daemon_attach")
+        );
+        assert_eq!(
+            details.get("sessionId").and_then(|v| v.as_str()),
+            Some("test-id")
+        );
     }
 
     #[test]
     fn worktree_mutations_are_never_blindly_resent() {
-        let worktree = crate::worktree::WorktreeIdentity { ws_id: "ws".into(), slug: "feature".into() };
+        let worktree = crate::worktree::WorktreeIdentity {
+            ws_id: "ws".into(),
+            slug: "feature".into(),
+        };
         for request in [
-            DaemonRequest::CreateWorktree { workspace_id: "ws".into(), worktree: worktree.clone(), base_ref: None },
-            DaemonRequest::DeleteWorktree { workspace_id: "ws".into(), worktree, delete_branch: false, destructive: false },
+            DaemonRequest::CreateWorktree {
+                workspace_id: "ws".into(),
+                worktree: worktree.clone(),
+                base_ref: None,
+            },
+            DaemonRequest::DeleteWorktree {
+                workspace_id: "ws".into(),
+                worktree,
+                delete_branch: false,
+                destructive: false,
+            },
         ] {
             assert!(!request_is_retry_safe(&request));
             let error = ambiguous_delivery_error(&request, &IpcError::internal("lost reply"));
-            assert_eq!(error.details.unwrap()["requestType"], request_type_name(&request));
+            assert_eq!(
+                error.details.unwrap()["requestType"],
+                request_type_name(&request)
+            );
         }
     }
 
@@ -3313,7 +3833,10 @@ mod tests {
         let client = DaemonClient::new();
         // Verifies the single-flight spawn_lock is instantiated and functions cleanly
         let guard = client.spawn_lock.try_lock();
-        assert!(guard.is_ok(), "spawn_lock must be available on construction");
+        assert!(
+            guard.is_ok(),
+            "spawn_lock must be available on construction"
+        );
         drop(guard);
     }
 
@@ -3321,7 +3844,10 @@ mod tests {
     async fn test_client_attach_retains_write_half_until_abort() {
         use std::os::unix::fs::PermissionsExt;
         use tokio::io::AsyncReadExt;
-        let dir = tempfile::Builder::new().prefix("fx-client").tempdir_in("/tmp").unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("fx-client")
+            .tempdir_in("/tmp")
+            .unwrap();
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let socket_path = dir.path().join("client_attach.sock");
         let listener = UnixListener::bind(&socket_path).unwrap();
@@ -3338,7 +3864,10 @@ mod tests {
             // Handshake
             reader.read_line(&mut line).await.unwrap();
             assert!(line.contains("handshake"));
-            write.write_all(b"{\"type\":\"handshakeOk\",\"version\":4,\"pid\":1,\"epoch\":1}\n").await.unwrap();
+            write
+                .write_all(b"{\"type\":\"handshakeOk\",\"version\":4,\"pid\":1,\"epoch\":1}\n")
+                .await
+                .unwrap();
 
             // Attach
             line.clear();
@@ -3352,7 +3881,10 @@ mod tests {
             // Now read from the client socket. It must observe EOF once stream_task is aborted.
             let mut buf = [0u8; 1];
             let n = read.read(&mut buf).await.unwrap();
-            assert_eq!(n, 0, "client socket write side must close when stream_task is aborted");
+            assert_eq!(
+                n, 0,
+                "client socket write side must close when stream_task is aborted"
+            );
             let _ = server_done_tx.send(());
         });
 
@@ -3366,8 +3898,105 @@ mod tests {
         attachment.stream_task.abort();
 
         let res = tokio::time::timeout(Duration::from_secs(2), server_done_rx).await;
-        assert!(res.is_ok(), "server must observe EOF within timeout after stream_task.abort()");
+        assert!(
+            res.is_ok(),
+            "server must observe EOF within timeout after stream_task.abort()"
+        );
 
         server_task.await.unwrap();
+    }
+
+    /// Idle DAG transport teardown: after the consumer drops the receiver and
+    /// without any stream frame ever arriving, the spawned reader must send
+    /// UnsubscribeDag and close the owned connection on its own.
+    #[tokio::test]
+    async fn test_subscribe_dag_releases_idle_transport_when_receiver_dropped() {
+        let dir = tempdir().unwrap();
+        let socket_path = dir.path().join("dag_idle_cancel.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+
+        let (subscribed_tx, subscribed_rx) = oneshot::channel::<()>();
+        let (teardown_tx, teardown_rx) = oneshot::channel::<(String, String)>();
+
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+
+            reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonRequest>(line.trim()).unwrap(),
+                DaemonRequest::Handshake { .. }
+            ));
+            write_half
+                .write_all(
+                    format!(
+                        "{{\"type\":\"handshakeOk\",\"version\":{DAEMON_PROTOCOL_VERSION},\"pid\":1,\"epoch\":1,\"daemonVersion\":\"test\"}}\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonRequest>(line.trim()).unwrap(),
+                DaemonRequest::SubscribeDag { .. }
+            ));
+            write_half
+                .write_all(b"{\"type\":\"subscribeDagOk\"}\n")
+                .await
+                .unwrap();
+            let _ = subscribed_tx.send(());
+
+            // Never emit a stream frame: teardown must be driven purely by the
+            // consumer dropping the receiver.
+            line.clear();
+            let n = reader.read_line(&mut line).await.unwrap();
+            assert_ne!(n, 0, "transport closed without sending UnsubscribeDag");
+            let observed = match serde_json::from_str::<DaemonRequest>(line.trim()).unwrap() {
+                DaemonRequest::UnsubscribeDag {
+                    workspace_id,
+                    project_path,
+                } => (workspace_id, project_path),
+                other => panic!("unexpected request after cancellation: {other:?}"),
+            };
+
+            // The owned connection must also be released, not merely unsubscribed.
+            line.clear();
+            assert_eq!(
+                reader.read_line(&mut line).await.unwrap(),
+                0,
+                "client must close the owned DAG connection after unsubscribing"
+            );
+            let _ = teardown_tx.send(observed);
+        });
+
+        let client = DaemonClient::new_with_socket(socket_path);
+        let rx = client
+            .subscribe_dag("ws-idle", "/paired/project")
+            .await
+            .expect("dag subscription succeeds");
+
+        tokio::time::timeout(Duration::from_secs(5), subscribed_rx)
+            .await
+            .expect("daemon acknowledges subscription within timeout")
+            .expect("subscription signal delivered");
+
+        drop(rx);
+
+        let (workspace_id, project_path) = tokio::time::timeout(Duration::from_secs(5), teardown_rx)
+            .await
+            .expect("idle DAG transport must tear down after receiver drop")
+            .expect("teardown signal delivered");
+        assert_eq!(workspace_id, "ws-idle");
+        assert_eq!(project_path, "/paired/project");
+
+        tokio::time::timeout(Duration::from_secs(5), server_task)
+            .await
+            .expect("fake daemon completes within timeout")
+            .unwrap();
     }
 }

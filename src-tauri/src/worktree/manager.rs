@@ -464,9 +464,7 @@ impl WorktreeManager {
                 }
                 if is_windows && matches!(ch, '<' | '>' | '"' | '|') {
                     return Err(WorktreeError::InvalidNamespace {
-                        reason: format!(
-                            "{label} contains invalid character '{ch}' on Windows"
-                        ),
+                        reason: format!("{label} contains invalid character '{ch}' on Windows"),
                     });
                 }
             }
@@ -489,9 +487,19 @@ impl WorktreeManager {
         // Resolve before creating even parent directories; never pass an option-like ref.
         let base = options.base_ref.as_deref().unwrap_or("HEAD");
         if base.is_empty() || base.starts_with('-') || base.chars().any(char::is_control) {
-            return Err(WorktreeError::InvalidNamespace { reason: "Invalid base ref".into() });
+            return Err(WorktreeError::InvalidNamespace {
+                reason: "Invalid base ref".into(),
+            });
         }
-        let commit = run_git(&self.repo_root, &["rev-parse", "--verify", "--end-of-options", &format!("{base}^{{commit}}")])?;
+        let commit = run_git(
+            &self.repo_root,
+            &[
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                &format!("{base}^{{commit}}"),
+            ],
+        )?;
         let parent = options
             .path
             .parent()
@@ -780,8 +788,17 @@ impl WorktreeManager {
         branch: &str,
     ) -> Result<BranchDeletionPreview, WorktreeError> {
         let branch = branch.to_owned();
-        let head = run_git(&self.repo_root, &["rev-parse", "--verify", "--end-of-options", &format!("refs/heads/{branch}^{{commit}}")])?
-            .trim().to_owned();
+        let head = run_git(
+            &self.repo_root,
+            &[
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                &format!("refs/heads/{branch}^{{commit}}"),
+            ],
+        )?
+        .trim()
+        .to_owned();
         let merged = self.branch_is_merged(&branch)?;
         let upstream = run_git(
             &self.repo_root,

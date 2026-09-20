@@ -35,7 +35,7 @@ So the relationship is one library, used for parsing, embedded in an application
 - Agent processes should survive closing or reloading the GUI, with missed output replayed on reconnect.
 - You want browser tabs beside terminal panes, or an authenticated mobile remote view.
 
-A caveat belongs here: Ferryx is at v0.1.0-alpha, with a narrow scope. It doesn't aim to be a general purpose terminal emulator, and it isn't one yet.
+A caveat belongs here: Ferryx is early software, with a narrow scope. It doesn't aim to be a general purpose terminal emulator, and it isn't one yet.
 
 ## Credit
 

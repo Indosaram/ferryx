@@ -96,10 +96,15 @@ fn late_generated_pin_survives_failure_window_rollover() {
         assert_eq!(window.failures, 0);
     }
     // Then the one-second-old PIN still pairs with its original permission.
-    let (token, device) = auth.exchange_pairing_code(&code, "late PIN").expect("PIN retains its full sixty-second lifetime");
+    let (token, device) = auth
+        .exchange_pairing_code(&code, "late PIN")
+        .expect("PIN retains its full sixty-second lifetime");
     assert_eq!(device.permission, DevicePermission::View);
     assert_eq!(auth.validate_token(&token).unwrap().id, device.id);
-    assert!(matches!(auth.exchange_pairing_code(&code, "replay"), Err(AuthError::InvalidPairingCode)));
+    assert!(matches!(
+        auth.exchange_pairing_code(&code, "replay"),
+        Err(AuthError::InvalidPairingCode)
+    ));
 }
 
 #[test]

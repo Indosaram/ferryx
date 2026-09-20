@@ -1,12 +1,13 @@
 pub mod bridge;
+pub(crate) mod agent_forward;
 pub mod browse;
 pub mod config;
 pub mod direct;
 pub mod exec;
+pub mod helper_assets;
 #[path = "../ferryx_scope/ssh/mod.rs"]
 pub mod helper_runtime;
 pub mod helper_setup;
-pub mod helper_assets;
 pub mod operations;
 pub mod password;
 pub mod projects;
@@ -76,7 +77,11 @@ impl<'de> Deserialize<'de> for SshHost {
             port: Option<u16>,
 
             identity_file: Option<String>,
-            #[serde(default, rename = "identity_file", deserialize_with = "deserialize_optional_string_lenient")]
+            #[serde(
+                default,
+                rename = "identity_file",
+                deserialize_with = "deserialize_optional_string_lenient"
+            )]
             identity_file_snake: Option<String>,
             #[serde(default, deserialize_with = "deserialize_optional_string_lenient")]
             key: Option<String>,
@@ -84,7 +89,11 @@ impl<'de> Deserialize<'de> for SshHost {
             key_path: Option<String>,
 
             jump_host: Option<String>,
-            #[serde(default, rename = "jump_host", deserialize_with = "deserialize_optional_string_lenient")]
+            #[serde(
+                default,
+                rename = "jump_host",
+                deserialize_with = "deserialize_optional_string_lenient"
+            )]
             jump_host_snake: Option<String>,
             #[serde(default, deserialize_with = "deserialize_optional_string_lenient")]
             proxy_jump: Option<String>,
@@ -95,9 +104,10 @@ impl<'de> Deserialize<'de> for SshHost {
         }
 
         let raw = RawSshHost::deserialize(deserializer)?;
-        let id = raw.id.filter(|s| !s.is_empty()).ok_or_else(|| {
-            serde::de::Error::missing_field("id")
-        })?;
+        let id = raw
+            .id
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| serde::de::Error::missing_field("id"))?;
 
         let hostname = raw
             .hostname
@@ -113,7 +123,13 @@ impl<'de> Deserialize<'de> for SshHost {
             .or(raw.title)
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
-            .or_else(|| if !hostname.is_empty() { Some(hostname.clone()) } else { None })
+            .or_else(|| {
+                if !hostname.is_empty() {
+                    Some(hostname.clone())
+                } else {
+                    None
+                }
+            })
             .unwrap_or_else(|| id.clone());
 
         let username = raw
@@ -303,7 +319,8 @@ mod tests {
             "hostname": "box.example.com",
             "host": "box.example.com"
         });
-        let host_equal: SshHost = serde_json::from_value(json_equal).expect("deserialize matching keys");
+        let host_equal: SshHost =
+            serde_json::from_value(json_equal).expect("deserialize matching keys");
         assert_eq!(host_equal.label, "SameBox");
         assert_eq!(host_equal.hostname, "box.example.com");
     }
@@ -381,7 +398,8 @@ mod tests {
             "identityFile": "~/.ssh/id_ed25519",
             "authMethod": "agent"
         });
-        let host_explicit: SshHost = serde_json::from_value(json_explicit).expect("deserialize explicit auth");
+        let host_explicit: SshHost =
+            serde_json::from_value(json_explicit).expect("deserialize explicit auth");
         assert_eq!(host_explicit.auth_method, SshAuthMethod::Agent);
     }
 
@@ -424,7 +442,8 @@ mod tests {
             "jump_host": 99,
             "proxyJump": null
         });
-        let host: SshHost = serde_json::from_value(json).expect("deserialize canonical host with non-string legacy fields");
+        let host: SshHost = serde_json::from_value(json)
+            .expect("deserialize canonical host with non-string legacy fields");
         assert_eq!(host.id, "stable");
         assert_eq!(host.label, "Box");
         assert_eq!(host.hostname, "example.com");

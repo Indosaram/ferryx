@@ -1,11 +1,11 @@
 //! Remote Browser Screencast Security, URL Allowlist & Path Sanitization
 //! Authoritative Spec: docs/plans/REMOTE_BROWSER_SCREENCAST_PLAN_2026-09-17.md (§6.1, §6.3, §6.4)
 
+use crate::remote::auth::DevicePermission;
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use parking_lot::Mutex;
 use tauri::Url;
-use crate::remote::auth::DevicePermission;
 
 pub const MAX_EVAL_RESULT_BYTES: usize = 65_536; // 64 KiB UTF-8
 pub const MAX_REQUEST_WIRE_BYTES: usize = 64 * 1024;
@@ -42,9 +42,9 @@ pub fn require_permission(
     match (granted, required) {
         (DevicePermission::Control, _) => Ok(()),
         (DevicePermission::View, DevicePermission::View) => Ok(()),
-        (DevicePermission::View, DevicePermission::Control) => {
-            Err(SecurityError::PermissionDenied("Control permission required"))
-        }
+        (DevicePermission::View, DevicePermission::Control) => Err(
+            SecurityError::PermissionDenied("Control permission required"),
+        ),
     }
 }
 
@@ -76,7 +76,11 @@ fn url_token_end(rest: &str) -> usize {
 /// Characters that terminate a filesystem path token.
 fn path_token_end(rest: &str) -> usize {
     rest.find(|c: char| {
-        c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '<' | '>' | ')' | '}' | ']' | ',' | ';')
+        c.is_whitespace()
+            || matches!(
+                c,
+                '"' | '\'' | '`' | '<' | '>' | ')' | '}' | ']' | ',' | ';'
+            )
     })
     .unwrap_or(rest.len())
 }
@@ -149,8 +153,12 @@ pub fn sanitize_public_string(raw: &str) -> String {
         // their path segments look like local directories. Recognized case-insensitively while
         // preserving original bytes (R5-16, R6-14).
         let bytes = rest.as_bytes();
-        let is_http_url = bytes.get(..7).is_some_and(|b| b.eq_ignore_ascii_case(b"http://"))
-            || bytes.get(..8).is_some_and(|b| b.eq_ignore_ascii_case(b"https://"));
+        let is_http_url = bytes
+            .get(..7)
+            .is_some_and(|b| b.eq_ignore_ascii_case(b"http://"))
+            || bytes
+                .get(..8)
+                .is_some_and(|b| b.eq_ignore_ascii_case(b"https://"));
         if is_http_url {
             let end = url_token_end(rest).max(1);
             out.push_str(&rest[..end]);
@@ -199,7 +207,11 @@ impl RequestDeduplicator {
         }
     }
 
-    pub fn check_or_record(&self, seq: u64, now: Instant) -> Result<Option<Vec<u8>>, SecurityError> {
+    pub fn check_or_record(
+        &self,
+        seq: u64,
+        now: Instant,
+    ) -> Result<Option<Vec<u8>>, SecurityError> {
         let mut cache = self.cache.lock();
         // Prune expired entries
         cache.retain(|_, (ts, _)| now.saturating_duration_since(*ts) <= DEDUP_CACHE_TTL);
@@ -321,7 +333,13 @@ pub mod tests {
                 "absolute path must be redacted: {raw} -> {redacted}"
             );
             for leaked in [
-                "/Volumes/", "/var/folders", "/tmp/", "/opt/", "/Applications/", "/Library/", "~/Projects",
+                "/Volumes/",
+                "/var/folders",
+                "/tmp/",
+                "/opt/",
+                "/Applications/",
+                "/Library/",
+                "~/Projects",
             ] {
                 assert!(
                     !redacted.contains(leaked),
@@ -378,10 +396,7 @@ pub mod tests {
             sanitize_public_string("Reading /flag.txt"),
             "Reading [redacted-path]"
         );
-        assert_eq!(
-            sanitize_public_string("/etc_config"),
-            "[redacted-path]"
-        );
+        assert_eq!(sanitize_public_string("/etc_config"), "[redacted-path]");
 
         // Uppercase and mixed-case HTTP(S) URLs must be preserved byte-identically
         let upper_url = "HTTPS://EXAMPLE.COM/SECRET.PEM";
@@ -407,7 +422,10 @@ pub mod tests {
         dedup.record_result(1, b"res1".to_vec(), now);
 
         // Duplicate request with seq 1: returns cached result
-        assert_eq!(dedup.check_or_record(1, now).unwrap(), Some(b"res1".to_vec()));
+        assert_eq!(
+            dedup.check_or_record(1, now).unwrap(),
+            Some(b"res1".to_vec())
+        );
 
         // 2nd request with seq 2: new request
         assert_eq!(dedup.check_or_record(2, now).unwrap(), None);

@@ -420,7 +420,11 @@ impl AuthManager {
         Ok(self.issue_pairing_code(default_permission, access_scope))
     }
 
-    fn issue_pairing_code(&self, default_permission: DevicePermission, access_scope: DeviceAccessScope) -> String {
+    fn issue_pairing_code(
+        &self,
+        default_permission: DevicePermission,
+        access_scope: DeviceAccessScope,
+    ) -> String {
         let _transaction = self.begin_transaction().ok();
         let pin: u32 = rand::thread_rng().gen_range(100_000..=999_999);
         let code = format!("{pin:06}");
@@ -474,7 +478,12 @@ impl AuthManager {
         Ok(())
     }
 
-    fn issue_pairing_capability(&self, token: &str, permission: DevicePermission, access_scope: DeviceAccessScope) {
+    fn issue_pairing_capability(
+        &self,
+        token: &str,
+        permission: DevicePermission,
+        access_scope: DeviceAccessScope,
+    ) {
         let _transaction = self.begin_transaction().ok();
         let mut window = self.pairing_window.write();
         window.refresh(Instant::now());
@@ -563,7 +572,9 @@ impl AuthManager {
                     }
                 }
                 self.tokens.write().retain(|_, owner| owner != &existing.id);
-                self.tokens.write().insert(token.clone(), existing.id.clone());
+                self.tokens
+                    .write()
+                    .insert(token.clone(), existing.id.clone());
 
                 let updated = DeviceInfo {
                     id: existing.id.clone(),
@@ -575,7 +586,9 @@ impl AuthManager {
                     revoked: false,
                     installation_id: effective_installation_id,
                 };
-                self.devices.write().insert(existing.id.clone(), updated.clone());
+                self.devices
+                    .write()
+                    .insert(existing.id.clone(), updated.clone());
                 updated
             } else {
                 let dev_id = self.tokens.read().get(&token).cloned();
@@ -867,8 +880,9 @@ impl AuthManager {
         let guard = self.transaction.lock();
         let file = if let Some(path) = self.persistence_path.as_deref() {
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| AuthError::Storage(format!("create remote auth directory: {e}")))?;
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    AuthError::Storage(format!("create remote auth directory: {e}"))
+                })?;
             }
             let mut open_opts = std::fs::OpenOptions::new();
             open_opts
@@ -910,11 +924,17 @@ impl AuthManager {
             pairing_codes: self.pairing_window.read().codes.clone(),
         };
         #[cfg(test)]
-        if self.injected_snapshot_failure.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(AuthError::Storage("Injected disk-full error during snapshot write".to_string()));
+        if self
+            .injected_snapshot_failure
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(AuthError::Storage(
+                "Injected disk-full error during snapshot write".to_string(),
+            ));
         }
-        write_private_json(path, &snapshot)
-            .map_err(|error| AuthError::Storage(format!("failed to persist remote auth state: {error}")))?;
+        write_private_json(path, &snapshot).map_err(|error| {
+            AuthError::Storage(format!("failed to persist remote auth state: {error}"))
+        })?;
         Ok(())
     }
 
@@ -939,8 +959,9 @@ fn revocation_journal_path(auth_path: &Path) -> PathBuf {
 fn append_revocation_journal(path: &Path, device_id: &str) -> Result<(), AuthError> {
     let journal_path = revocation_journal_path(path);
     if let Some(parent) = journal_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| AuthError::Storage(format!("create auth directory for revocation journal: {e}")))?;
+        std::fs::create_dir_all(parent).map_err(|e| {
+            AuthError::Storage(format!("create auth directory for revocation journal: {e}"))
+        })?;
     }
     let mut options = std::fs::OpenOptions::new();
     options.create(true).write(true).append(true);
@@ -979,7 +1000,9 @@ fn load_revocation_journal(path: &Path) -> Result<std::collections::HashSet<Stri
             Ok(set)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(set),
-        Err(e) => Err(AuthError::Storage(format!("failed to read revocation journal: {e}"))),
+        Err(e) => Err(AuthError::Storage(format!(
+            "failed to read revocation journal: {e}"
+        ))),
     }
 }
 
@@ -988,7 +1011,11 @@ fn clear_revocation_journal(path: &Path, device_id: &str) -> Result<(), AuthErro
     let content = match std::fs::read_to_string(&journal_path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(AuthError::Storage(format!("failed to read revocation journal for clear: {e}"))),
+        Err(e) => {
+            return Err(AuthError::Storage(format!(
+                "failed to read revocation journal for clear: {e}"
+            )))
+        }
     };
     let remaining: Vec<&str> = content
         .lines()
@@ -999,10 +1026,12 @@ fn clear_revocation_journal(path: &Path, device_id: &str) -> Result<(), AuthErro
         let _ = std::fs::remove_file(&journal_path);
     } else {
         let temp = journal_path.with_extension(format!("tmp.{}", std::process::id()));
-        std::fs::write(&temp, remaining.join("\n") + "\n")
-            .map_err(|e| AuthError::Storage(format!("failed to write updated revocation journal: {e}")))?;
-        std::fs::rename(&temp, &journal_path)
-            .map_err(|e| AuthError::Storage(format!("failed to rename updated revocation journal: {e}")))?;
+        std::fs::write(&temp, remaining.join("\n") + "\n").map_err(|e| {
+            AuthError::Storage(format!("failed to write updated revocation journal: {e}"))
+        })?;
+        std::fs::rename(&temp, &journal_path).map_err(|e| {
+            AuthError::Storage(format!("failed to rename updated revocation journal: {e}"))
+        })?;
     }
     Ok(())
 }
@@ -1011,7 +1040,11 @@ fn load_persisted_auth(path: &Path) -> Result<Option<PersistedAuthState>, AuthEr
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(AuthError::Storage(format!("failed to read persisted auth: {e}"))),
+        Err(e) => {
+            return Err(AuthError::Storage(format!(
+                "failed to read persisted auth: {e}"
+            )))
+        }
     };
     let mut state: PersistedAuthState = serde_json::from_slice(&bytes)
         .map_err(|e| AuthError::Storage(format!("failed to parse persisted auth: {e}")))?;
@@ -1023,7 +1056,9 @@ fn apply_revocation_journal(state: &mut PersistedAuthState, path: &Path) -> Resu
     let revocations = load_revocation_journal(path)?;
     if !revocations.is_empty() {
         state.devices.retain(|id, _| !revocations.contains(id));
-        state.tokens.retain(|_, device_id| !revocations.contains(device_id));
+        state
+            .tokens
+            .retain(|_, device_id| !revocations.contains(device_id));
     }
     Ok(())
 }
@@ -1156,7 +1191,10 @@ pub(crate) fn write_private_json<T: Serialize>(path: &Path, value: &T) -> std::i
 #[error("Machine access requires Control permission")]
 pub struct MachineGrantError;
 
-fn validate_machine_grant(permission: DevicePermission, scope: DeviceAccessScope) -> Result<(), MachineGrantError> {
+fn validate_machine_grant(
+    permission: DevicePermission,
+    scope: DeviceAccessScope,
+) -> Result<(), MachineGrantError> {
     if scope == DeviceAccessScope::Machine && permission != DevicePermission::Control {
         return Err(MachineGrantError);
     }
@@ -1542,7 +1580,10 @@ mod tests {
         assert_eq!(device2.name, "Phone 2", "device name must be updated");
         assert_ne!(token2, token1, "new token must be issued");
         assert!(
-            matches!(manager.validate_token(&token1), Err(AuthError::Unauthorized)),
+            matches!(
+                manager.validate_token(&token1),
+                Err(AuthError::Unauthorized)
+            ),
             "previous token must be invalidated"
         );
         assert!(
@@ -1556,7 +1597,11 @@ mod tests {
         let manager = AuthManager::new();
         let code1 = manager.create_pairing_code(DevicePermission::Control);
         let (_token1, device1) = manager
-            .exchange_pairing_code_with_installation(&code1, "Control Device", Some("install-perm-1"))
+            .exchange_pairing_code_with_installation(
+                &code1,
+                "Control Device",
+                Some("install-perm-1"),
+            )
             .expect("first pairing succeeds");
         assert_eq!(device1.permission, DevicePermission::Control);
 
@@ -1603,7 +1648,11 @@ mod tests {
 
         // list_devices filters it out even without store reload
         let filtered = auth.list_devices();
-        assert_eq!(filtered.len(), 0, "idle devices must be filtered from list_devices");
+        assert_eq!(
+            filtered.len(),
+            0,
+            "idle devices must be filtered from list_devices"
+        );
     }
 
     #[test]
@@ -1634,7 +1683,10 @@ mod tests {
         }
 
         assert!(
-            matches!(mem_manager.validate_token(&idle_token), Err(AuthError::Unauthorized)),
+            matches!(
+                mem_manager.validate_token(&idle_token),
+                Err(AuthError::Unauthorized)
+            ),
             "device idle past window must fail validate_token"
         );
 
@@ -1674,15 +1726,24 @@ mod tests {
 
         let disk_manager = AuthManager::with_persistence(Some(path));
         assert!(
-            disk_manager.list_devices().iter().all(|d| d.id != "idle-dev"),
+            disk_manager
+                .list_devices()
+                .iter()
+                .all(|d| d.id != "idle-dev"),
             "idle device must be pruned on load"
         );
         assert!(
-            disk_manager.list_devices().iter().any(|d| d.id == "active-dev"),
+            disk_manager
+                .list_devices()
+                .iter()
+                .any(|d| d.id == "active-dev"),
             "active device must survive store load"
         );
         assert!(
-            matches!(disk_manager.validate_token("idle-tok"), Err(AuthError::Unauthorized)),
+            matches!(
+                disk_manager.validate_token("idle-tok"),
+                Err(AuthError::Unauthorized)
+            ),
             "pruned idle device token must fail validate_token"
         );
         assert!(
@@ -1748,7 +1809,10 @@ mod tests {
         let devices = manager.list_devices();
         assert_eq!(devices.len(), 1, "legacy store must load device");
         assert_eq!(devices[0].id, "legacy-dev");
-        assert_eq!(devices[0].installation_id, None, "installation_id must be None");
+        assert_eq!(
+            devices[0].installation_id, None,
+            "installation_id must be None"
+        );
         assert!(
             manager.validate_token("legacy-token").is_ok(),
             "token for legacy device must validate"
@@ -1893,7 +1957,9 @@ mod persistence_tests {
             writer.join().expect("writer thread");
         }
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        reader.join().expect("reader observed only complete documents");
+        reader
+            .join()
+            .expect("reader observed only complete documents");
 
         // The surviving store is a complete, valid document.
         let final_state: serde_json::Value =
@@ -2162,7 +2228,10 @@ mod persistence_tests {
             "revoked device must be pruned upon reload"
         );
         assert!(
-            matches!(reopened.validate_token(&token), Err(AuthError::Unauthorized)),
+            matches!(
+                reopened.validate_token(&token),
+                Err(AuthError::Unauthorized)
+            ),
             "revoked token must be unauthorized"
         );
 
@@ -2213,15 +2282,11 @@ mod persistence_tests {
 
         let manager1 = Arc::clone(&manager);
         let code1 = code.clone();
-        let task1 = tokio::spawn(async move {
-            manager1.exchange_pairing_code(&code1, "Device 1")
-        });
+        let task1 = tokio::spawn(async move { manager1.exchange_pairing_code(&code1, "Device 1") });
 
         let manager2 = Arc::clone(&manager);
         let code2 = code.clone();
-        let task2 = tokio::spawn(async move {
-            manager2.exchange_pairing_code(&code2, "Device 2")
-        });
+        let task2 = tokio::spawn(async move { manager2.exchange_pairing_code(&code2, "Device 2") });
 
         let (res1, res2) = tokio::join!(task1, task2);
         let res1 = res1.expect("task1 join");
@@ -2230,7 +2295,9 @@ mod persistence_tests {
         let (winner, loser) = match (res1, res2) {
             (Ok(w), Err(l)) => (w, l),
             (Err(l), Ok(w)) => (w, l),
-            (r1, r2) => panic!("Expected exactly one winner and one loser, got: r1={r1:?}, r2={r2:?}"),
+            (r1, r2) => {
+                panic!("Expected exactly one winner and one loser, got: r1={r1:?}, r2={r2:?}")
+            }
         };
 
         assert_eq!(loser, AuthError::InvalidPairingCode);

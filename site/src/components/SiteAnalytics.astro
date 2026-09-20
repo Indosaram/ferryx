@@ -1,11 +1,122 @@
 ---
-// Both tags stay out of the build unless configured, so forks, local builds and
-// preview builds ship no third-party requests and no verification token.
-const verification = import.meta.env.PUBLIC_GSC_VERIFICATION;
-const analyticsSrc = import.meta.env.PUBLIC_ANALYTICS_SRC;
-const analyticsDomain = import.meta.env.PUBLIC_ANALYTICS_DOMAIN;
-const analyticsEnabled = Boolean(analyticsSrc && analyticsDomain);
+// Verification tokens and every analytics surface stay out of the build unless configured,
+// so forks, local builds and preview builds ship no third-party requests and no tokens.
+//
+// PUBLIC_GA_MEASUREMENT_ID enables the consent-gated Google tag. Nothing contacts Google,
+// defines dataLayer, or writes storage until the visitor explicitly accepts; the markup below
+// only ships an inert <template> plus the script that mounts the choice.
+import { resolveSiteAnalyticsConfig } from '../lib/analytics';
+import { consentMarkup, CONSENT_TEMPLATE_ID } from '../lib/analyticsRuntime';
+
+const config = resolveSiteAnalyticsConfig(import.meta.env);
+const base = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL : `${import.meta.env.BASE_URL}/`;
+const consentHtml = config.measurementId ? consentMarkup({ privacyHref: `${base}privacy/` }) : '';
+
+// Written as a raw string rather than an Astro <style> block: a <style> element inside a
+// conditional expression is emitted verbatim as text instead of being compiled, and hoisting
+// it to the template root would ship this CSS to builds that have no analytics at all.
+const consentStyles = `
+.ferryx-consent {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0.75rem;
+}
+.ferryx-consent[hidden] { display: none; }
+.ferryx-consent[data-consent-state='open'] {
+  position: fixed;
+  inset-inline: 0;
+  bottom: 0;
+  z-index: 60;
+  pointer-events: none;
+}
+.ferryx-consent[data-consent-state='open'] > * { pointer-events: auto; }
+.ferryx-consent__panel {
+  max-width: 26rem;
+  width: 100%;
+  border: 1px solid rgb(var(--line-rgb));
+  border-radius: 1rem;
+  background: rgb(var(--surface-rgb));
+  color: rgb(var(--ink-rgb));
+  box-shadow: var(--shadow-menu);
+  padding: 1rem 1.125rem 1.125rem;
+}
+.ferryx-consent__panel[hidden] { display: none; }
+.ferryx-consent__title {
+  margin: 0;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.ferryx-consent__text {
+  margin: 0.5rem 0 0;
+  font-size: 0.8125rem;
+  line-height: 1.55;
+  color: rgb(var(--ink-soft-rgb));
+}
+.ferryx-consent__link { color: rgb(var(--ink-rgb)); text-decoration: underline; }
+.ferryx-consent__actions {
+  margin-top: 0.875rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+/* Accept and decline are deliberately identical: same element, size, weight and colour. */
+.ferryx-consent__button {
+  flex: 1 1 9rem;
+  min-height: 2.75rem;
+  padding: 0.5rem 1rem;
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: rgb(var(--ink-rgb));
+  background: rgb(var(--page-rgb));
+  border: 1px solid rgb(var(--line-strong-rgb));
+  border-radius: 0.625rem;
+  cursor: pointer;
+}
+.ferryx-consent__button:hover { background: rgb(var(--page-raised-rgb)); }
+.ferryx-consent__reopen {
+  align-self: flex-end;
+  min-height: 2.25rem;
+  padding: 0.375rem 0.875rem;
+  font: inherit;
+  font-size: 0.75rem;
+  color: rgb(var(--ink-soft-rgb));
+  background: rgb(var(--surface-rgb));
+  border: 1px solid rgb(var(--line-rgb));
+  border-radius: 999px;
+  box-shadow: var(--shadow-card);
+  cursor: pointer;
+}
+.ferryx-consent__reopen[hidden] { display: none; }
+.ferryx-consent__reopen:hover { color: rgb(var(--ink-rgb)); }
+.ferryx-consent__button:focus-visible,
+.ferryx-consent__reopen:focus-visible {
+  outline: 2px solid rgb(var(--ink-rgb));
+  outline-offset: 2px;
+}
+@media (min-width: 640px) {
+  .ferryx-consent { padding: 1.25rem; }
+}
+`;
 ---
 
-{verification && <meta name="google-site-verification" content={verification} />}
-{analyticsEnabled && <script is:inline defer src={analyticsSrc} data-domain={analyticsDomain}></script>}
+{config.googleVerification && <meta name="google-site-verification" content={config.googleVerification} />}
+{config.bingVerification && <meta name="msvalidate.01" content={config.bingVerification} />}
+{
+  config.legacyScript && (
+    <script is:inline defer src={config.legacyScript.src} data-domain={config.legacyScript.domain} />
+  )
+}
+{
+  config.measurementId && (
+    <>
+      <template id={CONSENT_TEMPLATE_ID} data-measurement-id={config.measurementId} set:html={consentHtml} />
+      <style is:inline set:html={consentStyles} />
+      <script>
+        import { initAnalytics } from '../lib/analyticsRuntime';
+        initAnalytics();
+      </script>
+    </>
+  )
+}

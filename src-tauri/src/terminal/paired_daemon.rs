@@ -1,13 +1,26 @@
 //! Daemon relay transport, deliberately independent of the SSH helper runtime.
 //! The owner drives receive and keepalive; no task, process or PTY is spawned here.
-use crate::{paired_host::{client::{ClientError, MachineClient}, inventory::CredentialLease, service::PairedHostService}, remote::{machine_protocol as m, terminal_wire::{decode_frame, Metadata}}, scoped_contracts::Epoch};
 use super::output_hub::TerminalOutputHub;
+use crate::{
+    paired_host::{
+        client::{ClientError, MachineClient},
+        inventory::CredentialLease,
+        service::PairedHostService,
+    },
+    remote::{
+        machine_protocol as m,
+        terminal_wire::{decode_frame, Metadata},
+    },
+    scoped_contracts::Epoch,
+};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
-use tokio_tungstenite::{WebSocketStream, MaybeTlsStream, tungstenite::Message};
+use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
 type Result<T> = std::result::Result<T, ClientError>;
-fn error(code: &str) -> ClientError { ClientError::local(code) }
+fn error(code: &str) -> ClientError {
+    ClientError::local(code)
+}
 
 /// Credential-free durable identity. Local output cursors are never remote cursors.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,28 +72,61 @@ pub struct Proxy {
 }
 impl Proxy {
     pub fn new(descriptor: Descriptor, hub: Arc<TerminalOutputHub>) -> Result<Self> {
-        let id = m::proxy_backend_id(&descriptor.host_id, &descriptor.target).map_err(|_| error("INVALID_REQUEST"))?;
+        let id = m::proxy_backend_id(&descriptor.host_id, &descriptor.target)
+            .map_err(|_| error("INVALID_REQUEST"))?;
         // R4-N3: live-transport ownership is fenced separately from the retained
         // output entry. A retained hub (transport lost without confirmed exit) is
         // adoptable by the next proxy instead of conflicting; only a live owner conflicts.
-        if !hub.claim_transport(&id) { return Err(error("CONTROL_CONFLICT")); }
+        if !hub.claim_transport(&id) {
+            return Err(error("CONTROL_CONFLICT"));
+        }
         // Adopting a retained entry must keep its buffered history and live
         // subscribers: re-registering would reset the bounded buffer and drop
         // the old broadcast sender.
-        if !hub.has_session(&id) { hub.register_session(&id); }
-        Ok(Self { id, descriptor, hub, transport: None, controller: None, replay_pending: false, exited: false })
+        if !hub.has_session(&id) {
+            hub.register_session(&id);
+        }
+        Ok(Self {
+            id,
+            descriptor,
+            hub,
+            transport: None,
+            controller: None,
+            replay_pending: false,
+            exited: false,
+        })
     }
-    pub fn id(&self) -> &str { &self.id }
-    pub fn descriptor(&self) -> &Descriptor { &self.descriptor }
-    pub fn controller(&self) -> Option<Epoch> { self.controller }
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub fn descriptor(&self) -> &Descriptor {
+        &self.descriptor
+    }
+    pub fn controller(&self) -> Option<Epoch> {
+        self.controller
+    }
 
     /// Explicit reattach only. A failed connection never submits CreateSession.
-    pub async fn reattach(&mut self, client: &MachineClient, service: &PairedHostService) -> Result<()> {
+    pub async fn reattach(
+        &mut self,
+        client: &MachineClient,
+        service: &PairedHostService,
+    ) -> Result<()> {
         self.detach().await?;
         let mut transport = client.attach_terminal(service, &self.descriptor).await?;
-        let Message::Text(text) = transport.receive().await? else { return Err(error("PAIRED_HOST_INVALID_RESPONSE")); };
-        let m::Attached::Attached { target, generation, cols, rows, .. } = serde_json::from_str(&text).map_err(|_| error("PAIRED_HOST_INVALID_RESPONSE"))?;
-        if target != self.descriptor.target { return Err(error("PAIRED_HOST_WRONG_MACHINE")); }
+        let Message::Text(text) = transport.receive().await? else {
+            return Err(error("PAIRED_HOST_INVALID_RESPONSE"));
+        };
+        let m::Attached::Attached {
+            target,
+            generation,
+            cols,
+            rows,
+            ..
+        } = serde_json::from_str(&text).map_err(|_| error("PAIRED_HOST_INVALID_RESPONSE"))?;
+        if target != self.descriptor.target {
+            return Err(error("PAIRED_HOST_WRONG_MACHINE"));
+        }
         self.hub.record_initial_size(&self.id, cols, rows);
         self.controller = Some(generation);
         self.replay_pending = true;
@@ -89,61 +135,114 @@ impl Proxy {
     }
     pub async fn detach(&mut self) -> Result<()> {
         self.controller = None;
-        if let Some(mut transport) = self.transport.take() { transport.send(Message::Close(None)).await?; }
+        if let Some(mut transport) = self.transport.take() {
+            transport.send(Message::Close(None)).await?;
+        }
         Ok(())
     }
     async fn send(&mut self, generation: Epoch, message: Message) -> Result<()> {
-        if self.controller != Some(generation) { return Err(error("STALE_GENERATION")); }
-        let result = self.transport.as_mut().ok_or_else(|| error("HOST_UNAVAILABLE"))?.send(message).await;
-        if result.is_err() { self.transport = None; self.controller = None; }
+        if self.controller != Some(generation) {
+            return Err(error("STALE_GENERATION"));
+        }
+        let result = self
+            .transport
+            .as_mut()
+            .ok_or_else(|| error("HOST_UNAVAILABLE"))?
+            .send(message)
+            .await;
+        if result.is_err() {
+            self.transport = None;
+            self.controller = None;
+        }
         result
     }
     pub async fn write(&mut self, generation: Epoch, bytes: &[u8]) -> Result<()> {
-        if bytes.len() > 64 * 1024 { return Err(error("PAYLOAD_TOO_LARGE")); }
-        self.send(generation, Message::Binary(bytes.to_vec().into())).await
+        if bytes.len() > 64 * 1024 {
+            return Err(error("PAYLOAD_TOO_LARGE"));
+        }
+        self.send(generation, Message::Binary(bytes.to_vec().into()))
+            .await
     }
     pub async fn resize(&mut self, generation: Epoch, cols: u16, rows: u16) -> Result<()> {
-        if cols == 0 || rows == 0 || cols > 1000 || rows > 1000 { return Err(error("INVALID_REQUEST")); }
+        if cols == 0 || rows == 0 || cols > 1000 || rows > 1000 {
+            return Err(error("INVALID_REQUEST"));
+        }
         self.send(generation, Message::Text(serde_json::json!({"type":"resize","generation":generation,"cols":cols,"rows":rows}).to_string().into())).await?;
         self.hub.record_resize(&self.id, cols, rows);
         Ok(())
     }
     pub async fn interrupt(&mut self, generation: Epoch) -> Result<()> {
-        self.send(generation, Message::Text(serde_json::json!({"type":"signal","generation":generation,"signal":"interrupt"}).to_string().into())).await
+        self.send(
+            generation,
+            Message::Text(
+                serde_json::json!({"type":"signal","generation":generation,"signal":"interrupt"})
+                    .to_string()
+                    .into(),
+            ),
+        )
+        .await
     }
     pub async fn ping(&mut self, generation: Epoch) -> Result<()> {
-        self.send(generation, Message::Text("{\"type\":\"ping\"}".into())).await
+        self.send(generation, Message::Text("{\"type\":\"ping\"}".into()))
+            .await
     }
     /// One bounded message at a time; consumers subscribe to the native hub.
     /// Lifecycle JSON is returned to the owner and never rendered as PTY bytes.
     pub async fn receive(&mut self) -> Result<Option<serde_json::Value>> {
         let result = self.receive_inner().await;
-        if result.is_err() { self.transport = None; self.controller = None; }
+        if result.is_err() {
+            self.transport = None;
+            self.controller = None;
+        }
         result
     }
     async fn receive_inner(&mut self) -> Result<Option<serde_json::Value>> {
-        let message = self.transport.as_mut().ok_or_else(|| error("HOST_UNAVAILABLE"))?.receive().await?;
+        let message = self
+            .transport
+            .as_mut()
+            .ok_or_else(|| error("HOST_UNAVAILABLE"))?
+            .receive()
+            .await?;
         match message {
             Message::Binary(bytes) => {
-                let frame = decode_frame(&bytes).map_err(|_| error("PAIRED_HOST_INVALID_RESPONSE"))?;
+                let frame =
+                    decode_frame(&bytes).map_err(|_| error("PAIRED_HOST_INVALID_RESPONSE"))?;
                 let (end, gap) = match frame.metadata {
                     Metadata::Replay { end, gap, .. } if self.replay_pending => (end, gap),
                     Metadata::Output { sequence, gap } => (Some(sequence), gap),
                     _ => return Err(error("PAIRED_HOST_INVALID_RESPONSE")),
                 };
                 self.replay_pending = false;
-                if gap.is_none() && end.is_some_and(|end| self.descriptor.after_sequence.is_some_and(|last| end <= last.0)) { return Ok(None); }
-                if gap.is_some() { self.hub.publish_gap(&self.id); }
+                if gap.is_none()
+                    && end.is_some_and(|end| {
+                        self.descriptor
+                            .after_sequence
+                            .is_some_and(|last| end <= last.0)
+                    })
+                {
+                    return Ok(None);
+                }
+                if gap.is_some() {
+                    self.hub.publish_gap(&self.id);
+                }
                 self.hub.publish(&self.id, frame.terminal_bytes.to_vec());
-                if let Some(end) = end { self.descriptor.after_sequence = Some(Epoch(end)); }
+                if let Some(end) = end {
+                    self.descriptor.after_sequence = Some(Epoch(end));
+                }
                 Ok(None)
             }
             Message::Text(text) => {
-                if text.len() > 16 * 1024 { return Err(error("PAYLOAD_TOO_LARGE")); }
-                let value: serde_json::Value = serde_json::from_str(&text).map_err(|_| error("PAIRED_HOST_INVALID_RESPONSE"))?;
+                if text.len() > 16 * 1024 {
+                    return Err(error("PAYLOAD_TOO_LARGE"));
+                }
+                let value: serde_json::Value = serde_json::from_str(&text)
+                    .map_err(|_| error("PAIRED_HOST_INVALID_RESPONSE"))?;
                 if let Some(target) = value.get("target") {
-                    let target: m::RemoteTerminalTarget = serde_json::from_value(target.clone()).map_err(|_| error("PAIRED_HOST_INVALID_RESPONSE"))?;
-                    if target != self.descriptor.target { return Err(error("PAIRED_HOST_WRONG_MACHINE")); }
+                    let target: m::RemoteTerminalTarget = serde_json::from_value(target.clone())
+                        .map_err(|_| error("PAIRED_HOST_INVALID_RESPONSE"))?;
+                    if target != self.descriptor.target {
+                        return Err(error("PAIRED_HOST_WRONG_MACHINE"));
+                    }
                 }
                 if matches!(value["type"].as_str(), Some("exit")) {
                     self.exited = true;
@@ -156,7 +255,11 @@ impl Proxy {
                 Ok(Some(value))
             }
             Message::Ping(bytes) => {
-                self.transport.as_mut().ok_or_else(|| error("HOST_UNAVAILABLE"))?.send(Message::Pong(bytes)).await?;
+                self.transport
+                    .as_mut()
+                    .ok_or_else(|| error("HOST_UNAVAILABLE"))?
+                    .send(Message::Pong(bytes))
+                    .await?;
                 Ok(None)
             }
             Message::Pong(_) => Ok(None),

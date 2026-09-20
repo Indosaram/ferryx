@@ -203,10 +203,18 @@ pub fn start_managed_pump<R: Runtime>(
                                     Some(&epoch_str),
                                 );
                             }
-                            Ok(DaemonStreamMessage::RemoteStatus { state, generation, failure, replay_gap, .. }) => {
+                            Ok(DaemonStreamMessage::RemoteStatus {
+                                state,
+                                generation,
+                                failure,
+                                replay_gap,
+                                ..
+                            }) => {
                                 let _ = app.emit("terminal_remote_status", serde_json::json!({"sessionId":session_id_clone,"state":state,"generation":generation,"failure":failure,"replayGap":replay_gap}));
                             }
-                            Ok(DaemonStreamMessage::AgentState { .. }) => {}
+                            Ok(DaemonStreamMessage::AgentState { .. })
+                            | Ok(DaemonStreamMessage::DagRunUpdated { .. })
+                            | Ok(DaemonStreamMessage::DagInventory { .. }) => {}
                             Ok(DaemonStreamMessage::Exit { exit_code, .. }) => {
                                 flush_terminal_output(
                                     &app,
@@ -280,10 +288,18 @@ pub fn start_managed_pump<R: Runtime>(
                         Some(&epoch_str),
                     );
                 }
-                Some(DaemonStreamMessage::RemoteStatus { state, generation, failure, replay_gap, .. }) => {
+                Some(DaemonStreamMessage::RemoteStatus {
+                    state,
+                    generation,
+                    failure,
+                    replay_gap,
+                    ..
+                }) => {
                     let _ = app.emit("terminal_remote_status", serde_json::json!({"sessionId":session_id_clone,"state":state,"generation":generation,"failure":failure,"replayGap":replay_gap}));
                 }
-                Some(DaemonStreamMessage::AgentState { .. }) => {}
+                Some(DaemonStreamMessage::AgentState { .. })
+                | Some(DaemonStreamMessage::DagRunUpdated { .. })
+                | Some(DaemonStreamMessage::DagInventory { .. }) => {}
                 Some(DaemonStreamMessage::Exit { exit_code, .. }) => {
                     flush_terminal_output(
                         &app,
@@ -666,27 +682,25 @@ pub(crate) fn infer_worktree_slug(
     request_worktree: Option<&WorktreeIdentity>,
     target_cwd: Option<&std::path::Path>,
 ) -> Option<String> {
-    request_worktree
-        .map(|w| w.slug.clone())
-        .or_else(|| {
-            target_cwd.and_then(|cwd| {
-                let s = cwd.to_string_lossy();
-                let marker_unix = ".orca-worktrees/wt-";
-                let marker_win = ".orca-worktrees\\wt-";
-                let start_idx = s
-                    .find(marker_unix)
-                    .map(|i| i + marker_unix.len())
-                    .or_else(|| s.find(marker_win).map(|i| i + marker_win.len()))?;
-                let rem = &s[start_idx..];
-                let end_idx = rem.find(['/', '\\']).unwrap_or(rem.len());
-                let slug = &rem[..end_idx];
-                if !slug.is_empty() {
-                    Some(slug.to_string())
-                } else {
-                    None
-                }
-            })
+    request_worktree.map(|w| w.slug.clone()).or_else(|| {
+        target_cwd.and_then(|cwd| {
+            let s = cwd.to_string_lossy();
+            let marker_unix = ".orca-worktrees/wt-";
+            let marker_win = ".orca-worktrees\\wt-";
+            let start_idx = s
+                .find(marker_unix)
+                .map(|i| i + marker_unix.len())
+                .or_else(|| s.find(marker_win).map(|i| i + marker_win.len()))?;
+            let rem = &s[start_idx..];
+            let end_idx = rem.find(['/', '\\']).unwrap_or(rem.len());
+            let slug = &rem[..end_idx];
+            if !slug.is_empty() {
+                Some(slug.to_string())
+            } else {
+                None
+            }
         })
+    })
 }
 
 pub(crate) fn resolve_paired_spawn_target(
@@ -740,7 +754,11 @@ pub(crate) fn resolve_paired_spawn_target(
         } else {
             None
         };
-        (remote_workspace_id.to_string(), Some(worktree_ident), sub_rel)
+        (
+            remote_workspace_id.to_string(),
+            Some(worktree_ident),
+            sub_rel,
+        )
     } else if let Some(cwd_path) = target_cwd {
         let cwd_norm = cwd_path.to_string_lossy().replace('\\', "/");
         let repo_norm = effective_repo_root.to_string_lossy().replace('\\', "/");
@@ -782,10 +800,9 @@ pub struct PendingCreateRecord {
     pub session: Option<crate::remote::machine_protocol::Session>,
 }
 
-
-
-static PENDING_CREATES: std::sync::LazyLock<Mutex<std::collections::HashMap<String, PendingCreateRecord>>> =
-    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+static PENDING_CREATES: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<String, PendingCreateRecord>>,
+> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
 pub fn get_pending_creates() -> std::collections::HashMap<String, PendingCreateRecord> {
     ensure_pending_creates_loaded();
@@ -835,7 +852,9 @@ fn ensure_pending_creates_loaded() {
     let Ok(data) = std::fs::read(&path) else {
         return;
     };
-    if let Ok(map) = serde_json::from_slice::<std::collections::HashMap<String, PendingCreateRecord>>(&data) {
+    if let Ok(map) =
+        serde_json::from_slice::<std::collections::HashMap<String, PendingCreateRecord>>(&data)
+    {
         PENDING_CREATES.lock().extend(map);
     } else {
         eprintln!("[ipc::terminal] pending-create store unreadable; starting empty");
@@ -908,10 +927,13 @@ fn spawn_background_create_reconciler(
     let host_id = host_id.to_string();
     let request_id = request_id.to_string();
     tokio::spawn(async move {
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_secs(PENDING_CREATE_BACKGROUND_WINDOW_SECS);
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(PENDING_CREATE_BACKGROUND_WINDOW_SECS);
         loop {
-            tokio::time::sleep(std::time::Duration::from_millis(PENDING_CREATE_BACKGROUND_POLL_MS)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(
+                PENDING_CREATE_BACKGROUND_POLL_MS,
+            ))
+            .await;
             if std::time::Instant::now() >= deadline {
                 // Window exhausted: leave the record Pending so a later pass
                 // (or operator action) can still reconcile it.
@@ -920,7 +942,10 @@ fn spawn_background_create_reconciler(
             let (cancelled, still_pending) = {
                 let guard = PENDING_CREATES.lock();
                 match guard.get(&request_id) {
-                    Some(record) => (record.cancelled, matches!(record.status, PendingCreateStatus::Pending)),
+                    Some(record) => (
+                        record.cancelled,
+                        matches!(record.status, PendingCreateStatus::Pending),
+                    ),
                     None => return,
                 }
             };
@@ -1028,7 +1053,9 @@ async fn resolve_pending_create_terminal(
             {
                 let mut guard = PENDING_CREATES.lock();
                 if let Some(record) = guard.get_mut(&request_id) {
-                    record.status = PendingCreateStatus::Failed { error: error.message.clone() };
+                    record.status = PendingCreateStatus::Failed {
+                        error: error.message.clone(),
+                    };
                 }
             }
             persist_pending_creates();
@@ -1071,7 +1098,9 @@ pub async fn start_pending_create_reaper(daemon_client: Arc<DaemonClient>) {
                 let terminal = match daemon_client.paired_host_operation(journal_req).await {
                     Ok(resp) => match resp.result {
                         crate::paired_host::client::OperationResult::Operation(
-                            crate::remote::machine_protocol::Operation::Completed { outcome, .. },
+                            crate::remote::machine_protocol::Operation::Completed {
+                                outcome, ..
+                            },
                         ) => Some(outcome),
                         _ => None,
                     },
@@ -1089,7 +1118,10 @@ pub async fn start_pending_create_reaper(daemon_client: Arc<DaemonClient>) {
                     .await;
                 }
             }
-            tokio::time::sleep(std::time::Duration::from_secs(PENDING_CREATE_REAPER_INTERVAL_SECS)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(
+                PENDING_CREATE_REAPER_INTERVAL_SECS,
+            ))
+            .await;
         }
     });
 }
@@ -1119,15 +1151,15 @@ pub async fn reconcile_ambiguous_create(
                 match op_resp.result {
                     crate::paired_host::client::OperationResult::Operation(
                         crate::remote::machine_protocol::Operation::Completed { outcome, .. },
-                    ) => {
-                        match outcome {
-                            crate::remote::machine_protocol::OperationOutcome::Session { session } => {
-                                if cancelled {
-                                    let close_req = crate::remote::machine_protocol::CloseSessionRequest {
+                    ) => match outcome {
+                        crate::remote::machine_protocol::OperationOutcome::Session { session } => {
+                            if cancelled {
+                                let close_req =
+                                    crate::remote::machine_protocol::CloseSessionRequest {
                                         request_id: uuid::Uuid::new_v4().to_string(),
                                         daemon_epoch: session.target.daemon_epoch.clone(),
                                     };
-                                    let _ = daemon_client
+                                let _ = daemon_client
                                         .paired_host_operation(crate::paired_host::client::OperationRequest {
                                             host_id: host_id.to_string(),
                                             generation,
@@ -1137,34 +1169,41 @@ pub async fn reconcile_ambiguous_create(
                                             },
                                         })
                                         .await;
-                                    return Ok(None);
-                                }
-                                return Ok(Some(session));
+                                return Ok(None);
                             }
-                            crate::remote::machine_protocol::OperationOutcome::Error { error } => {
-                                let client_err = crate::paired_host::client::ClientError {
-                                    code: error.code.clone(),
-                                    machine_error: Some(error.clone()),
-                                    request_id: if error.request_id.is_empty() {
-                                        Some(request_id.to_string())
-                                    } else {
-                                        Some(error.request_id.clone())
-                                    },
-                                    ambiguous: false,
-                                };
-                                return Err(map_client_error(&client_err, Some(host_id), Some(generation)));
-                            }
-                            _ => {
-                                let unknown_err = crate::paired_host::client::ClientError {
-                                    code: "OPERATION_OUTCOME_UNKNOWN".to_string(),
-                                    machine_error: None,
-                                    request_id: Some(request_id.to_string()),
-                                    ambiguous: true,
-                                };
-                                return Err(map_client_error(&unknown_err, Some(host_id), Some(generation)));
-                            }
+                            return Ok(Some(session));
                         }
-                    }
+                        crate::remote::machine_protocol::OperationOutcome::Error { error } => {
+                            let client_err = crate::paired_host::client::ClientError {
+                                code: error.code.clone(),
+                                machine_error: Some(error.clone()),
+                                request_id: if error.request_id.is_empty() {
+                                    Some(request_id.to_string())
+                                } else {
+                                    Some(error.request_id.clone())
+                                },
+                                ambiguous: false,
+                            };
+                            return Err(map_client_error(
+                                &client_err,
+                                Some(host_id),
+                                Some(generation),
+                            ));
+                        }
+                        _ => {
+                            let unknown_err = crate::paired_host::client::ClientError {
+                                code: "OPERATION_OUTCOME_UNKNOWN".to_string(),
+                                machine_error: None,
+                                request_id: Some(request_id.to_string()),
+                                ambiguous: true,
+                            };
+                            return Err(map_client_error(
+                                &unknown_err,
+                                Some(host_id),
+                                Some(generation),
+                            ));
+                        }
+                    },
                     crate::paired_host::client::OperationResult::Operation(
                         crate::remote::machine_protocol::Operation::Pending { .. },
                     )
@@ -1173,14 +1212,23 @@ pub async fn reconcile_ambiguous_create(
                     ) => {
                         if attempts >= MAX_RECONCILE_ATTEMPTS {
                             register_pending_create(host_id, generation, request_id, cancelled);
-                            spawn_background_create_reconciler(daemon_client, host_id, generation, request_id);
+                            spawn_background_create_reconciler(
+                                daemon_client,
+                                host_id,
+                                generation,
+                                request_id,
+                            );
                             let unknown_err = crate::paired_host::client::ClientError {
                                 code: "OPERATION_OUTCOME_UNKNOWN".to_string(),
                                 machine_error: None,
                                 request_id: Some(request_id.to_string()),
                                 ambiguous: true,
                             };
-                            return Err(map_client_error(&unknown_err, Some(host_id), Some(generation)));
+                            return Err(map_client_error(
+                                &unknown_err,
+                                Some(host_id),
+                                Some(generation),
+                            ));
                         }
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         continue;
@@ -1188,14 +1236,23 @@ pub async fn reconcile_ambiguous_create(
                     _ => {
                         if attempts >= MAX_RECONCILE_ATTEMPTS {
                             register_pending_create(host_id, generation, request_id, cancelled);
-                            spawn_background_create_reconciler(daemon_client, host_id, generation, request_id);
+                            spawn_background_create_reconciler(
+                                daemon_client,
+                                host_id,
+                                generation,
+                                request_id,
+                            );
                             let unknown_err = crate::paired_host::client::ClientError {
                                 code: "OPERATION_OUTCOME_UNKNOWN".to_string(),
                                 machine_error: None,
                                 request_id: Some(request_id.to_string()),
                                 ambiguous: true,
                             };
-                            return Err(map_client_error(&unknown_err, Some(host_id), Some(generation)));
+                            return Err(map_client_error(
+                                &unknown_err,
+                                Some(host_id),
+                                Some(generation),
+                            ));
                         }
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         continue;
@@ -1356,7 +1413,6 @@ pub async fn start_cleanup_reaper(daemon_client: Arc<DaemonClient>) {
     });
 }
 
-
 pub async fn execute_cleanup_close(
     daemon_client: &DaemonClient,
     host_id: &str,
@@ -1381,7 +1437,10 @@ pub async fn execute_cleanup_close(
     match daemon_client.paired_host_operation(op_req).await {
         Ok(_) => CleanupOutcome::Success,
         Err(e) if e.code == "SESSION_NOT_FOUND" => CleanupOutcome::Success,
-        Err(e) if e.ambiguous || matches!(e.code.as_str(), "TIMEOUT" | "OPERATION_OUTCOME_UNKNOWN") => {
+        Err(e)
+            if e.ambiguous
+                || matches!(e.code.as_str(), "TIMEOUT" | "OPERATION_OUTCOME_UNKNOWN") =>
+        {
             let journal_req = crate::paired_host::client::OperationRequest {
                 host_id: host_id.to_string(),
                 generation,
@@ -1396,7 +1455,8 @@ pub async fn execute_cleanup_close(
                             outcome: crate::remote::machine_protocol::OperationOutcome::NoContent,
                             ..
                         },
-                    ) = resp.result {
+                    ) = resp.result
+                    {
                         CleanupOutcome::Success
                     } else {
                         let mut guard = PENDING_CLEANUPS.lock();
@@ -1484,7 +1544,8 @@ pub async fn reap_cleanup_unknowns(daemon_client: &DaemonClient) -> usize {
             Ok(resp) => {
                 if let crate::paired_host::client::OperationResult::Operation(
                     crate::remote::machine_protocol::Operation::Completed { outcome, .. },
-                ) = resp.result {
+                ) = resp.result
+                {
                     retain_pending_cleanups(&item.cleanup_request_id);
                     if matches!(
                         outcome,
@@ -1600,25 +1661,36 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
         let dir = data_dir.clone();
         let ws_id = request.workspace_id.clone();
         let stored_project = run_blocking(move || {
-            Ok::<_, IpcError>(crate::paired_host::projects::resolve_stored_project(&dir, &ws_id))
+            Ok::<_, IpcError>(crate::paired_host::projects::resolve_stored_project(
+                &dir, &ws_id,
+            ))
         })
         .await?;
 
-        let (host_id, remote_workspace_id, repo_root): (String, String, std::path::PathBuf) = match &request.startup {
-            Some(TerminalStartup::PairedDaemon { host_id, remote_workspace_id }) => {
-                let repo_root = stored_project
-                    .as_ref()
-                    .map(|p| std::path::PathBuf::from(&p.metadata.repo_root))
-                    .unwrap_or_default();
-                (host_id.clone(), remote_workspace_id.clone(), repo_root)
-            }
-            _ => {
-                match stored_project {
+        let (host_id, remote_workspace_id, repo_root): (String, String, std::path::PathBuf) =
+            match &request.startup {
+                Some(TerminalStartup::PairedDaemon {
+                    host_id,
+                    remote_workspace_id,
+                }) => {
+                    let repo_root = stored_project
+                        .as_ref()
+                        .map(|p| std::path::PathBuf::from(&p.metadata.repo_root))
+                        .unwrap_or_default();
+                    (host_id.clone(), remote_workspace_id.clone(), repo_root)
+                }
+                _ => match stored_project {
                     Some(stored) => match stored.target {
-                        crate::scoped_contracts::RunTarget::PairedDaemon { host_id } => {
-                            (host_id, stored.remote_workspace_id, std::path::PathBuf::from(stored.metadata.repo_root))
-                        }
-                        _ => (stored.remote_workspace_id.clone(), stored.remote_workspace_id, std::path::PathBuf::from(stored.metadata.repo_root)),
+                        crate::scoped_contracts::RunTarget::PairedDaemon { host_id } => (
+                            host_id,
+                            stored.remote_workspace_id,
+                            std::path::PathBuf::from(stored.metadata.repo_root),
+                        ),
+                        _ => (
+                            stored.remote_workspace_id.clone(),
+                            stored.remote_workspace_id,
+                            std::path::PathBuf::from(stored.metadata.repo_root),
+                        ),
                     },
                     None => {
                         return Err(IpcError::new(
@@ -1626,18 +1698,23 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                             "Paired daemon project not found. Re-select or re-pair this project.",
                         ));
                     }
-                }
-            }
-        };
+                },
+            };
 
-        let hosts = daemon_client.paired_host_list().await.map_err(|e| {
-            IpcError::internal(e.message)
-        })?;
-        let host = hosts.into_iter().find(|h| h.host_id == host_id).ok_or_else(|| {
-            IpcError::internal(format!("Paired machine '{host_id}' not found in inventory"))
-        })?;
+        let hosts = daemon_client
+            .paired_host_list()
+            .await
+            .map_err(|e| IpcError::internal(e.message))?;
+        let host = hosts
+            .into_iter()
+            .find(|h| h.host_id == host_id)
+            .ok_or_else(|| {
+                IpcError::internal(format!("Paired machine '{host_id}' not found in inventory"))
+            })?;
         if host.auth_status != crate::paired_host::inventory::AuthStatus::Paired {
-            return Err(IpcError::internal("Machine authorization required for paired host"));
+            return Err(IpcError::internal(
+                "Machine authorization required for paired host",
+            ));
         }
 
         let client_request_id = request
@@ -1671,12 +1748,22 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
 
             if !effective_repo_root.as_os_str().is_empty() && cwd_path == effective_repo_root {
                 (remote_workspace_id.clone(), None, None)
-            } else if !effective_repo_root.as_os_str().is_empty() && cwd_path.starts_with(&effective_repo_root) {
+            } else if !effective_repo_root.as_os_str().is_empty()
+                && cwd_path.starts_with(&effective_repo_root)
+            {
                 if let Ok(rel) = cwd_path.strip_prefix(&effective_repo_root) {
-                    if rel.components().all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir))
-                        && !rel.as_os_str().is_empty()
+                    if rel.components().all(|c| {
+                        matches!(
+                            c,
+                            std::path::Component::Normal(_) | std::path::Component::CurDir
+                        )
+                    }) && !rel.as_os_str().is_empty()
                     {
-                        (remote_workspace_id.clone(), None, Some(rel.to_string_lossy().to_string()))
+                        (
+                            remote_workspace_id.clone(),
+                            None,
+                            Some(rel.to_string_lossy().to_string()),
+                        )
                     } else {
                         (remote_workspace_id.clone(), None, None)
                     }
@@ -1684,12 +1771,12 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                     (remote_workspace_id.clone(), None, None)
                 }
             } else if is_absolute {
-                static REGISTERED_WORKTREES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
-                    std::sync::OnceLock::new();
-                let cache_mutex = REGISTERED_WORKTREES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-                let cached_id = {
-                    cache_mutex.lock().unwrap().get(cwd_str.as_ref()).cloned()
-                };
+                static REGISTERED_WORKTREES: std::sync::OnceLock<
+                    std::sync::Mutex<std::collections::HashMap<String, String>>,
+                > = std::sync::OnceLock::new();
+                let cache_mutex = REGISTERED_WORKTREES
+                    .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+                let cached_id = { cache_mutex.lock().unwrap().get(cwd_str.as_ref()).cloned() };
 
                 if let Some(cached_id) = cached_id {
                     tracing::info!(
@@ -1725,7 +1812,10 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                                 remote_ws = %data.remote_workspace_id,
                                 "Registered worktree workspace on paired host"
                             );
-                            cache_mutex.lock().unwrap().insert(cwd_str.to_string(), data.remote_workspace_id.clone());
+                            cache_mutex
+                                .lock()
+                                .unwrap()
+                                .insert(cwd_str.to_string(), data.remote_workspace_id.clone());
                             (data.remote_workspace_id, None, None)
                         }
                         Ok(other) => {
@@ -1746,8 +1836,12 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                         }
                     }
                 }
-            } else if cwd_path.components().all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir))
-                && !cwd_path.as_os_str().is_empty()
+            } else if cwd_path.components().all(|c| {
+                matches!(
+                    c,
+                    std::path::Component::Normal(_) | std::path::Component::CurDir
+                )
+            }) && !cwd_path.as_os_str().is_empty()
             {
                 (remote_workspace_id.clone(), None, Some(cwd_str.to_string()))
             } else {
@@ -1803,7 +1897,13 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
             .await;
 
         if let Err(ref e) = op_resp {
-            if !e.ambiguous && resolved_inherit.is_some() && matches!(e.code.as_str(), "SESSION_NOT_FOUND" | "PARENT_SESSION_MISMATCH" | "SESSION_EXPIRED") {
+            if !e.ambiguous
+                && resolved_inherit.is_some()
+                && matches!(
+                    e.code.as_str(),
+                    "SESSION_NOT_FOUND" | "PARENT_SESSION_MISMATCH" | "SESSION_EXPIRED"
+                )
+            {
                 tracing::warn!(
                     parent_sid = ?resolved_inherit,
                     error = %e.code,
@@ -1833,11 +1933,24 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
             Ok(resp) => match resp.result {
                 crate::paired_host::client::OperationResult::CreateSession(session) => session,
                 other => {
-                    return Err(IpcError::internal(format!("Unexpected operation result: {other:?}")));
+                    return Err(IpcError::internal(format!(
+                        "Unexpected operation result: {other:?}"
+                    )));
                 }
             },
-            Err(ref e) if e.ambiguous || matches!(e.code.as_str(), "TIMEOUT" | "OPERATION_OUTCOME_UNKNOWN") => {
-                match reconcile_ambiguous_create(&daemon_client, &host_id, host.generation, &active_request_id, false).await? {
+            Err(ref e)
+                if e.ambiguous
+                    || matches!(e.code.as_str(), "TIMEOUT" | "OPERATION_OUTCOME_UNKNOWN") =>
+            {
+                match reconcile_ambiguous_create(
+                    &daemon_client,
+                    &host_id,
+                    host.generation,
+                    &active_request_id,
+                    false,
+                )
+                .await?
+                {
                     Some(session) => session,
                     None => {
                         let unknown_err = crate::paired_host::client::ClientError {
@@ -1846,7 +1959,11 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                             request_id: Some(active_request_id.clone()),
                             ambiguous: true,
                         };
-                        return Err(map_client_error(&unknown_err, Some(&host_id), Some(host.generation)));
+                        return Err(map_client_error(
+                            &unknown_err,
+                            Some(&host_id),
+                            Some(host.generation),
+                        ));
                     }
                 }
             }
@@ -1865,7 +1982,12 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
             .await
         {
             Ok(result) => result,
-            Err(e) if matches!(e.code.as_str(), "TIMEOUT" | "HOST_UNAVAILABLE" | "PAIRED_PROXY_UNAVAILABLE") => {
+            Err(e)
+                if matches!(
+                    e.code.as_str(),
+                    "TIMEOUT" | "HOST_UNAVAILABLE" | "PAIRED_PROXY_UNAVAILABLE"
+                ) =>
+            {
                 tracing::warn!(
                     error = %e.code,
                     "Retrying paired terminal reattach once after transient error"
@@ -1884,7 +2006,11 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                             cleanup_req_id,
                         )
                         .await;
-                        return Err(map_client_error(&reattach_error, Some(&host_id), Some(host.generation)));
+                        return Err(map_client_error(
+                            &reattach_error,
+                            Some(&host_id),
+                            Some(host.generation),
+                        ));
                     }
                 }
             }
@@ -1901,7 +2027,11 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                     cleanup_req_id,
                 )
                 .await;
-                return Err(map_client_error(&reattach_error, Some(&host_id), Some(host.generation)));
+                return Err(map_client_error(
+                    &reattach_error,
+                    Some(&host_id),
+                    Some(host.generation),
+                ));
             }
         };
 
@@ -1940,7 +2070,8 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
             let _ = run_blocking(move || {
                 let _ = crate::paired_host::projects::save_stored_project(&dir, p);
                 Ok::<_, IpcError>(())
-            }).await;
+            })
+            .await;
         }
 
         crate::daemon::client::DaemonSpawnResult {
@@ -1950,7 +2081,10 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                 session_id: proxy_session_id,
                 workspace_id: Some(request.workspace_id.clone()),
                 worktree: request.worktree.clone(),
-                cwd: request.cwd.map(|p| p.to_string_lossy().to_string()).or(Some(remote_session.cwd)),
+                cwd: request
+                    .cwd
+                    .map(|p| p.to_string_lossy().to_string())
+                    .or(Some(remote_session.cwd)),
                 cols,
                 rows,
                 running: true,
@@ -2089,13 +2223,17 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
     };
 
     let session_id = spawn_result.session_id.clone();
-    if let Some(host) = app.try_state::<crate::native_terminal::surface_host::NativeTerminalSurfaceHostState>() {
+    if let Some(host) =
+        app.try_state::<crate::native_terminal::surface_host::NativeTerminalSurfaceHostState>()
+    {
         host.mark_pending_startup(&session_id);
     }
     let attachment = match daemon_client.attach(&session_id, None).await {
         Ok(attachment) => attachment,
         Err(err) => {
-            if let Some(host) = app.try_state::<crate::native_terminal::surface_host::NativeTerminalSurfaceHostState>() {
+            if let Some(host) = app
+                .try_state::<crate::native_terminal::surface_host::NativeTerminalSurfaceHostState>(
+            ) {
                 host.clear_pending_session(&session_id);
             }
             eprintln!(
@@ -2114,7 +2252,9 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
         reason: None,
     };
     if let Err(error) = app.emit(TERMINAL_LIFECYCLE_EVENT, started) {
-        if let Some(host) = app.try_state::<crate::native_terminal::surface_host::NativeTerminalSurfaceHostState>() {
+        if let Some(host) =
+            app.try_state::<crate::native_terminal::surface_host::NativeTerminalSurfaceHostState>()
+        {
             host.clear_pending_session(&session_id);
         }
         eprintln!("[cmd_terminal_spawn] stage=emit_lifecycle failed");
@@ -2194,10 +2334,15 @@ pub async fn cmd_terminal_attach<R: Runtime>(
     session_id: String,
     after_sequence: Option<String>,
 ) -> Result<AttachTerminalResponse, IpcError> {
-    let after_seq = after_sequence.as_deref().and_then(|s| s.parse::<u64>().ok());
+    let after_seq = after_sequence
+        .as_deref()
+        .and_then(|s| s.parse::<u64>().ok());
 
     let (attachment, target_session_id) = if session_id.starts_with("daemon-session:") {
-        match daemon_client.paired_terminal_descriptor(session_id.clone()).await {
+        match daemon_client
+            .paired_terminal_descriptor(session_id.clone())
+            .await
+        {
             Ok(Some(mut descriptor)) => {
                 let host_id = descriptor.host_id.clone();
                 let generation = descriptor.generation;
@@ -2209,14 +2354,19 @@ pub async fn cmd_terminal_attach<R: Runtime>(
                 let (proxy_session_id, proxy_gen) = daemon_client
                     .paired_terminal_reattach(descriptor)
                     .await
-                    .map_err(|client_err| map_client_error(&client_err, Some(&host_id), Some(generation)))?;
+                    .map_err(|client_err| {
+                        map_client_error(&client_err, Some(&host_id), Some(generation))
+                    })?;
 
                 let timeout_duration = hub_attach_retry_deadline();
                 let attach_deadline = tokio::time::Instant::now() + timeout_duration;
                 let mut poll_interval = std::time::Duration::from_millis(50);
 
                 loop {
-                    match daemon_client.attach(&proxy_session_id, effective_after_seq).await {
+                    match daemon_client
+                        .attach(&proxy_session_id, effective_after_seq)
+                        .await
+                    {
                         Ok(att) => break (att, proxy_session_id),
                         Err(err) if err.code == IpcErrorCode::SessionNotFound => {
                             if tokio::time::Instant::now() >= attach_deadline {
@@ -2245,7 +2395,10 @@ pub async fn cmd_terminal_attach<R: Runtime>(
                 let att = daemon_client.attach(&session_id, after_seq).await?;
                 (att, session_id.clone())
             }
-            Err(e) if e.ambiguous || matches!(e.code.as_str(), "TIMEOUT" | "OPERATION_OUTCOME_UNKNOWN") => {
+            Err(e)
+                if e.ambiguous
+                    || matches!(e.code.as_str(), "TIMEOUT" | "OPERATION_OUTCOME_UNKNOWN") =>
+            {
                 return Err(map_client_error(&e, None, None));
             }
             Err(_) => {
@@ -2470,20 +2623,41 @@ pub async fn cmd_terminal_resize(
 }
 
 #[tauri::command]
-pub async fn cmd_terminal_remote_write(daemon_client: State<'_, Arc<DaemonClient>>, session_id: String, generation: u64, data: String) -> Result<(), IpcError> {
-    daemon_client.write_terminal_at_generation(&session_id, Some(generation), data.into_bytes()).await
+pub async fn cmd_terminal_remote_write(
+    daemon_client: State<'_, Arc<DaemonClient>>,
+    session_id: String,
+    generation: u64,
+    data: String,
+) -> Result<(), IpcError> {
+    daemon_client
+        .write_terminal_at_generation(&session_id, Some(generation), data.into_bytes())
+        .await
 }
 
 #[tauri::command]
-pub async fn cmd_terminal_remote_resize(daemon_client: State<'_, Arc<DaemonClient>>, session_id: String, generation: u64, cols: u16, rows: u16) -> Result<(), IpcError> {
-    daemon_client.resize_terminal_at_generation(&session_id, Some(generation), cols, rows).await
+pub async fn cmd_terminal_remote_resize(
+    daemon_client: State<'_, Arc<DaemonClient>>,
+    session_id: String,
+    generation: u64,
+    cols: u16,
+    rows: u16,
+) -> Result<(), IpcError> {
+    daemon_client
+        .resize_terminal_at_generation(&session_id, Some(generation), cols, rows)
+        .await
 }
 
-pub(crate) fn remote_control_result(reply: crate::daemon::protocol::DaemonResponse) -> Result<(), IpcError> {
+pub(crate) fn remote_control_result(
+    reply: crate::daemon::protocol::DaemonResponse,
+) -> Result<(), IpcError> {
     use crate::daemon::protocol::DaemonResponse;
     match reply {
         DaemonResponse::WriteOk | DaemonResponse::ResizeOk => Ok(()),
-        DaemonResponse::RemoteSessionError { failure } => Err(IpcError::internal(failure.to_string()).with_details(serde_json::to_value(failure).map_err(|e| IpcError::internal(e.to_string()))?)),
+        DaemonResponse::RemoteSessionError { failure } => {
+            Err(IpcError::internal(failure.to_string()).with_details(
+                serde_json::to_value(failure).map_err(|e| IpcError::internal(e.to_string()))?,
+            ))
+        }
         DaemonResponse::Error { message, .. } => Err(IpcError::internal(message)),
         _ => Err(IpcError::internal("Unexpected remote control response")),
     }
@@ -2592,14 +2766,21 @@ pub(crate) fn map_client_error(
 
     let mut details = serde_json::Map::new();
     if let Some(ref req_id) = err.request_id {
-        details.insert("requestId".to_string(), serde_json::Value::String(req_id.clone()));
+        details.insert(
+            "requestId".to_string(),
+            serde_json::Value::String(req_id.clone()),
+        );
     } else if let Some(ref me) = err.machine_error {
         if !me.request_id.is_empty() {
-            details.insert("requestId".to_string(), serde_json::Value::String(me.request_id.clone()));
+            details.insert(
+                "requestId".to_string(),
+                serde_json::Value::String(me.request_id.clone()),
+            );
         }
     }
 
-    let ambiguous = err.ambiguous || matches!(err.code.as_str(), "TIMEOUT" | "OPERATION_OUTCOME_UNKNOWN");
+    let ambiguous =
+        err.ambiguous || matches!(err.code.as_str(), "TIMEOUT" | "OPERATION_OUTCOME_UNKNOWN");
     details.insert("ambiguous".to_string(), serde_json::Value::Bool(ambiguous));
 
     if let Some(ref me) = err.machine_error {
@@ -2609,7 +2790,10 @@ pub(crate) fn map_client_error(
     }
 
     if let Some(h) = host_id {
-        details.insert("hostId".to_string(), serde_json::Value::String(h.to_string()));
+        details.insert(
+            "hostId".to_string(),
+            serde_json::Value::String(h.to_string()),
+        );
     }
 
     if let Some(g) = generation {
@@ -2643,7 +2827,9 @@ mod tests {
             resolved: false,
         };
         PENDING_CLEANUPS.lock().push(record("cleanup-exhausted", 3));
-        PENDING_CLEANUPS.lock().push(record("cleanup-unresolved", 0));
+        PENDING_CLEANUPS
+            .lock()
+            .push(record("cleanup-unresolved", 0));
 
         let socket = dir.path().join("never-answers.sock");
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
@@ -2652,8 +2838,12 @@ mod tests {
         let reap = reap_cleanup_unknowns(&client);
         let _ = tokio::time::timeout(std::time::Duration::from_millis(250), reap).await;
 
-        assert!(get_pending_cleanups().iter().any(|r| r.cleanup_request_id == "cleanup-unresolved"));
-        assert!(get_exhausted_cleanups().iter().any(|r| r.cleanup_request_id == "cleanup-exhausted"));
+        assert!(get_pending_cleanups()
+            .iter()
+            .any(|r| r.cleanup_request_id == "cleanup-unresolved"));
+        assert!(get_exhausted_cleanups()
+            .iter()
+            .any(|r| r.cleanup_request_id == "cleanup-exhausted"));
 
         let data = std::fs::read(dir.path().join("paired_pending_cleanups.json")).unwrap();
         #[derive(serde::Deserialize)]
@@ -2662,8 +2852,16 @@ mod tests {
             exhausted: Vec<serde_json::Value>,
         }
         let saved: Saved = serde_json::from_slice(&data).unwrap();
-        assert!(saved.pending.iter().any(|v| v.get("cleanup_request_id").and_then(|s| s.as_str()) == Some("cleanup-unresolved")));
-        assert!(saved.exhausted.iter().any(|v| v.get("cleanup_request_id").and_then(|s| s.as_str()) == Some("cleanup-exhausted")));
+        assert!(saved
+            .pending
+            .iter()
+            .any(|v| v.get("cleanup_request_id").and_then(|s| s.as_str())
+                == Some("cleanup-unresolved")));
+        assert!(saved
+            .exhausted
+            .iter()
+            .any(|v| v.get("cleanup_request_id").and_then(|s| s.as_str())
+                == Some("cleanup-exhausted")));
 
         std::env::remove_var("FERRYX_PAIRED_PENDING_CLEANUPS_DIR");
         clear_pending_cleanups_for_test();
@@ -2702,10 +2900,22 @@ mod tests {
         assert_eq!(ipc_err.message, "Remote session terminated");
 
         let details = ipc_err.details.expect("expected structured details");
-        assert_eq!(details.get("requestId").and_then(|v| v.as_str()), Some("req-test-123"));
-        assert_eq!(details.get("ambiguous").and_then(|v| v.as_bool()), Some(false));
-        assert_eq!(details.get("hostId").and_then(|v| v.as_str()), Some("paired-host-42"));
-        assert_eq!(details.get("generation").and_then(|v| v.as_str()), Some("10"));
+        assert_eq!(
+            details.get("requestId").and_then(|v| v.as_str()),
+            Some("req-test-123")
+        );
+        assert_eq!(
+            details.get("ambiguous").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            details.get("hostId").and_then(|v| v.as_str()),
+            Some("paired-host-42")
+        );
+        assert_eq!(
+            details.get("generation").and_then(|v| v.as_str()),
+            Some("10")
+        );
         assert!(details.get("machineError").is_some());
     }
 
@@ -2714,10 +2924,16 @@ mod tests {
         // Test various produced codes map to typed variants
         for (code, expected) in [
             ("SESSION_EXPIRED", IpcErrorCode::SessionExpired),
-            ("PARENT_SESSION_MISMATCH", IpcErrorCode::ParentSessionMismatch),
+            (
+                "PARENT_SESSION_MISMATCH",
+                IpcErrorCode::ParentSessionMismatch,
+            ),
             ("TIMEOUT", IpcErrorCode::Timeout),
             ("HOST_UNAVAILABLE", IpcErrorCode::HostUnavailable),
-            ("OPERATION_OUTCOME_UNKNOWN", IpcErrorCode::OperationOutcomeUnknown),
+            (
+                "OPERATION_OUTCOME_UNKNOWN",
+                IpcErrorCode::OperationOutcomeUnknown,
+            ),
         ] {
             let err = crate::paired_host::client::ClientError::local(code);
             let ipc = map_client_error(&err, None, None);
@@ -2822,4 +3038,3 @@ mod tests {
         assert_eq!(frame.len(), data_offset + data.len());
     }
 }
-

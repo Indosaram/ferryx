@@ -30,7 +30,7 @@ Nimbalyst, per its repository description, runs multiple Codex and Claude Code s
 - As of September 2026, the repository had 3,115 GitHub stars. The project is MIT licensed and its primary language is TypeScript.
 - Its core workflow, per the repository description: run multiple Codex and Claude Code AI sessions in parallel git worktrees, test and compare approaches, and manage AI-assisted development in one desktop app.
 - A rename from Crystal to Nimbalyst means both names refer to the same project.
-- As of September 2026, Ferryx is at v0.1.0-alpha and ships as a macOS universal DMG, a Windows build through the Microsoft Store, and Linux AppImage and .deb packages.
+- As of September 2026, Ferryx is early software on calendar-versioned releases and ships as a macOS universal DMG, an x64 Windows installer, and Linux AppImage and .deb packages.
 - Terminal parsing goes through libghostty-vt and rendering through WGPU on a native child surface, with no Electron.
 - The headless PTY daemon keeps agent processes alive across GUI closes and reloads and replays missed output on reconnect.
 - Embedded browser tabs on native WebViews split beside terminal panes.

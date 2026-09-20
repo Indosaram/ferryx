@@ -304,7 +304,10 @@ mod tests {
                 matches!(observed, Some(Foreground::Agent(_))),
                 "{observed:?}"
             );
-            assert_ne!(transition.observe(observed), Some(AgentProcessEdge::Released));
+            assert_ne!(
+                transition.observe(observed),
+                Some(AgentProcessEdge::Released)
+            );
         }
         assert!(matches!(
             states.receiver.try_recv(),
@@ -317,7 +320,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(observed, Some(Foreground::Shell));
-        assert_eq!(transition.observe(observed), Some(AgentProcessEdge::Released));
+        assert_eq!(
+            transition.observe(observed),
+            Some(AgentProcessEdge::Released)
+        );
         hub.release_foreground(&id);
         let released = tokio::time::timeout(Duration::from_secs(1), states.receiver.recv())
             .await
@@ -355,7 +361,9 @@ mod tests {
         // Windows shells are not agents, and their arguments must not be promoted.
         assert!(!is_agent(r"C:\Windows\System32\cmd.exe"));
         assert!(!is_agent("cmd.exe /c omo"));
-        assert!(!is_agent(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"));
+        assert!(!is_agent(
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        ));
 
         assert!(is_shell("powershell.exe"));
         assert!(is_shell("pwsh.exe"));

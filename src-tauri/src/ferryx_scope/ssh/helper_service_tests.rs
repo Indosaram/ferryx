@@ -16,7 +16,10 @@ fn ssh_reconnect_safety_live_runtime_cannot_be_replaced() {
         bind_runtime(dir.path(), "qa-lock".into()),
         Err(error) if error.starts_with("REMOTE_RUNTIME_CONFLICT:")
     ));
-    assert_eq!(std::fs::read(dir.path().join("endpoint.json")).unwrap(), original);
+    assert_eq!(
+        std::fs::read(dir.path().join("endpoint.json")).unwrap(),
+        original
+    );
     drop(first);
 }
 
@@ -86,14 +89,28 @@ fn ssh_process_survival_bridge_allows_describe_without_stopping_runtime() {
         serve(stream, bound.runtime.clone()).unwrap();
     });
     let mut input = Vec::new();
-    write_frame(&mut input, &json!({"protocol":1,"op":"pty.describe","params":{}})).unwrap();
+    write_frame(
+        &mut input,
+        &json!({"protocol":1,"op":"pty.describe","params":{}}),
+    )
+    .unwrap();
     let mut output = Vec::new();
     bridge(dir.path(), std::io::Cursor::new(input), &mut output).unwrap();
-    let response = read_frame(&mut std::io::Cursor::new(output)).unwrap().unwrap();
-    assert_eq!(response["error"].as_str().unwrap().split(':').next(), Some("INVALID_REQUEST"));
+    let response = read_frame(&mut std::io::Cursor::new(output))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        response["error"].as_str().unwrap().split(':').next(),
+        Some("INVALID_REQUEST")
+    );
     worker.join().unwrap();
     let auth = endpoint(dir.path()).unwrap();
-    assert!(runtime.handle(Request {
-        protocol: 1, token: auth.token, op: "handshake".into(), params: json!({})
-    }).is_ok());
+    assert!(runtime
+        .handle(Request {
+            protocol: 1,
+            token: auth.token,
+            op: "handshake".into(),
+            params: json!({})
+        })
+        .is_ok());
 }

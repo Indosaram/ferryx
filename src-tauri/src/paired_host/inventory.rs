@@ -337,12 +337,16 @@ impl Inventory {
             self.fence();
             return Err(InventoryError::Unavailable);
         }
-        self.list().into_iter().find(|row| row.host_id == id)
+        self.list()
+            .into_iter()
+            .find(|row| row.host_id == id)
             .ok_or(InventoryError::StaleGeneration)
     }
     /// Capture live and forgotten identities before an issuer resolves a PIN.
     pub fn generation_snapshot(&self) -> Result<BTreeMap<String, Epoch>> {
-        if self.fenced { return Err(InventoryError::Unavailable); }
+        if self.fenced {
+            return Err(InventoryError::Unavailable);
+        }
         Ok(self.disk.generations.clone())
     }
     pub fn validate_generation(&self, id: &str, generation: Epoch) -> Result<()> {

@@ -2,9 +2,9 @@ import { Github } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { DiscordIcon } from "@/components/ui/PlatformIcons";
 import { DownloadMenu } from "@/components/DownloadMenu";
-import { DISCORD_INVITE_URL } from "@/lib/links";
+import { DISCORD_INVITE_URL, GITHUB_REPO_URL } from "@/lib/links";
 
-export function Hero() {
+export function Hero({ basePath }: { readonly basePath: string }) {
   return (
     <section className="relative z-20 pt-36 pb-0 text-center">
       <div className="absolute inset-0 bg-[radial-gradient(60%_50%_at_50%_0%,rgb(var(--ink-rgb)/0.05),transparent)] pointer-events-none" />
@@ -15,6 +15,13 @@ export function Hero() {
           <br />
           Zero bloat.
         </h1>
+
+        {/* The only server-rendered sentence above the fold, so it states the product
+            concretely: which agents, what isolates them, and what it is built on. */}
+        <p className="mx-auto mt-7 max-w-2xl text-[17px] leading-relaxed text-ink-soft">
+          Ferryx runs Claude Code, Codex, and other CLI coding agents side by side &mdash; each in its own
+          Git worktree, each in a native terminal pane. Built in Rust on Tauri v2, with no Electron.
+        </p>
 
         <div className="mt-10 flex flex-col sm:flex-row items-center justify-center gap-4">
           <DownloadMenu variant="hero" />
@@ -39,6 +46,25 @@ export function Hero() {
             </Button>
           </a>
         </div>
+
+        <p className="mt-6 text-[13px] leading-relaxed text-ink-faint">
+          macOS, Windows, and Linux &middot; free and source-available under{" "}
+          <a
+            href={`${GITHUB_REPO_URL}/blob/main/LICENSE`}
+            target="_blank"
+            rel="noreferrer"
+            className="underline underline-offset-4 hover:text-ink transition-colors"
+          >
+            SUL-1.0
+          </a>{" "}
+          &middot;{" "}
+          <a
+            href={`${basePath}docs/facts/`}
+            className="underline underline-offset-4 hover:text-ink transition-colors"
+          >
+            product facts
+          </a>
+        </p>
       </div>
     </section>
   );

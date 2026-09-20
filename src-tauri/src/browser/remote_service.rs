@@ -1,11 +1,11 @@
+use super::remote_bridge_protocol::MAX_FRAME_PAYLOAD_BYTES;
+use super::remote_driver::*;
 use crate::browser::manager::BrowserManager;
 use crate::browser::model::*;
 use crate::browser::security::BrowserError;
 use crate::browser::snapshot_source::{
     BrowserSnapshotSource, SnapshotFormat, SnapshotOptions, UnsupportedSnapshotSource,
 };
-use super::remote_bridge_protocol::MAX_FRAME_PAYLOAD_BYTES;
-use super::remote_driver::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -95,10 +95,15 @@ pub struct BrowserRemoteService {
     stream_counter: Arc<AtomicU64>,
     desktop_epoch: Arc<AtomicU64>,
     service_epoch: u64,
-    frame_broadcaster: Arc<parking_lot::Mutex<HashMap<String, tokio::sync::broadcast::Sender<Vec<u8>>>>>,
+    frame_broadcaster:
+        Arc<parking_lot::Mutex<HashMap<String, tokio::sync::broadcast::Sender<Vec<u8>>>>>,
     snapshot_source: Arc<parking_lot::RwLock<Arc<dyn BrowserSnapshotSource>>>,
     native_capture_semaphore: Arc<tokio::sync::Semaphore>,
-    quarantined_permits: Arc<parking_lot::Mutex<HashMap<String, crate::browser::snapshot_source::SnapshotCallbackCoordinator>>>,
+    quarantined_permits: Arc<
+        parking_lot::Mutex<
+            HashMap<String, crate::browser::snapshot_source::SnapshotCallbackCoordinator>,
+        >,
+    >,
 }
 
 pub static ACTIVE_REMOTE_SERVICE: parking_lot::RwLock<Option<Arc<BrowserRemoteService>>> =
@@ -123,7 +128,9 @@ impl BrowserRemoteService {
             desktop_epoch: Arc::new(AtomicU64::new(1)),
             service_epoch: 1,
             frame_broadcaster: Arc::new(parking_lot::Mutex::new(HashMap::new())),
-            snapshot_source: Arc::new(parking_lot::RwLock::new(Arc::new(UnsupportedSnapshotSource))),
+            snapshot_source: Arc::new(parking_lot::RwLock::new(Arc::new(
+                UnsupportedSnapshotSource,
+            ))),
             native_capture_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
             quarantined_permits: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         };
@@ -242,17 +249,23 @@ impl BrowserRemoteService {
 
     pub fn get_viewer_info(&self, browser_id: &str, subscription_id: &str) -> Option<ViewerInfo> {
         let subs = self.subscribers_per_browser.lock();
-        subs.get(browser_id).and_then(|m| m.get(subscription_id)).cloned()
+        subs.get(browser_id)
+            .and_then(|m| m.get(subscription_id))
+            .cloned()
     }
 
     pub fn is_viewer_paused(&self, browser_id: &str, subscription_id: &str) -> bool {
         let subs = self.subscribers_per_browser.lock();
-        subs.get(browser_id).and_then(|m| m.get(subscription_id)).map_or(false, |v| v.paused)
+        subs.get(browser_id)
+            .and_then(|m| m.get(subscription_id))
+            .map_or(false, |v| v.paused)
     }
 
     pub fn is_viewer_stalled(&self, browser_id: &str, subscription_id: &str) -> bool {
         let subs = self.subscribers_per_browser.lock();
-        subs.get(browser_id).and_then(|m| m.get(subscription_id)).map_or(false, |v| v.stalled)
+        subs.get(browser_id)
+            .and_then(|m| m.get(subscription_id))
+            .map_or(false, |v| v.stalled)
     }
 
     /// Subscribes a viewer to a browser's shared screencast producer.
@@ -275,8 +288,14 @@ impl BrowserRemoteService {
         requested_profile: Option<NegotiatedCaptureProfile>,
     ) -> Result<(String, NegotiatedCaptureProfile), RemoteServiceError> {
         // Ensure browser exists and is visible
-        if !self.manager.is_visible(browser_id).map_err(|e| RemoteServiceError::BrowserNotFound(e.to_string()))? {
-            return Err(RemoteServiceError::Unsupported("browser is not visible; screencast requires visible session"));
+        if !self
+            .manager
+            .is_visible(browser_id)
+            .map_err(|e| RemoteServiceError::BrowserNotFound(e.to_string()))?
+        {
+            return Err(RemoteServiceError::Unsupported(
+                "browser is not visible; screencast requires visible session",
+            ));
         }
 
         let mut subs_map = self.subscribers_per_browser.lock();
@@ -400,7 +419,12 @@ impl BrowserRemoteService {
         subs_map.get(browser_id).map(|s| s.len()).unwrap_or(0)
     }
 
-    fn spawn_capture_producer(&self, browser_id: String, stream_id: u32, profile: NegotiatedCaptureProfile) {
+    fn spawn_capture_producer(
+        &self,
+        browser_id: String,
+        stream_id: u32,
+        profile: NegotiatedCaptureProfile,
+    ) {
         if let Some(existing) = self.producer_handles.lock().remove(&browser_id) {
             existing.abort();
         }
@@ -565,7 +589,11 @@ impl BrowserRemoteService {
 
                 let source = snapshot_source_holder.read().clone();
                 let snapshot_res = source
-                    .take_snapshot_coordinated(&state.webview_label, snapshot_options, coordinator.clone())
+                    .take_snapshot_coordinated(
+                        &state.webview_label,
+                        snapshot_options,
+                        coordinator.clone(),
+                    )
                     .await;
 
                 let is_timeout = match &snapshot_res {
@@ -604,7 +632,9 @@ impl BrowserRemoteService {
                     continue;
                 }
 
-                let current_instance_id = manager.get_instance_id(&browser_id_clone).unwrap_or_default();
+                let current_instance_id = manager
+                    .get_instance_id(&browser_id_clone)
+                    .unwrap_or_default();
                 let current_desktop_epoch = desktop_epoch.load(Ordering::SeqCst);
                 let (_, _, current_viewport_rev) = manager
                     .get_geometry(&browser_id_clone)
@@ -890,7 +920,10 @@ mod tests {
         let sub1 = service.subscribe(&b1, "dev1", "v1").unwrap();
         let sub2 = service.subscribe(&b1, "dev2", "v2").unwrap();
         let sub3_err = service.subscribe(&b1, "dev3", "v3");
-        assert!(matches!(sub3_err, Err(RemoteServiceError::QuotaExceeded(_))));
+        assert!(matches!(
+            sub3_err,
+            Err(RemoteServiceError::QuotaExceeded(_))
+        ));
 
         // 2. Max 1 concurrently captured browser (§8.1 binding override)
         // Create second browser session
@@ -910,7 +943,10 @@ mod tests {
 
         // Attempting to subscribe to second browser while first browser is active is rejected
         let b2_sub_err = service.subscribe("test-b2", "dev4", "v4");
-        assert!(matches!(b2_sub_err, Err(RemoteServiceError::QuotaExceeded(_))));
+        assert!(matches!(
+            b2_sub_err,
+            Err(RemoteServiceError::QuotaExceeded(_))
+        ));
 
         // Once first browser is unsubscribed, second browser can be captured
         service.unsubscribe(&b1, &sub1);
@@ -1020,7 +1056,9 @@ mod tests {
             .unwrap();
 
         // Valid reference resolution
-        let sel = service.verify_snapshot_ref(&b1, &snap1_id, rev1, "btn-submit").unwrap();
+        let sel = service
+            .verify_snapshot_ref(&b1, &snap1_id, rev1, "btn-submit")
+            .unwrap();
         assert_eq!(sel, "#submit");
 
         // Stale snapshot reference or wrong map revision rejected
@@ -1052,7 +1090,9 @@ mod tests {
         ));
 
         // New snap2_id is accepted
-        let sel2 = service.verify_snapshot_ref(&b1, &snap2_id, rev2, "btn-next").unwrap();
+        let sel2 = service
+            .verify_snapshot_ref(&b1, &snap2_id, rev2, "btn-next")
+            .unwrap();
         assert_eq!(sel2, "#next");
     }
 
@@ -1069,7 +1109,10 @@ mod tests {
         // 2. While frame 1 is unacknowledged, frame 2 arrives -> queued in pending_frame (latest)
         let frame2 = vec![4, 5, 6];
         let immediate2 = service.admit_frame(&b1, 2, frame2.clone()).unwrap();
-        assert!(immediate2.is_empty(), "busy viewer does not get immediate delivery");
+        assert!(
+            immediate2.is_empty(),
+            "busy viewer does not get immediate delivery"
+        );
 
         // 3. Frame 3 arrives before ACK -> replaces frame 2 in pending_frame (frame 2 dropped!)
         let frame3 = vec![7, 8, 9];
@@ -1094,13 +1137,26 @@ mod tests {
         }
 
         impl crate::browser::snapshot_source::BrowserSnapshotSource for SingleCoordinatedSource {
-            fn is_supported(&self) -> bool { true }
+            fn is_supported(&self) -> bool {
+                true
+            }
             fn capture_snapshot<'a>(
                 &'a self,
                 webview_label: &'a str,
                 options: crate::browser::snapshot_source::SnapshotOptions,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<crate::browser::snapshot_source::BrowserSnapshot, crate::ipc::IpcError>> + Send + 'a>> {
-                let (coordinator, _) = crate::browser::snapshot_source::SnapshotCallbackCoordinator::new();
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<
+                                crate::browser::snapshot_source::BrowserSnapshot,
+                                crate::ipc::IpcError,
+                            >,
+                        > + Send
+                        + 'a,
+                >,
+            > {
+                let (coordinator, _) =
+                    crate::browser::snapshot_source::SnapshotCallbackCoordinator::new();
                 self.take_snapshot_coordinated(webview_label, options, coordinator)
             }
             fn take_snapshot_coordinated<'a>(
@@ -1108,7 +1164,10 @@ mod tests {
                 _webview_label: &'a str,
                 _options: crate::browser::snapshot_source::SnapshotOptions,
                 _coordinator: crate::browser::snapshot_source::SnapshotCallbackCoordinator,
-            ) -> crate::remote::browser_backend::BoxFuture<'a, Result<crate::browser::snapshot_source::BrowserSnapshot, crate::ipc::IpcError>> {
+            ) -> crate::remote::browser_backend::BoxFuture<
+                'a,
+                Result<crate::browser::snapshot_source::BrowserSnapshot, crate::ipc::IpcError>,
+            > {
                 Box::pin(async move {
                     let _ = self.started_tx.send(()).await;
                     let _ = self.proceed_rx.lock().await.recv().await;
@@ -1164,7 +1223,10 @@ mod tests {
             .unwrap();
 
         let new_instance_id = service.manager.get_instance_id(&b1).unwrap();
-        assert_ne!(old_instance_id, new_instance_id, "Recreated session has new instance_id");
+        assert_ne!(
+            old_instance_id, new_instance_id,
+            "Recreated session has new instance_id"
+        );
         assert_eq!(
             service.manager.get_state(&b1).unwrap().generation,
             1,
@@ -1176,10 +1238,12 @@ mod tests {
 
         // Immediate unsubscribe to ensure tick 2 does not produce a frame
         // (we are specifically testing that tick 1's old frame is dropped!)
-        let recv_frame = tokio::time::timeout(std::time::Duration::from_millis(100), frame_rx.recv()).await;
+        let recv_frame =
+            tokio::time::timeout(std::time::Duration::from_millis(100), frame_rx.recv()).await;
         // In tick 1, ticket mismatch occurred: instance_id changed! Frame MUST have been dropped!
         if let Ok(Ok(frame_bytes)) = recv_frame {
-            let (_, metadata, _) = crate::browser::remote_bridge_protocol::decode_frame(&frame_bytes).unwrap();
+            let (_, metadata, _) =
+                crate::browser::remote_bridge_protocol::decode_frame(&frame_bytes).unwrap();
             panic!(
                 "Old capture must not be published! Received frame with browser_instance_id={}, ticket was {}",
                 metadata.browser_instance_id, old_instance_id

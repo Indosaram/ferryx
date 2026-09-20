@@ -24,12 +24,17 @@ pub(super) async fn projects(state: &RemoteGatewayState) -> Result<Vec<RemotePro
             }
         }
         Ok(enabled)
-    }).await
+    })
+    .await
 }
 
 pub(super) fn label(project: &RemoteProject) -> String {
-    project.repo_root.trim_end_matches(['/', '\\'])
-        .rsplit(['/', '\\']).next()
+    project
+        .repo_root
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
         .filter(|name| !name.is_empty() && !name.chars().any(char::is_control))
-        .unwrap_or("SSH").to_owned()
+        .unwrap_or("SSH")
+        .to_owned()
 }

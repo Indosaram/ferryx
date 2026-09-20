@@ -61,7 +61,9 @@ fn ssh_helper_setup_default_location_posix() {
     let env = sample_posix_env("/home/testuser");
     let location = default_location(&host, &env).expect("default_location");
 
-    assert!(location.executable.starts_with("/home/testuser/.ferryx/bin/"));
+    assert!(location
+        .executable
+        .starts_with("/home/testuser/.ferryx/bin/"));
     assert!(location.root.starts_with("/home/testuser/.ferryx/helper/"));
 
     // Trailing slashes in home should be normalized
@@ -80,8 +82,12 @@ fn ssh_helper_setup_default_location_windows() {
     let env = sample_windows_env("C:\\Users\\testuser");
     let location = default_location(&host, &env).expect("default_location");
 
-    assert!(location.executable.starts_with("C:\\Users\\testuser\\.ferryx\\bin\\"));
-    assert!(location.root.starts_with("C:\\Users\\testuser\\.ferryx\\helper\\"));
+    assert!(location
+        .executable
+        .starts_with("C:\\Users\\testuser\\.ferryx\\bin\\"));
+    assert!(location
+        .root
+        .starts_with("C:\\Users\\testuser\\.ferryx\\helper\\"));
 
     // Trailing slashes in home should be normalized
     let env_trailing = sample_windows_env("C:\\Users\\testuser\\");
@@ -201,11 +207,12 @@ fn ssh_helper_setup_ensure_started_exit_code_127_maps_to_missing_helper() {
         executable: "/home/u/.ferryx/bin/helper".into(),
         root: "/home/u/.ferryx/helper/qa".into(),
     };
-    let raw_err = IpcError::new(IpcErrorCode::IoError, "exit 127").with_details(serde_json::json!({
-        "stage": "execution",
-        "exitCode": 127,
-        "stderr": "sh: helper: not found",
-    }));
+    let raw_err =
+        IpcError::new(IpcErrorCode::IoError, "exit 127").with_details(serde_json::json!({
+            "stage": "execution",
+            "exitCode": 127,
+            "stderr": "sh: helper: not found",
+        }));
     let mapped = map_ensure_started_error(raw_err, &location);
     assert_eq!(mapped.code, IpcErrorCode::CliExecutableNotFound);
     let details = mapped.details.as_ref().expect("details");
@@ -221,11 +228,12 @@ fn ssh_helper_setup_ensure_started_exit_code_126_maps_to_unsupported_permissions
         executable: "/home/u/.ferryx/bin/helper".into(),
         root: "/home/u/.ferryx/helper/qa".into(),
     };
-    let raw_err = IpcError::new(IpcErrorCode::IoError, "exit 126").with_details(serde_json::json!({
-        "stage": "execution",
-        "exitCode": 126,
-        "stderr": "sh: helper: Permission denied",
-    }));
+    let raw_err =
+        IpcError::new(IpcErrorCode::IoError, "exit 126").with_details(serde_json::json!({
+            "stage": "execution",
+            "exitCode": 126,
+            "stderr": "sh: helper: Permission denied",
+        }));
     let mapped = map_ensure_started_error(raw_err, &location);
     assert_eq!(mapped.code, IpcErrorCode::Unsupported);
     let details = mapped.details.as_ref().expect("details");
@@ -321,13 +329,12 @@ fn ssh_helper_setup_map_error_rejects_contradictory_markers() {
     let mapped = map_ensure_started_error(raw_err.clone(), &location);
     assert_eq!(mapped.code, IpcErrorCode::IoError);
 
-    let raw_err2 = IpcError::new(IpcErrorCode::IoError, "exit 126 with missing marker").with_details(
-        serde_json::json!({
+    let raw_err2 = IpcError::new(IpcErrorCode::IoError, "exit 126 with missing marker")
+        .with_details(serde_json::json!({
             "stage": "execution",
             "exitCode": 126,
             "stderr": "FERRYX_ERR_HELPER_MISSING\n",
-        }),
-    );
+        }));
     let mapped2 = map_ensure_started_error(raw_err2.clone(), &location);
     assert_eq!(mapped2.code, IpcErrorCode::IoError);
 }
@@ -338,28 +345,42 @@ fn ssh_helper_setup_map_error_retains_diagnostic_cause() {
         executable: r"C:\Users\u\.ferryx\bin\ferryx-remote-helper.exe".into(),
         root: r"C:\Users\u\.ferryx\helper\qa".into(),
     };
-    let raw_err = IpcError::new(
-        IpcErrorCode::IoError,
-        "SSH command failed (exit 1)",
-    )
-    .with_details(serde_json::json!({
-        "stage": "execution",
-        "exitCode": 1,
-        "stderr": "FERRYX_ERR_HELPER_MISSING\r\n",
-    }));
+    let raw_err = IpcError::new(IpcErrorCode::IoError, "SSH command failed (exit 1)").with_details(
+        serde_json::json!({
+            "stage": "execution",
+            "exitCode": 1,
+            "stderr": "FERRYX_ERR_HELPER_MISSING\r\n",
+        }),
+    );
     let mapped = map_ensure_started_error(raw_err, &location);
     assert_eq!(mapped.code, IpcErrorCode::CliExecutableNotFound);
     let details = mapped.details.as_ref().expect("details");
     let cause = details.get("cause").expect("cause must be preserved");
-    assert_eq!(cause.get("exitCode").and_then(serde_json::Value::as_i64), Some(1));
-    assert!(cause.get("stderr").and_then(serde_json::Value::as_str).unwrap().contains("FERRYX_ERR_HELPER_MISSING"));
+    assert_eq!(
+        cause.get("exitCode").and_then(serde_json::Value::as_i64),
+        Some(1)
+    );
+    assert!(cause
+        .get("stderr")
+        .and_then(serde_json::Value::as_str)
+        .unwrap()
+        .contains("FERRYX_ERR_HELPER_MISSING"));
 }
 
 #[test]
 fn ssh_helper_setup_probe_state_serde_camel_case() {
-    assert_eq!(serde_json::to_string(&HelperProbeState::Installed).unwrap(), "\"installed\"");
-    assert_eq!(serde_json::to_string(&HelperProbeState::Missing).unwrap(), "\"missing\"");
-    assert_eq!(serde_json::to_string(&HelperProbeState::Unknown).unwrap(), "\"unknown\"");
+    assert_eq!(
+        serde_json::to_string(&HelperProbeState::Installed).unwrap(),
+        "\"installed\""
+    );
+    assert_eq!(
+        serde_json::to_string(&HelperProbeState::Missing).unwrap(),
+        "\"missing\""
+    );
+    assert_eq!(
+        serde_json::to_string(&HelperProbeState::Unknown).unwrap(),
+        "\"unknown\""
+    );
 }
 
 #[test]
@@ -372,37 +393,50 @@ fn ssh_helper_setup_probe_classifies_ready_marker_as_installed() {
 
 #[test]
 fn ssh_helper_setup_probe_classifies_missing_sentinel_as_missing() {
-    let err = IpcError::new(IpcErrorCode::IoError, "SSH command failed (exit 1): FERRYX_ERR_HELPER_MISSING")
-        .with_details(serde_json::json!({
-            "stage": "execution",
-            "exitCode": 1,
-            "stderr": "FERRYX_ERR_HELPER_MISSING\r\n",
-        }));
+    let err = IpcError::new(
+        IpcErrorCode::IoError,
+        "SSH command failed (exit 1): FERRYX_ERR_HELPER_MISSING",
+    )
+    .with_details(serde_json::json!({
+        "stage": "execution",
+        "exitCode": 1,
+        "stderr": "FERRYX_ERR_HELPER_MISSING\r\n",
+    }));
     assert_eq!(classify_probe_result(Err(&err)), HelperProbeState::Missing);
 }
 
 #[test]
 fn ssh_helper_setup_probe_classifies_not_executable_sentinel_as_missing() {
-    let err = IpcError::new(IpcErrorCode::IoError, "SSH command failed (exit 1): FERRYX_ERR_HELPER_NOT_EXECUTABLE")
-        .with_details(serde_json::json!({
-            "stage": "execution",
-            "exitCode": 1,
-            "stderr": "FERRYX_ERR_HELPER_NOT_EXECUTABLE\r\n",
-        }));
+    let err = IpcError::new(
+        IpcErrorCode::IoError,
+        "SSH command failed (exit 1): FERRYX_ERR_HELPER_NOT_EXECUTABLE",
+    )
+    .with_details(serde_json::json!({
+        "stage": "execution",
+        "exitCode": 1,
+        "stderr": "FERRYX_ERR_HELPER_NOT_EXECUTABLE\r\n",
+    }));
     assert_eq!(classify_probe_result(Err(&err)), HelperProbeState::Missing);
 
-    let posix_err = IpcError::new(IpcErrorCode::IoError, "exit 126")
-        .with_details(serde_json::json!({
+    let posix_err =
+        IpcError::new(IpcErrorCode::IoError, "exit 126").with_details(serde_json::json!({
             "stage": "execution",
             "exitCode": 126,
             "stderr": "sh: helper: Permission denied",
         }));
-    assert_eq!(classify_probe_result(Err(&posix_err)), HelperProbeState::Missing);
+    assert_eq!(
+        classify_probe_result(Err(&posix_err)),
+        HelperProbeState::Missing
+    );
 }
 
 #[test]
 fn ssh_helper_setup_probe_classifies_timeout_as_unknown() {
-    let err = runtime::error(IpcErrorCode::IoError, "transport", "SSH operation timed out");
+    let err = runtime::error(
+        IpcErrorCode::IoError,
+        "transport",
+        "SSH operation timed out",
+    );
     assert_eq!(classify_probe_result(Err(&err)), HelperProbeState::Unknown);
 }
 
@@ -412,12 +446,13 @@ fn ssh_helper_setup_probe_classifies_unexpected_output_as_unknown() {
         classify_probe_result(Ok(b"some unrelated output\n")),
         HelperProbeState::Unknown
     );
-    let err = IpcError::new(IpcErrorCode::IoError, "SSH command failed (exit 2)")
-        .with_details(serde_json::json!({
+    let err = IpcError::new(IpcErrorCode::IoError, "SSH command failed (exit 2)").with_details(
+        serde_json::json!({
             "stage": "execution",
             "exitCode": 2,
             "stderr": "unexpected failure",
-        }));
+        }),
+    );
     assert_eq!(classify_probe_result(Err(&err)), HelperProbeState::Unknown);
 }
 
@@ -552,9 +587,18 @@ fn ssh_helper_setup_posix_upload_script_execution_test() {
         .spawn()
         .unwrap();
 
-    child.stdin.take().unwrap().write_all(script.as_bytes()).unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
     let output = child.wait_with_output().unwrap();
-    assert!(output.status.success(), "script stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "script stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(std::fs::read(&exe_path).unwrap(), payload);
 }
 
@@ -569,7 +613,11 @@ fn process_alive(pid: u32) -> bool {
 #[test]
 fn posix_upload_script_skips_kill_for_foreign_process() {
     use std::process::{Command, Stdio};
-    let base = std::env::temp_dir().join(format!("ferryx-helper-test-{}-{}", std::process::id(), line!()));
+    let base = std::env::temp_dir().join(format!(
+        "ferryx-helper-test-{}-{}",
+        std::process::id(),
+        line!()
+    ));
     std::fs::create_dir_all(base.join("bin")).unwrap();
     std::fs::create_dir_all(base.join("helper")).unwrap();
     let sleeper = Command::new("sleep")
@@ -584,33 +632,58 @@ fn posix_upload_script_skips_kill_for_foreign_process() {
     )
     .unwrap();
     let loc = HelperLocation {
-        executable: base.join("bin/ferryx-remote-helper").to_string_lossy().to_string(),
+        executable: base
+            .join("bin/ferryx-remote-helper")
+            .to_string_lossy()
+            .to_string(),
         root: base.join("helper").to_string_lossy().to_string(),
     };
     let script = build_posix_upload_script(&loc, b"PAYLOAD");
-    let mut child = Command::new("sh").args(["-s"])
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().unwrap();
-    child.stdin.take().unwrap().write_all(script.as_bytes()).unwrap();
+    let mut child = Command::new("sh")
+        .args(["-s"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
     let output = child.wait_with_output().unwrap();
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     // The identity check must refuse to kill an unrelated pid.
     assert!(process_alive(pid), "foreign process was killed");
-    let _ = Command::new("sh").args(["-c", &format!("kill {pid}")]).status();
+    let _ = Command::new("sh")
+        .args(["-c", &format!("kill {pid}")])
+        .status();
     let _ = std::fs::remove_dir_all(&base);
 }
 
 #[test]
 fn posix_upload_script_kills_only_helper_named_process() {
     use std::process::{Command, Stdio};
-    let base = std::env::temp_dir().join(format!("ferryx-helper-test-{}-{}", std::process::id(), line!()));
+    let base = std::env::temp_dir().join(format!(
+        "ferryx-helper-test-{}-{}",
+        std::process::id(),
+        line!()
+    ));
     std::fs::create_dir_all(base.join("bin")).unwrap();
     std::fs::create_dir_all(base.join("helper")).unwrap();
     // A binary named exactly like the helper (here: a copy of sleep) must be killed.
     let fake_helper = base.join("bin/ferryx-remote-helper");
     std::fs::copy("/bin/sleep", &fake_helper).unwrap();
-    let mut sleeper = Command::new(&fake_helper).arg("30")
-        .stdout(Stdio::null()).spawn().unwrap();
+    let mut sleeper = Command::new(&fake_helper)
+        .arg("30")
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
     std::fs::write(
         base.join("helper/endpoint.json"),
         format!("{{\"pid\":{}}}", sleeper.id()),
@@ -621,14 +694,30 @@ fn posix_upload_script_kills_only_helper_named_process() {
         root: base.join("helper").to_string_lossy().to_string(),
     };
     let script = build_posix_upload_script(&loc, b"PAYLOAD");
-    let mut child = Command::new("sh").args(["-s"])
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().unwrap();
-    child.stdin.take().unwrap().write_all(script.as_bytes()).unwrap();
+    let mut child = Command::new("sh")
+        .args(["-s"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
     let output = child.wait_with_output().unwrap();
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let exited = sleeper.wait().map(|s| !s.success()).unwrap_or(true);
-    assert!(exited || !process_alive(sleeper.id()), "helper-named process survived");
+    assert!(
+        exited || !process_alive(sleeper.id()),
+        "helper-named process survived"
+    );
     assert_eq!(std::fs::read(&fake_helper).unwrap(), b"PAYLOAD");
     let _ = std::fs::remove_dir_all(&base);
 }
@@ -666,4 +755,3 @@ fn windows_upload_script_verifies_identity_and_restores_on_failure() {
     assert!(script.contains("ProcessName -eq 'ferryx-remote-helper'"));
     assert!(script.contains("[System.IO.File]::Move($old, $dest)"));
 }
-

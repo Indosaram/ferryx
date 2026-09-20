@@ -17,7 +17,10 @@ fn sample_payload() -> FilePreviewPayload {
         media_url: None,
         text: Some("# 안녕".into()),
         line_count: Some(1),
-        target: Some(FilePreviewTarget { line: 3, col: Some(7) }),
+        target: Some(FilePreviewTarget {
+            line: 3,
+            col: Some(7),
+        }),
     }
 }
 
@@ -63,7 +66,14 @@ fn child_asset_serializes_camel_case_keys() {
     keys.sort_unstable();
     assert_eq!(
         keys,
-        vec!["byteLength", "displayName", "handle", "kind", "mediaType", "mediaUrl"]
+        vec![
+            "byteLength",
+            "displayName",
+            "handle",
+            "kind",
+            "mediaType",
+            "mediaUrl"
+        ]
     );
     assert_eq!(object["kind"], json!("image"));
 }
@@ -89,7 +99,12 @@ fn every_kind_has_a_lowercase_wire_value() {
     .collect();
     assert_eq!(
         values,
-        vec![json!("text"), json!("markdown"), json!("image"), json!("video")]
+        vec![
+            json!("text"),
+            json!("markdown"),
+            json!("image"),
+            json!("video")
+        ]
     );
 }
 
@@ -128,7 +143,11 @@ fn preview_error_carries_machine_reason_and_extra_details() {
     assert_eq!(details["byteLength"], json!(3_000_000u64));
     assert_eq!(details["limit"], json!(2_097_152u64));
 
-    let plain = preview_error(FilePreviewErrorReason::ExpiredHandle, "handle expired", None);
+    let plain = preview_error(
+        FilePreviewErrorReason::ExpiredHandle,
+        "handle expired",
+        None,
+    );
     assert_eq!(plain.code, IpcErrorCode::InvalidArgument);
     assert_eq!(
         plain.details.expect("details present"),

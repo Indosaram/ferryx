@@ -1,11 +1,8 @@
-
 use std::io::Write;
 use std::sync::Arc;
 
 use crate::browser::BrowserAutomationAction;
-use crate::ipc::browser_cli::{
-    send_browser_cli_request, BrowserCliRequest, BrowserCliResponse,
-};
+use crate::ipc::browser_cli::{send_browser_cli_request, BrowserCliRequest, BrowserCliResponse};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchMode {
@@ -160,18 +157,16 @@ where
         Some("list") => Ok(BrowserCliCommand::List),
         Some("open") => {
             let url = required_option(&args, "--url")?;
-            let workspace_id = optional_option(&args, "--workspace")?
-                .or_else(|| {
-                    std::env::var("FERRYX_WORKSPACE_ID")
-                        .ok()
-                        .filter(|v| !v.trim().is_empty())
-                });
-            let worktree_path = optional_option(&args, "--worktree-path")?
-                .or_else(|| {
-                    std::env::var("FERRYX_WORKTREE_PATH")
-                        .ok()
-                        .filter(|v| !v.trim().is_empty())
-                });
+            let workspace_id = optional_option(&args, "--workspace")?.or_else(|| {
+                std::env::var("FERRYX_WORKSPACE_ID")
+                    .ok()
+                    .filter(|v| !v.trim().is_empty())
+            });
+            let worktree_path = optional_option(&args, "--worktree-path")?.or_else(|| {
+                std::env::var("FERRYX_WORKTREE_PATH")
+                    .ok()
+                    .filter(|v| !v.trim().is_empty())
+            });
             Ok(BrowserCliCommand::Open {
                 url,
                 workspace_id,
@@ -239,7 +234,10 @@ where
         Some("wait") => {
             let browser_id = required_option(&args, "--browser-id")?;
             let timeout_ms = optional_option(&args, "--timeout-ms")?
-                .map(|v| v.parse::<u64>().map_err(|_| "--timeout-ms must be an unsigned integer"))
+                .map(|v| {
+                    v.parse::<u64>()
+                        .map_err(|_| "--timeout-ms must be an unsigned integer")
+                })
                 .transpose()?;
             let condition = if let Some(selector) = optional_option(&args, "--selector")? {
                 BrowserWaitCondition::Selector { selector }
@@ -281,10 +279,7 @@ where
         Some("errors") => {
             let browser_id = required_option(&args, "--browser-id")?;
             let clear = args.iter().any(|arg| arg == "--clear");
-            Ok(BrowserCliCommand::Errors {
-                browser_id,
-                clear,
-            })
+            Ok(BrowserCliCommand::Errors { browser_id, clear })
         }
         Some("focus") => {
             let browser_id = required_option(&args, "--browser-id")?;
@@ -308,8 +303,14 @@ where
             let action = match positional.first().map(String::as_str) {
                 Some("get") => CookieCliAction::Get,
                 Some("set") => {
-                    let name = positional.get(1).cloned().ok_or("missing cookie name for set")?;
-                    let value = positional.get(2).cloned().ok_or("missing cookie value for set")?;
+                    let name = positional
+                        .get(1)
+                        .cloned()
+                        .ok_or("missing cookie name for set")?;
+                    let value = positional
+                        .get(2)
+                        .cloned()
+                        .ok_or("missing cookie value for set")?;
                     let domain = optional_option(&args, "--domain")?;
                     let path = optional_option(&args, "--path")?;
                     CookieCliAction::Set {
@@ -320,7 +321,10 @@ where
                     }
                 }
                 Some("clear") => {
-                    let name = positional.get(1).cloned().ok_or("missing cookie name for clear")?;
+                    let name = positional
+                        .get(1)
+                        .cloned()
+                        .ok_or("missing cookie name for clear")?;
                     CookieCliAction::Clear { name }
                 }
                 _ => return Err("expected cookies <get|set|clear>".into()),
@@ -352,8 +356,14 @@ where
                     key: positional.get(2).cloned(),
                 },
                 Some("set") => {
-                    let key = positional.get(2).cloned().ok_or("missing key for storage set")?;
-                    let value = positional.get(3).cloned().ok_or("missing value for storage set")?;
+                    let key = positional
+                        .get(2)
+                        .cloned()
+                        .ok_or("missing key for storage set")?;
+                    let value = positional
+                        .get(3)
+                        .cloned()
+                        .ok_or("missing value for storage set")?;
                     StorageCliAction::Set { key, value }
                 }
                 Some("clear") => StorageCliAction::Clear {
@@ -428,7 +438,7 @@ fn browser_cli_request(command: BrowserCliCommand) -> BrowserCliRequest {
         #[cfg(any())]
         BrowserCliCommand::Eval { browser_id, script } => {
             BrowserCliRequest::Eval { browser_id, script }
-        },
+        }
         #[cfg(any())]
         BrowserCliCommand::Wait {
             browser_id,
@@ -529,7 +539,7 @@ fn browser_cli_request(command: BrowserCliCommand) -> BrowserCliRequest {
                     value: None,
                 },
             }
-        },
+        }
         _ => unimplemented!("Lane E wire variants converging"),
     }
 }
@@ -555,8 +565,12 @@ fn parse_pair_subcommand(
         Some("list") => Ok(PairCliCommand::List),
         Some("--generate-pin") | Some("generate") => match &args[subcommand_index + 1..] {
             [] => Ok(PairCliCommand::GeneratePin),
-            [flag, scope] if flag == "--access" && scope == "mirror" => Ok(PairCliCommand::GeneratePin),
-            [flag, scope] if flag == "--access" && scope == "machine" => Ok(PairCliCommand::GenerateMachinePin),
+            [flag, scope] if flag == "--access" && scope == "mirror" => {
+                Ok(PairCliCommand::GeneratePin)
+            }
+            [flag, scope] if flag == "--access" && scope == "machine" => {
+                Ok(PairCliCommand::GenerateMachinePin)
+            }
             _ => Err("expected pair generate [--access mirror|machine]".into()),
         },
         Some("approve") => {
@@ -631,7 +645,9 @@ pub fn run_pair_cli(command: PairCliCommand) -> Result<(), String> {
             let machine = command == PairCliCommand::GenerateMachinePin;
             if let Ok(val) = std::env::var("FERRYX_RELAY_URL") {
                 if val.trim().is_empty() {
-                    return Err("Pairing requires a configured relay URL (FERRYX_RELAY_URL)".to_string());
+                    return Err(
+                        "Pairing requires a configured relay URL (FERRYX_RELAY_URL)".to_string()
+                    );
                 }
             }
 
@@ -644,14 +660,31 @@ pub fn run_pair_cli(command: PairCliCommand) -> Result<(), String> {
                 let client = crate::daemon::client::DaemonClient::new();
                 if machine {
                     use crate::daemon::protocol::{DaemonRequest, DaemonResponse};
-                    match client.send_request(DaemonRequest::RemoteCreateMachinePairingCode).await? {
-                        DaemonResponse::RemotePairingCodeOk { code, pairing_token, machine_id, relay_url } =>
-                            Ok((code, pairing_token, machine_id, relay_url)),
-                        DaemonResponse::Error { message, .. } => Err(crate::ipc::IpcError::new(crate::ipc::IpcErrorCode::InternalError, message)),
-                        _ => Err(crate::ipc::IpcError::new(crate::ipc::IpcErrorCode::InternalError, "Daemon does not support machine pairing")),
+                    match client
+                        .send_request(DaemonRequest::RemoteCreateMachinePairingCode)
+                        .await?
+                    {
+                        DaemonResponse::RemotePairingCodeOk {
+                            code,
+                            pairing_token,
+                            machine_id,
+                            relay_url,
+                        } => Ok((code, pairing_token, machine_id, relay_url)),
+                        DaemonResponse::Error { message, .. } => Err(crate::ipc::IpcError::new(
+                            crate::ipc::IpcErrorCode::InternalError,
+                            message,
+                        )),
+                        _ => Err(crate::ipc::IpcError::new(
+                            crate::ipc::IpcErrorCode::InternalError,
+                            "Daemon does not support machine pairing",
+                        )),
                     }
                 } else {
-                    client.remote_create_pairing_code_detailed(Some(crate::remote::auth::DevicePermission::Control)).await
+                    client
+                        .remote_create_pairing_code_detailed(Some(
+                            crate::remote::auth::DevicePermission::Control,
+                        ))
+                        .await
                 }
             });
 
@@ -678,7 +711,9 @@ pub fn run_pair_cli(command: PairCliCommand) -> Result<(), String> {
                         "Pairing registered by the running daemon; it holds the relay control connection."
                     );
                     eprintln!("Enter this PIN in the desktop's Paired machines settings. Mirror PINs stay valid for one minute; machine PINs for ten minutes.");
-                    std::io::stdout().flush().map_err(|error| error.to_string())?;
+                    std::io::stdout()
+                        .flush()
+                        .map_err(|error| error.to_string())?;
                     Ok(())
                 }
                 Err(error) => Err(format!(
@@ -839,9 +874,7 @@ fn format_browser_cli_response(
         BrowserCliResponse::Opened { browser } => {
             serde_json::to_string(&browser).map_err(|error| error.to_string())
         }
-        BrowserCliResponse::Navigated => {
-            Ok(serde_json::json!({ "type": "navigated" }).to_string())
-        }
+        BrowserCliResponse::Navigated => Ok(serde_json::json!({ "type": "navigated" }).to_string()),
         BrowserCliResponse::Closed => Ok(serde_json::json!({ "type": "closed" }).to_string()),
         BrowserCliResponse::Identified { browser } => {
             serde_json::to_string(&browser).map_err(|error| error.to_string())
@@ -886,7 +919,9 @@ pub fn run_browser_cli(command: BrowserCliCommand) -> Result<(), String> {
         .build()
         .map_err(|error| error.to_string())?;
     let response = runtime
-        .block_on(send_browser_cli_request(browser_cli_request(command.clone())))
+        .block_on(send_browser_cli_request(browser_cli_request(
+            command.clone(),
+        )))
         .map_err(|error| error.to_string())?;
     let output = format_browser_cli_response(&command, response)?;
     println!("{output}");
@@ -948,7 +983,9 @@ pub fn run_daemon_headless(
             let hub = crate::daemon::agent_state::AgentStateHub::default();
             hub.release_manual("logging-fixture-session");
             hub.release_foreground("logging-fixture-session");
-            if let Some(logging) = logging { logging.finish().await?; }
+            if let Some(logging) = logging {
+                logging.finish().await?;
+            }
             return Ok(());
         }
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
@@ -959,34 +996,38 @@ pub fn run_daemon_headless(
         let server_task = if lifecycle_fixture {
             tokio::spawn(async move {
                 let _ = ready_tx.send(());
-                crate::daemon::agent_state::AgentStateHub::default().release_manual("failure-fixture");
+                crate::daemon::agent_state::AgentStateHub::default()
+                    .release_manual("failure-fixture");
                 use tokio::io::AsyncReadExt;
                 let mut byte = [0];
-                tokio::io::stdin().read_exact(&mut byte).await.map_err(|e| e.to_string())?;
+                tokio::io::stdin()
+                    .read_exact(&mut byte)
+                    .await
+                    .map_err(|e| e.to_string())?;
                 println!("FERRYX_PRIMARY_SERVICE_ALIVE");
                 Ok(())
             })
         } else {
-        let server = Arc::new(crate::daemon::server::DaemonServer::new());
-        let server_clone = Arc::clone(&server);
-        let server_task = tokio::spawn(async move {
-            server_clone
-                .run_server_with_handover_and_readiness(handover_from, Some(ready_tx))
-                .await
-        });
+            let server = Arc::new(crate::daemon::server::DaemonServer::new());
+            let server_clone = Arc::clone(&server);
+            let server_task = tokio::spawn(async move {
+                server_clone
+                    .run_server_with_handover_and_readiness(handover_from, Some(ready_tx))
+                    .await
+            });
 
-        let registry = server.workspace_registry().clone();
-        tokio::task::spawn_blocking(move || {
-            if let Ok(initial) = crate::ipc::project::initial_project(&registry) {
-                tracing::info!(
-                    workspace_id = %initial.workspace_id,
-                    repo_root = %initial.repo_root.display(),
-                    "Registered startup workspace for headless daemon"
-                );
-            }
-        });
+            let registry = server.workspace_registry().clone();
+            tokio::task::spawn_blocking(move || {
+                if let Ok(initial) = crate::ipc::project::initial_project(&registry) {
+                    tracing::info!(
+                        workspace_id = %initial.workspace_id,
+                        repo_root = %initial.repo_root.display(),
+                        "Registered startup workspace for headless daemon"
+                    );
+                }
+            });
 
-        server_task
+            server_task
         };
 
         // Wait for server to bind listener and initialize before emitting readiness signal
@@ -1034,32 +1075,63 @@ mod tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
         let fixture = tempfile::tempdir_in(root).unwrap();
         let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
-        child.args(["--exact", "cli::tests::headless_logging_child", "--nocapture"])
+        child
+            .args([
+                "--exact",
+                "cli::tests::headless_logging_child",
+                "--nocapture",
+            ])
             .env("FERRYX_LOGGING_FIXTURE", "1")
             .current_dir(fixture.path())
             .kill_on_drop(true);
-        for key in ["FERRYX_DATA_DIR", "FERRYX_RUNTIME_DIR", "HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "TMPDIR", "TMP", "TEMP"] {
+        for key in [
+            "FERRYX_DATA_DIR",
+            "FERRYX_RUNTIME_DIR",
+            "HOME",
+            "USERPROFILE",
+            "LOCALAPPDATA",
+            "APPDATA",
+            "TMPDIR",
+            "TMP",
+            "TEMP",
+        ] {
             child.env(key, fixture.path());
         }
         // When: production headless initialization emits both real release operations and exits.
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let output = runtime.block_on(async {
             tokio::time::timeout(std::time::Duration::from_secs(20), child.output())
-                .await.expect("bounded child exit").unwrap()
+                .await
+                .expect("bounded child exit")
+                .unwrap()
         });
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         // Then: both structured reasons and their session reach the daemon-owned file.
         let path = fixture.path().join("logs/daemon.log");
         let text = std::fs::read_to_string(&path).expect("headless release log must exist");
         for reason in ["manual_reset", "foreground_agent_to_shell"] {
-            assert!(text.lines().any(|line| line.contains("session_id=\"logging-fixture-session\"") && line.contains(&format!("reason=\"{reason}\""))), "missing {reason}: {text}");
+            assert!(
+                text.lines().any(
+                    |line| line.contains("session_id=\"logging-fixture-session\"")
+                        && line.contains(&format!("reason=\"{reason}\""))
+                ),
+                "missing {reason}: {text}"
+            );
         }
         assert!(text.len() <= 1024 * 1024);
         assert!(!String::from_utf8_lossy(&output.stdout).contains("reason="));
         assert!(!String::from_utf8_lossy(&output.stderr).contains("reason="));
-        #[cfg(unix)] {
+        #[cfg(unix)]
+        {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
     }
 
@@ -1075,28 +1147,60 @@ mod tests {
             }
             tokio::runtime::Runtime::new().unwrap().block_on(async {
                 tokio::time::timeout(std::time::Duration::from_secs(20), async {
-                    let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
-                    command.args(["--exact", "cli::tests::headless_logging_child", "--nocapture"])
-                        .env("FERRYX_LOGGING_FIXTURE", mode).current_dir(fixture.path())
-                        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped())
-                        .stderr(std::process::Stdio::piped()).kill_on_drop(true);
-                    for key in ["FERRYX_DATA_DIR", "FERRYX_RUNTIME_DIR", "HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "TMPDIR", "TMP", "TEMP"] {
+                    let mut command =
+                        tokio::process::Command::new(std::env::current_exe().unwrap());
+                    command
+                        .args([
+                            "--exact",
+                            "cli::tests::headless_logging_child",
+                            "--nocapture",
+                        ])
+                        .env("FERRYX_LOGGING_FIXTURE", mode)
+                        .current_dir(fixture.path())
+                        .stdin(std::process::Stdio::piped())
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::piped())
+                        .kill_on_drop(true);
+                    for key in [
+                        "FERRYX_DATA_DIR",
+                        "FERRYX_RUNTIME_DIR",
+                        "HOME",
+                        "USERPROFILE",
+                        "LOCALAPPDATA",
+                        "APPDATA",
+                        "TMPDIR",
+                        "TMP",
+                        "TEMP",
+                    ] {
                         command.env(key, fixture.path());
                     }
                     let mut child = command.spawn().unwrap();
                     let mut errors = BufReader::new(child.stderr.take().unwrap()).lines();
                     // When: the actual CLI reports sink failure, release the primary task.
                     let report = errors.next_line().await.unwrap().unwrap_or_default();
-                    if let Some(mut stdin) = child.stdin.take() { let _ = stdin.write_all(b"x").await; }
+                    if let Some(mut stdin) = child.stdin.take() {
+                        let _ = stdin.write_all(b"x").await;
+                    }
                     let output = child.wait_with_output().await.unwrap();
                     // Then: readiness and a post-failure service action both survive.
                     assert!(output.status.success(), "{mode}: {report}");
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     assert!(stdout.contains("FERRYX_DAEMON_READY"), "{mode}: {stdout}");
-                    assert!(stdout.contains("FERRYX_PRIMARY_SERVICE_ALIVE"), "{mode}: {stdout}");
-                    assert!(report.contains("FERRYX_DAEMON_LOGGING_DISABLED"), "{report}");
-                    assert!(errors.next_line().await.unwrap().is_none(), "only one failure report");
-                }).await.expect("bounded lifecycle fixture exit");
+                    assert!(
+                        stdout.contains("FERRYX_PRIMARY_SERVICE_ALIVE"),
+                        "{mode}: {stdout}"
+                    );
+                    assert!(
+                        report.contains("FERRYX_DAEMON_LOGGING_DISABLED"),
+                        "{report}"
+                    );
+                    assert!(
+                        errors.next_line().await.unwrap().is_none(),
+                        "only one failure report"
+                    );
+                })
+                .await
+                .expect("bounded lifecycle fixture exit");
             });
         }
     }
@@ -1240,13 +1344,13 @@ mod tests {
         // A handover exists to transplant live PTY sessions from a retiring daemon;
         // starting fresh instead abandons every session the caller meant to preserve,
         // and the caller sees a daemon that looks healthy.
-        assert!(parse_handover_from(&["--daemon".to_string(), "--handover-from".to_string()]).is_err());
+        assert!(
+            parse_handover_from(&["--daemon".to_string(), "--handover-from".to_string()]).is_err()
+        );
         // A following flag is not a path.
-        assert!(parse_handover_from(&[
-            "--handover-from".to_string(),
-            "--daemon".to_string()
-        ])
-        .is_err());
+        assert!(
+            parse_handover_from(&["--handover-from".to_string(), "--daemon".to_string()]).is_err()
+        );
         // Absent entirely is a legitimate cold start.
         assert_eq!(
             parse_handover_from(&["--daemon".to_string()]).expect("absent is ok"),
@@ -1684,10 +1788,7 @@ mod tests {
             response,
         )
         .expect("format snapshot");
-        assert_eq!(
-            snapshot_output,
-            serde_json::to_string(&snapshot).unwrap()
-        );
+        assert_eq!(snapshot_output, serde_json::to_string(&snapshot).unwrap());
     }
 
     #[test]

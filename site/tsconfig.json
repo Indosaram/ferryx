@@ -1,4 +1,7 @@
 {
+  // Browser/Astro program: the same module graph Vite builds, so `@ui` and the Tauri mocks
+  // resolve exactly as astro.config.mjs aliases them. Bun's globals are deliberately absent
+  // here because the landing bundle never runs under bun; the test program below adds them.
   "compilerOptions": {
     "target": "ES2020",
     "useDefineForClassFields": true,
@@ -16,10 +19,17 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
     "baseUrl": ".",
+    // Mirrors vite.resolve.alias in astro.config.mjs; keep both lists in sync.
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@ui/*": ["../ui/src/*"],
+      "@tauri-apps/api/core": ["./src/mock/core.ts"],
+      "@tauri-apps/api/event": ["./src/mock/events.ts"],
+      "@tauri-apps/plugin-dialog": ["./src/mock/dialog.ts"]
     },
-    "types": ["bun"]
+    "types": ["astro/client"]
   },
-  "include": ["src"]
+  "include": ["src"],
+  // Tests are type-checked by tsconfig.test.json, which supplies the bun runtime types.
+  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"]
 }

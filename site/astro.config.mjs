@@ -11,7 +11,9 @@ const baseUrl = process.env.BASE_URL
   ? `${process.env.BASE_URL.replace(/\/$/, '')}/`
   : undefined;
 // Absolute origin, required so canonical/og:url resolve instead of emitting empty attributes.
-const siteOrigin = process.env.SITE_URL ?? 'https://indosaram.github.io';
+// Defaults to the production domain so a plain `astro build` never publishes canonicals
+// pointing at the legacy GitHub Pages host; SITE_URL still overrides for that deployment.
+const siteOrigin = process.env.SITE_URL ?? 'https://ferryx.dev';
 const socialImage = `${siteOrigin.replace(/\/$/, '')}${baseUrl ?? '/'}og-image.png`;
 
 // Astro does not rewrite root-relative links written inside markdown, so `/compare/warp/`
@@ -64,7 +66,10 @@ export default defineConfig({
         },
         {
           label: 'Reference',
-          items: [{ label: 'Keyboard Shortcuts', slug: 'docs/shortcuts' }],
+          items: [
+            { label: 'Keyboard Shortcuts', slug: 'docs/shortcuts' },
+            { label: 'Product facts', slug: 'docs/facts' },
+          ],
         },
         {
           label: 'Architecture',

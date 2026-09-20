@@ -70,6 +70,11 @@ pub enum Operation {
     PasteUploadChunk {
         request: m::PasteUploadChunkRequest,
     },
+    /// Capability probe for DAG streaming. The stream itself is a socket, opened by
+    /// [`MachineClient::attach_dag`], not an HTTP result.
+    DagStream {
+        workspace_id: String,
+    },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -140,25 +145,59 @@ type Result<T> = std::result::Result<T, ClientError>;
 /// Request IDs have already been constrained to UUIDs by the wire decoder.
 fn project_remote_error(error: m::MachineError) -> m::MachineError {
     let code = match error.code.as_str() {
-        "UNAUTHORIZED" | "MACHINE_ACCESS_REQUIRED" | "MACHINE_OWNER_UNSUPPORTED"
-        | "MACHINE_SERVICE_UNAVAILABLE" | "HOST_UNAVAILABLE" | "TIMEOUT"
-        | "INVALID_REQUEST" | "INVALID_PATH" | "UNSUPPORTED_PATH" | "PAYLOAD_TOO_LARGE"
-        | "PERMISSION_DENIED" | "RATE_LIMITED" | "CAPACITY_EXCEEDED"
-        | "DIRECTORY_NOT_FOUND" | "PROJECT_NOT_FOUND" | "PROJECT_BUSY"
-        | "NOT_A_GIT_REPOSITORY" | "BASE_REF_UNAVAILABLE" | "INVALID_BASE_REF"
-        | "INVALID_WORKTREE" | "WORKSPACE_ID_MISMATCH" | "WORKTREE_NOT_FOUND"
-        | "WORKTREE_BUSY" | "WORKTREE_EXISTS" | "WORKTREE_LOCKED" | "DIRTY_WORKTREE"
-        | "UNMERGED_BRANCH" | "WORKTREE_REMOVED_BRANCH_RETAINED" | "WORKTREE_REMOVED_PRUNE_FAILED"
-        | "OUTPUT_LIMIT_EXCEEDED" | "REQUEST_CONFLICT" | "STALE_REVISION"
-        | "OPERATION_NOT_FOUND" | "OPERATION_OUTCOME_UNKNOWN" | "OPERATION_RESULT_EXPIRED"
-        | "SESSION_EXPIRED" | "SESSION_NOT_FOUND" | "SESSION_OWNERSHIP_CHANGED"
-        | "AGENT_RESUME_UNSUPPORTED" | "AGENT_SESSION_CONFLICT" | "PARENT_SESSION_MISMATCH"
-        | "CONTROL_CONFLICT" | "STALE_EPOCH" | "STALE_GENERATION"
-        | "NOT_FOUND" | "METHOD_NOT_ALLOWED" => error.code.as_str(),
+        "UNAUTHORIZED"
+        | "MACHINE_ACCESS_REQUIRED"
+        | "MACHINE_OWNER_UNSUPPORTED"
+        | "MACHINE_SERVICE_UNAVAILABLE"
+        | "HOST_UNAVAILABLE"
+        | "TIMEOUT"
+        | "INVALID_REQUEST"
+        | "INVALID_PATH"
+        | "UNSUPPORTED_PATH"
+        | "PAYLOAD_TOO_LARGE"
+        | "PERMISSION_DENIED"
+        | "RATE_LIMITED"
+        | "CAPACITY_EXCEEDED"
+        | "DIRECTORY_NOT_FOUND"
+        | "PROJECT_NOT_FOUND"
+        | "PROJECT_BUSY"
+        | "NOT_A_GIT_REPOSITORY"
+        | "BASE_REF_UNAVAILABLE"
+        | "INVALID_BASE_REF"
+        | "INVALID_WORKTREE"
+        | "WORKSPACE_ID_MISMATCH"
+        | "WORKTREE_NOT_FOUND"
+        | "WORKTREE_BUSY"
+        | "WORKTREE_EXISTS"
+        | "WORKTREE_LOCKED"
+        | "DIRTY_WORKTREE"
+        | "UNMERGED_BRANCH"
+        | "WORKTREE_REMOVED_BRANCH_RETAINED"
+        | "WORKTREE_REMOVED_PRUNE_FAILED"
+        | "OUTPUT_LIMIT_EXCEEDED"
+        | "REQUEST_CONFLICT"
+        | "STALE_REVISION"
+        | "OPERATION_NOT_FOUND"
+        | "OPERATION_OUTCOME_UNKNOWN"
+        | "OPERATION_RESULT_EXPIRED"
+        | "SESSION_EXPIRED"
+        | "SESSION_NOT_FOUND"
+        | "SESSION_OWNERSHIP_CHANGED"
+        | "AGENT_RESUME_UNSUPPORTED"
+        | "AGENT_SESSION_CONFLICT"
+        | "PARENT_SESSION_MISMATCH"
+        | "CONTROL_CONFLICT"
+        | "STALE_EPOCH"
+        | "STALE_GENERATION"
+        | "NOT_FOUND"
+        | "METHOD_NOT_ALLOWED" => error.code.as_str(),
         _ => "PAIRED_HOST_REMOTE_ERROR",
     };
     let mut details = serde_json::Map::new();
-    if matches!(code, "WORKTREE_REMOVED_BRANCH_RETAINED" | "WORKTREE_REMOVED_PRUNE_FAILED") {
+    if matches!(
+        code,
+        "WORKTREE_REMOVED_BRANCH_RETAINED" | "WORKTREE_REMOVED_PRUNE_FAILED"
+    ) {
         for key in ["worktreeRemoved", "branchDeleted", "pruned"] {
             if let Some(value) = error.details.get(key).and_then(serde_json::Value::as_bool) {
                 details.insert(key.into(), value.into());
@@ -273,6 +312,10 @@ impl Operation {
                 path = "workspace/paste-upload";
                 r.capability = Some("machineWorkspaceV1");
             }
+            Self::DagStream { .. } => {
+                path = "capabilities";
+                r.capability = Some(crate::remote::dag_api::DAG_STREAM_CAPABILITY);
+            }
         }
         r.segments = path.split('/').map(str::to_owned).collect();
         match self {
@@ -333,10 +376,14 @@ fn map_ticket_error(status: reqwest::StatusCode, bytes: &[u8]) -> ClientError {
     if let Ok(envelope) = serde_json::from_slice::<m::ErrorEnvelope>(bytes) {
         let mut error = project_remote_error(envelope.error);
         if !error.details.contains_key("status") {
-            error.details.insert("status".into(), serde_json::json!(status.as_u16()));
+            error
+                .details
+                .insert("status".into(), serde_json::json!(status.as_u16()));
         }
         if !error.details.contains_key("httpStatus") {
-            error.details.insert("httpStatus".into(), serde_json::json!(status.as_u16()));
+            error
+                .details
+                .insert("httpStatus".into(), serde_json::json!(status.as_u16()));
         }
         return ClientError {
             code: error.code.clone(),
@@ -352,10 +399,14 @@ fn map_ticket_error(status: reqwest::StatusCode, bytes: &[u8]) -> ClientError {
     if let Ok(error) = serde_json::from_slice::<m::MachineError>(bytes) {
         let mut error = project_remote_error(error);
         if !error.details.contains_key("status") {
-            error.details.insert("status".into(), serde_json::json!(status.as_u16()));
+            error
+                .details
+                .insert("status".into(), serde_json::json!(status.as_u16()));
         }
         if !error.details.contains_key("httpStatus") {
-            error.details.insert("httpStatus".into(), serde_json::json!(status.as_u16()));
+            error
+                .details
+                .insert("httpStatus".into(), serde_json::json!(status.as_u16()));
         }
         return ClientError {
             code: error.code.clone(),
@@ -412,6 +463,15 @@ fn map_ticket_error(status: reqwest::StatusCode, bytes: &[u8]) -> ClientError {
     }
 }
 
+/// A live authenticated DAG stream. Holding the lease keeps the stream bound to the
+/// generation that authorized it: a forget or re-pair cancels it.
+pub struct PairedDagStream {
+    pub socket: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    pub lease: CredentialLease,
+}
+
 pub struct MachineClient {
     http: reqwest::Client,
 }
@@ -440,38 +500,66 @@ impl MachineClient {
         descriptor: &crate::terminal::paired_daemon::Descriptor,
     ) -> Result<crate::terminal::paired_daemon::Transport> {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-        let response = self.execute_with_capability(service, OperationRequest {
-            host_id: descriptor.host_id.clone(), generation: descriptor.generation,
-            operation: Operation::Session { session_id: descriptor.target.session_id.clone(), daemon_epoch: descriptor.target.daemon_epoch },
-        }, Some("terminalStreamV1")).await?;
+        let response = self
+            .execute_with_capability(
+                service,
+                OperationRequest {
+                    host_id: descriptor.host_id.clone(),
+                    generation: descriptor.generation,
+                    operation: Operation::Session {
+                        session_id: descriptor.target.session_id.clone(),
+                        daemon_epoch: descriptor.target.daemon_epoch,
+                    },
+                },
+                Some("terminalStreamV1"),
+            )
+            .await?;
         match response.result {
-            OperationResult::Session(m::SessionDetail::Running { session }) if session.target == descriptor.target => {},
+            OperationResult::Session(m::SessionDetail::Running { session })
+                if session.target == descriptor.target => {}
             _ => return Err(ClientError::local("SESSION_EXPIRED")),
         }
-        let (host, lease) = service.capture_operation(descriptor.host_id.clone(), descriptor.generation).await?;
-        let mut url = Url::parse(&host.host_id).map_err(|_| ClientError::local("INVALID_REQUEST"))?;
+        let (host, lease) = service
+            .capture_operation(descriptor.host_id.clone(), descriptor.generation)
+            .await?;
+        let mut url =
+            Url::parse(&host.host_id).map_err(|_| ClientError::local("INVALID_REQUEST"))?;
         let is_relay = is_relay_transport(&url);
-        url.path_segments_mut().map_err(|_| ClientError::local("INVALID_REQUEST"))?
+        url.path_segments_mut()
+            .map_err(|_| ClientError::local("INVALID_REQUEST"))?
             .extend(["api", "v1", "terminal", &descriptor.target.session_id]);
-        url.query_pairs_mut().append_pair("daemonEpoch", &descriptor.target.daemon_epoch.0.to_string());
-        if let Some(cursor) = descriptor.after_sequence { url.query_pairs_mut().append_pair("afterSequence", &cursor.0.to_string()); }
+        url.query_pairs_mut()
+            .append_pair("daemonEpoch", &descriptor.target.daemon_epoch.0.to_string());
+        if let Some(cursor) = descriptor.after_sequence {
+            url.query_pairs_mut()
+                .append_pair("afterSequence", &cursor.0.to_string());
+        }
 
         // Mint a single-use socket ticket if the host/relay endpoint supports it (relay requires ticket for upgrade).
         let ticket: Option<String> = {
-            let mut t_url = Url::parse(&host.host_id).map_err(|_| ClientError::local("INVALID_REQUEST"))?;
-            t_url.path_segments_mut().map_err(|_| ClientError::local("INVALID_REQUEST"))?
+            let mut t_url =
+                Url::parse(&host.host_id).map_err(|_| ClientError::local("INVALID_REQUEST"))?;
+            t_url
+                .path_segments_mut()
+                .map_err(|_| ClientError::local("INVALID_REQUEST"))?
                 .extend(["api", "v1", "socket-ticket"]);
             let target_path = format!("/api/v1/terminal/{}", descriptor.target.session_id);
             let body = serde_json::json!({ "target": target_path }).to_string();
             let token = lease.token()?;
-            let request_build = self.http.post(t_url)
+            let request_build = self
+                .http
+                .post(t_url)
                 .bearer_auth(token)
                 .header("content-type", "application/json")
                 .body(body);
             let resp = match request_build.send().await {
                 Ok(resp) => resp,
                 Err(err) => {
-                    let code = if err.is_timeout() { "TIMEOUT" } else { "HOST_UNAVAILABLE" };
+                    let code = if err.is_timeout() {
+                        "TIMEOUT"
+                    } else {
+                        "HOST_UNAVAILABLE"
+                    };
                     return Err(ClientError::local(code));
                 }
             };
@@ -482,15 +570,22 @@ impl MachineClient {
                 }
                 let mut bytes = Vec::new();
                 let mut resp = resp;
-                while let Some(chunk) = resp.chunk().await.map_err(|_| ClientError::local("HOST_UNAVAILABLE"))? {
+                while let Some(chunk) = resp
+                    .chunk()
+                    .await
+                    .map_err(|_| ClientError::local("HOST_UNAVAILABLE"))?
+                {
                     if bytes.len() + chunk.len() > 64 * 1024 {
                         return Err(ClientError::local("PAYLOAD_TOO_LARGE"));
                     }
                     bytes.extend_from_slice(&chunk);
                 }
                 #[derive(serde::Deserialize)]
-                struct TicketResp { ticket: String }
-                let tr = serde_json::from_slice::<TicketResp>(&bytes).map_err(|_| ClientError::local("PAIRED_HOST_INVALID_RESPONSE"))?;
+                struct TicketResp {
+                    ticket: String,
+                }
+                let tr = serde_json::from_slice::<TicketResp>(&bytes)
+                    .map_err(|_| ClientError::local("PAIRED_HOST_INVALID_RESPONSE"))?;
                 if tr.ticket.is_empty() || tr.ticket.len() > 1024 {
                     return Err(ClientError::local("PAIRED_HOST_INVALID_RESPONSE"));
                 }
@@ -520,9 +615,18 @@ impl MachineClient {
         }
 
         let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
-        url.set_scheme(scheme).map_err(|_| ClientError::local("INVALID_REQUEST"))?;
-        let mut request = url.as_str().into_client_request().map_err(|_| ClientError::local("INVALID_REQUEST"))?;
-        request.headers_mut().insert("authorization", format!("Bearer {}", lease.token()?).parse().map_err(|_| ClientError::local("INVALID_REQUEST"))?);
+        url.set_scheme(scheme)
+            .map_err(|_| ClientError::local("INVALID_REQUEST"))?;
+        let mut request = url
+            .as_str()
+            .into_client_request()
+            .map_err(|_| ClientError::local("INVALID_REQUEST"))?;
+        request.headers_mut().insert(
+            "authorization",
+            format!("Bearer {}", lease.token()?)
+                .parse()
+                .map_err(|_| ClientError::local("INVALID_REQUEST"))?,
+        );
         let mut cancelled = lease.cancellation();
         let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
             .max_message_size(Some(crate::remote::terminal_wire::MAX_FRAME_BYTES))
@@ -536,8 +640,156 @@ impl MachineClient {
                     ClientError::local("HOST_UNAVAILABLE")
                 })?,
         };
-        service.current_generation(descriptor.host_id.clone(), descriptor.generation).await?;
+        service
+            .current_generation(descriptor.host_id.clone(), descriptor.generation)
+            .await?;
         Ok(crate::terminal::paired_daemon::Transport { socket, lease })
+    }
+
+    /// Opens an authenticated DAG stream on the paired host.
+    ///
+    /// Identity is bound before any frame is read: the capability probe runs through
+    /// the same executor as every other machine operation, so a host whose
+    /// `machineId` does not match the inventory record, or whose grant is not
+    /// machine/control, is refused rather than streamed from. The workspace id is the
+    /// host's own id; the desktop never supplies a filesystem path.
+    pub async fn attach_dag(
+        &self,
+        service: &PairedHostService,
+        host_id: String,
+        generation: Epoch,
+        remote_workspace_id: &str,
+    ) -> Result<PairedDagStream> {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        // Capability + identity gate. `execute_with_capability` verifies
+        // caps.machine_id == host.machine_id and machine/control scope.
+        self.execute_with_capability(
+            service,
+            OperationRequest {
+                host_id: host_id.clone(),
+                generation,
+                operation: Operation::DagStream {
+                    workspace_id: remote_workspace_id.to_owned(),
+                },
+            },
+            Some(crate::remote::dag_api::DAG_STREAM_CAPABILITY),
+        )
+        .await?;
+
+        let (host, lease) = service.capture_operation(host_id, generation).await?;
+        let mut url =
+            Url::parse(&host.host_id).map_err(|_| ClientError::local("INVALID_REQUEST"))?;
+        let is_relay = is_relay_transport(&url);
+        url.path_segments_mut()
+            .map_err(|_| ClientError::local("INVALID_REQUEST"))?
+            .extend(["api", "v1", "workspace", "dag"]);
+        url.query_pairs_mut()
+            .append_pair("workspaceId", remote_workspace_id);
+
+        let ticket = self
+            .socket_ticket(&host, &lease, crate::remote::dag_api::DAG_SOCKET_TARGET, is_relay)
+            .await?;
+        if let Some(ticket) = &ticket {
+            url.query_pairs_mut().append_pair("ticket", ticket);
+        }
+        let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
+        url.set_scheme(scheme)
+            .map_err(|_| ClientError::local("INVALID_REQUEST"))?;
+        let mut request = url
+            .as_str()
+            .into_client_request()
+            .map_err(|_| ClientError::local("INVALID_REQUEST"))?;
+        request.headers_mut().insert(
+            "authorization",
+            format!("Bearer {}", lease.token()?)
+                .parse()
+                .map_err(|_| ClientError::local("INVALID_REQUEST"))?,
+        );
+        let mut cancelled = lease.cancellation();
+        let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+            .max_message_size(Some(crate::remote::dag_api::MAX_DAG_FRAME_BYTES))
+            .max_frame_size(Some(crate::remote::dag_api::MAX_DAG_FRAME_BYTES));
+        let (socket, _) = tokio::select! { biased;
+            _ = cancelled.changed() => return Err(ClientError::local("PAIRED_HOST_STALE_GENERATION")),
+            result = tokio::time::timeout(Duration::from_secs(30), tokio_tungstenite::connect_async_with_config(request, Some(config), true)) =>
+                result.map_err(|_| ClientError::local("TIMEOUT"))?.map_err(|_| ClientError::local("HOST_UNAVAILABLE"))?,
+        };
+        // Re-verify the generation: a forget or re-pair during the upgrade must not
+        // leave a live stream authorized by a retired credential.
+        service
+            .current_generation(host.host_id.clone(), generation)
+            .await?;
+        Ok(PairedDagStream { socket, lease })
+    }
+
+    /// Mints a single-use socket ticket for `target`, mirroring terminal attachment.
+    /// A direct (non-relay) host that predates tickets answers 404 and is allowed to
+    /// fall back to the Authorization header; a relay never is.
+    async fn socket_ticket(
+        &self,
+        host: &HostView,
+        lease: &CredentialLease,
+        target: &str,
+        is_relay: bool,
+    ) -> Result<Option<String>> {
+        let mut url =
+            Url::parse(&host.host_id).map_err(|_| ClientError::local("INVALID_REQUEST"))?;
+        url.path_segments_mut()
+            .map_err(|_| ClientError::local("INVALID_REQUEST"))?
+            .extend(["api", "v1", "socket-ticket"]);
+        let body = serde_json::json!({ "target": target }).to_string();
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(lease.token()?)
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(|error| {
+                ClientError::local(if error.is_timeout() {
+                    "TIMEOUT"
+                } else {
+                    "HOST_UNAVAILABLE"
+                })
+            })?;
+        let status = response.status();
+        if status.is_success() {
+            let mut bytes = Vec::new();
+            let mut response = response;
+            while let Some(chunk) = response
+                .chunk()
+                .await
+                .map_err(|_| ClientError::local("HOST_UNAVAILABLE"))?
+            {
+                if bytes.len() + chunk.len() > 64 * 1024 {
+                    return Err(ClientError::local("PAYLOAD_TOO_LARGE"));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            #[derive(serde::Deserialize)]
+            struct TicketResp {
+                ticket: String,
+            }
+            let parsed = serde_json::from_slice::<TicketResp>(&bytes)
+                .map_err(|_| ClientError::local("PAIRED_HOST_INVALID_RESPONSE"))?;
+            if parsed.ticket.is_empty() || parsed.ticket.len() > 1024 {
+                return Err(ClientError::local("PAIRED_HOST_INVALID_RESPONSE"));
+            }
+            return Ok(Some(parsed.ticket));
+        }
+        if !is_relay && status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let mut bytes = Vec::new();
+        let mut response = response;
+        while let Ok(Some(chunk)) = response.chunk().await {
+            if bytes.len() + chunk.len() > 16 * 1024 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Err(map_ticket_error(status, &bytes))
     }
 
     async fn http(
@@ -635,7 +887,9 @@ impl MachineClient {
                 return true;
             }
             // Compatibility for hosts advertising terminalCreateV1 before terminalStreamV1 was explicit.
-            if required == "terminalStreamV1" && caps.capabilities.iter().any(|v| v == "terminalCreateV1") {
+            if required == "terminalStreamV1"
+                && caps.capabilities.iter().any(|v| v == "terminalCreateV1")
+            {
                 #[cfg(test)]
                 if caps.machine_id == "a" {
                     return false;
@@ -644,7 +898,10 @@ impl MachineClient {
             }
             false
         };
-        if route.capability.into_iter().chain(additional_capability)
+        if route
+            .capability
+            .into_iter()
+            .chain(additional_capability)
             .any(|c| !satisfies_capability(c))
         {
             return Err(ClientError::local("PAIRED_HOST_CAPABILITY_UNAVAILABLE"));
@@ -744,7 +1001,11 @@ fn session(host: &HostView, row: &m::Session) -> Result<()> {
         workspace_identity(&row.workspace_id, row.worktree.as_ref(), &row.workspace_id)
     }
 }
-fn workspace_identity(workspace: &str, worktree: Option<&m::WorktreeIdentity>, expected: &str) -> Result<()> {
+fn workspace_identity(
+    workspace: &str,
+    worktree: Option<&m::WorktreeIdentity>,
+    expected: &str,
+) -> Result<()> {
     if workspace != expected || worktree.is_some_and(|w| w.ws_id != expected) {
         return Err(ClientError::local("PAIRED_HOST_INVALID_RESPONSE"));
     }
@@ -763,19 +1024,32 @@ fn map_result(host: &HostView, operation: &Operation, bytes: &[u8]) -> Result<Op
         Operation::UnregisterProject { .. } => OperationResult::UnregisterProject(decode(bytes)?),
         Operation::Worktrees { workspace_id } => {
             let rows: m::Worktrees = decode(bytes)?;
-            for row in &rows.worktrees { workspace_identity(&row.workspace_id, row.identity.as_ref(), workspace_id)?; }
+            for row in &rows.worktrees {
+                workspace_identity(&row.workspace_id, row.identity.as_ref(), workspace_id)?;
+            }
             OperationResult::Worktrees(rows)
         }
-        Operation::WorktreeStatus { workspace_id, worktree } => {
+        Operation::WorktreeStatus {
+            workspace_id,
+            worktree,
+        } => {
             let row: m::WorktreeStatus = decode(bytes)?;
             workspace_identity(&row.workspace_id, Some(&row.worktree), workspace_id)?;
-            if row.worktree != *worktree { return Err(ClientError::local("PAIRED_HOST_INVALID_RESPONSE")); }
+            if row.worktree != *worktree {
+                return Err(ClientError::local("PAIRED_HOST_INVALID_RESPONSE"));
+            }
             OperationResult::WorktreeStatus(row)
         }
         Operation::CreateWorktree { request } => {
             let row: m::Worktree = decode(bytes)?;
-            workspace_identity(&row.workspace_id, row.identity.as_ref(), &request.workspace_id)?;
-            if row.identity.as_ref() != Some(&request.worktree) { return Err(ClientError::local("PAIRED_HOST_INVALID_RESPONSE")); }
+            workspace_identity(
+                &row.workspace_id,
+                row.identity.as_ref(),
+                &request.workspace_id,
+            )?;
+            if row.identity.as_ref() != Some(&request.worktree) {
+                return Err(ClientError::local("PAIRED_HOST_INVALID_RESPONSE"));
+            }
             OperationResult::CreateWorktree(row)
         }
         Operation::DeleteWorktree { .. } => OperationResult::DeleteWorktree(decode(bytes)?),
@@ -783,9 +1057,17 @@ fn map_result(host: &HostView, operation: &Operation, bytes: &[u8]) -> Result<Op
             let rows: m::Sessions = decode(bytes)?;
             for row in &rows.sessions {
                 session(host, row)?;
-                if let Some(expected) = workspace_id { workspace_identity(&row.workspace_id, row.worktree.as_ref(), expected)?; }
+                if let Some(expected) = workspace_id {
+                    workspace_identity(&row.workspace_id, row.worktree.as_ref(), expected)?;
+                }
             }
-            if workspace_id.as_ref().is_some_and(|id| rows.unavailable_workspace_ids.iter().any(|other| other != id)) { return Err(ClientError::local("PAIRED_HOST_INVALID_RESPONSE")); }
+            if workspace_id.as_ref().is_some_and(|id| {
+                rows.unavailable_workspace_ids
+                    .iter()
+                    .any(|other| other != id)
+            }) {
+                return Err(ClientError::local("PAIRED_HOST_INVALID_RESPONSE"));
+            }
             OperationResult::Sessions(rows)
         }
         Operation::Session {
@@ -809,8 +1091,14 @@ fn map_result(host: &HostView, operation: &Operation, bytes: &[u8]) -> Result<Op
         Operation::CreateSession { request } => {
             let row = decode(bytes)?;
             session(host, &row)?;
-            workspace_identity(&row.workspace_id, row.worktree.as_ref(), &request.workspace_id)?;
-            if row.worktree != request.worktree { return Err(ClientError::local("PAIRED_HOST_INVALID_RESPONSE")); }
+            workspace_identity(
+                &row.workspace_id,
+                row.worktree.as_ref(),
+                &request.workspace_id,
+            )?;
+            if row.worktree != request.worktree {
+                return Err(ClientError::local("PAIRED_HOST_INVALID_RESPONSE"));
+            }
             OperationResult::CreateSession(row)
         }
         Operation::CloseSession { .. } => OperationResult::CloseSession(decode(bytes)?),
@@ -820,9 +1108,15 @@ fn map_result(host: &HostView, operation: &Operation, bytes: &[u8]) -> Result<Op
             if let m::Operation::Completed { outcome, .. } = &mut op {
                 match outcome {
                     m::OperationOutcome::Session { session: row } => session(host, row)?,
-                    m::OperationOutcome::Worktree { worktree: row } => workspace_identity(&row.workspace_id, row.identity.as_ref(), &row.workspace_id)?,
+                    m::OperationOutcome::Worktree { worktree: row } => workspace_identity(
+                        &row.workspace_id,
+                        row.identity.as_ref(),
+                        &row.workspace_id,
+                    )?,
                     m::OperationOutcome::Error { error } => {
-                        if error.request_id != *request_id { return Err(ClientError::local("PAIRED_HOST_INVALID_RESPONSE")); }
+                        if error.request_id != *request_id {
+                            return Err(ClientError::local("PAIRED_HOST_INVALID_RESPONSE"));
+                        }
                         *error = project_remote_error(error.clone());
                     }
                     _ => {}
@@ -831,6 +1125,9 @@ fn map_result(host: &HostView, operation: &Operation, bytes: &[u8]) -> Result<Op
             OperationResult::Operation(op)
         }
         Operation::PasteUploadChunk { .. } => OperationResult::PasteUploadChunk(decode(bytes)?),
+        // The capability probe returns this host's advertised capabilities; the stream
+        // is opened separately over a socket.
+        Operation::DagStream { .. } => OperationResult::Capabilities(decode(bytes)?),
     })
 }
 #[cfg(test)]

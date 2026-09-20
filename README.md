@@ -29,13 +29,15 @@ No Electron anywhere.
 | Platform | Package | |
 | :--- | :--- | :--- |
 | **macOS** | Universal DMG (Apple Silicon & Intel) | [`.dmg`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_universal.dmg) |
-| **Windows** | Microsoft Store (x64, auto-updates) | [Store](https://apps.microsoft.com/search?query=Ferryx) |
+| **Windows** | Installer (x64, not code-signed yet) | [`.exe`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_x64-setup.exe) |
 | **Linux** | Portable AppImage (x64) | [`.AppImage`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.AppImage) |
 | **Linux** | Debian / Ubuntu package (x64) | [`.deb`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.deb) |
-| **Linux (Headless)** | Server / VPS PTY Daemon & CLI (x64) | [`ferryx-cli`](https://github.com/Indosaram/ferryx/releases/latest/download/ferryx-cli) |
+| **Linux (Headless)** | Server / VPS PTY Daemon & CLI (x64) | [`ferryx-cli`](https://github.com/Indosaram/ferryx/releases/download/v2026.09.11.1/ferryx-cli) |
 
-Every link resolves against the latest release. Verify downloads with the `SHA256SUMS.txt`
-published alongside the binaries:
+The macOS, Windows, and Linux links resolve against the latest release. `ferryx-cli` is pinned
+to `v2026.09.11.1`, the most recent release that publishes it; newer releases do not, so build it
+from source (`cargo build --release --bin ferryx-cli`) if you need it current. Verify downloads
+with the `SHA256SUMS.txt` published alongside the binaries:
 
 ```bash
 sha256sum -c SHA256SUMS.txt
@@ -93,7 +95,8 @@ public IPs / open SSH ports connect seamlessly.
 
 ```bash
 # 1. Download ferryx-cli on the remote Linux machine (x64)
-sudo curl -fsSL https://github.com/Indosaram/ferryx/releases/latest/download/ferryx-cli -o /usr/local/bin/ferryx-cli
+#    Pinned to the most recent release that publishes this binary.
+sudo curl -fsSL https://github.com/Indosaram/ferryx/releases/download/v2026.09.11.1/ferryx-cli -o /usr/local/bin/ferryx-cli
 sudo chmod +x /usr/local/bin/ferryx-cli
 
 # 2. Start the headless PTY daemon in background

@@ -19,9 +19,16 @@ export interface PlatformConfig {
 
 export const GITHUB_RELEASE_LATEST = 'https://github.com/Indosaram/ferryx/releases/latest';
 export const GITHUB_RELEASE_DOWNLOAD_BASE = 'https://github.com/Indosaram/ferryx/releases/latest/download';
-// Interim pointer until the Store listing has a stable product page URL; replace with the
-// apps.microsoft.com detail URL (ProductId) once Partner Center publishes the listing.
-export const MICROSOFT_STORE_URL = 'https://apps.microsoft.com/search?query=Ferryx';
+
+/**
+ * Not a download destination. Ferryx has no published Microsoft Store listing: as of
+ * 2026-09-19 the Store search and catalogue APIs return no such product, and the MSIX in the
+ * GitHub release is an unsigned Store-ingestion package. This constant exists only so
+ * analytics can still recognise a Store link if one is ever published or linked externally;
+ * replace it with the apps.microsoft.com detail URL (ProductId) when a listing goes live, and
+ * only then offer it as a Windows download.
+ */
+export const MICROSOFT_STORE_SEARCH_URL = 'https://apps.microsoft.com/search?query=Ferryx';
 
 export const PLATFORMS: Record<'macos' | 'windows' | 'linux', PlatformConfig> = {
   macos: {
@@ -56,23 +63,25 @@ export const PLATFORMS: Record<'macos' | 'windows' | 'linux', PlatformConfig> = 
     badge: 'Windows 10/11 (64-bit)',
     systemReqs: 'x64 Architecture with WebView2',
     defaultAsset: {
-      id: 'windows-store',
-      name: 'Microsoft Store',
-      architecture: 'x64 · MSIX',
-      fileType: 'Store',
-      url: MICROSOFT_STORE_URL,
+      id: 'windows-installer',
+      name: 'Windows Installer',
+      architecture: 'x64',
+      fileType: '.exe',
+      url: `${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_x64-setup.exe`,
       recommended: true,
-      notes: 'Distributed through the Microsoft Store — the Store keeps Ferryx up to date automatically',
+      notes: 'Installs for the current user and updates itself in place',
     },
     assets: [
       {
-        id: 'windows-store',
-        name: 'Microsoft Store',
-        architecture: 'x64 · MSIX',
-        fileType: 'Store',
-        url: MICROSOFT_STORE_URL,
+        id: 'windows-installer',
+        name: 'Windows Installer (.exe)',
+        architecture: 'x64',
+        fileType: '.exe',
+        url: `${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_x64-setup.exe`,
         recommended: true,
-        notes: 'Get Ferryx from the Microsoft Store with automatic background updates',
+        // The installer is not yet Authenticode-signed, so SmartScreen warns on first run;
+        // saying so here is more useful than letting the warning come as a surprise.
+        notes: 'Not code-signed yet: Windows SmartScreen shows a warning — check SHA256SUMS.txt before running',
       },
     ],
   },
@@ -107,14 +116,6 @@ export const PLATFORMS: Record<'macos' | 'windows' | 'linux', PlatformConfig> = 
         fileType: '.deb',
         url: `${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_amd64.deb`,
         notes: 'For Debian, Ubuntu, Linux Mint, and derivatives',
-      },
-      {
-        id: 'linux-cli',
-        name: 'Headless Daemon & CLI (ferryx-cli)',
-        architecture: 'x86_64 / amd64',
-        fileType: 'binary',
-        url: `${GITHUB_RELEASE_DOWNLOAD_BASE}/ferryx-cli`,
-        notes: 'Headless PTY daemon for remote Linux servers, VPS, and cloud machines (no GUI/SSH required)',
       },
     ],
   },

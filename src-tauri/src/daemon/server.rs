@@ -1,11 +1,13 @@
 // allow: SIZE_OK — daemon IPC server implementation with routing, session persistence offloading, remote control, and streaming
 #[path = "machine_gateway.rs"]
 mod machine_gateway;
+use super::session_service::*;
 use crate::daemon::agent_state::{AgentState, AgentStateHub, AgentStateSubscription};
+#[cfg(test)]
+use crate::daemon::protocol::AgentProviderSessionKey;
 use crate::daemon::protocol::{
-    AgentStateReport, DaemonRemoteEvent, DaemonRemoteStatus,
-    DaemonRequest, DaemonResponse, DaemonStreamMessage, HistorySegmentWire,
-    TerminalStartup, DAEMON_PROTOCOL_VERSION,
+    AgentStateReport, DaemonRemoteEvent, DaemonRemoteStatus, DaemonRequest, DaemonResponse,
+    DaemonStreamMessage, HistorySegmentWire, TerminalStartup, DAEMON_PROTOCOL_VERSION,
 };
 use crate::remote::auth::DevicePermission;
 use crate::remote::server::{start_remote_server, RemoteServerHandle};
@@ -16,8 +18,6 @@ use crate::session::{clear_session_from_path, load_session_from_path, save_sessi
 use crate::terminal::{PtyManager, TerminalOutputHub, TerminalService};
 use crate::worktree::{WorkspaceRegistry, WorktreeIdentity};
 use super::session_service::*;
-#[cfg(test)]
-use crate::daemon::protocol::AgentProviderSessionKey;
 use bytes::Bytes;
 use parking_lot::{Mutex, RwLock};
 use std::borrow::Cow;
@@ -699,24 +699,76 @@ fn try_lock_file(file: File) -> Result<DaemonLockFile, String> {
     DaemonLockFile::try_lock(file)
 }
 
+/// Takes one lock file, optionally outlasting a predecessor that is still shutting down. The
+/// wait is only ever armed for a declared successor, so ordinary startup keeps failing fast.
+/// The deadline is checked before every attempt, so a closed window can never be reopened by a
+/// lock that happens to free up after it.
+fn lock_file_with_optional_wait(
+    path: &Path,
+    deadline: Option<std::time::Instant>,
+) -> Result<DaemonLockFile, String> {
+    lock_file_with_optional_wait_internal(path, deadline, || {})
+}
+
+fn lock_file_with_optional_wait_internal<F: FnMut()>(
+    path: &Path,
+    deadline: Option<std::time::Instant>,
+    mut on_pre_attempt: F,
+) -> Result<DaemonLockFile, String> {
+    let mut last_error: Option<String> = None;
+    loop {
+        let Some(deadline) = deadline else {
+            let file = open_secure_lock_file(path)?;
+            return try_lock_file(file);
+        };
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(last_error.unwrap_or_else(|| {
+                format!(
+                    "Timed out waiting for the daemon instance lock at {}",
+                    path.display()
+                )
+            }));
+        }
+        on_pre_attempt();
+        let file = open_secure_lock_file(path)?;
+        match try_lock_file(file) {
+            Ok(locked) => {
+                if std::time::Instant::now() >= deadline {
+                    drop(locked);
+                    return Err(format!(
+                        "Acquired instance lock at {} after the wait window expired",
+                        path.display()
+                    ));
+                }
+                return Ok(locked);
+            }
+            Err(error) => {
+                last_error = Some(error);
+                std::thread::sleep(remaining.min(std::time::Duration::from_millis(200)));
+            }
+        }
+    }
+}
+
 pub(crate) fn acquire_daemon_locks(
     persistent_path: Option<&Path>,
     legacy_path: &Path,
 ) -> Result<DaemonLockFiles, String> {
+    let deadline = crate::daemon::handover::successor_wait_from_env()
+        .map(|wait| std::time::Instant::now() + wait);
     let persistent = if let Some(path) = persistent_path {
         let parent = path
             .parent()
             .ok_or_else(|| format!("Persistent lock path has no parent: {}", path.display()))?;
         ensure_runtime_directory(parent)?;
-        let file = open_secure_lock_file(path)?;
-        let locked = try_lock_file(file)?;
+        let locked = lock_file_with_optional_wait(path, deadline)?;
         Some(locked)
     } else {
         None
     };
 
-    let legacy = open_secure_lock_file(legacy_path)?;
-    let locked = try_lock_file(legacy)?;
+    let locked = lock_file_with_optional_wait(legacy_path, deadline)?;
     Ok(DaemonLockFiles {
         _persistent: persistent,
         _legacy: locked,
@@ -785,73 +837,132 @@ mod a05_compatibility_tests {
 
     #[test]
     fn catalog_constructor_child() {
-        let Some(root) = std::env::var_os("A05_CONSTRUCTOR_ROOT") else { return };
+        let Some(root) = std::env::var_os("A05_CONSTRUCTOR_ROOT") else {
+            return;
+        };
         let root = PathBuf::from(root);
         let sentinel = root.join("data/remote/machine-workspaces.v1.json");
         let before = fs::read(&sentinel).unwrap();
         let first = DaemonServer::new();
         let second = DaemonServer::new_with_paths(None, None);
-        assert!(first.session_service.workspace_service.catalog().is_ok(), "constructor read canonical sentinel");
-        let first_dir = first.session_service.remote_sessions_path.parent().unwrap().to_owned();
-        let second_dir = second.session_service.remote_sessions_path.parent().unwrap().to_owned();
+        assert!(
+            first.session_service.workspace_service.catalog().is_ok(),
+            "constructor read canonical sentinel"
+        );
+        let first_dir = first
+            .session_service
+            .remote_sessions_path
+            .parent()
+            .unwrap()
+            .to_owned();
+        let second_dir = second
+            .session_service
+            .remote_sessions_path
+            .parent()
+            .unwrap()
+            .to_owned();
         assert_ne!(first_dir, second_dir);
         for (server, name) in [(&first, "one"), (&second, "two")] {
             let plain = root.join(name);
             fs::create_dir(&plain).unwrap();
-            server.handle_register_workspace("same-id", plain.to_str().unwrap()).unwrap();
-            assert_eq!(server.workspace_registry.repo_root("same-id").unwrap(), fs::canonicalize(plain).unwrap());
+            server
+                .handle_register_workspace("same-id", plain.to_str().unwrap())
+                .unwrap();
+            assert_eq!(
+                server.workspace_registry.repo_root("same-id").unwrap(),
+                fs::canonicalize(plain).unwrap()
+            );
         }
         assert_eq!(fs::read(&sentinel).unwrap(), before);
         drop(first);
         drop(second);
         assert!(!first_dir.exists());
         assert!(!second_dir.exists());
-        eprintln!("CONSTRUCTOR cleanup first={} second={} absent=true sentinel_unchanged=true", first_dir.display(), second_dir.display());
+        eprintln!(
+            "CONSTRUCTOR cleanup first={} second={} absent=true sentinel_unchanged=true",
+            first_dir.display(),
+            second_dir.display()
+        );
     }
 
     #[tokio::test]
     async fn catalog_constructor_isolation() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("data/remote")).unwrap();
-        fs::write(root.path().join("data/remote/machine-workspaces.v1.json"), b"private canonical sentinel").unwrap();
+        fs::write(
+            root.path().join("data/remote/machine-workspaces.v1.json"),
+            b"private canonical sentinel",
+        )
+        .unwrap();
         let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "daemon::server::a05_compatibility_tests::catalog_constructor_child", "--nocapture"])
+            .args([
+                "--exact",
+                "daemon::server::a05_compatibility_tests::catalog_constructor_child",
+                "--nocapture",
+            ])
             .env("A05_CONSTRUCTOR_ROOT", root.path())
             .env("FERRYX_DATA_DIR", root.path().join("data"))
             .env("FERRYX_RUNTIME_DIR", root.path().join("runtime"))
-            .env("HOME", root.path()).env("TMPDIR", root.path())
-            .kill_on_drop(true).spawn().unwrap();
+            .env("HOME", root.path())
+            .env("TMPDIR", root.path())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
         let pid = child.id().unwrap();
         let status = match tokio::time::timeout(Duration::from_secs(20), child.wait()).await {
             Ok(status) => status.unwrap(),
-            Err(_) => { child.start_kill().unwrap(); child.wait().await.unwrap() }
+            Err(_) => {
+                child.start_kill().unwrap();
+                child.wait().await.unwrap()
+            }
         };
         let receipt = root.path().to_owned();
         root.close().unwrap();
-        eprintln!("CONSTRUCTOR owner pid={pid} reaped=true root={} absent={}", receipt.display(), !receipt.exists());
+        eprintln!(
+            "CONSTRUCTOR owner pid={pid} reaped=true root={} absent={}",
+            receipt.display(),
+            !receipt.exists()
+        );
         assert!(status.success());
     }
 
     #[tokio::test]
     async fn catalog_ssh_unregister_compatibility() {
         let root = tempfile::tempdir().unwrap();
-        let server = DaemonServer::new_with_paths(Some(root.path().join("data/config")), Some(root.path().join("data/auth")));
+        let server = DaemonServer::new_with_paths(
+            Some(root.path().join("data/config")),
+            Some(root.path().join("data/auth")),
+        );
         let id = "ssh:isolated-fixture";
         let metadata = serde_json::from_value(serde_json::json!({
             "client_request_id": "fixture", "workspace_id": id, "worktree": null,
             "cwd": root.path(), "provider_claim": null,
             "spawn_fingerprint": {"workspace_id": id, "worktree": null, "cwd": null,
                 "cols": 80, "rows": 24, "shell": null, "provider_claim": null, "startup": null}
-        })).unwrap();
-        server.session_metadata.write().insert("expired-ssh-session".into(), metadata);
+        }))
+        .unwrap();
+        server
+            .session_metadata
+            .write()
+            .insert("expired-ssh-session".into(), metadata);
         let result = server.handle_unregister_workspace(id).await;
-        let cleaned = !server.session_metadata.read().contains_key("expired-ssh-session");
-        assert!(server.handle_unregister_workspace("daemon:desktop").await.is_err());
+        let cleaned = !server
+            .session_metadata
+            .read()
+            .contains_key("expired-ssh-session");
+        assert!(server
+            .handle_unregister_workspace("daemon:desktop")
+            .await
+            .is_err());
         assert!(!root.path().join("data/machine-workspaces.v1.json").exists());
         drop(server);
         let receipt = root.path().to_owned();
         root.close().unwrap();
-        eprintln!("SSH cleanup root={} absent={} no_hosts_contacted=true ownership_released={cleaned}", receipt.display(), !receipt.exists());
+        eprintln!(
+            "SSH cleanup root={} absent={} no_hosts_contacted=true ownership_released={cleaned}",
+            receipt.display(),
+            !receipt.exists()
+        );
         assert!(result.is_ok(), "SSH unregister rejected: {result:?}");
         assert!(cleaned);
     }
@@ -868,7 +979,10 @@ mod paired_host_operation_tests;
 #[cfg(all(test, unix))]
 mod paired_host_native_tests {
     use super::*;
-    use crate::paired_host::{inventory::{AuthStatus, MigrationReceipt}, service::{PairRequest, Secret}};
+    use crate::paired_host::{
+        inventory::{AuthStatus, MigrationReceipt},
+        service::{PairRequest, Secret},
+    };
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn native_daemon_relay_inventory_roundtrip() {
@@ -876,21 +990,29 @@ mod paired_host_native_tests {
         let outcome = tokio::time::timeout(Duration::from_secs(60), exercise(root.path())).await;
         let path = root.path().to_owned();
         root.close().unwrap();
-        eprintln!("A13 cleanup private_root={} absent={}", path.display(), !path.exists());
+        eprintln!(
+            "A13 cleanup private_root={} absent={}",
+            path.display(),
+            !path.exists()
+        );
         outcome.unwrap().unwrap();
     }
     struct GatewayGuard(Arc<DaemonServer>);
     impl Drop for GatewayGuard {
         fn drop(&mut self) {
-            if let Some(handle) = self.0.remote_server_handle.lock().take() { handle.stop(); }
+            if let Some(handle) = self.0.remote_server_handle.lock().take() {
+                handle.stop();
+            }
         }
     }
     async fn exercise(root: &Path) -> anyhow::Result<()> {
         use anyhow::{ensure, Context};
         let data = root.join("data");
         fs::create_dir_all(&data)?;
-        let mut daemon = DaemonServer::new_with_paths(Some(data.join("config")), Some(data.join("auth")));
-        daemon.paired_hosts = crate::paired_host::service::PairedHostService::open_test_loopback(data.clone());
+        let mut daemon =
+            DaemonServer::new_with_paths(Some(data.join("config")), Some(data.join("auth")));
+        daemon.paired_hosts =
+            crate::paired_host::service::PairedHostService::open_test_loopback(data.clone());
         let daemon = Arc::new(daemon);
         let _gateway_guard = GatewayGuard(Arc::clone(&daemon));
         let socket = root.join("native.sock");
@@ -909,13 +1031,20 @@ mod paired_host_native_tests {
                 }
             }
         });
-        let relay_state = crate::remote::relay_server::RelayState::new_with_key_store(vec![], root.join("relay-keys.json"))
-            .map_err(anyhow::Error::msg)?;
+        let relay_state = crate::remote::relay_server::RelayState::new_with_key_store(
+            vec![],
+            root.join("relay-keys.json"),
+        )
+        .map_err(anyhow::Error::msg)?;
         let relay_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let origin = format!("http://{}", relay_listener.local_addr()?);
         tasks.spawn(async move {
-            axum::serve(relay_listener, crate::remote::relay_server::relay_router(relay_state)
-                .into_make_service_with_connect_info::<std::net::SocketAddr>()).await
+            axum::serve(
+                relay_listener,
+                crate::remote::relay_server::relay_router(relay_state)
+                    .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
         });
         let result = async {
             daemon.configure_gateway(RemoteGatewayConfig { mode: RemoteNetworkMode::Relay, port: 0,
@@ -995,7 +1124,9 @@ mod paired_host_native_tests {
             eprintln!("A13 real_uds=true relay_pair_exchange=true scope_negotiation=true re_pair=1,2,3 stale_forget=rejected lease_cancelled=true durable_readback=true restart=true failed_migration_preserved=true local_forget=true cross_host_isolation=true modes=700,600");
             Ok::<_, anyhow::Error>(())
         }.await;
-        if let Some(handle) = daemon.remote_server_handle.lock().take() { handle.stop(); }
+        if let Some(handle) = daemon.remote_server_handle.lock().take() {
+            handle.stop();
+        }
         tasks.shutdown().await;
         drop(daemon);
         fs::remove_file(socket)?;
@@ -1013,7 +1144,9 @@ mod a04_shared_services_tests;
 
 impl std::ops::Deref for DaemonServer {
     type Target = DaemonSessionService;
-    fn deref(&self) -> &Self::Target { &self.session_service }
+    fn deref(&self) -> &Self::Target {
+        &self.session_service
+    }
 }
 
 impl Default for DaemonServer {
@@ -1021,7 +1154,6 @@ impl Default for DaemonServer {
         Self::new()
     }
 }
-
 
 fn daemon_error(message: impl ToString) -> DaemonResponse {
     DaemonResponse::Error {
@@ -1047,9 +1179,9 @@ impl DaemonServer {
     pub fn new() -> Self {
         // Headless CLI constructs synchronously inside its multi-thread runtime.
         // Yield that executor worker while startup waits for catalog restoration.
-        if tokio::runtime::Handle::try_current().is_ok_and(|handle|
-            handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
-        {
+        if tokio::runtime::Handle::try_current().is_ok_and(|handle| {
+            handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+        }) {
             return tokio::task::block_in_place(|| Self::new_with_paths(None, None));
         }
         Self::new_with_paths(None, None)
@@ -1059,16 +1191,22 @@ impl DaemonServer {
         // No-path unit constructors must never share or inspect owner state.
         // Explicit paths keep their persistent restart semantics.
         #[cfg(test)]
-        let catalog_fixture = config_path.is_none().then(|| tempfile::tempdir().expect("private test catalog"));
+        let catalog_fixture = config_path
+            .is_none()
+            .then(|| tempfile::tempdir().expect("private test catalog"));
         let isolated_dir = config_path
             .as_ref()
             .and_then(|p| p.parent())
             .map(Path::to_path_buf);
         #[cfg(test)]
-        let isolated_dir = isolated_dir.or_else(|| catalog_fixture.as_ref().map(|dir| dir.path().to_owned()));
+        let isolated_dir =
+            isolated_dir.or_else(|| catalog_fixture.as_ref().map(|dir| dir.path().to_owned()));
         let paired_hosts = crate::paired_host::service::PairedHostService::open(
-            isolated_dir.clone().unwrap_or_else(|| crate::remote::auth::canonical_identity_dir()
-                .expect("daemon requires a private data directory")));
+            isolated_dir.clone().unwrap_or_else(|| {
+                crate::remote::auth::canonical_identity_dir()
+                    .expect("daemon requires a private data directory")
+            }),
+        );
         let pty_manager = Arc::new(PtyManager::new());
         let output_hub = Arc::new(TerminalOutputHub::default());
         let terminal_service = Arc::new(TerminalService::new(
@@ -1079,18 +1217,30 @@ impl DaemonServer {
             &terminal_service,
         )));
         let workspace_registry = WorkspaceRegistry::new();
-        let handover_manager = Arc::new(crate::daemon::handover::HandoverManager::new(get_socket_path()));
+        let handover_manager = Arc::new(crate::daemon::handover::HandoverManager::new(
+            get_socket_path(),
+        ));
         let remote_event_tx = broadcast::channel::<DaemonRemoteEvent>(64).0;
-        let catalog_path = isolated_dir.clone()
-            .unwrap_or_else(|| crate::remote::auth::canonical_identity_dir()
-                .expect("daemon requires a private data directory"))
+        let catalog_path = isolated_dir
+            .clone()
+            .unwrap_or_else(|| {
+                crate::remote::auth::canonical_identity_dir()
+                    .expect("daemon requires a private data directory")
+            })
             .join("machine-workspaces.v1.json");
         // Keep restore filesystem/Git work off executor threads, and join before
         // building the gateway or advertising readiness.
         let workspace_service = std::thread::scope(|scope| {
             let registry = workspace_registry.clone();
-            scope.spawn(move || Arc::new(super::workspace_service::DaemonWorkspaceService::new(registry, catalog_path)))
-                .join().expect("workspace catalog initialization panicked")
+            scope
+                .spawn(move || {
+                    Arc::new(super::workspace_service::DaemonWorkspaceService::new(
+                        registry,
+                        catalog_path,
+                    ))
+                })
+                .join()
+                .expect("workspace catalog initialization panicked")
         });
         let session_service = Arc::new(DaemonSessionService {
             workspace_service,
@@ -1109,7 +1259,8 @@ impl DaemonServer {
                 .or_else(session_dir_override)
                 .unwrap_or_else(get_runtime_dir)
                 .join("remote_sessions.json"),
-            ssh_store_path: isolated_dir.clone()
+            ssh_store_path: isolated_dir
+                .clone()
                 .map(|p| p.join("ssh_hosts.json"))
                 .unwrap_or_else(daemon_ssh_store_path),
             session_metadata: Arc::new(RwLock::new(HashMap::new())),
@@ -1142,9 +1293,11 @@ impl DaemonServer {
             ))
         };
 
-        let remote_state = Arc::new(Arc::try_unwrap(remote_state)
-            .unwrap_or_else(|_| unreachable!("gateway not published yet"))
-            .with_machine_services(Arc::clone(&session_service)));
+        let remote_state = Arc::new(
+            Arc::try_unwrap(remote_state)
+                .unwrap_or_else(|_| unreachable!("gateway not published yet"))
+                .with_machine_services(Arc::clone(&session_service)),
+        );
 
         let epoch = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1152,7 +1305,9 @@ impl DaemonServer {
             .unwrap_or(1);
 
         let (binary_path, binary_mtime_ms) = resolve_binary_identity();
-        remote_state.daemon_epoch.store(epoch, std::sync::atomic::Ordering::Release);
+        remote_state
+            .daemon_epoch
+            .store(epoch, std::sync::atomic::Ordering::Release);
 
         // The gateway runs inside this process, so desktop-directed events must
         // be relayed to the GUI over the socket; without this sink they are
@@ -1178,8 +1333,7 @@ impl DaemonServer {
             paired_hosts.set_event_sink(Arc::new(move |event| {
                 let payload = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
                 let _ = inventory_sink_tx.send(DaemonRemoteEvent {
-                    event: crate::ipc::paired_host::PAIRED_HOST_INVENTORY_CHANGED_EVENT
-                        .to_string(),
+                    event: crate::ipc::paired_host::PAIRED_HOST_INVENTORY_CHANGED_EVENT.to_string(),
                     payload,
                 });
             }));
@@ -1225,6 +1379,16 @@ impl DaemonServer {
         }
     }
 
+    /// Installs a loopback-permitting paired inventory for isolated fixtures.
+    /// Production pairing always uses the HTTPS-only policy.
+    #[cfg(test)]
+    pub fn set_paired_hosts_for_test(
+        &mut self,
+        service: crate::paired_host::service::PairedHostService,
+    ) {
+        self.paired_hosts = service;
+    }
+
     async fn handle_spawn(
         &self,
         client_request_id: &str,
@@ -1236,8 +1400,20 @@ impl DaemonServer {
         shell: Option<String>,
         startup: Option<TerminalStartup>,
     ) -> Result<String, SpawnError> {
-        self.session_service.handle_spawn(client_request_id, workspace_id, worktree, cwd,
-            cols, rows, shell, startup, #[cfg(test)] self.helper_home.clone()).await
+        self.session_service
+            .handle_spawn(
+                client_request_id,
+                workspace_id,
+                worktree,
+                cwd,
+                cols,
+                rows,
+                shell,
+                startup,
+                #[cfg(test)]
+                self.helper_home.clone(),
+            )
+            .await
     }
 
     pub fn epoch(&self) -> u64 {
@@ -1315,17 +1491,34 @@ impl DaemonServer {
                     while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                         if let Some(report) = Self::parse_agent_state_report(&line) {
                             match sessions.machine_detail_routed(&report.0, epoch).await {
-                                Ok(crate::remote::machine_protocol::SessionDetail::Running { session }) => {
-                                    let hint = AgentStateReport { session_id: report.0.clone(), state: report.1.clone(), agent: report.2.clone(), provider_session: report.3.clone() };
-                                    if let Err(error) = sessions.validate_machine_agent_report(session.target, hint).await {
+                                Ok(crate::remote::machine_protocol::SessionDetail::Running {
+                                    session,
+                                }) => {
+                                    let hint = AgentStateReport {
+                                        session_id: report.0.clone(),
+                                        state: report.1.clone(),
+                                        agent: report.2.clone(),
+                                        provider_session: report.3.clone(),
+                                    };
+                                    if let Err(error) = sessions
+                                        .validate_machine_agent_report(session.target, hint)
+                                        .await
+                                    {
                                         tracing::debug!(%error, "Machine agent metadata rejected");
                                         line.clear();
                                         continue;
                                     }
-                                },
-                                Ok(_) => { line.clear(); continue; },
-                                Err(error) if error == "SESSION_NOT_FOUND" => {},
-                                Err(error) => { tracing::debug!(%error, "Machine agent owner unavailable"); line.clear(); continue; },
+                                }
+                                Ok(_) => {
+                                    line.clear();
+                                    continue;
+                                }
+                                Err(error) if error == "SESSION_NOT_FOUND" => {}
+                                Err(error) => {
+                                    tracing::debug!(%error, "Machine agent owner unavailable");
+                                    line.clear();
+                                    continue;
+                                }
                             }
                             states.publish_canonical(AgentState {
                                 session_id: report.0,
@@ -1353,13 +1546,18 @@ impl DaemonServer {
             sample.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 sample.tick().await;
-                let Some(server) = server.upgrade() else { break };
+                let Some(server) = server.upgrade() else {
+                    break;
+                };
                 let sessions: Vec<_> = server
                     .terminal_service
                     .list_sessions()
                     .into_iter()
                     .filter_map(|id| {
-                        server.terminal_service.get_session(&id).map(|session| (id, session))
+                        server
+                            .terminal_service
+                            .get_session(&id)
+                            .map(|session| (id, session))
                     })
                     .collect();
                 transitions.retain(|id, _| sessions.iter().any(|(live, _)| live == id));
@@ -1374,12 +1572,16 @@ impl DaemonServer {
                 })
                 .await;
                 match observations {
-                    Ok(observations) => for (id, observation) in observations {
-                        match observation {
-                            Ok(observation) => {
-                                let edge = transitions.entry(id.clone()).or_default().observe(observation);
-                                if server.terminal_service.get_session(&id).is_some() {
-                                    match edge {
+                    Ok(observations) => {
+                        for (id, observation) in observations {
+                            match observation {
+                                Ok(observation) => {
+                                    let edge = transitions
+                                        .entry(id.clone())
+                                        .or_default()
+                                        .observe(observation);
+                                    if server.terminal_service.get_session(&id).is_some() {
+                                        match edge {
                                         Some(crate::terminal::foreground::AgentProcessEdge::Released) => {
                                             server.agent_states.release_foreground(&id);
                                         }
@@ -1388,12 +1590,17 @@ impl DaemonServer {
                                         }
                                         None => {}
                                     }
+                                    }
+                                }
+                                Err(error) => {
+                                    tracing::debug!(session_id = id, %error, "foreground inspection unavailable; holding state")
                                 }
                             }
-                            Err(error) => tracing::debug!(session_id = id, %error, "foreground inspection unavailable; holding state"),
                         }
-                    },
-                    Err(error) => tracing::warn!(%error, "foreground observer failed; holding state"),
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "foreground observer failed; holding state")
+                    }
                 }
             }
         });
@@ -2159,7 +2366,7 @@ impl DaemonServer {
                     DaemonResponse::PairedHostForgetOk
                 }
                 Ok(DaemonRequest::GetCapabilities) => {
-                    let mut capabilities = vec!["machinePairingV1".into(), "sshPasswordV1".into()];
+                    let mut capabilities = vec!["machinePairingV1".into(), "sshPasswordV1".into(), "dagStreamingV1".into()];
                     if self.paired_hosts.available().await { capabilities.push("pairedHostInventoryV1".into()); }
                     DaemonResponse::CapabilitiesOk { capabilities }
                 },
@@ -2378,6 +2585,30 @@ impl DaemonServer {
                         Err(e) => daemon_error(e.message),
                     }
                 }
+                Ok(DaemonRequest::SubscribeDag { workspace_id, project_path, paired }) => {
+                    let mut resp_json = serde_json::to_string(&DaemonResponse::SubscribeDagOk).unwrap();
+                    resp_json.push('\n');
+                    if write_half.write_all(resp_json.as_bytes()).await.is_err()
+                        || write_half.flush().await.is_err()
+                    {
+                        return;
+                    }
+                    match paired {
+                        // A paired workspace's journal lives on the remote machine.
+                        // Scanning project_path here would read an unrelated local
+                        // directory that happens to share the name, or nothing at all.
+                        Some(binding) => {
+                            self.serve_paired_dag_stream(&mut reader, &mut write_half, workspace_id, binding).await;
+                        }
+                        None => {
+                            self.serve_dag_stream(&mut reader, &mut write_half, workspace_id, project_path).await;
+                        }
+                    }
+                    return;
+                }
+                Ok(DaemonRequest::UnsubscribeDag { .. }) => {
+                    DaemonResponse::UnsubscribeDagOk
+                }
                 Ok(DaemonRequest::Shutdown) => {
                     match self.persist_remote_sessions_at(self.remote_sessions_path.clone()).await {
                         Ok(()) => std::process::exit(0),
@@ -2422,7 +2653,194 @@ impl DaemonServer {
         });
     }
 
-    #[cfg(unix)]
+    /// Streams a paired workspace's DAG from the authenticated remote host.
+    ///
+    /// The desktop daemon owns no copy of that journal, so it forwards frames the
+    /// host pushes and translates them into the same stream messages a local
+    /// subscription produces. `project_path` on every forwarded frame is the root
+    /// the *remote* resolved, never a local path.
+    async fn serve_paired_dag_stream<R, W>(
+        &self,
+        reader: &mut R,
+        write_half: &mut W,
+        workspace_id: String,
+        binding: crate::daemon::protocol::PairedDagBinding,
+    ) where
+        R: tokio::io::AsyncBufReadExt + Unpin,
+        W: tokio::io::AsyncWriteExt + Unpin,
+    {
+        use futures_util::StreamExt;
+
+        let stream = crate::paired_host::client::MachineClient::new()
+            .attach_dag(
+                &self.paired_hosts,
+                binding.host_id.clone(),
+                binding.generation,
+                &binding.remote_workspace_id,
+            )
+            .await;
+        let mut stream = match stream {
+            Ok(stream) => stream,
+            Err(error) => {
+                tracing::warn!(code = %error.code, workspace_id = %workspace_id, "Paired DAG attach refused");
+                let message = DaemonResponse::Error {
+                    message: error.code.clone(),
+                    code: Some(error.code),
+                    details: None,
+                };
+                if let Ok(mut json) = serde_json::to_string(&message) {
+                    json.push('\n');
+                    let _ = write_half.write_all(json.as_bytes()).await;
+                    let _ = write_half.flush().await;
+                }
+                return;
+            }
+        };
+
+        let mut client_lines = reader.lines();
+        loop {
+            tokio::select! {
+                frame = stream.socket.next() => {
+                    let Some(Ok(frame)) = frame else { break };
+                    let text = match frame {
+                        tokio_tungstenite::tungstenite::Message::Text(text) => text,
+                        tokio_tungstenite::tungstenite::Message::Close(_) => break,
+                        _ => continue,
+                    };
+                    let Ok(parsed) = serde_json::from_str::<crate::remote::dag_api::DagFrame>(&text) else {
+                        continue;
+                    };
+                    let message = match parsed {
+                        crate::remote::dag_api::DagFrame::DagInventory { project_path, runs, .. } => {
+                            DaemonStreamMessage::DagInventory {
+                                workspace_id: std::borrow::Cow::Borrowed(&workspace_id),
+                                project_path: std::borrow::Cow::Owned(project_path),
+                                runs,
+                            }
+                        }
+                        crate::remote::dag_api::DagFrame::DagRunUpdated { project_path, snapshot, .. } => {
+                            DaemonStreamMessage::DagRunUpdated {
+                                workspace_id: std::borrow::Cow::Borrowed(&workspace_id),
+                                project_path: std::borrow::Cow::Owned(project_path),
+                                snapshot,
+                            }
+                        }
+                        crate::remote::dag_api::DagFrame::DagError { code } => {
+                            tracing::warn!(%code, workspace_id = %workspace_id, "Paired DAG stream reported an error");
+                            break;
+                        }
+                    };
+                    if let Ok(mut json) = serde_json::to_string(&message) {
+                        json.push('\n');
+                        if write_half.write_all(json.as_bytes()).await.is_err()
+                            || write_half.flush().await.is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+                line = client_lines.next_line() => {
+                    match line {
+                        Ok(Some(line)) => {
+                            if let Ok(DaemonRequest::UnsubscribeDag { .. }) = serde_json::from_str::<DaemonRequest>(&line) {
+                                let mut unsub_ok = serde_json::to_string(&DaemonResponse::UnsubscribeDagOk).unwrap();
+                                unsub_ok.push('\n');
+                                let _ = write_half.write_all(unsub_ok.as_bytes()).await;
+                                let _ = write_half.flush().await;
+                                break;
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+            }
+        }
+        // Closing the socket is what stops the remote watcher; dropping alone would
+        // leave the host streaming until its own transfer timeout.
+        let _ = stream.socket.close(None).await;
+    }
+
+    async fn serve_dag_stream<R, W>(
+        &self,
+        reader: &mut R,
+        write_half: &mut W,
+        workspace_id: String,
+        project_path: String,
+    ) where
+        R: tokio::io::AsyncBufReadExt + Unpin,
+        W: tokio::io::AsyncWriteExt + Unpin,
+    {
+        let ppath = project_path.clone();
+        let runs = crate::ipc::run_blocking(move || {
+            Ok(crate::daemon::dag_service::scan_project_inventory(
+                std::path::Path::new(&ppath),
+            ))
+        })
+        .await
+        .unwrap_or_default();
+
+        let inv_msg = DaemonStreamMessage::DagInventory {
+            workspace_id: std::borrow::Cow::Borrowed(&workspace_id),
+            project_path: std::borrow::Cow::Borrowed(&project_path),
+            runs,
+        };
+        if let Ok(mut inv_json) = serde_json::to_string(&inv_msg) {
+            inv_json.push('\n');
+            if write_half.write_all(inv_json.as_bytes()).await.is_err()
+                || write_half.flush().await.is_err()
+            {
+                return;
+            }
+        }
+
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(100);
+        let watcher_handle = crate::dag::watcher::spawn_dag_watcher(
+            std::path::PathBuf::from(&project_path),
+            event_tx,
+        );
+
+        let mut client_lines = reader.lines();
+        loop {
+            tokio::select! {
+                maybe_event = event_rx.recv() => {
+                    match maybe_event {
+                        Some((_, snapshot)) => {
+                            let update_msg = DaemonStreamMessage::DagRunUpdated {
+                                workspace_id: std::borrow::Cow::Borrowed(&workspace_id),
+                                project_path: std::borrow::Cow::Borrowed(&project_path),
+                                snapshot: Box::new(snapshot),
+                            };
+                            if let Ok(mut update_json) = serde_json::to_string(&update_msg) {
+                                update_json.push('\n');
+                                if write_half.write_all(update_json.as_bytes()).await.is_err()
+                                    || write_half.flush().await.is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                res = client_lines.next_line() => {
+                    match res {
+                        Ok(Some(line)) => {
+                            if let Ok(DaemonRequest::UnsubscribeDag { .. }) = serde_json::from_str::<DaemonRequest>(&line) {
+                                let mut unsub_ok = serde_json::to_string(&DaemonResponse::UnsubscribeDagOk).unwrap();
+                                unsub_ok.push('\n');
+                                let _ = write_half.write_all(unsub_ok.as_bytes()).await;
+                                let _ = write_half.flush().await;
+                                break;
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+            }
+        }
+        watcher_handle.abort();
+    }
+
     #[cfg(unix)]
     pub fn spawn_legacy_handover_daemon(
         self: Arc<Self>,
@@ -2471,8 +2889,10 @@ impl DaemonServer {
                 new_binary_path,
                 std::env::current_exe().ok()
             );
-            return daemon_error("Daemon upgrade unavailable: the running daemon's executable no longer \
-                          exists on disk and no valid newBinaryPath was supplied");
+            return daemon_error(
+                "Daemon upgrade unavailable: the running daemon's executable no longer \
+                          exists on disk and no valid newBinaryPath was supplied",
+            );
         };
 
         // If no explicit new binary path was provided by the GUI, check if upgrade is needed
@@ -2512,9 +2932,7 @@ impl DaemonServer {
             .prepare_handover(&self.terminal_service)
         {
             Ok(res) => res,
-            Err(e) => {
-                return daemon_error(format!("Failed to prepare handover: {e}"),)
-            }
+            Err(e) => return daemon_error(format!("Failed to prepare handover: {e}")),
         };
 
         Arc::clone(self).spawn_legacy_handover_daemon(legacy_path, listener, target_exe);
@@ -2527,11 +2945,72 @@ impl DaemonServer {
         self: &Arc<Self>,
         _new_binary_path: Option<String>,
     ) -> DaemonResponse {
-        DaemonResponse::UpgradeUnsupported
+        let live_sessions = self.terminal_service.list_sessions().len();
+        match crate::daemon::handover::upgrade_action(live_sessions, false) {
+            crate::daemon::handover::UpgradeAction::Proceed => {
+                if !crate::daemon::handover::idle_upgrade_requested() {
+                    tracing::warn!(
+                        live_sessions,
+                        "Daemon upgrade requested on a platform without session transfer; \
+                         set FERRYX_DAEMON_IDLE_UPGRADE=1 to allow an idle restart, or restart \
+                         the daemon manually"
+                    );
+                    return DaemonResponse::UpgradeUnsupported;
+                }
+                let exe = match std::env::current_exe() {
+                    Ok(exe) => exe,
+                    Err(error) => {
+                        tracing::warn!(%error, "Daemon upgrade aborted: current executable unknown");
+                        return DaemonResponse::UpgradeUnsupported;
+                    }
+                };
+                // The successor waits for our instance lock, so it must be running before we
+                // release it. No session is live here, so the exit cannot cost a terminal.
+                let spawned = std::process::Command::new(&exe)
+                    .arg("--daemon")
+                    .env("FERRYX_DAEMON_SUCCESSOR", "1")
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+                match spawned {
+                    Ok(child) => {
+                        tracing::warn!(
+                            pid = child.id(),
+                            live_sessions,
+                            "Restarting idle daemon: successor spawned, releasing locks and exiting"
+                        );
+                        tokio::spawn(async move {
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                            std::process::exit(0);
+                        });
+                        DaemonResponse::UpgradeScheduled
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, live_sessions, "Idle daemon restart failed to spawn a successor");
+                        DaemonResponse::UpgradeUnsupported
+                    }
+                }
+            }
+            crate::daemon::handover::UpgradeAction::Refuse { live_sessions } => {
+                tracing::warn!(
+                    live_sessions,
+                    "Daemon upgrade refused: this platform cannot upgrade without ending live \
+                     sessions"
+                );
+                DaemonResponse::UpgradeUnsupported
+            }
+        }
     }
 
-    pub fn handle_register_workspace(&self, workspace_id: &str, repo_root: &str) -> Result<(), String> {
-        self.session_service.workspace_service.register(workspace_id, repo_root)
+    pub fn handle_register_workspace(
+        &self,
+        workspace_id: &str,
+        repo_root: &str,
+    ) -> Result<(), String> {
+        self.session_service
+            .workspace_service
+            .register(workspace_id, repo_root)
     }
 
     pub async fn handle_remote_configure(
@@ -3006,8 +3485,11 @@ mod tests {
             ("/repo", "/repo/src", "src"),
             ("/repo", "/repo", ""),
         ] {
-            assert_eq!(remote_spawn_relative_path(repo, cwd), expected,
-                "remote cwd {cwd} under {repo} must not silently select repository root");
+            assert_eq!(
+                remote_spawn_relative_path(repo, cwd),
+                expected,
+                "remote cwd {cwd} under {repo} must not silently select repository root"
+            );
         }
     }
 
@@ -3060,6 +3542,96 @@ mod tests {
             .current_dir(dir.path())
             .output();
         dir
+    }
+
+    #[tokio::test]
+    async fn test_serve_dag_stream_inventory_and_unsubscribe() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+        let temp = tempdir().expect("tempdir");
+        let project_dir = temp.path().to_path_buf();
+        let runs_dir = project_dir.join(".omo/senpi-task/dag/runs");
+        std::fs::create_dir_all(&runs_dir).expect("create runs dir");
+
+        let run_file = runs_dir.join("run-1.json");
+        let run_content =
+            include_str!("../dag/testdata/dag_081e597f-0aa8-4a20-a826-4e3d045aacef.json");
+        std::fs::write(&run_file, run_content).expect("write run");
+
+        let (mut client_duplex, server_duplex) = tokio::io::duplex(4096);
+        let (read_half, mut write_half) = tokio::io::split(server_duplex);
+        let mut reader = tokio::io::BufReader::new(read_half);
+
+        let server = Arc::new(DaemonServer::new_with_paths(None, None));
+        let ppath = project_dir.to_string_lossy().to_string();
+        let server_task = {
+            let server = Arc::clone(&server);
+            let ppath = ppath.clone();
+            tokio::spawn(async move {
+                server
+                    .serve_dag_stream(&mut reader, &mut write_half, "ws-test".to_string(), ppath)
+                    .await;
+            })
+        };
+
+        let mut client_reader = tokio::io::BufReader::new(&mut client_duplex);
+        let mut inv_line = String::new();
+        tokio::time::timeout(
+            tokio::time::Duration::from_secs(3),
+            client_reader.read_line(&mut inv_line),
+        )
+        .await
+        .expect("read inventory timeout")
+        .expect("read inventory line");
+
+        let inv_msg: DaemonStreamMessage =
+            serde_json::from_str(&inv_line).expect("parse inventory");
+        match inv_msg {
+            DaemonStreamMessage::DagInventory {
+                workspace_id,
+                project_path,
+                runs,
+            } => {
+                assert_eq!(workspace_id, "ws-test");
+                assert_eq!(project_path, ppath);
+                assert_eq!(runs.len(), 1);
+                assert_eq!(runs[0].run_id, "dag_081e597f-0aa8-4a20-a826-4e3d045aacef");
+            }
+            _ => panic!("Expected DagInventory message, got: {:?}", inv_msg),
+        }
+
+        let unsub_req = DaemonRequest::UnsubscribeDag {
+            workspace_id: "ws-test".to_string(),
+            project_path: ppath,
+        };
+        let mut unsub_line = serde_json::to_string(&unsub_req).unwrap();
+        unsub_line.push('\n');
+        client_reader
+            .get_mut()
+            .write_all(unsub_line.as_bytes())
+            .await
+            .expect("write unsub");
+        client_reader.get_mut().flush().await.expect("flush unsub");
+
+        tokio::time::timeout(tokio::time::Duration::from_secs(3), async {
+            let mut lines = client_reader.lines();
+            loop {
+                let line = lines.next_line().await.expect("read unsubscribe frame")
+                    .expect("stream closed before unsubscribe acknowledgement");
+                if matches!(serde_json::from_str::<DaemonResponse>(&line),
+                    Ok(DaemonResponse::UnsubscribeDagOk)) {
+                    break;
+                }
+                let frame: DaemonStreamMessage = serde_json::from_str(&line)
+                    .expect("expected DAG update before unsubscribe acknowledgement");
+                assert!(matches!(frame, DaemonStreamMessage::DagRunUpdated { .. }));
+            }
+        }).await.expect("unsubscribe acknowledgement timeout");
+
+        tokio::time::timeout(tokio::time::Duration::from_secs(3), server_task)
+            .await
+            .expect("server task exit timeout")
+            .expect("server task join");
     }
 
     #[tokio::test]
@@ -4095,7 +4667,8 @@ mod tests {
         match resp {
             DaemonResponse::Error { message, .. } => {
                 assert!(
-                    message.contains("Relay is unreachable") || message.contains("registration failed"),
+                    message.contains("Relay is unreachable")
+                        || message.contains("registration failed"),
                     "unexpected error message: {message}"
                 );
             }
@@ -4203,7 +4776,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_remote_create_pairing_code_local_mode_creates_local_pin() {
-        for mode in [RemoteNetworkMode::LocalNetwork, RemoteNetworkMode::Tailscale] {
+        for mode in [
+            RemoteNetworkMode::LocalNetwork,
+            RemoteNetworkMode::Tailscale,
+        ] {
             let server = Arc::new(DaemonServer::new());
             *server.remote_state.config.write() = RemoteGatewayConfig {
                 mode,
@@ -4231,7 +4807,12 @@ mod tests {
             reader.read_line(&mut line).await.unwrap();
             let resp: DaemonResponse = serde_json::from_str(line.trim()).unwrap();
             match resp {
-                DaemonResponse::RemotePairingCodeOk { code, pairing_token, machine_id, relay_url } => {
+                DaemonResponse::RemotePairingCodeOk {
+                    code,
+                    pairing_token,
+                    machine_id,
+                    relay_url,
+                } => {
                     assert_eq!(code.len(), 6);
                     assert_eq!(pairing_token, None);
                     assert_eq!(machine_id, None);
@@ -4274,7 +4855,10 @@ mod tests {
             relay_url: Some(mock_relay_url.clone()),
             ..Default::default()
         };
-        server.handle_remote_configure(config).await.expect("configure gateway");
+        server
+            .handle_remote_configure(config)
+            .await
+            .expect("configure gateway");
 
         let (client_stream, server_stream) = UnixStream::pair().expect("unix pair");
         let server_clone = Arc::clone(&server);
@@ -4296,7 +4880,12 @@ mod tests {
         reader.read_line(&mut line).await.unwrap();
         let resp: DaemonResponse = serde_json::from_str(line.trim()).unwrap();
         match resp {
-            DaemonResponse::RemotePairingCodeOk { code, pairing_token, machine_id, relay_url } => {
+            DaemonResponse::RemotePairingCodeOk {
+                code,
+                pairing_token,
+                machine_id,
+                relay_url,
+            } => {
                 assert_eq!(code.len(), 6);
                 assert!(pairing_token.is_some());
                 assert!(machine_id.is_some());
@@ -4520,7 +5109,10 @@ mod tests {
             provider_session: None,
             origin: crate::daemon::protocol::AgentStateOrigin::Agent,
         });
-        assert_eq!(server.agent_states.current(&session_id).unwrap().state, "working");
+        assert_eq!(
+            server.agent_states.current(&session_id).unwrap().state,
+            "working"
+        );
 
         // Subscribe to exact state change BEFORE triggering reset
         let mut sub = server.agent_states.subscribe(&session_id);
@@ -4558,7 +5150,10 @@ mod tests {
             .expect("update signal within timeout")
             .expect("valid update");
         assert_eq!(update.state.state, "idle");
-        assert_eq!(server.agent_states.current(&session_id).unwrap().state, "idle");
+        assert_eq!(
+            server.agent_states.current(&session_id).unwrap().state,
+            "idle"
+        );
 
         server_task.abort();
     }
@@ -4999,7 +5594,9 @@ mod tests {
                 assert!(
                     matches!(
                         status.gate_status,
-                        Some(crate::remote::server::DirectGatewayGateStatus::InsecureLanGated { .. })
+                        Some(
+                            crate::remote::server::DirectGatewayGateStatus::InsecureLanGated { .. }
+                        )
                     ),
                     "expected InsecureLanGated in status response, got {:?}",
                     status.gate_status
@@ -5046,7 +5643,10 @@ mod tests {
 
         // Assert that the pump terminates within 2 seconds instead of hanging forever.
         let result = tokio::time::timeout(Duration::from_secs(2), pump_handle).await;
-        assert!(result.is_ok(), "pump must terminate promptly when client disconnects on idle stream");
+        assert!(
+            result.is_ok(),
+            "pump must terminate promptly when client disconnects on idle stream"
+        );
     }
 
     #[tokio::test]
@@ -5072,14 +5672,19 @@ mod tests {
         let mut reader = BufReader::new(read_half);
         let mut line = String::new();
 
-        let hs = DaemonRequest::Handshake { version: DAEMON_PROTOCOL_VERSION };
+        let hs = DaemonRequest::Handshake {
+            version: DAEMON_PROTOCOL_VERSION,
+        };
         let mut hs_json = serde_json::to_string(&hs).unwrap();
         hs_json.push('\n');
         write_half.write_all(hs_json.as_bytes()).await.unwrap();
         write_half.flush().await.unwrap();
         reader.read_line(&mut line).await.unwrap();
 
-        let attach = DaemonRequest::Attach { session_id: session_id.clone(), after_sequence: None };
+        let attach = DaemonRequest::Attach {
+            session_id: session_id.clone(),
+            after_sequence: None,
+        };
         let mut attach_json = serde_json::to_string(&attach).unwrap();
         attach_json.push('\n');
         write_half.write_all(attach_json.as_bytes()).await.unwrap();
@@ -5094,7 +5699,10 @@ mod tests {
         drop(write_half);
 
         let result = tokio::time::timeout(Duration::from_secs(2), server_task).await;
-        assert!(result.is_ok(), "handle_client must terminate promptly when client disconnects from idle attach");
+        assert!(
+            result.is_ok(),
+            "handle_client must terminate promptly when client disconnects from idle attach"
+        );
     }
 
     #[tokio::test]
@@ -5141,8 +5749,12 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         use tokio::net::UnixListener;
 
-        let socket_dir = tempfile::Builder::new().prefix("fx-legacy").tempdir_in("/tmp").unwrap();
-        std::fs::set_permissions(socket_dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket_dir = tempfile::Builder::new()
+            .prefix("fx-legacy")
+            .tempdir_in("/tmp")
+            .unwrap();
+        std::fs::set_permissions(socket_dir.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
         let socket_path = socket_dir.path().join("legacy.sock");
         let listener = UnixListener::bind(&socket_path).unwrap();
 
@@ -5155,7 +5767,10 @@ mod tests {
             // Handshake
             let line = lines.next_line().await.unwrap().unwrap();
             assert!(line.contains("handshake"));
-            write.write_all(b"{\"type\":\"handshakeOk\",\"version\":3,\"pid\":1,\"epoch\":1}\n").await.unwrap();
+            write
+                .write_all(b"{\"type\":\"handshakeOk\",\"version\":3,\"pid\":1,\"epoch\":1}\n")
+                .await
+                .unwrap();
 
             // Attach
             let line = lines.next_line().await.unwrap().unwrap();
@@ -5165,11 +5780,17 @@ mod tests {
             // The legacy daemon is now idle, waiting for commands or connection close.
             // When LegacyPeer drops its socket, next_line() returns None (EOF).
             let eof = lines.next_line().await.unwrap();
-            assert!(eof.is_none(), "legacy daemon must observe EOF when client disconnects");
+            assert!(
+                eof.is_none(),
+                "legacy daemon must observe EOF when client disconnects"
+            );
             let _ = legacy_closed_tx.send(());
         });
 
-        let peer = Arc::new(crate::daemon::proxy::LegacyPeer::new(socket_path, vec!["legacy-1".into()]));
+        let peer = Arc::new(crate::daemon::proxy::LegacyPeer::new(
+            socket_path,
+            vec!["legacy-1".into()],
+        ));
         let agent_hub = Arc::new(AgentStateHub::default());
         let agent_sub = agent_hub.subscribe("legacy-1");
 
@@ -5178,14 +5799,16 @@ mod tests {
 
         let peer_clone = Arc::clone(&peer);
         let stream_task = tokio::spawn(async move {
-            peer_clone.attach_and_stream(
-                "legacy-1",
-                None,
-                &mut client_writer,
-                &mut client_reader,
-                agent_sub,
-                agent_hub,
-            ).await
+            peer_clone
+                .attach_and_stream(
+                    "legacy-1",
+                    None,
+                    &mut client_writer,
+                    &mut client_reader,
+                    agent_sub,
+                    agent_hub,
+                )
+                .await
         });
 
         // Client reads the forwarded AttachOk frame
@@ -5198,12 +5821,18 @@ mod tests {
 
         // attach_and_stream must terminate promptly
         let stream_res = tokio::time::timeout(Duration::from_secs(2), stream_task).await;
-        assert!(stream_res.is_ok(), "attach_and_stream must terminate within timeout");
+        assert!(
+            stream_res.is_ok(),
+            "attach_and_stream must terminate within timeout"
+        );
         assert!(stream_res.unwrap().unwrap().is_ok());
 
         // Legacy daemon must have observed EOF and closed its socket within timeout
         let legacy_res = tokio::time::timeout(Duration::from_secs(2), legacy_closed_rx).await;
-        assert!(legacy_res.is_ok(), "upstream connection to legacy daemon must be closed promptly");
+        assert!(
+            legacy_res.is_ok(),
+            "upstream connection to legacy daemon must be closed promptly"
+        );
 
         legacy_daemon.await.unwrap();
     }
@@ -5214,8 +5843,12 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         use tokio::net::UnixListener;
 
-        let socket_dir = tempfile::Builder::new().prefix("fx-legacy").tempdir_in("/tmp").unwrap();
-        std::fs::set_permissions(socket_dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket_dir = tempfile::Builder::new()
+            .prefix("fx-legacy")
+            .tempdir_in("/tmp")
+            .unwrap();
+        std::fs::set_permissions(socket_dir.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
         let socket_path = socket_dir.path().join("legacy_session.sock");
         let listener = UnixListener::bind(&socket_path).unwrap();
 
@@ -5227,7 +5860,10 @@ mod tests {
 
             let line = lines.next_line().await.unwrap().unwrap();
             assert!(line.contains("handshake"));
-            write.write_all(b"{\"type\":\"handshakeOk\",\"version\":3,\"pid\":1,\"epoch\":1}\n").await.unwrap();
+            write
+                .write_all(b"{\"type\":\"handshakeOk\",\"version\":3,\"pid\":1,\"epoch\":1}\n")
+                .await
+                .unwrap();
 
             let line = lines.next_line().await.unwrap().unwrap();
             assert!(line.contains("attach"));
@@ -5247,7 +5883,10 @@ mod tests {
             let _ = legacy_closed_tx.send(());
         });
 
-        let peer = Arc::new(crate::daemon::proxy::LegacyPeer::new(socket_path, vec!["legacy-session-1".into()]));
+        let peer = Arc::new(crate::daemon::proxy::LegacyPeer::new(
+            socket_path,
+            vec!["legacy-session-1".into()],
+        ));
         let attachment = peer.attach_session("legacy-session-1", None).await.unwrap();
 
         // Drop the receiver, making receiver_count() == 0
@@ -5255,8 +5894,102 @@ mod tests {
 
         // Within 2 seconds, the legacy connection should be closed because reader task breaks
         let legacy_res = tokio::time::timeout(Duration::from_secs(2), legacy_closed_rx).await;
-        assert!(legacy_res.is_ok(), "dropping receiver must cause legacy peer reader task to drop connection");
+        assert!(
+            legacy_res.is_ok(),
+            "dropping receiver must cause legacy peer reader task to drop connection"
+        );
 
         legacy_daemon.await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod instance_lock_deadline_tests {
+    use super::*;
+
+    #[test]
+    fn expired_wait_window_never_attempts_or_acquires_instance_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("instance.lock");
+
+        // 1. Even if the lock file is completely free, calling lock_file_with_optional_wait
+        // with an already-expired deadline must return Err immediately without acquiring.
+        // If expiry were checked after attempt (the bug), try_lock_file would succeed and return Ok.
+        let expired_deadline = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(10))
+            .unwrap();
+        let outcome = lock_file_with_optional_wait(&path, Some(expired_deadline));
+        assert!(
+            outcome.is_err(),
+            "an expired wait window must never acquire the lock, even when free"
+        );
+
+        // 2. Predecessor holds lock past the successor's deadline:
+        // Successor must wait the full window and timeout with Err.
+        let held = try_lock_file(open_secure_lock_file(&path).unwrap()).unwrap();
+        let started = std::time::Instant::now();
+        let outcome = lock_file_with_optional_wait(
+            &path,
+            Some(std::time::Instant::now() + std::time::Duration::from_millis(200)),
+        );
+        assert!(
+            outcome.is_err(),
+            "successor must timeout when predecessor holds past deadline"
+        );
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(180),
+            "wait must last until deadline, took {:?}",
+            started.elapsed()
+        );
+        drop(held);
+
+        // 3. Without a declared successor deadline, plain startup fails fast on a held lock.
+        let held_again = try_lock_file(open_secure_lock_file(&path).unwrap()).unwrap();
+        let fast = std::time::Instant::now();
+        let immediate = lock_file_with_optional_wait(&path, None);
+        assert!(immediate.is_err(), "plain startup must fail on held lock");
+        assert!(
+            fast.elapsed() < std::time::Duration::from_millis(100),
+            "plain startup must fail fast, took {:?}",
+            fast.elapsed()
+        );
+        drop(held_again);
+
+        // 4. Predecessor releases WITHIN deadline: successor acquires successfully.
+        let held_third = try_lock_file(open_secure_lock_file(&path).unwrap()).unwrap();
+        let release_thread = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            drop(held_third);
+        });
+        let acquired = lock_file_with_optional_wait(
+            &path,
+            Some(std::time::Instant::now() + std::time::Duration::from_millis(400)),
+        );
+        assert!(
+            acquired.is_ok(),
+            "successor must acquire lock when predecessor releases within deadline"
+        );
+        release_thread.join().unwrap();
+        drop(acquired);
+
+        // 5. Pre-check passes with remaining window, but delay before lock crosses deadline:
+        // Post-acquisition check deterministically detects late lock, drops it immediately, and returns Err.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(20);
+        let late_outcome = lock_file_with_optional_wait_internal(
+            &path,
+            Some(deadline),
+            || std::thread::sleep(std::time::Duration::from_millis(30)),
+        );
+        assert!(
+            late_outcome.is_err(),
+            "lock acquired past deadline must be dropped and rejected"
+        );
+        let err_msg = late_outcome.unwrap_err();
+        assert!(
+            err_msg.contains("after the wait window expired"),
+            "must be rejected specifically by the post-acquisition check, got: {err_msg}"
+        );
+        // Lock must have been dropped, so an immediate unarmed call succeeds.
+        assert!(lock_file_with_optional_wait(&path, None).is_ok());
     }
 }

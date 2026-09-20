@@ -94,8 +94,7 @@ pub fn preview_error(
     extra: Option<serde_json::Value>,
 ) -> IpcError {
     let mut details = json!({ "reason": reason.as_str() });
-    if let (Some(serde_json::Value::Object(extra)), Some(target)) =
-        (extra, details.as_object_mut())
+    if let (Some(serde_json::Value::Object(extra)), Some(target)) = (extra, details.as_object_mut())
     {
         for (key, value) in extra {
             target.insert(key, value);
