@@ -3163,11 +3163,14 @@ impl NativeSurfaceFrameTarget {
         // Adapter/device requests and all surface configuration happen on the GPU worker.
         let instance = super::renderer::gpu_context::GpuContext::shared_surface_instance();
         let surface = match target.surface_layer_ptr() {
+            #[cfg(target_os = "macos")]
             Some(layer_ptr) => unsafe {
                 // The layer pointer stays valid for the whole surface lifetime: the target
                 // holding it is dropped strictly after this surface (drop-order invariant).
                 instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer_ptr))
             },
+            #[cfg(not(target_os = "macos"))]
+            Some(_) => instance.create_surface(target.surface_target()),
             None => instance.create_surface(target.surface_target()),
         }
         .map_err(|error| {
