@@ -186,7 +186,9 @@ fn parse_listing(
         .windows(prefix.len())
         .position(|part| part == prefix.as_bytes())
         .ok_or_else(invalid)?;
-    let fields: Vec<&[u8]> = bytes[start + prefix.len()..].split(|byte| *byte == 0).collect();
+    let fields: Vec<&[u8]> = bytes[start + prefix.len()..]
+        .split(|byte| *byte == 0)
+        .collect();
     if fields.len() < 5
         || (fields.len() - 5) % 2 != 0
         || fields.last() != Some(&b"".as_slice())
@@ -462,11 +464,20 @@ mod tests {
         use std::os::unix::ffi::OsStringExt;
         let fixture = tempfile::tempdir().unwrap();
         std::fs::create_dir(fixture.path().join("project")).unwrap();
-        std::fs::create_dir(fixture.path().join(std::ffi::OsString::from_vec(vec![b'x', 0xff]))).unwrap();
+        std::fs::create_dir(
+            fixture
+                .path()
+                .join(std::ffi::OsString::from_vec(vec![b'x', 0xff])),
+        )
+        .unwrap();
         let env = environment();
         let output = std::process::Command::new("sh")
-            .args(["-c", &listing_script(&env, fixture.path().to_str().unwrap(), "UTF8")])
-            .output().unwrap();
+            .args([
+                "-c",
+                &listing_script(&env, fixture.path().to_str().unwrap(), "UTF8"),
+            ])
+            .output()
+            .unwrap();
         assert!(output.status.success());
         let listing = parse_listing(&output.stdout, "UTF8", &env).unwrap();
         assert_eq!(listing.entries.len(), 1);
@@ -481,7 +492,14 @@ mod tests {
         assert_eq!(listing.entries.len(), 1);
         assert_eq!(listing.entries[0].path, "/home/test/project");
         assert!(listing.truncated);
-        assert!(parse_listing(b"UTF8\0/home/\xff\0/home\0END\00\0", "UTF8", &environment()).is_err());
-        assert!(parse_listing(b"UTF8\0/home/test\0/home\0bad\xff\0x\0END\00\0", "UTF8", &environment()).is_err());
+        assert!(
+            parse_listing(b"UTF8\0/home/\xff\0/home\0END\00\0", "UTF8", &environment()).is_err()
+        );
+        assert!(parse_listing(
+            b"UTF8\0/home/test\0/home\0bad\xff\0x\0END\00\0",
+            "UTF8",
+            &environment()
+        )
+        .is_err());
     }
 }

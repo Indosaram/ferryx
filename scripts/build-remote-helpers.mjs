@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, mkdte
 import { resolve, join, dirname, relative, isAbsolute } from "node:path";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
-const TARGETS = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-pc-windows-msvc"];
+const TARGETS = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc"];
 export function computeSha256(buffer) {
   return createHash("sha256").update(buffer).digest("hex");
 }
@@ -35,11 +35,16 @@ export function stageHelpers({ repoRoot = REPO_ROOT, resourcesDir = join(repoRoo
     assert(bytes.length > 0);
     assert.equal(computeSha256(bytes), receipt.sha256, "artifact hash mismatch");
     const windows = target.endsWith("windows-msvc");
+    const darwin = target.endsWith("apple-darwin");
     if (windows) {
       assert(bytes.length >= 64 && bytes.toString("ascii", 0, 2) === "MZ", "missing PE header");
       const pe = bytes.readUInt32LE(60);
       assert(pe + 6 <= bytes.length && bytes.toString("ascii", pe, pe + 4) === "PE\0\0", "invalid PE header");
       assert.equal(bytes.readUInt16LE(pe + 4), 0x8664, "PE machine mismatch");
+    } else if (darwin) {
+      assert(bytes.length >= 16, "truncated Mach-O header");
+      assert.equal(bytes.readUInt32LE(0), 0xfeedfacf, "missing 64-bit Mach-O magic");
+      assert.equal(bytes.readUInt32LE(4), target.startsWith("aarch64") ? 0x0100000c : 0x01000007, "Mach-O cputype mismatch");
     } else {
       assert(bytes.length >= 20 && bytes.subarray(0, 4).equals(Buffer.from([127, 69, 76, 70])), "missing ELF header");
       assert.equal(bytes[4], 2, "ELF must be 64 bit");

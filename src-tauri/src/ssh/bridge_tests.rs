@@ -60,10 +60,14 @@ fn sample_env() -> RemoteEnvironment {
 fn loopback_ssh_available() -> bool {
     std::process::Command::new("ssh")
         .args([
-            "-o", "BatchMode=yes",
-            "-o", "StrictHostKeyChecking=yes",
-            "-o", "UpdateHostKeys=no",
-            "-o", "ConnectTimeout=2",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            "UpdateHostKeys=no",
+            "-o",
+            "ConnectTimeout=2",
             "127.0.0.1",
             "true",
         ])
@@ -166,12 +170,7 @@ impl TestFixture {
 
     fn spawn_bridge_connection(&self) -> BridgeConnection {
         let child = tokio::process::Command::new(&self.helper_bin)
-            .args([
-                "bridge",
-                "--stdio",
-                "--root",
-                self.root.to_str().unwrap(),
-            ])
+            .args(["bridge", "--stdio", "--root", self.root.to_str().unwrap()])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -320,7 +319,8 @@ fn ssh_bridge_handshake_independently_validates_configured_host_and_target_ident
         epoch: Epoch(12345),
         backend_session_id: "s1".into(),
     };
-    let err = validate_target_handshake(&handshake, "host-live", Some(&bad_host_target)).unwrap_err();
+    let err =
+        validate_target_handshake(&handshake, "host-live", Some(&bad_host_target)).unwrap_err();
     assert!(matches!(err, BridgeError::TargetExpired { .. }));
 
     // 4. Target with mismatched owner returns TargetExpired
@@ -330,7 +330,8 @@ fn ssh_bridge_handshake_independently_validates_configured_host_and_target_ident
         epoch: Epoch(12345),
         backend_session_id: "s1".into(),
     };
-    let err = validate_target_handshake(&handshake, "host-live", Some(&bad_owner_target)).unwrap_err();
+    let err =
+        validate_target_handshake(&handshake, "host-live", Some(&bad_owner_target)).unwrap_err();
     assert!(matches!(err, BridgeError::TargetExpired { .. }));
 
     // 5. Target with mismatched epoch returns TargetExpired
@@ -340,7 +341,8 @@ fn ssh_bridge_handshake_independently_validates_configured_host_and_target_ident
         epoch: Epoch(99999),
         backend_session_id: "s1".into(),
     };
-    let err = validate_target_handshake(&handshake, "host-live", Some(&bad_epoch_target)).unwrap_err();
+    let err =
+        validate_target_handshake(&handshake, "host-live", Some(&bad_epoch_target)).unwrap_err();
     assert!(matches!(err, BridgeError::TargetExpired { .. }));
 
     // 6. Matching target passes
@@ -450,7 +452,10 @@ async fn ssh_bridge_independent_read_does_not_block_control() {
         "write took {elapsed:?}, should have completed without waiting for read"
     );
 
-    let read_res = read_handle.await.expect("join read task").expect("pty_read");
+    let read_res = read_handle
+        .await
+        .expect("join read task")
+        .expect("pty_read");
     let decoded = read_res.decoded_bytes();
     let text = String::from_utf8_lossy(&decoded);
     assert!(
@@ -695,7 +700,10 @@ async fn ssh_bridge_lifecycle_poison_on_timeout_cancel_and_eof_reaping() {
         .await
         .unwrap_err();
     assert!(
-        matches!(eof_err, BridgeError::ProcessExited { .. } | BridgeError::ConnectionClosed),
+        matches!(
+            eof_err,
+            BridgeError::ProcessExited { .. } | BridgeError::ConnectionClosed
+        ),
         "expected ProcessExited or ConnectionClosed, got: {eof_err:?}"
     );
 
@@ -772,8 +780,412 @@ async fn ssh_bridge_live_loopback_openssh_connection() {
         .expect("reattach over SSH");
     assert_eq!(describe.pid, spawn_res.pid);
 
-    client.pty_stop(&spawn_res.target).await.expect("pty_stop over SSH");
+    client
+        .pty_stop(&spawn_res.target)
+        .await
+        .expect("pty_stop over SSH");
     client.close().await.expect("close client");
 
     // Dropping fixture reaps the owned daemon_child via RAII
+}
+
+#[tokio::test]
+async fn test_ssh_bridge_dag_inventory_and_poll() {
+    let fixture = TestFixture::new("dag");
+    let client = fixture.create_client().await;
+
+    assert!(client.supports_dag());
+
+    client
+        .project_register("proj-dag", fixture.project_dir.to_str().unwrap())
+        .await
+        .expect("register project");
+
+    let runs_dir = fixture.project_dir.join(".omo/senpi-task/dag/runs");
+    std::fs::create_dir_all(&runs_dir).expect("create runs dir");
+    let run_file = runs_dir.join("run-test-1.json");
+    let mut run_json: Value = serde_json::from_str(include_str!(
+        "../dag/testdata/dag_081e597f-0aa8-4a20-a826-4e3d045aacef.json"
+    ))
+    .expect("valid DAG checkpoint fixture");
+    run_json["runId"] = json!("run-dag-ssh-1");
+    run_json["status"] = json!("running");
+    std::fs::write(&run_file, serde_json::to_string(&run_json).unwrap()).expect("write run file");
+
+    let runs = client
+        .dag_inventory("proj-dag")
+        .await
+        .expect("query dag inventory");
+    assert_eq!(runs.len(), 1);
+    // The helper streams raw journal text; only the journal parser normalizes
+    // optional fields (e.g. amendCount), so the desktop contract is
+    // parse_run_checkpoint, never a bare serde decode.
+    let snapshot = crate::dag::journal::parse_run_checkpoint(&runs[0].to_string())
+        .expect("desktop parses raw helper checkpoint via parse_run_checkpoint");
+    assert_eq!(snapshot.status, crate::dag::journal::DagRunStatus::Running);
+    assert_eq!(snapshot.run_id, "run-dag-ssh-1");
+    assert!(
+        serde_json::from_value::<crate::dag::journal::DagRunSnapshot>(runs[0].clone()).is_err(),
+        "raw checkpoints are not directly decodable; the parser contract is required"
+    );
+
+    let (mtime, new_runs) = client.dag_poll("proj-dag", 0, &[]).await.expect("dag poll");
+    assert!(mtime > 0);
+    assert_eq!(new_runs.len(), 1);
+
+    let (mtime2, no_runs) = client
+        .dag_poll("proj-dag", mtime, &new_runs)
+        .await
+        .expect("dag poll with known");
+    assert_eq!(mtime2, mtime);
+    assert!(no_runs.is_empty());
+
+    let original_time = std::fs::metadata(&run_file).unwrap().modified().unwrap();
+    run_json["status"] = json!("completed");
+    std::fs::write(&run_file, serde_json::to_vec(&run_json).unwrap()).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&run_file)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(original_time))
+        .unwrap();
+    let (_, changed_runs) = client
+        .dag_poll("proj-dag", mtime, &new_runs)
+        .await
+        .expect("same-timestamp changed checkpoint crosses real bridge");
+    assert_eq!(changed_runs.len(), 1);
+    let changed = crate::dag::journal::parse_run_checkpoint(&changed_runs[0].to_string())
+        .expect("changed checkpoint parses through parse_run_checkpoint");
+    assert_eq!(changed.status, crate::dag::journal::DagRunStatus::Completed);
+
+    client.close().await.expect("close client");
+}
+
+/// Real child helper process, real SSH-shaped bridge connections: the desktop
+/// opens a helper-owned subscription and receives inventory plus asynchronous
+/// updates without ever sending a known-run set or driving a poll loop.
+#[tokio::test]
+async fn ssh_bridge_dag_subscription_streams_inventory_updates_and_cancels() {
+    let fixture = TestFixture::new("dag-stream");
+    let client = fixture.create_client().await;
+    assert!(
+        client.supports_dag_stream(),
+        "helper must advertise dagSubscribeV1"
+    );
+
+    client
+        .project_register("proj-stream", fixture.project_dir.to_str().unwrap())
+        .await
+        .expect("register project");
+
+    let runs_dir = fixture.project_dir.join(".omo/senpi-task/dag/runs");
+    std::fs::create_dir_all(&runs_dir).expect("create runs dir");
+    let run_file = runs_dir.join("run-stream.json");
+    let mut run_json: Value = serde_json::from_str(include_str!(
+        "../dag/testdata/dag_081e597f-0aa8-4a20-a826-4e3d045aacef.json"
+    ))
+    .expect("valid DAG checkpoint fixture");
+    run_json["runId"] = json!("run-stream-1");
+    run_json["status"] = json!("running");
+    std::fs::write(&run_file, serde_json::to_vec(&run_json).unwrap()).expect("write checkpoint");
+
+    // 1. Inventory arrives on the subscribe frame itself.
+    let (mut subscription, inventory) = client
+        .dag_subscribe_on(fixture.spawn_bridge_connection(), "proj-stream")
+        .await
+        .expect("open dag subscription");
+    assert!(inventory.resync, "first frame must be a full inventory");
+    assert_eq!(inventory.runs.len(), 1);
+    assert!(inventory.dropped.is_empty());
+    let hydrated = crate::dag::journal::parse_run_checkpoint(&inventory.runs[0].to_string())
+        .expect("stream frames carry raw checkpoints for parse_run_checkpoint");
+    assert_eq!(hydrated.run_id, "run-stream-1");
+    assert_eq!(hydrated.status, crate::dag::journal::DagRunStatus::Running);
+
+    // 2. A same-mtime content change is delivered asynchronously, with no
+    //    knownRuns payload from the desktop.
+    let original_time = std::fs::metadata(&run_file).unwrap().modified().unwrap();
+    run_json["status"] = json!("completed");
+    std::fs::write(&run_file, serde_json::to_vec(&run_json).unwrap()).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&run_file)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(original_time))
+        .unwrap();
+    assert_eq!(
+        std::fs::metadata(&run_file).unwrap().modified().unwrap(),
+        original_time,
+        "fixture must preserve the original mtime"
+    );
+
+    let update = subscription
+        .next_frame(Duration::from_secs(5))
+        .await
+        .expect("same-mtime update crosses the real bridge");
+    assert!(!update.resync);
+    assert_eq!(update.runs.len(), 1, "expected exactly the changed run");
+    assert!(update.sequence > inventory.sequence, "sequence must advance");
+    let changed = crate::dag::journal::parse_run_checkpoint(&update.runs[0].to_string())
+        .expect("update frame parses through parse_run_checkpoint");
+    assert_eq!(changed.status, crate::dag::journal::DagRunStatus::Completed);
+
+    // 3. An unchanged rewrite is deduplicated by the helper.
+    std::fs::write(&run_file, serde_json::to_vec(&run_json).unwrap()).unwrap();
+    let idle = subscription
+        .next_frame(Duration::from_millis(600))
+        .await
+        .expect("idle frame");
+    assert!(
+        idle.runs.is_empty(),
+        "byte-identical rewrite must not be redelivered: {idle:?}"
+    );
+    assert!(!idle.closed);
+
+    // 4. Explicit cancellation releases the subscription and its connection.
+    subscription.unsubscribe().await.expect("unsubscribe");
+
+    client.close().await.expect("close client");
+}
+
+/// A subscription must never be opened for a project the helper has not
+/// registered, even when the caller passes a real remote directory path.
+#[tokio::test]
+async fn ssh_bridge_dag_subscription_rejects_unregistered_project() {
+    let fixture = TestFixture::new("dag-stream-unregistered");
+    let client = fixture.create_client().await;
+
+    let err = client
+        .dag_subscribe_on(
+            fixture.spawn_bridge_connection(),
+            fixture.project_dir.to_str().unwrap(),
+        )
+        .await
+        .expect_err("unregistered project must be rejected");
+    assert!(
+        matches!(err, BridgeError::TargetNotFound),
+        "expected NOT_FOUND, got {err:?}"
+    );
+
+    client.close().await.expect("close client");
+}
+
+/// Dropping the subscription (the cancellation path used while connecting,
+/// registering, or waiting) must release the helper-side subscription without
+/// touching PTY lifecycle.
+#[tokio::test]
+async fn ssh_bridge_dag_subscription_drop_releases_helper_and_keeps_pty_alive() {
+    let fixture = TestFixture::new("dag-stream-drop");
+    let client = fixture.create_client().await;
+
+    client
+        .project_register("proj-drop", fixture.project_dir.to_str().unwrap())
+        .await
+        .expect("register project");
+    std::fs::create_dir_all(fixture.project_dir.join(".omo/senpi-task/dag/runs"))
+        .expect("create runs dir");
+
+    let spawn_res = client
+        .pty_spawn(&SpawnParams {
+            project_id: "proj-drop".into(),
+            worktree: Some(".".into()),
+            cols: Some(80),
+            rows: Some(24),
+            program: None,
+            args: None,
+            env: None,
+            client_request_id: Some("req-dag-drop".into()),
+        })
+        .await
+        .expect("pty_spawn");
+
+    let (subscription, first) = client
+        .dag_subscribe_on(fixture.spawn_bridge_connection(), "proj-drop")
+        .await
+        .expect("open dag subscription");
+    let subscription_id = subscription.id().to_string();
+    drop(subscription);
+
+    // The helper released the subscription: a later reference is unknown.
+    let mut probe = fixture.spawn_bridge_connection();
+    let mut released = false;
+    for _ in 0..50 {
+        match probe
+            .request(
+                "dag.next",
+                json!({ "subscriptionId": subscription_id, "waitMs": 100 }),
+                Duration::from_secs(5),
+            )
+            .await
+        {
+            Err(BridgeError::TargetNotFound) => {
+                released = true;
+                break;
+            }
+            Ok(_) => continue,
+            Err(e) => panic!("unexpected probe error: {e:?}"),
+        }
+    }
+    probe.close().await.expect("close probe");
+    assert!(
+        released,
+        "dropping the subscription must release it on the helper (id {subscription_id}, first seq {})",
+        first.sequence
+    );
+
+    // The PTY is untouched by DAG subscription teardown.
+    let describe = client
+        .reattach(&spawn_res.target)
+        .await
+        .expect("PTY survives DAG subscription teardown");
+    assert_eq!(describe.pid, spawn_res.pid);
+    assert!(!describe.exited, "DAG teardown must not kill the PTY");
+
+    client
+        .pty_stop(&spawn_res.target)
+        .await
+        .expect("pty_stop");
+    client.close().await.expect("close client");
+}
+
+/// Frame-ordering contract at the desktop parser seam: contiguous frames are
+/// accepted, duplicates and regressions are rejected, and a forward gap is only
+/// legal when the frame re-establishes the current inventory (`resync`).
+#[tokio::test]
+async fn ssh_bridge_dag_frame_ordering_requires_contiguity_or_resync() {
+    let fixture = TestFixture::new("dag-stream-order");
+    let client = fixture.create_client().await;
+    client
+        .project_register("proj-order", fixture.project_dir.to_str().unwrap())
+        .await
+        .expect("register project");
+    std::fs::create_dir_all(fixture.project_dir.join(".omo/senpi-task/dag/runs"))
+        .expect("create runs dir");
+
+    let (mut subscription, first) = client
+        .dag_subscribe_on(fixture.spawn_bridge_connection(), "proj-order")
+        .await
+        .expect("open dag subscription");
+    let id = subscription.id().to_string();
+    let base = first.sequence;
+
+    let frame = |sequence: u64, resync: bool| DagFrame {
+        subscription_id: id.clone(),
+        sequence,
+        runs: Vec::new(),
+        dropped: Vec::new(),
+        resync,
+        more: false,
+        closed: false,
+    };
+
+    // Contiguous: accepted, cursor advances.
+    subscription
+        .accept_frame_for_test(frame(base + 1, false))
+        .expect("contiguous frame is accepted");
+    assert_eq!(subscription.last_sequence(), base + 1);
+
+    // Duplicate and regression: rejected, cursor unchanged.
+    for stale in [base + 1, base] {
+        let err = subscription
+            .accept_frame_for_test(frame(stale, false))
+            .expect_err("stale frame must be rejected");
+        assert!(
+            matches!(&err, BridgeError::Protocol(m) if m.contains("regressed")),
+            "expected regression rejection, got {err:?}"
+        );
+    }
+    assert_eq!(subscription.last_sequence(), base + 1);
+
+    // Forward gap without resync: rejected (design 4.5 forbids silently
+    // applying frames after a loss).
+    let err = subscription
+        .accept_frame_for_test(frame(base + 5, false))
+        .expect_err("gap without resync must be rejected");
+    assert!(
+        matches!(&err, BridgeError::Protocol(m) if m.contains("gap")),
+        "expected gap rejection, got {err:?}"
+    );
+    assert_eq!(subscription.last_sequence(), base + 1);
+
+    // Same gap carrying a resync inventory: accepted.
+    subscription
+        .accept_frame_for_test(frame(base + 5, true))
+        .expect("resync frame may close a gap");
+    assert_eq!(subscription.last_sequence(), base + 5);
+
+    // A frame for a different subscription is never accepted.
+    let mut foreign = frame(base + 6, false);
+    foreign.subscription_id = format!("{id}-other");
+    let err = subscription
+        .accept_frame_for_test(foreign)
+        .expect_err("foreign subscription frame must be rejected");
+    assert!(
+        matches!(&err, BridgeError::Protocol(m) if m.contains("foreign subscription")),
+        "expected foreign-subscription rejection, got {err:?}"
+    );
+
+    subscription.unsubscribe().await.expect("unsubscribe");
+    client.close().await.expect("close client");
+}
+
+/// A consumer that dies while parked inside a blocking `dag.next` must still be
+/// cleaned up. The helper observes EOF only when the blocked call returns, so
+/// release is bounded by the requested wait, not unbounded.
+#[tokio::test]
+async fn ssh_bridge_dag_subscription_released_after_eof_during_blocked_next() {
+    let fixture = TestFixture::new("dag-stream-eof");
+    let client = fixture.create_client().await;
+
+    client
+        .project_register("proj-eof", fixture.project_dir.to_str().unwrap())
+        .await
+        .expect("register project");
+    std::fs::create_dir_all(fixture.project_dir.join(".omo/senpi-task/dag/runs"))
+        .expect("create runs dir");
+
+    let (mut subscription, _first) = client
+        .dag_subscribe_on(fixture.spawn_bridge_connection(), "proj-eof")
+        .await
+        .expect("open dag subscription");
+    let subscription_id = subscription.id().to_string();
+
+    // Park a real blocking dag.next on the helper, then kill the consumer.
+    let (parked_tx, parked_rx) = tokio::sync::oneshot::channel::<()>();
+    let waiter = tokio::spawn(async move {
+        let _ = parked_tx.send(());
+        let _ = subscription.next_frame(Duration::from_secs(2)).await;
+        subscription
+    });
+    parked_rx.await.expect("waiter started");
+    waiter.abort();
+    let _ = waiter.await;
+
+    let mut probe = fixture.spawn_bridge_connection();
+    let mut released = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while tokio::time::Instant::now() < deadline {
+        match probe
+            .request(
+                "dag.next",
+                json!({ "subscriptionId": subscription_id, "waitMs": 200 }),
+                Duration::from_secs(10),
+            )
+            .await
+        {
+            Err(BridgeError::TargetNotFound) => {
+                released = true;
+                break;
+            }
+            Ok(_) => continue,
+            Err(e) => panic!("unexpected probe error: {e:?}"),
+        }
+    }
+    probe.close().await.expect("close probe");
+    assert!(
+        released,
+        "helper must release subscription {subscription_id} after consumer EOF"
+    );
+
+    client.close().await.expect("close client");
 }

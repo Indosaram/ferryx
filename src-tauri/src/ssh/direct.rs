@@ -30,7 +30,9 @@ pub fn validate_host(host: &SshHost) -> Result<(), IpcError> {
         return Err(invalid("Invalid SSH hostname, username, port or jump host"));
     }
     if host.identity_file.as_deref().is_some_and(|p| {
-        (!std::path::Path::new(p).is_absolute() && !p.starts_with("~/"))
+        (!std::path::Path::new(p).is_absolute()
+            && !p.starts_with("~/")
+            && !p.starts_with(r"~\"))
             || p.len() > 4096
             || p.chars().any(char::is_control)
     }) || (host.auth_method == SshAuthMethod::Key && host.identity_file.is_none())
@@ -60,6 +62,7 @@ pub fn ssh_plan(
 ) -> Result<ShellCommandPlan, IpcError> {
     validate_host(host)?;
     super::password::require(host)?;
+    let program = super::exec::resolve_ssh_program()?;
     let mut args = super::exec::interactive_argv(host);
     args.remove(0);
     if !interactive {
@@ -67,7 +70,11 @@ pub fn ssh_plan(
     }
     // These precede user config and prevent prompts, forwarding, or connection reuse.
     let mut options = vec![
-        if host.auth_method == SshAuthMethod::Password { "BatchMode=no" } else { "BatchMode=yes" },
+        if host.auth_method == SshAuthMethod::Password {
+            "BatchMode=no"
+        } else {
+            "BatchMode=yes"
+        },
         "StrictHostKeyChecking=yes",
         "UpdateHostKeys=no",
         "ConnectTimeout=5",
@@ -83,14 +90,20 @@ pub fn ssh_plan(
         options.push("ClearAllForwardings=yes");
     }
     if host.auth_method == SshAuthMethod::Password {
-        options.extend(["PreferredAuthentications=password", "PasswordAuthentication=yes", "PubkeyAuthentication=no", "KbdInteractiveAuthentication=no", "NumberOfPasswordPrompts=1"]);
+        options.extend([
+            "PreferredAuthentications=password",
+            "PasswordAuthentication=yes",
+            "PubkeyAuthentication=no",
+            "KbdInteractiveAuthentication=no",
+            "NumberOfPasswordPrompts=1",
+        ]);
     }
     for option in options {
         args.splice(0..0, ["-o".to_string(), option.to_string()]);
     }
     args.push(command);
     Ok(ShellCommandPlan {
-        program: "ssh".into(),
+        program,
         args,
     })
 }
@@ -222,7 +235,8 @@ pub fn parse_probe(bytes: &[u8]) -> Result<(String, Option<String>, Option<Strin
         Some(git.to_string())
     };
     let git_remote = if parts.len() == 5 {
-        let remote = std::str::from_utf8(parts[3]).map_err(|_| invalid("Remote origin URL is not UTF-8"))?;
+        let remote =
+            std::str::from_utf8(parts[3]).map_err(|_| invalid("Remote origin URL is not UTF-8"))?;
         if remote.trim().is_empty() {
             None
         } else {
@@ -234,7 +248,10 @@ pub fn parse_probe(bytes: &[u8]) -> Result<(String, Option<String>, Option<Strin
     Ok((root.to_string(), git_root, git_remote))
 }
 
-pub async fn probe(host: &SshHost, path: &str) -> Result<(String, Option<String>, Option<String>), IpcError> {
+pub async fn probe(
+    host: &SshHost,
+    path: &str,
+) -> Result<(String, Option<String>, Option<String>), IpcError> {
     let environment = super::runtime::detect(host).await?;
     let probed = super::operations::probe(host, &environment, path).await?;
     Ok((probed.repo_root, probed.git_root, probed.git_remote))
@@ -250,23 +267,11 @@ pub fn bridge_command(
             quote_posix(&location.executable),
             quote_posix(&location.root),
         ),
-        super::runtime::RemotePlatform::Windows => {
-            let exe_data = super::runtime::powershell_data(&location.executable);
-            let root_data = super::runtime::powershell_data(&location.root);
-            format!(
-                "$p = New-Object System.Diagnostics.Process; \
-                 $p.StartInfo.FileName = {exe_data}; \
-                 $p.StartInfo.Arguments = ('bridge --stdio --root ' + {root_data}); \
-                 $p.StartInfo.UseShellExecute = $false; \
-                 $p.StartInfo.RedirectStandardInput = $false; \
-                 $p.StartInfo.RedirectStandardOutput = $false; \
-                 $p.StartInfo.RedirectStandardError = $false; \
-                 $p.StartInfo.CreateNoWindow = $true; \
-                 $null = $p.Start(); \
-                 $p.WaitForExit(); \
-                 [Environment]::Exit($p.ExitCode)"
-            )
-        }
+        super::runtime::RemotePlatform::Windows => format!(
+            "& {} bridge --stdio --root {}",
+            super::runtime::powershell_data(&location.executable),
+            super::runtime::powershell_data(&location.root),
+        ),
     }
 }
 
@@ -366,10 +371,13 @@ async fn collect_output(
                     IpcErrorCode::IoError,
                     format!(
                         "SSH command failed (exit {}): {}",
-                        status.code().map_or_else(|| "signal".into(), |code| code.to_string()),
+                        status
+                            .code()
+                            .map_or_else(|| "signal".into(), |code| code.to_string()),
                         diagnostic
                     ),
-                ).with_details(serde_json::json!({
+                )
+                .with_details(serde_json::json!({
                     "stage": "execution",
                     "exitCode": status.code(),
                     "stderr": text,
@@ -378,7 +386,11 @@ async fn collect_output(
                 })))
             };
         }
-        Err(_) => super::runtime::error(IpcErrorCode::IoError, "transport", "SSH operation timed out"),
+        Err(_) => super::runtime::error(
+            IpcErrorCode::IoError,
+            "transport",
+            "SSH operation timed out",
+        ),
         Ok(Err(error)) => IpcError::new(
             IpcErrorCode::IoError,
             format!("SSH probe output failed: {error}"),

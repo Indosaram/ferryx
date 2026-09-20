@@ -111,7 +111,9 @@ pub fn resolve(
             "Remote project identity does not match its stored location",
         ));
     }
-    project.platform.unwrap_or(super::runtime::RemotePlatform::Posix)
+    project
+        .platform
+        .unwrap_or(super::runtime::RemotePlatform::Posix)
         .validate_path(&project.repo_root)?;
     let host = enabled_host(host_store, &project.host_id)?;
     Ok((project.clone(), host))

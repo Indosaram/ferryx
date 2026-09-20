@@ -208,7 +208,8 @@ fn failed_atomic_save_cleans_temporary_file() {
 }
 
 #[test]
-fn persisted_resolve_and_enabled_host_succeeds_with_legacy_keys_mixed_keys_and_unrelated_malformed_entry() {
+fn persisted_resolve_and_enabled_host_succeeds_with_legacy_keys_mixed_keys_and_unrelated_malformed_entry(
+) {
     let dir = tempfile::tempdir().unwrap();
     let host_store = dir.path().join("ssh_hosts.json");
 
@@ -275,7 +276,8 @@ fn persisted_resolve_and_enabled_host_succeeds_with_legacy_keys_mixed_keys_and_u
     )
     .unwrap();
 
-    let (resolved_project, resolved_host) = resolve(&host_store, &ws_id).expect("resolve project with extra fields");
+    let (resolved_project, resolved_host) =
+        resolve(&host_store, &ws_id).expect("resolve project with extra fields");
     assert_eq!(resolved_project.workspace_id, ws_id);
     assert_eq!(resolved_project.host_id, "mixed-1");
     assert_eq!(resolved_host.label, "CanonicalBox");

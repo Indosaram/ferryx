@@ -64,3 +64,33 @@ for (const mismatch of ['hash', 'lock', 'machine', 'duplicate']) test(`stager re
   await assert.rejects(stage(root, { receipts: mismatch === 'duplicate' ? [r, r] : [r], requiredTargets: [target] }));
   assert.equal(existsSync(join(root, 'out/manifest.json')), false);
 });
+const CPU_TYPE = { 'aarch64-apple-darwin': 0x0100000c, 'x86_64-apple-darwin': 0x01000007 };
+function machoReceipt(root, machoTarget, { magic = 0xfeedfacf, cpuType = CPU_TYPE[machoTarget] } = {}) {
+  const path = join(root, `helper-${machoTarget}`);
+  // Minimal 64-bit Mach-O header fixture; the ABI is asserted from bytes, never the triple string.
+  const bytes = Buffer.alloc(256); bytes.writeUInt32LE(magic, 0); bytes.writeUInt32LE(cpuType, 4); writeFileSync(path, bytes);
+  const sources = ['remote-helper/Cargo.toml', 'remote-helper/Cargo.lock'].map(path => ({ path, sha256: computeSha256(readFileSync(join(root, path))) }));
+  return { target: machoTarget, profile: 'release', executable: path, sha256: computeSha256(bytes), sources };
+}
+for (const machoTarget of Object.keys(CPU_TYPE)) test(`stager publishes ${machoTarget} from an explicit Mach-O receipt`, async t => {
+  const root = fixture(t); const r = machoReceipt(root, machoTarget);
+  const manifest = await stage(root, { receipts: [r], requiredTargets: [machoTarget] });
+  assert.equal(manifest.artifacts.length, 1);
+  assert.equal(manifest.artifacts[0].target, machoTarget);
+  assert.equal(manifest.artifacts[0].filename, 'ferryx-remote-helper');
+  assert.equal(manifest.artifacts[0].sha256, r.sha256);
+  assert.deepEqual(readFileSync(join(root, 'out', machoTarget, 'ferryx-remote-helper')), readFileSync(r.executable));
+});
+for (const bad of ['magic', 'cputype', 'elf']) test(`stager rejects darwin receipt with wrong ${bad}`, async t => {
+  const root = fixture(t);
+  const r = bad === 'cputype'
+    ? machoReceipt(root, 'aarch64-apple-darwin', { cpuType: CPU_TYPE['x86_64-apple-darwin'] })
+    : machoReceipt(root, 'aarch64-apple-darwin', { magic: bad === 'elf' ? 0x464c457f : 0xfeedface });
+  await assert.rejects(stage(root, { receipts: [r], requiredTargets: ['aarch64-apple-darwin'] }));
+  assert.equal(existsSync(join(root, 'out/manifest.json')), false);
+});
+test('stager still rejects a Mach-O artifact published under a linux target', async t => {
+  const root = fixture(t); const r = machoReceipt(root, 'aarch64-apple-darwin');
+  await assert.rejects(stage(root, { receipts: [{ ...r, target: 'aarch64-unknown-linux-gnu' }], requiredTargets: ['aarch64-unknown-linux-gnu'] }));
+  assert.equal(existsSync(join(root, 'out/manifest.json')), false);
+});

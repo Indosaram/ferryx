@@ -41,6 +41,20 @@ pub fn powershell_data(value: &str) -> String {
     )
 }
 
+/// Maps the Windows OpenSSH `DefaultShell` registry value (HKLM\SOFTWARE\OpenSSH)
+/// to a supported executor so SSH terminals open the same shell the host configured
+/// for interactive logins. Returns `None` for cmd.exe and anything else, leaving the
+/// guaranteed-available executor probe fallback in charge.
+pub fn executor_from_default_shell(value: &str) -> Option<RemoteExecutor> {
+    let trimmed = value.trim().trim_matches('"');
+    let program = trimmed.rsplit(['\\', '/']).next()?;
+    match program.to_ascii_lowercase().as_str() {
+        "pwsh.exe" | "pwsh" => Some(RemoteExecutor::Pwsh),
+        "powershell.exe" | "powershell" => Some(RemoteExecutor::Powershell),
+        _ => None,
+    }
+}
+
 impl RemoteExecutor {
     pub const fn program(self) -> &'static str {
         match self {
@@ -157,15 +171,8 @@ pub async fn detect(host: &SshHost) -> Result<RemoteEnvironment, IpcError> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
     let nonce = uuid::Uuid::new_v4().simple().to_string();
     let marker = format!("FERRYX_ENV_V1_{nonce}");
-    let executors = [
-        RemoteExecutor::Powershell,
-        RemoteExecutor::Pwsh,
-        RemoteExecutor::Sh,
-    ];
-    let mut last_error: Option<IpcError> = None;
-
-    for (index, &executor) in executors.iter().enumerate() {
-        let script = match executor {
+    let probe_script = |executor: RemoteExecutor| -> String {
+        match executor {
             RemoteExecutor::Sh => format!(
                 "os=$(uname -s) || exit; case \"$os\" in Linux|Darwin|FreeBSD|OpenBSD|NetBSD) ;; *) exit 2;; esac; \
                  g=0; command -v git >/dev/null 2>&1 && g=1; printf '{marker}\\000%s\\000%s\\000%s\\000%s\\000%s\\000' \
@@ -174,9 +181,21 @@ pub async fn detect(host: &SshHost) -> Result<RemoteEnvironment, IpcError> {
             RemoteExecutor::Powershell | RemoteExecutor::Pwsh => format!(
                 "if ([Environment]::OSVersion.Platform -ne 'Win32NT') {{ exit 2 }}; \
                  $g='0'; if (Get-Command git -ErrorAction SilentlyContinue) {{ $g='1' }}; \
-                 [Console]::Write(('{marker}','windows',$PSVersionTable.PSVersion.ToString(),$HOME,[IO.Path]::GetTempPath(),$g,'' -join [char]0))"
+                 $ds=''; $k=Get-ItemProperty 'HKLM:\\SOFTWARE\\OpenSSH' -ErrorAction SilentlyContinue; \
+                 if ($k -and $k.DefaultShell) {{ $ds=[string]$k.DefaultShell }}; \
+                 [Console]::Write(('{marker}','windows',$PSVersionTable.PSVersion.ToString(),$HOME,[IO.Path]::GetTempPath(),$g,$ds,'' -join [char]0))"
             ),
-        };
+        }
+    };
+    let executors = [
+        RemoteExecutor::Powershell,
+        RemoteExecutor::Pwsh,
+        RemoteExecutor::Sh,
+    ];
+    let mut last_error: Option<IpcError> = None;
+
+    for (index, &executor) in executors.iter().enumerate() {
+        let script = probe_script(executor);
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             if let Some(err) = last_error {
@@ -201,7 +220,11 @@ pub async fn detect(host: &SshHost) -> Result<RemoteEnvironment, IpcError> {
         let plan = direct::ssh_plan(host, executor.command(&script), false)?;
         match direct::bounded_output(&plan, step_timeout).await {
             Ok(output) => {
-                let fields = parse_fields(&output, &marker, 5)?;
+                let fields = parse_fields(
+                    &output,
+                    &marker,
+                    if executor == RemoteExecutor::Sh { 5 } else { 6 },
+                )?;
                 let platform = match (executor, fields[0]) {
                     (RemoteExecutor::Sh, "posix") => RemotePlatform::Posix,
                     (RemoteExecutor::Powershell | RemoteExecutor::Pwsh, "windows") => {
@@ -228,14 +251,63 @@ pub async fn detect(host: &SshHost) -> Result<RemoteEnvironment, IpcError> {
                         ))
                     }
                 };
-                return Ok(RemoteEnvironment {
+                let mut environment = RemoteEnvironment {
                     platform,
                     executor,
                     version: fields[1].into(),
                     home: fields[2].into(),
                     temp: fields[3].into(),
                     git,
-                });
+                };
+
+                // Windows terminals must open the shell the host configured via the
+                // OpenSSH DefaultShell registry value (mirrors the POSIX branch, which
+                // execs the account login shell). When the probed executor differs from
+                // the host decision, re-probe under it to validate it runs and report
+                // its true engine version; on any failure fall back to the probe result.
+                if platform == RemotePlatform::Windows {
+                    if let Some(preferred) = executor_from_default_shell(fields[5]) {
+                        if preferred != executor {
+                            let remaining =
+                                deadline.saturating_duration_since(tokio::time::Instant::now());
+                            if !remaining.is_zero() {
+                                let step = remaining.min(Duration::from_secs(4));
+                                let script2 = probe_script(preferred);
+                                let plan =
+                                    direct::ssh_plan(host, preferred.command(&script2), false)?;
+                                if let Ok(output2) = direct::bounded_output(&plan, step).await {
+                                    environment = parse_fields(&output2, &marker, 6)
+                                        .ok()
+                                        .filter(|fields| fields[0] == "windows")
+                                        .and_then(|fields| {
+                                            RemotePlatform::Windows
+                                                .validate_path(fields[2])
+                                                .ok()?;
+                                            RemotePlatform::Windows
+                                                .validate_path(fields[3])
+                                                .ok()?;
+                                            let git = match fields[4] {
+                                                "0" => false,
+                                                "1" => true,
+                                                _ => return None,
+                                            };
+                                            Some(RemoteEnvironment {
+                                                platform: RemotePlatform::Windows,
+                                                executor: preferred,
+                                                version: fields[1].into(),
+                                                home: fields[2].into(),
+                                                temp: fields[3].into(),
+                                                git,
+                                            })
+                                        })
+                                        .unwrap_or(environment);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                return Ok(environment);
             }
             Err(mut err) => {
                 let exit_code = err
@@ -249,13 +321,24 @@ pub async fn detect(host: &SshHost) -> Result<RemoteEnvironment, IpcError> {
                 // executor probes will also fail identically, so fail immediately.
                 if exit_code == Some(255) {
                     let authentication_failed = host.auth_method == super::SshAuthMethod::Password
-                        && err.details.as_ref().and_then(|v| v.get("stderr")).and_then(|v| v.as_str())
+                        && err
+                            .details
+                            .as_ref()
+                            .and_then(|v| v.get("stderr"))
+                            .and_then(|v| v.as_str())
                             .is_some_and(|text| text.contains("Permission denied"));
                     if authentication_failed {
-                        if let Some(generation) = credential_generation.as_deref() { super::password::clear_generation(host, generation)?; }
+                        if let Some(generation) = credential_generation.as_deref() {
+                            super::password::clear_generation(host, generation)?;
+                        }
                     }
                     if let Some(details) = err.details.as_mut() {
-                        details["stage"] = if authentication_failed { "authentication" } else { "environment" }.into();
+                        details["stage"] = if authentication_failed {
+                            "authentication"
+                        } else {
+                            "environment"
+                        }
+                        .into();
                         details["executor"] = executor.program().into();
                     }
                     return Err(err);
@@ -321,6 +404,30 @@ mod tests {
     }
 
     #[test]
+    fn default_shell_registry_value_maps_to_matching_executor() {
+        assert_eq!(
+            executor_from_default_shell(r"C:\Program Files\PowerShell\7\pwsh.exe"),
+            Some(RemoteExecutor::Pwsh)
+        );
+        assert_eq!(
+            executor_from_default_shell(r#""C:\Program Files\PowerShell\7\pwsh.exe""#),
+            Some(RemoteExecutor::Pwsh)
+        );
+        assert_eq!(
+            executor_from_default_shell(
+                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+            ),
+            Some(RemoteExecutor::Powershell)
+        );
+        assert_eq!(
+            executor_from_default_shell(r"C:\Windows\System32\cmd.exe"),
+            None
+        );
+        assert_eq!(executor_from_default_shell(""), None);
+        assert_eq!(executor_from_default_shell("/bin/bash"), None);
+    }
+
+    #[test]
     fn frames_accept_banners_but_reject_truncation_and_wrong_requests() {
         assert_eq!(
             parse_fields(b"banner\nframe\0one\0two\0", "frame", 2).unwrap(),
@@ -349,7 +456,11 @@ mod tests {
 
     #[test]
     fn non_fatal_timeout_has_no_exit_code_and_does_not_match_255() {
-        let err = error(IpcErrorCode::IoError, "transport", "SSH operation timed out");
+        let err = error(
+            IpcErrorCode::IoError,
+            "transport",
+            "SSH operation timed out",
+        );
         let exit_code = err
             .details
             .as_ref()

@@ -76,9 +76,14 @@ try {{
 }} finally {{ $listener.Stop() }}
 "#
         );
-        let plan = direct::ssh_plan(host, format!(
-            "{} -NoLogo -NoProfile -NonInteractive -Command -", environment.executor.program()
-        ), false)?;
+        let plan = direct::ssh_plan(
+            host,
+            format!(
+                "{} -NoLogo -NoProfile -NonInteractive -Command -",
+                environment.executor.program()
+            ),
+            false,
+        )?;
         let mut child = tokio::process::Command::new(&plan.program)
             .args(&plan.args)
             .envs(super::password::environment(&plan.args)?)
@@ -92,8 +97,13 @@ try {{
             "$ProgressPreference='SilentlyContinue'; $ErrorActionPreference='Stop'; try {{ {} }} catch {{ [Console]::Error.Write($_.Exception.Message); exit 1 }}\n",
             format!("Invoke-Expression {}", runtime::powershell_data(&script))
         );
-        let mut stdin = child.stdin.take().ok_or_else(|| IpcError::internal("Missing SSH state input"))?;
-        stdin.write_all(script.as_bytes()).await
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| IpcError::internal("Missing SSH state input"))?;
+        stdin
+            .write_all(script.as_bytes())
+            .await
             .map_err(|e| runtime::error(IpcErrorCode::IoError, "integration", &e.to_string()))?;
         drop(stdin);
         let stdout = child
@@ -110,10 +120,13 @@ try {{
                     return Err(std::io::Error::other("Missing SSH state listener response"));
                 }
                 if let Some(fields) = line.trim().strip_prefix(&prefix) {
-                    let (port, process_id) = fields.split_once(':')
-                        .ok_or_else(|| std::io::Error::other("Malformed state listener response"))?;
-                    return Ok((port.parse::<u16>().map_err(std::io::Error::other)?,
-                        process_id.parse::<u32>().map_err(std::io::Error::other)?));
+                    let (port, process_id) = fields.split_once(':').ok_or_else(|| {
+                        std::io::Error::other("Malformed state listener response")
+                    })?;
+                    return Ok((
+                        port.parse::<u16>().map_err(std::io::Error::other)?,
+                        process_id.parse::<u32>().map_err(std::io::Error::other)?,
+                    ));
                 }
             }
         })
@@ -136,7 +149,11 @@ try {{
         Ok(Self {
             child,
             reader,
-            endpoint: StateEndpoint { port, token, process_id },
+            endpoint: StateEndpoint {
+                port,
+                token,
+                process_id,
+            },
         })
     }
 

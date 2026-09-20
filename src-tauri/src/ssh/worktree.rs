@@ -193,7 +193,10 @@ pub fn resolve_remote_spawn_root(
             RemotePlatform::Posix => cwd.trim_end_matches('/') == repo_root.trim_end_matches('/'),
             RemotePlatform::Windows => {
                 cwd.replace('\\', "/").trim_end_matches('/').to_lowercase()
-                    == repo_root.replace('\\', "/").trim_end_matches('/').to_lowercase()
+                    == repo_root
+                        .replace('\\', "/")
+                        .trim_end_matches('/')
+                        .to_lowercase()
             }
         };
         if is_root {
@@ -333,7 +336,8 @@ pub async fn list_remote(
     let output = direct::bounded_output(&plan, Duration::from_secs(30))
         .await
         .map_err(|err| tag_error(err, "worktree-list"))?;
-    let fields = parse_fields(&output, &marker, 1).map_err(|err| tag_error(err, "worktree-list"))?;
+    let fields =
+        parse_fields(&output, &marker, 1).map_err(|err| tag_error(err, "worktree-list"))?;
     Ok(parse_worktree_porcelain(fields[0]))
 }
 
@@ -351,9 +355,7 @@ pub async fn create_remote(
     environment.platform.validate_path(path)?;
     let is_windows = environment.platform == RemotePlatform::Windows;
     let branch = crate::worktree::manager::WorktreeManager::format_branch_name_platform(
-        ws_segment,
-        slug,
-        is_windows,
+        ws_segment, slug, is_windows,
     )
     .map_err(|err| IpcError::new(IpcErrorCode::InvalidNamespace, err.to_string()))?;
     let script = worktree_create_script(environment.platform, repo_root, &branch, path, base_ref);
@@ -426,7 +428,8 @@ mod tests {
         assert!(posix.contains("git -C '/home/user/repo' worktree list --porcelain"));
         assert!(posix.contains("MARKER_LIST\\000%s\\000"));
 
-        let windows = worktree_list_script(RemotePlatform::Windows, r"C:\Users\sook\repo", "MARKER_WIN");
+        let windows =
+            worktree_list_script(RemotePlatform::Windows, r"C:\Users\sook\repo", "MARKER_WIN");
         assert!(windows.contains("Invoke-FerryxGit"));
         assert!(windows.contains("'worktree','list','--porcelain'"));
         assert!(windows.contains("MARKER_WIN"));
@@ -440,7 +443,8 @@ mod tests {
             "/srv/repo/.orca-worktrees/wt-1",
             false,
         );
-        assert!(posix_safe.contains("git -C '/srv/repo' worktree remove '/srv/repo/.orca-worktrees/wt-1'"));
+        assert!(posix_safe
+            .contains("git -C '/srv/repo' worktree remove '/srv/repo/.orca-worktrees/wt-1'"));
         assert!(!posix_safe.contains("--force"));
 
         let posix_force = worktree_remove_script(
@@ -449,7 +453,9 @@ mod tests {
             "/srv/repo/.orca-worktrees/wt-1",
             true,
         );
-        assert!(posix_force.contains("git -C '/srv/repo' worktree remove --force '/srv/repo/.orca-worktrees/wt-1'"));
+        assert!(posix_force.contains(
+            "git -C '/srv/repo' worktree remove --force '/srv/repo/.orca-worktrees/wt-1'"
+        ));
 
         let win_safe = worktree_remove_script(
             RemotePlatform::Windows,
@@ -485,7 +491,8 @@ mod tests {
         let ws_segment = derive_ws_segment(raw_ws_id).expect("valid segment");
         assert_eq!(ws_segment, "ssh-0123456789ab");
 
-        let branch = WorktreeManager::format_branch_name(&ws_segment, "my-feature").expect("valid branch");
+        let branch =
+            WorktreeManager::format_branch_name(&ws_segment, "my-feature").expect("valid branch");
         assert_eq!(branch, "orca/ssh-0123456789ab/my-feature");
 
         // Posix create script with base_ref
@@ -530,27 +537,85 @@ mod tests {
 
     #[test]
     fn red_path_inside_root_guard() {
-        assert!(validate_path_inside_root(RemotePlatform::Posix, "/home/user/repo", "/home/user/repo/.orca-worktrees/wt-1").is_ok());
-        assert!(validate_path_inside_root(RemotePlatform::Windows, r"C:\Users\sook\repo", r"C:\Users\sook\repo\.orca-worktrees\wt-1").is_ok());
-        assert!(validate_path_inside_root(RemotePlatform::Windows, r"C:/Users/sook/repo", r"C:\Users\sook\repo\.orca-worktrees\wt-1").is_ok());
+        assert!(validate_path_inside_root(
+            RemotePlatform::Posix,
+            "/home/user/repo",
+            "/home/user/repo/.orca-worktrees/wt-1"
+        )
+        .is_ok());
+        assert!(validate_path_inside_root(
+            RemotePlatform::Windows,
+            r"C:\Users\sook\repo",
+            r"C:\Users\sook\repo\.orca-worktrees\wt-1"
+        )
+        .is_ok());
+        assert!(validate_path_inside_root(
+            RemotePlatform::Windows,
+            r"C:/Users/sook/repo",
+            r"C:\Users\sook\repo\.orca-worktrees\wt-1"
+        )
+        .is_ok());
 
         // Repo root itself cannot be deleted
-        assert!(validate_path_inside_root(RemotePlatform::Posix, "/home/user/repo", "/home/user/repo").is_err());
+        assert!(validate_path_inside_root(
+            RemotePlatform::Posix,
+            "/home/user/repo",
+            "/home/user/repo"
+        )
+        .is_err());
         // Sibling folder cannot be deleted
-        assert!(validate_path_inside_root(RemotePlatform::Posix, "/home/user/repo", "/home/user/repo-other/wt").is_err());
+        assert!(validate_path_inside_root(
+            RemotePlatform::Posix,
+            "/home/user/repo",
+            "/home/user/repo-other/wt"
+        )
+        .is_err());
         // Traversal cannot be deleted
-        assert!(validate_path_inside_root(RemotePlatform::Posix, "/home/user/repo", "/home/user/repo/../secret").is_err());
-        assert!(validate_path_inside_root(RemotePlatform::Posix, "/home/user/repo", "/etc/passwd").is_err());
+        assert!(validate_path_inside_root(
+            RemotePlatform::Posix,
+            "/home/user/repo",
+            "/home/user/repo/../secret"
+        )
+        .is_err());
+        assert!(
+            validate_path_inside_root(RemotePlatform::Posix, "/home/user/repo", "/etc/passwd")
+                .is_err()
+        );
 
         // Fix 1 Regression tests:
         // Posix: no backslash translation
-        assert!(validate_path_inside_root(RemotePlatform::Posix, "/srv/repo", r"/srv/repo\outside").is_err());
-        assert!(validate_path_inside_root(RemotePlatform::Posix, "/srv/repo", "/srv/repo-other/x").is_err());
-        assert!(validate_path_inside_root(RemotePlatform::Posix, "/srv/repo", "/srv/repo/.orca-worktrees/wt-1").is_ok());
-        assert!(validate_path_inside_root(RemotePlatform::Posix, "/srv/repo", "/srv/repo").is_err());
+        assert!(validate_path_inside_root(
+            RemotePlatform::Posix,
+            "/srv/repo",
+            r"/srv/repo\outside"
+        )
+        .is_err());
+        assert!(
+            validate_path_inside_root(RemotePlatform::Posix, "/srv/repo", "/srv/repo-other/x")
+                .is_err()
+        );
+        assert!(validate_path_inside_root(
+            RemotePlatform::Posix,
+            "/srv/repo",
+            "/srv/repo/.orca-worktrees/wt-1"
+        )
+        .is_ok());
+        assert!(
+            validate_path_inside_root(RemotePlatform::Posix, "/srv/repo", "/srv/repo").is_err()
+        );
         // Windows: case and separator insensitive, traversal rejected
-        assert!(validate_path_inside_root(RemotePlatform::Windows, r"C:\Repo", r"c:\repo\.orca-worktrees\wt-1").is_ok());
-        assert!(validate_path_inside_root(RemotePlatform::Windows, r"C:\Repo", r"C:\Repo\..\secret").is_err());
+        assert!(validate_path_inside_root(
+            RemotePlatform::Windows,
+            r"C:\Repo",
+            r"c:\repo\.orca-worktrees\wt-1"
+        )
+        .is_ok());
+        assert!(validate_path_inside_root(
+            RemotePlatform::Windows,
+            r"C:\Repo",
+            r"C:\Repo\..\secret"
+        )
+        .is_err());
     }
 
     #[test]
@@ -606,8 +671,13 @@ mod tests {
     fn red_posix_script_builders_executable_behavior() {
         let dir = tempfile::tempdir().expect("tempdir");
         let repo_root_path = dir.path().canonicalize().expect("canonicalize");
-        let portable_root = crate::worktree::strip_verbatim_prefix(repo_root_path.to_str().expect("repo root str"));
-        let portable_root = if cfg!(windows) { portable_root.replace('\\', "/") } else { portable_root };
+        let portable_root =
+            crate::worktree::strip_verbatim_prefix(repo_root_path.to_str().expect("repo root str"));
+        let portable_root = if cfg!(windows) {
+            portable_root.replace('\\', "/")
+        } else {
+            portable_root
+        };
         let repo_root = portable_root.as_str();
 
         let init_status = std::process::Command::new("git")
@@ -635,23 +705,22 @@ mod tests {
         assert!(commit_status.success());
 
         let ws_segment = derive_ws_segment("ssh:0123456789abcdef").expect("valid segment");
-        let branch = WorktreeManager::format_branch_name(&ws_segment, "feat-test").expect("valid branch");
+        let branch =
+            WorktreeManager::format_branch_name(&ws_segment, "feat-test").expect("valid branch");
         let wt_path = format!("{repo_root}/.orca-worktrees/wt-feat-test");
 
-        let create_script = worktree_create_script(
-            RemotePlatform::Posix,
-            repo_root,
-            &branch,
-            &wt_path,
-            None,
-        );
+        let create_script =
+            worktree_create_script(RemotePlatform::Posix, repo_root, &branch, &wt_path, None);
 
         let bash = if cfg!(windows) {
             let git = std::env::split_paths(&std::env::var_os("PATH").expect("PATH"))
                 .map(|dir| dir.join("git.exe"))
-                .find(|path| path.is_file()).expect("Git for Windows on PATH");
+                .find(|path| path.is_file())
+                .expect("Git for Windows on PATH");
             git.parent().unwrap().parent().unwrap().join("bin/bash.exe")
-        } else { std::path::PathBuf::from("bash") };
+        } else {
+            std::path::PathBuf::from("bash")
+        };
         let create_output = std::process::Command::new(&bash)
             .args(["-c", &create_script])
             .output()
@@ -684,7 +753,10 @@ mod tests {
             .iter()
             .find(|wt| wt.path == wt_path)
             .expect("created worktree in porcelain listing");
-        assert_eq!(created_wt.branch.as_deref(), Some("orca/ssh-0123456789ab/feat-test"));
+        assert_eq!(
+            created_wt.branch.as_deref(),
+            Some("orca/ssh-0123456789ab/feat-test")
+        );
     }
 
     #[test]
@@ -750,23 +822,14 @@ mod tests {
             ws_id: "agent".into(),
             slug: "feature-1".into(),
         };
-        let res_posix = resolve_remote_spawn_root(
-            RemotePlatform::Posix,
-            "/srv/repo",
-            Some(&wt),
-            None,
-        )
-        .unwrap();
+        let res_posix =
+            resolve_remote_spawn_root(RemotePlatform::Posix, "/srv/repo", Some(&wt), None).unwrap();
         assert_eq!(res_posix, "/srv/repo/.orca-worktrees/wt-feature-1");
 
         // backslash variant (windows)
-        let res_win = resolve_remote_spawn_root(
-            RemotePlatform::Windows,
-            r"C:\Repo",
-            Some(&wt),
-            None,
-        )
-        .unwrap();
+        let res_win =
+            resolve_remote_spawn_root(RemotePlatform::Windows, r"C:\Repo", Some(&wt), None)
+                .unwrap();
         assert_eq!(res_win, r"C:\Repo\.orca-worktrees\wt-feature-1");
 
         // empty slug rejected with IpcErrorCode::InvalidArgument
@@ -774,13 +837,9 @@ mod tests {
             ws_id: "agent".into(),
             slug: "".into(),
         };
-        let err = resolve_remote_spawn_root(
-            RemotePlatform::Posix,
-            "/srv/repo",
-            Some(&empty_wt),
-            None,
-        )
-        .unwrap_err();
+        let err =
+            resolve_remote_spawn_root(RemotePlatform::Posix, "/srv/repo", Some(&empty_wt), None)
+                .unwrap_err();
         assert_eq!(err.code, IpcErrorCode::InvalidArgument);
 
         // slug containing .. rejected
@@ -809,50 +868,29 @@ mod tests {
         .is_err());
 
         // none -> repo_root
-        let res_none = resolve_remote_spawn_root(
-            RemotePlatform::Posix,
-            "/srv/repo",
-            None,
-            None,
-        )
-        .unwrap();
+        let res_none =
+            resolve_remote_spawn_root(RemotePlatform::Posix, "/srv/repo", None, None).unwrap();
         assert_eq!(res_none, "/srv/repo");
 
         // cwd equal to repo_root ok (posix and windows)
-        let res_root_posix = resolve_remote_spawn_root(
-            RemotePlatform::Posix,
-            "/srv/repo",
-            None,
-            Some("/srv/repo"),
-        )
-        .unwrap();
+        let res_root_posix =
+            resolve_remote_spawn_root(RemotePlatform::Posix, "/srv/repo", None, Some("/srv/repo"))
+                .unwrap();
         assert_eq!(res_root_posix, "/srv/repo");
 
-        let res_root_slash = resolve_remote_spawn_root(
-            RemotePlatform::Posix,
-            "/srv/repo",
-            None,
-            Some("/srv/repo/"),
-        )
-        .unwrap();
+        let res_root_slash =
+            resolve_remote_spawn_root(RemotePlatform::Posix, "/srv/repo", None, Some("/srv/repo/"))
+                .unwrap();
         assert_eq!(res_root_slash, "/srv/repo");
 
-        let res_root_win = resolve_remote_spawn_root(
-            RemotePlatform::Windows,
-            r"C:\Repo",
-            None,
-            Some(r"C:\Repo"),
-        )
-        .unwrap();
+        let res_root_win =
+            resolve_remote_spawn_root(RemotePlatform::Windows, r"C:\Repo", None, Some(r"C:\Repo"))
+                .unwrap();
         assert_eq!(res_root_win, r"C:\Repo");
 
-        let res_root_win_ci = resolve_remote_spawn_root(
-            RemotePlatform::Windows,
-            r"C:\Repo",
-            None,
-            Some(r"c:\repo\"),
-        )
-        .unwrap();
+        let res_root_win_ci =
+            resolve_remote_spawn_root(RemotePlatform::Windows, r"C:\Repo", None, Some(r"c:\repo\"))
+                .unwrap();
         assert_eq!(res_root_win_ci, r"C:\Repo");
     }
 }
