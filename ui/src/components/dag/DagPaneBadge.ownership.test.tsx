@@ -28,6 +28,24 @@ describe("DAG badge exact pane ownership", () => {
     },
   );
 
+  it("rescues a session-owned run stored under an unrelated project path", () => {
+    dagStore.applySnapshot("/other/repo", {
+      ...snapshot, runId: "run", status: "running", rootSessionId: "current-session",
+    });
+    render(<DagPaneBadge projectPath="/repo" paneId="pane"
+      providerSessionId="current-session" agentPresent agentWorking />);
+    expect(screen.getByTestId("dag-pane-badge")).toBeInTheDocument();
+  });
+
+  it("does not leak other projects' unowned runs into a pane", () => {
+    dagStore.applySnapshot("/other/repo", {
+      ...snapshot, runId: "run", status: "running", rootSessionId: "foreign-session",
+    });
+    render(<DagPaneBadge projectPath="/repo" paneId="pane"
+      providerSessionId="current-session" agentPresent agentWorking />);
+    expect(screen.queryByTestId("dag-pane-badge")).not.toBeInTheDocument();
+  });
+
   it("hides an unresolved owner's run on an idle agent pane", () => {
     dagStore.applySnapshot("/repo", {
       ...snapshot, runId: "run", status: "running", rootSessionId: "foreign-session",

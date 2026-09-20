@@ -54,7 +54,7 @@ describe("DagPaneBadge", () => {
     expect(first.container.querySelector("[data-testid=dag-pane-badge]")).toBeNull();
   });
 
-  it("idle hidden: renders null when projectPath is undefined or empty", () => {
+  it("hides unowned runs even without a projectPath, but surfaces session-owned ones", () => {
     const runningRun: DagRunSnapshot = {
       ...baseSnapshot,
       runId: "run-active-1",
@@ -62,12 +62,16 @@ describe("DagPaneBadge", () => {
     };
     dagStore.applySnapshot("/repo/my-project", runningRun);
 
-    const { unmount } = render(<DagPaneBadge providerSessionId="provider-a" projectPath={undefined} agentWorking agentPresent paneId="pane-a" />);
+    const { unmount } = render(<DagPaneBadge providerSessionId="provider-b" projectPath={undefined} agentWorking agentPresent paneId="pane-a" />);
     expect(screen.queryByTestId("dag-pane-badge")).not.toBeInTheDocument();
     unmount();
 
-    render(<DagPaneBadge providerSessionId="provider-a" projectPath="" agentWorking agentPresent paneId="pane-a" />);
+    render(<DagPaneBadge providerSessionId="provider-b" projectPath="" agentWorking agentPresent paneId="pane-a" />);
     expect(screen.queryByTestId("dag-pane-badge")).not.toBeInTheDocument();
+    unmount();
+
+    render(<DagPaneBadge providerSessionId="provider-a" projectPath={undefined} agentWorking agentPresent paneId="pane-a" />);
+    expect(screen.getByTestId("dag-pane-badge")).toBeInTheDocument();
   });
 
   it("retains completed and failed runs when retainSettled is true", () => {
@@ -127,11 +131,12 @@ describe("DagPaneBadge", () => {
     expect(button).toHaveStyle({ filter: "drop-shadow(0 0 4px currentColor)" });
   });
 
-  it("nonmatching project hidden: does not render when runs belong to another project", () => {
+  it("nonmatching project hidden: unowned runs of another project never render", () => {
     const runningRun: DagRunSnapshot = {
       ...baseSnapshot,
       runId: "run-other-1",
       status: "running",
+      rootSessionId: "provider-b",
     };
     dagStore.applySnapshot("/repo/project-a", runningRun);
 
@@ -139,7 +144,7 @@ describe("DagPaneBadge", () => {
     expect(screen.queryByTestId("dag-pane-badge")).not.toBeInTheDocument();
   });
 
-  it("nested cwd matching respects directory boundaries and does not prefix-match sibling directories", () => {
+  it("session-owned runs surface regardless of which project path their journal lives under", () => {
     const runningRun: DagRunSnapshot = {
       ...baseSnapshot,
       runId: "run-root-1",
@@ -147,29 +152,11 @@ describe("DagPaneBadge", () => {
     };
     dagStore.applySnapshot("/repo/a", runningRun);
 
-    // Exact match
-    const { unmount: unmount1 } = render(<DagPaneBadge providerSessionId="provider-a" projectPath="/repo/a" agentWorking agentPresent paneId="pane-a" />);
-    expect(screen.getByTestId("dag-pane-badge")).toBeInTheDocument();
-    unmount1();
-
-    // Trailing slash match
-    const { unmount: unmount2 } = render(<DagPaneBadge providerSessionId="provider-a" projectPath="/repo/a/" agentWorking agentPresent paneId="pane-a" />);
-    expect(screen.getByTestId("dag-pane-badge")).toBeInTheDocument();
-    unmount2();
-
-    // Nested cwd match
-    const { unmount: unmount3 } = render(<DagPaneBadge providerSessionId="provider-a" projectPath="/repo/a/nested/subdir" agentWorking agentPresent paneId="pane-a" />);
-    expect(screen.getByTestId("dag-pane-badge")).toBeInTheDocument();
-    unmount3();
-
-    // Sibling directory with shared prefix must NOT match (/repo/a vs /repo/another)
-    const { unmount: unmount4 } = render(<DagPaneBadge providerSessionId="provider-a" projectPath="/repo/another" agentWorking agentPresent paneId="pane-a" />);
-    expect(screen.queryByTestId("dag-pane-badge")).not.toBeInTheDocument();
-    unmount4();
-
-    // Sibling directory /repo/a-pkg must NOT match
-    render(<DagPaneBadge providerSessionId="provider-a" projectPath="/repo/a-pkg" agentWorking agentPresent paneId="pane-a" />);
-    expect(screen.queryByTestId("dag-pane-badge")).not.toBeInTheDocument();
+    for (const projectPath of [undefined, "/repo/another", "/repo/a-pkg", "/totally/elsewhere"]) {
+      const { unmount } = render(<DagPaneBadge providerSessionId="provider-a" projectPath={projectPath} agentWorking agentPresent paneId="pane-a" />);
+      expect(screen.getByTestId("dag-pane-badge")).toBeInTheDocument();
+      unmount();
+    }
   });
 
   it("click opens a large centered modal with live graph and closes on backdrop click", () => {

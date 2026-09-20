@@ -1165,7 +1165,23 @@ export async function installCliLauncher(): Promise<CliLauncherStatus> {
 
 export type DagRunUpdatedEvent = {
   projectPath: string;
+  generation?: number;
   snapshot: DagRunSnapshot;
+};
+
+export type DagWatchFailureCode =
+  | "helper_missing"
+  | "capability_missing"
+  | "authentication"
+  | "unavailable";
+
+/** Terminal DAG-watch outcome pushed by the backend when retrying stopped for good. */
+export type DagWatchStatusEvent = {
+  projectPath: string;
+  hostId: string;
+  code: DagWatchFailureCode | (string & {});
+  message: string;
+  generation?: number | null;
 };
 
 export async function listenDagRunUpdated(
@@ -1175,14 +1191,55 @@ export async function listenDagRunUpdated(
   return listen<DagRunUpdatedEvent>("dag-run-updated", (event) => handler(event.payload));
 }
 
+export async function listenDagWatchStatus(
+  handler: (event: DagWatchStatusEvent) => void,
+): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listen<DagWatchStatusEvent>("dag-watch-status", (event) => handler(event.payload));
+}
+
 export type DagWatchProjectResult = {
   projectPath: string;
+  generation?: number | null;
   runs: DagRunSnapshot[];
+  failure?: DagWatchStatusEvent | null;
 };
 
 export async function watchDagProject(projectPath: string): Promise<DagWatchProjectResult> {
   if (!isTauri()) return { projectPath, runs: [] };
   return invokeCommand<DagWatchProjectResult>("dag_watch_project", { projectPath });
+}
+
+export async function watchDagPairedProject(
+  workspaceId: string,
+  remotePath: string,
+): Promise<DagWatchProjectResult> {
+  if (!isTauri()) return { projectPath: `paired:${workspaceId}:${remotePath}`, runs: [] };
+  return invokeCommand<DagWatchProjectResult>("dag_watch_paired_project", {
+    workspaceId,
+    remotePath,
+  });
+}
+
+export async function watchDagSshProject(
+  workspaceId: string,
+  remotePath: string,
+): Promise<DagWatchProjectResult> {
+  if (!isTauri()) return { projectPath: `ssh:${workspaceId}:${remotePath}`, runs: [] };
+  return invokeCommand<DagWatchProjectResult>("dag_watch_ssh_project", {
+    workspaceId,
+    remotePath,
+  });
+}
+
+export async function unwatchDagProject(projectPath: string): Promise<void> {
+  if (!isTauri()) return;
+  return invokeCommand<void>("dag_unwatch_project", { projectPath });
+}
+
+export async function discoverDagWatchRoots(projectRoots: readonly string[]): Promise<string[]> {
+  if (!isTauri()) return [];
+  return invokeCommand<string[]>("dag_discover_watch_roots", { projectRoots: [...projectRoots] });
 }
 
 export async function dagReadNodeArtifact(

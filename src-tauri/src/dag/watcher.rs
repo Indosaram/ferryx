@@ -212,6 +212,7 @@ async fn run_watcher_loop_observed(
     loop {
         tokio::select! {
             biased;
+            _ = sink.closed() => break,
             _ = async {
                 match lose_watch.as_mut() {
                     Some(signal) => { let _ = signal.await; }
@@ -301,6 +302,35 @@ mod tests {
         })
         .await
         .expect("watcher state deadline");
+    }
+
+    #[tokio::test]
+    async fn test_dag_watcher_exits_when_idle_sink_closes() {
+        let temp = tempfile::tempdir().expect("journal root");
+        let root = temp.path().to_path_buf();
+        std::fs::create_dir_all(root.join(".omo/senpi-task/dag/runs")).unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel(10);
+        let (events_tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let mut task = tokio::spawn(run_watcher_loop_observed(
+            root.to_string_lossy().into_owned(),
+            root,
+            tx,
+            WatcherHooks {
+                events: Some(events_tx),
+                scan: None,
+            },
+            None,
+        ));
+        next_event(&mut events, "scanned").await;
+        drop(rx);
+        let result = tokio::time::timeout(Duration::from_secs(3), &mut task).await;
+        if result.is_err() {
+            task.abort();
+            let _ = task.await;
+        }
+        result
+            .expect("idle watcher must release its native watch after sink closure")
+            .expect("watcher task");
     }
 
     #[tokio::test]

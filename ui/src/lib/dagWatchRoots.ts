@@ -1,5 +1,24 @@
 import type { TerminalSession } from "./types";
 
+export function isLocalDagProject(project: { readonly target?: { readonly kind: string } | null } | null | undefined): boolean {
+  if (!project) return true;
+  return project.target?.kind !== "ssh" && project.target?.kind !== "pairedDaemon";
+}
+
+export function remoteProjectsWatchKey(
+  projects: readonly {
+    readonly workspaceId: string;
+    readonly repoRoot: string;
+    readonly target?: { readonly kind: string } | null;
+  }[]
+): string {
+  return projects
+    .filter((project) => !isLocalDagProject(project))
+    .map((project) => `${project.workspaceId}:${project.repoRoot}:${project.target?.kind ?? ""}`)
+    .sort()
+    .join("\n");
+}
+
 /**
  * A dag journal is written under the directory its agent runs in - the session's own root,
  * which is often not a registered project. Watching only project roots hides every other

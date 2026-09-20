@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
 import type { DagNodeSnapshot } from "../../lib/dagTypes";
-import { DagNodeInspector } from "./DagNodeInspector";
+import { DagNodeInspector, isRemoteDagProjectKey } from "./DagNodeInspector";
 import * as tauriBridge from "../../lib/tauri";
 
 vi.mock("../../lib/tauri", () => ({
@@ -136,6 +136,95 @@ describe("DagNodeInspector", () => {
 
     expect(screen.getByText("task_error")).toBeInTheDocument();
     expect(screen.getByText("Child turn exited abnormally")).toBeInTheDocument();
+  });
+
+  describe("remote synthetic project keys", () => {
+    const remoteKeys = [
+      ["paired", "paired:ws-42:/srv/remote/repo"],
+      ["ssh", "ssh:ws-42:/srv/remote/repo"],
+      ["paired with colons in remote path", "paired:ws-42:/srv/repo:main:v2"],
+      ["ssh with colons in remote path", "ssh:ws-42:C:/srv/repo:main"],
+    ] as const;
+
+    for (const [label, projectPath] of remoteKeys) {
+      it(`never invokes local artifact IPC for a ${label} key`, async () => {
+        render(
+          <DagNodeInspector
+            node={mockNode()}
+            projectPath={projectPath}
+            onClose={vi.fn()}
+          />,
+        );
+
+        expect(await screen.findByTestId("dag-artifact-remote-unavailable")).toBeInTheDocument();
+        expect(tauriBridge.dagReadNodeArtifact).not.toHaveBeenCalled();
+      });
+    }
+
+    it("keeps prompt, stats and error tabs usable for a remote node", async () => {
+      const remoteFailure = mockNode({
+        state: "failed",
+        error: {
+          code: "task_error",
+          message: "Remote child turn exited abnormally",
+          at: "2026-09-19T10:01:00.000Z",
+        },
+      });
+
+      render(
+        <DagNodeInspector
+          node={remoteFailure}
+          projectPath="paired:ws-42:/srv/remote/repo"
+          onClose={vi.fn()}
+        />,
+      );
+
+      expect(screen.getByText("task_error")).toBeInTheDocument();
+      expect(screen.getByText("Remote child turn exited abnormally")).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("tab", { name: /prompt/i }));
+      expect(
+        screen.getByText("TASK: Compile native binary. DELIVERABLE: bin/out. SCOPE: src."),
+      ).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("tab", { name: /stats/i }));
+      expect(screen.getByText("15,600")).toBeInTheDocument();
+      expect(screen.getByText("750 tok/s")).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("tab", { name: /deliverable/i }));
+      expect(await screen.findByTestId("dag-artifact-remote-unavailable")).toBeInTheDocument();
+      expect(screen.getByText("dag/results/dag_123/step_1.txt")).toBeInTheDocument();
+      expect(tauriBridge.dagReadNodeArtifact).not.toHaveBeenCalled();
+    });
+
+    it("still reads artifacts for local project paths", async () => {
+      vi.mocked(tauriBridge.dagReadNodeArtifact).mockResolvedValueOnce("Local artifact body");
+
+      render(
+        <DagNodeInspector
+          node={mockNode()}
+          projectPath="/test/project"
+          onClose={vi.fn()}
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Local artifact body")).toBeInTheDocument();
+      });
+      expect(tauriBridge.dagReadNodeArtifact).toHaveBeenCalledWith(
+        "/test/project",
+        "dag/results/dag_123/step_1.txt",
+      );
+      expect(screen.queryByTestId("dag-artifact-remote-unavailable")).not.toBeInTheDocument();
+    });
+
+    it("classifies keys by transport prefix only", () => {
+      expect(isRemoteDagProjectKey("paired:ws:/srv/repo")).toBe(true);
+      expect(isRemoteDagProjectKey("ssh:ws:/srv/repo:main")).toBe(true);
+      expect(isRemoteDagProjectKey("/Users/me/paired:ws")).toBe(false);
+      expect(isRemoteDagProjectKey("/srv/ssh:repo")).toBe(false);
+      expect(isRemoteDagProjectKey(undefined)).toBe(false);
+    });
   });
 
   it("supports close and navigation between nodes", () => {
