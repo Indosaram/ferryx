@@ -95,7 +95,9 @@ pub fn compute_wheel_outcome<T: TerminalEngine>(
         return Ok(TerminalWheelOutcome::WritePty(bytes));
     }
 
-    Ok(TerminalWheelOutcome::ScrollViewport(ScrollViewport::Delta(rows as isize)))
+    Ok(TerminalWheelOutcome::ScrollViewport(ScrollViewport::Delta(
+        rows as isize,
+    )))
 }
 
 #[cfg(test)]
@@ -106,16 +108,9 @@ mod tests {
     #[test]
     fn test_wheel_zero_rows_returns_none() {
         let terminal = NativeTerminal::new(80, 24).expect("terminal");
-        let outcome = compute_wheel_outcome(
-            &terminal,
-            None,
-            None,
-            0.0,
-            0.0,
-            0,
-            KeyModifiers::default(),
-        )
-        .expect("outcome");
+        let outcome =
+            compute_wheel_outcome(&terminal, None, None, 0.0, 0.0, 0, KeyModifiers::default())
+                .expect("outcome");
         assert_eq!(outcome, TerminalWheelOutcome::None);
     }
 
@@ -181,16 +176,8 @@ mod tests {
             shift: true,
             ..KeyModifiers::default()
         };
-        let outcome = compute_wheel_outcome(
-            &terminal,
-            None,
-            None,
-            10.0,
-            20.0,
-            -3,
-            shift_mods,
-        )
-        .expect("outcome");
+        let outcome = compute_wheel_outcome(&terminal, None, None, 10.0, 20.0, -3, shift_mods)
+            .expect("outcome");
         assert_eq!(
             outcome,
             TerminalWheelOutcome::ScrollViewport(ScrollViewport::Delta(-3))
@@ -204,16 +191,9 @@ mod tests {
         assert!(terminal.is_alternate_screen().expect("is alt"));
         assert!(!terminal.mouse_tracking_enabled().expect("tracking"));
 
-        let outcome_up = compute_wheel_outcome(
-            &terminal,
-            None,
-            None,
-            0.0,
-            0.0,
-            -2,
-            KeyModifiers::default(),
-        )
-        .expect("outcome up");
+        let outcome_up =
+            compute_wheel_outcome(&terminal, None, None, 0.0, 0.0, -2, KeyModifiers::default())
+                .expect("outcome up");
         match outcome_up {
             TerminalWheelOutcome::WritePty(bytes) => {
                 let s = String::from_utf8_lossy(&bytes);
@@ -225,16 +205,9 @@ mod tests {
             other => panic!("expected WritePty for alternate screen wheel up, got {other:?}"),
         }
 
-        let outcome_down = compute_wheel_outcome(
-            &terminal,
-            None,
-            None,
-            0.0,
-            0.0,
-            2,
-            KeyModifiers::default(),
-        )
-        .expect("outcome down");
+        let outcome_down =
+            compute_wheel_outcome(&terminal, None, None, 0.0, 0.0, 2, KeyModifiers::default())
+                .expect("outcome down");
         match outcome_down {
             TerminalWheelOutcome::WritePty(bytes) => {
                 let s = String::from_utf8_lossy(&bytes);
@@ -256,16 +229,8 @@ mod tests {
             shift: true,
             ..KeyModifiers::default()
         };
-        let outcome = compute_wheel_outcome(
-            &terminal,
-            None,
-            None,
-            0.0,
-            0.0,
-            2,
-            shift_mods,
-        )
-        .expect("outcome");
+        let outcome =
+            compute_wheel_outcome(&terminal, None, None, 0.0, 0.0, 2, shift_mods).expect("outcome");
         assert_eq!(
             outcome,
             TerminalWheelOutcome::ScrollViewport(ScrollViewport::Delta(2))
@@ -277,16 +242,9 @@ mod tests {
         let terminal = NativeTerminal::new(80, 24).expect("terminal");
         assert!(!terminal.is_alternate_screen().expect("is alt"));
 
-        let outcome = compute_wheel_outcome(
-            &terminal,
-            None,
-            None,
-            0.0,
-            0.0,
-            -3,
-            KeyModifiers::default(),
-        )
-        .expect("outcome");
+        let outcome =
+            compute_wheel_outcome(&terminal, None, None, 0.0, 0.0, -3, KeyModifiers::default())
+                .expect("outcome");
         assert_eq!(
             outcome,
             TerminalWheelOutcome::ScrollViewport(ScrollViewport::Delta(-3))

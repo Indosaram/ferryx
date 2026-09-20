@@ -74,7 +74,8 @@ pub fn initial_project_from_path(
             } else {
                 return Err(IpcError::from(WorktreeError::InvalidPath {
                     path: canonical,
-                    reason: "filesystem root cannot be registered as a startup workspace".to_string(),
+                    reason: "filesystem root cannot be registered as a startup workspace"
+                        .to_string(),
                 }));
             }
         } else {

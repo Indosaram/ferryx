@@ -25,6 +25,7 @@ use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, MainThreadMarker};
 use objc2_app_kit::{NSColor, NSView, NSWindow, NSWindowOrderingMode};
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+use objc2_quartz_core::CAMetalLayer;
 use raw_window_handle::{
     AppKitDisplayHandle, AppKitWindowHandle, DisplayHandle, HandleError, HasDisplayHandle,
     HasWindowHandle, RawDisplayHandle, RawWindowHandle, WindowHandle,
@@ -144,6 +145,7 @@ impl HasDisplayHandle for NativeChildViewHandle {
 /// macOS native child compositor target managing the layer-backed child NSView.
 pub struct MacosCompositorTarget {
     view_ptr: NonNull<c_void>,
+    layer_ptr: NonNull<c_void>,
     handle: Arc<NativeChildViewHandle>,
     frame_latch: Arc<AppKitFrameLatch>,
 }
@@ -224,7 +226,8 @@ unsafe fn apply_viewport(
                 &window,
                 crate::native_terminal::renderer::RendererTheme::from(
                     crate::terminal::preferences::cached_terminal_preferences().as_ref(),
-                ).background,
+                )
+                .background,
             );
         }
         let Some(bounds) = bounds else {
@@ -261,18 +264,15 @@ unsafe fn apply_viewport(
 
 /// Applies the compositing properties that keep terminal pixels unresampled.
 ///
-/// `contentsScale` belongs on the NSView backing layer: wgpu-hal's KVO observer
-/// watches that key and forwards it to the Metal layer it owns.
+/// The terminal owns its CAMetalLayer sublayer, so this function is the only
+/// UI-thread sync point for its frame and `contentsScale`; there is no KVO
+/// observer copying the backing layer onto it.
 ///
-/// The gravity and filter properties must NOT stay there. wgpu-hal 24
-/// (`src/metal/layer_observer.rs`) parents the real `CAMetalLayer` subclass as a
-/// **sublayer** of the backing layer and syncs only `contentsScale` and
-/// `bounds`; its own `setContentsGravity: kCAGravityTopLeft` is commented out
-/// upstream, so that layer keeps `kCAGravityResize` with `kCAFilterLinear`.
-/// Setting them on the backing layer is inert, which left the drawable stretched
-/// into the layer box and every glyph resampled whenever the two disagreed --
-/// the split-pane softness. Walking the sublayers instead makes a transient
-/// mismatch crop one edge rather than blur the whole frame.
+/// The gravity and filter properties must NOT ride on the backing layer. Setting
+/// them there is inert, which left the drawable stretched into the layer box and
+/// every glyph resampled whenever the two disagreed -- the split-pane softness.
+/// Walking the sublayers keeps a transient mismatch cropping one edge rather than
+/// blurring the whole frame.
 ///
 /// `setDrawableSize:` is deliberately never sent: the backing layer does not
 /// implement it and that call is the `199761a` SIGABRT.
@@ -308,6 +308,12 @@ unsafe fn configure_terminal_layers(view: &AnyObject, scale_factor: f64) {
             if !is_metal_layer {
                 continue;
             }
+            // The terminal owns this layer, so nothing observes the backing layer on its
+            // behalf: sync frame and scale directly. No `setDrawableSize` here; that
+            // remains the GPU thread's configure call.
+            let view_bounds: NSRect = msg_send![view, bounds];
+            let _: () = msg_send![sublayer, setFrame: view_bounds];
+            let _: () = msg_send![sublayer, setContentsScale: scale];
             let _: () = msg_send![sublayer, setContentsGravity: &*gravity];
             let _: () = msg_send![sublayer, setMagnificationFilter: &*nearest];
             let _: () = msg_send![sublayer, setMinificationFilter: &*nearest];
@@ -341,7 +347,8 @@ impl MacosCompositorTarget {
             ns_window,
             crate::native_terminal::renderer::RendererTheme::from(
                 crate::terminal::preferences::cached_terminal_preferences().as_ref(),
-            ).background,
+            )
+            .background,
         );
         let content_view = ns_window.contentView().ok_or_else(|| {
             NativeTerminalError::GpuPipelineError("NSWindow has no contentView".into())
@@ -361,9 +368,18 @@ impl MacosCompositorTarget {
                 let _: () = msg_send![layer, setOpaque: true];
             }
         }
-        // The Metal layer does not exist until wgpu creates the surface, so this
-        // only lands `contentsScale` here; every later `update_viewport` call
-        // configures the Metal sublayer once it is present.
+        // The terminal owns its CAMetalLayer instead of letting wgpu's raw-window-metal
+        // path create one: that path registers KVO observers on the view's backing layer and
+        // deregisters them from whichever thread drops the wgpu Surface, while the UI thread
+        // mutates the same layer during resize. A dedicated layer carries no observers, and
+        // `configure_terminal_layers` syncs its frame and scale on the UI thread.
+        let metal_layer = CAMetalLayer::new();
+        metal_layer.setContentsScale(backing_scale);
+        if let Some(layer) = layer {
+            unsafe {
+                let _: () = msg_send![layer, addSublayer: &*metal_layer];
+            }
+        }
         unsafe { configure_terminal_layers(&view, backing_scale) };
 
         // Initially hidden until an active terminal layout is positioned
@@ -379,10 +395,16 @@ impl MacosCompositorTarget {
                 NativeTerminalError::GpuPipelineError("Child view pointer is null".into())
             })?;
 
+        let raw_layer_ptr =
+            NonNull::new(Retained::into_raw(metal_layer) as *mut c_void).ok_or_else(|| {
+                NativeTerminalError::GpuPipelineError("Metal layer pointer is null".into())
+            })?;
+
         let handle = Arc::new(NativeChildViewHandle { raw_view_ptr });
 
         Ok(Self {
             view_ptr: raw_view_ptr,
+            layer_ptr: raw_layer_ptr,
             handle,
             frame_latch: Arc::new(AppKitFrameLatch::default()),
         })
@@ -391,6 +413,11 @@ impl MacosCompositorTarget {
     /// Returns the raw-window-handle target for wgpu surface creation.
     pub fn surface_target(&self) -> Arc<NativeChildViewHandle> {
         Arc::clone(&self.handle)
+    }
+
+    /// Raw pointer of the terminal-owned CAMetalLayer for wgpu surface creation.
+    pub fn surface_layer_ptr(&self) -> *mut c_void {
+        self.layer_ptr.as_ptr()
     }
 
     pub fn window_backing_scale_factor(&self) -> f64 {
@@ -423,7 +450,11 @@ impl MacosCompositorTarget {
         } else {
             let latch = Arc::clone(&self.frame_latch);
             dispatch2::DispatchQueue::main().exec_async(move || unsafe {
-                apply_viewport(&*(view_ptr as *const FerryxNativeTerminalView), bounds, &latch)
+                apply_viewport(
+                    &*(view_ptr as *const FerryxNativeTerminalView),
+                    bounds,
+                    &latch,
+                )
             });
         }
     }
@@ -508,25 +539,27 @@ impl MacosCompositorTarget {
 
 impl Drop for MacosCompositorTarget {
     fn drop(&mut self) {
-        let raw_ptr = self.view_ptr.as_ptr() as usize;
+        let raw_view_ptr = self.view_ptr.as_ptr() as usize;
+        let raw_layer_ptr = self.layer_ptr.as_ptr() as usize;
         if let Some(mtm) = MainThreadMarker::new() {
             let _ = mtm;
             unsafe {
-                if let Some(view) = Retained::from_raw(raw_ptr as *mut FerryxNativeTerminalView) {
+                if let Some(view) = Retained::from_raw(raw_view_ptr as *mut FerryxNativeTerminalView) {
                     view.removeFromSuperview();
                 }
+                let _ = Retained::from_raw(raw_layer_ptr as *mut CAMetalLayer);
             }
         } else {
             // When dropping from a worker thread, dispatch removeFromSuperview and release to main queue.
             dispatch2::DispatchQueue::main().exec_async(move || unsafe {
-                if let Some(view) = Retained::from_raw(raw_ptr as *mut FerryxNativeTerminalView) {
+                if let Some(view) = Retained::from_raw(raw_view_ptr as *mut FerryxNativeTerminalView) {
                     view.removeFromSuperview();
                 }
+                let _ = Retained::from_raw(raw_layer_ptr as *mut CAMetalLayer);
             });
         }
     }
 }
-
 
 #[cfg(test)]
 mod appkit_frame_latch_tests {
@@ -536,7 +569,10 @@ mod appkit_frame_latch_tests {
     fn repeated_identical_frames_apply_once() {
         let latch = AppKitFrameLatch::default();
         let frame = AppKitFrameLatch::key(10.0, 20.0, 800.0, 480.0, 2.0);
-        assert!(latch.needs_apply(frame), "the first frame must reach AppKit");
+        assert!(
+            latch.needs_apply(frame),
+            "the first frame must reach AppKit"
+        );
         for tick in 0..64 {
             assert!(
                 !latch.needs_apply(frame),

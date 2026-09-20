@@ -267,11 +267,21 @@ pub struct BrowserAutomationRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BrowserWaitCondition {
-    Selector { selector: String },
-    Text { text: String },
-    UrlContains { fragment: String },
-    LoadState { state: String },
-    Function { script: String },
+    Selector {
+        selector: String,
+    },
+    Text {
+        text: String,
+    },
+    UrlContains {
+        fragment: String,
+    },
+    LoadState {
+        state: String,
+    },
+    Function {
+        script: String,
+    },
     WithTimeout {
         inner: Box<BrowserWaitCondition>,
         timeout_ms: u64,
@@ -332,7 +342,11 @@ impl<'de> serde::Deserialize<'de> for BrowserWaitCondition {
         D: serde::Deserializer<'de>,
     {
         #[derive(Deserialize)]
-        #[serde(tag = "condition", rename_all = "camelCase", rename_all_fields = "camelCase")]
+        #[serde(
+            tag = "condition",
+            rename_all = "camelCase",
+            rename_all_fields = "camelCase"
+        )]
         enum TaggedCondition {
             #[serde(rename_all = "camelCase")]
             Selector {
@@ -420,15 +434,17 @@ impl<'de> serde::Deserialize<'de> for BrowserWaitCondition {
         }
 
         match Helper::deserialize(deserializer)? {
-            Helper::Tagged(TaggedCondition::Selector { selector, timeout_ms }) => {
-                Ok(wrap(Self::Selector { selector }, timeout_ms))
-            }
+            Helper::Tagged(TaggedCondition::Selector {
+                selector,
+                timeout_ms,
+            }) => Ok(wrap(Self::Selector { selector }, timeout_ms)),
             Helper::Tagged(TaggedCondition::Text { text, timeout_ms }) => {
                 Ok(wrap(Self::Text { text }, timeout_ms))
             }
-            Helper::Tagged(TaggedCondition::UrlContains { fragment, timeout_ms }) => {
-                Ok(wrap(Self::UrlContains { fragment }, timeout_ms))
-            }
+            Helper::Tagged(TaggedCondition::UrlContains {
+                fragment,
+                timeout_ms,
+            }) => Ok(wrap(Self::UrlContains { fragment }, timeout_ms)),
             Helper::Tagged(TaggedCondition::LoadState { state, timeout_ms }) => {
                 Ok(wrap(Self::LoadState { state }, timeout_ms))
             }
@@ -436,21 +452,22 @@ impl<'de> serde::Deserialize<'de> for BrowserWaitCondition {
                 Ok(wrap(Self::Function { script }, timeout_ms))
             }
             Helper::StringScript(script) => Ok(Self::Function { script }),
-            Helper::StringConditionWithTimeout { condition, timeout_ms } => {
-                Ok(wrap(Self::Function { script: condition }, timeout_ms))
-            }
+            Helper::StringConditionWithTimeout {
+                condition,
+                timeout_ms,
+            } => Ok(wrap(Self::Function { script: condition }, timeout_ms)),
             Helper::UntaggedScript { script, timeout_ms } => {
                 Ok(wrap(Self::Function { script }, timeout_ms))
             }
-            Helper::UntaggedSelector { selector, timeout_ms } => {
-                Ok(wrap(Self::Selector { selector }, timeout_ms))
-            }
-            Helper::UntaggedText { text, timeout_ms } => {
-                Ok(wrap(Self::Text { text }, timeout_ms))
-            }
-            Helper::UntaggedUrl { fragment, timeout_ms } => {
-                Ok(wrap(Self::UrlContains { fragment }, timeout_ms))
-            }
+            Helper::UntaggedSelector {
+                selector,
+                timeout_ms,
+            } => Ok(wrap(Self::Selector { selector }, timeout_ms)),
+            Helper::UntaggedText { text, timeout_ms } => Ok(wrap(Self::Text { text }, timeout_ms)),
+            Helper::UntaggedUrl {
+                fragment,
+                timeout_ms,
+            } => Ok(wrap(Self::UrlContains { fragment }, timeout_ms)),
             Helper::UntaggedLoadState { state, timeout_ms } => {
                 Ok(wrap(Self::LoadState { state }, timeout_ms))
             }
@@ -500,10 +517,8 @@ mod tests {
         );
 
         // Tagged form
-        let from_tagged: BrowserWaitCondition = serde_json::from_str(
-            r##"{"condition":"selector","selector":"#ready"}"##,
-        )
-        .unwrap();
+        let from_tagged: BrowserWaitCondition =
+            serde_json::from_str(r##"{"condition":"selector","selector":"#ready"}"##).unwrap();
         assert_eq!(
             from_tagged,
             BrowserWaitCondition::Selector {
@@ -645,8 +660,11 @@ mod tests {
             assert_eq!(parsed, expected_cond, "Failed for JSON: {}", json_str);
             let reserialized = serde_json::to_string(&parsed).unwrap();
             let reparsed: BrowserWaitCondition = serde_json::from_str(&reserialized).unwrap();
-            assert_eq!(reparsed, expected_cond, "Failed round-trip for: {}", json_str);
+            assert_eq!(
+                reparsed, expected_cond,
+                "Failed round-trip for: {}",
+                json_str
+            );
         }
     }
 }
-

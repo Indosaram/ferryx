@@ -1,7 +1,10 @@
 //! Private durable registration state, independent of GUI and SSH snapshots.
 use crate::{remote::machine_protocol::Availability, scoped_contracts::Epoch};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, path::{Path, PathBuf}};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -27,7 +30,15 @@ pub struct Catalog {
 }
 
 impl Default for Catalog {
-    fn default() -> Self { Self { version: 1, revision: Epoch(0), workspaces: BTreeMap::new(), worktree_observations: BTreeMap::new(), transaction: None } }
+    fn default() -> Self {
+        Self {
+            version: 1,
+            revision: Epoch(0),
+            workspaces: BTreeMap::new(),
+            worktree_observations: BTreeMap::new(),
+            transaction: None,
+        }
+    }
 }
 
 pub(crate) fn load(path: &Path) -> Result<Catalog, String> {
@@ -36,11 +47,15 @@ pub(crate) fn load(path: &Path) -> Result<Catalog, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Catalog::default()),
         Err(e) => return Err(e.to_string()),
     };
-    let parsed = serde_json::from_slice::<Catalog>(&bytes).map_err(|e| e.to_string())
+    let parsed = serde_json::from_slice::<Catalog>(&bytes)
+        .map_err(|e| e.to_string())
         .and_then(|catalog| {
-            if catalog.version != 1 { return Err("Unsupported catalog version".into()); }
+            if catalog.version != 1 {
+                return Err("Unsupported catalog version".into());
+            }
             for (id, row) in &catalog.workspaces {
-                crate::worktree::WorkspaceRegistry::validate_workspace_id(id).map_err(|e| e.to_string())?;
+                crate::worktree::WorkspaceRegistry::validate_workspace_id(id)
+                    .map_err(|e| e.to_string())?;
                 if !row.repo_root.is_absolute() || row.repo_root.parent().is_none() {
                     return Err("Invalid catalog root".into());
                 }
@@ -67,7 +82,8 @@ pub(crate) fn persist(path: &Path, catalog: &Catalog) -> Result<(), String> {
     // Catalog admission must not: an ambiguous commit fences further mutations.
     #[cfg(unix)]
     std::fs::File::open(path.parent().ok_or("Catalog has no parent")?)
-        .and_then(|directory| directory.sync_all()).map_err(|e| e.to_string())?;
+        .and_then(|directory| directory.sync_all())
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 

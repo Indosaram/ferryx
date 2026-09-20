@@ -34,23 +34,37 @@ pub struct PushSubscriptionStore {
 
 impl PushSubscriptionStore {
     pub fn new() -> Self {
-        Self { subscriptions: Mutex::new(Vec::new()) }
+        Self {
+            subscriptions: Mutex::new(Vec::new()),
+        }
     }
 
     pub fn subscribe(&self, info: PushSubscriptionInfo) {
-        let mut subs = self.subscriptions.lock().expect("push subscription lock poisoned");
-        if !subs.iter().any(|existing| existing.endpoint == info.endpoint) {
+        let mut subs = self
+            .subscriptions
+            .lock()
+            .expect("push subscription lock poisoned");
+        if !subs
+            .iter()
+            .any(|existing| existing.endpoint == info.endpoint)
+        {
             subs.push(info);
         }
     }
 
     pub fn unsubscribe(&self, endpoint: &str) {
-        let mut subs = self.subscriptions.lock().expect("push subscription lock poisoned");
+        let mut subs = self
+            .subscriptions
+            .lock()
+            .expect("push subscription lock poisoned");
         subs.retain(|existing| existing.endpoint != endpoint);
     }
 
     pub fn list_subscriptions(&self) -> Vec<PushSubscriptionInfo> {
-        let subs = self.subscriptions.lock().expect("push subscription lock poisoned");
+        let subs = self
+            .subscriptions
+            .lock()
+            .expect("push subscription lock poisoned");
         subs.clone()
     }
 }

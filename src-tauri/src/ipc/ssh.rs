@@ -88,7 +88,9 @@ where
             }
             Err(e) => {
                 let id_display = id_hint.as_deref().unwrap_or("<unknown>");
-                tracing::warn!("Skipping unparseable SSH host at index {index} (id: {id_display}): {e}");
+                tracing::warn!(
+                    "Skipping unparseable SSH host at index {index} (id: {id_display}): {e}"
+                );
             }
         }
     }
@@ -96,7 +98,9 @@ where
 }
 
 pub(crate) fn get_ssh_store_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, IpcError> {
-    if let Some(dir) = std::env::var_os("FERRYX_DATA_DIR") { return Ok(PathBuf::from(dir).join("ssh_hosts.json")); }
+    if let Some(dir) = std::env::var_os("FERRYX_DATA_DIR") {
+        return Ok(PathBuf::from(dir).join("ssh_hosts.json"));
+    }
     let app_dir = app.path().app_data_dir().map_err(|e| {
         IpcError::new(
             IpcErrorCode::IoError,
@@ -111,14 +115,11 @@ pub(crate) fn get_ssh_store_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathB
 }
 
 pub fn resolve_home_dir<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
-    app.path()
-        .home_dir()
-        .ok()
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .or_else(|| std::env::var_os("USERPROFILE"))
-                .map(PathBuf::from)
-        })
+    app.path().home_dir().ok().or_else(|| {
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+    })
 }
 
 pub fn system_ssh_config_path<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
@@ -127,7 +128,8 @@ pub fn system_ssh_config_path<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf>
 
 pub(crate) fn expand_tilde_path(raw: &str, home: Option<&Path>) -> PathBuf {
     if raw == "~" {
-        home.map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(raw))
+        home.map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(raw))
     } else if let Some(stripped) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
         match home {
             Some(h) => {
@@ -240,18 +242,17 @@ fn save_store(path: &PathBuf, store: &SshHostStore) -> Result<(), IpcError> {
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     ));
-    let write_result = std::fs::write(&tmp, serialized.as_bytes())
-        .and_then(|()| std::fs::rename(&tmp, path));
+    let write_result =
+        std::fs::write(&tmp, serialized.as_bytes()).and_then(|()| std::fs::rename(&tmp, path));
     if write_result.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
-    write_result
-        .map_err(|e| {
-            IpcError::new(
-                IpcErrorCode::IoError,
-                format!("Failed to write ssh store: {}", e),
-            )
-        })
+    write_result.map_err(|e| {
+        IpcError::new(
+            IpcErrorCode::IoError,
+            format!("Failed to write ssh store: {}", e),
+        )
+    })
 }
 
 fn now_millis() -> u64 {
@@ -285,7 +286,11 @@ fn import_config_into_store(path: &PathBuf, config_text: &str) -> Result<Vec<Ssh
     for host in imported {
         let key = host.key();
         store.tombstones.retain(|tombstone| tombstone != &key);
-        if let Some(position) = store.hosts.iter().position(|existing| existing.id == host.id) {
+        if let Some(position) = store
+            .hosts
+            .iter()
+            .position(|existing| existing.id == host.id)
+        {
             store.hosts[position] = host;
         } else {
             store.hosts.push(host);
@@ -400,15 +405,24 @@ pub async fn cmd_ssh_set_password(
     let credential_host = host.clone();
     let credential = password.clone();
     run_blocking(move || crate::ssh::password::set(&credential_host, credential)).await?;
-    match daemon_client.send_request(crate::daemon::protocol::DaemonRequest::SshPassword {
-        host: host.clone(), password: Some(password),
-    }).await {
+    match daemon_client
+        .send_request(crate::daemon::protocol::DaemonRequest::SshPassword {
+            host: host.clone(),
+            password: Some(password),
+        })
+        .await
+    {
         Ok(crate::daemon::protocol::DaemonResponse::Pong) => Ok(()),
         result => {
             crate::ssh::password::clear(&host)?;
             match result {
-                Err(error) | Ok(crate::daemon::protocol::DaemonResponse::WorktreeError { error }) => Err(error),
-                _ => Err(IpcError::internal("Daemon does not support SSH password credentials")),
+                Err(error)
+                | Ok(crate::daemon::protocol::DaemonResponse::WorktreeError { error }) => {
+                    Err(error)
+                }
+                _ => Err(IpcError::internal(
+                    "Daemon does not support SSH password credentials",
+                )),
             }
         }
     }
@@ -423,12 +437,23 @@ pub async fn cmd_ssh_clear_password(
     clear_password_in_daemon(&daemon_client, host).await
 }
 
-async fn clear_password_in_daemon(daemon_client: &crate::daemon::client::DaemonClient, host: SshHost) -> Result<(), IpcError> {
+async fn clear_password_in_daemon(
+    daemon_client: &crate::daemon::client::DaemonClient,
+    host: SshHost,
+) -> Result<(), IpcError> {
     crate::ssh::password::clear(&host)?;
-    match daemon_client.send_request(crate::daemon::protocol::DaemonRequest::SshPassword { host, password: None }).await? {
+    match daemon_client
+        .send_request(crate::daemon::protocol::DaemonRequest::SshPassword {
+            host,
+            password: None,
+        })
+        .await?
+    {
         crate::daemon::protocol::DaemonResponse::Pong => Ok(()),
         crate::daemon::protocol::DaemonResponse::WorktreeError { error } => Err(error),
-        _ => Err(IpcError::internal("Daemon does not support SSH password credentials")),
+        _ => Err(IpcError::internal(
+            "Daemon does not support SSH password credentials",
+        )),
     }
 }
 
@@ -440,7 +465,8 @@ pub async fn cmd_ssh_install_project_helper<R: Runtime>(
     local_binary: PathBuf,
 ) -> Result<crate::ssh::helper_setup::HelperLocation, IpcError> {
     let store = get_ssh_store_path(&app)?;
-    let (_, host) = super::run_blocking(move || crate::ssh::projects::resolve(&store, &workspace_id)).await?;
+    let (_, host) =
+        super::run_blocking(move || crate::ssh::projects::resolve(&store, &workspace_id)).await?;
     let environment = crate::ssh::runtime::detect(&host).await?;
     let location = crate::ssh::helper_setup::default_location(&host, &environment)?;
     crate::ssh::helper_setup::install(&host, &environment, &location, &local_binary).await?;
@@ -464,13 +490,37 @@ pub fn bundled_helper_path<R: Runtime>(
 
     let mut candidates = Vec::new();
     if let Ok(resource_dir) = app.path().resource_dir() {
-        candidates.push(resource_dir.join("helpers").join(target_triple).join(filename));
-        candidates.push(resource_dir.join("resources").join("helpers").join(target_triple).join(filename));
+        candidates.push(
+            resource_dir
+                .join("helpers")
+                .join(target_triple)
+                .join(filename),
+        );
+        candidates.push(
+            resource_dir
+                .join("resources")
+                .join("helpers")
+                .join(target_triple)
+                .join(filename),
+        );
     }
-    candidates.push(PathBuf::from("src-tauri/resources/helpers").join(target_triple).join(filename));
-    candidates.push(PathBuf::from("resources/helpers").join(target_triple).join(filename));
+    candidates.push(
+        PathBuf::from("src-tauri/resources/helpers")
+            .join(target_triple)
+            .join(filename),
+    );
+    candidates.push(
+        PathBuf::from("resources/helpers")
+            .join(target_triple)
+            .join(filename),
+    );
     if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        candidates.push(PathBuf::from(manifest_dir).join("resources/helpers").join(target_triple).join(filename));
+        candidates.push(
+            PathBuf::from(manifest_dir)
+                .join("resources/helpers")
+                .join(target_triple)
+                .join(filename),
+        );
     }
 
     for candidate in candidates {
@@ -489,12 +539,21 @@ pub fn bundled_helper_version<R: Runtime>(app: &AppHandle<R>) -> Option<String> 
     let mut candidates = Vec::new();
     if let Ok(resource_dir) = app.path().resource_dir() {
         candidates.push(resource_dir.join("helpers").join("manifest.json"));
-        candidates.push(resource_dir.join("resources").join("helpers").join("manifest.json"));
+        candidates.push(
+            resource_dir
+                .join("resources")
+                .join("helpers")
+                .join("manifest.json"),
+        );
     }
     candidates.push(PathBuf::from("src-tauri/resources/helpers/manifest.json"));
     candidates.push(PathBuf::from("resources/helpers/manifest.json"));
     if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        candidates.push(PathBuf::from(manifest_dir).join("resources/helpers").join("manifest.json"));
+        candidates.push(
+            PathBuf::from(manifest_dir)
+                .join("resources/helpers")
+                .join("manifest.json"),
+        );
     }
 
     for candidate in candidates {
@@ -516,27 +575,30 @@ pub async fn resolve_remote_target_triple(
     env: &crate::ssh::runtime::RemoteEnvironment,
 ) -> Result<String, IpcError> {
     match env.platform {
-        crate::ssh::runtime::RemotePlatform::Windows => {
-            Ok("x86_64-pc-windows-msvc".to_string())
-        }
+        crate::ssh::runtime::RemotePlatform::Windows => Ok("x86_64-pc-windows-msvc".to_string()),
         crate::ssh::runtime::RemotePlatform::Posix => {
             let script = "uname -s; uname -m";
             let plan = crate::ssh::direct::ssh_plan(host, env.executor.command(script), false)?;
-            let output = crate::ssh::direct::bounded_output(&plan, std::time::Duration::from_secs(3))
-                .await
-                .map_err(|e| {
-                    IpcError::new(
-                        IpcErrorCode::Unsupported,
-                        format!("Failed to determine remote architecture: {e}"),
-                    )
-                })?;
+            let output =
+                crate::ssh::direct::bounded_output(&plan, std::time::Duration::from_secs(3))
+                    .await
+                    .map_err(|e| {
+                        IpcError::new(
+                            IpcErrorCode::Unsupported,
+                            format!("Failed to determine remote architecture: {e}"),
+                        )
+                    })?;
             let text = std::str::from_utf8(&output).map_err(|_| {
                 IpcError::new(
                     IpcErrorCode::Unsupported,
                     "Remote architecture probe returned non-UTF8 output",
                 )
             })?;
-            let lines: Vec<&str> = text.lines().map(str::trim).filter(|s| !s.is_empty()).collect();
+            let lines: Vec<&str> = text
+                .lines()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect();
             let (os, arch) = match lines.as_slice() {
                 [os, arch, ..] => (*os, *arch),
                 [os] => (*os, "x86_64"),
@@ -613,9 +675,13 @@ pub async fn cmd_ssh_helper_update_state<R: Runtime>(
         Err(_) => None,
     };
 
-    let decision = bundled_ver
-        .as_deref()
-        .map(|bundled| crate::ssh::helper_setup::decide_helper_upgrade(installed, remote_version.as_deref(), bundled));
+    let decision = bundled_ver.as_deref().map(|bundled| {
+        crate::ssh::helper_setup::decide_helper_upgrade(
+            installed,
+            remote_version.as_deref(),
+            bundled,
+        )
+    });
 
     Ok(HelperUpdateState {
         installed,
@@ -673,8 +739,7 @@ pub async fn cmd_ssh_list_remote_worktrees<R: Runtime>(
 ) -> Result<Vec<crate::ssh::worktree::RemoteWorktree>, IpcError> {
     let store = get_ssh_store_path(&app)?;
     let id = workspace_id.clone();
-    let (project, host) =
-        run_blocking(move || crate::ssh::projects::resolve(&store, &id)).await?;
+    let (project, host) = run_blocking(move || crate::ssh::projects::resolve(&store, &id)).await?;
     let environment = crate::ssh::runtime::detect(&host).await?;
     crate::ssh::worktree::list_remote(&host, &environment, &project.repo_root).await
 }
@@ -688,15 +753,11 @@ pub async fn cmd_ssh_create_remote_worktree<R: Runtime>(
 ) -> Result<crate::ssh::worktree::RemoteWorktree, IpcError> {
     let store = get_ssh_store_path(&app)?;
     let id = workspace_id.clone();
-    let (project, host) =
-        run_blocking(move || crate::ssh::projects::resolve(&store, &id)).await?;
+    let (project, host) = run_blocking(move || crate::ssh::projects::resolve(&store, &id)).await?;
     let environment = crate::ssh::runtime::detect(&host).await?;
     let ws_segment = crate::ssh::worktree::derive_ws_segment(&workspace_id)?;
-    let wt_path = crate::ssh::worktree::remote_worktree_path(
-        environment.platform,
-        &project.repo_root,
-        &slug,
-    );
+    let wt_path =
+        crate::ssh::worktree::remote_worktree_path(environment.platform, &project.repo_root, &slug);
     crate::ssh::worktree::create_remote(
         &host,
         &environment,
@@ -713,8 +774,7 @@ pub async fn cmd_ssh_create_remote_worktree<R: Runtime>(
     let created = worktrees
         .into_iter()
         .find(|wt| {
-            wt.path == wt_path
-                || wt.path.replace('\\', "/").trim_end_matches('/') == norm_wt_path
+            wt.path == wt_path || wt.path.replace('\\', "/").trim_end_matches('/') == norm_wt_path
         })
         .ok_or_else(|| {
             IpcError::new(
@@ -745,8 +805,7 @@ pub async fn cmd_ssh_delete_remote_worktree<R: Runtime>(
 ) -> Result<(), IpcError> {
     let store = get_ssh_store_path(&app)?;
     let id = workspace_id.clone();
-    let (project, host) =
-        run_blocking(move || crate::ssh::projects::resolve(&store, &id)).await?;
+    let (project, host) = run_blocking(move || crate::ssh::projects::resolve(&store, &id)).await?;
     let environment = crate::ssh::runtime::detect(&host).await?;
     crate::ssh::worktree::validate_path_inside_root(
         environment.platform,
@@ -852,7 +911,10 @@ mod tests {
         let result = import_config_into_store(&path, "Host new-box\n  HostName new.example\n");
         let saved = std::fs::read(&path).expect("read inventory after import");
         assert_eq!(
-            (result.as_ref().err().map(|error| error.code.clone()), saved.as_slice()),
+            (
+                result.as_ref().err().map(|error| error.code.clone()),
+                saved.as_slice()
+            ),
             (Some(IpcErrorCode::ParseError), original.as_slice()),
         );
         assert!(!path.with_extension("json.tmp").exists());
@@ -888,11 +950,9 @@ mod tests {
         )
         .expect("seed store");
 
-        let hosts = import_config_into_store(
-            &path,
-            "Host dev-box\n  HostName dev.example\n  User dev\n",
-        )
-        .expect("import config");
+        let hosts =
+            import_config_into_store(&path, "Host dev-box\n  HostName dev.example\n  User dev\n")
+                .expect("import config");
 
         assert_eq!(hosts.len(), 1);
         assert_eq!(hosts[0].label, "dev-box");
@@ -945,8 +1005,11 @@ mod tests {
     fn explicit_config_file_is_read_and_parsed_from_its_own_path() {
         let dir = tempfile::tempdir().expect("temporary dir");
         let path = dir.path().join("work-ssh-config");
-        std::fs::write(&path, "Host work-box\n  HostName work.example\n  User dev\n")
-            .expect("write config");
+        std::fs::write(
+            &path,
+            "Host work-box\n  HostName work.example\n  User dev\n",
+        )
+        .expect("write config");
 
         let result = read_ssh_config_file(&path).expect("read config");
 

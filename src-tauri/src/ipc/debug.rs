@@ -70,8 +70,7 @@ pub async fn cmd_switch_debug_log(entry: SwitchDebugEntry) -> Result<(), IpcErro
         return Ok(());
     }
 
-    run_blocking(move || append_switch_debug_entry(&std::env::temp_dir(), &entry))
-    .await
+    run_blocking(move || append_switch_debug_entry(&std::env::temp_dir(), &entry)).await
 }
 
 #[cfg(test)]
@@ -92,7 +91,10 @@ mod tests {
         append_switch_debug_entry(root.path(), &entry).expect("first append");
         append_switch_debug_entry(root.path(), &entry).expect("second append");
         let text = std::fs::read_to_string(path).expect("read actual sink");
-        let entries: Vec<Value> = text.lines().map(|line| serde_json::from_str(line).expect("JSONL record")).collect();
+        let entries: Vec<Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("JSONL record"))
+            .collect();
         assert_eq!(entries, vec![wire.clone(), wire]);
         root.close().expect("remove owned sink");
     }
@@ -101,9 +103,14 @@ mod tests {
     fn invalid_sink_root_returns_error() {
         let root = tempfile::tempdir().expect("owned sink root");
         let invalid = root.path().join("file-not-directory");
-        assert_eq!(switch_debug_path(&invalid).parent(), Some(invalid.as_path()));
+        assert_eq!(
+            switch_debug_path(&invalid).parent(),
+            Some(invalid.as_path())
+        );
         std::fs::write(&invalid, b"sentinel").expect("create non-directory");
-        assert!(append_switch_debug_entry(&invalid, &serde_json::json!({"event": "test"})).is_err());
+        assert!(
+            append_switch_debug_entry(&invalid, &serde_json::json!({"event": "test"})).is_err()
+        );
         assert_eq!(std::fs::read(&invalid).expect("read sentinel"), b"sentinel");
         root.close().expect("remove owned sink");
     }

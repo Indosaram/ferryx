@@ -35,7 +35,7 @@ import { IconButton } from "./components/ui/IconButton";
 import { copyTextToClipboard } from "./lib/clipboard";
 import { useApplyAppearanceSettings } from "./lib/appearanceSettings";
 import { workspaceName } from "./lib/branchFilter";
-import { collectDagWatchRoots } from "./lib/dagWatchRoots";
+import { collectDagWatchRoots, isLocalDagProject, remoteProjectsWatchKey } from "./lib/dagWatchRoots";
 import { newBrowserTabUrl } from "./lib/browserSettings";
 import { BROWSER_SHORTCUT_EVENT, onBrowserOpenRequested, onBrowserSessionCreated, onBrowserShortcutRequested, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
 import { registerBuiltInBrowserLinkOpener } from "./lib/linkRouting";
@@ -103,14 +103,14 @@ import {
   writeTerminal,
   bootTrace,
   browserRemoteReclaim,
-  listenDagRunUpdated,
-  watchDagProject,
+  discoverDagWatchRoots,
   type AgentDetection,
   type FocusedTerminalPayload,
   type RegisteredProject,
   type RemoteSelectionRequestedPayload,
 } from "./lib/tauri";
 import { safeRandomUUID } from "./lib/uuid";
+import { dagRemoteWatchTargets, useDagWatchLifecycle } from "./lib/useDagWatchLifecycle";
 import { getCachedSshHosts } from "./lib/sshHosts";
 import { reconnectAgentSession } from "./lib/agentReconnect";
 import { isPairedWorkspaceId, isRemoteWorkspaceId, registerRemoteProject, toRegisteredProject } from "./lib/remoteProject";
@@ -124,7 +124,6 @@ import { createAppReconnectDependencies } from "./lib/appReconnectDependencies";
 import { replaceExitedShellSession } from "./lib/shellReplacement";
 import { enqueueStrictPersistence } from "./lib/persistenceQueue";
 import { workspaceReducer } from "./state/workspaceStore";
-import { dagStore } from "./state/dagStore";
 import type { NotificationTarget, PersistedWorkspaceSession } from "./lib/types";
 import { subscribeNotificationActivations } from "./lib/notificationActivation";
 import { ensureTerminalEvents } from "./lib/terminalEvents";
@@ -957,11 +956,11 @@ function WorkspaceApp({
 
   // Dag journals: watch every known project root, worktree and live session root so any omo
   // graph run anywhere lights up the activity badge, regardless of which cwd the app started in.
-  const dagWatchedPathsRef = useRef<Set<string>>(new Set());
   const stateProject = projects.find((project) => project.workspaceId === (state.workspaceId ?? activeProject.workspaceId));
-  const isRemoteState = stateProject?.target?.kind === "ssh";
+  const isRemoteState = !isLocalDagProject(stateProject);
   const activeWorktreePathsKey = isRemoteState ? "" : state.worktrees.map((worktree) => worktree.path).join("\n");
-  const projectRootsKey = projects.filter((project) => project.target?.kind !== "ssh").map((project) => project.repoRoot).join("\n");
+  const projectRootsKey = projects.filter(isLocalDagProject).map((project) => project.repoRoot).join("\n");
+  const remoteProjectsKey = useMemo(() => remoteProjectsWatchKey(projects), [projects]);
   const sessionDagRootsKey = useMemo(
     () =>
       isRemoteState ? "" : collectDagWatchRoots({ projectRoots: [], worktreePaths: [], sessions: state.sessions })
@@ -969,48 +968,47 @@ function WorkspaceApp({
         .join("\n"),
     [isRemoteState, state.sessions],
   );
+  const discoveredDagRootsRef = useRef<string[]>([]);
+  const [discoveredDagRootsKey, setDiscoveredDagRootsKey] = useState("");
   useEffect(() => {
-    const paths = collectDagWatchRoots({
-      projectRoots: projectRootsKey.split("\n"),
-      worktreePaths: [
-        ...Object.entries(inactiveProjectWorktreesRef.current).flatMap(([workspaceId, worktrees]) =>
-          projectsRef.current.some((project) => project.workspaceId === workspaceId && project.target?.kind !== "ssh")
-            ? worktrees.map((worktree) => worktree.path) : [],
-        ),
-        ...activeWorktreePathsKey.split("\n"),
-        ...sessionDagRootsKey.split("\n"),
-      ],
-      sessions: [],
-    });
-    for (const path of paths) {
-      if (dagWatchedPathsRef.current.has(path)) continue;
-      dagWatchedPathsRef.current.add(path);
-      void watchDagProject(path)
-        // Events are tagged with the backend's canonical path, so hydrate under
-        // that same key or the pane lookup would never find these runs.
-        .then(({ projectPath, runs }) => {
-          for (const snapshot of runs) dagStore.applySnapshot(projectPath, snapshot);
-        })
-        .catch(() => {
-          dagWatchedPathsRef.current.delete(path);
-        });
-    }
-  }, [inactiveProjectWorktrees, activeWorktreePathsKey, projectRootsKey, sessionDagRootsKey]);
-
-  useEffect(() => {
+    if (isRemoteState || projectRootsKey === "") return;
     let disposed = false;
-    let unlisten: (() => void) | undefined;
-    void listenDagRunUpdated((event) => {
-      dagStore.applySnapshot(event.projectPath, event.snapshot);
-    }).then((fn) => {
-      if (disposed) fn();
-      else unlisten = fn;
-    });
+    void discoverDagWatchRoots(projectRootsKey.split("\n").filter(Boolean))
+      .then((roots) => {
+        if (disposed) return;
+        discoveredDagRootsRef.current = roots;
+        setDiscoveredDagRootsKey(roots.slice().sort().join("\n"));
+      })
+      .catch(() => undefined);
     return () => {
       disposed = true;
-      unlisten?.();
     };
-  }, []);
+  }, [isRemoteState, projectRootsKey]);
+  const dagLocalRoots = useMemo(
+    () => [
+      ...collectDagWatchRoots({
+        projectRoots: projectRootsKey.split("\n"),
+        worktreePaths: [
+          ...Object.entries(inactiveProjectWorktrees).flatMap(([workspaceId, worktrees]) =>
+            projects.some((project) => project.workspaceId === workspaceId && isLocalDagProject(project))
+              ? worktrees.map((worktree) => worktree.path) : [],
+          ),
+          ...activeWorktreePathsKey.split("\n"),
+          ...sessionDagRootsKey.split("\n"),
+        ],
+        sessions: [],
+      }),
+      ...discoveredDagRootsRef.current,
+    ],
+    // discoveredDagRootsKey tracks the ref's content; the ref itself holds the exact roots.
+    [projects, inactiveProjectWorktrees, projectRootsKey, activeWorktreePathsKey, sessionDagRootsKey, discoveredDagRootsKey],
+  );
+  const dagRemoteTargets = useMemo(() => dagRemoteWatchTargets(projects), [projects]);
+  useDagWatchLifecycle({
+    localRoots: dagLocalRoots,
+    remoteTargets: dagRemoteTargets,
+    watchKey: `${dagLocalRoots.join("\n")}\u0001${remoteProjectsKey}`,
+  });
   inactiveProjectWorktreesRef.current = inactiveProjectWorktrees;
 
   useEffect(() => {

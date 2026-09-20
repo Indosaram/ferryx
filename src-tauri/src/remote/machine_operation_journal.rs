@@ -58,21 +58,49 @@ fn key(device: &str, request: &str) -> String {
 }
 impl MachineOperationJournal {
     pub(crate) fn recover_catalog(&self, receipt: &Record) -> Result<(), String> {
-        let pending = self.reconcile(&receipt.device_id, &receipt.request_id)?.ok_or("MACHINE_SERVICE_UNAVAILABLE")?;
-        if pending.digest != receipt.digest || pending.kind != receipt.kind || pending.resource != receipt.resource {
+        let pending = self
+            .reconcile(&receipt.device_id, &receipt.request_id)?
+            .ok_or("MACHINE_SERVICE_UNAVAILABLE")?;
+        if pending.digest != receipt.digest
+            || pending.kind != receipt.kind
+            || pending.resource != receipt.resource
+        {
             return Err("MACHINE_SERVICE_UNAVAILABLE".into());
         }
-        if matches!(pending.operation, Operation::Pending { .. } | Operation::OutcomeUnknown { .. }) {
-            let Operation::Completed { outcome, .. } = &receipt.operation else { return Err("MACHINE_SERVICE_UNAVAILABLE".into()); };
-            self.complete(&receipt.device_id, &receipt.request_id, receipt.status, outcome.clone())?;
+        if matches!(
+            pending.operation,
+            Operation::Pending { .. } | Operation::OutcomeUnknown { .. }
+        ) {
+            let Operation::Completed { outcome, .. } = &receipt.operation else {
+                return Err("MACHINE_SERVICE_UNAVAILABLE".into());
+            };
+            self.complete(
+                &receipt.device_id,
+                &receipt.request_id,
+                receipt.status,
+                outcome.clone(),
+            )?;
         }
         Ok(())
     }
-    pub(crate) fn catalog_receipt(&self, device: &str, request: &str, status: u16, outcome: OperationOutcome) -> Result<Record, String> {
-        let mut record = self.reconcile(device, request)?.ok_or("OPERATION_NOT_FOUND")?;
-        if !matches!(record.operation, Operation::Pending { .. }) { return Err("REQUEST_CONFLICT".into()); }
+    pub(crate) fn catalog_receipt(
+        &self,
+        device: &str,
+        request: &str,
+        status: u16,
+        outcome: OperationOutcome,
+    ) -> Result<Record, String> {
+        let mut record = self
+            .reconcile(device, request)?
+            .ok_or("OPERATION_NOT_FOUND")?;
+        if !matches!(record.operation, Operation::Pending { .. }) {
+            return Err("REQUEST_CONFLICT".into());
+        }
         record.status = status;
-        record.operation = Operation::Completed { request_id: request.into(), outcome };
+        record.operation = Operation::Completed {
+            request_id: request.into(),
+            outcome,
+        };
         Ok(record)
     }
     pub(crate) fn open(path: PathBuf) -> Self {
@@ -116,22 +144,32 @@ impl MachineOperationJournal {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
         }
-        let lock = options.open(self.path.with_extension("tx.lock")).map_err(|_| "MACHINE_SERVICE_UNAVAILABLE")?;
+        let lock = options
+            .open(self.path.with_extension("tx.lock"))
+            .map_err(|_| "MACHINE_SERVICE_UNAVAILABLE")?;
         lock.lock().map_err(|_| "MACHINE_SERVICE_UNAVAILABLE")?;
         match std::fs::read(&self.path) {
             Ok(bytes) => {
-                let mut current: Store = serde_json::from_slice(&bytes).map_err(|_| "MACHINE_SERVICE_UNAVAILABLE")?;
-                if current.version != 1 { return Err("MACHINE_SERVICE_UNAVAILABLE".into()); }
+                let mut current: Store =
+                    serde_json::from_slice(&bytes).map_err(|_| "MACHINE_SERVICE_UNAVAILABLE")?;
+                if current.version != 1 {
+                    return Err("MACHINE_SERVICE_UNAVAILABLE".into());
+                }
                 let previous = state.as_ref().map_err(Clone::clone)?;
                 for (key, record) in &mut current.records {
                     if matches!(record.operation, Operation::Pending { .. })
-                        && previous.records.get(key).is_some_and(|prior| matches!(prior.operation, Operation::OutcomeUnknown { .. })) {
-                        record.operation = Operation::OutcomeUnknown { request_id: record.request_id.clone() };
+                        && previous.records.get(key).is_some_and(|prior| {
+                            matches!(prior.operation, Operation::OutcomeUnknown { .. })
+                        })
+                    {
+                        record.operation = Operation::OutcomeUnknown {
+                            request_id: record.request_id.clone(),
+                        };
                     }
                 }
                 *state = Ok(current);
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => return Err("MACHINE_SERVICE_UNAVAILABLE".into()),
         }
         Ok(lock)
@@ -224,47 +262,100 @@ impl MachineOperationJournal {
         self.probe("reconcile");
         let mut state = self.state.lock();
         let _file_lock = self.refresh_locked(&mut state)?;
-        Ok(state.as_ref().map_err(Clone::clone)?.records
+        Ok(state
+            .as_ref()
+            .map_err(Clone::clone)?
+            .records
             .get(&key(device_id, request_id))
             .cloned())
     }
     pub(crate) fn sessions(&self) -> Result<Vec<MachineSession>, String> {
         #[cfg(test)]
         self.probe("sessions");
-        Ok(self.state.lock().as_ref().map_err(Clone::clone)?.sessions.values().cloned().collect())
+        Ok(self
+            .state
+            .lock()
+            .as_ref()
+            .map_err(Clone::clone)?
+            .sessions
+            .values()
+            .cloned()
+            .collect())
     }
     pub(crate) fn session_revision(&self) -> Result<crate::scoped_contracts::Epoch, String> {
-        Ok(crate::scoped_contracts::Epoch(self.state.lock().as_ref().map_err(Clone::clone)?.session_revision))
+        Ok(crate::scoped_contracts::Epoch(
+            self.state
+                .lock()
+                .as_ref()
+                .map_err(Clone::clone)?
+                .session_revision,
+        ))
     }
     /// Includes unacknowledged spawns, fencing mirror admission before metadata publication.
     pub(crate) fn owns_session(&self, id: &str) -> bool {
         let state = self.state.lock();
-        let Ok(store) = state.as_ref() else { return true; };
-        store.sessions.contains_key(id) || store.records.values().any(|record| {
-            record.kind == "createSession" && serde_json::from_str::<super::machine_protocol::RemoteTerminalTarget>(&record.resource)
-                .is_ok_and(|target| target.session_id == id)
-        })
+        let Ok(store) = state.as_ref() else {
+            return true;
+        };
+        store.sessions.contains_key(id)
+            || store.records.values().any(|record| {
+                record.kind == "createSession"
+                    && serde_json::from_str::<super::machine_protocol::RemoteTerminalTarget>(
+                        &record.resource,
+                    )
+                    .is_ok_and(|target| target.session_id == id)
+            })
     }
     /// Ownership and the original create receipt share one durable replacement.
-    pub(crate) fn commit_spawn(&self, device: &str, request: &str, session: MachineSession) -> Result<(), String> {
+    pub(crate) fn commit_spawn(
+        &self,
+        device: &str,
+        request: &str,
+        session: MachineSession,
+    ) -> Result<(), String> {
         let mut state = self.state.lock();
         let _file_lock = self.refresh_locked(&mut state)?;
         let mut candidate = state.as_ref().map_err(Clone::clone)?.clone();
-        let record = candidate.records.get_mut(&key(device, request)).ok_or("OPERATION_NOT_FOUND")?;
-        if record.kind != "createSession" || record.resource != serde_json::to_string(&session.session.target).expect("target")
-            || !matches!(record.operation, Operation::Pending { .. } | Operation::OutcomeUnknown { .. }) {
+        let record = candidate
+            .records
+            .get_mut(&key(device, request))
+            .ok_or("OPERATION_NOT_FOUND")?;
+        if record.kind != "createSession"
+            || record.resource != serde_json::to_string(&session.session.target).expect("target")
+            || !matches!(
+                record.operation,
+                Operation::Pending { .. } | Operation::OutcomeUnknown { .. }
+            )
+        {
             return Err("REQUEST_CONFLICT".into());
         }
         record.status = 201;
         record.completed_at = Some(now());
         record.outcome_summary = Some("session".into());
-        record.operation = Operation::Completed { request_id: request.into(), outcome: OperationOutcome::Session { session: session.session.clone() } };
-        candidate.sessions.insert(session.session.target.session_id.clone(), session);
-        candidate.session_revision = candidate.session_revision.checked_add(1).ok_or("CAPACITY_EXCEEDED")?;
+        record.operation = Operation::Completed {
+            request_id: request.into(),
+            outcome: OperationOutcome::Session {
+                session: session.session.clone(),
+            },
+        };
+        candidate
+            .sessions
+            .insert(session.session.target.session_id.clone(), session);
+        candidate.session_revision = candidate
+            .session_revision
+            .checked_add(1)
+            .ok_or("CAPACITY_EXCEEDED")?;
         self.persist(&mut state, candidate)
     }
     pub(crate) fn session(&self, id: &str) -> Result<Option<MachineSession>, String> {
-        Ok(self.state.lock().as_ref().map_err(Clone::clone)?.sessions.get(id).cloned())
+        Ok(self
+            .state
+            .lock()
+            .as_ref()
+            .map_err(Clone::clone)?
+            .sessions
+            .get(id)
+            .cloned())
     }
     pub(crate) fn save_session(&self, session: MachineSession) -> Result<(), String> {
         let mut state = self.state.lock();
@@ -272,27 +363,52 @@ impl MachineOperationJournal {
         let mut candidate = state.as_ref().map_err(Clone::clone)?.clone();
         let mut merged = session;
         if let Some(current) = candidate.sessions.get(&merged.session.target.session_id) {
-            if current.session.target != merged.session.target { return Err("STALE_EPOCH".into()); }
+            if current.session.target != merged.session.target {
+                return Err("STALE_EPOCH".into());
+            }
             merged.session.title = current.session.title.clone();
             merged.session.cwd = current.session.cwd.clone();
             merged.session.agent_type = current.session.agent_type.clone();
             merged.session.provider_session = current.session.provider_session.clone();
         }
-        candidate.sessions.insert(merged.session.target.session_id.clone(), merged);
-        candidate.session_revision = candidate.session_revision.checked_add(1).ok_or("CAPACITY_EXCEEDED")?;
+        candidate
+            .sessions
+            .insert(merged.session.target.session_id.clone(), merged);
+        candidate.session_revision = candidate
+            .session_revision
+            .checked_add(1)
+            .ok_or("CAPACITY_EXCEEDED")?;
         self.persist(&mut state, candidate)
     }
     /// Commit only owner-derived metadata, fenced against exit and owner replacement.
-    pub(crate) fn update_session_metadata(&self, session: &super::machine_protocol::Session)
-        -> Result<Option<(super::machine_protocol::Session, crate::scoped_contracts::Epoch)>, String> {
+    pub(crate) fn update_session_metadata(
+        &self,
+        session: &super::machine_protocol::Session,
+    ) -> Result<
+        Option<(
+            super::machine_protocol::Session,
+            crate::scoped_contracts::Epoch,
+        )>,
+        String,
+    > {
         let mut state = self.state.lock();
         let _file_lock = self.refresh_locked(&mut state)?;
         let mut candidate = state.as_ref().map_err(Clone::clone)?.clone();
-        let current = candidate.sessions.get_mut(&session.target.session_id).ok_or("SESSION_NOT_FOUND")?;
-        if current.session.target != session.target { return Err("STALE_EPOCH".into()); }
-        if current.exit.is_some() || !current.session.running { return Err("SESSION_EXPIRED".into()); }
-        if current.session.cwd == session.cwd && current.session.title == session.title
-            && current.session.agent_type == session.agent_type && current.session.provider_session == session.provider_session {
+        let current = candidate
+            .sessions
+            .get_mut(&session.target.session_id)
+            .ok_or("SESSION_NOT_FOUND")?;
+        if current.session.target != session.target {
+            return Err("STALE_EPOCH".into());
+        }
+        if current.exit.is_some() || !current.session.running {
+            return Err("SESSION_EXPIRED".into());
+        }
+        if current.session.cwd == session.cwd
+            && current.session.title == session.title
+            && current.session.agent_type == session.agent_type
+            && current.session.provider_session == session.provider_session
+        {
             return Ok(None);
         }
         current.session.cwd = session.cwd.clone();
@@ -300,7 +416,10 @@ impl MachineOperationJournal {
         current.session.agent_type = session.agent_type.clone();
         current.session.provider_session = session.provider_session.clone();
         let updated = current.session.clone();
-        candidate.session_revision = candidate.session_revision.checked_add(1).ok_or("CAPACITY_EXCEEDED")?;
+        candidate.session_revision = candidate
+            .session_revision
+            .checked_add(1)
+            .ok_or("CAPACITY_EXCEEDED")?;
         let revision = crate::scoped_contracts::Epoch(candidate.session_revision);
         self.persist(&mut state, candidate)?;
         Ok(Some((updated, revision)))
@@ -310,9 +429,14 @@ impl MachineOperationJournal {
         let mut state = self.state.lock();
         let _file_lock = self.refresh_locked(&mut state)?;
         let mut candidate = state.as_ref().map_err(Clone::clone)?.clone();
-        let record = candidate.records.get_mut(&key(device, request)).ok_or("OPERATION_NOT_FOUND")?;
+        let record = candidate
+            .records
+            .get_mut(&key(device, request))
+            .ok_or("OPERATION_NOT_FOUND")?;
         record.status = 409;
-        record.operation = Operation::OutcomeUnknown { request_id: request.into() };
+        record.operation = Operation::OutcomeUnknown {
+            request_id: request.into(),
+        };
         self.persist(&mut state, candidate)
     }
     pub fn complete(
@@ -358,7 +482,9 @@ impl MachineOperationJournal {
 impl MachineOperationJournal {
     fn probe(&self, phase: &str) {
         let probe = self.probe.read().clone();
-        if let Some(probe) = probe { probe(phase); }
+        if let Some(probe) = probe {
+            probe(phase);
+        }
     }
 }
 

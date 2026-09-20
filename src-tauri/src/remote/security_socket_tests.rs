@@ -9,14 +9,18 @@ use tokio::sync::Notify;
 fn a10_controller_generation_disconnect_and_exact_reservation_boundary() {
     use crate::daemon::session_service::DaemonSessionService;
     let mut controllers = std::collections::HashMap::new();
-    let original = DaemonSessionService::acquire_machine_controller(&mut controllers, "one", "a").unwrap();
+    let original =
+        DaemonSessionService::acquire_machine_controller(&mut controllers, "one", "a").unwrap();
     let old_cancelled = original.cancelled.clone();
-    let replacement = DaemonSessionService::acquire_machine_controller(&mut controllers, "one", "a").unwrap();
+    let replacement =
+        DaemonSessionService::acquire_machine_controller(&mut controllers, "one", "a").unwrap();
     assert!(*old_cancelled.borrow());
     assert_eq!(replacement.generation, original.generation + 1);
     drop(original);
     assert!(controllers["one"].disconnected.lock().is_none());
-    assert!(DaemonSessionService::acquire_machine_controller(&mut controllers, "one", "b").is_err());
+    assert!(
+        DaemonSessionService::acquire_machine_controller(&mut controllers, "one", "b").is_err()
+    );
     drop(replacement);
     assert!(controllers["one"].disconnected.lock().is_some());
     let disconnected = controllers["one"].disconnected.lock().unwrap();
@@ -24,8 +28,10 @@ fn a10_controller_generation_disconnect_and_exact_reservation_boundary() {
     assert!(!controllers["one"].reserved_at(disconnected + Duration::from_secs(15)));
     // Controlled clock values exercise the production reservation predicate;
     // no wall-clock wait or probabilistic negative assertion.
-    *controllers["one"].disconnected.lock() = Some(tokio::time::Instant::now() - Duration::from_secs(16));
-    let other = DaemonSessionService::acquire_machine_controller(&mut controllers, "one", "b").unwrap();
+    *controllers["one"].disconnected.lock() =
+        Some(tokio::time::Instant::now() - Duration::from_secs(16));
+    let other =
+        DaemonSessionService::acquire_machine_controller(&mut controllers, "one", "b").unwrap();
     assert_eq!(controllers["one"].device, "b");
     drop(other);
     eprintln!("A10 sole controller: old drop cannot release replacement; disconnect records reservation; controlled expiry permits other device");
@@ -47,8 +53,17 @@ async fn a10_real_socket_reservation_transfers_http_close_authority() {
     let services = state.machine_services.as_ref().unwrap().clone();
     let backend = owner.terminal_service().clone();
     let machine_pair = |name: &str| {
-        let pin = state.auth_manager.create_scoped_pairing_code(DevicePermission::Control, crate::remote::DeviceAccessScope::Machine).unwrap();
-        state.auth_manager.exchange_pairing_code(&pin, name).unwrap()
+        let pin = state
+            .auth_manager
+            .create_scoped_pairing_code(
+                DevicePermission::Control,
+                crate::remote::DeviceAccessScope::Machine,
+            )
+            .unwrap();
+        state
+            .auth_manager
+            .exchange_pairing_code(&pin, name)
+            .unwrap()
     };
     let (token, device) = machine_pair("creator");
     let (other, other_device) = machine_pair("other");
@@ -82,13 +97,23 @@ async fn a10_real_socket_reservation_transfers_http_close_authority() {
         drop(second);
         eprintln!("A10 actual socket release: reserved other=409; controlled15s expiry=attach; creator close=409; sole current controller close=204; original_pid={pid:?} epoch={epoch} reaped=true");
     }).catch_unwind().await;
-    let _ = state.auth_manager.revoke_device(&device.id); let _ = state.auth_manager.revoke_device(&other_device.id);
-    for id in backend.list_sessions() { backend.close_session(&id).await.unwrap(); services.sessions.wait_machine_lifecycle(&id).await.unwrap(); }
+    let _ = state.auth_manager.revoke_device(&device.id);
+    let _ = state.auth_manager.revoke_device(&other_device.id);
+    for id in backend.list_sessions() {
+        backend.close_session(&id).await.unwrap();
+        services.sessions.wait_machine_lifecycle(&id).await.unwrap();
+    }
     server.stop().await;
-    drop(services); drop(state); drop(owner);
-    tokio::task::spawn_blocking(move || root.close().unwrap()).await.unwrap();
+    drop(services);
+    drop(state);
+    drop(owner);
+    tokio::task::spawn_blocking(move || root.close().unwrap())
+        .await
+        .unwrap();
     eprintln!("A10 joint socket-close cleanup: listener stopped, original PTYs/lifecycles reaped, root removed");
-    if let Err(panic) = result { std::panic::resume_unwind(panic); }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 #[cfg(unix)]
@@ -627,7 +652,10 @@ async fn gateway_refuses_to_mint_a_socket_ticket_without_a_valid_bearer() {
             Some(r#"{"target":"/api/v1/terminal/session"}"#),
         )
         .await;
-        assert_eq!(status, 401, "unauthenticated ticket minting must be refused");
+        assert_eq!(
+            status, 401,
+            "unauthenticated ticket minting must be refused"
+        );
     }
     server.stop().await;
 }

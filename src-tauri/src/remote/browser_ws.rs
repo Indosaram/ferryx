@@ -1,17 +1,12 @@
 //! Remote Browser WebSocket Per-Connection Lifetime, Actors & Dispatcher
 //! Authoritative Spec: docs/plans/REMOTE_BROWSER_SCREENCAST_PLAN_2026-09-17.md (§4.3, §4.4, §5, §6.2)
 
-use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
-use std::time::Instant;
-use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
-use tokio::sync::Semaphore;
-use tokio_util::sync::CancellationToken;
 use crate::browser::model::LogicalRect;
 use crate::browser::remote_input::{map_point_mainframe, validate_point_timing_and_viewport};
 use crate::remote::auth::DevicePermission;
-use crate::remote::browser_admission::{AdmissionController, SubscriberQueue, CONTROL_QUEUE_MAX_COUNT};
+use crate::remote::browser_admission::{
+    AdmissionController, SubscriberQueue, CONTROL_QUEUE_MAX_COUNT,
+};
 use crate::remote::browser_backend::{
     BrowserCommandContext, RemoteBrowserBackend, RemoteBrowserError,
 };
@@ -20,9 +15,16 @@ use crate::remote::browser_protocol::{
     MAX_METADATA_BYTES,
 };
 use crate::remote::browser_security::{
-    require_permission, sanitize_public_string, sanitize_url, RequestDeduplicator,
-    MAX_FILL_BYTES, MAX_REQUEST_WIRE_BYTES, MAX_SCRIPT_BYTES,
+    require_permission, sanitize_public_string, sanitize_url, RequestDeduplicator, MAX_FILL_BYTES,
+    MAX_REQUEST_WIRE_BYTES, MAX_SCRIPT_BYTES,
 };
+use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
+use std::time::Instant;
+use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 
 /// Number of most recently sent frames retained for point-click fencing (§4.5, R4-8).
 pub const MAX_SENT_FRAME_RECORDS: usize = 16;
@@ -293,7 +295,9 @@ pub struct BrowserWsSession {
 /// Serializer map ensuring fill commands per (browser_id, lease_epoch, target) are queued
 /// sequentially and never interleave on one target (R6-11).
 static FILL_SERIALIZERS: std::sync::LazyLock<
-    parking_lot::Mutex<std::collections::HashMap<(String, u64, String), Arc<tokio::sync::Mutex<()>>>>,
+    parking_lot::Mutex<
+        std::collections::HashMap<(String, u64, String), Arc<tokio::sync::Mutex<()>>>,
+    >,
 > = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
 
 fn get_fill_serializer(browser_id: &str, epoch: u64, target: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -374,7 +378,15 @@ pub fn normalize_decimal_u64(value: &serde_json::Value) -> Option<String> {
 /// from a number (R4-9).
 pub fn snapshot_catalogue_from_backend(
     value: &serde_json::Value,
-) -> Result<(String, String, Option<serde_json::Value>, Vec<serde_json::Value>), String> {
+) -> Result<
+    (
+        String,
+        String,
+        Option<serde_json::Value>,
+        Vec<serde_json::Value>,
+    ),
+    String,
+> {
     let obj = value
         .as_object()
         .ok_or_else(|| "snapshot response is not an object".to_string())?;
@@ -470,10 +482,7 @@ impl BrowserWsSession {
     }
 
     /// Binds an active scope validation check (R6-4).
-    pub fn with_scope_validator(
-        mut self,
-        validator: Arc<dyn Fn() -> bool + Send + Sync>,
-    ) -> Self {
+    pub fn with_scope_validator(mut self, validator: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
         self.scope_validator = Some(validator);
         self
     }
@@ -560,8 +569,14 @@ impl BrowserWsSession {
         };
 
         // Reference clicks are fenced by the snapshot contract, not the frame ledger.
-        if map.get("reference").and_then(|v| v.as_str()).is_some_and(|s| !s.trim().is_empty())
-            || map.get("selector").and_then(|v| v.as_str()).is_some_and(|s| !s.trim().is_empty())
+        if map
+            .get("reference")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.trim().is_empty())
+            || map
+                .get("selector")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.trim().is_empty())
         {
             return Ok(Some(serde_json::Value::Object(map)));
         }
@@ -586,7 +601,9 @@ impl BrowserWsSession {
             .or_else(|| map.get("seq"))
             .and_then(|v| v.as_u64())
             .and_then(|v| u32::try_from(v).ok());
-        let doc_gen = map.get("documentGeneration").and_then(normalize_decimal_u64);
+        let doc_gen = map
+            .get("documentGeneration")
+            .and_then(normalize_decimal_u64);
         let viewport_rev = map.get("viewportRevision").and_then(normalize_decimal_u64);
         let instance_id = map
             .get("browserInstanceId")
@@ -654,8 +671,14 @@ impl BrowserWsSession {
             })?;
 
         // Age fence: clicks on frames older than MAX_FRAME_AGE are rejected.
-        validate_point_timing_and_viewport(record.sent_at, frame_vp, frame_vp, frame_gen, frame_gen)
-            .map_err(|e| ("BROWSER_STALE_FRAME", e.to_string()))?;
+        validate_point_timing_and_viewport(
+            record.sent_at,
+            frame_vp,
+            frame_vp,
+            frame_gen,
+            frame_gen,
+        )
+        .map_err(|e| ("BROWSER_STALE_FRAME", e.to_string()))?;
 
         // Real displayed geometry from the sent frame, never a guessed viewport.
         let rect = LogicalRect {
@@ -737,7 +760,8 @@ impl BrowserWsSession {
 
         match serde_json::from_str::<ClientMessage>(text) {
             Ok(client_msg) => {
-                self.dispatch_client_message(client_msg, backend, admission, out_tx, now).await
+                self.dispatch_client_message(client_msg, backend, admission, out_tx, now)
+                    .await
             }
             Err(e) => {
                 let err = browser_error(
@@ -761,13 +785,16 @@ impl BrowserWsSession {
         now: Instant,
     ) -> Result<Option<ServerMessage>, String> {
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
-        self.dispatch_raw_text(text, backend, admission, &tx, now).await?;
+        self.dispatch_raw_text(text, backend, admission, &tx, now)
+            .await?;
         Ok(rx.recv().await)
     }
 
     pub fn handle_client_binary(&mut self, _bytes: &[u8]) -> Result<(), String> {
         // §4.2: Client to server binary frames are strictly rejected
-        Err(sanitize_public_string("Client-to-server binary WebSocket frames are rejected"))
+        Err(sanitize_public_string(
+            "Client-to-server binary WebSocket frames are rejected",
+        ))
     }
 
     pub async fn dispatch_client_message(
@@ -879,7 +906,9 @@ impl BrowserWsSession {
                         }
                     }
                     if let Some(queue) = self.queue.as_mut() {
-                        if let Some((promoted_seq, promoted_bytes)) = queue.acknowledge_frame(stream_id, seq, now) {
+                        if let Some((promoted_seq, promoted_bytes)) =
+                            queue.acknowledge_frame(stream_id, seq, now)
+                        {
                             self.record_sent_frame(&promoted_bytes, promoted_seq, now);
                             self.pending_promoted_frame = Some(promoted_bytes);
                         }
@@ -1179,7 +1208,9 @@ impl BrowserWsSession {
                     return Ok(());
                 };
 
-                if browser_instance_id.trim().is_empty() || browser_instance_id != negotiated.browser_instance_id {
+                if browser_instance_id.trim().is_empty()
+                    || browser_instance_id != negotiated.browser_instance_id
+                {
                     let err = browser_error(
                         Some(request_id),
                         "BROWSER_STALE_IDENTITY",
@@ -1209,7 +1240,9 @@ impl BrowserWsSession {
                     return Ok(());
                 }
 
-                if document_generation.trim().is_empty() || document_generation != negotiated.document_generation {
+                if document_generation.trim().is_empty()
+                    || document_generation != negotiated.document_generation
+                {
                     let err = browser_error(
                         Some(request_id),
                         "BROWSER_STALE_IDENTITY",
@@ -1252,7 +1285,11 @@ impl BrowserWsSession {
                             return Ok(());
                         }
                     }
-                    if let Some(fill_val) = p.get("text").or_else(|| p.get("value")).and_then(|v| v.as_str()) {
+                    if let Some(fill_val) = p
+                        .get("text")
+                        .or_else(|| p.get("value"))
+                        .and_then(|v| v.as_str())
+                    {
                         if fill_val.len() > MAX_FILL_BYTES {
                             let err = browser_error(
                                 Some(request_id),
@@ -1405,22 +1442,30 @@ impl BrowserWsSession {
                     params.as_ref().and_then(|p| {
                         p.get("revision")
                             .or_else(|| p.get("imeRevision"))
-                            .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok())))
+                            .and_then(|v| {
+                                v.as_u64()
+                                    .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+                            })
                     })
                 } else {
                     None
                 };
                 let fill_target = if command == "fill" {
-                    params.as_ref().and_then(|p| {
-                        p.get("reference").or_else(|| p.get("selector"))
-                    }).and_then(|v| v.as_str()).unwrap_or("active").to_string()
+                    params
+                        .as_ref()
+                        .and_then(|p| p.get("reference").or_else(|| p.get("selector")))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("active")
+                        .to_string()
                 } else {
                     String::new()
                 };
 
                 if let Some(rev) = maybe_fill_rev {
                     let mut tracker = crate::browser::remote_input::IME_SUPERSESSION_TRACKER.lock();
-                    let entry = tracker.entry((browser_id.clone(), epoch, fill_target.clone())).or_insert(0);
+                    let entry = tracker
+                        .entry((browser_id.clone(), epoch, fill_target.clone()))
+                        .or_insert(0);
                     if rev > *entry {
                         *entry = rev;
                     }
@@ -1539,7 +1584,8 @@ impl BrowserWsSession {
                     // R5-13, R6-11: Enforce supersession at the mutation boundary (under the fill lock)
                     if let Some(rev) = maybe_fill_rev {
                         let is_superseded = {
-                            let tracker = crate::browser::remote_input::IME_SUPERSESSION_TRACKER.lock();
+                            let tracker =
+                                crate::browser::remote_input::IME_SUPERSESSION_TRACKER.lock();
                             tracker
                                 .get(&(browser_id_str.clone(), epoch, fill_target.clone()))
                                 .copied()
@@ -1551,7 +1597,9 @@ impl BrowserWsSession {
                             drop(eval_permit);
                             let reply = ServerMessage::BrowserResult {
                                 request_id,
-                                result: Some(serde_json::json!({ "filled": true, "superseded": true })),
+                                result: Some(
+                                    serde_json::json!({ "filled": true, "superseded": true }),
+                                ),
                             };
                             let _ = out_tx.send(reply).await;
                             return;
@@ -1619,7 +1667,9 @@ impl BrowserWsSession {
                 subscription_id,
             } => {
                 if let Some(backend_sub) = self.backend_subscription_id.take() {
-                    let _ = backend.unsubscribe_viewer(&self.browser_id, &backend_sub).await;
+                    let _ = backend
+                        .unsubscribe_viewer(&self.browser_id, &backend_sub)
+                        .await;
                 }
                 self.teardown(admission);
                 let resp = ServerMessage::BrowserUnsubscribed {
@@ -1679,34 +1729,42 @@ impl BrowserWsSession {
                 }
 
                 let reply = match res {
-                    Ok(result) => match result.value.as_ref().map(snapshot_catalogue_from_backend) {
-                        Some(Ok((snapshot_id, map_revision, root, elements))) => {
-                            ServerMessage::BrowserSnapshot {
-                                request_id,
-                                snapshot_id,
-                                map_revision,
-                                root,
-                                elements,
+                    Ok(result) => {
+                        match result.value.as_ref().map(snapshot_catalogue_from_backend) {
+                            Some(Ok((snapshot_id, map_revision, root, elements))) => {
+                                ServerMessage::BrowserSnapshot {
+                                    request_id,
+                                    snapshot_id,
+                                    map_revision,
+                                    root,
+                                    elements,
+                                }
                             }
+                            Some(Err(e)) => browser_error(
+                                Some(request_id),
+                                "BROWSER_EXECUTION_FAILED",
+                                e,
+                                false,
+                                None,
+                            ),
+                            None => browser_error(
+                                Some(request_id),
+                                "BROWSER_EXECUTION_FAILED",
+                                "snapshot returned no result",
+                                false,
+                                None,
+                            ),
                         }
-                        Some(Err(e)) => browser_error(
-                            Some(request_id),
-                            "BROWSER_EXECUTION_FAILED",
-                            e,
-                            false,
-                            None,
-                        ),
-                        None => browser_error(
-                            Some(request_id),
-                            "BROWSER_EXECUTION_FAILED",
-                            "snapshot returned no result",
-                            false,
-                            None,
-                        ),
-                    },
+                    }
                     Err(e) => {
                         let (code, retryable, retry_after_ms) = map_remote_browser_error(&e);
-                        browser_error(Some(request_id), code, e.to_string(), retryable, retry_after_ms)
+                        browser_error(
+                            Some(request_id),
+                            code,
+                            e.to_string(),
+                            retryable,
+                            retry_after_ms,
+                        )
                     }
                 };
                 let _ = out_tx.send(reply).await;
@@ -1771,7 +1829,8 @@ impl BrowserWsSession {
         now: Instant,
     ) -> Result<Option<ServerMessage>, String> {
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
-        self.dispatch_client_message(msg, backend, admission, &tx, now).await?;
+        self.dispatch_client_message(msg, backend, admission, &tx, now)
+            .await?;
         Ok(rx.recv().await)
     }
 
@@ -1816,7 +1875,9 @@ impl BrowserWsSession {
         const CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
         let backend_cleanup = async {
             if let Some(backend_sub) = self.backend_subscription_id.take() {
-                let _ = backend.unsubscribe_viewer(&self.browser_id, &backend_sub).await;
+                let _ = backend
+                    .unsubscribe_viewer(&self.browser_id, &backend_sub)
+                    .await;
                 if let Some(epoch) = self.lease_epoch {
                     let sub_id = self.subscription_id.clone().unwrap_or_default();
                     let _ = backend.release_driver(&sub_id, epoch).await;
@@ -1944,25 +2005,40 @@ pub mod tests {
                 max_edge: None,
             },
         };
-        session.handle_client_message(sub_msg, &backend, &admission, now).await.unwrap();
+        session
+            .handle_client_message(sub_msg, &backend, &admission, now)
+            .await
+            .unwrap();
 
         let claim_msg = ClientMessage::BrowserDriverClaim {
             request_id: "r2".into(),
             subscription_id: session.subscription_id.clone().unwrap(),
             browser_id: "b1".into(),
         };
-        session.handle_client_message(claim_msg, &backend, &admission, now).await.unwrap();
+        session
+            .handle_client_message(claim_msg, &backend, &admission, now)
+            .await
+            .unwrap();
         assert!(session.is_driver);
 
         // Heartbeat is handled immediately even if eval permit is acquired
-        let _permit = session.eval_semaphore.clone().acquire_owned().await.unwrap();
+        let _permit = session
+            .eval_semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .unwrap();
 
         let hb_msg = ClientMessage::BrowserHeartbeat {
             request_id: Some("hb1".into()),
             lease_epoch: session.lease_epoch.map(|e| e.to_string()),
             subscription_id: session.subscription_id.clone(),
         };
-        let hb_resp = session.handle_client_message(hb_msg, &backend, &admission, now).await.unwrap().unwrap();
+        let hb_resp = session
+            .handle_client_message(hb_msg, &backend, &admission, now)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(matches!(hb_resp, ServerMessage::BrowserPong { .. }));
 
         // Driver release is also handled immediately without blocking on eval permit!
@@ -1970,8 +2046,15 @@ pub mod tests {
             request_id: "rel1".into(),
             lease_epoch: session.lease_epoch.unwrap().to_string(),
         };
-        let rel_resp = session.handle_client_message(release_msg, &backend, &admission, now).await.unwrap().unwrap();
-        assert!(matches!(rel_resp, ServerMessage::BrowserDriverReleased { .. }));
+        let rel_resp = session
+            .handle_client_message(release_msg, &backend, &admission, now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            rel_resp,
+            ServerMessage::BrowserDriverReleased { .. }
+        ));
         assert!(!session.is_driver);
     }
 
@@ -2049,7 +2132,10 @@ pub mod tests {
                 max_edge: None,
             },
         };
-        session.handle_client_message(sub_msg, &backend, &admission, now).await.unwrap();
+        session
+            .handle_client_message(sub_msg, &backend, &admission, now)
+            .await
+            .unwrap();
 
         // 2. Claim with mismatched subscription_id -> rejected
         let claim_bad_sub = ClientMessage::BrowserDriverClaim {
@@ -2133,14 +2219,20 @@ pub mod tests {
                 max_edge: None,
             },
         };
-        session.handle_client_message(sub_msg, &backend, &admission, now).await.unwrap();
+        session
+            .handle_client_message(sub_msg, &backend, &admission, now)
+            .await
+            .unwrap();
 
         let claim_msg = ClientMessage::BrowserDriverClaim {
             request_id: "r2".into(),
             subscription_id: session.subscription_id.clone().unwrap(),
             browser_id: "b1".into(),
         };
-        session.handle_client_message(claim_msg, &backend, &admission, now).await.unwrap();
+        session
+            .handle_client_message(claim_msg, &backend, &admission, now)
+            .await
+            .unwrap();
 
         let epoch = session.lease_epoch.unwrap().to_string();
 
@@ -2230,29 +2322,48 @@ pub mod tests {
         fn list_sessions<'a>(
             &'a self,
             _scope: &'a crate::remote::browser_backend::DesktopScope,
-        ) -> futures_util::future::BoxFuture<'a, Result<Vec<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>> {
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<
+                Vec<crate::remote::browser_backend::RemoteBrowserSessionSummary>,
+                RemoteBrowserError,
+            >,
+        > {
             Box::pin(async move { Ok(vec![]) })
         }
         fn identify_session<'a>(
             &'a self,
             _scope: &'a crate::remote::browser_backend::DesktopScope,
-        ) -> futures_util::future::BoxFuture<'a, Result<Option<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>> {
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<
+                Option<crate::remote::browser_backend::RemoteBrowserSessionSummary>,
+                RemoteBrowserError,
+            >,
+        > {
             Box::pin(async move { Ok(None) })
         }
         fn get_state<'a>(
             &'a self,
             _browser_id: &'a str,
             _scope: &'a crate::remote::browser_backend::DesktopScope,
-        ) -> futures_util::future::BoxFuture<'a, Result<crate::remote::browser_backend::BrowserRemoteState, RemoteBrowserError>> {
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<crate::remote::browser_backend::BrowserRemoteState, RemoteBrowserError>,
+        > {
             Box::pin(async move { Err(self.err.clone()) })
         }
         fn execute_command(
             &self,
             _ctx: BrowserCommandContext,
-        ) -> futures_util::future::BoxFuture<'_, Result<BrowserCommandResult, RemoteBrowserError>> {
+        ) -> futures_util::future::BoxFuture<'_, Result<BrowserCommandResult, RemoteBrowserError>>
+        {
             Box::pin(async move { Err(self.err.clone()) })
         }
-        fn capabilities(&self) -> futures_util::future::BoxFuture<'_, crate::remote::browser_backend::BrowserCapabilities> {
+        fn capabilities(
+            &self,
+        ) -> futures_util::future::BoxFuture<'_, crate::remote::browser_backend::BrowserCapabilities>
+        {
             Box::pin(async move {
                 crate::remote::browser_backend::BrowserCapabilities {
                     browser_available: false,
@@ -2271,8 +2382,14 @@ pub mod tests {
 
         for (backend_err, expected_code) in [
             (RemoteBrowserError::WaitTimeout, "BROWSER_TIMEOUT"),
-            (RemoteBrowserError::Forbidden("Permission denied /Users/alice".into()), "BROWSER_FORBIDDEN"),
-            (RemoteBrowserError::Unavailable("GUI process exited".into()), "BROWSER_UNAVAILABLE"),
+            (
+                RemoteBrowserError::Forbidden("Permission denied /Users/alice".into()),
+                "BROWSER_FORBIDDEN",
+            ),
+            (
+                RemoteBrowserError::Unavailable("GUI process exited".into()),
+                "BROWSER_UNAVAILABLE",
+            ),
         ] {
             let admission = AdmissionController::new();
             let mut session = BrowserWsSession::new(
@@ -2282,7 +2399,8 @@ pub mod tests {
                 DevicePermission::Control,
                 now,
             );
-            let backend: Arc<dyn RemoteBrowserBackend> = Arc::new(ErrorBackend { err: backend_err });
+            let backend: Arc<dyn RemoteBrowserBackend> =
+                Arc::new(ErrorBackend { err: backend_err });
 
             let sub_msg = ClientMessage::BrowserSubscribe {
                 request_id: "r1".into(),
@@ -2294,14 +2412,20 @@ pub mod tests {
                     max_edge: None,
                 },
             };
-            session.handle_client_message(sub_msg, &backend, &admission, now).await.unwrap();
+            session
+                .handle_client_message(sub_msg, &backend, &admission, now)
+                .await
+                .unwrap();
 
             let claim_msg = ClientMessage::BrowserDriverClaim {
                 request_id: "r2".into(),
                 subscription_id: session.subscription_id.clone().unwrap(),
                 browser_id: "b1".into(),
             };
-            session.handle_client_message(claim_msg, &backend, &admission, now).await.unwrap();
+            session
+                .handle_client_message(claim_msg, &backend, &admission, now)
+                .await
+                .unwrap();
 
             let cmd = ClientMessage::BrowserCommand {
                 request_id: "r3".into(),
@@ -2344,15 +2468,21 @@ pub mod tests {
                 "BROWSER_TARGET_NOT_FOUND",
             ),
             (
-                RemoteBrowserError::ExecutionFailed("BROWSER_TARGET_NOT_FOUND: querySelector null".into()),
+                RemoteBrowserError::ExecutionFailed(
+                    "BROWSER_TARGET_NOT_FOUND: querySelector null".into(),
+                ),
                 "BROWSER_TARGET_NOT_FOUND",
             ),
             (
-                RemoteBrowserError::InvalidRequest("target resolution failed: invalid reference".into()),
+                RemoteBrowserError::InvalidRequest(
+                    "target resolution failed: invalid reference".into(),
+                ),
                 "BROWSER_TARGET_NOT_FOUND",
             ),
             (
-                RemoteBrowserError::ExecutionFailed("BROWSER_STALE_FRAME: viewport revision changed since frame capture".into()),
+                RemoteBrowserError::ExecutionFailed(
+                    "BROWSER_STALE_FRAME: viewport revision changed since frame capture".into(),
+                ),
                 "BROWSER_STALE_FRAME",
             ),
         ];
@@ -2366,7 +2496,8 @@ pub mod tests {
                 DevicePermission::Control,
                 now,
             );
-            let backend: Arc<dyn RemoteBrowserBackend> = Arc::new(ErrorBackend { err: backend_err });
+            let backend: Arc<dyn RemoteBrowserBackend> =
+                Arc::new(ErrorBackend { err: backend_err });
 
             let sub_msg = ClientMessage::BrowserSubscribe {
                 request_id: "r1".into(),
@@ -2378,14 +2509,20 @@ pub mod tests {
                     max_edge: None,
                 },
             };
-            session.handle_client_message(sub_msg, &backend, &admission, now).await.unwrap();
+            session
+                .handle_client_message(sub_msg, &backend, &admission, now)
+                .await
+                .unwrap();
 
             let claim_msg = ClientMessage::BrowserDriverClaim {
                 request_id: "r2".into(),
                 subscription_id: session.subscription_id.clone().unwrap(),
                 browser_id: "b1".into(),
             };
-            session.handle_client_message(claim_msg, &backend, &admission, now).await.unwrap();
+            session
+                .handle_client_message(claim_msg, &backend, &admission, now)
+                .await
+                .unwrap();
 
             let cmd = ClientMessage::BrowserCommand {
                 request_id: "r3".into(),
@@ -2428,26 +2565,42 @@ pub mod tests {
             fn list_sessions<'a>(
                 &'a self,
                 _scope: &'a crate::remote::browser_backend::DesktopScope,
-            ) -> futures_util::future::BoxFuture<'a, Result<Vec<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>> {
+            ) -> futures_util::future::BoxFuture<
+                'a,
+                Result<
+                    Vec<crate::remote::browser_backend::RemoteBrowserSessionSummary>,
+                    RemoteBrowserError,
+                >,
+            > {
                 Box::pin(async move { Ok(vec![]) })
             }
             fn identify_session<'a>(
                 &'a self,
                 _scope: &'a crate::remote::browser_backend::DesktopScope,
-            ) -> futures_util::future::BoxFuture<'a, Result<Option<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>> {
+            ) -> futures_util::future::BoxFuture<
+                'a,
+                Result<
+                    Option<crate::remote::browser_backend::RemoteBrowserSessionSummary>,
+                    RemoteBrowserError,
+                >,
+            > {
                 Box::pin(async move { Ok(None) })
             }
             fn get_state<'a>(
                 &'a self,
                 _browser_id: &'a str,
                 _scope: &'a crate::remote::browser_backend::DesktopScope,
-            ) -> futures_util::future::BoxFuture<'a, Result<crate::remote::browser_backend::BrowserRemoteState, RemoteBrowserError>> {
+            ) -> futures_util::future::BoxFuture<
+                'a,
+                Result<crate::remote::browser_backend::BrowserRemoteState, RemoteBrowserError>,
+            > {
                 Box::pin(async move { Err(RemoteBrowserError::NotFound("b1".into())) })
             }
             fn execute_command(
                 &self,
                 ctx: BrowserCommandContext,
-            ) -> futures_util::future::BoxFuture<'_, Result<BrowserCommandResult, RemoteBrowserError>> {
+            ) -> futures_util::future::BoxFuture<'_, Result<BrowserCommandResult, RemoteBrowserError>>
+            {
                 Box::pin(async move {
                     if ctx.command == "fill" {
                         let prev = self.in_flight.fetch_add(1, Ordering::SeqCst);
@@ -2463,7 +2616,12 @@ pub mod tests {
                     })
                 })
             }
-            fn capabilities(&self) -> futures_util::future::BoxFuture<'_, crate::remote::browser_backend::BrowserCapabilities> {
+            fn capabilities(
+                &self,
+            ) -> futures_util::future::BoxFuture<
+                '_,
+                crate::remote::browser_backend::BrowserCapabilities,
+            > {
                 Box::pin(async move {
                     crate::remote::browser_backend::BrowserCapabilities {
                         browser_available: true,
@@ -2497,14 +2655,20 @@ pub mod tests {
             viewer_instance_id: "v1".into(),
             options: BrowserSubscribeOptions::default(),
         };
-        session.handle_client_message(sub_msg, &dyn_backend, &admission, now).await.unwrap();
+        session
+            .handle_client_message(sub_msg, &dyn_backend, &admission, now)
+            .await
+            .unwrap();
 
         let claim_msg = ClientMessage::BrowserDriverClaim {
             request_id: "r2".into(),
             subscription_id: session.subscription_id.clone().unwrap(),
             browser_id: "b-fill-1".into(),
         };
-        session.handle_client_message(claim_msg, &dyn_backend, &admission, now).await.unwrap();
+        session
+            .handle_client_message(claim_msg, &dyn_backend, &admission, now)
+            .await
+            .unwrap();
 
         let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(16);
 
@@ -2532,8 +2696,14 @@ pub mod tests {
             params: Some(serde_json::json!({ "selector": "#input", "value": "b" })),
         };
 
-        session.dispatch_client_message(cmd1, &dyn_backend, &admission, &out_tx, now).await.unwrap();
-        session.dispatch_client_message(cmd2, &dyn_backend, &admission, &out_tx, now).await.unwrap();
+        session
+            .dispatch_client_message(cmd1, &dyn_backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
+        session
+            .dispatch_client_message(cmd2, &dyn_backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
 
         // Wait for both results
         let r1 = out_rx.recv().await.unwrap();
@@ -2558,28 +2728,50 @@ pub mod tests {
             fn list_sessions<'a>(
                 &'a self,
                 _scope: &'a crate::remote::browser_backend::DesktopScope,
-            ) -> futures_util::future::BoxFuture<'a, Result<Vec<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>> {
+            ) -> futures_util::future::BoxFuture<
+                'a,
+                Result<
+                    Vec<crate::remote::browser_backend::RemoteBrowserSessionSummary>,
+                    RemoteBrowserError,
+                >,
+            > {
                 Box::pin(async move { Ok(vec![]) })
             }
             fn identify_session<'a>(
                 &'a self,
                 _scope: &'a crate::remote::browser_backend::DesktopScope,
-            ) -> futures_util::future::BoxFuture<'a, Result<Option<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>> {
+            ) -> futures_util::future::BoxFuture<
+                'a,
+                Result<
+                    Option<crate::remote::browser_backend::RemoteBrowserSessionSummary>,
+                    RemoteBrowserError,
+                >,
+            > {
                 Box::pin(async move { Ok(None) })
             }
             fn get_state<'a>(
                 &'a self,
                 _browser_id: &'a str,
                 _scope: &'a crate::remote::browser_backend::DesktopScope,
-            ) -> futures_util::future::BoxFuture<'a, Result<crate::remote::browser_backend::BrowserRemoteState, RemoteBrowserError>> {
+            ) -> futures_util::future::BoxFuture<
+                'a,
+                Result<crate::remote::browser_backend::BrowserRemoteState, RemoteBrowserError>,
+            > {
                 Box::pin(async move { Err(RemoteBrowserError::NotFound("b1".into())) })
             }
             fn execute_command(
                 &self,
                 ctx: BrowserCommandContext,
-            ) -> futures_util::future::BoxFuture<'_, Result<BrowserCommandResult, RemoteBrowserError>> {
+            ) -> futures_util::future::BoxFuture<'_, Result<BrowserCommandResult, RemoteBrowserError>>
+            {
                 Box::pin(async move {
-                    let val = ctx.params.as_ref().and_then(|p| p.get("value")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let val = ctx
+                        .params
+                        .as_ref()
+                        .and_then(|p| p.get("value"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     if val == "first" {
                         self.executed_commands.lock().push(val.clone());
                         self.first_started.notify_one();
@@ -2593,7 +2785,12 @@ pub mod tests {
                     })
                 })
             }
-            fn capabilities(&self) -> futures_util::future::BoxFuture<'_, crate::remote::browser_backend::BrowserCapabilities> {
+            fn capabilities(
+                &self,
+            ) -> futures_util::future::BoxFuture<
+                '_,
+                crate::remote::browser_backend::BrowserCapabilities,
+            > {
                 Box::pin(async move {
                     crate::remote::browser_backend::BrowserCapabilities {
                         browser_available: true,
@@ -2628,14 +2825,20 @@ pub mod tests {
             viewer_instance_id: "v1".into(),
             options: BrowserSubscribeOptions::default(),
         };
-        session.handle_client_message(sub_msg, &dyn_backend, &admission, now).await.unwrap();
+        session
+            .handle_client_message(sub_msg, &dyn_backend, &admission, now)
+            .await
+            .unwrap();
 
         let claim_msg = ClientMessage::BrowserDriverClaim {
             request_id: "r2".into(),
             subscription_id: session.subscription_id.clone().unwrap(),
             browser_id: "b-super-1".into(),
         };
-        session.handle_client_message(claim_msg, &dyn_backend, &admission, now).await.unwrap();
+        session
+            .handle_client_message(claim_msg, &dyn_backend, &admission, now)
+            .await
+            .unwrap();
 
         let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(16);
 
@@ -2649,9 +2852,14 @@ pub mod tests {
             desktop_epoch: "1".into(),
             document_generation: "1".into(),
             command: "fill".into(),
-            params: Some(serde_json::json!({ "selector": "#target", "value": "first", "revision": 1 })),
+            params: Some(
+                serde_json::json!({ "selector": "#target", "value": "first", "revision": 1 }),
+            ),
         };
-        session.dispatch_client_message(cmd1, &dyn_backend, &admission, &out_tx, now).await.unwrap();
+        session
+            .dispatch_client_message(cmd1, &dyn_backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
 
         // Wait until first fill begins executing
         backend.first_started.notified().await;
@@ -2668,7 +2876,9 @@ pub mod tests {
             desktop_epoch: "1".into(),
             document_generation: "1".into(),
             command: "fill".into(),
-            params: Some(serde_json::json!({ "selector": "#target", "value": "stale", "revision": 1 })),
+            params: Some(
+                serde_json::json!({ "selector": "#target", "value": "stale", "revision": 1 }),
+            ),
         };
         let cmd_newer = ClientMessage::BrowserCommand {
             request_id: "f-newer".into(),
@@ -2679,11 +2889,19 @@ pub mod tests {
             desktop_epoch: "1".into(),
             document_generation: "1".into(),
             command: "fill".into(),
-            params: Some(serde_json::json!({ "selector": "#target", "value": "newer", "revision": 2 })),
+            params: Some(
+                serde_json::json!({ "selector": "#target", "value": "newer", "revision": 2 }),
+            ),
         };
 
-        session.dispatch_client_message(cmd_stale, &dyn_backend, &admission, &out_tx, now).await.unwrap();
-        session.dispatch_client_message(cmd_newer, &dyn_backend, &admission, &out_tx, now).await.unwrap();
+        session
+            .dispatch_client_message(cmd_stale, &dyn_backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
+        session
+            .dispatch_client_message(cmd_newer, &dyn_backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
 
         // Release first command to finish
         backend.first_continue.notify_one();
@@ -2695,12 +2913,17 @@ pub mod tests {
         }
 
         // Verify "stale" was superseded at the mutation boundary under the lock:
-        let stale_resp = results.iter().find(|m| match m {
-            ServerMessage::BrowserResult { request_id, .. } => request_id == "f-stale",
-            _ => false,
-        }).unwrap();
+        let stale_resp = results
+            .iter()
+            .find(|m| match m {
+                ServerMessage::BrowserResult { request_id, .. } => request_id == "f-stale",
+                _ => false,
+            })
+            .unwrap();
         match stale_resp {
-            ServerMessage::BrowserResult { result: Some(val), .. } => {
+            ServerMessage::BrowserResult {
+                result: Some(val), ..
+            } => {
                 assert_eq!(val.get("superseded"), Some(&serde_json::json!(true)));
             }
             other => panic!("Expected superseded BrowserResult, got {:?}", other),
@@ -2722,26 +2945,42 @@ pub mod tests {
             fn list_sessions<'a>(
                 &'a self,
                 _scope: &'a crate::remote::browser_backend::DesktopScope,
-            ) -> futures_util::future::BoxFuture<'a, Result<Vec<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>> {
+            ) -> futures_util::future::BoxFuture<
+                'a,
+                Result<
+                    Vec<crate::remote::browser_backend::RemoteBrowserSessionSummary>,
+                    RemoteBrowserError,
+                >,
+            > {
                 Box::pin(async move { Ok(vec![]) })
             }
             fn identify_session<'a>(
                 &'a self,
                 _scope: &'a crate::remote::browser_backend::DesktopScope,
-            ) -> futures_util::future::BoxFuture<'a, Result<Option<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>> {
+            ) -> futures_util::future::BoxFuture<
+                'a,
+                Result<
+                    Option<crate::remote::browser_backend::RemoteBrowserSessionSummary>,
+                    RemoteBrowserError,
+                >,
+            > {
                 Box::pin(async move { Ok(None) })
             }
             fn get_state<'a>(
                 &'a self,
                 _browser_id: &'a str,
                 _scope: &'a crate::remote::browser_backend::DesktopScope,
-            ) -> futures_util::future::BoxFuture<'a, Result<crate::remote::browser_backend::BrowserRemoteState, RemoteBrowserError>> {
+            ) -> futures_util::future::BoxFuture<
+                'a,
+                Result<crate::remote::browser_backend::BrowserRemoteState, RemoteBrowserError>,
+            > {
                 Box::pin(async move { Err(RemoteBrowserError::NotFound("b1".into())) })
             }
             fn execute_command(
                 &self,
                 _ctx: BrowserCommandContext,
-            ) -> futures_util::future::BoxFuture<'_, Result<BrowserCommandResult, RemoteBrowserError>> {
+            ) -> futures_util::future::BoxFuture<'_, Result<BrowserCommandResult, RemoteBrowserError>>
+            {
                 Box::pin(async move {
                     // Hang forever until cancelled
                     std::future::pending::<()>().await;
@@ -2762,7 +3001,12 @@ pub mod tests {
                     Ok(())
                 })
             }
-            fn capabilities(&self) -> futures_util::future::BoxFuture<'_, crate::remote::browser_backend::BrowserCapabilities> {
+            fn capabilities(
+                &self,
+            ) -> futures_util::future::BoxFuture<
+                '_,
+                crate::remote::browser_backend::BrowserCapabilities,
+            > {
                 Box::pin(async move {
                     crate::remote::browser_backend::BrowserCapabilities {
                         browser_available: true,
@@ -2795,14 +3039,20 @@ pub mod tests {
             viewer_instance_id: "v1".into(),
             options: BrowserSubscribeOptions::default(),
         };
-        session.handle_client_message(sub_msg, &dyn_backend, &admission, now).await.unwrap();
+        session
+            .handle_client_message(sub_msg, &dyn_backend, &admission, now)
+            .await
+            .unwrap();
 
         let claim_msg = ClientMessage::BrowserDriverClaim {
             request_id: "r2".into(),
             subscription_id: session.subscription_id.clone().unwrap(),
             browser_id: "b-r64-1".into(),
         };
-        session.handle_client_message(claim_msg, &dyn_backend, &admission, now).await.unwrap();
+        session
+            .handle_client_message(claim_msg, &dyn_backend, &admission, now)
+            .await
+            .unwrap();
 
         let (out_tx, _out_rx) = tokio::sync::mpsc::channel(16);
 
@@ -2818,17 +3068,33 @@ pub mod tests {
             command: "click".into(),
             params: Some(serde_json::json!({ "reference": "target-1" })),
         };
-        session.dispatch_client_message(cmd, &dyn_backend, &admission, &out_tx, now).await.unwrap();
+        session
+            .dispatch_client_message(cmd, &dyn_backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
 
-        assert_eq!(session.tracked_tasks.lock().len(), 1, "Command task must be tracked");
+        assert_eq!(
+            session.tracked_tasks.lock().len(),
+            1,
+            "Command task must be tracked"
+        );
         assert!(!session.cancel_token.is_cancelled());
 
         // Perform teardown
-        session.teardown_with_backend(&admission, &dyn_backend).await;
+        session
+            .teardown_with_backend(&admission, &dyn_backend)
+            .await;
 
         // Verify cancelled and tasks aborted
-        assert!(session.cancel_token.is_cancelled(), "Cancel token must be cancelled on teardown");
-        assert_eq!(session.tracked_tasks.lock().len(), 0, "Tracked tasks must be aborted on teardown");
+        assert!(
+            session.cancel_token.is_cancelled(),
+            "Cancel token must be cancelled on teardown"
+        );
+        assert_eq!(
+            session.tracked_tasks.lock().len(),
+            0,
+            "Tracked tasks must be aborted on teardown"
+        );
     }
 
     #[tokio::test]
@@ -2840,26 +3106,42 @@ pub mod tests {
             fn list_sessions<'a>(
                 &'a self,
                 _scope: &'a crate::remote::browser_backend::DesktopScope,
-            ) -> futures_util::future::BoxFuture<'a, Result<Vec<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>> {
+            ) -> futures_util::future::BoxFuture<
+                'a,
+                Result<
+                    Vec<crate::remote::browser_backend::RemoteBrowserSessionSummary>,
+                    RemoteBrowserError,
+                >,
+            > {
                 Box::pin(async move { Ok(vec![]) })
             }
             fn identify_session<'a>(
                 &'a self,
                 _scope: &'a crate::remote::browser_backend::DesktopScope,
-            ) -> futures_util::future::BoxFuture<'a, Result<Option<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>> {
+            ) -> futures_util::future::BoxFuture<
+                'a,
+                Result<
+                    Option<crate::remote::browser_backend::RemoteBrowserSessionSummary>,
+                    RemoteBrowserError,
+                >,
+            > {
                 Box::pin(async move { Ok(None) })
             }
             fn get_state<'a>(
                 &'a self,
                 _browser_id: &'a str,
                 _scope: &'a crate::remote::browser_backend::DesktopScope,
-            ) -> futures_util::future::BoxFuture<'a, Result<crate::remote::browser_backend::BrowserRemoteState, RemoteBrowserError>> {
+            ) -> futures_util::future::BoxFuture<
+                'a,
+                Result<crate::remote::browser_backend::BrowserRemoteState, RemoteBrowserError>,
+            > {
                 Box::pin(async move { Err(RemoteBrowserError::NotFound("b1".into())) })
             }
             fn execute_command(
                 &self,
                 ctx: BrowserCommandContext,
-            ) -> futures_util::future::BoxFuture<'_, Result<BrowserCommandResult, RemoteBrowserError>> {
+            ) -> futures_util::future::BoxFuture<'_, Result<BrowserCommandResult, RemoteBrowserError>>
+            {
                 Box::pin(async move {
                     if ctx.command == "snapshot" {
                         Ok(BrowserCommandResult {
@@ -2872,11 +3154,19 @@ pub mod tests {
                             })),
                         })
                     } else {
-                        Ok(BrowserCommandResult { success: true, value: None })
+                        Ok(BrowserCommandResult {
+                            success: true,
+                            value: None,
+                        })
                     }
                 })
             }
-            fn capabilities(&self) -> futures_util::future::BoxFuture<'_, crate::remote::browser_backend::BrowserCapabilities> {
+            fn capabilities(
+                &self,
+            ) -> futures_util::future::BoxFuture<
+                '_,
+                crate::remote::browser_backend::BrowserCapabilities,
+            > {
                 Box::pin(async move {
                     crate::remote::browser_backend::BrowserCapabilities {
                         browser_available: true,
@@ -2901,9 +3191,7 @@ pub mod tests {
             DevicePermission::Control,
             now,
         )
-        .with_scope_validator(Arc::new(move || {
-            scope_valid_clone.load(Ordering::SeqCst)
-        }));
+        .with_scope_validator(Arc::new(move || scope_valid_clone.load(Ordering::SeqCst)));
 
         let backend: Arc<dyn RemoteBrowserBackend> = Arc::new(SnapshotBackend);
 
@@ -2913,7 +3201,10 @@ pub mod tests {
             viewer_instance_id: "v1".into(),
             options: BrowserSubscribeOptions::default(),
         };
-        session.handle_client_message(sub_msg, &backend, &admission, now).await.unwrap();
+        session
+            .handle_client_message(sub_msg, &backend, &admission, now)
+            .await
+            .unwrap();
 
         let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(16);
 
@@ -2925,11 +3216,20 @@ pub mod tests {
             request_id: "snap-req-1".into(),
             browser_id: "b-snap-1".into(),
         };
-        session.dispatch_client_message(snap_msg, &backend, &admission, &out_tx, now).await.unwrap();
+        session
+            .dispatch_client_message(snap_msg, &backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
 
         // Must NOT publish snapshot to out_tx because scope was invalid
-        assert!(out_rx.try_recv().is_err(), "Snapshot must not be published when scope is revoked");
-        assert!(session.cancel_token.is_cancelled(), "Session cancel token must be cancelled");
+        assert!(
+            out_rx.try_recv().is_err(),
+            "Snapshot must not be published when scope is revoked"
+        );
+        assert!(
+            session.cancel_token.is_cancelled(),
+            "Session cancel token must be cancelled"
+        );
     }
 
     struct SlowBackend {
@@ -2940,26 +3240,42 @@ pub mod tests {
         fn list_sessions<'a>(
             &'a self,
             _scope: &'a crate::remote::browser_backend::DesktopScope,
-        ) -> futures_util::future::BoxFuture<'a, Result<Vec<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>> {
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<
+                Vec<crate::remote::browser_backend::RemoteBrowserSessionSummary>,
+                RemoteBrowserError,
+            >,
+        > {
             Box::pin(async move { Ok(vec![]) })
         }
         fn identify_session<'a>(
             &'a self,
             _scope: &'a crate::remote::browser_backend::DesktopScope,
-        ) -> futures_util::future::BoxFuture<'a, Result<Option<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>> {
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<
+                Option<crate::remote::browser_backend::RemoteBrowserSessionSummary>,
+                RemoteBrowserError,
+            >,
+        > {
             Box::pin(async move { Ok(None) })
         }
         fn get_state<'a>(
             &'a self,
             _browser_id: &'a str,
             _scope: &'a crate::remote::browser_backend::DesktopScope,
-        ) -> futures_util::future::BoxFuture<'a, Result<crate::remote::browser_backend::BrowserRemoteState, RemoteBrowserError>> {
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<crate::remote::browser_backend::BrowserRemoteState, RemoteBrowserError>,
+        > {
             Box::pin(async move { Err(RemoteBrowserError::NotFound("b1".into())) })
         }
         fn execute_command(
             &self,
             _ctx: BrowserCommandContext,
-        ) -> futures_util::future::BoxFuture<'_, Result<BrowserCommandResult, RemoteBrowserError>> {
+        ) -> futures_util::future::BoxFuture<'_, Result<BrowserCommandResult, RemoteBrowserError>>
+        {
             Box::pin(async move {
                 let _ = self.cmd_started_tx.send(()).await;
                 let mut rx = self.cmd_continue_rx.lock().await;
@@ -2970,7 +3286,10 @@ pub mod tests {
                 })
             })
         }
-        fn capabilities(&self) -> futures_util::future::BoxFuture<'_, crate::remote::browser_backend::BrowserCapabilities> {
+        fn capabilities(
+            &self,
+        ) -> futures_util::future::BoxFuture<'_, crate::remote::browser_backend::BrowserCapabilities>
+        {
             Box::pin(async move {
                 crate::remote::browser_backend::BrowserCapabilities {
                     browser_available: true,
@@ -3015,7 +3334,10 @@ pub mod tests {
                 max_edge: None,
             },
         };
-        session.dispatch_client_message(sub, &backend, &admission, &out_tx, now).await.unwrap();
+        session
+            .dispatch_client_message(sub, &backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
         let sub_resp = out_rx.recv().await.unwrap();
         assert!(matches!(sub_resp, ServerMessage::BrowserSubscribed { .. }));
 
@@ -3025,9 +3347,15 @@ pub mod tests {
             subscription_id: session.subscription_id.clone().unwrap(),
             browser_id: "b1".into(),
         };
-        session.dispatch_client_message(claim, &backend, &admission, &out_tx, now).await.unwrap();
+        session
+            .dispatch_client_message(claim, &backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
         let claim_resp = out_rx.recv().await.unwrap();
-        assert!(matches!(claim_resp, ServerMessage::BrowserDriverClaimed { .. }));
+        assert!(matches!(
+            claim_resp,
+            ServerMessage::BrowserDriverClaimed { .. }
+        ));
 
         // 3. Dispatch long-running command (eval or wait)
         let cmd = ClientMessage::BrowserCommand {
@@ -3041,7 +3369,10 @@ pub mod tests {
             command: "wait".into(),
             params: None,
         };
-        session.dispatch_client_message(cmd, &backend, &admission, &out_tx, now).await.unwrap();
+        session
+            .dispatch_client_message(cmd, &backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
 
         // Wait until command has actually started executing in background task
         started_rx.recv().await.unwrap();
@@ -3052,7 +3383,10 @@ pub mod tests {
             lease_epoch: session.lease_epoch.map(|e| e.to_string()),
             subscription_id: session.subscription_id.clone(),
         };
-        session.dispatch_client_message(hb, &backend, &admission, &out_tx, now).await.unwrap();
+        session
+            .dispatch_client_message(hb, &backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
 
         // Heartbeat response is received IMMEDIATELY without waiting for command!
         let hb_resp = out_rx.recv().await.unwrap();
@@ -3063,11 +3397,17 @@ pub mod tests {
             request_id: "rel-nb".into(),
             lease_epoch: session.lease_epoch.unwrap().to_string(),
         };
-        session.dispatch_client_message(rel, &backend, &admission, &out_tx, now).await.unwrap();
+        session
+            .dispatch_client_message(rel, &backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
 
         // Release response is received IMMEDIATELY!
         let rel_resp = out_rx.recv().await.unwrap();
-        assert!(matches!(rel_resp, ServerMessage::BrowserDriverReleased { .. }));
+        assert!(matches!(
+            rel_resp,
+            ServerMessage::BrowserDriverReleased { .. }
+        ));
         assert!(!session.is_driver);
 
         // 6. Now let the background command finish
@@ -3093,7 +3433,11 @@ pub mod tests {
 
         // Raw payload over 64 KiB
         let oversized = "X".repeat(65 * 1024);
-        let resp = session.handle_raw_text(&oversized, &backend, &admission, now).await.unwrap().unwrap();
+        let resp = session
+            .handle_raw_text(&oversized, &backend, &admission, now)
+            .await
+            .unwrap()
+            .unwrap();
         match resp {
             ServerMessage::BrowserError { code, message, .. } => {
                 assert_eq!(code, "BROWSER_INVALID_REQUEST");
@@ -3108,26 +3452,42 @@ pub mod tests {
         fn list_sessions<'a>(
             &'a self,
             _scope: &'a crate::remote::browser_backend::DesktopScope,
-        ) -> futures_util::future::BoxFuture<'a, Result<Vec<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>> {
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<
+                Vec<crate::remote::browser_backend::RemoteBrowserSessionSummary>,
+                RemoteBrowserError,
+            >,
+        > {
             Box::pin(async move { Ok(vec![]) })
         }
         fn identify_session<'a>(
             &'a self,
             _scope: &'a crate::remote::browser_backend::DesktopScope,
-        ) -> futures_util::future::BoxFuture<'a, Result<Option<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>> {
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<
+                Option<crate::remote::browser_backend::RemoteBrowserSessionSummary>,
+                RemoteBrowserError,
+            >,
+        > {
             Box::pin(async move { Ok(None) })
         }
         fn get_state<'a>(
             &'a self,
             _browser_id: &'a str,
             _scope: &'a crate::remote::browser_backend::DesktopScope,
-        ) -> futures_util::future::BoxFuture<'a, Result<crate::remote::browser_backend::BrowserRemoteState, RemoteBrowserError>> {
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<crate::remote::browser_backend::BrowserRemoteState, RemoteBrowserError>,
+        > {
             Box::pin(async move { Err(RemoteBrowserError::NotFound("b1".into())) })
         }
         fn execute_command(
             &self,
             _ctx: BrowserCommandContext,
-        ) -> futures_util::future::BoxFuture<'_, Result<BrowserCommandResult, RemoteBrowserError>> {
+        ) -> futures_util::future::BoxFuture<'_, Result<BrowserCommandResult, RemoteBrowserError>>
+        {
             Box::pin(async move {
                 Ok(BrowserCommandResult {
                     success: true,
@@ -3140,7 +3500,10 @@ pub mod tests {
                 })
             })
         }
-        fn capabilities(&self) -> futures_util::future::BoxFuture<'_, crate::remote::browser_backend::BrowserCapabilities> {
+        fn capabilities(
+            &self,
+        ) -> futures_util::future::BoxFuture<'_, crate::remote::browser_backend::BrowserCapabilities>
+        {
             Box::pin(async move {
                 crate::remote::browser_backend::BrowserCapabilities {
                     browser_available: true,
@@ -3176,14 +3539,20 @@ pub mod tests {
                 max_edge: None,
             },
         };
-        session.handle_client_message(sub, &backend, &admission, now).await.unwrap();
+        session
+            .handle_client_message(sub, &backend, &admission, now)
+            .await
+            .unwrap();
 
         let claim = ClientMessage::BrowserDriverClaim {
             request_id: "r2".into(),
             subscription_id: session.subscription_id.clone().unwrap(),
             browser_id: "b1".into(),
         };
-        session.handle_client_message(claim, &backend, &admission, now).await.unwrap();
+        session
+            .handle_client_message(claim, &backend, &admission, now)
+            .await
+            .unwrap();
 
         let cmd = ClientMessage::BrowserCommand {
             request_id: "r3".into(),
@@ -3197,7 +3566,10 @@ pub mod tests {
             params: None,
         };
         let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(16);
-        session.dispatch_client_message(cmd, &backend, &admission, &out_tx, now).await.unwrap();
+        session
+            .dispatch_client_message(cmd, &backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
         let res = out_rx.recv().await.unwrap();
 
         match res {
@@ -3237,18 +3609,29 @@ pub mod tests {
                 max_edge: None,
             },
         };
-        session.handle_client_message(sub, &backend, &admission, now).await.unwrap();
+        session
+            .handle_client_message(sub, &backend, &admission, now)
+            .await
+            .unwrap();
 
         let claim = ClientMessage::BrowserDriverClaim {
             request_id: "r2".into(),
             subscription_id: session.subscription_id.clone().unwrap(),
             browser_id: "b1".into(),
         };
-        session.handle_client_message(claim, &backend, &admission, now).await.unwrap();
+        session
+            .handle_client_message(claim, &backend, &admission, now)
+            .await
+            .unwrap();
         let epoch = session.lease_epoch.unwrap();
 
         // Hold the eval semaphore so spawned eval command waits
-        let held_permit = session.eval_semaphore.clone().acquire_owned().await.unwrap();
+        let held_permit = session
+            .eval_semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .unwrap();
 
         let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(16);
         let cmd = ClientMessage::BrowserCommand {
@@ -3262,7 +3645,10 @@ pub mod tests {
             command: "eval".into(),
             params: Some(serde_json::json!({ "script": "1+1" })),
         };
-        session.dispatch_client_message(cmd, &backend, &admission, &out_tx, now).await.unwrap();
+        session
+            .dispatch_client_message(cmd, &backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
 
         // Now revoke driver lease via desktop reclaim while task is waiting for permit!
         admission.broker.reclaim_desktop();
@@ -3305,14 +3691,20 @@ pub mod tests {
                 max_edge: None,
             },
         };
-        session.handle_client_message(sub, &backend, &admission, now).await.unwrap();
+        session
+            .handle_client_message(sub, &backend, &admission, now)
+            .await
+            .unwrap();
 
         let claim = ClientMessage::BrowserDriverClaim {
             request_id: "r2".into(),
             subscription_id: session.subscription_id.clone().unwrap(),
             browser_id: "b1".into(),
         };
-        session.handle_client_message(claim, &backend, &admission, now).await.unwrap();
+        session
+            .handle_client_message(claim, &backend, &admission, now)
+            .await
+            .unwrap();
         let epoch = session.lease_epoch.unwrap();
 
         // 1. Heartbeat with wrong subscription_id -> BROWSER_INVALID_REQUEST
@@ -3321,8 +3713,14 @@ pub mod tests {
             lease_epoch: Some(epoch.to_string()),
             subscription_id: Some("sub-wrong".into()),
         };
-        let bad_hb_resp = session.handle_client_message(bad_sub_hb, &backend, &admission, now).await.unwrap().unwrap();
-        assert!(matches!(bad_hb_resp, ServerMessage::BrowserError { ref code, .. } if code == "BROWSER_INVALID_REQUEST"));
+        let bad_hb_resp = session
+            .handle_client_message(bad_sub_hb, &backend, &admission, now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(bad_hb_resp, ServerMessage::BrowserError { ref code, .. } if code == "BROWSER_INVALID_REQUEST")
+        );
 
         // 2. Heartbeat with wrong lease_epoch -> BROWSER_INVALID_REQUEST
         let bad_epoch_hb = ClientMessage::BrowserHeartbeat {
@@ -3330,8 +3728,14 @@ pub mod tests {
             lease_epoch: Some("99999".into()),
             subscription_id: session.subscription_id.clone(),
         };
-        let bad_epoch_resp = session.handle_client_message(bad_epoch_hb, &backend, &admission, now).await.unwrap().unwrap();
-        assert!(matches!(bad_epoch_resp, ServerMessage::BrowserError { ref code, .. } if code == "BROWSER_INVALID_REQUEST"));
+        let bad_epoch_resp = session
+            .handle_client_message(bad_epoch_hb, &backend, &admission, now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(bad_epoch_resp, ServerMessage::BrowserError { ref code, .. } if code == "BROWSER_INVALID_REQUEST")
+        );
 
         // 3. Heartbeat with correct 5-tuple -> BrowserPong
         let good_hb = ClientMessage::BrowserHeartbeat {
@@ -3339,7 +3743,11 @@ pub mod tests {
             lease_epoch: Some(epoch.to_string()),
             subscription_id: session.subscription_id.clone(),
         };
-        let good_hb_resp = session.handle_client_message(good_hb, &backend, &admission, now).await.unwrap().unwrap();
+        let good_hb_resp = session
+            .handle_client_message(good_hb, &backend, &admission, now)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(matches!(good_hb_resp, ServerMessage::BrowserPong { .. }));
 
         // 4. Release with wrong lease_epoch -> BROWSER_INVALID_REQUEST
@@ -3347,16 +3755,29 @@ pub mod tests {
             request_id: "rel-bad".into(),
             lease_epoch: "99999".into(),
         };
-        let bad_rel_resp = session.handle_client_message(bad_rel, &backend, &admission, now).await.unwrap().unwrap();
-        assert!(matches!(bad_rel_resp, ServerMessage::BrowserError { ref code, .. } if code == "BROWSER_INVALID_REQUEST"));
+        let bad_rel_resp = session
+            .handle_client_message(bad_rel, &backend, &admission, now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(bad_rel_resp, ServerMessage::BrowserError { ref code, .. } if code == "BROWSER_INVALID_REQUEST")
+        );
 
         // 5. Release with correct 5-tuple -> BrowserDriverReleased
         let good_rel = ClientMessage::BrowserDriverRelease {
             request_id: "rel-good".into(),
             lease_epoch: epoch.to_string(),
         };
-        let good_rel_resp = session.handle_client_message(good_rel, &backend, &admission, now).await.unwrap().unwrap();
-        assert!(matches!(good_rel_resp, ServerMessage::BrowserDriverReleased { .. }));
+        let good_rel_resp = session
+            .handle_client_message(good_rel, &backend, &admission, now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            good_rel_resp,
+            ServerMessage::BrowserDriverReleased { .. }
+        ));
         assert!(!session.is_driver);
     }
 
@@ -3372,7 +3793,9 @@ pub mod tests {
         );
 
         // Before subscribing: frames are dropped
-        assert!(session.enqueue_frame(vec![0x62, 1, 1, 1, 1, 0, 0, 0], now).is_none());
+        assert!(session
+            .enqueue_frame(vec![0x62, 1, 1, 1, 1, 0, 0, 0], now)
+            .is_none());
 
         // Setup queue (as if subscribed)
         session.queue = Some(SubscriberQueue::new("sub-flow".into(), 1));
@@ -3391,12 +3814,18 @@ pub mod tests {
         assert!(session.enqueue_frame(f3.clone(), now).is_none());
 
         // ACK arrives for frame 1: frame 3 is promoted and stored in pending_promoted_frame
-        let ack = ClientMessage::BrowserFrameAck { stream_id: 1, seq: 1 };
+        let ack = ClientMessage::BrowserFrameAck {
+            stream_id: 1,
+            seq: 1,
+        };
         let admission = AdmissionController::new();
         let backend: Arc<dyn RemoteBrowserBackend> = Arc::new(InProcessTestBackend::new());
         let (out_tx, _) = tokio::sync::mpsc::channel(16);
-        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
-        rt.block_on(session.dispatch_client_message(ack, &backend, &admission, &out_tx, now)).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(session.dispatch_client_message(ack, &backend, &admission, &out_tx, now))
+            .unwrap();
 
         assert_eq!(session.pending_promoted_frame, Some(f3));
     }
@@ -3421,7 +3850,10 @@ pub mod tests {
             viewer_instance_id: "v1".into(),
             options: Default::default(),
         };
-        session.dispatch_client_message(sub, &backend, &admission, &out_tx, now).await.unwrap();
+        session
+            .dispatch_client_message(sub, &backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
         let _ = out_rx.recv().await.unwrap(); // BrowserSubscribed
         assert_eq!(session.state, WsConnectionState::Streaming);
 
@@ -3430,25 +3862,43 @@ pub mod tests {
         assert_eq!(session.enqueue_frame(f1.clone(), now), Some(f1));
 
         // Acknowledge frame 1 so queue has no unacked frame
-        let ack1 = ClientMessage::BrowserFrameAck { stream_id: 1, seq: 1 };
-        session.dispatch_client_message(ack1, &backend, &admission, &out_tx, now).await.unwrap();
+        let ack1 = ClientMessage::BrowserFrameAck {
+            stream_id: 1,
+            seq: 1,
+        };
+        session
+            .dispatch_client_message(ack1, &backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
 
         // 2. Pause session via BrowserPause
         let pause = ClientMessage::BrowserPause {
             browser_id: "b1".into(),
             stream_id: session.stream_id,
         };
-        session.dispatch_client_message(pause, &backend, &admission, &out_tx, now).await.unwrap();
+        session
+            .dispatch_client_message(pause, &backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
         assert_eq!(session.state, WsConnectionState::Paused);
-        assert!(session.subscription_id.is_some(), "Session not torn down on pause");
+        assert!(
+            session.subscription_id.is_some(),
+            "Session not torn down on pause"
+        );
 
         // While paused: frames are NOT forwarded (enqueue_frame returns None even without unacked frame)
         let f2 = vec![0x62, 1, 1, 1, 2, 0, 0, 0, 30, 40];
         assert_eq!(session.enqueue_frame(f2.clone(), now), None);
 
         // While paused: ACKs are paused and do NOT promote frames
-        let ack2 = ClientMessage::BrowserFrameAck { stream_id: 1, seq: 2 };
-        session.dispatch_client_message(ack2, &backend, &admission, &out_tx, now).await.unwrap();
+        let ack2 = ClientMessage::BrowserFrameAck {
+            stream_id: 1,
+            seq: 2,
+        };
+        session
+            .dispatch_client_message(ack2, &backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
         assert_eq!(session.pending_promoted_frame, None);
 
         // 3. Resume session via BrowserResume
@@ -3456,7 +3906,10 @@ pub mod tests {
             browser_id: "b1".into(),
             stream_id: session.stream_id,
         };
-        session.dispatch_client_message(resume, &backend, &admission, &out_tx, now).await.unwrap();
+        session
+            .dispatch_client_message(resume, &backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
         assert_eq!(session.state, WsConnectionState::Streaming);
 
         // After resume: frame forwarding works again
@@ -3468,8 +3921,14 @@ pub mod tests {
         assert_eq!(session.enqueue_frame(f4.clone(), now), None);
 
         // ACK for frame 3 promotes frame 4
-        let ack3 = ClientMessage::BrowserFrameAck { stream_id: 1, seq: 3 };
-        session.dispatch_client_message(ack3, &backend, &admission, &out_tx, now).await.unwrap();
+        let ack3 = ClientMessage::BrowserFrameAck {
+            stream_id: 1,
+            seq: 3,
+        };
+        session
+            .dispatch_client_message(ack3, &backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
         assert_eq!(session.pending_promoted_frame, Some(f4));
     }
 
@@ -3484,26 +3943,42 @@ pub mod tests {
         fn list_sessions<'a>(
             &'a self,
             _scope: &'a crate::remote::browser_backend::DesktopScope,
-        ) -> futures_util::future::BoxFuture<'a, Result<Vec<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>> {
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<
+                Vec<crate::remote::browser_backend::RemoteBrowserSessionSummary>,
+                RemoteBrowserError,
+            >,
+        > {
             Box::pin(async move { Ok(vec![]) })
         }
         fn identify_session<'a>(
             &'a self,
             _scope: &'a crate::remote::browser_backend::DesktopScope,
-        ) -> futures_util::future::BoxFuture<'a, Result<Option<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>> {
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<
+                Option<crate::remote::browser_backend::RemoteBrowserSessionSummary>,
+                RemoteBrowserError,
+            >,
+        > {
             Box::pin(async move { Ok(None) })
         }
         fn get_state<'a>(
             &'a self,
             _browser_id: &'a str,
             _scope: &'a crate::remote::browser_backend::DesktopScope,
-        ) -> futures_util::future::BoxFuture<'a, Result<crate::remote::browser_backend::BrowserRemoteState, RemoteBrowserError>> {
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<crate::remote::browser_backend::BrowserRemoteState, RemoteBrowserError>,
+        > {
             Box::pin(async move { Err(RemoteBrowserError::NotFound("b1".into())) })
         }
         fn execute_command(
             &self,
             ctx: BrowserCommandContext,
-        ) -> futures_util::future::BoxFuture<'_, Result<BrowserCommandResult, RemoteBrowserError>> {
+        ) -> futures_util::future::BoxFuture<'_, Result<BrowserCommandResult, RemoteBrowserError>>
+        {
             let value = self.value.clone();
             Box::pin(async move {
                 assert_eq!(ctx.command, "snapshot");
@@ -3513,7 +3988,10 @@ pub mod tests {
                 })
             })
         }
-        fn capabilities(&self) -> futures_util::future::BoxFuture<'_, crate::remote::browser_backend::BrowserCapabilities> {
+        fn capabilities(
+            &self,
+        ) -> futures_util::future::BoxFuture<'_, crate::remote::browser_backend::BrowserCapabilities>
+        {
             Box::pin(async move {
                 crate::remote::browser_backend::BrowserCapabilities {
                     browser_available: true,
@@ -3533,26 +4011,42 @@ pub mod tests {
         fn list_sessions<'a>(
             &'a self,
             _scope: &'a crate::remote::browser_backend::DesktopScope,
-        ) -> futures_util::future::BoxFuture<'a, Result<Vec<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>> {
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<
+                Vec<crate::remote::browser_backend::RemoteBrowserSessionSummary>,
+                RemoteBrowserError,
+            >,
+        > {
             Box::pin(async move { Ok(vec![]) })
         }
         fn identify_session<'a>(
             &'a self,
             _scope: &'a crate::remote::browser_backend::DesktopScope,
-        ) -> futures_util::future::BoxFuture<'a, Result<Option<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>> {
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<
+                Option<crate::remote::browser_backend::RemoteBrowserSessionSummary>,
+                RemoteBrowserError,
+            >,
+        > {
             Box::pin(async move { Ok(None) })
         }
         fn get_state<'a>(
             &'a self,
             _browser_id: &'a str,
             _scope: &'a crate::remote::browser_backend::DesktopScope,
-        ) -> futures_util::future::BoxFuture<'a, Result<crate::remote::browser_backend::BrowserRemoteState, RemoteBrowserError>> {
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<crate::remote::browser_backend::BrowserRemoteState, RemoteBrowserError>,
+        > {
             Box::pin(async move { Err(RemoteBrowserError::NotFound("b1".into())) })
         }
         fn execute_command(
             &self,
             ctx: BrowserCommandContext,
-        ) -> futures_util::future::BoxFuture<'_, Result<BrowserCommandResult, RemoteBrowserError>> {
+        ) -> futures_util::future::BoxFuture<'_, Result<BrowserCommandResult, RemoteBrowserError>>
+        {
             Box::pin(async move {
                 *self.last_ctx.lock().unwrap() = Some(ctx);
                 Ok(BrowserCommandResult {
@@ -3567,7 +4061,18 @@ pub mod tests {
             _device_id: &'a str,
             _viewer_instance_id: &'a str,
             options: Option<crate::remote::browser_protocol::BrowserSubscribeOptions>,
-        ) -> futures_util::future::BoxFuture<'a, Result<(String, u32, crate::remote::browser_protocol::BrowserSubscribeOptions, crate::remote::browser_backend::BrowserSubscribeIdentity), RemoteBrowserError>> {
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<
+                (
+                    String,
+                    u32,
+                    crate::remote::browser_protocol::BrowserSubscribeOptions,
+                    crate::remote::browser_backend::BrowserSubscribeIdentity,
+                ),
+                RemoteBrowserError,
+            >,
+        > {
             Box::pin(async move {
                 let sub_id = format!("sub-{}", uuid::Uuid::new_v4());
                 let identity = crate::remote::browser_backend::BrowserSubscribeIdentity {
@@ -3579,7 +4084,10 @@ pub mod tests {
                 Ok((sub_id, 1, options.unwrap_or_default(), identity))
             })
         }
-        fn capabilities(&self) -> futures_util::future::BoxFuture<'_, crate::remote::browser_backend::BrowserCapabilities> {
+        fn capabilities(
+            &self,
+        ) -> futures_util::future::BoxFuture<'_, crate::remote::browser_backend::BrowserCapabilities>
+        {
             Box::pin(async move {
                 crate::remote::browser_backend::BrowserCapabilities {
                     browser_available: true,
@@ -3592,7 +4100,9 @@ pub mod tests {
         }
     }
 
-    fn click_test_metadata(seq_stream_id: u32) -> crate::remote::browser_protocol::BrowserFrameMetadata {
+    fn click_test_metadata(
+        seq_stream_id: u32,
+    ) -> crate::remote::browser_protocol::BrowserFrameMetadata {
         crate::remote::browser_protocol::BrowserFrameMetadata {
             offset_top: 0.0,
             page_scale_factor: 1.0,
@@ -3649,7 +4159,10 @@ pub mod tests {
             viewer_instance_id: "v1".into(),
             options: Default::default(),
         };
-        session.dispatch_client_message(sub, backend, admission, out_tx, now).await.unwrap();
+        session
+            .dispatch_client_message(sub, backend, admission, out_tx, now)
+            .await
+            .unwrap();
         let _ = out_rx.recv().await.unwrap();
 
         let claim = ClientMessage::BrowserDriverClaim {
@@ -3657,7 +4170,10 @@ pub mod tests {
             subscription_id: session.subscription_id.clone().unwrap(),
             browser_id: "b1".into(),
         };
-        session.dispatch_client_message(claim, backend, admission, out_tx, now).await.unwrap();
+        session
+            .dispatch_client_message(claim, backend, admission, out_tx, now)
+            .await
+            .unwrap();
         let _ = out_rx.recv().await.unwrap();
     }
 
@@ -3681,7 +4197,10 @@ pub mod tests {
             viewer_instance_id: "v1".into(),
             options: Default::default(),
         };
-        session.dispatch_client_message(sub, &backend, &admission, &out_tx, now).await.unwrap();
+        session
+            .dispatch_client_message(sub, &backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
         let _ = out_rx.recv().await.unwrap();
 
         // Frame 1 is sent but the viewer goes hidden before acknowledging it.
@@ -3692,14 +4211,20 @@ pub mod tests {
             browser_id: "b1".into(),
             stream_id: session.stream_id,
         };
-        session.dispatch_client_message(pause, &backend, &admission, &out_tx, now).await.unwrap();
+        session
+            .dispatch_client_message(pause, &backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
         assert_eq!(session.state, WsConnectionState::Paused);
 
         let resume = ClientMessage::BrowserResume {
             browser_id: "b1".into(),
             stream_id: session.stream_id,
         };
-        session.dispatch_client_message(resume, &backend, &admission, &out_tx, now).await.unwrap();
+        session
+            .dispatch_client_message(resume, &backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
         assert_eq!(session.state, WsConnectionState::Streaming);
 
         // Credit must have been reset: the next frame flows without an ACK for the stranded frame 1.
@@ -3715,7 +4240,10 @@ pub mod tests {
             browser_id: "b1".into(),
             stream_id: session.stream_id + 99,
         };
-        session.dispatch_client_message(bad_pause, &backend, &admission, &out_tx, now).await.unwrap();
+        session
+            .dispatch_client_message(bad_pause, &backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
         assert_eq!(session.state, WsConnectionState::Streaming);
         match out_rx.recv().await.unwrap() {
             ServerMessage::BrowserError { code, .. } => assert_eq!(code, "BROWSER_INVALID_REQUEST"),
@@ -3753,14 +4281,20 @@ pub mod tests {
             viewer_instance_id: "v1".into(),
             options: Default::default(),
         };
-        session.dispatch_client_message(sub, &backend, &admission, &out_tx, now).await.unwrap();
+        session
+            .dispatch_client_message(sub, &backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
         let _ = out_rx.recv().await.unwrap();
 
         let snap = ClientMessage::BrowserSnapshot {
             request_id: "r-snap".into(),
             browser_id: "b1".into(),
         };
-        session.dispatch_client_message(snap, &backend, &admission, &out_tx, now).await.unwrap();
+        session
+            .dispatch_client_message(snap, &backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
 
         match out_rx.recv().await.unwrap() {
             ServerMessage::BrowserSnapshot {
@@ -3799,7 +4333,9 @@ pub mod tests {
             ServerMessage::BrowserError { code, .. } => {
                 assert_eq!(code, "BROWSER_EXECUTION_FAILED");
             }
-            other => panic!("Expected BROWSER_EXECUTION_FAILED for counts-only snapshot, got {other:?}"),
+            other => {
+                panic!("Expected BROWSER_EXECUTION_FAILED for counts-only snapshot, got {other:?}")
+            }
         }
     }
 
@@ -3821,7 +4357,15 @@ pub mod tests {
         let backend: Arc<dyn RemoteBrowserBackend> = capturing.clone();
         let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(16);
 
-        subscribe_and_claim(&mut session, &backend, &admission, &out_tx, &mut out_rx, now).await;
+        subscribe_and_claim(
+            &mut session,
+            &backend,
+            &admission,
+            &out_tx,
+            &mut out_rx,
+            now,
+        )
+        .await;
         let epoch = session.lease_epoch.unwrap().to_string();
         let stream_id = session.stream_id;
 
@@ -3837,21 +4381,32 @@ pub mod tests {
             command: "click".into(),
             params: Some(serde_json::json!({ "u": 0.5, "v": 0.25 })),
         };
-        session.dispatch_client_message(bare_click, &backend, &admission, &out_tx, now).await.unwrap();
+        session
+            .dispatch_client_message(bare_click, &backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
         match out_rx.recv().await.unwrap() {
             ServerMessage::BrowserError { code, .. } => assert_eq!(code, "BROWSER_INVALID_REQUEST"),
-            other => panic!("Expected BROWSER_INVALID_REQUEST for click without frame metadata, got {other:?}"),
+            other => panic!(
+                "Expected BROWSER_INVALID_REQUEST for click without frame metadata, got {other:?}"
+            ),
         }
 
         // Send and acknowledge two real frames.
         let f1 = sample_click_frame(1, stream_id);
         assert!(session.enqueue_frame(f1, now).is_some());
         let ack1 = ClientMessage::BrowserFrameAck { stream_id, seq: 1 };
-        session.dispatch_client_message(ack1, &backend, &admission, &out_tx, now).await.unwrap();
+        session
+            .dispatch_client_message(ack1, &backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
         let f2 = sample_click_frame(2, stream_id);
         assert!(session.enqueue_frame(f2, now).is_some());
         let ack2 = ClientMessage::BrowserFrameAck { stream_id, seq: 2 };
-        session.dispatch_client_message(ack2, &backend, &admission, &out_tx, now).await.unwrap();
+        session
+            .dispatch_client_message(ack2, &backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
 
         // 2. Click referencing a frame older than the last acked frame is rejected.
         let stale_click = ClientMessage::BrowserCommand {
@@ -3873,7 +4428,10 @@ pub mod tests {
                 "browserInstanceId": "bi1"
             })),
         };
-        session.dispatch_client_message(stale_click, &backend, &admission, &out_tx, now).await.unwrap();
+        session
+            .dispatch_client_message(stale_click, &backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
         match out_rx.recv().await.unwrap() {
             ServerMessage::BrowserError { code, .. } => assert_eq!(code, "BROWSER_STALE_FRAME"),
             other => panic!("Expected BROWSER_STALE_FRAME for superseded frame, got {other:?}"),
@@ -3899,13 +4457,21 @@ pub mod tests {
                 "browserInstanceId": "bi1"
             })),
         };
-        session.dispatch_client_message(good_click, &backend, &admission, &out_tx, now).await.unwrap();
+        session
+            .dispatch_client_message(good_click, &backend, &admission, &out_tx, now)
+            .await
+            .unwrap();
         match out_rx.recv().await.unwrap() {
             ServerMessage::BrowserResult { request_id, .. } => assert_eq!(request_id, "c-good"),
             other => panic!("Expected BrowserResult for fenced click, got {other:?}"),
         }
 
-        let ctx = capturing.last_ctx.lock().unwrap().clone().expect("click reached backend");
+        let ctx = capturing
+            .last_ctx
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("click reached backend");
         let params = ctx.params.expect("click params");
         assert_eq!(
             params.get("captureRect"),
@@ -3938,7 +4504,15 @@ pub mod tests {
         let backend: Arc<dyn RemoteBrowserBackend> = Arc::new(InProcessTestBackend::new());
         let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(16);
 
-        subscribe_and_claim(&mut session, &backend, &admission, &out_tx, &mut out_rx, now).await;
+        subscribe_and_claim(
+            &mut session,
+            &backend,
+            &admission,
+            &out_tx,
+            &mut out_rx,
+            now,
+        )
+        .await;
 
         // Viewer admission publishes sharing state
         let viewing = sharing_rx.recv().await.unwrap();
@@ -4195,7 +4769,10 @@ pub mod tests {
             .unwrap();
 
         let real_instance = manager.get_instance_id("b-real-1").unwrap();
-        assert_ne!(real_instance, "bi1", "Real instance ID must not be bi1 literal");
+        assert_ne!(
+            real_instance, "bi1",
+            "Real instance ID must not be bi1 literal"
+        );
 
         let admission = AdmissionController::new();
         let mut session = BrowserWsSession::new(
@@ -4224,7 +4801,8 @@ pub mod tests {
             desktop_epoch,
             document_generation,
             ..
-        } = resp else {
+        } = resp
+        else {
             panic!("Expected BrowserSubscribed, got: {:?}", resp);
         };
 
@@ -4275,7 +4853,8 @@ pub mod tests {
         let ServerMessage::BrowserSubscribed {
             browser_instance_id: inst2,
             ..
-        } = resp2 else {
+        } = resp2
+        else {
             panic!("Expected BrowserSubscribed");
         };
         assert_eq!(inst2, real_instance2);
@@ -4304,7 +4883,10 @@ pub mod tests {
             }
             other => panic!("Expected BROWSER_SUBSCRIPTION_FAILED, got: {:?}", other),
         }
-        assert!(!admission.should_capture("b-missing"), "Admission must be rolled back on failed subscribe");
+        assert!(
+            !admission.should_capture("b-missing"),
+            "Admission must be rolled back on failed subscribe"
+        );
     }
 
     /// R4-7 Part B: Command identity fencing rejects stale instance/epoch/generation with BROWSER_STALE_IDENTITY.
@@ -4364,7 +4946,10 @@ pub mod tests {
             .unwrap();
         match resp {
             ServerMessage::BrowserError { ref code, .. } => {
-                assert_eq!(code, "BROWSER_STALE_IDENTITY", "Stale instance must be rejected with BROWSER_STALE_IDENTITY");
+                assert_eq!(
+                    code, "BROWSER_STALE_IDENTITY",
+                    "Stale instance must be rejected with BROWSER_STALE_IDENTITY"
+                );
             }
             other => panic!("Expected BROWSER_STALE_IDENTITY error, got: {:?}", other),
         }
@@ -4388,7 +4973,10 @@ pub mod tests {
             .unwrap();
         match resp2 {
             ServerMessage::BrowserError { ref code, .. } => {
-                assert_eq!(code, "BROWSER_STALE_IDENTITY", "Stale desktop epoch must be rejected with BROWSER_STALE_IDENTITY");
+                assert_eq!(
+                    code, "BROWSER_STALE_IDENTITY",
+                    "Stale desktop epoch must be rejected with BROWSER_STALE_IDENTITY"
+                );
             }
             other => panic!("Expected BROWSER_STALE_IDENTITY error, got: {:?}", other),
         }
@@ -4412,7 +5000,10 @@ pub mod tests {
             .unwrap();
         match resp3 {
             ServerMessage::BrowserError { ref code, .. } => {
-                assert_eq!(code, "BROWSER_STALE_IDENTITY", "Mismatched documentGeneration must be rejected with BROWSER_STALE_IDENTITY");
+                assert_eq!(
+                    code, "BROWSER_STALE_IDENTITY",
+                    "Mismatched documentGeneration must be rejected with BROWSER_STALE_IDENTITY"
+                );
             }
             other => panic!("Expected BROWSER_STALE_IDENTITY error, got: {:?}", other),
         }
@@ -4436,7 +5027,10 @@ pub mod tests {
             .unwrap();
         match resp4 {
             ServerMessage::BrowserError { ref code, .. } => {
-                assert_eq!(code, "BROWSER_STALE_IDENTITY", "Missing documentGeneration must be rejected with BROWSER_STALE_IDENTITY");
+                assert_eq!(
+                    code, "BROWSER_STALE_IDENTITY",
+                    "Missing documentGeneration must be rejected with BROWSER_STALE_IDENTITY"
+                );
             }
             other => panic!("Expected BROWSER_STALE_IDENTITY error, got: {:?}", other),
         }
@@ -4459,7 +5053,10 @@ pub mod tests {
             .await
             .unwrap();
         let valid_resp = out_rx.recv().await.unwrap();
-        assert!(matches!(valid_resp, ServerMessage::BrowserResult { .. }), "Valid tuple must execute successfully");
+        assert!(
+            matches!(valid_resp, ServerMessage::BrowserResult { .. }),
+            "Valid tuple must execute successfully"
+        );
     }
 
     /// R4-7 Part B: InProcess backend executes through remote_service.execute_command_guard.
@@ -4473,11 +5070,12 @@ pub mod tests {
 
         let manager = Arc::new(BrowserManager::new());
         let broker = Arc::new(RemoteDriverBroker::new());
-        let service = Arc::new(BrowserRemoteService::new((*manager).clone(), Arc::clone(&broker)));
-        let backend = InProcessBrowserServiceBackend::new(
-            Arc::clone(&service),
-            Arc::clone(&manager),
-        );
+        let service = Arc::new(BrowserRemoteService::new(
+            (*manager).clone(),
+            Arc::clone(&broker),
+        ));
+        let backend =
+            InProcessBrowserServiceBackend::new(Arc::clone(&service), Arc::clone(&manager));
 
         manager
             .register_session(CreateBrowserRequest {
@@ -4493,7 +5091,9 @@ pub mod tests {
             .unwrap();
 
         let real_instance = manager.get_instance_id("b-guard-1").unwrap();
-        let lease = broker.claim("dev-guard", "conn-guard", "sub-guard", "b-guard-1", true).unwrap();
+        let lease = broker
+            .claim("dev-guard", "conn-guard", "sub-guard", "b-guard-1", true)
+            .unwrap();
 
         // Stale instance rejected through guarded path
         let stale_inst_res = backend
@@ -4509,7 +5109,10 @@ pub mod tests {
                 connection_id: Some("conn-guard".into()),
             })
             .await;
-        assert!(stale_inst_res.is_err(), "Guarded path must reject stale instance");
+        assert!(
+            stale_inst_res.is_err(),
+            "Guarded path must reject stale instance"
+        );
 
         // Stale epoch rejected through guarded path
         let stale_epoch_res = backend
@@ -4525,7 +5128,10 @@ pub mod tests {
                 connection_id: Some("conn-guard".into()),
             })
             .await;
-        assert!(stale_epoch_res.is_err(), "Guarded path must reject stale desktop epoch");
+        assert!(
+            stale_epoch_res.is_err(),
+            "Guarded path must reject stale desktop epoch"
+        );
 
         // Stale generation rejected through guarded path
         let stale_gen_res = backend
@@ -4541,7 +5147,10 @@ pub mod tests {
                 connection_id: Some("conn-guard".into()),
             })
             .await;
-        assert!(stale_gen_res.is_err(), "Guarded path must reject stale generation");
+        assert!(
+            stale_gen_res.is_err(),
+            "Guarded path must reject stale generation"
+        );
 
         // Valid tuple succeeds through guarded path
         let valid_res = backend
@@ -4557,6 +5166,10 @@ pub mod tests {
                 connection_id: Some("conn-guard".into()),
             })
             .await;
-        assert!(valid_res.is_ok(), "Guarded path must accept valid tuple: {:?}", valid_res);
+        assert!(
+            valid_res.is_ok(),
+            "Guarded path must accept valid tuple: {:?}",
+            valid_res
+        );
     }
 }

@@ -88,9 +88,9 @@ impl EditorTarget {
     pub fn bundled_cli_paths(self) -> &'static [&'static str] {
         match self {
             Self::System => &[],
-            Self::VsCode => &[
-                "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
-            ],
+            Self::VsCode => {
+                &["/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"]
+            }
             Self::Cursor => &["/Applications/Cursor.app/Contents/Resources/app/bin/cursor"],
             Self::Zed => &["/Applications/Zed.app/Contents/MacOS/cli"],
         }
@@ -197,7 +197,10 @@ pub fn resolve_file_link(token: &str, cwd: Option<&str>, home: Option<PathBuf>) 
     if token == "~" {
         return home.unwrap_or_else(|| PathBuf::from(token));
     }
-    if let Some(suffix) = token.strip_prefix("~/").or_else(|| token.strip_prefix("~\\")) {
+    if let Some(suffix) = token
+        .strip_prefix("~/")
+        .or_else(|| token.strip_prefix("~\\"))
+    {
         return match home {
             Some(home) => {
                 let mut path = home;
@@ -250,13 +253,11 @@ pub fn session_cwd_guard(
         ));
     }
     let Some(details) = details else {
-        return Err(
-            IpcError::new(
-                IpcErrorCode::SessionNotFound,
-                format!("terminal session '{session_id}' is not available"),
-            )
-            .with_details(json!({ "sessionId": session_id, "cause": cause })),
-        );
+        return Err(IpcError::new(
+            IpcErrorCode::SessionNotFound,
+            format!("terminal session '{session_id}' is not available"),
+        )
+        .with_details(json!({ "sessionId": session_id, "cause": cause })));
     };
     if let Some(workspace_id) = details.workspace_id.as_deref() {
         if crate::ssh::projects::is_remote(workspace_id) {
@@ -320,15 +321,15 @@ pub fn discover_editor_cli(editor: EditorTarget) -> Option<PathBuf> {
     };
     let exists = |candidate: &Path| candidate.is_file();
     for name in editor.cli_names() {
-        if let Some(found) = which_in_path(
-            name,
-            path_var.as_deref(),
-            pathext.as_deref(),
-            &exists,
-        ) {
+        if let Some(found) = which_in_path(name, path_var.as_deref(), pathext.as_deref(), &exists) {
             #[cfg(windows)]
-            if found.extension().and_then(OsStr::to_str).is_some_and(|ext|
-                ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat")) {
+            if found
+                .extension()
+                .and_then(OsStr::to_str)
+                .is_some_and(|ext| {
+                    ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat")
+                })
+            {
                 let binary = match editor {
                     EditorTarget::VsCode => "Code.exe",
                     EditorTarget::Cursor => "Cursor.exe",
@@ -337,7 +338,9 @@ pub fn discover_editor_cli(editor: EditorTarget) -> Option<PathBuf> {
                 };
                 if let Some(root) = found.parent().and_then(Path::parent) {
                     let executable = root.join(binary);
-                    if executable.is_file() { return Some(executable); }
+                    if executable.is_file() {
+                        return Some(executable);
+                    }
                 }
                 continue;
             }
@@ -496,8 +499,10 @@ pub fn execute(plan: LaunchPlan) -> Result<(), IpcError> {
                     if status.success() {
                         Ok(())
                     } else {
-                        Err(IpcError::new(IpcErrorCode::IoError,
-                            format!("editor launcher exited with {status}")))
+                        Err(IpcError::new(
+                            IpcErrorCode::IoError,
+                            format!("editor launcher exited with {status}"),
+                        ))
                     }
                 })
         }

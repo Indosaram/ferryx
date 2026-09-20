@@ -1,7 +1,7 @@
 //! One machine-only sequence domain per workspace authority. Never use mirror event_tx.
-use std::sync::Arc;
 use parking_lot::Mutex;
 use serde_json::{json, Value};
+use std::sync::Arc;
 use tokio::sync::broadcast;
 
 pub struct MachineEvents {
@@ -25,31 +25,78 @@ mod machine_event_cancellation_tests;
 mod machine_event_snapshot_race_tests;
 
 impl Default for MachineEvents {
-    fn default() -> Self { Self::new(64) }
+    fn default() -> Self {
+        Self::new(64)
+    }
 }
 
 impl MachineEvents {
     pub fn new(capacity: usize) -> Self {
-        Self { sequence: Mutex::new(0), sender: broadcast::channel(capacity).0, snapshot_slots: Arc::new(tokio::sync::Semaphore::new(2)), subscriptions: tokio::sync::watch::channel(0).0, forwarders: tokio::sync::watch::channel(0).0, owner_streams: tokio::sync::watch::channel(0).0, socket_slots: tokio::sync::Semaphore::new(16), watch_slots: Arc::new(tokio::sync::Semaphore::new(2)) }
+        Self {
+            sequence: Mutex::new(0),
+            sender: broadcast::channel(capacity).0,
+            snapshot_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            subscriptions: tokio::sync::watch::channel(0).0,
+            forwarders: tokio::sync::watch::channel(0).0,
+            owner_streams: tokio::sync::watch::channel(0).0,
+            socket_slots: tokio::sync::Semaphore::new(16),
+            watch_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+        }
     }
-    pub fn subscribe(&self) -> broadcast::Receiver<Value> { self.sender.subscribe() }
-    pub fn sequence(&self) -> u64 { *self.sequence.lock() }
-    pub fn forwarder_count(&self) -> tokio::sync::watch::Receiver<usize> { self.forwarders.subscribe() }
-    pub fn owner_stream_count(&self) -> tokio::sync::watch::Receiver<usize> { self.owner_streams.subscribe() }
-    pub fn subscription_count(&self) -> tokio::sync::watch::Receiver<usize> { self.subscriptions.subscribe() }
-    pub(crate) fn publish(&self, kind: &str, workspace: Option<&str>, session: Option<&str>, payload: Value) {
+    pub fn subscribe(&self) -> broadcast::Receiver<Value> {
+        self.sender.subscribe()
+    }
+    pub fn sequence(&self) -> u64 {
+        *self.sequence.lock()
+    }
+    pub fn forwarder_count(&self) -> tokio::sync::watch::Receiver<usize> {
+        self.forwarders.subscribe()
+    }
+    pub fn owner_stream_count(&self) -> tokio::sync::watch::Receiver<usize> {
+        self.owner_streams.subscribe()
+    }
+    pub fn subscription_count(&self) -> tokio::sync::watch::Receiver<usize> {
+        self.subscriptions.subscribe()
+    }
+    pub(crate) fn publish(
+        &self,
+        kind: &str,
+        workspace: Option<&str>,
+        session: Option<&str>,
+        payload: Value,
+    ) {
         self.publish_event(None, kind, workspace, session, payload);
     }
-    pub(crate) fn publish_revision(&self, revision: u64, kind: &str, workspace: Option<&str>, session: Option<&str>, payload: Value) {
+    pub(crate) fn publish_revision(
+        &self,
+        revision: u64,
+        kind: &str,
+        workspace: Option<&str>,
+        session: Option<&str>,
+        payload: Value,
+    ) {
         self.publish_event(Some(revision), kind, workspace, session, payload);
     }
-    fn publish_event(&self, domain_revision: Option<u64>, kind: &str, workspace: Option<&str>, session: Option<&str>, payload: Value) {
+    fn publish_event(
+        &self,
+        domain_revision: Option<u64>,
+        kind: &str,
+        workspace: Option<&str>,
+        session: Option<&str>,
+        payload: Value,
+    ) {
         let mut sequence = self.sequence.lock();
-        *sequence = sequence.checked_add(1).expect("machine event sequence exhausted");
+        *sequence = sequence
+            .checked_add(1)
+            .expect("machine event sequence exhausted");
         let mut event = json!({"sequence":sequence.to_string(),"revision":sequence.to_string(),"type":kind,
             "workspaceId":workspace,"sessionId":session,"payload":payload});
         if let Some(revision) = domain_revision {
-            event[if session.is_some() { "sessionRevision" } else { "projectRevision" }] = json!(revision.to_string());
+            event[if session.is_some() {
+                "sessionRevision"
+            } else {
+                "projectRevision"
+            }] = json!(revision.to_string());
         }
         // Bound each retained slot as well as the slot count. A too-large change
         // is recoverable through the bounded authoritative snapshot, not truncation.
@@ -61,23 +108,35 @@ impl MachineEvents {
     }
 }
 
-pub(crate) async fn serve(mut socket: axum::extract::ws::WebSocket, state: Arc<super::state::RemoteGatewayState>,
-    mut receiver: broadcast::Receiver<Value>) {
+pub(crate) async fn serve(
+    mut socket: axum::extract::ws::WebSocket,
+    state: Arc<super::state::RemoteGatewayState>,
+    mut receiver: broadcast::Receiver<Value>,
+) {
     use axum::extract::ws::Message;
     use futures_util::StreamExt;
-    let services = state.machine_services.as_ref().expect("authorized machine services");
+    let services = state
+        .machine_services
+        .as_ref()
+        .expect("authorized machine services");
     let events = &services.workspaces.machine_events;
-    let Ok(_socket_slot) = events.socket_slots.try_acquire() else { return; };
+    let Ok(_socket_slot) = events.socket_slots.try_acquire() else {
+        return;
+    };
     struct Subscription<'a>(&'a MachineEvents);
     impl Drop for Subscription<'_> {
-        fn drop(&mut self) { self.0.subscriptions.send_modify(|count| *count -= 1); }
+        fn drop(&mut self) {
+            self.0.subscriptions.send_modify(|count| *count -= 1);
+        }
     }
     let _subscription = Subscription(events);
     events.subscriptions.send_modify(|count| *count += 1);
-    let mut watcher: Option<crate::daemon::workspace_service::workspace_watcher::WorkspaceWatch> = None;
+    let mut watcher: Option<crate::daemon::workspace_service::workspace_watcher::WorkspaceWatch> =
+        None;
     let mut reason = "subscribe";
     let mut metadata_forwarders = tokio::task::JoinSet::new();
-    let mut forwarded_targets = std::collections::HashMap::<String, tokio::sync::watch::Receiver<bool>>::new();
+    let mut forwarded_targets =
+        std::collections::HashMap::<String, tokio::sync::watch::Receiver<bool>>::new();
     let (owner_changed, mut owner_changes) = tokio::sync::mpsc::channel(64);
     loop {
         // The cursor is read BEFORE inventory construction. Any overlapping commit
@@ -85,25 +144,55 @@ pub(crate) async fn serve(mut socket: axum::extract::ws::WebSocket, state: Arc<s
         let sequence = events.sequence();
         let workspaces = services.workspaces.clone();
         let sessions = services.sessions.clone();
-        let epoch = crate::scoped_contracts::Epoch(state.daemon_epoch.load(std::sync::atomic::Ordering::Acquire));
+        let epoch = crate::scoped_contracts::Epoch(
+            state
+                .daemon_epoch
+                .load(std::sync::atomic::Ordering::Acquire),
+        );
         let snapshot = {
             let snapshot = async {
-                let slot = events.watch_slots.clone().acquire_owned().await.map_err(|_| crate::ipc::IpcError::internal("MACHINE_SERVICE_UNAVAILABLE"))?;
+                let slot = events
+                    .watch_slots
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| crate::ipc::IpcError::internal("MACHINE_SERVICE_UNAVAILABLE"))?;
                 let watch = match watcher.take() {
                     Some(watch) => watch,
-                    None => crate::daemon::workspace_service::workspace_watcher::WorkspaceWatch::new().map_err(crate::ipc::IpcError::internal)?,
+                    None => {
+                        crate::daemon::workspace_service::workspace_watcher::WorkspaceWatch::new()
+                            .map_err(crate::ipc::IpcError::internal)?
+                    }
                 };
-                let watch = watch.refresh_bounded(workspaces.clone(), slot).await.map_err(crate::ipc::IpcError::internal)?;
-                let _slot = events.snapshot_slots.acquire().await.map_err(|_| crate::ipc::IpcError::internal("MACHINE_SERVICE_UNAVAILABLE"))?;
+                let watch = watch
+                    .refresh_bounded(workspaces.clone(), slot)
+                    .await
+                    .map_err(crate::ipc::IpcError::internal)?;
+                let _slot =
+                    events.snapshot_slots.acquire().await.map_err(|_| {
+                        crate::ipc::IpcError::internal("MACHINE_SERVICE_UNAVAILABLE")
+                    })?;
                 let catalog = match super::workspace_api::event_projects(workspaces).await {
                     Ok(catalog) => catalog,
-                    Err(error) if error == "STALE_REVISION" => return Ok((json!({"completeness":"partial","error":"STALE_REVISION"}), watch)),
+                    Err(error) if error == "STALE_REVISION" => {
+                        return Ok((
+                            json!({"completeness":"partial","error":"STALE_REVISION"}),
+                            watch,
+                        ))
+                    }
                     Err(error) => return Err(crate::ipc::IpcError::internal(error)),
                 };
-                let mut inventory = sessions.machine_sessions_routed(epoch).await.map_err(crate::ipc::IpcError::internal)?;
+                let mut inventory = sessions
+                    .machine_sessions_routed(epoch)
+                    .await
+                    .map_err(crate::ipc::IpcError::internal)?;
                 for session in &inventory.sessions {
-                    if sessions.router().find_legacy_peer_for_session(&session.target.session_id).is_some()
-                        && !forwarded_targets.contains_key(&session.target.session_id) {
+                    if sessions
+                        .router()
+                        .find_legacy_peer_for_session(&session.target.session_id)
+                        .is_some()
+                        && !forwarded_targets.contains_key(&session.target.session_id)
+                    {
                         let (status, current) = tokio::sync::watch::channel(false);
                         forwarded_targets.insert(session.target.session_id.clone(), current);
                         let changed = owner_changed.clone();
@@ -135,18 +224,31 @@ pub(crate) async fn serve(mut socket: axum::extract::ws::WebSocket, state: Arc<s
                     }
                 }
                 for session in &inventory.sessions {
-                    if forwarded_targets.get(&session.target.session_id).is_some_and(|status| !*status.borrow()) {
+                    if forwarded_targets
+                        .get(&session.target.session_id)
+                        .is_some_and(|status| !*status.borrow())
+                    {
                         inventory.completeness = super::machine_protocol::Completeness::Partial;
-                        if !inventory.unavailable_workspace_ids.contains(&session.workspace_id) { inventory.unavailable_workspace_ids.push(session.workspace_id.clone()); }
+                        if !inventory
+                            .unavailable_workspace_ids
+                            .contains(&session.workspace_id)
+                        {
+                            inventory
+                                .unavailable_workspace_ids
+                                .push(session.workspace_id.clone());
+                        }
                     }
                 }
                 let sessions = inventory;
                 let payload = json!({"projects":catalog,"sessions":sessions});
-                if payload.to_string().len() > 1024 * 1024 { return Err(crate::ipc::IpcError::internal("OUTPUT_LIMIT_EXCEEDED")); }
+                if payload.to_string().len() > 1024 * 1024 {
+                    return Err(crate::ipc::IpcError::internal("OUTPUT_LIMIT_EXCEEDED"));
+                }
                 Ok::<_, crate::ipc::IpcError>((payload, watch))
             };
             let snapshot = async {
-                tokio::time::timeout(std::time::Duration::from_secs(10), snapshot).await
+                tokio::time::timeout(std::time::Duration::from_secs(10), snapshot)
+                    .await
                     .map_err(|_| crate::ipc::IpcError::internal("TIMEOUT"))?
             };
             tokio::pin!(snapshot);
@@ -160,19 +262,45 @@ pub(crate) async fn serve(mut socket: axum::extract::ws::WebSocket, state: Arc<s
                 }
             }
         };
-        let (payload, refreshed_watch) = match snapshot { Ok((value, watch)) => (value, Some(watch)), Err(error) => {
-            tracing::warn!(%error, "Machine inventory snapshot failed");
-            (json!({"completeness":"partial","error":"MACHINE_SERVICE_UNAVAILABLE"}), None)
-        }};
+        let (payload, refreshed_watch) = match snapshot {
+            Ok((value, watch)) => (value, Some(watch)),
+            Err(error) => {
+                tracing::warn!(%error, "Machine inventory snapshot failed");
+                (
+                    json!({"completeness":"partial","error":"MACHINE_SERVICE_UNAVAILABLE"}),
+                    None,
+                )
+            }
+        };
         let revision = sequence.to_string();
-        let completeness = if payload["sessions"]["completeness"] == "partial" || payload["projects"]["completeness"] == "partial" || payload["completeness"] == "partial" { "partial" } else { "complete" };
+        let completeness = if payload["sessions"]["completeness"] == "partial"
+            || payload["projects"]["completeness"] == "partial"
+            || payload["completeness"] == "partial"
+        {
+            "partial"
+        } else {
+            "complete"
+        };
         let mut payload = payload;
         payload["completeness"] = json!(completeness);
         let boundary = json!({"sequence":sequence.to_string(),"revision":revision,
             "type":"inventoryInvalidated","reason":reason,"payload":payload});
-        if !matches!(tokio::time::timeout(std::time::Duration::from_secs(10), socket.send(Message::Text(boundary.to_string().into()))).await, Ok(Ok(()))) { return; }
+        if !matches!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                socket.send(Message::Text(boundary.to_string().into()))
+            )
+            .await,
+            Ok(Ok(()))
+        ) {
+            return;
+        }
         let Some(mut watch) = refreshed_watch else {
-            let _closed = tokio::time::timeout(std::time::Duration::from_secs(10), socket.send(Message::Close(None))).await;
+            let _closed = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                socket.send(Message::Close(None)),
+            )
+            .await;
             return;
         };
         if payload["error"] == "STALE_REVISION" {

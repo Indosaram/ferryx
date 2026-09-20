@@ -19,8 +19,15 @@ pub struct ReplayGap {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Metadata {
-    Output { sequence: u64, gap: Option<ReplayGap> },
-    Replay { start: Option<u64>, end: Option<u64>, gap: Option<ReplayGap> },
+    Output {
+        sequence: u64,
+        gap: Option<ReplayGap>,
+    },
+    Replay {
+        start: Option<u64>,
+        end: Option<u64>,
+        gap: Option<ReplayGap>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,12 +81,17 @@ struct WireMetadata {
 }
 
 fn sequence(value: Option<String>, field: &'static str) -> Result<Option<u64>, ParseError> {
-    value.map(|s| {
-        if s.is_empty() || (s.len() > 1 && s.starts_with('0')) || !s.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(ParseError::InvalidSequence(field));
-        }
-        s.parse().map_err(|_| ParseError::InvalidSequence(field))
-    }).transpose()
+    value
+        .map(|s| {
+            if s.is_empty()
+                || (s.len() > 1 && s.starts_with('0'))
+                || !s.bytes().all(|b| b.is_ascii_digit())
+            {
+                return Err(ParseError::InvalidSequence(field));
+            }
+            s.parse().map_err(|_| ParseError::InvalidSequence(field))
+        })
+        .transpose()
 }
 
 fn parse_metadata(w: WireMetadata) -> Result<Metadata, ParseError> {
@@ -90,24 +102,38 @@ fn parse_metadata(w: WireMetadata) -> Result<Metadata, ParseError> {
     let available = sequence(w.available_from_sequence, "availableFromSequence")?;
     let gap = match (requested, available) {
         (None, None) => None,
-        (Some(requested_after_sequence), Some(available_from_sequence)) => Some(ReplayGap { requested_after_sequence, available_from_sequence }),
+        (Some(requested_after_sequence), Some(available_from_sequence)) => Some(ReplayGap {
+            requested_after_sequence,
+            available_from_sequence,
+        }),
         _ => return Err(ParseError::InvalidMetadata),
     };
     if (w.kind == "replayGap") != gap.is_some() {
         return Err(ParseError::InvalidMetadata);
     }
     match w.kind.as_str() {
-        "output" | "replayGap" if start.is_none() && end.is_none() && seq.is_some() =>
-            Ok(Metadata::Output { sequence: seq.unwrap(), gap }),
-        "replay" | "replayGap" if start.is_some() == end.is_some() && seq == end && start <= end =>
-            Ok(Metadata::Replay { start, end, gap }),
+        "output" | "replayGap" if start.is_none() && end.is_none() && seq.is_some() => {
+            Ok(Metadata::Output {
+                sequence: seq.unwrap(),
+                gap,
+            })
+        }
+        "replay" | "replayGap"
+            if start.is_some() == end.is_some() && seq == end && start <= end =>
+        {
+            Ok(Metadata::Replay { start, end, gap })
+        }
         _ => Err(ParseError::InvalidMetadata),
     }
 }
 
 /// Encode the same metadata and raw bytes as the legacy server. A gap always
 /// inserts a reset; a forced replay boundary inserts one even without a gap.
-pub fn encode_frame(metadata: Metadata, payload: &[u8], force_reset: bool) -> Result<Vec<u8>, ParseError> {
+pub fn encode_frame(
+    metadata: Metadata,
+    payload: &[u8],
+    force_reset: bool,
+) -> Result<Vec<u8>, ParseError> {
     let (kind, seq, start, end, gap) = match metadata {
         Metadata::Output { sequence, gap } => ("output", Some(sequence), None, None, gap),
         Metadata::Replay { start, end, gap } => ("replay", end, start, end, gap),
@@ -123,13 +149,18 @@ pub fn encode_frame(metadata: Metadata, payload: &[u8], force_reset: bool) -> Re
     let json = serde_json::to_vec(&wire).expect("string-only metadata serializes");
     parse_metadata(wire)?;
     let reset = force_reset || gap.is_some();
-    let header_len = METADATA_PREFIX.len() + json.len() + 1 + if reset { HARD_RESET.len() } else { 0 };
-    if payload.len() > MAX_FRAME_BYTES - header_len { return Err(ParseError::FrameTooLarge); }
+    let header_len =
+        METADATA_PREFIX.len() + json.len() + 1 + if reset { HARD_RESET.len() } else { 0 };
+    if payload.len() > MAX_FRAME_BYTES - header_len {
+        return Err(ParseError::FrameTooLarge);
+    }
     let mut frame = Vec::with_capacity(header_len + payload.len());
     frame.extend_from_slice(METADATA_PREFIX);
     frame.extend_from_slice(&json);
     frame.push(7);
-    if reset { frame.extend_from_slice(HARD_RESET); }
+    if reset {
+        frame.extend_from_slice(HARD_RESET);
+    }
     frame.extend_from_slice(payload);
     Ok(frame)
 }
@@ -138,31 +169,55 @@ pub fn encode_frame(metadata: Metadata, payload: &[u8], force_reset: bool) -> Re
 /// Payload truncation cannot be detected by this lengthless format; the caller
 /// must supply a complete WebSocket message or report transport failure.
 pub fn decode_frame(frame: &[u8]) -> Result<DecodedFrame<'_>, ParseError> {
-    if frame.len() > MAX_FRAME_BYTES { return Err(ParseError::FrameTooLarge); }
+    if frame.len() > MAX_FRAME_BYTES {
+        return Err(ParseError::FrameTooLarge);
+    }
     if frame.len() < METADATA_PREFIX.len() && METADATA_PREFIX.starts_with(frame) {
         return Err(ParseError::TruncatedMetadata);
     }
-    let body = frame.strip_prefix(METADATA_PREFIX).ok_or(ParseError::InvalidPrefix)?;
+    let body = frame
+        .strip_prefix(METADATA_PREFIX)
+        .ok_or(ParseError::InvalidPrefix)?;
     let Some(end) = body.iter().position(|b| *b == 7) else {
-        return Err(if body.len() > MAX_METADATA_BYTES { ParseError::MetadataTooLarge } else { ParseError::TruncatedMetadata });
+        return Err(if body.len() > MAX_METADATA_BYTES {
+            ParseError::MetadataTooLarge
+        } else {
+            ParseError::TruncatedMetadata
+        });
     };
-    if end > MAX_METADATA_BYTES { return Err(ParseError::MetadataTooLarge); }
+    if end > MAX_METADATA_BYTES {
+        return Err(ParseError::MetadataTooLarge);
+    }
     let wire = serde_json::from_slice(&body[..end]).map_err(|_| ParseError::InvalidJson)?;
     let metadata = parse_metadata(wire)?;
     let terminal_bytes = &body[end + 1..];
-    let gap = match metadata { Metadata::Output { gap, .. } | Metadata::Replay { gap, .. } => gap };
-    if gap.is_some() && !terminal_bytes.starts_with(HARD_RESET) { return Err(ParseError::MissingGapReset); }
-    Ok(DecodedFrame { metadata, terminal_bytes })
+    let gap = match metadata {
+        Metadata::Output { gap, .. } | Metadata::Replay { gap, .. } => gap,
+    };
+    if gap.is_some() && !terminal_bytes.starts_with(HARD_RESET) {
+        return Err(ParseError::MissingGapReset);
+    }
+    Ok(DecodedFrame {
+        metadata,
+        terminal_bytes,
+    })
 }
 
 /// Fragments of exactly ONE complete binary message, in order. Bounded assembly;
 /// iterator completion must mean the transport's message-end, not a read pause.
-pub fn decode_fragments<'a>(fragments: impl IntoIterator<Item = &'a [u8]>) -> Result<OwnedFrame, ParseError> {
+pub fn decode_fragments<'a>(
+    fragments: impl IntoIterator<Item = &'a [u8]>,
+) -> Result<OwnedFrame, ParseError> {
     let mut message = Vec::new();
     for fragment in fragments {
-        if fragment.len() > MAX_FRAME_BYTES - message.len() { return Err(ParseError::FrameTooLarge); }
+        if fragment.len() > MAX_FRAME_BYTES - message.len() {
+            return Err(ParseError::FrameTooLarge);
+        }
         message.extend_from_slice(fragment);
     }
     let decoded = decode_frame(&message)?;
-    Ok(OwnedFrame { metadata: decoded.metadata, terminal_bytes: decoded.terminal_bytes.to_vec() })
+    Ok(OwnedFrame {
+        metadata: decoded.metadata,
+        terminal_bytes: decoded.terminal_bytes.to_vec(),
+    })
 }

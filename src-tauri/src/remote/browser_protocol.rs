@@ -155,7 +155,18 @@ fn parse_jpeg_dimensions(bytes: &[u8]) -> Result<(u32, u32), ProtocolCodecError>
         let len = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]) as usize;
         let is_sof = matches!(
             marker,
-            0xc0 | 0xc1 | 0xc2 | 0xc3 | 0xc5 | 0xc6 | 0xc7 | 0xc9 | 0xca | 0xcb | 0xcd | 0xce | 0xcf
+            0xc0 | 0xc1
+                | 0xc2
+                | 0xc3
+                | 0xc5
+                | 0xc6
+                | 0xc7
+                | 0xc9
+                | 0xca
+                | 0xcb
+                | 0xcd
+                | 0xce
+                | 0xcf
         );
         if is_sof {
             if offset + len <= bytes.len() && len >= 7 {
@@ -227,7 +238,11 @@ pub fn validate_metadata(meta: &BrowserFrameMetadata) -> Result<(), ProtocolCode
     {
         return Err(ProtocolCodecError::NonFiniteNumeric("capture_rect"));
     }
-    if meta.image_width == 0 || meta.image_height == 0 || meta.image_width > MAX_IMAGE_EDGE || meta.image_height > MAX_IMAGE_EDGE {
+    if meta.image_width == 0
+        || meta.image_height == 0
+        || meta.image_width > MAX_IMAGE_EDGE
+        || meta.image_height > MAX_IMAGE_EDGE
+    {
         return Err(ProtocolCodecError::ImageEdgeExceeded {
             width: meta.image_width,
             height: meta.image_height,
@@ -241,19 +256,27 @@ pub fn validate_metadata(meta: &BrowserFrameMetadata) -> Result<(), ProtocolCode
         return Err(ProtocolCodecError::NonFiniteNumeric("stream_id"));
     }
     if meta.browser_instance_id.is_empty() {
-        return Err(ProtocolCodecError::InvalidDecimalString("browser_instance_id"));
+        return Err(ProtocolCodecError::InvalidDecimalString(
+            "browser_instance_id",
+        ));
     }
     if !is_decimal_u64_string(&meta.browser_service_epoch) {
-        return Err(ProtocolCodecError::InvalidDecimalString("browser_service_epoch"));
+        return Err(ProtocolCodecError::InvalidDecimalString(
+            "browser_service_epoch",
+        ));
     }
     if !is_decimal_u64_string(&meta.desktop_epoch) {
         return Err(ProtocolCodecError::InvalidDecimalString("desktop_epoch"));
     }
     if !is_decimal_u64_string(&meta.document_generation) {
-        return Err(ProtocolCodecError::InvalidDecimalString("document_generation"));
+        return Err(ProtocolCodecError::InvalidDecimalString(
+            "document_generation",
+        ));
     }
     if !is_decimal_u64_string(&meta.viewport_revision) {
-        return Err(ProtocolCodecError::InvalidDecimalString("viewport_revision"));
+        return Err(ProtocolCodecError::InvalidDecimalString(
+            "viewport_revision",
+        ));
     }
     if meta.geometry_source != "wkSnapshot" {
         return Err(ProtocolCodecError::InvalidGeometrySource(
@@ -876,10 +899,9 @@ pub mod tests {
     // R4-9: browserSnapshot must exist on both directions of the Rust wire contract.
     #[test]
     fn test_r4_9_browser_snapshot_wire_variants() {
-        let client: ClientMessage = serde_json::from_str(
-            r#"{"type":"browserSnapshot","requestId":"r1","browserId":"b1"}"#,
-        )
-        .expect("browserSnapshot client message must parse");
+        let client: ClientMessage =
+            serde_json::from_str(r#"{"type":"browserSnapshot","requestId":"r1","browserId":"b1"}"#)
+                .expect("browserSnapshot client message must parse");
         assert_eq!(
             serde_json::to_value(&client).unwrap(),
             serde_json::json!({ "type": "browserSnapshot", "requestId": "r1", "browserId": "b1" })

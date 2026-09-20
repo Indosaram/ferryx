@@ -1205,9 +1205,9 @@ pub async fn navigate_browser_session<R: tauri::Runtime>(
 
     if let Some(webview) = app.get_webview(&state.webview_label) {
         emit_browser_state(&webview, &state);
-        let parsed = valid_url
-            .parse()
-            .map_err(|error| BrowserError::NavigationFailed(format!("invalid target URL: {error}")))?;
+        let parsed = valid_url.parse().map_err(|error| {
+            BrowserError::NavigationFailed(format!("invalid target URL: {error}"))
+        })?;
         if let Err(error) = webview.navigate(parsed) {
             let message = error.to_string();
             if let Ok(error_state) = manager.update_navigation_state(
@@ -1498,9 +1498,7 @@ pub async fn cmd_browser_set_visible<R: tauri::Runtime>(
     };
     // A dropped hide is what strands an opaque child webview over the pane that replaced it.
     outcome.map_err(|error| {
-        BrowserError::Internal(format!(
-            "failed to set browser webview visibility: {error}"
-        ))
+        BrowserError::Internal(format!("failed to set browser webview visibility: {error}"))
     })?;
     Ok(())
 }
@@ -1780,15 +1778,24 @@ fn open_windows_target(target: &std::ffi::OsStr) -> std::io::Result<()> {
     }
     let mut wide: Vec<u16> = target.encode_wide().collect();
     if wide.contains(&0) {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "open target contains NUL"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "open target contains NUL",
+        ));
     }
     wide.push(0);
     // SAFETY: all strings are NUL-terminated and live until the synchronous
     // ShellExecuteW call returns. Null optional parameters mean no arguments,
     // no working directory and no owner HWND; the target is never shell syntax.
     let result = unsafe {
-        ShellExecuteW(std::ptr::null_mut(), [111u16, 112, 101, 110, 0].as_ptr(),
-            wide.as_ptr(), std::ptr::null(), std::ptr::null(), 1)
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            [111u16, 112, 101, 110, 0].as_ptr(),
+            wide.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1,
+        )
     };
     shell_execute_result(result)
 }
@@ -1796,7 +1803,9 @@ fn open_windows_target(target: &std::ffi::OsStr) -> std::io::Result<()> {
 #[cfg(any(target_os = "windows", test))]
 fn shell_execute_result(result: isize) -> std::io::Result<()> {
     if result <= 32 {
-        return Err(std::io::Error::other(format!("ShellExecuteW failed with code {result}")));
+        return Err(std::io::Error::other(format!(
+            "ShellExecuteW failed with code {result}"
+        )));
     }
     Ok(())
 }
@@ -1812,10 +1821,14 @@ pub(crate) fn open_system_target(target: &std::ffi::OsStr) -> Result<(), IpcErro
         let program = "open";
         #[cfg(not(target_os = "macos"))]
         let program = "xdg-open";
-        let status = std::process::Command::new(program).arg(target).status()
+        let status = std::process::Command::new(program)
+            .arg(target)
+            .status()
             .map_err(|error| IpcError::internal(error.to_string()))?;
         if !status.success() {
-            return Err(IpcError::internal(format!("system opener exited with {status}")));
+            return Err(IpcError::internal(format!(
+                "system opener exited with {status}"
+            )));
         }
         Ok(())
     }
@@ -1830,7 +1843,8 @@ pub async fn cmd_browser_open_external(url: String) -> Result<(), IpcError> {
         #[cfg(not(target_os = "windows"))]
         let target = valid_url.as_str();
         open_system_target(std::ffi::OsStr::new(target))
-    }).await
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1879,23 +1893,22 @@ pub async fn open_file_path_request(
         Some(session_id) => resolve_session_cwd(daemon_client, session_id).await?,
         None => None,
     };
-    let cwd = if session_id.is_some() {
-        if resolved_cwd.is_none() && !crate::ipc::file_link::is_absolute_token(&path)
-            && !path.starts_with('~') {
-            return Err(IpcError::new(crate::ipc::error::IpcErrorCode::Unsupported,
+    let cwd =
+        if session_id.is_some() {
+            if resolved_cwd.is_none()
+                && !crate::ipc::file_link::is_absolute_token(&path)
+                && !path.starts_with('~')
+            {
+                return Err(IpcError::new(crate::ipc::error::IpcErrorCode::Unsupported,
                 "The terminal's current directory could not be read. Use an absolute file path."));
-        }
-        resolved_cwd.map(|cwd| cwd.to_string_lossy().into_owned())
-    } else { cwd };
+            }
+            resolved_cwd.map(|cwd| cwd.to_string_lossy().into_owned())
+        } else {
+            cwd
+        };
 
     crate::ipc::run_blocking::<bool, _>(move || {
-        crate::ipc::file_link::open_file_link_blocking(
-            &path,
-            cwd.as_deref(),
-            line,
-            col,
-            editor,
-        )
+        crate::ipc::file_link::open_file_link_blocking(&path, cwd.as_deref(), line, col, editor)
     })
     .await
 }
@@ -1928,14 +1941,21 @@ mod tests {
 
     #[test]
     fn windows_keypress_returns_typed_unsupported() {
-        let error = super::windows_keypress_capability().expect_err("no trusted Windows input adapter");
+        let error =
+            super::windows_keypress_capability().expect_err("no trusted Windows input adapter");
         assert_eq!(error.code, crate::ipc::error::IpcErrorCode::Unsupported);
     }
 
     #[test]
     fn external_open_preserves_target_without_shell() {
-        for target in ["https://example.test/?a=1&b=2", "C:\\QA\\two words & notes.txt"] {
-            assert_eq!(windows_open_request(target), WindowsOpenRequest::ShellExecute { target });
+        for target in [
+            "https://example.test/?a=1&b=2",
+            "C:\\QA\\two words & notes.txt",
+        ] {
+            assert_eq!(
+                windows_open_request(target),
+                WindowsOpenRequest::ShellExecute { target }
+            );
         }
     }
 
@@ -1943,7 +1963,10 @@ mod tests {
     fn file_link_expands_bare_home() {
         use crate::ipc::file_link::resolve_file_link;
         let home = std::path::PathBuf::from("C:/Users/P13 fixture");
-        assert_eq!(resolve_file_link("~", Some("C:/work"), Some(home.clone())), home);
+        assert_eq!(
+            resolve_file_link("~", Some("C:/work"), Some(home.clone())),
+            home
+        );
     }
 
     #[test]
@@ -1992,7 +2015,10 @@ mod tests {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         // Test the production resolver, not the user's default application.
         let resolved = resolve_file_link("Cargo.toml", Some(manifest_dir), None);
-        assert_eq!(resolved, std::path::Path::new(manifest_dir).join("Cargo.toml"));
+        assert_eq!(
+            resolved,
+            std::path::Path::new(manifest_dir).join("Cargo.toml")
+        );
         assert!(resolved.is_file());
     }
 
@@ -2058,7 +2084,9 @@ mod tests {
         let get_script = build_cookie_script("get", None, None, None, None).unwrap();
         assert!(get_script.contains("document.cookie"));
 
-        let set_script = build_cookie_script("set", Some("k"), Some("v"), Some("example.com"), Some("/")).unwrap();
+        let set_script =
+            build_cookie_script("set", Some("k"), Some("v"), Some("example.com"), Some("/"))
+                .unwrap();
         assert!(set_script.contains("document.cookie ="));
         assert!(set_script.contains("k=v"));
         assert!(set_script.contains("domain=example.com"));
@@ -2090,15 +2118,21 @@ pub fn build_wait_condition_script(
     match condition {
         BrowserWaitCondition::Selector { selector } => {
             let sel_json = serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".into());
-            format!(r#"(() => {{ try {{ return document.querySelector({sel_json}) !== null; }} catch (_) {{ return false; }} }})()"#)
+            format!(
+                r#"(() => {{ try {{ return document.querySelector({sel_json}) !== null; }} catch (_) {{ return false; }} }})()"#
+            )
         }
         BrowserWaitCondition::Text { text } => {
             let text_json = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".into());
-            format!(r#"(() => {{ try {{ return Boolean(document.body && document.body.innerText.includes({text_json})); }} catch (_) {{ return false; }} }})()"#)
+            format!(
+                r#"(() => {{ try {{ return Boolean(document.body && document.body.innerText.includes({text_json})); }} catch (_) {{ return false; }} }})()"#
+            )
         }
         BrowserWaitCondition::UrlContains { fragment } => {
             let frag_json = serde_json::to_string(fragment).unwrap_or_else(|_| "\"\"".into());
-            format!(r#"(() => {{ try {{ return location.href.includes({frag_json}); }} catch (_) {{ return false; }} }})()"#)
+            format!(
+                r#"(() => {{ try {{ return location.href.includes({frag_json}); }} catch (_) {{ return false; }} }})()"#
+            )
         }
         BrowserWaitCondition::LoadState { state } => {
             if state.eq_ignore_ascii_case("interactive") {
@@ -2112,11 +2146,11 @@ pub fn build_wait_condition_script(
         }
         BrowserWaitCondition::Function { script } => {
             let script_json = serde_json::to_string(script).unwrap_or_else(|_| "\"\"".into());
-            format!(r#"(() => {{ try {{ return Boolean(eval({script_json})); }} catch (_) {{ return false; }} }})()"#)
+            format!(
+                r#"(() => {{ try {{ return Boolean(eval({script_json})); }} catch (_) {{ return false; }} }})()"#
+            )
         }
-        BrowserWaitCondition::WithTimeout { inner, .. } => {
-            build_wait_condition_script(inner)
-        }
+        BrowserWaitCondition::WithTimeout { inner, .. } => build_wait_condition_script(inner),
     }
 }
 
@@ -2193,11 +2227,14 @@ pub fn build_cookie_script(
                 cookie_str.push_str("; path=/");
             }
             let encoded = serde_json::to_string(&cookie_str).map_err(|e| e.to_string())?;
-            Ok(format!("(() => {{ document.cookie = {encoded}; return document.cookie; }})()"))
+            Ok(format!(
+                "(() => {{ document.cookie = {encoded}; return document.cookie; }})()"
+            ))
         }
         "clear" | "delete" => {
             let name = name.ok_or_else(|| "cookie name is required for clear".to_string())?;
-            let mut cookie_str = format!("{name}=; Max-Age=0; expires=Thu, 01 Jan 1970 00:00:00 GMT");
+            let mut cookie_str =
+                format!("{name}=; Max-Age=0; expires=Thu, 01 Jan 1970 00:00:00 GMT");
             if let Some(d) = domain {
                 cookie_str.push_str(&format!("; domain={d}"));
             }
@@ -2207,7 +2244,9 @@ pub fn build_cookie_script(
                 cookie_str.push_str("; path=/");
             }
             let encoded = serde_json::to_string(&cookie_str).map_err(|e| e.to_string())?;
-            Ok(format!("(() => {{ document.cookie = {encoded}; return document.cookie; }})()"))
+            Ok(format!(
+                "(() => {{ document.cookie = {encoded}; return document.cookie; }})()"
+            ))
         }
         other => Err(format!("unknown cookie action: {other}")),
     }
@@ -2228,7 +2267,9 @@ pub fn build_storage_script(
         "get" => {
             let key_str = key.ok_or_else(|| "key is required for storage get".to_string())?;
             let key_json = serde_json::to_string(key_str).map_err(|e| e.to_string())?;
-            Ok(format!("(() => {{ return {storage_obj}.getItem({key_json}); }})()"))
+            Ok(format!(
+                "(() => {{ return {storage_obj}.getItem({key_json}); }})()"
+            ))
         }
         "set" => {
             let key_str = key.ok_or_else(|| "key is required for storage set".to_string())?;
@@ -2240,9 +2281,13 @@ pub fn build_storage_script(
         "clear" | "delete" | "remove" => {
             if let Some(k) = key {
                 let key_json = serde_json::to_string(k).map_err(|e| e.to_string())?;
-                Ok(format!("(() => {{ {storage_obj}.removeItem({key_json}); return null; }})()"))
+                Ok(format!(
+                    "(() => {{ {storage_obj}.removeItem({key_json}); return null; }})()"
+                ))
             } else {
-                Ok(format!("(() => {{ {storage_obj}.clear(); return null; }})()"))
+                Ok(format!(
+                    "(() => {{ {storage_obj}.clear(); return null; }})()"
+                ))
             }
         }
         other => Err(format!("unknown storage action: {other}")),
@@ -2450,7 +2495,8 @@ impl ProductionDaemonReclaimTransport {
 impl DaemonReclaimTransport for ProductionDaemonReclaimTransport {
     fn reclaim_daemon_broker<'a>(
         &'a self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<u64, IpcError>> + Send + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<u64, IpcError>> + Send + 'a>>
+    {
         Box::pin(async move {
             // 1. Authoritative in-process state if present
             if let Some(state) = self.remote_manager.state() {
@@ -2459,7 +2505,11 @@ impl DaemonReclaimTransport for ProductionDaemonReclaimTransport {
             }
 
             // 2. Authoritative daemon-side reclaim: revoke control permissions & clear active selection
-            let devices = self.daemon_client.remote_list_devices().await.unwrap_or_default();
+            let devices = self
+                .daemon_client
+                .remote_list_devices()
+                .await
+                .unwrap_or_default();
             for dev in devices {
                 if dev.permission == crate::remote::DevicePermission::Control {
                     let _ = self.daemon_client.remote_revoke_device(&dev.id).await;
@@ -2508,7 +2558,9 @@ pub async fn cmd_browser_remote_reclaim<R: tauri::Runtime>(
     // 3. Fall back to local broker only via explicit pure-GUI mode flag; reject missing transport in daemon mode (R6-5)
     let final_epoch = match epoch {
         Some(e) => {
-            if let Some(broker) = app.try_state::<Arc<crate::browser::remote_driver::RemoteDriverBroker>>() {
+            if let Some(broker) =
+                app.try_state::<Arc<crate::browser::remote_driver::RemoteDriverBroker>>()
+            {
                 let _ = broker.desktop_reclaim();
             }
             e
@@ -2516,7 +2568,9 @@ pub async fn cmd_browser_remote_reclaim<R: tauri::Runtime>(
         None => {
             let is_pure_gui = app.try_state::<PureGuiMode>().map(|m| m.0).unwrap_or(false);
             if is_pure_gui {
-                if let Some(broker) = app.try_state::<Arc<crate::browser::remote_driver::RemoteDriverBroker>>() {
+                if let Some(broker) =
+                    app.try_state::<Arc<crate::browser::remote_driver::RemoteDriverBroker>>()
+                {
                     broker.desktop_reclaim()
                 } else {
                     1
@@ -2557,17 +2611,27 @@ impl<R: tauri::Runtime> GuiBrowserCommandExecutor<R> {
     }
 }
 
-impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor for GuiBrowserCommandExecutor<R> {
+impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor
+    for GuiBrowserCommandExecutor<R>
+{
     fn execute<'a>(
         &'a self,
         ctx: crate::remote::browser_backend::BrowserCommandContext,
-    ) -> crate::remote::browser_backend::BoxFuture<'a, Result<crate::remote::browser_backend::BrowserCommandResult, crate::remote::browser_backend::RemoteBrowserError>> {
+    ) -> crate::remote::browser_backend::BoxFuture<
+        'a,
+        Result<
+            crate::remote::browser_backend::BrowserCommandResult,
+            crate::remote::browser_backend::RemoteBrowserError,
+        >,
+    > {
         Box::pin(async move {
             use crate::remote::browser_backend::{BrowserCommandResult, RemoteBrowserError};
 
             if let Some(ref exp_gen) = ctx.document_generation {
                 if let Ok(expected) = exp_gen.parse::<u64>() {
-                    let st = self.manager.get_state(&ctx.browser_id)
+                    let st = self
+                        .manager
+                        .get_state(&ctx.browser_id)
                         .map_err(|_| RemoteBrowserError::NotFound(ctx.browser_id.clone()))?;
                     if st.generation != expected {
                         return Err(RemoteBrowserError::Forbidden(format!(
@@ -2580,13 +2644,19 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor f
 
             match ctx.command.as_str() {
                 "navigate" => {
-                    let url = ctx.params.as_ref()
+                    let url = ctx
+                        .params
+                        .as_ref()
                         .and_then(|p| p.get("url").and_then(|v| v.as_str()))
-                        .ok_or_else(|| RemoteBrowserError::InvalidRequest("missing url param".into()))?;
+                        .ok_or_else(|| {
+                            RemoteBrowserError::InvalidRequest("missing url param".into())
+                        })?;
                     navigate_browser_session(&self.app, &self.manager, &ctx.browser_id, url)
                         .await
                         .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
-                    let state = self.manager.get_state(&ctx.browser_id)
+                    let state = self
+                        .manager
+                        .get_state(&ctx.browser_id)
                         .map_err(|_| RemoteBrowserError::NotFound(ctx.browser_id.clone()))?;
                     Ok(BrowserCommandResult {
                         success: true,
@@ -2614,11 +2684,16 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor f
                     })
                 }
                 "reload" => {
-                    let state = self.manager.begin_reload(&ctx.browser_id)
+                    let state = self
+                        .manager
+                        .begin_reload(&ctx.browser_id)
                         .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
-                    let webview = self.app.get_webview(&state.webview_label)
+                    let webview = self
+                        .app
+                        .get_webview(&state.webview_label)
                         .ok_or_else(|| RemoteBrowserError::NotFound(state.webview_label.clone()))?;
-                    webview.reload()
+                    webview
+                        .reload()
                         .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
                     Ok(BrowserCommandResult {
                         success: true,
@@ -2631,24 +2706,38 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor f
                     })?;
 
                     // R5-10, R6-6: Point-click viewport revision recheck at execution time (mismatch => BROWSER_STALE_FRAME)
-                    let (_, _, current_vp_rev) = self.manager.get_geometry(&ctx.browser_id).unwrap_or((None, 1.0, 1));
-                    if let Some(vp_str) = p.get("viewportRevision").and_then(|v| v.as_str()).or_else(|| p.get("viewport_revision").and_then(|v| v.as_str())) {
+                    let (_, _, current_vp_rev) = self
+                        .manager
+                        .get_geometry(&ctx.browser_id)
+                        .unwrap_or((None, 1.0, 1));
+                    if let Some(vp_str) = p
+                        .get("viewportRevision")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| p.get("viewport_revision").and_then(|v| v.as_str()))
+                    {
                         if let Ok(expected_vp) = vp_str.parse::<u64>() {
                             if expected_vp != current_vp_rev as u64 {
                                 return Err(RemoteBrowserError::InvalidRequest("BROWSER_STALE_FRAME: viewport revision changed since frame capture".into()));
                             }
                         }
-                    } else if let Some(expected_vp) = p.get("viewportRevision").or_else(|| p.get("viewport_revision")).and_then(|v| v.as_u64()) {
+                    } else if let Some(expected_vp) = p
+                        .get("viewportRevision")
+                        .or_else(|| p.get("viewport_revision"))
+                        .and_then(|v| v.as_u64())
+                    {
                         if expected_vp != current_vp_rev as u64 {
                             return Err(RemoteBrowserError::InvalidRequest("BROWSER_STALE_FRAME: viewport revision changed since frame capture".into()));
                         }
                     }
 
-                    let state = self.manager.get_state(&ctx.browser_id)
+                    let state = self
+                        .manager
+                        .get_state(&ctx.browser_id)
                         .map_err(|_| RemoteBrowserError::NotFound(ctx.browser_id.clone()))?;
 
                     // R5-11: Reference resolution via snapshotId and mapRevision
-                    let maybe_ref = p.get("reference")
+                    let maybe_ref = p
+                        .get("reference")
                         .or_else(|| p.get("ref"))
                         .and_then(|v| v.as_str())
                         .or_else(|| {
@@ -2660,19 +2749,36 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor f
                         });
 
                     let script = if let Some(ref_str) = maybe_ref {
-                        let snap_id = p.get("snapshotId")
+                        let snap_id = p
+                            .get("snapshotId")
                             .or_else(|| p.get("snapshot_id"))
                             .and_then(|v| v.as_str())
                             .filter(|s| !s.trim().is_empty())
-                            .ok_or_else(|| RemoteBrowserError::InvalidRequest("remote click requires snapshotId".into()))?;
-                        let map_rev = p.get("mapRevision")
+                            .ok_or_else(|| {
+                                RemoteBrowserError::InvalidRequest(
+                                    "remote click requires snapshotId".into(),
+                                )
+                            })?;
+                        let map_rev = p
+                            .get("mapRevision")
                             .or_else(|| p.get("map_revision"))
                             .and_then(|v| {
-                                v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+                                v.as_u64()
+                                    .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
                             })
-                            .ok_or_else(|| RemoteBrowserError::InvalidRequest("remote click requires mapRevision".into()))?;
-                        let selector = self.manager.verify_remote_target(&ctx.browser_id, snap_id, map_rev, ref_str)
-                            .map_err(|e| RemoteBrowserError::NotFound(format!("BROWSER_TARGET_NOT_FOUND: target resolution failed: {e}")))?;
+                            .ok_or_else(|| {
+                                RemoteBrowserError::InvalidRequest(
+                                    "remote click requires mapRevision".into(),
+                                )
+                            })?;
+                        let selector = self
+                            .manager
+                            .verify_remote_target(&ctx.browser_id, snap_id, map_rev, ref_str)
+                            .map_err(|e| {
+                                RemoteBrowserError::NotFound(format!(
+                                    "BROWSER_TARGET_NOT_FOUND: target resolution failed: {e}"
+                                ))
+                            })?;
                         let sel_json = serde_json::to_string(&selector).unwrap_or_default();
                         format!(
                             r#"(function() {{
@@ -2694,7 +2800,10 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor f
                             }})()"#,
                             sel_json
                         )
-                    } else if let (Some(px), Some(py)) = (p.get("x").and_then(|n| n.as_f64()), p.get("y").and_then(|n| n.as_f64())) {
+                    } else if let (Some(px), Some(py)) = (
+                        p.get("x").and_then(|n| n.as_f64()),
+                        p.get("y").and_then(|n| n.as_f64()),
+                    ) {
                         // R5-10: Use the validated capture coordinates from WS fence directly without remapping
                         format!(
                             r#"(function() {{
@@ -2705,7 +2814,10 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor f
                             }})()"#,
                             px, py
                         )
-                    } else if let (Some(u), Some(v)) = (p.get("u").and_then(|n| n.as_f64()), p.get("v").and_then(|n| n.as_f64())) {
+                    } else if let (Some(u), Some(v)) = (
+                        p.get("u").and_then(|n| n.as_f64()),
+                        p.get("v").and_then(|n| n.as_f64()),
+                    ) {
                         // R5-10: If captureRect was passed from WS fence, use it directly without remapping against current bounds
                         let rect = if let Some(c) = p.get("captureRect") {
                             LogicalRect {
@@ -2715,11 +2827,21 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor f
                                 height: c.get("height").and_then(|n| n.as_f64()).unwrap_or(768.0),
                             }
                         } else {
-                            let (bounds, _, _) = self.manager.get_geometry(&ctx.browser_id).unwrap_or((None, 1.0, 1));
-                            bounds.unwrap_or(LogicalRect { x: 0.0, y: 0.0, width: 1024.0, height: 768.0 })
+                            let (bounds, _, _) = self
+                                .manager
+                                .get_geometry(&ctx.browser_id)
+                                .unwrap_or((None, 1.0, 1));
+                            bounds.unwrap_or(LogicalRect {
+                                x: 0.0,
+                                y: 0.0,
+                                width: 1024.0,
+                                height: 768.0,
+                            })
                         };
-                        let pt = crate::browser::remote_input::map_point_mainframe(u, v, &rect, false, false, false)
-                            .map_err(|e| RemoteBrowserError::InvalidRequest(e.to_string()))?;
+                        let pt = crate::browser::remote_input::map_point_mainframe(
+                            u, v, &rect, false, false, false,
+                        )
+                        .map_err(|e| RemoteBrowserError::InvalidRequest(e.to_string()))?;
                         format!(
                             r#"(function() {{
                                 const el = document.elementFromPoint({}, {});
@@ -2730,55 +2852,69 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor f
                             pt.x, pt.y
                         )
                     } else {
-                        return Err(RemoteBrowserError::InvalidRequest("missing click target".into()));
+                        return Err(RemoteBrowserError::InvalidRequest(
+                            "missing click target".into(),
+                        ));
                     };
 
-                    let webview = self.app.get_webview(&state.webview_label)
+                    let webview = self
+                        .app
+                        .get_webview(&state.webview_label)
                         .ok_or_else(|| RemoteBrowserError::NotFound(state.webview_label.clone()))?;
-                    let res_str = eval_webview(webview, script).await
+                    let res_str = eval_webview(webview, script)
+                        .await
                         .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
-                    crate::browser::remote_input::decode_action_result(&res_str)
-                        .map_err(|e| {
-                            if e.contains("element not found") || e.contains("no element at coordinates") {
-                                RemoteBrowserError::NotFound(format!("BROWSER_TARGET_NOT_FOUND: {e}"))
-                            } else {
-                                RemoteBrowserError::ExecutionFailed(e)
-                            }
-                        })?;
+                    crate::browser::remote_input::decode_action_result(&res_str).map_err(|e| {
+                        if e.contains("element not found")
+                            || e.contains("no element at coordinates")
+                        {
+                            RemoteBrowserError::NotFound(format!("BROWSER_TARGET_NOT_FOUND: {e}"))
+                        } else {
+                            RemoteBrowserError::ExecutionFailed(e)
+                        }
+                    })?;
                     Ok(BrowserCommandResult {
                         success: true,
                         value: Some(serde_json::json!({ "clicked": true })),
                     })
                 }
                 "fill" => {
-                    let state = self.manager.get_state(&ctx.browser_id)
+                    let state = self
+                        .manager
+                        .get_state(&ctx.browser_id)
                         .map_err(|_| RemoteBrowserError::NotFound(ctx.browser_id.clone()))?;
-                    let webview = self.app.get_webview(&state.webview_label)
+                    let webview = self
+                        .app
+                        .get_webview(&state.webview_label)
                         .ok_or_else(|| RemoteBrowserError::NotFound(state.webview_label.clone()))?;
                     let p = ctx.params.as_ref().ok_or_else(|| {
                         RemoteBrowserError::InvalidRequest("fill requires params".into())
                     })?;
 
                     let script = build_fill_script(Some(&self.manager), &ctx.browser_id, p)?;
-                    let res_str = eval_webview(webview, script).await
+                    let res_str = eval_webview(webview, script)
+                        .await
                         .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
-                    crate::browser::remote_input::decode_action_result(&res_str)
-                        .map_err(|e| {
-                            if e.contains("element not found") || e.contains("no active element") {
-                                RemoteBrowserError::NotFound(format!("BROWSER_TARGET_NOT_FOUND: {e}"))
-                            } else {
-                                RemoteBrowserError::ExecutionFailed(e)
-                            }
-                        })?;
+                    crate::browser::remote_input::decode_action_result(&res_str).map_err(|e| {
+                        if e.contains("element not found") || e.contains("no active element") {
+                            RemoteBrowserError::NotFound(format!("BROWSER_TARGET_NOT_FOUND: {e}"))
+                        } else {
+                            RemoteBrowserError::ExecutionFailed(e)
+                        }
+                    })?;
                     Ok(BrowserCommandResult {
                         success: true,
                         value: Some(serde_json::json!({ "filled": true })),
                     })
                 }
                 "keypress" => {
-                    let state = self.manager.get_state(&ctx.browser_id)
+                    let state = self
+                        .manager
+                        .get_state(&ctx.browser_id)
                         .map_err(|_| RemoteBrowserError::NotFound(ctx.browser_id.clone()))?;
-                    let webview = self.app.get_webview(&state.webview_label)
+                    let webview = self
+                        .app
+                        .get_webview(&state.webview_label)
                         .ok_or_else(|| RemoteBrowserError::NotFound(state.webview_label.clone()))?;
                     let p = ctx.params.as_ref().ok_or_else(|| {
                         RemoteBrowserError::InvalidRequest("keypress requires params".into())
@@ -2794,7 +2930,8 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor f
                         }})()"#,
                         key_json, key_json
                     );
-                    let _ = eval_webview(webview, script).await
+                    let _ = eval_webview(webview, script)
+                        .await
                         .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
                     Ok(BrowserCommandResult {
                         success: true,
@@ -2808,9 +2945,10 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor f
                     let script = p.get("script").and_then(|v| v.as_str()).ok_or_else(|| {
                         RemoteBrowserError::InvalidRequest("missing script in eval".into())
                     })?;
-                    let (eval_res, truncated) = eval_browser_session(&self.app, &self.manager, &ctx.browser_id, script)
-                        .await
-                        .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
+                    let (eval_res, truncated) =
+                        eval_browser_session(&self.app, &self.manager, &ctx.browser_id, script)
+                            .await
+                            .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
                     Ok(BrowserCommandResult {
                         success: true,
                         value: Some(serde_json::json!({
@@ -2823,30 +2961,47 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor f
                     let p = ctx.params.as_ref().ok_or_else(|| {
                         RemoteBrowserError::InvalidRequest("wait requires params".into())
                     })?;
-                    let (condition, timeout) = crate::remote::browser_backend::normalize_wait_params(p)?;
-                    wait_browser_session_with_timeout(&self.app, &self.manager, &ctx.browser_id, condition, timeout)
-                        .await
-                        .map_err(|e| match e.code {
-                            IpcErrorCode::BrowserWaitTimeout => RemoteBrowserError::WaitTimeout,
-                            _ => RemoteBrowserError::ExecutionFailed(e.to_string()),
-                        })?;
+                    let (condition, timeout) =
+                        crate::remote::browser_backend::normalize_wait_params(p)?;
+                    wait_browser_session_with_timeout(
+                        &self.app,
+                        &self.manager,
+                        &ctx.browser_id,
+                        condition,
+                        timeout,
+                    )
+                    .await
+                    .map_err(|e| match e.code {
+                        IpcErrorCode::BrowserWaitTimeout => RemoteBrowserError::WaitTimeout,
+                        _ => RemoteBrowserError::ExecutionFailed(e.to_string()),
+                    })?;
                     Ok(BrowserCommandResult {
                         success: true,
                         value: None,
                     })
                 }
                 "snapshot" => {
-                    let state = self.manager.get_state(&ctx.browser_id)
+                    let state = self
+                        .manager
+                        .get_state(&ctx.browser_id)
                         .map_err(|_| RemoteBrowserError::NotFound(ctx.browser_id.clone()))?;
-                    let webview = self.app.get_webview(&state.webview_label)
+                    let webview = self
+                        .app
+                        .get_webview(&state.webview_label)
                         .ok_or_else(|| RemoteBrowserError::NotFound(state.webview_label.clone()))?;
-                    let result = eval_webview(webview, AUTOMATION_SNAPSHOT_SCRIPT.to_string()).await
+                    let result = eval_webview(webview, AUTOMATION_SNAPSHOT_SCRIPT.to_string())
+                        .await
                         .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
                     let snapshot_json: String = serde_json::from_str(&result).map_err(|error| {
-                        RemoteBrowserError::ExecutionFailed(format!("invalid snapshot callback result: {error}"))
+                        RemoteBrowserError::ExecutionFailed(format!(
+                            "invalid snapshot callback result: {error}"
+                        ))
                     })?;
-                    let snapshot: AutomationSnapshotResult = serde_json::from_str(&snapshot_json).map_err(|error| {
-                        RemoteBrowserError::ExecutionFailed(format!("invalid snapshot response: {error}"))
+                    let snapshot: AutomationSnapshotResult = serde_json::from_str(&snapshot_json)
+                        .map_err(|error| {
+                        RemoteBrowserError::ExecutionFailed(format!(
+                            "invalid snapshot response: {error}"
+                        ))
                     })?;
                     let targets = snapshot
                         .elements
@@ -2856,7 +3011,8 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor f
                             selector: element.selector.clone(),
                         })
                         .collect();
-                    let (snapshot_id, map_revision) = self.manager
+                    let (snapshot_id, map_revision) = self
+                        .manager
                         .record_remote_snapshot(&ctx.browser_id, state.generation, targets)
                         .map_err(|e| match e {
                             BrowserError::AutomationSnapshotStale => RemoteBrowserError::Forbidden(
@@ -2889,9 +3045,14 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor f
                     })
                 }
                 "getState" => {
-                    let state = self.manager.get_state(&ctx.browser_id)
+                    let state = self
+                        .manager
+                        .get_state(&ctx.browser_id)
                         .map_err(|_| RemoteBrowserError::NotFound(ctx.browser_id.clone()))?;
-                    let (_, _, vp_rev) = self.manager.get_geometry(&ctx.browser_id).unwrap_or((None, 1.0, 1));
+                    let (_, _, vp_rev) = self
+                        .manager
+                        .get_geometry(&ctx.browser_id)
+                        .unwrap_or((None, 1.0, 1));
                     Ok(BrowserCommandResult {
                         success: true,
                         value: Some(serde_json::json!({
@@ -2920,21 +3081,31 @@ pub fn build_fill_script(
     p: &serde_json::Value,
 ) -> Result<String, crate::remote::browser_backend::RemoteBrowserError> {
     use crate::remote::browser_backend::RemoteBrowserError;
-    let value = p.get("value").or_else(|| p.get("text")).and_then(|v| v.as_str()).unwrap_or("");
+    let value = p
+        .get("value")
+        .or_else(|| p.get("text"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let val_json = serde_json::to_string(value).unwrap_or_default();
 
-    let fill_rev = p.get("revision")
+    let fill_rev = p
+        .get("revision")
         .or_else(|| p.get("imeRevision"))
         .or_else(|| p.get("trackedRevision"))
-        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok())));
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+        });
     let rev_json = serde_json::to_string(&fill_rev).unwrap_or_else(|_| "null".into());
 
-    let snap_id = p.get("snapshotId")
+    let snap_id = p
+        .get("snapshotId")
         .or_else(|| p.get("snapshot_id"))
         .and_then(|v| v.as_str())
         .filter(|s| !s.trim().is_empty());
 
-    let raw_ref = p.get("reference")
+    let raw_ref = p
+        .get("reference")
         .or_else(|| p.get("ref"))
         .and_then(|v| v.as_str());
 
@@ -2973,15 +3144,25 @@ pub fn build_fill_script(
         ))
     } else if let (Some(sid), Some(ref_str)) = (snap_id, raw_ref) {
         // Snapshot-resolved element fill
-        let map_rev = p.get("mapRevision")
+        let map_rev = p
+            .get("mapRevision")
             .or_else(|| p.get("map_revision"))
             .and_then(|v| {
-                v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+                v.as_u64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
             })
-            .ok_or_else(|| RemoteBrowserError::InvalidRequest("remote fill requires mapRevision".into()))?;
-        let mgr = manager.ok_or_else(|| RemoteBrowserError::ExecutionFailed("missing manager".into()))?;
-        let selector = mgr.verify_remote_target(browser_id, sid, map_rev, ref_str)
-            .map_err(|e| RemoteBrowserError::NotFound(format!("BROWSER_TARGET_NOT_FOUND: target resolution failed: {e}")))?;
+            .ok_or_else(|| {
+                RemoteBrowserError::InvalidRequest("remote fill requires mapRevision".into())
+            })?;
+        let mgr =
+            manager.ok_or_else(|| RemoteBrowserError::ExecutionFailed("missing manager".into()))?;
+        let selector = mgr
+            .verify_remote_target(browser_id, sid, map_rev, ref_str)
+            .map_err(|e| {
+                RemoteBrowserError::NotFound(format!(
+                    "BROWSER_TARGET_NOT_FOUND: target resolution failed: {e}"
+                ))
+            })?;
         let sel_json = serde_json::to_string(&selector).unwrap_or_default();
         Ok(format!(
             r#"(function() {{
@@ -3071,9 +3252,16 @@ mod r6_fill_tests {
             "reference": "active",
             "value": "hello",
         });
-        let script = build_fill_script(None, "b1", &active_params).expect("active fill must not require snapshotId");
-        assert!(script.contains("document.activeElement"), "Must target activeElement");
-        assert!(!script.contains("querySelector"), "Active fill must not querySelector");
+        let script = build_fill_script(None, "b1", &active_params)
+            .expect("active fill must not require snapshotId");
+        assert!(
+            script.contains("document.activeElement"),
+            "Must target activeElement"
+        );
+        assert!(
+            !script.contains("querySelector"),
+            "Active fill must not querySelector"
+        );
     }
 
     #[test]
@@ -3084,8 +3272,14 @@ mod r6_fill_tests {
             "revision": 5,
         });
         let script = build_fill_script(None, "b1", &params).unwrap();
-        assert!(script.contains("const trackedRevision = el.__ferryx_tracked_revision"), "Must capture tracked revision at script start");
-        assert!(script.contains("el.__ferryx_tracked_revision !== trackedRevision"), "Must compare tracked revision before mutation");
+        assert!(
+            script.contains("const trackedRevision = el.__ferryx_tracked_revision"),
+            "Must capture tracked revision at script start"
+        );
+        assert!(
+            script.contains("el.__ferryx_tracked_revision !== trackedRevision"),
+            "Must compare tracked revision before mutation"
+        );
         assert!(script.contains("fill superseded"), "Must abort on mismatch");
     }
 
@@ -3093,7 +3287,9 @@ mod r6_fill_tests {
     async fn test_r6_5_cmd_browser_remote_reclaim_rejects_missing_transport_in_daemon_mode() {
         use tauri::Manager;
         let daemon_client = Arc::new(crate::daemon::client::DaemonClient::new());
-        let mgr = Arc::new(crate::ipc::remote::RemoteGatewayManager::from_daemon(daemon_client));
+        let mgr = Arc::new(crate::ipc::remote::RemoteGatewayManager::from_daemon(
+            daemon_client,
+        ));
         let app = tauri::test::mock_builder()
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .expect("mock app");
@@ -3101,14 +3297,19 @@ mod r6_fill_tests {
 
         // In daemon mode without transport or PureGuiMode flag, reclaim MUST be rejected!
         let res = cmd_browser_remote_reclaim(app.handle().clone()).await;
-        assert!(res.is_err(), "Must reject missing DaemonReclaimTransport in daemon mode");
+        assert!(
+            res.is_err(),
+            "Must reject missing DaemonReclaimTransport in daemon mode"
+        );
     }
 
     #[tokio::test]
     async fn test_r6_5_pure_gui_mode_allows_local_fallback() {
         use tauri::Manager;
         let daemon_client = Arc::new(crate::daemon::client::DaemonClient::new());
-        let mgr = Arc::new(crate::ipc::remote::RemoteGatewayManager::from_daemon(daemon_client));
+        let mgr = Arc::new(crate::ipc::remote::RemoteGatewayManager::from_daemon(
+            daemon_client,
+        ));
         let broker = Arc::new(crate::browser::remote_driver::RemoteDriverBroker::new());
         let app = tauri::test::mock_builder()
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
@@ -3118,7 +3319,10 @@ mod r6_fill_tests {
         app.manage(PureGuiMode(true));
 
         let res = cmd_browser_remote_reclaim(app.handle().clone()).await;
-        assert!(res.is_ok(), "PureGuiMode(true) must allow local broker fallback");
+        assert!(
+            res.is_ok(),
+            "PureGuiMode(true) must allow local broker fallback"
+        );
     }
 
     #[tokio::test]
@@ -3128,16 +3332,21 @@ mod r6_fill_tests {
         impl DaemonReclaimTransport for MockTransport {
             fn reclaim_daemon_broker<'a>(
                 &'a self,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<u64, IpcError>> + Send + 'a>> {
-                Box::pin(async move {
-                    Ok(self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
-                })
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<u64, IpcError>> + Send + 'a>,
+            > {
+                Box::pin(
+                    async move { Ok(self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst)) },
+                )
             }
         }
 
         let daemon_client = Arc::new(crate::daemon::client::DaemonClient::new());
-        let mgr = Arc::new(crate::ipc::remote::RemoteGatewayManager::from_daemon(daemon_client));
-        let transport: Arc<dyn DaemonReclaimTransport> = Arc::new(MockTransport(std::sync::atomic::AtomicU64::new(77)));
+        let mgr = Arc::new(crate::ipc::remote::RemoteGatewayManager::from_daemon(
+            daemon_client,
+        ));
+        let transport: Arc<dyn DaemonReclaimTransport> =
+            Arc::new(MockTransport(std::sync::atomic::AtomicU64::new(77)));
         let app = tauri::test::mock_builder()
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .expect("mock app");
@@ -3145,8 +3354,10 @@ mod r6_fill_tests {
         app.manage(transport);
 
         let res = cmd_browser_remote_reclaim(app.handle().clone()).await;
-        assert_eq!(res.unwrap(), 77, "Must return epoch from registered DaemonReclaimTransport");
+        assert_eq!(
+            res.unwrap(),
+            77,
+            "Must return epoch from registered DaemonReclaimTransport"
+        );
     }
 }
-
-

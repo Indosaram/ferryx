@@ -158,10 +158,7 @@ impl ImageCache {
                     let pixels = (width as usize)
                         .checked_mul(height as usize)
                         .ok_or(NativeTerminalError::LimitExceeded)?;
-                    if ptr.is_null()
-                        || pixels == 0
-                        || pixels.checked_mul(channels) != Some(len)
-                    {
+                    if ptr.is_null() || pixels == 0 || pixels.checked_mul(channels) != Some(len) {
                         return Err(NativeTerminalError::InvalidValue(
                             "Invalid Kitty image payload dimensions".into(),
                         ));

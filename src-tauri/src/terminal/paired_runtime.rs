@@ -2,7 +2,12 @@
 use super::paired_daemon::Proxy;
 use crate::scoped_contracts::Epoch;
 use parking_lot::Mutex;
-use std::{collections::HashMap, path::{Path, PathBuf}, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::sync::{mpsc, oneshot};
 
 fn default_descriptors_path() -> Option<PathBuf> {
@@ -52,7 +57,10 @@ impl FsFault {
 fn fs_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     #[cfg(test)]
     if FsFault::get() == FsFault::FailTempWrite {
-        return Err(std::io::Error::new(std::io::ErrorKind::Other, "injected temp write failure"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "injected temp write failure",
+        ));
     }
     std::fs::write(path, bytes)
 }
@@ -60,18 +68,24 @@ fn fs_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 fn fs_rename(from: &Path, to: &Path) -> std::io::Result<()> {
     #[cfg(test)]
     if FsFault::get() == FsFault::FailRename {
-        return Err(std::io::Error::new(std::io::ErrorKind::Other, "injected rename failure"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "injected rename failure",
+        ));
     }
     std::fs::rename(from, to)
 }
 
-fn load_descriptors(path: &Path) -> Result<HashMap<String, super::paired_daemon::Descriptor>, String> {
+fn load_descriptors(
+    path: &Path,
+) -> Result<HashMap<String, super::paired_daemon::Descriptor>, String> {
     // N2 (round 2): fail closed on load. A read or parse failure must NOT be
     // silently converted into an empty map — that would let a later save
     // clobber a corrupt-but-recoverable store with only the live memory.
     match std::fs::read(path) {
-        Ok(data) => serde_json::from_slice(&data)
-            .map_err(|e| format!("PAIRED_DESCRIPTOR_PARSE: {e}")),
+        Ok(data) => {
+            serde_json::from_slice(&data).map_err(|e| format!("PAIRED_DESCRIPTOR_PARSE: {e}"))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(HashMap::new()),
         Err(e) => Err(format!("PAIRED_DESCRIPTOR_READ: {e}")),
     }
@@ -80,7 +94,10 @@ fn load_descriptors(path: &Path) -> Result<HashMap<String, super::paired_daemon:
 static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static PERSIST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn save_descriptors_locked(path: &Path, descriptors: &HashMap<String, super::paired_daemon::Descriptor>) -> Result<(), String> {
+fn save_descriptors_locked(
+    path: &Path,
+    descriptors: &HashMap<String, super::paired_daemon::Descriptor>,
+) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -113,7 +130,10 @@ fn save_descriptors_locked(path: &Path, descriptors: &HashMap<String, super::pai
 }
 
 #[allow(dead_code)]
-fn save_descriptors(path: &Path, descriptors: &HashMap<String, super::paired_daemon::Descriptor>) -> Result<(), String> {
+fn save_descriptors(
+    path: &Path,
+    descriptors: &HashMap<String, super::paired_daemon::Descriptor>,
+) -> Result<(), String> {
     let _persist_guard = PERSIST_MUTEX.lock().map_err(|e| e.to_string())?;
     save_descriptors_locked(path, descriptors)
 }
@@ -154,7 +174,10 @@ impl Drop for ReapOwner {
             // transition, and a skipped removal is inert because every live-task
             // check filters finished entries.
             if let Some(mut owners) = owners.try_lock() {
-                if owners.get(&self.id).is_some_and(|owner| Arc::ptr_eq(&owner.identity, &self.identity)) {
+                if owners
+                    .get(&self.id)
+                    .is_some_and(|owner| Arc::ptr_eq(&owner.identity, &self.identity))
+                {
                     owners.remove(&self.id);
                 }
             }
@@ -163,7 +186,11 @@ impl Drop for ReapOwner {
         let _ = self.completed.send(true);
     }
 }
-impl Drop for Owner { fn drop(&mut self) { self.task.abort(); } }
+impl Drop for Owner {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
 
 pub struct Runtime {
     owners: Arc<Mutex<HashMap<String, Owner>>>,
@@ -206,7 +233,9 @@ impl Runtime {
             Err(e) => {
                 // N2 (round 2): a failed load must not let the subsequent save
                 // clobber a corrupt-but-recoverable store with live memory.
-                eprintln!("[paired_runtime] descriptor store load failed; leaving file untouched: {e}");
+                eprintln!(
+                    "[paired_runtime] descriptor store load failed; leaving file untouched: {e}"
+                );
                 return;
             }
             Ok(loaded) => {
@@ -229,9 +258,23 @@ impl Runtime {
         }
     }
 
-    pub fn owns(id: &str) -> bool { id.starts_with("daemon-session:") }
-    pub fn contains(&self, id: &str) -> bool { self.owners.lock().get(id).is_some_and(|o| !o.task.is_finished()) }
-    pub fn list(&self) -> Vec<String> { self.owners.lock().iter().filter(|(_, o)| !o.task.is_finished()).map(|(id, _)| id.clone()).collect() }
+    pub fn owns(id: &str) -> bool {
+        id.starts_with("daemon-session:")
+    }
+    pub fn contains(&self, id: &str) -> bool {
+        self.owners
+            .lock()
+            .get(id)
+            .is_some_and(|o| !o.task.is_finished())
+    }
+    pub fn list(&self) -> Vec<String> {
+        self.owners
+            .lock()
+            .iter()
+            .filter(|(_, o)| !o.task.is_finished())
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
     pub fn descriptor(&self, id: &str) -> Option<super::paired_daemon::Descriptor> {
         self.descriptors.lock().get(id).cloned()
     }
@@ -259,7 +302,9 @@ impl Runtime {
         let id = proxy.id().to_owned();
         let descriptor = proxy.descriptor().clone();
         let mut owners = self.owners.lock();
-        if owners.get(&id).is_some_and(|o| !o.task.is_finished()) { return Err("CONTROL_CONFLICT".into()); }
+        if owners.get(&id).is_some_and(|o| !o.task.is_finished()) {
+            return Err("CONTROL_CONFLICT".into());
+        }
         owners.remove(&id);
 
         // R3-N1: hold PERSIST_MUTEX while mutating descriptors and writing disk
@@ -278,8 +323,12 @@ impl Runtime {
                 // previous install (exactly the reattach recovery case).
                 let mut descs = self.descriptors.lock();
                 match previous {
-                    Some(old) => { descs.insert(id.clone(), old); }
-                    None => { descs.remove(&id); }
+                    Some(old) => {
+                        descs.insert(id.clone(), old);
+                    }
+                    None => {
+                        descs.remove(&id);
+                    }
                 }
                 return Err(e);
             }
@@ -291,7 +340,9 @@ impl Runtime {
         #[cfg(test)]
         let (completed_tx, completed) = tokio::sync::watch::channel(false);
         let reap = ReapOwner {
-            owners: Arc::downgrade(&self.owners), id: id.clone(), identity: identity.clone(),
+            owners: Arc::downgrade(&self.owners),
+            id: id.clone(),
+            identity: identity.clone(),
             #[cfg(test)]
             completed: completed_tx,
         };
@@ -305,7 +356,8 @@ impl Runtime {
             let mut proxy = proxy;
             let mut receiver = receiver;
             let period = Duration::from_secs(5);
-            let mut keepalive = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            let mut keepalive =
+                tokio::time::interval_at(tokio::time::Instant::now() + period, period);
             keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! {
@@ -380,11 +432,16 @@ impl Runtime {
                 }
             }
         });
-        owners.insert(id.clone(), Owner {
-            sender, task, identity,
-            #[cfg(test)]
-            completed,
-        });
+        owners.insert(
+            id.clone(),
+            Owner {
+                sender,
+                task,
+                identity,
+                #[cfg(test)]
+                completed,
+            },
+        );
         Ok(id)
     }
     #[cfg(test)]
@@ -394,7 +451,11 @@ impl Runtime {
         self.owners.lock().remove(id);
     }
     #[cfg(test)]
-    pub(crate) fn completion_probe(&self, id: &str, pending: super::remote::RemoteOperation) -> impl std::future::Future<Output = ()> + '_ {
+    pub(crate) fn completion_probe(
+        &self,
+        id: &str,
+        pending: super::remote::RemoteOperation,
+    ) -> impl std::future::Future<Output = ()> + '_ {
         let (weak, mut completed) = {
             let owners = self.owners.lock();
             let owner = owners.get(id).unwrap();
@@ -403,7 +464,10 @@ impl Runtime {
         let id = id.to_owned();
         async move {
             completed.wait_for(|done| *done).await.unwrap();
-            assert!(!self.owners.lock().contains_key(&id), "completed owner retained in map");
+            assert!(
+                !self.owners.lock().contains_key(&id),
+                "completed owner retained in map"
+            );
             let failure = pending.await.unwrap_err();
             assert_eq!(failure.kind, super::remote::RemoteFailureKind::Disconnected);
             assert_eq!(failure.message, "PAIRED_PROXY_UNAVAILABLE");
@@ -412,37 +476,85 @@ impl Runtime {
         }
     }
     fn sender(&self, id: &str) -> Result<mpsc::Sender<Command>, String> {
-        self.owners.lock().get(id).map(|o| o.sender.clone()).ok_or_else(|| "PAIRED_PROXY_MISSING".into())
+        self.owners
+            .lock()
+            .get(id)
+            .map(|o| o.sender.clone())
+            .ok_or_else(|| "PAIRED_PROXY_MISSING".into())
     }
-    pub fn write(self: &Arc<Self>, id: &str, generation: u64, data: Vec<u8>) -> Result<super::remote::RemoteOperation, super::PtyError> {
+    pub fn write(
+        self: &Arc<Self>,
+        id: &str,
+        generation: u64,
+        data: Vec<u8>,
+    ) -> Result<super::remote::RemoteOperation, super::PtyError> {
         self.operation(id, move |reply| Command::Write(generation, data, reply))
     }
-    pub fn resize(self: &Arc<Self>, id: &str, generation: u64, cols: u16, rows: u16) -> Result<super::remote::RemoteOperation, super::PtyError> {
-        self.operation(id, move |reply| Command::Resize(generation, cols, rows, reply))
+    pub fn resize(
+        self: &Arc<Self>,
+        id: &str,
+        generation: u64,
+        cols: u16,
+        rows: u16,
+    ) -> Result<super::remote::RemoteOperation, super::PtyError> {
+        self.operation(id, move |reply| {
+            Command::Resize(generation, cols, rows, reply)
+        })
     }
-    pub fn interrupt(&self, id: &str, generation: u64) -> Result<super::remote::RemoteOperation, super::PtyError> {
+    pub fn interrupt(
+        &self,
+        id: &str,
+        generation: u64,
+    ) -> Result<super::remote::RemoteOperation, super::PtyError> {
         self.operation(id, move |reply| Command::Interrupt(generation, reply))
     }
-    fn operation(&self, id: &str, command: impl FnOnce(Reply) -> Command + Send + 'static) -> Result<super::remote::RemoteOperation, super::PtyError> {
+    fn operation(
+        &self,
+        id: &str,
+        command: impl FnOnce(Reply) -> Command + Send + 'static,
+    ) -> Result<super::remote::RemoteOperation, super::PtyError> {
         let sender = self.sender(id).map_err(super::PtyError::Other)?;
         Ok(Box::pin(async move {
             let result = tokio::time::timeout(Duration::from_secs(30), async {
                 let (tx, rx) = oneshot::channel();
-                sender.try_send(command(tx)).map_err(|_| "PAIRED_PROXY_UNAVAILABLE".to_string())?;
-                rx.await.map_err(|_| "PAIRED_PROXY_UNAVAILABLE".to_string())?
-            }).await.unwrap_or_else(|_| Err("TIMEOUT".into()));
-            result.map_err(|message| super::remote::RemoteFailure { kind: super::remote::RemoteFailureKind::Disconnected, message })
+                sender
+                    .try_send(command(tx))
+                    .map_err(|_| "PAIRED_PROXY_UNAVAILABLE".to_string())?;
+                rx.await
+                    .map_err(|_| "PAIRED_PROXY_UNAVAILABLE".to_string())?
+            })
+            .await
+            .unwrap_or_else(|_| Err("TIMEOUT".into()));
+            result.map_err(|message| super::remote::RemoteFailure {
+                kind: super::remote::RemoteFailureKind::Disconnected,
+                message,
+            })
         }))
     }
     /// Detach only; deliberately not remote session close.
     pub async fn detach(&self, id: &str) -> Result<(), String> {
-        let mut owner = self.owners.lock().remove(id).ok_or("PAIRED_PROXY_MISSING")?;
-        if owner.task.is_finished() { return Ok(()); }
+        let mut owner = self
+            .owners
+            .lock()
+            .remove(id)
+            .ok_or("PAIRED_PROXY_MISSING")?;
+        if owner.task.is_finished() {
+            return Ok(());
+        }
         let (tx, rx) = oneshot::channel();
-        owner.sender.send(Command::Detach(tx)).await.map_err(|_| "PAIRED_PROXY_UNAVAILABLE")?;
-        let result = tokio::time::timeout(Duration::from_secs(30), rx).await.map_err(|_| "TIMEOUT")?.map_err(|_| "PAIRED_PROXY_UNAVAILABLE")?;
+        owner
+            .sender
+            .send(Command::Detach(tx))
+            .await
+            .map_err(|_| "PAIRED_PROXY_UNAVAILABLE")?;
+        let result = tokio::time::timeout(Duration::from_secs(30), rx)
+            .await
+            .map_err(|_| "TIMEOUT")?
+            .map_err(|_| "PAIRED_PROXY_UNAVAILABLE")?;
         // The acknowledgement is emitted only after socket and hub destruction.
-        (&mut owner.task).await.map_err(|_| "PAIRED_PROXY_UNAVAILABLE")?;
+        (&mut owner.task)
+            .await
+            .map_err(|_| "PAIRED_PROXY_UNAVAILABLE")?;
         result
     }
 
@@ -458,16 +570,19 @@ impl Runtime {
                     false
                 }
             } else {
-                descs.insert(task_id.to_string(), super::paired_daemon::Descriptor {
-                    host_id: "https://relay.example.com".into(),
-                    generation: Epoch(1),
-                    target: crate::remote::machine_protocol::RemoteTerminalTarget {
-                        machine_id: "test-machine".into(),
-                        daemon_epoch: Epoch(1),
-                        session_id: task_id.to_string(),
+                descs.insert(
+                    task_id.to_string(),
+                    super::paired_daemon::Descriptor {
+                        host_id: "https://relay.example.com".into(),
+                        generation: Epoch(1),
+                        target: crate::remote::machine_protocol::RemoteTerminalTarget {
+                            machine_id: "test-machine".into(),
+                            daemon_epoch: Epoch(1),
+                            session_id: task_id.to_string(),
+                        },
+                        after_sequence: seq,
                     },
-                    after_sequence: seq,
-                });
+                );
                 true
             }
         };
@@ -488,9 +603,9 @@ impl Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::remote::machine_protocol::RemoteTerminalTarget;
     use crate::terminal::output_hub::TerminalOutputHub;
     use crate::terminal::paired_daemon::Descriptor;
-    use crate::remote::machine_protocol::RemoteTerminalTarget;
 
     static FAULT_SERIALIZER: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -613,7 +728,10 @@ mod tests {
         assert!(res.is_err(), "install must fail when temp write fails");
         assert!(store_path.exists(), "existing store file must survive");
         let reloaded = Runtime::new(Some(store_path.clone()));
-        assert!(reloaded.descriptor(&id1).is_some(), "original descriptor must still be present");
+        assert!(
+            reloaded.descriptor(&id1).is_some(),
+            "original descriptor must still be present"
+        );
     }
 
     #[tokio::test]
@@ -665,7 +783,10 @@ mod tests {
         assert_eq!(kept.target.daemon_epoch, Epoch(1));
         let reloaded = Runtime::new(Some(store_path.clone()));
         assert_eq!(
-            reloaded.descriptor(&id1).expect("disk still holds prior").generation,
+            reloaded
+                .descriptor(&id1)
+                .expect("disk still holds prior")
+                .generation,
             Epoch(1)
         );
     }
@@ -704,7 +825,10 @@ mod tests {
         std::fs::write(&store_path, b"{not-json").unwrap();
 
         let runtime = Runtime::new(Some(store_path.clone()));
-        assert!(runtime.descriptor("daemon-session:s1").is_none(), "corrupt store loads empty");
+        assert!(
+            runtime.descriptor("daemon-session:s1").is_none(),
+            "corrupt store loads empty"
+        );
         runtime.set_store_path(store_path.clone());
         // The failed load must not let the follow-up save overwrite the
         // corrupt-but-recoverable file with live memory.
@@ -750,9 +874,15 @@ mod tests {
         FsFault::set(FsFault::None);
 
         assert!(res.is_err(), "install must fail when rename fails");
-        assert!(store_path.exists(), "existing store file must survive rename failure (destructive save defect)");
+        assert!(
+            store_path.exists(),
+            "existing store file must survive rename failure (destructive save defect)"
+        );
         let reloaded = Runtime::new(Some(store_path.clone()));
-        assert!(reloaded.descriptor(&id1).is_some(), "original descriptor must survive rename failure");
+        assert!(
+            reloaded.descriptor(&id1).is_some(),
+            "original descriptor must survive rename failure"
+        );
     }
 
     #[tokio::test]
@@ -799,9 +929,12 @@ mod tests {
             let (res1, res2) = tokio::join!(t1, t2);
             res1.unwrap();
             res2.unwrap();
-        }).await;
+        })
+        .await;
 
-        assert!(res.is_ok(), "deadlock detected: opposite lock order hung tasks");
+        assert!(
+            res.is_ok(),
+            "deadlock detected: opposite lock order hung tasks"
+        );
     }
 }
-

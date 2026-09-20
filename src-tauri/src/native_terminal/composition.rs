@@ -17,9 +17,11 @@ impl SurfacePresentationGeometry {
         match self {
             Self::Default => Ok(bounds),
             Self::WaylandSubsurface => {
-                let geometry = WaylandSubsurfaceGeometry::from_logical_bounds(&bounds)
-                    .ok_or_else(|| {
-                        NativeTerminalError::InvalidValue("Invalid Wayland presentation bounds".into())
+                let geometry =
+                    WaylandSubsurfaceGeometry::from_logical_bounds(&bounds).ok_or_else(|| {
+                        NativeTerminalError::InvalidValue(
+                            "Invalid Wayland presentation bounds".into(),
+                        )
                     })?;
                 Ok(LogicalBounds {
                     x: geometry.position_x as f64,

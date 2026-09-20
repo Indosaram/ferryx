@@ -15,8 +15,8 @@ pub mod native_terminal;
 #[cfg(not(feature = "native-terminal"))]
 pub mod native_terminal_disabled;
 pub mod notifications;
-pub mod permissions;
 pub mod paired_host;
+pub mod permissions;
 pub mod preferences;
 pub mod project;
 pub mod project_remote;

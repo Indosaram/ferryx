@@ -802,7 +802,11 @@ async fn test_active_desktop_terminal_contract_and_safe_selection_bridge() {
     .await;
     assert_eq!(status, 200);
     let ws_state: RemoteWorkspaceState = serde_json::from_str(&body).expect("parse ws state");
-    let mut ws_listed_ids: Vec<_> = ws_state.sessions.iter().map(|s| s.session_id.clone()).collect();
+    let mut ws_listed_ids: Vec<_> = ws_state
+        .sessions
+        .iter()
+        .map(|s| s.session_id.clone())
+        .collect();
     ws_listed_ids.sort();
     assert_eq!(
         ws_listed_ids, expected_ids,
@@ -819,8 +823,12 @@ async fn test_active_desktop_terminal_contract_and_safe_selection_bridge() {
     );
 
     // Attach to missing session without active selection returns 403 Forbidden
-    let ws_status_missing =
-        ws_handshake_status(addr, "/api/v1/terminal/nonexistent-session", Some(&token_ctrl)).await;
+    let ws_status_missing = ws_handshake_status(
+        addr,
+        "/api/v1/terminal/nonexistent-session",
+        Some(&token_ctrl),
+    )
+    .await;
     assert_eq!(
         ws_status_missing, 403,
         "Attach to non-existent session without active selection must return 403 Forbidden"
@@ -866,7 +874,11 @@ async fn test_active_desktop_terminal_contract_and_safe_selection_bridge() {
     .await;
     assert_eq!(status, 200);
     let ws_state: RemoteWorkspaceState = serde_json::from_str(&body).expect("parse ws state");
-    let mut ws_listed_ids: Vec<_> = ws_state.sessions.iter().map(|s| s.session_id.clone()).collect();
+    let mut ws_listed_ids: Vec<_> = ws_state
+        .sessions
+        .iter()
+        .map(|s| s.session_id.clone())
+        .collect();
     ws_listed_ids.sort();
     assert_eq!(ws_listed_ids, expected_ids);
 
@@ -2994,7 +3006,12 @@ async fn test_remote_select_workspace_with_tab_selector_and_primary_worktree() {
         (Some(token_view.as_str()), "feature-tab", None, 403),
         (None, "feature-tab", None, 401),
         (Some(token_ctrl.as_str()), "missing-worktree", None, 400),
-        (Some(token_ctrl.as_str()), "feature-tab", Some("tab-term-selected"), 400),
+        (
+            Some(token_ctrl.as_str()),
+            "feature-tab",
+            Some("tab-term-selected"),
+            400,
+        ),
         (Some(token_ctrl.as_str()), "feature-tab", None, 200),
     ] {
         let mut request = serde_json::json!({
@@ -3005,10 +3022,20 @@ async fn test_remote_select_workspace_with_tab_selector_and_primary_worktree() {
         if let Some(tab_id) = tab_id {
             request["tabId"] = tab_id.into();
         }
-        let (status, body) = http_request(addr, "POST", "/api/v1/workspace/select", token, Some(&request.to_string())).await;
+        let (status, body) = http_request(
+            addr,
+            "POST",
+            "/api/v1/workspace/select",
+            token,
+            Some(&request.to_string()),
+        )
+        .await;
         assert_eq!(status, expected, "{body}");
         if expected == 200 {
-            let (event, payload) = event_received.lock().take().expect("creation event emitted before HTTP response");
+            let (event, payload) = event_received
+                .lock()
+                .take()
+                .expect("creation event emitted before HTTP response");
             assert_eq!(event, REMOTE_SELECTION_REQUEST_EVENT);
             assert_eq!(payload["createTerminal"], true);
             assert_eq!(payload["workspaceId"], workspace_id);
@@ -3893,12 +3920,13 @@ async fn test_remote_gateway_legacy_peer_attach_write_output_exit_and_listing() 
                             write_half.flush().await.unwrap();
                         }
                         DaemonRequest::RemoteSessionDetails { session_id: _ } => {
-                            let resp = serde_json::to_string(&DaemonResponse::RemoteSessionDetailsOk {
-                                details: None,
-                                legacy_direct_ssh: false,
-                            })
-                            .unwrap()
-                                + "\n";
+                            let resp =
+                                serde_json::to_string(&DaemonResponse::RemoteSessionDetailsOk {
+                                    details: None,
+                                    legacy_direct_ssh: false,
+                                })
+                                .unwrap()
+                                    + "\n";
                             write_half.write_all(resp.as_bytes()).await.unwrap();
                             write_half.flush().await.unwrap();
                         }
@@ -4205,12 +4233,13 @@ async fn test_headless_handover_workspace_state_selects_live_session_without_des
                             write_half.flush().await.unwrap();
                         }
                         DaemonRequest::RemoteSessionDetails { session_id: _ } => {
-                            let resp = serde_json::to_string(&DaemonResponse::RemoteSessionDetailsOk {
-                                details: None,
-                                legacy_direct_ssh: false,
-                            })
-                            .unwrap()
-                                + "\n";
+                            let resp =
+                                serde_json::to_string(&DaemonResponse::RemoteSessionDetailsOk {
+                                    details: None,
+                                    legacy_direct_ssh: false,
+                                })
+                                .unwrap()
+                                    + "\n";
                             write_half.write_all(resp.as_bytes()).await.unwrap();
                             write_half.flush().await.unwrap();
                         }
@@ -4351,7 +4380,10 @@ async fn test_headless_handover_workspace_state_selects_live_session_without_des
         "active_context workspace_id must align with the legacy session's workspace"
     );
     assert_eq!(ws_state.active_context.terminal_tabs.len(), 1);
-    assert_eq!(ws_state.active_context.terminal_tabs[0].id, legacy_session_id);
+    assert_eq!(
+        ws_state.active_context.terminal_tabs[0].id,
+        legacy_session_id
+    );
 
     // 2. Verify sessions list contains only the legacy session, with running=true
     assert_eq!(

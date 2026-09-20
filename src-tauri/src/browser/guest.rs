@@ -463,12 +463,18 @@ pub fn build_console_drain_script(clear: bool, errors_only: bool) -> String {
     )
 }
 
-pub fn parse_console_drain_result(raw_json: &str) -> Result<Vec<crate::browser::model::BrowserConsoleEntry>, String> {
-    if let Ok(entries) = serde_json::from_str::<Vec<crate::browser::model::BrowserConsoleEntry>>(raw_json) {
+pub fn parse_console_drain_result(
+    raw_json: &str,
+) -> Result<Vec<crate::browser::model::BrowserConsoleEntry>, String> {
+    if let Ok(entries) =
+        serde_json::from_str::<Vec<crate::browser::model::BrowserConsoleEntry>>(raw_json)
+    {
         return Ok(entries);
     }
     if let Ok(unquoted) = serde_json::from_str::<String>(raw_json) {
-        if let Ok(entries) = serde_json::from_str::<Vec<crate::browser::model::BrowserConsoleEntry>>(&unquoted) {
+        if let Ok(entries) =
+            serde_json::from_str::<Vec<crate::browser::model::BrowserConsoleEntry>>(&unquoted)
+        {
             return Ok(entries);
         }
     }
@@ -492,4 +498,3 @@ pub fn browser_guest_geometry_observation_script() -> &'static str {
     })()
     "#
 }
-

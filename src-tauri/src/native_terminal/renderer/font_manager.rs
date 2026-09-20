@@ -344,7 +344,10 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn p06_windows_missing_first_face_uses_next_family() {
-        p06_assert_stack_matches("P06 Definitely Missing Font, \"Courier New\", monospace", "Courier New");
+        p06_assert_stack_matches(
+            "P06 Definitely Missing Font, \"Courier New\", monospace",
+            "Courier New",
+        );
     }
 
     #[cfg(target_os = "windows")]
@@ -353,9 +356,16 @@ mod tests {
         let reference = FontManager::new_with_family_and_size(family, 17.0);
         for text in ["A", "M", "g", "W"] {
             let expected = reference.rasterize_glyph(text, 32, 40, false, false);
-            assert!(expected.buffer().iter().any(|&byte| byte != 0), "known font reference must have ink");
+            assert!(
+                expected.buffer().iter().any(|&byte| byte != 0),
+                "known font reference must have ink"
+            );
             let actual = requested.rasterize_glyph(text, 32, 40, false, false);
-            assert_eq!(actual.buffer(), expected.buffer(), "stack must select {family} for {text}");
+            assert_eq!(
+                actual.buffer(),
+                expected.buffer(),
+                "stack must select {family} for {text}"
+            );
         }
     }
 

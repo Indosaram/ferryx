@@ -380,55 +380,127 @@ async fn response_provenance_is_fenced_over_http() {
     let session = json!({"target":{"machineId":"a","daemonEpoch":"7","sessionId":"s"},"workspaceId":"wanted","worktree":wt,"cwd":"/repo","cols":80,"rows":24,"running":true,"providerSession":null,"startSequence":"0","endSequence":"0"});
     let mut cases = vec![];
     for field in ["workspaceId", "identity"] {
-        let mut bad = worktree.clone(); bad[field] = if field == "identity" {json!({"wsId":"wrong","slug":"branch"})} else {json!("wrong")};
-        cases.push((json!({"kind":"worktrees","workspaceId":"wanted"}), json!({"revision":"1","worktrees":[bad.clone()]}), "/workspace/worktrees"));
+        let mut bad = worktree.clone();
+        bad[field] = if field == "identity" {
+            json!({"wsId":"wrong","slug":"branch"})
+        } else {
+            json!("wrong")
+        };
+        cases.push((
+            json!({"kind":"worktrees","workspaceId":"wanted"}),
+            json!({"revision":"1","worktrees":[bad.clone()]}),
+            "/workspace/worktrees",
+        ));
         cases.push((json!({"kind":"createWorktree","request":{"requestId":id,"workspaceId":"wanted","worktree":wt}}), bad, "/workspace/worktrees"));
     }
     let status = json!({"workspaceId":"wanted","worktree":wt,"dirty":{"isDirty":false,"files":[]},"dirtyCount":0,"branchDeletion":null,"locked":null,"prunable":null,"liveSessionIds":[],"revision":"1"});
     for field in ["workspaceId", "worktree"] {
-        let mut bad = status.clone(); bad[field] = if field == "worktree" {json!({"wsId":"wanted","slug":"wrong"})} else {json!("wrong")};
-        cases.push((json!({"kind":"worktreeStatus","workspaceId":"wanted","worktree":wt}),bad,"/workspace/worktrees/status"));
+        let mut bad = status.clone();
+        bad[field] = if field == "worktree" {
+            json!({"wsId":"wanted","slug":"wrong"})
+        } else {
+            json!("wrong")
+        };
+        cases.push((
+            json!({"kind":"worktreeStatus","workspaceId":"wanted","worktree":wt}),
+            bad,
+            "/workspace/worktrees/status",
+        ));
     }
     for field in ["workspaceId", "worktree", "target"] {
-        let mut bad = session.clone(); bad[field] = match field { "worktree" => json!({"wsId":"wanted","slug":"wrong"}), "target" => json!({"machineId":"wrong","daemonEpoch":"7","sessionId":"s"}), _ => json!("wrong") };
+        let mut bad = session.clone();
+        bad[field] = match field {
+            "worktree" => json!({"wsId":"wanted","slug":"wrong"}),
+            "target" => json!({"machineId":"wrong","daemonEpoch":"7","sessionId":"s"}),
+            _ => json!("wrong"),
+        };
         cases.push((json!({"kind":"createSession","request":{"requestId":id,"workspaceId":"wanted","worktree":wt,"cols":80,"rows":24,"inheritFromSessionId":null,"cwdRelative":null,"startup":{"kind":"shell"}}}),bad.clone(),"/sessions"));
-        if field != "worktree" { cases.push((json!({"kind":"sessions","workspaceId":"wanted"}),json!({"revision":"1","completeness":"complete","sessions":[bad.clone()],"unavailableWorkspaceIds":[]}),"/sessions")); }
-        if field == "target" { cases.push((json!({"kind":"operation","requestId":id}),json!({"state":"completed","requestId":id,"outcome":{"kind":"session","session":bad}}),"/workspace/operations/3941b9de-b16d-4d9a-ae0a-118f90fd91f4")); }
+        if field != "worktree" {
+            cases.push((json!({"kind":"sessions","workspaceId":"wanted"}),json!({"revision":"1","completeness":"complete","sessions":[bad.clone()],"unavailableWorkspaceIds":[]}),"/sessions"));
+        }
+        if field == "target" {
+            cases.push((json!({"kind":"operation","requestId":id}),json!({"state":"completed","requestId":id,"outcome":{"kind":"session","session":bad}}),"/workspace/operations/3941b9de-b16d-4d9a-ae0a-118f90fd91f4"));
+        }
     }
     let mut adopted = vec![];
     for (op, body, path) in cases {
         let operation: Operation = serde_json::from_value(op.clone()).unwrap();
-        let route = Router::new().route(&format!("/host/a/api/v1{path}"), get({let body=body.clone(); move || {let body=body.clone();async move {Json(body)}}}).post(move || {let body=body.clone();async move {Json(body)}}));
+        let route = Router::new().route(
+            &format!("/host/a/api/v1{path}"),
+            get({
+                let body = body.clone();
+                move || {
+                    let body = body.clone();
+                    async move { Json(body) }
+                }
+            })
+            .post(move || {
+                let body = body.clone();
+                async move { Json(body) }
+            }),
+        );
         let (root, service, host, task) = provenance_fixture(route).await;
-        let result = MachineClient::new().execute(&service, request(&host, operation)).await;
-        if result.is_ok() { adopted.push(op); }
+        let result = MachineClient::new()
+            .execute(&service, request(&host, operation))
+            .await;
+        if result.is_ok() {
+            adopted.push(op);
+        }
         cleanup(root, task).await;
     }
     assert!(adopted.is_empty(), "wrong provenance adopted: {adopted:?}");
 }
-async fn provenance_fixture(extra: Router) -> (tempfile::TempDir, PairedHostService, HostView, tokio::task::JoinHandle<()>) {
-    let root = crate::ipc::run_blocking(|| Ok(tempfile::tempdir().unwrap())).await.unwrap();
+async fn provenance_fixture(
+    extra: Router,
+) -> (
+    tempfile::TempDir,
+    PairedHostService,
+    HostView,
+    tokio::task::JoinHandle<()>,
+) {
+    let root = crate::ipc::run_blocking(|| Ok(tempfile::tempdir().unwrap()))
+        .await
+        .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let origin = format!("http://{}",listener.local_addr().unwrap());
+    let origin = format!("http://{}", listener.local_addr().unwrap());
     let router = Router::new()
         .route("/api/v1/pair/exchange",post(|| async {Json(json!({"token":"fixture-secret","machineId":"a","device":{"id":"d","name":"d","permission":"control","accessScope":"machine","createdAt":1,"lastSeenAt":1}}))}))
         .route("/host/a/api/v1/capabilities",get(|| async { let mut c=caps("a"); c["capabilities"]=json!(["machineWorkspaceV1","managedWorktreesV1","terminalCreateV1","futureAdditiveV2"]);Json(c)}))
         .merge(extra).fallback(|| async { (axum::http::StatusCode::NOT_FOUND, Json(json!({"error":{"code":"OPERATION_NOT_FOUND","message":"missing","retryable":false,"requestId":"3941b9de-b16d-4d9a-ae0a-118f90fd91f4","details":{}}}))) });
-    let task=tokio::spawn(async move {axum::serve(listener,router).await.unwrap()});
-    let service=PairedHostService::open_test_loopback(root.path().join("data"));
-    let host=service.pair(PairRequest {relay_origin:origin,pin:Secret("fixture".into()),display_label:"fixture".into()}).await.unwrap();
-    (root,service,host,task)
+    let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let service = PairedHostService::open_test_loopback(root.path().join("data"));
+    let host = service
+        .pair(PairRequest {
+            relay_origin: origin,
+            pin: Secret("fixture".into()),
+            display_label: "fixture".into(),
+        })
+        .await
+        .unwrap();
+    (root, service, host, task)
 }
 
 #[tokio::test]
 async fn predecessor_epoch_and_additive_capabilities_are_preserved() {
-    let row=json!({"target":{"machineId":"a","daemonEpoch":"7","sessionId":"s"},"workspaceId":"wanted","worktree":null,"cwd":"/repo","cols":80,"rows":24,"running":true,"providerSession":null,"startSequence":"0","endSequence":"0"});
+    let row = json!({"target":{"machineId":"a","daemonEpoch":"7","sessionId":"s"},"workspaceId":"wanted","worktree":null,"cwd":"/repo","cols":80,"rows":24,"running":true,"providerSession":null,"startSequence":"0","endSequence":"0"});
     let route=Router::new().route("/host/a/api/v1/sessions",get(move || {let row=row.clone();async move {Json(json!({"revision":"1","completeness":"complete","sessions":[row],"unavailableWorkspaceIds":[]}))}}));
-    let (root,service,host,task)=provenance_fixture(route).await;
-    let result=MachineClient::new().execute(&service,request(&host,Operation::Sessions {workspace_id:Some("wanted".into())})).await;
-    cleanup(root,task).await;
-    let OperationResult::Sessions(rows)=result.unwrap().result else {panic!("sessions")};
-    assert_eq!(rows.sessions[0].target.daemon_epoch,Epoch(7));
+    let (root, service, host, task) = provenance_fixture(route).await;
+    let result = MachineClient::new()
+        .execute(
+            &service,
+            request(
+                &host,
+                Operation::Sessions {
+                    workspace_id: Some("wanted".into()),
+                },
+            ),
+        )
+        .await;
+    cleanup(root, task).await;
+    let OperationResult::Sessions(rows) = result.unwrap().result else {
+        panic!("sessions")
+    };
+    assert_eq!(rows.sessions[0].target.daemon_epoch, Epoch(7));
 }
 #[tokio::test]
 async fn gatefix_remote_error_never_projects_bearer_text() {
@@ -443,15 +515,33 @@ async fn gatefix_remote_error_never_projects_bearer_text() {
             }})))
         }));
         let (root, service, host, task) = fixture(route).await;
-        let error = MachineClient::new().execute(&service, request(&host, Operation::Directories { path: None, include_hidden: false })).await.unwrap_err();
+        let error = MachineClient::new()
+            .execute(
+                &service,
+                request(
+                    &host,
+                    Operation::Directories {
+                        path: None,
+                        include_hidden: false,
+                    },
+                ),
+            )
+            .await
+            .unwrap_err();
         cleanup(root, task).await;
         let wire = serde_json::to_string(&error).unwrap();
-        assert!(!wire.contains("fixture-secret"), "native error leaked fixture bearer: {wire}");
+        assert!(
+            !wire.contains("fixture-secret"),
+            "native error leaked fixture bearer: {wire}"
+        );
         assert!(!format!("{error:?}").contains("fixture-secret"));
         let projected = error.machine_error.unwrap();
         if code == "WORKTREE_REMOVED_BRANCH_RETAINED" {
             assert_eq!(error.code, code);
-            assert_eq!(serde_json::to_value(projected.details).unwrap(), json!({"worktreeRemoved": true, "branchDeleted": false}));
+            assert_eq!(
+                serde_json::to_value(projected.details).unwrap(),
+                json!({"worktreeRemoved": true, "branchDeleted": false})
+            );
         } else {
             assert_eq!(error.code, "PAIRED_HOST_REMOTE_ERROR");
             assert!(projected.details.is_empty());
@@ -469,16 +559,41 @@ async fn gatefix_journal_error_uses_the_same_safe_projection() {
         }}}))
     }));
     let (root, service, host, task) = fixture(route).await;
-    let result = MachineClient::new().execute(&service, request(&host, Operation::Operation { request_id: id.into() })).await.unwrap();
+    let result = MachineClient::new()
+        .execute(
+            &service,
+            request(
+                &host,
+                Operation::Operation {
+                    request_id: id.into(),
+                },
+            ),
+        )
+        .await
+        .unwrap();
     cleanup(root, task).await;
-    assert!(!serde_json::to_string(&result).unwrap().contains("fixture-secret"));
-    let OperationResult::Operation(m::Operation::Completed { outcome: m::OperationOutcome::Error { error }, .. }) = result.result else { panic!("journal error"); };
-    assert_eq!(serde_json::to_value(error.details).unwrap(), json!({"pruned":false, "worktreeRemoved":true}));
+    assert!(!serde_json::to_string(&result)
+        .unwrap()
+        .contains("fixture-secret"));
+    let OperationResult::Operation(m::Operation::Completed {
+        outcome: m::OperationOutcome::Error { error },
+        ..
+    }) = result.result
+    else {
+        panic!("journal error");
+    };
+    assert_eq!(
+        serde_json::to_value(error.details).unwrap(),
+        json!({"pruned":false, "worktreeRemoved":true})
+    );
 }
 
 #[tokio::test]
 async fn gatefix_create_only_peer_receives_zero_socket_requests() {
-    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
     let attempts = Arc::new(AtomicUsize::new(0));
     let observed = attempts.clone();
     let route = Router::new()
@@ -490,12 +605,24 @@ async fn gatefix_create_only_peer_receives_zero_socket_requests() {
     // This fixture advertises terminalCreateV1 but not terminalStreamV1.
     let (root, service, host, task) = provenance_fixture(route).await;
     let descriptor = crate::terminal::paired_daemon::Descriptor {
-        host_id: host.host_id, generation: host.generation,
-        target: m::RemoteTerminalTarget { machine_id: "a".into(), daemon_epoch: Epoch(1), session_id: "s".into() }, after_sequence: None,
+        host_id: host.host_id,
+        generation: host.generation,
+        target: m::RemoteTerminalTarget {
+            machine_id: "a".into(),
+            daemon_epoch: Epoch(1),
+            session_id: "s".into(),
+        },
+        after_sequence: None,
     };
-    let result = MachineClient::new().attach_terminal(&service, &descriptor).await;
+    let result = MachineClient::new()
+        .attach_terminal(&service, &descriptor)
+        .await;
     cleanup(root, task).await;
-    assert_eq!(observed.load(Ordering::SeqCst), 0, "create-only peer received a socket request");
+    assert_eq!(
+        observed.load(Ordering::SeqCst),
+        0,
+        "create-only peer received a socket request"
+    );
     let error = result.err().expect("stream capability must be required");
     assert_eq!(error.code, "PAIRED_HOST_CAPABILITY_UNAVAILABLE");
     assert_eq!(serde_json::to_value(error).unwrap()["ambiguous"], false);
@@ -503,8 +630,13 @@ async fn gatefix_create_only_peer_receives_zero_socket_requests() {
 
 #[test]
 fn operation_requires_machine_workspace_capability() {
-    let operation=Operation::Operation {request_id:"3941b9de-b16d-4d9a-ae0a-118f90fd91f4".into()};
-    assert_eq!(operation.route().unwrap().capability,Some("machineWorkspaceV1"));
+    let operation = Operation::Operation {
+        request_id: "3941b9de-b16d-4d9a-ae0a-118f90fd91f4".into(),
+    };
+    assert_eq!(
+        operation.route().unwrap().capability,
+        Some("machineWorkspaceV1")
+    );
 }
 
 #[test]
@@ -620,11 +752,7 @@ async fn gatefix_p06_relay_ticket_failure_surfaces_typed_error_without_ws_retry(
             "MACHINE_SERVICE_UNAVAILABLE",
             None,
         ),
-        (
-            axum::http::StatusCode::NOT_FOUND,
-            "NOT_FOUND",
-            None,
-        ),
+        (axum::http::StatusCode::NOT_FOUND, "NOT_FOUND", None),
     ] {
         let ws_attempts = Arc::new(AtomicUsize::new(0));
         let ws_attempts_clone = ws_attempts.clone();
@@ -701,7 +829,8 @@ async fn gatefix_p06_relay_ticket_failure_surfaces_typed_error_without_ws_retry(
                 "/host/a/api/v1/capabilities",
                 get(|| async {
                     let mut c = caps("a");
-                    c["capabilities"] = json!(["machineWorkspaceV1", "terminalCreateV1", "terminalStreamV1"]);
+                    c["capabilities"] =
+                        json!(["machineWorkspaceV1", "terminalCreateV1", "terminalStreamV1"]);
                     Json(c)
                 }),
             )
@@ -729,7 +858,9 @@ async fn gatefix_p06_relay_ticket_failure_surfaces_typed_error_without_ws_retry(
             after_sequence: None,
         };
 
-        let result = MachineClient::new().attach_terminal(&service, &descriptor).await;
+        let result = MachineClient::new()
+            .attach_terminal(&service, &descriptor)
+            .await;
         cleanup(root, task).await;
 
         assert_eq!(
@@ -744,14 +875,19 @@ async fn gatefix_p06_relay_ticket_failure_surfaces_typed_error_without_ws_retry(
             Ok(_) => panic!("ticket mint failure must be returned as an error"),
         };
         assert_eq!(err.code, expected_code);
-        let machine_err = err.machine_error.expect("structured machine error must be preserved");
+        let machine_err = err
+            .machine_error
+            .expect("structured machine error must be preserved");
         assert_eq!(machine_err.code, expected_code);
         assert_eq!(
             machine_err.details.get("status").and_then(|v| v.as_u64()),
             Some(status_code.as_u16() as u64)
         );
         assert_eq!(
-            machine_err.details.get("httpStatus").and_then(|v| v.as_u64()),
+            machine_err
+                .details
+                .get("httpStatus")
+                .and_then(|v| v.as_u64()),
             Some(status_code.as_u16() as u64)
         );
     }
@@ -759,14 +895,28 @@ async fn gatefix_p06_relay_ticket_failure_surfaces_typed_error_without_ws_retry(
 
 #[test]
 fn test_is_relay_transport_classification() {
-    assert!(is_relay_transport(&Url::parse("https://relay.checka.cc/host/m1").unwrap()));
-    assert!(is_relay_transport(&Url::parse("http://127.0.0.1:8787/host/target-id").unwrap()));
-    assert!(is_relay_transport(&Url::parse("https://custom.relay.io:8443/host/abc%20123/api/v1").unwrap()));
+    assert!(is_relay_transport(
+        &Url::parse("https://relay.checka.cc/host/m1").unwrap()
+    ));
+    assert!(is_relay_transport(
+        &Url::parse("http://127.0.0.1:8787/host/target-id").unwrap()
+    ));
+    assert!(is_relay_transport(
+        &Url::parse("https://custom.relay.io:8443/host/abc%20123/api/v1").unwrap()
+    ));
 
-    assert!(!is_relay_transport(&Url::parse("http://127.0.0.1:43821").unwrap()));
-    assert!(!is_relay_transport(&Url::parse("http://127.0.0.1:43821/").unwrap()));
-    assert!(!is_relay_transport(&Url::parse("http://192.168.1.10:43821/api/v1").unwrap()));
-    assert!(!is_relay_transport(&Url::parse("https://direct-gateway.internal:443/api/v1/terminal/s").unwrap()));
+    assert!(!is_relay_transport(
+        &Url::parse("http://127.0.0.1:43821").unwrap()
+    ));
+    assert!(!is_relay_transport(
+        &Url::parse("http://127.0.0.1:43821/").unwrap()
+    ));
+    assert!(!is_relay_transport(
+        &Url::parse("http://192.168.1.10:43821/api/v1").unwrap()
+    ));
+    assert!(!is_relay_transport(
+        &Url::parse("https://direct-gateway.internal:443/api/v1/terminal/s").unwrap()
+    ));
 }
 
 #[test]
@@ -780,18 +930,23 @@ fn test_map_ticket_error_structured_and_plain() {
             "requestId": "3941b9de-b16d-4d9a-ae0a-118f90fd91f4",
             "details": { "reason": "expired" }
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let err = map_ticket_error(reqwest::StatusCode::UNAUTHORIZED, &body);
     assert_eq!(err.code, "UNAUTHORIZED");
     let me = err.machine_error.unwrap();
     assert_eq!(me.details["status"], 401);
     assert_eq!(me.details["httpStatus"], 401);
-    assert_eq!(err.request_id.as_deref(), Some("3941b9de-b16d-4d9a-ae0a-118f90fd91f4"));
+    assert_eq!(
+        err.request_id.as_deref(),
+        Some("3941b9de-b16d-4d9a-ae0a-118f90fd91f4")
+    );
 
     // 2. Relay simple json error
     let relay_err_body = serde_json::to_vec(&json!({
         "error": "Device token not authorized for this machine"
-    })).unwrap();
+    }))
+    .unwrap();
     let err2 = map_ticket_error(reqwest::StatusCode::UNAUTHORIZED, &relay_err_body);
     assert_eq!(err2.code, "UNAUTHORIZED");
     let me2 = err2.machine_error.unwrap();
@@ -808,7 +963,10 @@ fn test_map_ticket_error_structured_and_plain() {
     assert!(me3.retryable);
 
     // 4. Plain text / empty body 503
-    let err4 = map_ticket_error(reqwest::StatusCode::SERVICE_UNAVAILABLE, b"Service Unavailable");
+    let err4 = map_ticket_error(
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        b"Service Unavailable",
+    );
     assert_eq!(err4.code, "MACHINE_SERVICE_UNAVAILABLE");
     let me4 = err4.machine_error.unwrap();
     assert_eq!(me4.details["status"], 503);
@@ -825,14 +983,32 @@ fn test_map_ticket_error_structured_and_plain() {
 #[tokio::test]
 async fn test_p05_response_body_mapping_table() {
     let cases = vec![
-        (axum::http::StatusCode::NOT_FOUND, json!({"error": "PIN not found"}), "PIN_NOT_FOUND"),
-        (axum::http::StatusCode::TOO_MANY_REQUESTS, json!({"code": "RATE_LIMITED", "message": "Too many attempts"}), "RATE_LIMITED"),
-        (axum::http::StatusCode::SERVICE_UNAVAILABLE, json!({"message": "Gateway temporarily down"}), "SERVICE_UNAVAILABLE"),
-        (axum::http::StatusCode::UNAUTHORIZED, json!({"code": "PIN_EXPIRED", "message": "The PIN has expired"}), "PIN_EXPIRED"),
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            json!({"error": "PIN not found"}),
+            "PIN_NOT_FOUND",
+        ),
+        (
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            json!({"code": "RATE_LIMITED", "message": "Too many attempts"}),
+            "RATE_LIMITED",
+        ),
+        (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            json!({"message": "Gateway temporarily down"}),
+            "SERVICE_UNAVAILABLE",
+        ),
+        (
+            axum::http::StatusCode::UNAUTHORIZED,
+            json!({"code": "PIN_EXPIRED", "message": "The PIN has expired"}),
+            "PIN_EXPIRED",
+        ),
     ];
 
     for (status, body, expected_code) in cases {
-        let root = crate::ipc::run_blocking(|| Ok(tempfile::tempdir().unwrap())).await.unwrap();
+        let root = crate::ipc::run_blocking(|| Ok(tempfile::tempdir().unwrap()))
+            .await
+            .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let body_val = body.clone();
@@ -842,18 +1018,27 @@ async fn test_p05_response_body_mapping_table() {
         );
         let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         let service = PairedHostService::open_test_loopback(root.path().join("data"));
-        let err = service.pair(PairRequest {
-            relay_origin: origin,
-            pin: Secret("123456".into()),
-            display_label: "fixture".into(),
-        }).await.unwrap_err();
+        let err = service
+            .pair(PairRequest {
+                relay_origin: origin,
+                pin: Secret("123456".into()),
+                display_label: "fixture".into(),
+            })
+            .await
+            .unwrap_err();
         task.abort();
-        assert_eq!(err.code, expected_code, "status {status} body {body:?} should produce code {expected_code}, got {}", err.code);
+        assert_eq!(
+            err.code, expected_code,
+            "status {status} body {body:?} should produce code {expected_code}, got {}",
+            err.code
+        );
     }
 
     // Malformed response (200 OK with non-JSON body)
     {
-        let root = crate::ipc::run_blocking(|| Ok(tempfile::tempdir().unwrap())).await.unwrap();
+        let root = crate::ipc::run_blocking(|| Ok(tempfile::tempdir().unwrap()))
+            .await
+            .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let router = Router::new().route(
@@ -862,56 +1047,76 @@ async fn test_p05_response_body_mapping_table() {
         );
         let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         let service = PairedHostService::open_test_loopback(root.path().join("data"));
-        let err = service.pair(PairRequest {
-            relay_origin: origin,
-            pin: Secret("123456".into()),
-            display_label: "fixture".into(),
-        }).await.unwrap_err();
+        let err = service
+            .pair(PairRequest {
+                relay_origin: origin,
+                pin: Secret("123456".into()),
+                display_label: "fixture".into(),
+            })
+            .await
+            .unwrap_err();
         task.abort();
-        assert_eq!(err.code, "MALFORMED_RESPONSE", "malformed response body must map to MALFORMED_RESPONSE, got {}", err.code);
+        assert_eq!(
+            err.code, "MALFORMED_RESPONSE",
+            "malformed response body must map to MALFORMED_RESPONSE, got {}",
+            err.code
+        );
     }
 
     // Transport failure (connection refused)
     {
-        let root = crate::ipc::run_blocking(|| Ok(tempfile::tempdir().unwrap())).await.unwrap();
+        let root = crate::ipc::run_blocking(|| Ok(tempfile::tempdir().unwrap()))
+            .await
+            .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener); // Close listener immediately
         let service = PairedHostService::open_test_loopback(root.path().join("data"));
-        let err = service.pair(PairRequest {
-            relay_origin: format!("http://{addr}"),
-            pin: Secret("123456".into()),
-            display_label: "fixture".into(),
-        }).await.unwrap_err();
-        assert_eq!(err.code, "TRANSPORT", "transport failure must map to TRANSPORT, got {}", err.code);
+        let err = service
+            .pair(PairRequest {
+                relay_origin: format!("http://{addr}"),
+                pin: Secret("123456".into()),
+                display_label: "fixture".into(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.code, "TRANSPORT",
+            "transport failure must map to TRANSPORT, got {}",
+            err.code
+        );
     }
 }
 
 #[tokio::test]
 async fn test_p14_inventory_mutation_emits_inventory_changed_event() {
-    let root = crate::ipc::run_blocking(|| Ok(tempfile::tempdir().unwrap())).await.unwrap();
+    let root = crate::ipc::run_blocking(|| Ok(tempfile::tempdir().unwrap()))
+        .await
+        .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
-    let router = Router::new().route(
-        "/api/v1/pair/exchange",
-        post(|| async {
-            Json(json!({
-                "token": "fixture-secret",
-                "machineId": "a",
-                "device": {
-                    "id": "d",
-                    "name": "d",
-                    "permission": "control",
-                    "accessScope": "machine",
-                    "createdAt": 1,
-                    "lastSeenAt": 1
-                }
-            }))
-        }),
-    ).route(
-        "/host/a/api/v1/capabilities",
-        get(|| async { Json(caps("a")) }),
-    );
+    let router = Router::new()
+        .route(
+            "/api/v1/pair/exchange",
+            post(|| async {
+                Json(json!({
+                    "token": "fixture-secret",
+                    "machineId": "a",
+                    "device": {
+                        "id": "d",
+                        "name": "d",
+                        "permission": "control",
+                        "accessScope": "machine",
+                        "createdAt": 1,
+                        "lastSeenAt": 1
+                    }
+                }))
+            }),
+        )
+        .route(
+            "/host/a/api/v1/capabilities",
+            get(|| async { Json(caps("a")) }),
+        );
     let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let mut service = PairedHostService::open_test_loopback(root.path().join("data"));
 
@@ -921,17 +1126,28 @@ async fn test_p14_inventory_mutation_emits_inventory_changed_event() {
     }));
 
     // 1. Pair mutation
-    let host = service.pair(PairRequest {
-        relay_origin: origin,
-        pin: Secret("fixture".into()),
-        display_label: "fixture".into(),
-    }).await.unwrap();
+    let host = service
+        .pair(PairRequest {
+            relay_origin: origin,
+            pin: Secret("fixture".into()),
+            display_label: "fixture".into(),
+        })
+        .await
+        .unwrap();
 
-    let pair_event = rx.try_recv().expect("pair mutation must emit inventory changed event");
+    let pair_event = rx
+        .try_recv()
+        .expect("pair mutation must emit inventory changed event");
     assert_eq!(pair_event.r#type, "pair");
     assert_eq!(pair_event.host_id.as_deref(), Some(host.host_id.as_str()));
-    assert_eq!(pair_event.generation.as_deref(), Some(host.generation.0.to_string().as_str()));
-    let event_host = pair_event.host.as_ref().expect("pair event must include host view");
+    assert_eq!(
+        pair_event.generation.as_deref(),
+        Some(host.generation.0.to_string().as_str())
+    );
+    let event_host = pair_event
+        .host
+        .as_ref()
+        .expect("pair event must include host view");
     assert_eq!(event_host.host_id, host.host_id);
     assert_eq!(event_host.generation, host.generation);
     assert!(event_host.online);
@@ -942,44 +1158,59 @@ async fn test_p14_inventory_mutation_emits_inventory_changed_event() {
     assert_eq!(json_val["hostId"], host.host_id);
     assert_eq!(json_val["generation"], host.generation.0.to_string());
     assert_eq!(json_val["host"]["hostId"], host.host_id);
-    assert_eq!(json_val["host"]["generation"], host.generation.0.to_string());
+    assert_eq!(
+        json_val["host"]["generation"],
+        host.generation.0.to_string()
+    );
     assert_eq!(json_val["host"]["online"], true);
 
     // 2. Forget mutation
-    service.forget(host.host_id.clone(), host.generation).await.unwrap();
-    let forget_event = rx.try_recv().expect("forget mutation must emit inventory changed event");
+    service
+        .forget(host.host_id.clone(), host.generation)
+        .await
+        .unwrap();
+    let forget_event = rx
+        .try_recv()
+        .expect("forget mutation must emit inventory changed event");
     assert_eq!(forget_event.r#type, "forget");
     assert_eq!(forget_event.host_id.as_deref(), Some(host.host_id.as_str()));
-    assert_eq!(forget_event.generation.as_deref(), Some(host.generation.0.to_string().as_str()));
+    assert_eq!(
+        forget_event.generation.as_deref(),
+        Some(host.generation.0.to_string().as_str())
+    );
 
     task.abort();
 }
 
 #[tokio::test]
 async fn test_r4_n1_migrate_event_carries_correlated_host_view() {
-    let root = crate::ipc::run_blocking(|| Ok(tempfile::tempdir().unwrap())).await.unwrap();
+    let root = crate::ipc::run_blocking(|| Ok(tempfile::tempdir().unwrap()))
+        .await
+        .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
-    let router = Router::new().route(
-        "/api/v1/pair/exchange",
-        post(|| async {
-            Json(json!({
-                "token": "fixture-secret",
-                "machineId": "a",
-                "device": {
-                    "id": "d",
-                    "name": "d",
-                    "permission": "control",
-                    "accessScope": "machine",
-                    "createdAt": 1,
-                    "lastSeenAt": 1
-                }
-            }))
-        }),
-    ).route(
-        "/host/a/api/v1/capabilities",
-        get(|| async { Json(caps("a")) }),
-    );
+    let router = Router::new()
+        .route(
+            "/api/v1/pair/exchange",
+            post(|| async {
+                Json(json!({
+                    "token": "fixture-secret",
+                    "machineId": "a",
+                    "device": {
+                        "id": "d",
+                        "name": "d",
+                        "permission": "control",
+                        "accessScope": "machine",
+                        "createdAt": 1,
+                        "lastSeenAt": 1
+                    }
+                }))
+            }),
+        )
+        .route(
+            "/host/a/api/v1/capabilities",
+            get(|| async { Json(caps("a")) }),
+        );
     let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let mut service = PairedHostService::open_test_loopback(root.path().join("data"));
 
@@ -998,11 +1229,19 @@ async fn test_r4_n1_migrate_event_carries_correlated_host_view() {
         .await
         .unwrap();
 
-    let event = rx.try_recv().expect("migrate must emit the inventory changed event");
+    let event = rx
+        .try_recv()
+        .expect("migrate must emit the inventory changed event");
     assert_eq!(event.r#type, "migrate");
     assert_eq!(event.host_id.as_deref(), Some(receipt.host_id.as_str()));
-    assert_eq!(event.generation.as_deref(), Some(receipt.generation.0.to_string().as_str()));
-    let event_host = event.host.as_ref().expect("R4-N1: migrate event must carry the correlated host view");
+    assert_eq!(
+        event.generation.as_deref(),
+        Some(receipt.generation.0.to_string().as_str())
+    );
+    let event_host = event
+        .host
+        .as_ref()
+        .expect("R4-N1: migrate event must carry the correlated host view");
     assert_eq!(event_host.host_id, receipt.host_id);
     assert_eq!(event_host.generation, receipt.generation);
 
@@ -1011,7 +1250,10 @@ async fn test_r4_n1_migrate_event_carries_correlated_host_view() {
     let json_val = serde_json::to_value(&event).unwrap();
     assert_eq!(json_val["type"], "migrate");
     assert_eq!(json_val["host"]["hostId"], receipt.host_id);
-    assert_eq!(json_val["host"]["generation"], receipt.generation.0.to_string());
+    assert_eq!(
+        json_val["host"]["generation"],
+        receipt.generation.0.to_string()
+    );
 
     cleanup(root, task).await;
 }
@@ -1032,7 +1274,10 @@ fn test_r5_n3_machine_rejection_stays_definitive_and_transport_uncertainty_relab
     };
     machine.relabel_transport_uncertainty("req-1");
     assert_eq!(machine.request_id.as_deref(), Some("req-1"));
-    assert!(!machine.ambiguous, "a structured machine rejection is definitive");
+    assert!(
+        !machine.ambiguous,
+        "a structured machine rejection is definitive"
+    );
 
     let mut transport = ClientError {
         code: "TIMEOUT".into(),
@@ -1042,7 +1287,8 @@ fn test_r5_n3_machine_rejection_stays_definitive_and_transport_uncertainty_relab
     };
     transport.relabel_transport_uncertainty("req-2");
     assert_eq!(transport.request_id.as_deref(), Some("req-2"));
-    assert!(transport.ambiguous, "transport uncertainty must be relabeled ambiguous");
+    assert!(
+        transport.ambiguous,
+        "transport uncertainty must be relabeled ambiguous"
+    );
 }
-
-

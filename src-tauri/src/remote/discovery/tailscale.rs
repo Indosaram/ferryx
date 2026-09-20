@@ -66,8 +66,8 @@ impl TailscaleDiscoveryProvider {
     /// Parses `tailscale status --json` output into [`HostEndpoint`]
     /// records, one per peer that has a Tailscale IPv4 address.
     pub fn parse_status_json(json_str: &str) -> Result<Vec<HostEndpoint>, String> {
-        let status: TailscaleStatus =
-            serde_json::from_str(json_str).map_err(|e| format!("invalid tailscale status json: {e}"))?;
+        let status: TailscaleStatus = serde_json::from_str(json_str)
+            .map_err(|e| format!("invalid tailscale status json: {e}"))?;
 
         let mut endpoints = Vec::new();
         for (key, peer) in status.peer.into_iter() {

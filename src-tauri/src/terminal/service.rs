@@ -37,7 +37,9 @@ impl TerminalService {
         }
     }
 
-    pub fn paired(&self) -> &Arc<super::paired_runtime::Runtime> { &self.paired }
+    pub fn paired(&self) -> &Arc<super::paired_runtime::Runtime> {
+        &self.paired
+    }
 
     pub fn remote(&self) -> &Arc<super::remote::RemoteRuntime> {
         &self.remote
@@ -130,7 +132,12 @@ impl TerminalService {
         worktree_path: &Path,
     ) -> Result<(String, broadcast::Receiver<Vec<u8>>), PtyError> {
         let (session_id, pty_rx) = self.pty_manager.spawn_in_worktree_with_id(
-            session_id, cmd, cols, rows, worktree_manager, worktree_path,
+            session_id,
+            cmd,
+            cols,
+            rows,
+            worktree_manager,
+            worktree_path,
         )?;
         Ok(self.register_output(session_id, pty_rx, cols, rows))
     }
@@ -159,7 +166,8 @@ impl TerminalService {
         let mut cmd = CommandBuilder::new(&plan.program);
         cmd.args(&plan.args);
         for (key, value) in crate::ssh::password::environment(&plan.args)
-            .map_err(|e| PtyError::Other(e.to_string()))? {
+            .map_err(|e| PtyError::Other(e.to_string()))?
+        {
             cmd.env(key, value);
         }
         // No remote path is ever used as the local SSH process working directory.
@@ -264,7 +272,9 @@ impl TerminalService {
 
     pub fn resize(&self, session_id: &str, cols: u16, rows: u16) -> Result<(), PtyError> {
         if super::paired_runtime::Runtime::owns(session_id) {
-            return Err(PtyError::Other("Paired resize requires a controller generation".into()));
+            return Err(PtyError::Other(
+                "Paired resize requires a controller generation".into(),
+            ));
         }
         self.pty_manager.resize(session_id, cols, rows)?;
         // Single choke point for ALL resize callers (daemon request arm, remote gateway):
@@ -276,7 +286,9 @@ impl TerminalService {
 
     pub fn signal(&self, session_id: &str, signal: TerminalSignal) -> Result<(), PtyError> {
         if super::paired_runtime::Runtime::owns(session_id) {
-            return Err(PtyError::Other("Paired signal requires a controller generation".into()));
+            return Err(PtyError::Other(
+                "Paired signal requires a controller generation".into(),
+            ));
         }
         self.pty_manager.signal(session_id, signal)
     }
@@ -291,7 +303,9 @@ impl TerminalService {
             self.lifecycle.lock().remove(session_id);
             return Ok(());
         }
-        Err(PtyError::Other("Session detach is supported only for paired sessions".into()))
+        Err(PtyError::Other(
+            "Session detach is supported only for paired sessions".into(),
+        ))
     }
 
     pub async fn close_session(&self, session_id: &str) -> Result<(), PtyError> {
@@ -321,9 +335,13 @@ impl TerminalService {
 
     pub async fn hibernate_session(&self, session_id: &str) -> Result<(), PtyError> {
         if self.remote.contains(session_id) || super::paired_runtime::Runtime::owns(session_id) {
-            return Err(PtyError::Other("Session hibernation is supported only for local PTYs".into()));
+            return Err(PtyError::Other(
+                "Session hibernation is supported only for local PTYs".into(),
+            ));
         }
-        self.lifecycle.lock().mark_hibernated(session_id.to_string());
+        self.lifecycle
+            .lock()
+            .mark_hibernated(session_id.to_string());
         self.output_hub.remove_session(session_id);
         match self.pty_manager.close_session(session_id).await {
             Ok(()) => Ok(()),
@@ -340,7 +358,9 @@ impl TerminalService {
 
     pub async fn suspend_session(&self, session_id: &str) -> Result<(), PtyError> {
         if self.remote.contains(session_id) || super::paired_runtime::Runtime::owns(session_id) {
-            return Err(PtyError::Other("Session suspend is supported only for local PTYs".into()));
+            return Err(PtyError::Other(
+                "Session suspend is supported only for local PTYs".into(),
+            ));
         }
         self.pty_manager.signal(session_id, TerminalSignal::Stop)?;
         self.lifecycle.lock().mark_suspended(session_id.to_string());
@@ -349,16 +369,24 @@ impl TerminalService {
 
     pub async fn resume_session(&self, session_id: &str) -> Result<(), PtyError> {
         if self.remote.contains(session_id) || super::paired_runtime::Runtime::owns(session_id) {
-            return Err(PtyError::Other("Session resume is supported only for local PTYs".into()));
+            return Err(PtyError::Other(
+                "Session resume is supported only for local PTYs".into(),
+            ));
         }
-        self.pty_manager.signal(session_id, TerminalSignal::Continue)?;
+        self.pty_manager
+            .signal(session_id, TerminalSignal::Continue)?;
         self.lifecycle.lock().mark_running(session_id.to_string());
         Ok(())
     }
 
-    pub(crate) async fn close_machine_session(&self, session_id: &str,
-        authorize: Arc<dyn Fn() -> Result<(), String> + Send + Sync>) -> Result<(), PtyError> {
-        self.pty_manager.close_authorized(session_id, std::time::Duration::from_secs(5), authorize).await?;
+    pub(crate) async fn close_machine_session(
+        &self,
+        session_id: &str,
+        authorize: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
+    ) -> Result<(), PtyError> {
+        self.pty_manager
+            .close_authorized(session_id, std::time::Duration::from_secs(5), authorize)
+            .await?;
         self.output_hub.remove_session(session_id);
         self.lifecycle.lock().remove(session_id);
         Ok(())

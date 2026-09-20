@@ -30,17 +30,12 @@ fn sample_test_jpeg() -> &'static [u8] {
         0xFF, 0xD8, // SOI
         0xFF, 0xC0, // SOF0
         0x00, 0x11, // length = 17
-        0x08,       // precision = 8
+        0x08, // precision = 8
         0x00, 0x01, // height = 1
         0x00, 0x01, // width = 1
-        0x03,       // 3 components
-        0x01, 0x11, 0x00,
-        0x02, 0x11, 0x00,
-        0x03, 0x11, 0x00,
-        0xFF, 0xDA, // SOS
-        0x00, 0x08,
-        0x01, 0x01, 0x00, 0x00, 0x3F, 0x00,
-        0xFF, 0xD9, // EOI
+        0x03, // 3 components
+        0x01, 0x11, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00, 0xFF, 0xDA, // SOS
+        0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00, 0xFF, 0xD9, // EOI
     ]
 }
 
@@ -94,7 +89,8 @@ fn test_envelope_header_boundary_rejection() {
 #[test]
 fn test_envelope_field_corruption_rejection() {
     let meta = valid_test_metadata();
-    let encoded = encode_binary_frame(BrowserImageFormat::Png, 1, &meta, sample_test_png()).unwrap();
+    let encoded =
+        encode_binary_frame(BrowserImageFormat::Png, 1, &meta, sample_test_png()).unwrap();
 
     // 1. Invalid Kind (byte 0: must be 0x62)
     let mut bad_kind = encoded.clone();
@@ -178,7 +174,10 @@ fn test_size_limits_image_and_metadata_and_pixels() {
     let meta = valid_test_metadata();
     let oversized_image = vec![0u8; MAX_FRAME_PAYLOAD_BYTES + 1];
     let err_oversized = encode_binary_frame(BrowserImageFormat::Png, 1, &meta, &oversized_image);
-    assert!(matches!(err_oversized, Err(ProtocolCodecError::BufferTooLarge { .. })));
+    assert!(matches!(
+        err_oversized,
+        Err(ProtocolCodecError::BufferTooLarge { .. })
+    ));
 
     // 2. Max edge dimension: 2048 px cap
     let mut edge_meta = valid_test_metadata();
@@ -196,7 +195,8 @@ fn test_size_limits_image_and_metadata_and_pixels() {
     pixel_meta.image_width = 2000;
     pixel_meta.image_height = 2001;
     assert_eq!(
-        encode_binary_frame(BrowserImageFormat::Png, 1, &pixel_meta, sample_test_png()).unwrap_err(),
+        encode_binary_frame(BrowserImageFormat::Png, 1, &pixel_meta, sample_test_png())
+            .unwrap_err(),
         ProtocolCodecError::ImagePixelsExceeded { pixels: 4_002_000 }
     );
 }
@@ -206,7 +206,8 @@ fn test_ferryx_extension_fields_and_geometry_source() {
     // 1. geometry_source must be exactly "wkSnapshot"
     let mut meta = valid_test_metadata();
     meta.geometry_source = "cdpSnapshot".into();
-    let err = encode_binary_frame(BrowserImageFormat::Png, 1, &meta, sample_test_png()).unwrap_err();
+    let err =
+        encode_binary_frame(BrowserImageFormat::Png, 1, &meta, sample_test_png()).unwrap_err();
     assert_eq!(
         err,
         ProtocolCodecError::InvalidGeometrySource("cdpSnapshot".into())
@@ -225,7 +226,10 @@ fn test_ferryx_extension_fields_and_geometry_source() {
         "timestamp": 1726560000.0
     }"#;
     let res: Result<BrowserFrameMetadata, _> = serde_json::from_str(missing_field_json);
-    assert!(res.is_err(), "Missing Ferryx extension fields must fail deserialization");
+    assert!(
+        res.is_err(),
+        "Missing Ferryx extension fields must fail deserialization"
+    );
 }
 
 #[test]
@@ -233,23 +237,33 @@ fn test_decimal_string_u64_validation() {
     let meta = valid_test_metadata();
 
     // Verify all 4 epoch/generation fields parse into valid u64
-    let s_epoch: u64 = meta.browser_service_epoch.parse().expect("browser_service_epoch is u64");
+    let s_epoch: u64 = meta
+        .browser_service_epoch
+        .parse()
+        .expect("browser_service_epoch is u64");
     assert_eq!(s_epoch, 42);
 
     let d_epoch: u64 = meta.desktop_epoch.parse().expect("desktop_epoch is u64");
     assert_eq!(d_epoch, 7);
 
-    let doc_gen: u64 = meta.document_generation.parse().expect("document_generation is u64");
+    let doc_gen: u64 = meta
+        .document_generation
+        .parse()
+        .expect("document_generation is u64");
     assert_eq!(doc_gen, 15);
 
-    let vp_rev: u64 = meta.viewport_revision.parse().expect("viewport_revision is u64");
+    let vp_rev: u64 = meta
+        .viewport_revision
+        .parse()
+        .expect("viewport_revision is u64");
     assert_eq!(vp_rev, 3);
 
     // Explicit test that non-decimal string viewport_revision is rejected during validation
     for bad_vp in ["", "invalid_3.5", "-1", "0x10", "12a", " ", "1.0"] {
         let mut invalid_meta = valid_test_metadata();
         invalid_meta.viewport_revision = bad_vp.into();
-        let err = encode_binary_frame(BrowserImageFormat::Png, 1, &invalid_meta, sample_test_png()).unwrap_err();
+        let err = encode_binary_frame(BrowserImageFormat::Png, 1, &invalid_meta, sample_test_png())
+            .unwrap_err();
         assert_eq!(
             err,
             ProtocolCodecError::InvalidDecimalString("viewport_revision"),
@@ -260,7 +274,10 @@ fn test_decimal_string_u64_validation() {
 
 #[test]
 fn test_max_image_pixels_boundary() {
-    assert_eq!(MAX_IMAGE_PIXELS, 4_000_000, "MAX_IMAGE_PIXELS must equal 4 MP exactly");
+    assert_eq!(
+        MAX_IMAGE_PIXELS, 4_000_000,
+        "MAX_IMAGE_PIXELS must equal 4 MP exactly"
+    );
 
     // 2000 x 2000 = 4,000,000 pixels (within limit)
     let mut boundary_meta = valid_test_metadata();
@@ -271,7 +288,10 @@ fn test_max_image_pixels_boundary() {
     // 2000 x 2001 = 4,002,000 pixels (> 4,000,000 cap) -> ImagePixelsExceeded
     boundary_meta.image_height = 2001;
     let err = validate_metadata(&boundary_meta).unwrap_err();
-    assert_eq!(err, ProtocolCodecError::ImagePixelsExceeded { pixels: 4_002_000 });
+    assert_eq!(
+        err,
+        ProtocolCodecError::ImagePixelsExceeded { pixels: 4_002_000 }
+    );
 }
 
 #[test]
@@ -312,7 +332,8 @@ fn test_json_dto_camel_case_and_deny_unknown_fields() {
             "maxEdge": 1280
         }
     }"#;
-    let msg: ClientMessage = serde_json::from_str(valid_sub).expect("Valid subscribe deserialization");
+    let msg: ClientMessage =
+        serde_json::from_str(valid_sub).expect("Valid subscribe deserialization");
     assert!(matches!(msg, ClientMessage::BrowserSubscribe { .. }));
 
     // 2. Unknown field in ClientMessage must be rejected (deny_unknown_fields)
@@ -326,7 +347,10 @@ fn test_json_dto_camel_case_and_deny_unknown_fields() {
         }
     }"#;
     let err_sub: Result<ClientMessage, _> = serde_json::from_str(bad_sub);
-    assert!(err_sub.is_err(), "Unknown field in ClientMessage must be rejected");
+    assert!(
+        err_sub.is_err(),
+        "Unknown field in ClientMessage must be rejected"
+    );
 
     // 3. Unknown field in options must be rejected
     let bad_opts = r#"{
@@ -339,7 +363,10 @@ fn test_json_dto_camel_case_and_deny_unknown_fields() {
         }
     }"#;
     let err_opts: Result<ClientMessage, _> = serde_json::from_str(bad_opts);
-    assert!(err_opts.is_err(), "Unknown field in BrowserSubscribeOptions must be rejected");
+    assert!(
+        err_opts.is_err(),
+        "Unknown field in BrowserSubscribeOptions must be rejected"
+    );
 
     // 4. ServerMessage::BrowserHello valid camelCase
     let valid_hello = r#"{
@@ -351,7 +378,8 @@ fn test_json_dto_camel_case_and_deny_unknown_fields() {
         "protocolVersion": 1,
         "supportedCommands": ["navigate", "click"]
     }"#;
-    let s_msg: ServerMessage = serde_json::from_str(valid_hello).expect("Valid hello deserialization");
+    let s_msg: ServerMessage =
+        serde_json::from_str(valid_hello).expect("Valid hello deserialization");
     assert!(matches!(s_msg, ServerMessage::BrowserHello { .. }));
 
     // 5. Unknown field in ServerMessage must be rejected
@@ -366,7 +394,10 @@ fn test_json_dto_camel_case_and_deny_unknown_fields() {
         "extraLeak": "internal-path"
     }"#;
     let err_hello: Result<ServerMessage, _> = serde_json::from_str(bad_hello);
-    assert!(err_hello.is_err(), "Unknown field in ServerMessage must be rejected");
+    assert!(
+        err_hello.is_err(),
+        "Unknown field in ServerMessage must be rejected"
+    );
 
     // 6. ClientMessage::BrowserCommand valid camelCase
     let valid_cmd = r#"{
@@ -381,24 +412,29 @@ fn test_json_dto_camel_case_and_deny_unknown_fields() {
         "command": "click",
         "params": { "reference": "btn1" }
     }"#;
-    let cmd_msg: ClientMessage = serde_json::from_str(valid_cmd).expect("Valid command deserialization");
+    let cmd_msg: ClientMessage =
+        serde_json::from_str(valid_cmd).expect("Valid command deserialization");
     assert!(matches!(cmd_msg, ClientMessage::BrowserCommand { .. }));
 
     // 7. ClientMessage::BrowserPause valid camelCase and unknown field rejection
     // R4-10: pause/resume carry the client's (browserId, streamId) pair.
     let valid_pause = r#"{ "type": "browserPause", "browserId": "b1", "streamId": 1 }"#;
-    let pause_msg: ClientMessage = serde_json::from_str(valid_pause).expect("Valid pause deserialization");
+    let pause_msg: ClientMessage =
+        serde_json::from_str(valid_pause).expect("Valid pause deserialization");
     assert!(matches!(pause_msg, ClientMessage::BrowserPause { .. }));
 
-    let bad_pause = r#"{ "type": "browserPause", "browserId": "b1", "streamId": 1, "unknownExtra": 123 }"#;
+    let bad_pause =
+        r#"{ "type": "browserPause", "browserId": "b1", "streamId": 1, "unknownExtra": 123 }"#;
     assert!(serde_json::from_str::<ClientMessage>(bad_pause).is_err());
 
     // 8. ClientMessage::BrowserResume valid camelCase and unknown field rejection
     let valid_resume = r#"{ "type": "browserResume", "browserId": "b1", "streamId": 1 }"#;
-    let resume_msg: ClientMessage = serde_json::from_str(valid_resume).expect("Valid resume deserialization");
+    let resume_msg: ClientMessage =
+        serde_json::from_str(valid_resume).expect("Valid resume deserialization");
     assert!(matches!(resume_msg, ClientMessage::BrowserResume { .. }));
 
-    let bad_resume = r#"{ "type": "browserResume", "browserId": "b1", "streamId": 1, "unknownExtra": 456 }"#;
+    let bad_resume =
+        r#"{ "type": "browserResume", "browserId": "b1", "streamId": 1, "unknownExtra": 456 }"#;
     assert!(serde_json::from_str::<ClientMessage>(bad_resume).is_err());
 }
 

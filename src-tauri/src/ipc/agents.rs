@@ -42,7 +42,9 @@ pub async fn cmd_agent_state_reset<R: tauri::Runtime>(
     session_id: String,
 ) -> Result<(), super::IpcError> {
     daemon_client.reset_agent_state(&session_id).await?;
-    if let Some(host) = app.try_state::<crate::native_terminal::surface_host::NativeTerminalSurfaceHostState>() {
+    if let Some(host) =
+        app.try_state::<crate::native_terminal::surface_host::NativeTerminalSurfaceHostState>()
+    {
         host.reset_agent_state::<R>(&session_id, Some(&app));
     }
     Ok(())
@@ -586,7 +588,12 @@ fn login_shell_path() -> Option<OsString> {
 }
 
 pub(crate) fn resolve_binary(name: &str, search_paths: &[PathBuf]) -> Option<PathBuf> {
-    resolve_binary_with_env(name, search_paths, cfg!(windows), env::var("PATHEXT").ok().as_deref())
+    resolve_binary_with_env(
+        name,
+        search_paths,
+        cfg!(windows),
+        env::var("PATHEXT").ok().as_deref(),
+    )
 }
 
 fn resolve_binary_with_env(
@@ -600,27 +607,42 @@ fn resolve_binary_with_env(
     }
     if windows {
         // Only extensions with a supported native or command-script launch policy.
-        let extensions: Vec<String> = pathext.unwrap_or(".COM;.EXE;.BAT;.CMD")
+        let extensions: Vec<String> = pathext
+            .unwrap_or(".COM;.EXE;.BAT;.CMD")
             .split(';')
             .map(|ext| ext.trim().to_ascii_lowercase())
             .filter(|ext| matches!(ext.as_str(), ".com" | ".exe" | ".bat" | ".cmd"))
             .collect();
         let candidates: Vec<String> = if Path::new(name).extension().is_some() {
-            if !extensions.iter().any(|ext| name.to_ascii_lowercase().ends_with(ext)) {
+            if !extensions
+                .iter()
+                .any(|ext| name.to_ascii_lowercase().ends_with(ext))
+            {
                 return None;
             }
             vec![name.to_string()]
         } else {
-            extensions.iter().map(|ext| format!("{name}{ext}")).collect()
+            extensions
+                .iter()
+                .map(|ext| format!("{name}{ext}"))
+                .collect()
         };
         for dir in search_paths {
             for candidate in &candidates {
                 // Preserve the directory entry's spelling on both case-sensitive and
                 // case-insensitive filesystems (the returned path is displayed in the UI).
                 if let Ok(entries) = std::fs::read_dir(dir) {
-                    if let Some(path) = entries.filter_map(Result::ok)
-                        .find(|entry| entry.file_name().to_string_lossy().eq_ignore_ascii_case(candidate) && entry.path().is_file())
-                        .map(|entry| entry.path()) {
+                    if let Some(path) = entries
+                        .filter_map(Result::ok)
+                        .find(|entry| {
+                            entry
+                                .file_name()
+                                .to_string_lossy()
+                                .eq_ignore_ascii_case(candidate)
+                                && entry.path().is_file()
+                        })
+                        .map(|entry| entry.path())
+                    {
                         return Some(path);
                     }
                 }
@@ -1020,15 +1042,29 @@ mod p09_tests {
                 (".CMD;.BAT;.EXE", "fixture.CmD"),
                 (".BAT;.CMD", "fixture.bat"),
             ] {
-                assert_eq!(resolve_binary_with_env("fixture", &[dir.clone()], true, Some(extensions)), Some(dir.join(expected)));
+                assert_eq!(
+                    resolve_binary_with_env("fixture", &[dir.clone()], true, Some(extensions)),
+                    Some(dir.join(expected))
+                );
             }
-            assert_eq!(resolve_binary_with_env("FIXTURE.cmd", &[dir.clone()], true, Some(".CMD")), Some(dir.join("fixture.CmD")));
+            assert_eq!(
+                resolve_binary_with_env("FIXTURE.cmd", &[dir.clone()], true, Some(".CMD")),
+                Some(dir.join("fixture.CmD"))
+            );
             std::fs::write(dir.join("data.txt"), b"data").unwrap();
-            assert_eq!(resolve_binary_with_env("data.txt", &[dir.clone()], true, Some(".TXT;.CMD")), None);
-            assert_eq!(resolve_binary_with_env("../fixture", &[dir.clone()], true, Some(".EXE")), None);
+            assert_eq!(
+                resolve_binary_with_env("data.txt", &[dir.clone()], true, Some(".TXT;.CMD")),
+                None
+            );
+            assert_eq!(
+                resolve_binary_with_env("../fixture", &[dir.clone()], true, Some(".EXE")),
+                None
+            );
         });
         std::fs::remove_dir_all(&dir).unwrap();
-        if let Err(error) = result { std::panic::resume_unwind(error); }
+        if let Err(error) = result {
+            std::panic::resume_unwind(error);
+        }
     }
 
     #[cfg(unix)]
@@ -1041,11 +1077,19 @@ mod p09_tests {
             let file = dir.join("fixture");
             std::fs::write(&file, b"fixture").unwrap();
             std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
-            assert_eq!(resolve_binary_with_env("fixture", &[dir.clone()], false, None), None);
+            assert_eq!(
+                resolve_binary_with_env("fixture", &[dir.clone()], false, None),
+                None
+            );
             std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700)).unwrap();
-            assert_eq!(resolve_binary_with_env("fixture", &[dir.clone()], false, None), Some(file));
+            assert_eq!(
+                resolve_binary_with_env("fixture", &[dir.clone()], false, None),
+                Some(file)
+            );
         });
         std::fs::remove_dir_all(&dir).unwrap();
-        if let Err(error) = result { std::panic::resume_unwind(error); }
+        if let Err(error) = result {
+            std::panic::resume_unwind(error);
+        }
     }
 }

@@ -219,7 +219,10 @@ async fn ssh_reconnect_reasserts_recorded_pane_size() {
     // one resize at the first connect, one explicit, one at the redial.
     assert_eq!(*dialer.fake.last_resize.lock(), Some((120, 40)));
     assert_eq!(dialer.fake.resizes.load(Ordering::SeqCst), 3);
-    assert_eq!((reconnected.descriptor.cols, reconnected.descriptor.rows), (120, 40));
+    assert_eq!(
+        (reconnected.descriptor.cols, reconnected.descriptor.rows),
+        (120, 40)
+    );
 }
 
 #[tokio::test]
@@ -229,12 +232,21 @@ async fn ssh_reconnect_safety_control_failure_interrupts_pending_read() {
     let mut rx = runtime.subscribe("local-stable").unwrap();
     let connected = state(&mut rx, |d| d.state == RemoteConnectionState::Connected).await;
     *dialer.fake.write_failure.lock() = Some(BridgeError::ConnectionClosed);
-    let error = runtime.write("local-stable", connected.generation, b"once".to_vec())
-        .unwrap().await.unwrap_err();
+    let error = runtime
+        .write("local-stable", connected.generation, b"once".to_vec())
+        .unwrap()
+        .await
+        .unwrap_err();
     assert_eq!(error.kind, RemoteFailureKind::Transport);
-    state(&mut rx, |d| d.attempts == 1 && d.generation > connected.generation).await;
+    state(&mut rx, |d| {
+        d.attempts == 1 && d.generation > connected.generation
+    })
+    .await;
     dialer.clock.add_permits(1);
-    state(&mut rx, |d| d.state == RemoteConnectionState::Connected && d.generation > connected.generation).await;
+    state(&mut rx, |d| {
+        d.state == RemoteConnectionState::Connected && d.generation > connected.generation
+    })
+    .await;
     assert_eq!(dialer.fake.writes.load(Ordering::SeqCst), 1);
     assert_eq!(dialer.calls.load(Ordering::SeqCst), 2);
 }
@@ -245,7 +257,10 @@ async fn ssh_daemon_restart_rejects_duplicate_target_controller() {
     runtime.restore(descriptor()).unwrap();
     let mut duplicate = descriptor();
     duplicate.backend_session_id = "second-local-id".into();
-    assert_eq!(runtime.restore(duplicate).unwrap_err().kind, RemoteFailureKind::Protocol);
+    assert_eq!(
+        runtime.restore(duplicate).unwrap_err().kind,
+        RemoteFailureKind::Protocol
+    );
     assert_eq!(runtime.list(), vec!["local-stable"]);
 }
 
@@ -274,7 +289,14 @@ fn ssh_reconnect_safety_failure_classification() {
 }
 #[test]
 fn ssh_reconnect_safety_erased_ipc_errors_are_not_classified_by_prose() {
-    for message in ["Permission denied", "authentication", "connection refused", "connection timed out", "no route to host", "connection reset"] {
+    for message in [
+        "Permission denied",
+        "authentication",
+        "connection refused",
+        "connection timed out",
+        "no route to host",
+        "connection reset",
+    ] {
         assert_eq!(
             RemoteFailure::from_bridge(&BridgeError::SshPlan(message.into())).kind,
             RemoteFailureKind::Protocol,
@@ -287,16 +309,43 @@ fn ssh_reconnect_safety_erased_ipc_errors_are_not_classified_by_prose() {
 async fn ssh_reconnect_safety_setup_classifies_structured_transport_and_authentication() {
     use crate::ipc::{IpcError, IpcErrorCode};
     let cases = [
-        (IpcErrorCode::IoError, serde_json::json!({"stage": "transport"}), RemoteFailureKind::Transport),
-        (IpcErrorCode::IoError, serde_json::json!({"stage": "execution", "exitCode": 255, "stderr": "Permission denied (publickey)"}), RemoteFailureKind::Authentication),
-        (IpcErrorCode::IoError, serde_json::json!({"stage": "execution", "exitCode": 255, "stderr": "Connection refused"}), RemoteFailureKind::Transport),
-        (IpcErrorCode::InvalidArgument, serde_json::json!({"stage": "transport"}), RemoteFailureKind::Protocol),
-        (IpcErrorCode::IoError, serde_json::json!({"stage": "startup"}), RemoteFailureKind::Protocol),
-        (IpcErrorCode::CliExecutableNotFound, serde_json::json!({"stage": "helper_missing"}), RemoteFailureKind::Missing),
+        (
+            IpcErrorCode::IoError,
+            serde_json::json!({"stage": "transport"}),
+            RemoteFailureKind::Transport,
+        ),
+        (
+            IpcErrorCode::IoError,
+            serde_json::json!({"stage": "execution", "exitCode": 255, "stderr": "Permission denied (publickey)"}),
+            RemoteFailureKind::Authentication,
+        ),
+        (
+            IpcErrorCode::IoError,
+            serde_json::json!({"stage": "execution", "exitCode": 255, "stderr": "Connection refused"}),
+            RemoteFailureKind::Transport,
+        ),
+        (
+            IpcErrorCode::InvalidArgument,
+            serde_json::json!({"stage": "transport"}),
+            RemoteFailureKind::Protocol,
+        ),
+        (
+            IpcErrorCode::IoError,
+            serde_json::json!({"stage": "startup"}),
+            RemoteFailureKind::Protocol,
+        ),
+        (
+            IpcErrorCode::CliExecutableNotFound,
+            serde_json::json!({"stage": "helper_missing"}),
+            RemoteFailureKind::Missing,
+        ),
     ];
     for (code, details, expected) in cases {
         let error = IpcError::new(code, "authentication connection refused").with_details(details);
-        assert_eq!(RemoteFailure::from_bridge(&BridgeError::from(error)).kind, expected);
+        assert_eq!(
+            RemoteFailure::from_bridge(&BridgeError::from(error)).kind,
+            expected
+        );
     }
 }
 
@@ -346,10 +395,7 @@ async fn ssh_process_survival_same_target_replay_and_close() {
     tx.send(Ok(output(1, false))).unwrap();
     tx.send(Ok(output(8, true))).unwrap();
     let recovered = state(&mut rx, |d| d.descriptor.remote_cursor == RemoteCursor(8)).await;
-    assert_eq!(
-        hub.subscribe("local-stable").unwrap().0,
-        b"record-8;"
-    );
+    assert_eq!(hub.subscribe("local-stable").unwrap().0, b"record-8;");
     let boundary = live.receiver.try_recv().unwrap();
     assert!(boundary.bytes.is_empty());
     assert!(boundary.replay_gap.is_some());

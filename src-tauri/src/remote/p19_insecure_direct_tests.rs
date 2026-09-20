@@ -64,7 +64,9 @@ async fn test_p19_non_loopback_direct_without_insecure_opt_in_refuses_to_serve()
         .expect("active LAN IP on workstation");
     assert!(!local_lan_ip.is_loopback(), "must be non-loopback LAN IP");
 
-    let resolver = Arc::new(LanInterfaceResolver { lan_ip: local_lan_ip });
+    let resolver = Arc::new(LanInterfaceResolver {
+        lan_ip: local_lan_ip,
+    });
 
     // 1. start_remote_server_with_resolver_and_insecure_opt_in(..., false) must NOT bind the non-loopback external interface
     let (handle, local_addr) = start_remote_server_with_resolver_and_insecure_opt_in(
@@ -75,19 +77,26 @@ async fn test_p19_non_loopback_direct_without_insecure_opt_in_refuses_to_serve()
     .await
     .expect("gateway starts loopback baseline");
 
-    assert!(local_addr.ip().is_loopback(), "baseline primary listener is loopback");
+    assert!(
+        local_addr.ip().is_loopback(),
+        "baseline primary listener is loopback"
+    );
     assert!(
         !handle.is_external_bound(),
         "P19: non-loopback direct gateway must NOT bind external interface without explicit insecure opt-in"
     );
     assert!(
-        matches!(handle.gate_status(), DirectGatewayGateStatus::InsecureLanGated { .. }),
+        matches!(
+            handle.gate_status(),
+            DirectGatewayGateStatus::InsecureLanGated { .. }
+        ),
         "P19: gateway must surface explicit InsecureLanGated status"
     );
     handle.stop();
 
     // 2. Strict mode must return an Err refusing to serve
-    let strict_result = start_remote_server_strict_with_resolver(Arc::clone(&state), resolver).await;
+    let strict_result =
+        start_remote_server_strict_with_resolver(Arc::clone(&state), resolver).await;
     assert!(
         strict_result.is_err(),
         "P19: strict direct gateway startup must refuse to serve non-loopback LAN without opt-in"
@@ -120,13 +129,10 @@ async fn test_p19_overlay_mode_tailscale_unaffected() {
 
     let resolver = Arc::new(TailscaleInterfaceResolver { tailscale_ip });
 
-    let (handle, local_addr) = start_remote_server_with_resolver_and_insecure_opt_in(
-        Arc::clone(&state),
-        resolver,
-        false,
-    )
-    .await
-    .expect("tailscale overlay mode starts");
+    let (handle, local_addr) =
+        start_remote_server_with_resolver_and_insecure_opt_in(Arc::clone(&state), resolver, false)
+            .await
+            .expect("tailscale overlay mode starts");
 
     assert!(local_addr.ip().is_loopback());
     assert!(
@@ -134,7 +140,10 @@ async fn test_p19_overlay_mode_tailscale_unaffected() {
         "P19: Tailscale overlay mode must bind external interface without requiring insecure opt-in"
     );
     assert!(
-        matches!(handle.gate_status(), DirectGatewayGateStatus::OverlaySecure { .. }),
+        matches!(
+            handle.gate_status(),
+            DirectGatewayGateStatus::OverlaySecure { .. }
+        ),
         "P19: Tailscale gate status must be OverlaySecure"
     );
 
@@ -158,15 +167,14 @@ async fn test_p19_non_loopback_direct_with_insecure_opt_in_binds_and_serves() {
         .local_network_address()
         .expect("active LAN IP on workstation");
 
-    let resolver = Arc::new(LanInterfaceResolver { lan_ip: local_lan_ip });
+    let resolver = Arc::new(LanInterfaceResolver {
+        lan_ip: local_lan_ip,
+    });
 
-    let (handle, local_addr) = start_remote_server_with_resolver_and_insecure_opt_in(
-        Arc::clone(&state),
-        resolver,
-        true,
-    )
-    .await
-    .expect("gateway starts with explicit insecure opt-in");
+    let (handle, local_addr) =
+        start_remote_server_with_resolver_and_insecure_opt_in(Arc::clone(&state), resolver, true)
+            .await
+            .expect("gateway starts with explicit insecure opt-in");
 
     assert!(local_addr.ip().is_loopback());
     assert!(
@@ -174,7 +182,10 @@ async fn test_p19_non_loopback_direct_with_insecure_opt_in_binds_and_serves() {
         "With explicit insecure opt-in, non-loopback LAN interface must be bound"
     );
     assert!(
-        matches!(handle.gate_status(), DirectGatewayGateStatus::InsecureLanAllowed { .. }),
+        matches!(
+            handle.gate_status(),
+            DirectGatewayGateStatus::InsecureLanAllowed { .. }
+        ),
         "Gate status must be InsecureLanAllowed"
     );
 
@@ -214,7 +225,10 @@ async fn test_p19_cgnat_address_without_overlay_proof_is_gated() {
         "CGNAT address on physical/non-tailscale interface must NOT be exempted as overlay"
     );
     assert!(
-        matches!(handle.gate_status(), DirectGatewayGateStatus::InsecureLanGated { .. }),
+        matches!(
+            handle.gate_status(),
+            DirectGatewayGateStatus::InsecureLanGated { .. }
+        ),
         "CGNAT address without authoritative overlay proof must be InsecureLanGated, got {:?}",
         handle.gate_status()
     );
@@ -237,15 +251,14 @@ async fn test_p19_cgnat_address_with_authoritative_overlay_proof_is_exempt() {
         .tailscale_address()
         .expect("active Tailscale interface on workstation");
 
-    let resolver = Arc::new(LanInterfaceResolver { lan_ip: tailscale_ip });
+    let resolver = Arc::new(LanInterfaceResolver {
+        lan_ip: tailscale_ip,
+    });
 
-    let (handle, local_addr) = start_remote_server_with_resolver_and_insecure_opt_in(
-        Arc::clone(&state),
-        resolver,
-        false,
-    )
-    .await
-    .expect("authoritative overlay address starts without opt-in");
+    let (handle, local_addr) =
+        start_remote_server_with_resolver_and_insecure_opt_in(Arc::clone(&state), resolver, false)
+            .await
+            .expect("authoritative overlay address starts without opt-in");
 
     assert!(local_addr.ip().is_loopback());
     assert!(
@@ -253,7 +266,10 @@ async fn test_p19_cgnat_address_with_authoritative_overlay_proof_is_exempt() {
         "Authoritative overlay interface must be bound without requiring insecure opt-in"
     );
     assert!(
-        matches!(handle.gate_status(), DirectGatewayGateStatus::OverlaySecure { .. }),
+        matches!(
+            handle.gate_status(),
+            DirectGatewayGateStatus::OverlaySecure { .. }
+        ),
         "Gate status must be OverlaySecure, got {:?}",
         handle.gate_status()
     );

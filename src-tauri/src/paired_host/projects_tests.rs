@@ -35,14 +35,21 @@ fn stored_paired_projects_persist_and_resolve() {
             "revision": "1"
         }],
         "unavailableWorkspaceIds": []
-    })).unwrap();
+    }))
+    .unwrap();
     let host_id = "https://relay.checka.cc/host/m-1";
     let p = project(host_id, raw.projects[0].clone());
     let desktop_id = p.metadata.workspace_id.clone();
     assert!(resolve_stored_project(dir.path(), &desktop_id).is_none());
     save_stored_project(dir.path(), p.clone()).unwrap();
-    let resolved = resolve_stored_project(dir.path(), &desktop_id).expect("must resolve stored project");
+    let resolved =
+        resolve_stored_project(dir.path(), &desktop_id).expect("must resolve stored project");
     assert_eq!(resolved.remote_workspace_id, "remote-ws-1");
-    assert_eq!(resolved.target, RunTarget::PairedDaemon { host_id: host_id.into() });
+    assert_eq!(
+        resolved.target,
+        RunTarget::PairedDaemon {
+            host_id: host_id.into()
+        }
+    );
     assert_eq!(resolved.metadata.repo_root, "/home/user/project");
 }

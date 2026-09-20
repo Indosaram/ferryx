@@ -1,7 +1,7 @@
 pub mod agent_detect;
 pub mod browser;
-pub mod clipboard_image;
 pub mod cli;
+pub mod clipboard_image;
 pub mod daemon;
 pub mod dag;
 pub mod ipc;
@@ -12,9 +12,9 @@ pub mod notification;
 pub mod paired_host;
 pub mod permissions;
 pub mod remote;
-pub mod scoped_contracts;
 #[cfg(test)]
 mod rollout_tests;
+pub mod scoped_contracts;
 pub mod session;
 #[cfg(any(target_os = "macos", test))]
 mod shortcut_dispatch;
@@ -103,14 +103,23 @@ fn install_app_menu<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()>
 
     // TEMPORARY-DIAGNOSTIC: same opt-in as switchDebug's native sink.
     let shortcut_debug = crate::ipc::debug::switch_debug_sink_enabled(
-        cfg!(debug_assertions), std::env::var("FERRYX_SWITCH_DEBUG").ok().as_deref());
+        cfg!(debug_assertions),
+        std::env::var("FERRYX_SWITCH_DEBUG").ok().as_deref(),
+    );
     app.on_menu_event(move |app, event| {
         let event_id = event.id().as_ref();
         if shortcut_debug {
             let wall_time_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
-            tracing::info!(event = "shortcut.native.menu", action = event_id,
-                pid = std::process::id(), wall_time_ms, "TEMPORARY-DIAGNOSTIC before menu dispatch");
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            tracing::info!(
+                event = "shortcut.native.menu",
+                action = event_id,
+                pid = std::process::id(),
+                wall_time_ms,
+                "TEMPORARY-DIAGNOSTIC before menu dispatch"
+            );
         }
         match event_id {
             "tab.newTerminal" => {
@@ -223,10 +232,7 @@ pub fn ctrl_digit(
 
 /// Returns Some(true) for next tab (Ctrl+Tab), Some(false) for prev tab (Ctrl+Shift+Tab).
 #[cfg(target_os = "macos")]
-pub fn is_ctrl_tab(
-    flags: objc2_app_kit::NSEventModifierFlags,
-    key_code: u16,
-) -> Option<bool> {
+pub fn is_ctrl_tab(flags: objc2_app_kit::NSEventModifierFlags, key_code: u16) -> Option<bool> {
     if !flags.contains(objc2_app_kit::NSEventModifierFlags::Control)
         || flags.contains(objc2_app_kit::NSEventModifierFlags::Command)
         || flags.contains(objc2_app_kit::NSEventModifierFlags::Option)
@@ -261,10 +267,7 @@ pub fn is_cmd_shift_bracket(
 
 /// Returns Some(false) for split right (Cmd+D), Some(true) for split down (Cmd+Shift+D).
 #[cfg(target_os = "macos")]
-pub fn is_cmd_d_split(
-    flags: objc2_app_kit::NSEventModifierFlags,
-    key_code: u16,
-) -> Option<bool> {
+pub fn is_cmd_d_split(flags: objc2_app_kit::NSEventModifierFlags, key_code: u16) -> Option<bool> {
     if !flags.contains(objc2_app_kit::NSEventModifierFlags::Command)
         || flags.contains(objc2_app_kit::NSEventModifierFlags::Control)
         || flags.contains(objc2_app_kit::NSEventModifierFlags::Option)
@@ -438,22 +441,35 @@ fn install_macos_key_monitor<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
     let paste_latch = Cell::new(NativeTerminalPasteLatch::new());
     // TEMPORARY-DIAGNOSTIC: opt-in outside callback; no added locks or file I/O.
     let shortcut_debug = crate::ipc::debug::switch_debug_sink_enabled(
-        cfg!(debug_assertions), std::env::var("FERRYX_SWITCH_DEBUG").ok().as_deref());
+        cfg!(debug_assertions),
+        std::env::var("FERRYX_SWITCH_DEBUG").ok().as_deref(),
+    );
     let trace_pid = std::process::id();
     let block = RcBlock::new(move |event_ptr: NonNull<NSEvent>| -> *mut NSEvent {
         let event = unsafe { event_ptr.as_ref() };
         let event_type = event.r#type();
         let flags = event.modifierFlags();
-        let trace_chord = shortcut_debug && event_type == NSEventType::KeyDown
-            && flags.intersects(objc2_app_kit::NSEventModifierFlags::Command
-                | objc2_app_kit::NSEventModifierFlags::Control
-                | objc2_app_kit::NSEventModifierFlags::Option);
+        let trace_chord = shortcut_debug
+            && event_type == NSEventType::KeyDown
+            && flags.intersects(
+                objc2_app_kit::NSEventModifierFlags::Command
+                    | objc2_app_kit::NSEventModifierFlags::Control
+                    | objc2_app_kit::NSEventModifierFlags::Option,
+            );
         if trace_chord {
             let wall_time_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
-            tracing::info!(event = "shortcut.native.keydown", pid = trace_pid, wall_time_ms,
-                key_code = event.keyCode(), modifier_flags = flags.bits(), platform = "macos",
-                "TEMPORARY-DIAGNOSTIC before routing/focus lock");
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            tracing::info!(
+                event = "shortcut.native.keydown",
+                pid = trace_pid,
+                wall_time_ms,
+                key_code = event.keyCode(),
+                modifier_flags = flags.bits(),
+                platform = "macos",
+                "TEMPORARY-DIAGNOSTIC before routing/focus lock"
+            );
         }
         let chars = if native_key_event_has_characters(event_type) {
             event.charactersIgnoringModifiers()
@@ -471,72 +487,161 @@ fn install_macos_key_monitor<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
         if event_type == NSEventType::KeyDown
             && is_unshifted_cmd_w(flags, chars_str.as_deref(), key_code)
         {
-            if trace_chord { tracing::info!(event = "shortcut.native.forward", action = "menu_close_tab", "TEMPORARY-DIAGNOSTIC"); }
+            if trace_chord {
+                tracing::info!(
+                    event = "shortcut.native.forward",
+                    action = "menu_close_tab",
+                    "TEMPORARY-DIAGNOSTIC"
+                );
+            }
             if shortcut_dispatch::dispatch(&app_handle, "menu_close_tab", ()) {
                 ptr::null_mut()
             } else {
                 event_ptr.as_ptr()
             }
         } else if let Some(digit) = worktree_digit {
-            if trace_chord { tracing::info!(event = "shortcut.native.forward", action = "menu_select_worktree", digit, "TEMPORARY-DIAGNOSTIC"); }
+            if trace_chord {
+                tracing::info!(
+                    event = "shortcut.native.forward",
+                    action = "menu_select_worktree",
+                    digit,
+                    "TEMPORARY-DIAGNOSTIC"
+                );
+            }
             if shortcut_dispatch::dispatch(&app_handle, "menu_select_worktree", digit) {
                 ptr::null_mut()
             } else {
                 event_ptr.as_ptr()
             }
-        } else if let Some(digit) = if event_type == NSEventType::KeyDown { ctrl_digit(flags, chars_str.as_deref(), key_code) } else { None } {
-            if trace_chord { tracing::info!(event = "shortcut.native.forward", action = "menu_select_tab", digit, "TEMPORARY-DIAGNOSTIC"); }
+        } else if let Some(digit) = if event_type == NSEventType::KeyDown {
+            ctrl_digit(flags, chars_str.as_deref(), key_code)
+        } else {
+            None
+        } {
+            if trace_chord {
+                tracing::info!(
+                    event = "shortcut.native.forward",
+                    action = "menu_select_tab",
+                    digit,
+                    "TEMPORARY-DIAGNOSTIC"
+                );
+            }
             if shortcut_dispatch::dispatch(&app_handle, "menu_select_tab", digit) {
                 ptr::null_mut()
             } else {
                 event_ptr.as_ptr()
             }
-        } else if let Some(is_next) = if event_type == NSEventType::KeyDown { is_ctrl_tab(flags, key_code).or_else(|| is_cmd_shift_bracket(flags, key_code)) } else { None } {
-            let action = if is_next { "menu_next_tab" } else { "menu_prev_tab" };
-            if trace_chord { tracing::info!(event = "shortcut.native.forward", action, "TEMPORARY-DIAGNOSTIC"); }
+        } else if let Some(is_next) = if event_type == NSEventType::KeyDown {
+            is_ctrl_tab(flags, key_code).or_else(|| is_cmd_shift_bracket(flags, key_code))
+        } else {
+            None
+        } {
+            let action = if is_next {
+                "menu_next_tab"
+            } else {
+                "menu_prev_tab"
+            };
+            if trace_chord {
+                tracing::info!(
+                    event = "shortcut.native.forward",
+                    action,
+                    "TEMPORARY-DIAGNOSTIC"
+                );
+            }
             if shortcut_dispatch::dispatch(&app_handle, action, ()) {
                 ptr::null_mut()
             } else {
                 event_ptr.as_ptr()
             }
-        } else if event_type == NSEventType::KeyDown && is_unshifted_cmd_key(flags, key_code, ANSI_KEY_CODE_T) {
-            if trace_chord { tracing::info!(event = "shortcut.native.forward", action = "menu_new_terminal_tab", "TEMPORARY-DIAGNOSTIC"); }
+        } else if event_type == NSEventType::KeyDown
+            && is_unshifted_cmd_key(flags, key_code, ANSI_KEY_CODE_T)
+        {
+            if trace_chord {
+                tracing::info!(
+                    event = "shortcut.native.forward",
+                    action = "menu_new_terminal_tab",
+                    "TEMPORARY-DIAGNOSTIC"
+                );
+            }
             if shortcut_dispatch::dispatch(&app_handle, "menu_new_terminal_tab", ()) {
                 ptr::null_mut()
             } else {
                 event_ptr.as_ptr()
             }
-        } else if let Some(is_down) = if event_type == NSEventType::KeyDown { is_cmd_d_split(flags, key_code) } else { None } {
-            let action = if is_down { "menu_split_down" } else { "menu_split_right" };
-            if trace_chord { tracing::info!(event = "shortcut.native.forward", action, "TEMPORARY-DIAGNOSTIC"); }
+        } else if let Some(is_down) = if event_type == NSEventType::KeyDown {
+            is_cmd_d_split(flags, key_code)
+        } else {
+            None
+        } {
+            let action = if is_down {
+                "menu_split_down"
+            } else {
+                "menu_split_right"
+            };
+            if trace_chord {
+                tracing::info!(
+                    event = "shortcut.native.forward",
+                    action,
+                    "TEMPORARY-DIAGNOSTIC"
+                );
+            }
             if shortcut_dispatch::dispatch(&app_handle, action, ()) {
                 ptr::null_mut()
             } else {
                 event_ptr.as_ptr()
             }
-        } else if event_type == NSEventType::KeyDown && is_unshifted_cmd_key(flags, key_code, ANSI_KEY_CODE_K) {
-            if trace_chord { tracing::info!(event = "shortcut.native.forward", action = "menu_command_palette", "TEMPORARY-DIAGNOSTIC"); }
+        } else if event_type == NSEventType::KeyDown
+            && is_unshifted_cmd_key(flags, key_code, ANSI_KEY_CODE_K)
+        {
+            if trace_chord {
+                tracing::info!(
+                    event = "shortcut.native.forward",
+                    action = "menu_command_palette",
+                    "TEMPORARY-DIAGNOSTIC"
+                );
+            }
             if shortcut_dispatch::dispatch(&app_handle, "menu_command_palette", ()) {
                 ptr::null_mut()
             } else {
                 event_ptr.as_ptr()
             }
-        } else if event_type == NSEventType::KeyDown && is_unshifted_cmd_key(flags, key_code, ANSI_KEY_CODE_B) {
-            if trace_chord { tracing::info!(event = "shortcut.native.forward", action = "menu_toggle_sidebar", "TEMPORARY-DIAGNOSTIC"); }
+        } else if event_type == NSEventType::KeyDown
+            && is_unshifted_cmd_key(flags, key_code, ANSI_KEY_CODE_B)
+        {
+            if trace_chord {
+                tracing::info!(
+                    event = "shortcut.native.forward",
+                    action = "menu_toggle_sidebar",
+                    "TEMPORARY-DIAGNOSTIC"
+                );
+            }
             if shortcut_dispatch::dispatch(&app_handle, "menu_toggle_sidebar", ()) {
                 ptr::null_mut()
             } else {
                 event_ptr.as_ptr()
             }
-        } else if event_type == NSEventType::KeyDown && is_unshifted_cmd_key(flags, key_code, ANSI_KEY_CODE_COMMA) {
-            if trace_chord { tracing::info!(event = "shortcut.native.forward", action = "menu_open_settings", "TEMPORARY-DIAGNOSTIC"); }
+        } else if event_type == NSEventType::KeyDown
+            && is_unshifted_cmd_key(flags, key_code, ANSI_KEY_CODE_COMMA)
+        {
+            if trace_chord {
+                tracing::info!(
+                    event = "shortcut.native.forward",
+                    action = "menu_open_settings",
+                    "TEMPORARY-DIAGNOSTIC"
+                );
+            }
             if shortcut_dispatch::dispatch(&app_handle, "menu_open_settings", ()) {
                 ptr::null_mut()
             } else {
                 event_ptr.as_ptr()
             }
         } else {
-            if trace_chord { tracing::info!(event = "shortcut.native.focus.start", "TEMPORARY-DIAGNOSTIC"); }
+            if trace_chord {
+                tracing::info!(
+                    event = "shortcut.native.focus.start",
+                    "TEMPORARY-DIAGNOSTIC"
+                );
+            }
             let has_focused_terminal = {
                 #[cfg(feature = "native-terminal")]
                 {
@@ -547,13 +652,23 @@ fn install_macos_key_monitor<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
                     false
                 }
             };
-            if trace_chord { tracing::info!(event = "shortcut.native.focus.return", has_focused_terminal, "TEMPORARY-DIAGNOSTIC"); }
+            if trace_chord {
+                tracing::info!(
+                    event = "shortcut.native.focus.return",
+                    has_focused_terminal,
+                    "TEMPORARY-DIAGNOSTIC"
+                );
+            }
             if event_type == NSEventType::KeyDown
                 && is_unshifted_cmd_c(flags, chars_str.as_deref(), key_code)
             {
                 if trace_chord {
-                    tracing::info!(event = "shortcut.native.copy", has_focused_terminal, key_code,
-                        "TEMPORARY-DIAGNOSTIC");
+                    tracing::info!(
+                        event = "shortcut.native.copy",
+                        has_focused_terminal,
+                        key_code,
+                        "TEMPORARY-DIAGNOSTIC"
+                    );
                 }
                 if has_focused_terminal {
                     if let Some(window) = app_handle.get_window("main") {
@@ -574,8 +689,13 @@ fn install_macos_key_monitor<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
                 );
                 paste_latch.set(latch);
                 if trace_chord {
-                    tracing::info!(event = "shortcut.native.paste", ?action, has_focused_terminal, key_code,
-                        "TEMPORARY-DIAGNOSTIC");
+                    tracing::info!(
+                        event = "shortcut.native.paste",
+                        ?action,
+                        has_focused_terminal,
+                        key_code,
+                        "TEMPORARY-DIAGNOSTIC"
+                    );
                 }
                 match action {
                     NativeTerminalPasteAction::EmitAndConsume => {
@@ -752,19 +872,21 @@ fn install_macos_terminal_scroll_monitor<R: tauri::Runtime>(
                                         num_lock: false,
                                     };
                                     let bounds = surface_host.session_logical_bounds(&session_id);
-                                    let cell_metrics = surface_host.session_cell_metrics(&session_id);
+                                    let cell_metrics =
+                                        surface_host.session_cell_metrics(&session_id);
 
-                                    let outcome = surface_host.with_session_terminal(&session_id, |term| {
-                                        crate::native_terminal::compute_wheel_outcome(
-                                            term,
-                                            bounds.as_ref(),
-                                            cell_metrics.as_ref(),
-                                            logical_x,
-                                            logical_y,
-                                            rows,
-                                            modifiers,
-                                        )
-                                    });
+                                    let outcome =
+                                        surface_host.with_session_terminal(&session_id, |term| {
+                                            crate::native_terminal::compute_wheel_outcome(
+                                                term,
+                                                bounds.as_ref(),
+                                                cell_metrics.as_ref(),
+                                                logical_x,
+                                                logical_y,
+                                                rows,
+                                                modifiers,
+                                            )
+                                        });
 
                                     match outcome {
                                         Ok(crate::native_terminal::TerminalWheelOutcome::WritePty(bytes)) => {
@@ -934,11 +1056,13 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             Arc::clone(&browser_manager),
         ),
     );
-    remote_manager.set_browser_backend(Arc::clone(&in_process_backend) as Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>);
+    remote_manager.set_browser_backend(Arc::clone(&in_process_backend)
+        as Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>);
     let in_process_backend_setup = Arc::clone(&in_process_backend);
     let browser_remote_service_setup = Arc::clone(&browser_remote_service);
-    let file_preview_service = tauri::async_runtime::block_on(crate::ipc::file_preview::FilePreviewService::start())
-        .expect("file preview service failed to start");
+    let file_preview_service =
+        tauri::async_runtime::block_on(crate::ipc::file_preview::FilePreviewService::start())
+            .expect("file preview service failed to start");
     #[cfg(feature = "native-terminal")]
     let native_terminal_surface_host = NativeTerminalSurfaceHostState::default();
     let setup_activations = Arc::clone(&notification_activations);
@@ -1031,7 +1155,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             if let Some(window) = app.get_webview_window("main") {
                 if let Ok(raw_window) = window.ns_window() {
                     if !raw_window.is_null() {
-                        let native_window = unsafe { &*(raw_window as *const objc2_app_kit::NSWindow) };
+                        let native_window =
+                            unsafe { &*(raw_window as *const objc2_app_kit::NSWindow) };
                         #[cfg(feature = "native-terminal")]
                         crate::native_terminal::platform::macos::configure_window_background(
                             native_window,
@@ -1040,7 +1165,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                         if let Ok(raw_webview) = window.ns_view() {
                             if !raw_webview.is_null() {
                                 unsafe {
-                                    let webview_view = &*(raw_webview as *const objc2_app_kit::NSView);
+                                    let webview_view =
+                                        &*(raw_webview as *const objc2_app_kit::NSView);
                                     let _ = native_window.makeFirstResponder(Some(webview_view));
                                 }
                             }
@@ -1088,18 +1214,24 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                 worktree_rescan_registry,
             );
             browser_remote_service_setup.set_snapshot_source(Arc::new(
-                crate::browser::snapshot_source::TauriBrowserSnapshotSource::new(app.handle().clone()),
+                crate::browser::snapshot_source::TauriBrowserSnapshotSource::new(
+                    app.handle().clone(),
+                ),
             ));
             let gui_executor = Arc::new(crate::ipc::browser::GuiBrowserCommandExecutor::new(
                 app.handle().clone(),
                 Arc::clone(&browser_cli_manager),
             ));
             in_process_backend_setup.set_executor(gui_executor);
-            if let Some(remote_state) = app.try_state::<Arc<crate::remote::state::RemoteGatewayState>>() {
-                remote_state.set_browser_backend(Arc::clone(&in_process_backend_setup) as Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>);
+            if let Some(remote_state) =
+                app.try_state::<Arc<crate::remote::state::RemoteGatewayState>>()
+            {
+                remote_state.set_browser_backend(Arc::clone(&in_process_backend_setup)
+                    as Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>);
             }
             if let Some(remote_mgr) = app.try_state::<Arc<ipc::remote::RemoteGatewayManager>>() {
-                remote_mgr.set_browser_backend(Arc::clone(&in_process_backend_setup) as Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>);
+                remote_mgr.set_browser_backend(Arc::clone(&in_process_backend_setup)
+                    as Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>);
             }
             Ok(())
         })
@@ -1123,7 +1255,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         .manage(driver_broker)
         .manage(browser_remote_service)
         .manage(browser_manager)
-        .manage(Arc::clone(&in_process_backend) as Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>)
+        .manage(Arc::clone(&in_process_backend)
+            as Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>)
         .manage(in_process_backend)
         .manage(file_preview_service);
 
@@ -1285,6 +1418,10 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         dag_get_run,
         dag_read_node_artifact,
         dag_watch_project,
+        dag_watch_paired_project,
+        dag_watch_ssh_project,
+        dag_unwatch_project,
+        dag_discover_watch_roots,
     ])
 }
 
@@ -1354,7 +1491,10 @@ mod tests {
     fn tab_navigation_and_split_predicates_work() {
         use objc2_app_kit::NSEventModifierFlags;
 
-        assert_eq!(is_ctrl_tab(NSEventModifierFlags::Control, ANSI_KEY_CODE_TAB), Some(true));
+        assert_eq!(
+            is_ctrl_tab(NSEventModifierFlags::Control, ANSI_KEY_CODE_TAB),
+            Some(true)
+        );
         assert_eq!(
             is_ctrl_tab(
                 NSEventModifierFlags::Control | NSEventModifierFlags::Shift,
@@ -1378,7 +1518,10 @@ mod tests {
             Some(false)
         );
 
-        assert_eq!(is_cmd_d_split(NSEventModifierFlags::Command, ANSI_KEY_CODE_D), Some(false));
+        assert_eq!(
+            is_cmd_d_split(NSEventModifierFlags::Command, ANSI_KEY_CODE_D),
+            Some(false)
+        );
         assert_eq!(
             is_cmd_d_split(
                 NSEventModifierFlags::Command | NSEventModifierFlags::Shift,
@@ -1387,10 +1530,26 @@ mod tests {
             Some(true)
         );
 
-        assert!(is_unshifted_cmd_key(NSEventModifierFlags::Command, ANSI_KEY_CODE_T, ANSI_KEY_CODE_T));
-        assert!(is_unshifted_cmd_key(NSEventModifierFlags::Command, ANSI_KEY_CODE_K, ANSI_KEY_CODE_K));
-        assert!(is_unshifted_cmd_key(NSEventModifierFlags::Command, ANSI_KEY_CODE_B, ANSI_KEY_CODE_B));
-        assert!(is_unshifted_cmd_key(NSEventModifierFlags::Command, ANSI_KEY_CODE_COMMA, ANSI_KEY_CODE_COMMA));
+        assert!(is_unshifted_cmd_key(
+            NSEventModifierFlags::Command,
+            ANSI_KEY_CODE_T,
+            ANSI_KEY_CODE_T
+        ));
+        assert!(is_unshifted_cmd_key(
+            NSEventModifierFlags::Command,
+            ANSI_KEY_CODE_K,
+            ANSI_KEY_CODE_K
+        ));
+        assert!(is_unshifted_cmd_key(
+            NSEventModifierFlags::Command,
+            ANSI_KEY_CODE_B,
+            ANSI_KEY_CODE_B
+        ));
+        assert!(is_unshifted_cmd_key(
+            NSEventModifierFlags::Command,
+            ANSI_KEY_CODE_COMMA,
+            ANSI_KEY_CODE_COMMA
+        ));
     }
 
     #[test]
@@ -1930,7 +2089,9 @@ mod tests {
         assert!(status.is_running);
         let devices = client.remote_list_devices().await.expect("list devices");
         assert_eq!(devices.len(), 0);
-        let (_, paired_device) = server.remote_state().auth_manager
+        let (_, paired_device) = server
+            .remote_state()
+            .auth_manager
             .exchange_pairing_code(&code, "Phone")
             .expect("pair");
         server_task.abort();
@@ -1963,8 +2124,14 @@ mod tests {
         assert_eq!(status.mode, remote::RemoteNetworkMode::Relay);
         assert!(!status.is_running);
         assert!(status.bound_address.is_none());
-        assert_eq!(server2.remote_state().config.read().relay_url, Some(relay_url));
-        let devices = client2.remote_list_devices().await.expect("persisted devices");
+        assert_eq!(
+            server2.remote_state().config.read().relay_url,
+            Some(relay_url)
+        );
+        let devices = client2
+            .remote_list_devices()
+            .await
+            .expect("persisted devices");
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].id, paired_device.id);
         server_task2.abort();

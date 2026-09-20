@@ -166,7 +166,12 @@ fn test_coordinator_single_use_delivery() {
 fn test_coordinator_duplicate_callback_suppression() {
     let (coordinator, mut rx) = SnapshotCallbackCoordinator::new();
     let snap1 = BrowserSnapshot::new(sample_valid_png_bytes(), SnapshotFormat::Png, 100, 100);
-    let snap2 = BrowserSnapshot::new(sample_valid_jpeg_bytes(), SnapshotFormat::Jpeg { quality: 70 }, 200, 200);
+    let snap2 = BrowserSnapshot::new(
+        sample_valid_jpeg_bytes(),
+        SnapshotFormat::Jpeg { quality: 70 },
+        200,
+        200,
+    );
 
     // First completion succeeds
     assert!(coordinator.complete(Ok(snap1)));
@@ -184,14 +189,18 @@ fn test_coordinator_duplicate_callback_suppression() {
     assert_eq!(coordinator.call_count(), 3);
 
     // Receiver receives strictly the first snapshot
-    let delivered = rx.try_recv().expect("Message must be ready").expect("First snapshot was Ok");
+    let delivered = rx
+        .try_recv()
+        .expect("Message must be ready")
+        .expect("First snapshot was Ok");
     assert_eq!(delivered.width, 100);
     assert_eq!(delivered.format, SnapshotFormat::Png);
 }
 
 #[tokio::test]
 async fn test_coordinator_late_callback_arrival_after_timeout() {
-    let delayed_snap = BrowserSnapshot::new(sample_valid_png_bytes(), SnapshotFormat::Png, 320, 240);
+    let delayed_snap =
+        BrowserSnapshot::new(sample_valid_png_bytes(), SnapshotFormat::Png, 320, 240);
     let source = FakeBrowserSnapshotSource::new(FakeSnapshotBehavior::Delayed {
         delay: Duration::from_millis(60),
         result: Ok(delayed_snap),
@@ -252,8 +261,14 @@ fn test_capture_dimension_clamping_and_pixel_limits() {
 
     // 2. Max edge cap (2048) enforced with aspect ratio preserved
     let (w2, h2) = clamp_capture_dimensions(4096, 2048);
-    assert!(w2 <= MAX_CAPTURE_EDGE, "w2 ({w2}) must be <= {MAX_CAPTURE_EDGE}");
-    assert!(h2 <= MAX_CAPTURE_EDGE, "h2 ({h2}) must be <= {MAX_CAPTURE_EDGE}");
+    assert!(
+        w2 <= MAX_CAPTURE_EDGE,
+        "w2 ({w2}) must be <= {MAX_CAPTURE_EDGE}"
+    );
+    assert!(
+        h2 <= MAX_CAPTURE_EDGE,
+        "h2 ({h2}) must be <= {MAX_CAPTURE_EDGE}"
+    );
     assert_eq!(w2, 2048);
     assert_eq!(h2, 1024);
 
@@ -299,10 +314,14 @@ async fn test_coordinator_late_callback_quarantine_and_permit_release() {
         .expect_err("Should time out");
 
     assert!(coordinator.is_timed_out());
-    assert!(!permit_released.load(std::sync::atomic::Ordering::SeqCst), "Permit not released until callback arrives");
+    assert!(
+        !permit_released.load(std::sync::atomic::Ordering::SeqCst),
+        "Permit not released until callback arrives"
+    );
 
     // Late arriving callback after timeout
-    let late_snapshot = BrowserSnapshot::new(sample_valid_png_bytes(), SnapshotFormat::Png, 800, 600);
+    let late_snapshot =
+        BrowserSnapshot::new(sample_valid_png_bytes(), SnapshotFormat::Png, 800, 600);
     let delivered = coordinator.complete(Ok(late_snapshot));
 
     // Late delivery must be quarantined (returned false)

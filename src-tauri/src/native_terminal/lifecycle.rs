@@ -45,8 +45,11 @@ pub fn create_native_terminal(
     // SAFETY: The live terminal copies this u64 option synchronously. File,
     // temporary-file and shared-memory media remain disabled by default.
     let result = unsafe {
-        ghostty_terminal_set(non_null.as_ptr(), super::sys::kitty::STORAGE_LIMIT,
-            (&image_limit as *const u64).cast())
+        ghostty_terminal_set(
+            non_null.as_ptr(),
+            super::sys::kitty::STORAGE_LIMIT,
+            (&image_limit as *const u64).cast(),
+        )
     };
     if let Err(error) = NativeTerminalError::from_c_result(result, "set(KittyImageStorageLimit)") {
         unsafe { ghostty_terminal_free(non_null.as_ptr()) };
@@ -173,11 +176,7 @@ pub fn teardown_native_terminal(handle: NonNull<GhosttyTerminalImpl>) {
             GHOSTTY_TERMINAL_OPT_TITLE_CHANGED,
             null_ptr,
         );
-        let _ = ghostty_terminal_set(
-            handle.as_ptr(),
-            GHOSTTY_TERMINAL_OPT_WRITE_PTY,
-            null_ptr,
-        );
+        let _ = ghostty_terminal_set(handle.as_ptr(), GHOSTTY_TERMINAL_OPT_WRITE_PTY, null_ptr);
         let _ = ghostty_terminal_set(handle.as_ptr(), GHOSTTY_TERMINAL_OPT_SIZE, null_ptr);
         let _ = ghostty_terminal_set(handle.as_ptr(), GHOSTTY_TERMINAL_OPT_USERDATA, null_ptr);
         ghostty_terminal_free(handle.as_ptr());

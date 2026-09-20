@@ -31,21 +31,43 @@ impl std::fmt::Display for RemoteInputError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Unsupported(msg) => write!(f, "unsupported operation: {}", msg),
-            Self::OutOfBounds { u, v } => write!(f, "normalized coordinates out of bounds: ({}, {})", u, v),
+            Self::OutOfBounds { u, v } => {
+                write!(f, "normalized coordinates out of bounds: ({}, {})", u, v)
+            }
             Self::NonFiniteCoordinate => write!(f, "coordinate is NaN or Infinity"),
             Self::InvalidReference(msg) => write!(f, "invalid element reference: {}", msg),
-            Self::FillTooLarge { actual, max } => write!(f, "fill text too large: {} bytes (max {})", actual, max),
-            Self::EvalScriptTooLarge { actual, max } => write!(f, "eval script too large: {} bytes (max {})", actual, max),
-            Self::EvalApprovalRequired => write!(f, "eval operation requires explicit driver approval"),
-            Self::KeyNotAllowed(k) => write!(f, "keypress '{}' not allowed (page-scoped allowlist)", k),
+            Self::FillTooLarge { actual, max } => {
+                write!(f, "fill text too large: {} bytes (max {})", actual, max)
+            }
+            Self::EvalScriptTooLarge { actual, max } => {
+                write!(f, "eval script too large: {} bytes (max {})", actual, max)
+            }
+            Self::EvalApprovalRequired => {
+                write!(f, "eval operation requires explicit driver approval")
+            }
+            Self::KeyNotAllowed(k) => {
+                write!(f, "keypress '{}' not allowed (page-scoped allowlist)", k)
+            }
             Self::StaleViewport { expected, actual } => {
-                write!(f, "stale viewport revision: expected {}, actual {}", expected, actual)
+                write!(
+                    f,
+                    "stale viewport revision: expected {}, actual {}",
+                    expected, actual
+                )
             }
             Self::StaleFrameAge { age_ms, max_ms } => {
-                write!(f, "stale frame: age {} ms exceeds max {} ms", age_ms, max_ms)
+                write!(
+                    f,
+                    "stale frame: age {} ms exceeds max {} ms",
+                    age_ms, max_ms
+                )
             }
             Self::StaleDocumentGeneration { expected, actual } => {
-                write!(f, "stale document generation: expected {}, actual {}", expected, actual)
+                write!(
+                    f,
+                    "stale document generation: expected {}, actual {}",
+                    expected, actual
+                )
             }
         }
     }
@@ -120,7 +142,9 @@ pub fn validate_point_timing_and_viewport(
 pub fn validate_fill(reference: &str, value: &str) -> Result<(), RemoteInputError> {
     let trimmed_ref = reference.trim();
     if trimmed_ref.is_empty() {
-        return Err(RemoteInputError::InvalidReference("reference cannot be empty"));
+        return Err(RemoteInputError::InvalidReference(
+            "reference cannot be empty",
+        ));
     }
 
     if value.len() > MAX_FILL_BYTES {
@@ -226,8 +250,8 @@ pub fn truncate_eval_result(output: &str) -> (String, bool) {
 /// Decodes the JSON evaluation result returned by automation actions (click, fill)
 /// and verifies that target lookup succeeded (R5-6).
 pub fn decode_action_result(raw: &str) -> Result<(), String> {
-    let parsed: serde_json::Value = serde_json::from_str(raw)
-        .map_err(|e| format!("invalid action result json: {e}"))?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| format!("invalid action result json: {e}"))?;
     let obj = if let Some(s) = parsed.as_str() {
         serde_json::from_str::<serde_json::Value>(s)
             .map_err(|e| format!("invalid nested action result json: {e}"))?
@@ -359,10 +383,22 @@ mod tests {
         assert_eq!(validate_page_key("ArrowDown").unwrap(), "ArrowDown");
 
         // Disallowed chrome shortcuts
-        assert!(matches!(validate_page_key("cmd+q"), Err(RemoteInputError::KeyNotAllowed(_))));
-        assert!(matches!(validate_page_key("NewTab"), Err(RemoteInputError::KeyNotAllowed(_))));
-        assert!(matches!(validate_page_key("TabClose"), Err(RemoteInputError::KeyNotAllowed(_))));
-        assert!(matches!(validate_page_key("Alt+F4"), Err(RemoteInputError::KeyNotAllowed(_))));
+        assert!(matches!(
+            validate_page_key("cmd+q"),
+            Err(RemoteInputError::KeyNotAllowed(_))
+        ));
+        assert!(matches!(
+            validate_page_key("NewTab"),
+            Err(RemoteInputError::KeyNotAllowed(_))
+        ));
+        assert!(matches!(
+            validate_page_key("TabClose"),
+            Err(RemoteInputError::KeyNotAllowed(_))
+        ));
+        assert!(matches!(
+            validate_page_key("Alt+F4"),
+            Err(RemoteInputError::KeyNotAllowed(_))
+        ));
     }
 
     #[test]
@@ -392,7 +428,10 @@ mod tests {
         let (out, truncated) = truncate_eval_result(&long_out);
         assert!(truncated);
         assert!(out.len() <= 65_536);
-        assert!(std::str::from_utf8(out.as_bytes()).is_ok(), "must be valid UTF-8 boundary");
+        assert!(
+            std::str::from_utf8(out.as_bytes()).is_ok(),
+            "must be valid UTF-8 boundary"
+        );
     }
 
     #[test]
@@ -405,7 +444,9 @@ mod tests {
         let err1 = decode_action_result(r#"{"ok":false,"error":"element not found"}"#).unwrap_err();
         assert_eq!(err1, "element not found");
 
-        let err2 = decode_action_result(r#""{\"ok\":false,\"error\":\"no element at coordinates\"}""#).unwrap_err();
+        let err2 =
+            decode_action_result(r#""{\"ok\":false,\"error\":\"no element at coordinates\"}""#)
+                .unwrap_err();
         assert_eq!(err2, "no element at coordinates");
 
         // Missing ok or ok != true

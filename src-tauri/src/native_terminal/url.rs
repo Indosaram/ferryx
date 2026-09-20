@@ -119,6 +119,9 @@ mod tests {
         );
         let line = "한글 https://ferryx.dev/ko end";
         let click = line.chars().position(|c| c == 'f').expect("host char");
-        assert_eq!(span_text(line, click).as_deref(), Some("https://ferryx.dev/ko"));
+        assert_eq!(
+            span_text(line, click).as_deref(),
+            Some("https://ferryx.dev/ko")
+        );
     }
 }

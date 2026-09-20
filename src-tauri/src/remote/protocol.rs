@@ -5,8 +5,15 @@ use std::collections::HashMap;
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
 pub enum MachineTerminalControl {
-    Resize { generation: crate::scoped_contracts::Epoch, cols: u16, rows: u16 },
-    Signal { generation: crate::scoped_contracts::Epoch, signal: String },
+    Resize {
+        generation: crate::scoped_contracts::Epoch,
+        cols: u16,
+        rows: u16,
+    },
+    Signal {
+        generation: crate::scoped_contracts::Epoch,
+        signal: String,
+    },
     Ping,
 }
 

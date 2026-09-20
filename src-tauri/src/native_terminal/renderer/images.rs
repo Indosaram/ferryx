@@ -61,10 +61,7 @@ impl ImageTextures {
                 let expected = (image.width as usize)
                     .checked_mul(image.height as usize)
                     .and_then(|n| n.checked_mul(4));
-                if image.width == 0
-                    || image.height == 0
-                    || expected != Some(image.rgba.len())
-                {
+                if image.width == 0 || image.height == 0 || expected != Some(image.rgba.len()) {
                     return Err(NativeTerminalError::LimitExceeded);
                 }
                 let size = wgpu::Extent3d {

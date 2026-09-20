@@ -52,7 +52,9 @@ pub fn store_path(data_dir: &std::path::Path) -> std::path::PathBuf {
     data_dir.join("paired_projects.json")
 }
 
-pub fn read_stored_projects(data_dir: &std::path::Path) -> std::collections::BTreeMap<String, Project> {
+pub fn read_stored_projects(
+    data_dir: &std::path::Path,
+) -> std::collections::BTreeMap<String, Project> {
     let path = store_path(data_dir);
     match std::fs::read(&path) {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),

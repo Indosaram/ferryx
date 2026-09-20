@@ -1,7 +1,7 @@
+use crate::terminal::remote::RemoteConnectionState;
 use crate::terminal::{PtySessionState, SessionAttachment, TerminalService, TerminalSignal};
 use futures_util::future::BoxFuture;
 use futures_util::stream::BoxStream;
-use crate::terminal::remote::RemoteConnectionState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteRecoveryStatus {
@@ -11,15 +11,25 @@ pub struct RemoteRecoveryStatus {
 
 pub type RecoveryStream = BoxStream<'static, RemoteRecoveryStatus>;
 
-pub(crate) fn recovery_stream(rx: tokio::sync::watch::Receiver<crate::terminal::remote::RemoteSessionDetails>) -> RecoveryStream {
-    Box::pin(futures_util::stream::unfold((rx, true), |(mut rx, initial)| async move {
-        if !initial && rx.changed().await.is_err() { return None; }
-        let status = {
-            let details = rx.borrow_and_update();
-            RemoteRecoveryStatus { state: details.state, generation: details.generation }
-        };
-        Some((status, (rx, false)))
-    }))
+pub(crate) fn recovery_stream(
+    rx: tokio::sync::watch::Receiver<crate::terminal::remote::RemoteSessionDetails>,
+) -> RecoveryStream {
+    Box::pin(futures_util::stream::unfold(
+        (rx, true),
+        |(mut rx, initial)| async move {
+            if !initial && rx.changed().await.is_err() {
+                return None;
+            }
+            let status = {
+                let details = rx.borrow_and_update();
+                RemoteRecoveryStatus {
+                    state: details.state,
+                    generation: details.generation,
+                }
+            };
+            Some((status, (rx, false)))
+        },
+    ))
 }
 use std::path::PathBuf;
 
@@ -38,13 +48,27 @@ pub struct RemoteSessionDetails {
 /// Object-safe abstraction for session routing across local and legacy daemon backends.
 pub trait RemoteSessionBackend: Send + Sync {
     /// None identifies a local PTY. Errors must never downgrade SSH to local input.
-    fn recovery<'a>(&'a self, _id: &'a str) -> BoxFuture<'a, Result<Option<RecoveryStream>, String>> {
+    fn recovery<'a>(
+        &'a self,
+        _id: &'a str,
+    ) -> BoxFuture<'a, Result<Option<RecoveryStream>, String>> {
         Box::pin(async { Ok(None) })
     }
-    fn write_generation<'a>(&'a self, _id: &'a str, _generation: u64, _data: &'a [u8]) -> BoxFuture<'a, Result<(), String>> {
+    fn write_generation<'a>(
+        &'a self,
+        _id: &'a str,
+        _generation: u64,
+        _data: &'a [u8],
+    ) -> BoxFuture<'a, Result<(), String>> {
         Box::pin(async { Err("Generation input unsupported".into()) })
     }
-    fn resize_generation<'a>(&'a self, _id: &'a str, _generation: u64, _cols: u16, _rows: u16) -> BoxFuture<'a, Result<(), String>> {
+    fn resize_generation<'a>(
+        &'a self,
+        _id: &'a str,
+        _generation: u64,
+        _cols: u16,
+        _rows: u16,
+    ) -> BoxFuture<'a, Result<(), String>> {
         Box::pin(async { Err("Generation resize unsupported".into()) })
     }
     fn list_sessions(&self) -> BoxFuture<'_, Vec<String>>;
@@ -78,54 +102,110 @@ pub trait RemoteSessionBackend: Send + Sync {
 /// The router retains Local/SSH/legacy transport and generation validation;
 /// the shared service supplies authoritative metadata to HTTP and IPC alike.
 impl RemoteSessionBackend for crate::daemon::session_service::DaemonSessionService {
-    fn recovery<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Option<RecoveryStream>, String>> {
+    fn recovery<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> BoxFuture<'a, Result<Option<RecoveryStream>, String>> {
         self.router().recovery(id)
     }
-    fn write_generation<'a>(&'a self, id: &'a str, generation: u64, data: &'a [u8]) -> BoxFuture<'a, Result<(), String>> {
+    fn write_generation<'a>(
+        &'a self,
+        id: &'a str,
+        generation: u64,
+        data: &'a [u8],
+    ) -> BoxFuture<'a, Result<(), String>> {
         self.router().write_generation(id, generation, data)
     }
-    fn resize_generation<'a>(&'a self, id: &'a str, generation: u64, cols: u16, rows: u16) -> BoxFuture<'a, Result<(), String>> {
+    fn resize_generation<'a>(
+        &'a self,
+        id: &'a str,
+        generation: u64,
+        cols: u16,
+        rows: u16,
+    ) -> BoxFuture<'a, Result<(), String>> {
         self.router().resize_generation(id, generation, cols, rows)
     }
     fn list_sessions(&self) -> BoxFuture<'_, Vec<String>> {
         RemoteSessionBackend::list_sessions(self.router())
     }
-    fn describe_session<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<RemoteSessionDetails, String>> {
+    fn describe_session<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> BoxFuture<'a, Result<RemoteSessionDetails, String>> {
         Box::pin(async move {
             let mut details = self.router().describe_session(id).await?;
             self.project_session_metadata(&mut details);
             Ok(details)
         })
     }
-    fn attach_with_sequence<'a>(&'a self, id: &'a str, after: Option<u64>) -> BoxFuture<'a, Result<SessionAttachment, String>> {
+    fn attach_with_sequence<'a>(
+        &'a self,
+        id: &'a str,
+        after: Option<u64>,
+    ) -> BoxFuture<'a, Result<SessionAttachment, String>> {
         self.router().attach_with_sequence(id, after)
     }
     fn write_input<'a>(&'a self, id: &'a str, data: &'a [u8]) -> BoxFuture<'a, Result<(), String>> {
         self.router().write_input(id, data)
     }
-    fn resize<'a>(&'a self, id: &'a str, cols: u16, rows: u16) -> BoxFuture<'a, Result<(), String>> {
+    fn resize<'a>(
+        &'a self,
+        id: &'a str,
+        cols: u16,
+        rows: u16,
+    ) -> BoxFuture<'a, Result<(), String>> {
         self.router().resize(id, cols, rows)
     }
-    fn signal<'a>(&'a self, id: &'a str, signal: TerminalSignal) -> BoxFuture<'a, Result<(), String>> {
+    fn signal<'a>(
+        &'a self,
+        id: &'a str,
+        signal: TerminalSignal,
+    ) -> BoxFuture<'a, Result<(), String>> {
         self.router().signal(id, signal)
     }
 }
 
 impl RemoteSessionBackend for TerminalService {
-    fn recovery<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Option<RecoveryStream>, String>> {
+    fn recovery<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> BoxFuture<'a, Result<Option<RecoveryStream>, String>> {
         Box::pin(async move {
-            if !self.remote().contains(id) { return Ok(None); }
-            self.remote().subscribe(id).map(recovery_stream).map(Some).map_err(|e| e.to_string())
+            if !self.remote().contains(id) {
+                return Ok(None);
+            }
+            self.remote()
+                .subscribe(id)
+                .map(recovery_stream)
+                .map(Some)
+                .map_err(|e| e.to_string())
         })
     }
-    fn write_generation<'a>(&'a self, id: &'a str, generation: u64, data: &'a [u8]) -> BoxFuture<'a, Result<(), String>> {
+    fn write_generation<'a>(
+        &'a self,
+        id: &'a str,
+        generation: u64,
+        data: &'a [u8],
+    ) -> BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
-            self.write_input_operation(id, generation, data.to_vec()).map_err(|e| e.to_string())?.await.map_err(|e| e.to_string())
+            self.write_input_operation(id, generation, data.to_vec())
+                .map_err(|e| e.to_string())?
+                .await
+                .map_err(|e| e.to_string())
         })
     }
-    fn resize_generation<'a>(&'a self, id: &'a str, generation: u64, cols: u16, rows: u16) -> BoxFuture<'a, Result<(), String>> {
+    fn resize_generation<'a>(
+        &'a self,
+        id: &'a str,
+        generation: u64,
+        cols: u16,
+        rows: u16,
+    ) -> BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
-            self.resize_operation(id, generation, cols, rows).map_err(|e| e.to_string())?.await.map_err(|e| e.to_string())
+            self.resize_operation(id, generation, cols, rows)
+                .map_err(|e| e.to_string())?
+                .await
+                .map_err(|e| e.to_string())
         })
     }
     fn list_sessions(&self) -> BoxFuture<'_, Vec<String>> {

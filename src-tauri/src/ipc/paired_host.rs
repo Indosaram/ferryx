@@ -86,7 +86,9 @@ pub async fn paired_host_forget<R: tauri::Runtime>(
     daemon: State<'_, Arc<DaemonClient>>,
     request: MigrationReceipt,
 ) -> Result<()> {
-    daemon.paired_host_forget(request.host_id.clone(), request.generation).await?;
+    daemon
+        .paired_host_forget(request.host_id.clone(), request.generation)
+        .await?;
     let _ = emit_paired_host_inventory_changed(
         &app,
         &InventoryChangeEvent {
@@ -212,14 +214,13 @@ pub async fn cmd_daemon_paste_clipboard_image<R: tauri::Runtime>(
                 },
             };
 
-            let resp = daemon
-                .paired_host_operation(op_req)
-                .await
-                .map_err(|e| {
-                    crate::ipc::IpcError::internal(format!("{}: {:?}", e.code, e.machine_error))
-                })?;
+            let resp = daemon.paired_host_operation(op_req).await.map_err(|e| {
+                crate::ipc::IpcError::internal(format!("{}: {:?}", e.code, e.machine_error))
+            })?;
 
-            if let crate::paired_host::client::OperationResult::PasteUploadChunk(result) = resp.result {
+            if let crate::paired_host::client::OperationResult::PasteUploadChunk(result) =
+                resp.result
+            {
                 if let Some(path) = result.remote_path {
                     final_remote_path = Some(path);
                 }
@@ -237,12 +238,16 @@ pub async fn cmd_daemon_paste_clipboard_image<R: tauri::Runtime>(
     }
 
     let res = daemon
-        .send_request(crate::daemon::protocol::DaemonRequest::UploadClipboardImage {
-            file_name,
-            data: image.bytes,
-        })
+        .send_request(
+            crate::daemon::protocol::DaemonRequest::UploadClipboardImage {
+                file_name,
+                data: image.bytes,
+            },
+        )
         .await
-        .map_err(|e| crate::ipc::IpcError::internal(format!("Daemon communication error: {e:?}")))?;
+        .map_err(|e| {
+            crate::ipc::IpcError::internal(format!("Daemon communication error: {e:?}"))
+        })?;
 
     match res {
         crate::daemon::protocol::DaemonResponse::UploadClipboardImageOk {

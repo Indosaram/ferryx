@@ -472,7 +472,8 @@ fn install_pty_resize_dispatcher(
                     );
                 }
             }
-        }).await;
+        })
+        .await;
     });
 }
 
@@ -565,8 +566,12 @@ pub async fn cmd_native_terminal_set_bounds<R: Runtime>(
     let window = app
         .get_window("main")
         .ok_or_else(|| IpcError::internal("Main Ferryx window is unavailable"))?;
-    let mut updates = state.subscribe_session_update(&session_id).map_err(IpcError::from)?;
-    let mut detached = state.subscribe_session_detach(&session_id).map_err(IpcError::from)?;
+    let mut updates = state
+        .subscribe_session_update(&session_id)
+        .map_err(IpcError::from)?;
+    let mut detached = state
+        .subscribe_session_detach(&session_id)
+        .map_err(IpcError::from)?;
     let mut initial_request = Some(request);
     loop {
         let state_inner = state.inner().clone();
@@ -580,8 +585,8 @@ pub async fn cmd_native_terminal_set_bounds<R: Runtime>(
                     Some(request) => state_inner.render(&surface_window, request),
                     None => state_inner.render_current(&surface_window, &session_id_clone),
                 }
-                    .map(|receipt| into_ipc_receipt(session_id_clone, receipt))
-                    .map_err(IpcError::from);
+                .map(|receipt| into_ipc_receipt(session_id_clone, receipt))
+                .map_err(IpcError::from);
                 let _ = sender.send(result);
             })
             .map_err(|error| {
@@ -875,7 +880,10 @@ pub async fn cmd_native_terminal_send_input<R: Runtime>(
 ) -> Result<NativeTerminalBoundsReceipt, IpcError> {
     let bytes = encode_attached_native_input(state.inner(), &session_id, &input)?;
     state.emit_scrollbar_if_changed(Some(&app), &session_id);
-    if let Err(err) = daemon_client.write_terminal_at_generation(&session_id, generation, bytes).await {
+    if let Err(err) = daemon_client
+        .write_terminal_at_generation(&session_id, generation, bytes)
+        .await
+    {
         return Err(err);
     }
 
@@ -932,7 +940,11 @@ pub fn native_scroll_outcome<T: TerminalEngine>(
                         ));
                     }
                     let (x, y) = bounds.map(|b| (b.x, b.y)).unwrap_or((0.0, 0.0));
-                    (x + f64::from(wheel.position.x), y + f64::from(wheel.position.y), wheel.modifiers)
+                    (
+                        x + f64::from(wheel.position.x),
+                        y + f64::from(wheel.position.y),
+                        wheel.modifiers,
+                    )
                 }
                 None => {
                     let (x, y) = bounds
@@ -943,10 +955,18 @@ pub fn native_scroll_outcome<T: TerminalEngine>(
             };
             let rows = (*rows).clamp(isize::from(i16::MIN), isize::from(i16::MAX)) as i16;
             crate::native_terminal::compute_wheel_outcome(
-                term, bounds, cell_metrics, lx, ly, rows, modifiers,
+                term,
+                bounds,
+                cell_metrics,
+                lx,
+                ly,
+                rows,
+                modifiers,
             )
         }
-        _ => Ok(TerminalWheelOutcome::ScrollViewport(behavior.to_scroll_viewport())),
+        _ => Ok(TerminalWheelOutcome::ScrollViewport(
+            behavior.to_scroll_viewport(),
+        )),
     }
 }
 
@@ -965,13 +985,23 @@ pub async fn cmd_native_terminal_scroll<R: Runtime>(
 
     let bounds = state.session_logical_bounds(&session_id);
     let cell_metrics = state.session_cell_metrics(&session_id);
-    let outcome = state.with_session_terminal(&session_id, |term| {
-        native_scroll_outcome(term, bounds.as_ref(), cell_metrics.as_ref(), &behavior, wheel.as_ref())
-    }).map_err(|err| IpcError::internal(err.to_string()))?;
+    let outcome = state
+        .with_session_terminal(&session_id, |term| {
+            native_scroll_outcome(
+                term,
+                bounds.as_ref(),
+                cell_metrics.as_ref(),
+                &behavior,
+                wheel.as_ref(),
+            )
+        })
+        .map_err(|err| IpcError::internal(err.to_string()))?;
 
     match outcome {
         TerminalWheelOutcome::WritePty(bytes) => {
-            daemon_client.write_terminal_at_generation(&session_id, generation, bytes).await?;
+            daemon_client
+                .write_terminal_at_generation(&session_id, generation, bytes)
+                .await?;
         }
         TerminalWheelOutcome::ScrollViewport(v_behavior) => {
             if let Err(err) =
@@ -1204,7 +1234,10 @@ pub async fn cmd_native_terminal_paste<R: Runtime>(
         Err(err) => return Err(IpcError::internal(err.to_string())),
     };
     state.emit_scrollbar_if_changed(Some(&app), &session_id);
-    if let Err(err) = daemon_client.write_terminal_at_generation(&session_id, generation, bytes).await {
+    if let Err(err) = daemon_client
+        .write_terminal_at_generation(&session_id, generation, bytes)
+        .await
+    {
         return Err(err);
     }
 
@@ -1312,7 +1345,10 @@ pub async fn cmd_native_terminal_mouse<R: Runtime>(
             Err(err) => return Err(IpcError::internal(err.to_string())),
         };
         if !bytes.is_empty() {
-            if let Err(err) = daemon_client.write_terminal_at_generation(&session_id, generation, bytes).await {
+            if let Err(err) = daemon_client
+                .write_terminal_at_generation(&session_id, generation, bytes)
+                .await
+            {
                 return Err(err);
             }
         }
@@ -1591,8 +1627,17 @@ mod tests {
         let _ = cmd_native_terminal_send_input::<tauri::test::MockRuntime>;
         let source = include_str!("native_terminal.rs");
         for name in ["send_input", "paste", "mouse", "scroll"] {
-            let signature = source.split(&format!("pub async fn cmd_native_terminal_{name}<")).nth(1).unwrap().split(") ->").next().unwrap();
-            assert!(signature.contains("generation: Option<u64>"), "{name} must accept captured generation");
+            let signature = source
+                .split(&format!("pub async fn cmd_native_terminal_{name}<"))
+                .nth(1)
+                .unwrap()
+                .split(") ->")
+                .next()
+                .unwrap();
+            assert!(
+                signature.contains("generation: Option<u64>"),
+                "{name} must accept captured generation"
+            );
         }
     }
 
@@ -1609,27 +1654,34 @@ mod tests {
         dispatch_pty_resizes(receiver, |session, cols, rows| {
             applied.push((session, cols, rows));
             std::future::ready(())
-        }).await;
+        })
+        .await;
 
-        assert_eq!(applied, vec![("left".into(), 120, 40), ("right".into(), 100, 30)]);
+        assert_eq!(
+            applied,
+            vec![("left".into(), 120, 40), ("right".into(), 100, 30)]
+        );
     }
 
     #[test]
     fn deferred_presentation_status_survives_the_ipc_boundary() {
-        let receipt = into_ipc_receipt("deferred".into(), NativeTerminalSurfaceReceipt {
-            presented: false,
-            render_deferred: true,
-            render_suspended: false,
-            cols: 80,
-            rows: 24,
-            rebuilt_rows: 0,
-            reused_rows: 0,
-            cursor_col: 0,
-            cursor_row: 0,
-            cell_width_px: 10,
-            cell_height_px: 20,
-            effective_scale_factor: Some(2.0),
-        });
+        let receipt = into_ipc_receipt(
+            "deferred".into(),
+            NativeTerminalSurfaceReceipt {
+                presented: false,
+                render_deferred: true,
+                render_suspended: false,
+                cols: 80,
+                rows: 24,
+                rebuilt_rows: 0,
+                reused_rows: 0,
+                cursor_col: 0,
+                cursor_row: 0,
+                cell_width_px: 10,
+                cell_height_px: 20,
+                effective_scale_factor: Some(2.0),
+            },
+        );
         let json = serde_json::to_value(&receipt).unwrap();
         assert_eq!(json["renderDeferred"], true);
         assert_eq!(json["presented"], false);
@@ -1644,22 +1696,28 @@ mod tests {
         let mut released = Some(released);
         let applied = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let observed = Arc::clone(&applied);
-        let worker = tokio::spawn(dispatch_pty_resizes(receiver, move |session, cols, rows| {
-            let observed = Arc::clone(&observed);
-            let started = started.take();
-            let released = released.take();
-            async move {
-                observed.lock().push((session, cols, rows));
-                if let Some(started) = started {
-                    started.send(()).unwrap();
+        let worker = tokio::spawn(dispatch_pty_resizes(
+            receiver,
+            move |session, cols, rows| {
+                let observed = Arc::clone(&observed);
+                let started = started.take();
+                let released = released.take();
+                async move {
+                    observed.lock().push((session, cols, rows));
+                    if let Some(started) = started {
+                        started.send(()).unwrap();
+                    }
+                    if let Some(released) = released {
+                        released.await.unwrap();
+                    }
                 }
-                if let Some(released) = released {
-                    released.await.unwrap();
-                }
-            }
-        }));
+            },
+        ));
         sender.send(("left".into(), 80, 24)).unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(5), start).await.unwrap().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), start)
+            .await
+            .unwrap()
+            .unwrap();
         sender.send(("left".into(), 90, 25)).unwrap();
         sender.send(("right".into(), 60, 24)).unwrap();
         sender.send(("left".into(), 120, 40)).unwrap();
@@ -1667,11 +1725,19 @@ mod tests {
         drop(sender);
 
         release.send(()).unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(5), worker).await.unwrap().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), worker)
+            .await
+            .unwrap()
+            .unwrap();
 
-        assert_eq!(*applied.lock(), vec![
-            ("left".into(), 80, 24), ("left".into(), 120, 40), ("right".into(), 100, 30),
-        ]);
+        assert_eq!(
+            *applied.lock(),
+            vec![
+                ("left".into(), 80, 24),
+                ("left".into(), 120, 40),
+                ("right".into(), 100, 30),
+            ]
+        );
     }
 
     #[test]
@@ -1695,10 +1761,19 @@ mod tests {
                     session_id: session_id.into(),
                     bounds,
                 },
-                CellMetrics { width_px: 16, height_px: 32 },
+                CellMetrics {
+                    width_px: 16,
+                    height_px: 32,
+                },
             )
             .expect("stored layout");
-        assert_eq!(state.session_logical_bounds(session_id).unwrap().scale_factor, 2.0);
+        assert_eq!(
+            state
+                .session_logical_bounds(session_id)
+                .unwrap()
+                .scale_factor,
+            2.0
+        );
 
         let app = tauri::test::mock_builder()
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
@@ -1706,7 +1781,9 @@ mod tests {
         let window = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
             .build()
             .unwrap();
-        let receipt = state.get_receipt(&window.as_ref().window(), session_id).expect("session receipt");
+        let receipt = state
+            .get_receipt(&window.as_ref().window(), session_id)
+            .expect("session receipt");
         let json = serde_json::to_value(into_ipc_receipt(session_id.into(), receipt)).unwrap();
         state.teardown();
 
@@ -1723,23 +1800,29 @@ mod tests {
             (true, Some(1.5)),
             (true, Some(2.0)),
         ] {
-            let receipt = into_ipc_receipt("presentation".into(), NativeTerminalSurfaceReceipt {
-                presented,
-                render_deferred: false,
-                render_suspended: false,
-                cols: 80,
-                rows: 24,
-                rebuilt_rows: 0,
-                reused_rows: 0,
-                cursor_col: 0,
-                cursor_row: 0,
-                cell_width_px: 10,
-                cell_height_px: 20,
-                effective_scale_factor,
-            });
+            let receipt = into_ipc_receipt(
+                "presentation".into(),
+                NativeTerminalSurfaceReceipt {
+                    presented,
+                    render_deferred: false,
+                    render_suspended: false,
+                    cols: 80,
+                    rows: 24,
+                    rebuilt_rows: 0,
+                    reused_rows: 0,
+                    cursor_col: 0,
+                    cursor_row: 0,
+                    cell_width_px: 10,
+                    cell_height_px: 20,
+                    effective_scale_factor,
+                },
+            );
             let json = serde_json::to_value(&receipt).unwrap();
             assert_eq!(json["presented"], presented);
-            assert_eq!(json["effectiveScaleFactor"].as_f64(), effective_scale_factor);
+            assert_eq!(
+                json["effectiveScaleFactor"].as_f64(),
+                effective_scale_factor
+            );
             assert_eq!(
                 json.get("effectiveScaleFactor").is_some(),
                 effective_scale_factor.is_some(),

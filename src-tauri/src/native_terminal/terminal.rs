@@ -21,11 +21,10 @@ use super::paste::{
 use super::queries::{
     query_cols, query_cursor_position, query_cursor_state, query_default_background,
     query_default_cursor_color, query_default_foreground, query_is_alternate_screen,
-    query_mouse_tracking_enabled, query_palette, query_rows, query_scrollback_rows,
-    query_title, query_total_rows,
+    query_mouse_tracking_enabled, query_palette, query_rows, query_scrollback_rows, query_title,
+    query_total_rows,
 };
 use super::render_pass::capture_render_snapshot;
-use super::viewport::{query_scrollbar, scroll_viewport, ScrollViewport, ScrollbarState};
 use super::search::search_grid;
 use super::selection::{
     apply_mouse_gesture, clear_selection, create_selection_gesture, line_text_at,
@@ -40,11 +39,12 @@ use super::sys::ffi::{
 use super::sys::types::{
     GhosttyColorRgb, GhosttyString, GhosttyTerminalImpl, GhosttyTerminalModeConfig,
     GHOSTTY_MODE_SYNCHRONIZED_OUTPUT, GHOSTTY_TERMINAL_DATA_MODE,
-    GHOSTTY_TERMINAL_OPT_MODE, GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND,
-    GHOSTTY_TERMINAL_OPT_COLOR_CURSOR, GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND,
-    GHOSTTY_TERMINAL_OPT_COLOR_PALETTE, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
+    GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND, GHOSTTY_TERMINAL_OPT_COLOR_CURSOR,
+    GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND, GHOSTTY_TERMINAL_OPT_COLOR_PALETTE,
+    GHOSTTY_TERMINAL_OPT_MODE, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
     GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, GHOSTTY_TERMINAL_OPT_TITLE,
 };
+use super::viewport::{query_scrollbar, scroll_viewport, ScrollViewport, ScrollbarState};
 use crate::terminal::TerminalThemeColors;
 
 const ONE_DARK_DEFAULTS: [&str; 16] = [
@@ -217,7 +217,10 @@ impl NativeTerminal {
         &mut self,
         now: tokio::time::Instant,
     ) -> Result<bool, NativeTerminalError> {
-        if !self.synchronized_output_deadline.is_some_and(|deadline| now >= deadline) {
+        if !self
+            .synchronized_output_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
             return Ok(false);
         }
         self.finish_synchronized_output()?;
@@ -400,8 +403,12 @@ impl TerminalEngine for NativeTerminal {
         }
         self.context.cols.store(cols, Ordering::Release);
         self.context.rows.store(rows, Ordering::Release);
-        self.context.cell_width.store(cell_width_px, Ordering::Release);
-        self.context.cell_height.store(cell_height_px, Ordering::Release);
+        self.context
+            .cell_width
+            .store(cell_width_px, Ordering::Release);
+        self.context
+            .cell_height
+            .store(cell_height_px, Ordering::Release);
         let synchronized_output = self.synchronized_output_enabled()?;
 
         // SAFETY: Category: Foreign State Mutation.
@@ -482,7 +489,10 @@ impl TerminalEngine for NativeTerminal {
 
     fn render_snapshot(&self) -> Result<RenderSnapshot, NativeTerminalError> {
         let mut snapshot = capture_render_snapshot(self.handle.as_ptr())?;
-        snapshot.images = self.image_cache.borrow_mut().capture(self.handle.as_ptr())?;
+        snapshot.images = self
+            .image_cache
+            .borrow_mut()
+            .capture(self.handle.as_ptr())?;
         Ok(snapshot)
     }
 
@@ -640,8 +650,10 @@ mod tests {
 
         terminal.resize(120, 30, 8, 16).unwrap();
 
-        assert!(terminal.synchronized_output_enabled().unwrap(),
-            "a geometry change must not publish a half-written synchronized frame");
+        assert!(
+            terminal.synchronized_output_enabled().unwrap(),
+            "a geometry change must not publish a half-written synchronized frame"
+        );
         assert_eq!(terminal.synchronized_output_deadline(), deadline);
         terminal.feed_str("\rcomplete\x1b[?2026l").unwrap();
         assert!(!terminal.synchronized_output_enabled().unwrap());
@@ -657,9 +669,9 @@ mod tests {
         let deadline = terminal.synchronized_output_deadline().unwrap();
         terminal.feed_str("more output").unwrap();
         assert_eq!(terminal.synchronized_output_deadline(), Some(deadline));
-        assert!(!terminal.expire_synchronized_output(
-            deadline - std::time::Duration::from_nanos(1)
-        ).unwrap());
+        assert!(!terminal
+            .expire_synchronized_output(deadline - std::time::Duration::from_nanos(1))
+            .unwrap());
 
         assert!(terminal.expire_synchronized_output(deadline).unwrap());
 
@@ -728,10 +740,15 @@ mod tests {
     fn off_viewport_cursor_suppresses_visibility() {
         let mut terminal = NativeTerminal::new(80, 5).expect("create terminal");
         for i in 0..20 {
-            terminal.feed_str(&format!("line {}\r\n", i)).expect("feed lines");
+            terminal
+                .feed_str(&format!("line {}\r\n", i))
+                .expect("feed lines");
         }
         let snapshot_bottom = terminal.render_snapshot().expect("snapshot bottom");
-        assert!(snapshot_bottom.cursor.visible, "cursor at bottom should be visible");
+        assert!(
+            snapshot_bottom.cursor.visible,
+            "cursor at bottom should be visible"
+        );
 
         terminal
             .scroll_viewport(crate::native_terminal::ScrollViewport::Top)
@@ -801,7 +818,9 @@ mod tests {
     fn native_terminal_alternate_screen_detection() {
         let mut terminal = NativeTerminal::new(80, 24).expect("create live native terminal");
         assert!(
-            !terminal.is_alternate_screen().expect("query alternate screen"),
+            !terminal
+                .is_alternate_screen()
+                .expect("query alternate screen"),
             "initial terminal must be primary screen"
         );
 
@@ -810,7 +829,9 @@ mod tests {
             .feed(b"\x1b[?1049h")
             .expect("enter alternate screen");
         assert!(
-            terminal.is_alternate_screen().expect("query alternate screen"),
+            terminal
+                .is_alternate_screen()
+                .expect("query alternate screen"),
             "terminal must report alternate screen active after DECSET 1049"
         );
 
@@ -819,7 +840,9 @@ mod tests {
             .feed(b"\x1b[?1049l")
             .expect("exit alternate screen");
         assert!(
-            !terminal.is_alternate_screen().expect("query alternate screen"),
+            !terminal
+                .is_alternate_screen()
+                .expect("query alternate screen"),
             "terminal must report primary screen active after DECRST 1049"
         );
     }

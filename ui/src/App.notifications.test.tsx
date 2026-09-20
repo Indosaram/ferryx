@@ -110,6 +110,14 @@ const native = {
 vi.mock("./lib/tauri", () => ({
   listenDagRunUpdated: vi.fn(() => Promise.resolve(() => undefined)),
   watchDagProject: vi.fn((projectPath: string) => Promise.resolve({ projectPath, runs: [] })),
+  watchDagPairedProject: vi.fn((workspaceId: string, remotePath: string) =>
+    Promise.resolve({ projectPath: `paired:${workspaceId}:${remotePath}`, runs: [] }),
+  ),
+  watchDagSshProject: vi.fn((workspaceId: string, remotePath: string) =>
+    Promise.resolve({ projectPath: `ssh:${workspaceId}:${remotePath}`, runs: [] }),
+  ),
+  unwatchDagProject: vi.fn(() => Promise.resolve()),
+  discoverDagWatchRoots: vi.fn(() => Promise.resolve([])),
   DEFAULT_WORKSPACE_ID: "default",
   DEFAULT_TERMINAL_FONT_STACK: "monospace",
   getTerminalPreferences: () => Promise.resolve({}),
@@ -591,6 +599,18 @@ describe("App notification coordinator wiring", () => {
     expect(native.playNotificationSound).toHaveBeenCalledTimes(1);
     expect(markTabUnread).toHaveBeenCalledWith("tab-1", undefined);
     expect(markWorktreeUnread).toHaveBeenCalledWith("/repo/main", undefined);
+  });
+
+  it("starts DAG subscriptions when the registered project list is remote-only", async () => {
+    const dagBridge = await import("./lib/tauri");
+    const pairedWorkspace = `daemon:${"a".repeat(64)}`;
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([
+      { workspaceId: "ssh:build:dag", repoRoot: "/srv/dag", target: { kind: "ssh", hostId: "build" } },
+      { workspaceId: pairedWorkspace, repoRoot: "/srv/paired-dag", remoteWorkspaceId: "remote-dag", target: { kind: "pairedDaemon", hostId: "host" } },
+    ]));
+    await act(async () => { render(<App />); });
+    expect(dagBridge.watchDagSshProject).toHaveBeenCalledWith("ssh:build:dag", "/srv/dag");
+    expect(dagBridge.watchDagPairedProject).toHaveBeenCalledWith(pairedWorkspace, "/srv/paired-dag");
   });
 
   it.each([

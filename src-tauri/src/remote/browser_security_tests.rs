@@ -58,7 +58,8 @@ fn test_url_allowlist_schemes_and_credentials() {
         "https://admin@example.com",
     ];
     for url in with_credentials {
-        let err = sanitize_url(url).expect_err(&format!("URL with credentials should be rejected: {url}"));
+        let err = sanitize_url(url)
+            .expect_err(&format!("URL with credentials should be rejected: {url}"));
         assert_eq!(err, SecurityError::EmbeddedCredentials);
     }
 
@@ -75,7 +76,10 @@ fn test_local_filesystem_path_redaction() {
     let unix_user = "Failed to load /Users/alice/Library/Application Support/orca/settings.json";
     let redacted_user = sanitize_public_string(unix_user);
     assert!(!redacted_user.contains("/Users/"));
-    assert_eq!(redacted_user, "Failed to load [redacted-path] Support/orca/settings.json");
+    assert_eq!(
+        redacted_user,
+        "Failed to load [redacted-path] Support/orca/settings.json"
+    );
 
     let unix_home = "Exception in /home/developer/code/project/src/main.rs:42";
     let redacted_home = sanitize_public_string(unix_home);
@@ -115,9 +119,18 @@ fn test_local_filesystem_path_redaction() {
     ];
     for raw in raw_paths {
         let redacted = sanitize_public_string(raw);
-        assert!(!redacted.contains("/Users/"), "Must not leak /Users/: {redacted}");
-        assert!(!redacted.contains("/home/"), "Must not leak /home/: {redacted}");
-        assert!(!redacted.contains("/private/"), "Must not leak /private/: {redacted}");
+        assert!(
+            !redacted.contains("/Users/"),
+            "Must not leak /Users/: {redacted}"
+        );
+        assert!(
+            !redacted.contains("/home/"),
+            "Must not leak /home/: {redacted}"
+        );
+        assert!(
+            !redacted.contains("/private/"),
+            "Must not leak /private/: {redacted}"
+        );
         assert!(!redacted.contains(r"C:\"), r"Must not leak C:\: {redacted}");
         assert!(!redacted.contains(r"\\"), r"Must not leak \\: {redacted}");
         assert!(redacted.contains("[redacted-path]"));
@@ -138,7 +151,10 @@ fn test_local_filesystem_path_redaction() {
     assert_eq!(sanitize_public_string(github_users), github_users);
 
     // Raw paths are redacted
-    assert_eq!(sanitize_public_string("/Users/indo/file.txt"), "[redacted-path]");
+    assert_eq!(
+        sanitize_public_string("/Users/indo/file.txt"),
+        "[redacted-path]"
+    );
     assert_eq!(sanitize_public_string(r"C:\Users\foo"), "[redacted-path]");
 
     // Mixed sentence: URL preserved, local path redacted
@@ -169,10 +185,19 @@ fn test_r5_json_sanitization_preserves_urls_and_redacts_keys_and_paths() {
     let sanitized = sanitize_json_value(input);
 
     assert_eq!(sanitized["[redacted-path]"], "safe value");
-    assert_eq!(sanitized["https://example.com/Users/test"], "url key preserved");
-    assert_eq!(sanitized["nested"]["webUrl"], "http://localhost:3000/home/page");
+    assert_eq!(
+        sanitized["https://example.com/Users/test"],
+        "url key preserved"
+    );
+    assert_eq!(
+        sanitized["nested"]["webUrl"],
+        "http://localhost:3000/home/page"
+    );
     assert_eq!(sanitized["nested"]["winPath"], "[redacted-path]");
-    assert_eq!(sanitized["nested"]["list"][0], "https://example.com/Users/test");
+    assert_eq!(
+        sanitized["nested"]["list"][0],
+        "https://example.com/Users/test"
+    );
     assert_eq!(sanitized["nested"]["list"][1], "[redacted-path]");
 }
 
@@ -230,7 +255,9 @@ fn test_request_deduplication_and_30s_cache_retention() {
     assert!(check1.is_none());
 
     // Record result for request 1
-    let result1 = serde_json::json!({ "success": true, "result": "click_ok" }).to_string().into_bytes();
+    let result1 = serde_json::json!({ "success": true, "result": "click_ok" })
+        .to_string()
+        .into_bytes();
     dedup.record_result(1, result1.clone(), t0);
 
     // 2. Immediate duplicate of sequence 1 at t0 + 10s: returns cached result

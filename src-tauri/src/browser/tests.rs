@@ -300,21 +300,47 @@ fn engine_history_flags_win_over_the_shadow_vector() {
 #[test]
 fn native_history_invalidates_same_url_snapshot() {
     let mgr = BrowserManager::new();
-    let state = mgr.register_session(CreateBrowserRequest {
-        browser_id: None, workspace_id: None, worktree_path: None,
-        url: "https://example.test/same".into(), profile: None,
-        zoom_factor: None, bounds: None, visible: Some(true),
-    }).unwrap();
-    mgr.update_navigation_state(&state.browser_id, None, None, None,
-        Some(true), Some(false), None).unwrap();
-    mgr.record_automation_targets(&state.browser_id, state.generation,
-        vec![BrowserAutomationTarget { reference: "e1".into(), selector: "#old".into() }]).unwrap();
+    let state = mgr
+        .register_session(CreateBrowserRequest {
+            browser_id: None,
+            workspace_id: None,
+            worktree_path: None,
+            url: "https://example.test/same".into(),
+            profile: None,
+            zoom_factor: None,
+            bounds: None,
+            visible: Some(true),
+        })
+        .unwrap();
+    mgr.update_navigation_state(
+        &state.browser_id,
+        None,
+        None,
+        None,
+        Some(true),
+        Some(false),
+        None,
+    )
+    .unwrap();
+    mgr.record_automation_targets(
+        &state.browser_id,
+        state.generation,
+        vec![BrowserAutomationTarget {
+            reference: "e1".into(),
+            selector: "#old".into(),
+        }],
+    )
+    .unwrap();
 
-    let pending = mgr.begin_history_navigation(&state.browser_id, false).unwrap();
+    let pending = mgr
+        .begin_history_navigation(&state.browser_id, false)
+        .unwrap();
 
     assert!(pending.generation > state.generation);
-    assert!(matches!(mgr.automation_target(&state.browser_id, state.generation, "e1"),
-        Err(BrowserError::AutomationSnapshotStale)));
+    assert!(matches!(
+        mgr.automation_target(&state.browser_id, state.generation, "e1"),
+        Err(BrowserError::AutomationSnapshotStale)
+    ));
     assert_eq!(pending.url, state.url);
 }
 

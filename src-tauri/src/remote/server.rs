@@ -9,13 +9,13 @@ use crate::remote::browser_security::sanitize_public_string;
 use crate::remote::browser_ws::BrowserWsSession;
 use crate::remote::mirror::RemoteTerminalMirror;
 use crate::remote::protocol::RemoteGridFrame;
+pub use crate::remote::protocol::RemoteTerminalTabInfo as RemoteTerminalTab;
 use crate::remote::protocol::{
     ClientControlMessage, RemoteActiveDesktopSelection, RemoteCreateWorktreeRequest,
     RemoteDeleteWorktreeRequest, RemoteEventMessage, RemoteProjectInfo,
     RemoteSelectWorkspaceRequest, RemoteSelectionRequestPayload, RemoteTerminalSession,
     RemoteTerminalTabInfo, RemoteWorkspaceState, RemoteWorktreeInfo,
 };
-pub use crate::remote::protocol::RemoteTerminalTabInfo as RemoteTerminalTab;
 use crate::remote::push::{global_push_store, PushSubscriptionInfo};
 use crate::remote::state::{
     RemoteGatewayState, RemoteNetworkMode, REMOTE_ACTIVE_SELECTION_CHANGED_EVENT,
@@ -265,6 +265,7 @@ fn valid_socket_target(target: &str) -> bool {
                     b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b':')
                 })
         })
+        || target == super::dag_api::DAG_SOCKET_TARGET
 }
 
 /// Mints a single-use ticket for one WebSocket upgrade.
@@ -281,10 +282,12 @@ async fn issue_socket_ticket(
         .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".to_string()))?;
     // Authorize with the real device store, so a revoked or unknown bearer cannot
     // trade an unusable token for a working ticket.
-    state
-        .auth_manager
-        .validate_token(&token)
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".to_string()))?;
+    state.auth_manager.validate_token(&token).map_err(|_| {
+        (
+            StatusCode::UNAUTHORIZED,
+            "Invalid or revoked token".to_string(),
+        )
+    })?;
     if !valid_socket_target(&request.target) {
         return Err((StatusCode::BAD_REQUEST, "Unsupported socket target".into()));
     }
@@ -308,7 +311,7 @@ async fn issue_socket_ticket(
 
 /// Redeems a ticket for the device token it was minted from, removing it so the
 /// same ticket cannot authorize a second upgrade.
-fn consume_socket_ticket(
+pub(super) fn consume_socket_ticket(
     state: &RemoteGatewayState,
     ticket: &str,
     target: &str,
@@ -379,12 +382,16 @@ async fn pair_exchange(
                 .into_response(),
         })?;
 
-    Ok(([(header::CACHE_CONTROL, "no-store")], Json(PairExchangeResponse {
-        token,
-        device,
-        machine_id: identity.machine_id,
-        display_name: identity.display_name,
-    })).into_response())
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(PairExchangeResponse {
+            token,
+            device,
+            machine_id: identity.machine_id,
+            display_name: identity.display_name,
+        }),
+    )
+        .into_response())
 }
 
 /// Canonicalize a filesystem path for comparison purposes. When the path itself
@@ -676,7 +683,7 @@ pub(crate) async fn get_active_running_sessions(
     for session_id in state.session_backend.list_sessions().await {
         if let Some(services) = &state.machine_services {
             match services.sessions.machine_only_async(&session_id).await {
-                Ok(false) => {},
+                Ok(false) => {}
                 Ok(true) | Err(_) => continue,
             }
         }
@@ -713,21 +720,40 @@ pub(crate) async fn get_active_running_sessions(
         let workspace_id = derived_ws
             .or(details.workspace_id)
             .or_else(|| selected.and_then(|selection| selection.workspace_id.clone()))
-            .or_else(|| if active.is_none() { Some("default".to_string()) } else { None });
+            .or_else(|| {
+                if active.is_none() {
+                    Some("default".to_string())
+                } else {
+                    None
+                }
+            });
         // Sessions are listed for authenticated remote callers regardless of
         // desktop active selection; `active_selection` only supplies extra
         // label metadata when it matches this session, it never filters.
-        let worktree_label = derived_label.or(details.worktree_label).or_else(|| {
-            selected.and_then(|selection| {
-                selection
-                    .worktree_slug
-                    .clone()
-                    .or_else(|| selection.worktree_label.clone())
+        let worktree_label = derived_label
+            .or(details.worktree_label)
+            .or_else(|| {
+                selected.and_then(|selection| {
+                    selection
+                        .worktree_slug
+                        .clone()
+                        .or_else(|| selection.worktree_label.clone())
+                })
             })
-        }).or_else(|| if active.is_none() { Some("default".to_string()) } else { None });
+            .or_else(|| {
+                if active.is_none() {
+                    Some("default".to_string())
+                } else {
+                    None
+                }
+            });
         sessions.push(RemoteTerminalSession {
             session_id: details.session_id,
-            title: if active.is_none() { Some("Terminal".to_string()) } else { None },
+            title: if active.is_none() {
+                Some("Terminal".to_string())
+            } else {
+                None
+            },
             workspace_id,
             worktree_label,
             running: true,
@@ -739,19 +765,21 @@ pub(crate) async fn get_active_running_sessions(
             if sessions.iter().any(|s| s.session_id == session_id) {
                 continue;
             }
-            let is_running_or_starting = if let Some(session) = state.terminal_service.get_session(&session_id) {
-                matches!(
-                    session.state(),
-                    crate::terminal::PtySessionState::Running | crate::terminal::PtySessionState::Starting
-                )
-            } else if let Some(details) = state.terminal_service.remote().details(&session_id) {
-                matches!(
-                    details.state,
-                    crate::terminal::remote::RemoteConnectionState::Connected
-                )
-            } else {
-                false
-            };
+            let is_running_or_starting =
+                if let Some(session) = state.terminal_service.get_session(&session_id) {
+                    matches!(
+                        session.state(),
+                        crate::terminal::PtySessionState::Running
+                            | crate::terminal::PtySessionState::Starting
+                    )
+                } else if let Some(details) = state.terminal_service.remote().details(&session_id) {
+                    matches!(
+                        details.state,
+                        crate::terminal::remote::RemoteConnectionState::Connected
+                    )
+                } else {
+                    false
+                };
 
             if !is_running_or_starting {
                 continue;
@@ -789,8 +817,8 @@ async fn list_legacy_sessions(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<RemoteTerminalSession>>, (StatusCode, String)> {
-    let token = extract_token(&headers)
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let token =
+        extract_token(&headers).ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let _device = state
         .auth_manager
         .validate_token(&token)
@@ -815,8 +843,8 @@ async fn get_workspace_state(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
 ) -> Result<Json<RemoteWorkspaceState>, (StatusCode, String)> {
-    let token = extract_token(&headers)
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let token =
+        extract_token(&headers).ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let _device = state
         .auth_manager
         .validate_token(&token)
@@ -914,7 +942,9 @@ async fn get_workspace_state(
             }
         } else if backend_sessions.is_empty() && state.terminal_service.list_sessions().is_empty() {
             if let Ok((session_id, _)) = state.terminal_service.spawn_shell(80, 24) {
-                tracing::info!("Auto-spawned default shell session {session_id} for headless remote gateway");
+                tracing::info!(
+                    "Auto-spawned default shell session {session_id} for headless remote gateway"
+                );
                 active_context.session_id = Some(session_id.clone());
                 active_context.terminal_tabs = vec![RemoteTerminalTabInfo {
                     id: session_id,
@@ -971,8 +1001,8 @@ async fn select_workspace(
     headers: HeaderMap,
     Json(payload): Json<RemoteSelectWorkspaceRequest>,
 ) -> Result<Json<RemoteSelectionRequestPayload>, (StatusCode, String)> {
-    let token = extract_token(&headers)
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let token =
+        extract_token(&headers).ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let device = state
         .auth_manager
         .validate_token(&token)
@@ -986,7 +1016,10 @@ async fn select_workspace(
     }
 
     if payload.create_terminal && (payload.tab_id.is_some() || payload.session_id.is_some()) {
-        return Err((StatusCode::BAD_REQUEST, "Terminal creation cannot select an existing terminal".into()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Terminal creation cannot select an existing terminal".into(),
+        ));
     }
 
     let is_ssh = crate::ssh::projects::is_remote(&payload.workspace_id);
@@ -1103,8 +1136,8 @@ fn create_worktree_blocking(
     headers: HeaderMap,
     Json(payload): Json<RemoteCreateWorktreeRequest>,
 ) -> Result<Json<RemoteWorktreeInfo>, (StatusCode, String)> {
-    let token = extract_token(&headers)
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let token =
+        extract_token(&headers).ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let device = state
         .auth_manager
         .validate_token(&token)
@@ -1149,8 +1182,8 @@ fn delete_worktree_blocking(
     headers: HeaderMap,
     Json(payload): Json<RemoteDeleteWorktreeRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let token = extract_token(&headers)
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let token =
+        extract_token(&headers).ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let device = state
         .auth_manager
         .validate_token(&token)
@@ -1178,8 +1211,8 @@ async fn list_devices(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<DeviceInfo>>, (StatusCode, String)> {
-    let token = extract_token(&headers)
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let token =
+        extract_token(&headers).ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let _device = state
         .auth_manager
         .validate_token(&token)
@@ -1193,8 +1226,8 @@ async fn revoke_device(
     headers: HeaderMap,
     AxumPath(device_id): AxumPath<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let token = extract_token(&headers)
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let token =
+        extract_token(&headers).ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let device = state
         .auth_manager
         .validate_token(&token)
@@ -1236,10 +1269,17 @@ async fn ws_events_handler(
         if device.permission != DevicePermission::Control {
             return Err((StatusCode::FORBIDDEN, "MACHINE_ACCESS_REQUIRED".into()));
         }
-        let services = state.machine_services.as_ref().ok_or((StatusCode::SERVICE_UNAVAILABLE, "MACHINE_SERVICE_UNAVAILABLE".into()))?;
+        let services = state.machine_services.as_ref().ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MACHINE_SERVICE_UNAVAILABLE".into(),
+        ))?;
         let receiver = services.workspaces.machine_events.subscribe();
         return Ok(ws.on_upgrade(move |socket| async move {
-            let _ = while_device_authorized(&mut revocation, super::machine_events::serve(socket, state, receiver)).await;
+            let _ = while_device_authorized(
+                &mut revocation,
+                super::machine_events::serve(socket, state, receiver),
+            )
+            .await;
         }));
     }
 
@@ -1324,17 +1364,39 @@ async fn ws_terminal_handler(
         .device_revocation(&device.id)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
     if device.access_scope == DeviceAccessScope::Machine {
-        if let Some(peer) = state.machine_services.as_ref().and_then(|services| services.sessions.router().find_legacy_peer_for_session(&requested_session_id)) {
-            return machine_owner_socket::upgrade(ws, peer, requested_session_id, query, token, revocation).await;
+        if let Some(peer) = state.machine_services.as_ref().and_then(|services| {
+            services
+                .sessions
+                .router()
+                .find_legacy_peer_for_session(&requested_session_id)
+        }) {
+            return machine_owner_socket::upgrade(
+                ws,
+                peer,
+                requested_session_id,
+                query,
+                token,
+                revocation,
+            )
+            .await;
         }
-        return machine_terminal_upgrade(ws, requested_session_id, query, device, revocation, state).await;
+        return machine_terminal_upgrade(
+            ws,
+            requested_session_id,
+            query,
+            device,
+            revocation,
+            state,
+        )
+        .await;
     }
     let session_id = parse_host_scoped_session_id(&requested_session_id)
-        .map(|(_, id)| id.to_string()).unwrap_or(requested_session_id);
+        .map(|(_, id)| id.to_string())
+        .unwrap_or(requested_session_id);
     let render_grid = query.render.as_deref() == Some("grid");
     if let Some(services) = &state.machine_services {
         match services.sessions.machine_only_async(&session_id).await {
-            Ok(false) => {},
+            Ok(false) => {}
             Ok(true) => return Err((StatusCode::FORBIDDEN, "MACHINE_ACCESS_REQUIRED".into())),
             Err(code) => return Err(machine_socket_error(&code)),
         }
@@ -1359,7 +1421,11 @@ async fn ws_terminal_handler(
                 )
             } else {
                 state.terminal_service.list_sessions().contains(&session_id)
-                    || state.session_backend.list_sessions().await.contains(&session_id)
+                    || state
+                        .session_backend
+                        .list_sessions()
+                        .await
+                        .contains(&session_id)
             }
         }
     };
@@ -1386,7 +1452,11 @@ async fn ws_terminal_handler(
             }
         }
     } else if !is_session_valid
-        || state.terminal_service.remote().details(&session_id).is_some()
+        || state
+            .terminal_service
+            .remote()
+            .details(&session_id)
+            .is_some()
     {
         // Local headless sessions remain attachable, but an SSH terminal must
         // first be exposed through the desktop selection before mirror access.
@@ -1430,7 +1500,9 @@ fn machine_socket_error(code: &str) -> (StatusCode, String) {
         "UNAUTHORIZED" => StatusCode::UNAUTHORIZED,
         "MACHINE_ACCESS_REQUIRED" => StatusCode::FORBIDDEN,
         "SESSION_NOT_FOUND" => StatusCode::NOT_FOUND,
-        "CONTROL_CONFLICT" | "STALE_EPOCH" | "SESSION_EXPIRED" | "SESSION_OWNERSHIP_CHANGED" => StatusCode::CONFLICT,
+        "CONTROL_CONFLICT" | "STALE_EPOCH" | "SESSION_EXPIRED" | "SESSION_OWNERSHIP_CHANGED" => {
+            StatusCode::CONFLICT
+        }
         "MACHINE_SERVICE_UNAVAILABLE" | "HOST_UNAVAILABLE" => StatusCode::SERVICE_UNAVAILABLE,
         "MACHINE_OWNER_UNSUPPORTED" => StatusCode::UNPROCESSABLE_ENTITY,
         "TIMEOUT" => StatusCode::GATEWAY_TIMEOUT,
@@ -1440,39 +1512,71 @@ fn machine_socket_error(code: &str) -> (StatusCode, String) {
 }
 
 async fn machine_terminal_upgrade(
-    ws: WebSocketUpgrade, id: String, query: AuthQuery, device: DeviceInfo,
-    mut revoked: tokio::sync::watch::Receiver<bool>, state: Arc<RemoteGatewayState>,
+    ws: WebSocketUpgrade,
+    id: String,
+    query: AuthQuery,
+    device: DeviceInfo,
+    mut revoked: tokio::sync::watch::Receiver<bool>,
+    state: Arc<RemoteGatewayState>,
 ) -> Result<Response, (StatusCode, String)> {
     use crate::daemon::session_service::DaemonSessionService;
-    if device.permission != DevicePermission::Control { return Err(machine_socket_error("MACHINE_ACCESS_REQUIRED")); }
+    if device.permission != DevicePermission::Control {
+        return Err(machine_socket_error("MACHINE_ACCESS_REQUIRED"));
+    }
     // No host-scope stripping, grid negotiation or query-driven geometry in v1.
     if id.contains("::") || query.render.is_some() || query.cols.is_some() || query.rows.is_some() {
         return Err(machine_socket_error("INVALID_REQUEST"));
     }
-    let epoch = query.daemon_epoch.ok_or_else(|| machine_socket_error("STALE_EPOCH"))?;
-    let services = state.machine_services.as_ref().ok_or_else(|| machine_socket_error("MACHINE_SERVICE_UNAVAILABLE"))?;
-    let identity = load_gateway_identity(state.clone()).await.map_err(|_| machine_socket_error("MACHINE_SERVICE_UNAVAILABLE"))?;
-    let target = crate::remote::machine_protocol::RemoteTerminalTarget { machine_id: identity.machine_id, daemon_epoch: epoch, session_id: id };
+    let epoch = query
+        .daemon_epoch
+        .ok_or_else(|| machine_socket_error("STALE_EPOCH"))?;
+    let services = state
+        .machine_services
+        .as_ref()
+        .ok_or_else(|| machine_socket_error("MACHINE_SERVICE_UNAVAILABLE"))?;
+    let identity = load_gateway_identity(state.clone())
+        .await
+        .map_err(|_| machine_socket_error("MACHINE_SERVICE_UNAVAILABLE"))?;
+    let target = crate::remote::machine_protocol::RemoteTerminalTarget {
+        machine_id: identity.machine_id,
+        daemon_epoch: epoch,
+        session_id: id,
+    };
     let admission = async {
         let mut controllers = services.sessions.machine_controllers.lock().await;
         let session = services.sessions.validate_machine_target(&target).await?;
-        let attachment = services.sessions.attach_machine_output(&target.session_id, query.after_sequence.map(|s| s.0))
-            .ok_or("SESSION_NOT_FOUND")?.map_err(|_| "CAPACITY_EXCEEDED")?;
+        let attachment = services
+            .sessions
+            .attach_machine_output(&target.session_id, query.after_sequence.map(|s| s.0))
+            .ok_or("SESSION_NOT_FOUND")?
+            .map_err(|_| "CAPACITY_EXCEEDED")?;
         services.sessions.validate_machine_target(&target).await?;
-        let lease = DaemonSessionService::acquire_machine_controller(&mut controllers, &target.session_id, &device.id)?;
+        let lease = DaemonSessionService::acquire_machine_controller(
+            &mut controllers,
+            &target.session_id,
+            &device.id,
+        )?;
         Ok::<_, String>((session, attachment, lease))
     };
-    let (session, attachment, lease) = while_device_authorized(&mut revoked,
-        tokio::time::timeout(Duration::from_secs(45), admission)).await
-        .ok_or_else(|| machine_socket_error("UNAUTHORIZED"))?
-        .map_err(|_| machine_socket_error("TIMEOUT"))?
-        .map_err(|e| machine_socket_error(&e))?;
-    let response = ws.max_message_size(64 * 1024).max_frame_size(64 * 1024)
-        .max_write_buffer_size(1024 * 1024).write_buffer_size(0)
+    let (session, attachment, lease) = while_device_authorized(
+        &mut revoked,
+        tokio::time::timeout(Duration::from_secs(45), admission),
+    )
+    .await
+    .ok_or_else(|| machine_socket_error("UNAUTHORIZED"))?
+    .map_err(|_| machine_socket_error("TIMEOUT"))?
+    .map_err(|e| machine_socket_error(&e))?;
+    let response = ws
+        .max_message_size(64 * 1024)
+        .max_frame_size(64 * 1024)
+        .max_write_buffer_size(1024 * 1024)
+        .write_buffer_size(0)
         .on_upgrade(move |socket| async move {
             let mut fenced = lease.cancelled.clone();
             let generation = lease.generation;
-            let work = handle_machine_terminal_socket(socket, session, attachment, generation, device, state);
+            let work = handle_machine_terminal_socket(
+                socket, session, attachment, generation, device, state,
+            );
             tokio::select! {
                 biased;
                 _ = revoked.wait_for(|v| *v) => {},
@@ -1486,52 +1590,100 @@ async fn machine_terminal_upgrade(
     Ok(([(header::CACHE_CONTROL, "no-store")], response).into_response())
 }
 
-#[cfg(test)]
-#[path = "machine_input_probe.rs"]
-mod machine_input_probe;
 #[cfg(all(test, unix))]
 #[path = "../../tests/support/machine_input_cancellation.rs"]
 pub(crate) mod machine_input_cancellation_tests;
+#[cfg(test)]
+#[path = "machine_input_probe.rs"]
+mod machine_input_probe;
 
-fn machine_control_message(value: serde_json::Value) -> Message { Message::Text(value.to_string().into()) }
+fn machine_control_message(value: serde_json::Value) -> Message {
+    Message::Text(value.to_string().into())
+}
 
 #[path = "machine_output_writer.rs"]
 mod machine_output_writer;
-use machine_output_writer::{machine_send, machine_control, machine_frame};
+use machine_output_writer::{machine_control, machine_frame, machine_send};
 
 async fn handle_machine_terminal_socket(
-    socket: WebSocket, session: crate::remote::machine_protocol::Session,
+    socket: WebSocket,
+    session: crate::remote::machine_protocol::Session,
     attachment: crate::terminal::output_hub::machine_output::MachineAttachment,
-    generation: u64, device: DeviceInfo, state: Arc<RemoteGatewayState>,
+    generation: u64,
+    device: DeviceInfo,
+    state: Arc<RemoteGatewayState>,
 ) {
-    use crate::remote::terminal_wire::{encode_frame, Metadata, ReplayGap};
     use crate::remote::protocol::MachineTerminalControl;
+    use crate::remote::terminal_wire::{encode_frame, Metadata, ReplayGap};
     use crate::scoped_contracts::Epoch;
     let services = state.machine_services.as_ref().expect("admitted services");
     let target = &session.target;
-    let Some(pty) = services.sessions.machine_pty(&target.session_id) else { return; };
+    let Some(pty) = services.sessions.machine_pty(&target.session_id) else {
+        return;
+    };
     let (mut sender, mut receiver) = socket.split();
-    let crate::terminal::output_hub::machine_output::MachineAttachment { snapshot: charged_snapshot, receiver: mut output } = attachment;
+    let crate::terminal::output_hub::machine_output::MachineAttachment {
+        snapshot: charged_snapshot,
+        receiver: mut output,
+    } = attachment;
     let mut termination = output.termination();
     let snapshot = &charged_snapshot.value;
-    let gap = snapshot.gap.as_ref().map(|g| crate::remote::machine_protocol::ReplayGap {
-        requested_after_sequence: Epoch(g.requested_after_sequence), available_from_sequence: Epoch(g.available_from_sequence) });
+    let gap = snapshot
+        .gap
+        .as_ref()
+        .map(|g| crate::remote::machine_protocol::ReplayGap {
+            requested_after_sequence: Epoch(g.requested_after_sequence),
+            available_from_sequence: Epoch(g.available_from_sequence),
+        });
     let boundary = crate::remote::machine_protocol::Attached::Attached {
-        target: target.clone(), generation: Epoch(generation), cols: session.cols, rows: session.rows,
-        start_sequence: Epoch(snapshot.history_start_sequence.unwrap_or(0)), end_sequence: Epoch(snapshot.history_end_sequence.unwrap_or(0)), replay_gap: gap,
+        target: target.clone(),
+        generation: Epoch(generation),
+        cols: session.cols,
+        rows: session.rows,
+        start_sequence: Epoch(snapshot.history_start_sequence.unwrap_or(0)),
+        end_sequence: Epoch(snapshot.history_end_sequence.unwrap_or(0)),
+        replay_gap: gap,
     };
-    let Ok(boundary) = serde_json::to_string(&boundary) else { return; };
-    let Ok(boundary) = machine_control(Message::Text(boundary.into())) else { return; };
-    if machine_send(&mut sender, boundary, &mut termination).await.is_err() { return; }
-    let replay = |snapshot: &AttachmentSnapshot, reset| encode_frame(Metadata::Replay {
-        start: snapshot.history_start_sequence, end: snapshot.history_end_sequence,
-        gap: snapshot.gap.as_ref().map(|g| ReplayGap { requested_after_sequence: g.requested_after_sequence, available_from_sequence: g.available_from_sequence }),
-    }, &snapshot.history, reset);
+    let Ok(boundary) = serde_json::to_string(&boundary) else {
+        return;
+    };
+    let Ok(boundary) = machine_control(Message::Text(boundary.into())) else {
+        return;
+    };
+    if machine_send(&mut sender, boundary, &mut termination)
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let replay = |snapshot: &AttachmentSnapshot, reset| {
+        encode_frame(
+            Metadata::Replay {
+                start: snapshot.history_start_sequence,
+                end: snapshot.history_end_sequence,
+                gap: snapshot.gap.as_ref().map(|g| ReplayGap {
+                    requested_after_sequence: g.requested_after_sequence,
+                    available_from_sequence: g.available_from_sequence,
+                }),
+            },
+            &snapshot.history,
+            reset,
+        )
+    };
     let mut last = snapshot.history_end_sequence;
     if !snapshot.history.is_empty() || snapshot.gap.is_some() {
-        let Ok(frame) = replay(&snapshot, snapshot.gap.is_some()) else { return; };
-        let Ok(frame) = machine_frame(frame, snapshot.history.len()) else { return; };
-        if machine_send(&mut sender, frame, &mut termination).await.is_err() { return; }
+        let Ok(frame) = replay(&snapshot, snapshot.gap.is_some()) else {
+            return;
+        };
+        let Ok(frame) = machine_frame(frame, snapshot.history.len()) else {
+            return;
+        };
+        if machine_send(&mut sender, frame, &mut termination)
+            .await
+            .is_err()
+        {
+            return;
+        }
     }
     drop(charged_snapshot);
     // Eight queued controls plus one in flight and one being admitted each fit
@@ -1551,20 +1703,54 @@ async fn handle_machine_terminal_socket(
             match next {
                 Ok(charged) => {
                     let chunk = &charged.value;
-                    if services.sessions.validate_machine_target(target).await.is_err() { return; }
-                    if chunk.replay_gap.is_none() && last.is_some_and(|last| chunk.sequence <= last) { continue; }
-                    let Ok(frame) = encode_frame(Metadata::Output { sequence: chunk.sequence,
-                        gap: chunk.replay_gap.as_ref().map(|g| ReplayGap { requested_after_sequence: g.requested_after_sequence, available_from_sequence: g.available_from_sequence }) }, &chunk.bytes, false) else { return; };
-                    let Ok(frame) = machine_frame(frame, chunk.bytes.len()) else { return; };
-                    if machine_send(&mut sender, frame, &mut termination).await.is_err() { return; }
+                    if services
+                        .sessions
+                        .validate_machine_target(target)
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    if chunk.replay_gap.is_none() && last.is_some_and(|last| chunk.sequence <= last)
+                    {
+                        continue;
+                    }
+                    let Ok(frame) = encode_frame(
+                        Metadata::Output {
+                            sequence: chunk.sequence,
+                            gap: chunk.replay_gap.as_ref().map(|g| ReplayGap {
+                                requested_after_sequence: g.requested_after_sequence,
+                                available_from_sequence: g.available_from_sequence,
+                            }),
+                        },
+                        &chunk.bytes,
+                        false,
+                    ) else {
+                        return;
+                    };
+                    let Ok(frame) = machine_frame(frame, chunk.bytes.len()) else {
+                        return;
+                    };
+                    if machine_send(&mut sender, frame, &mut termination)
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
                     last = Some(chunk.sequence);
                     drop(charged);
                 }
-                Err(crate::terminal::output_hub::machine_output::MachineOutputError::Overflow) => return,
+                Err(crate::terminal::output_hub::machine_output::MachineOutputError::Overflow) => {
+                    return
+                }
                 Err(crate::terminal::output_hub::machine_output::MachineOutputError::Closed) => {
                     let status = match pty.state() {
-                        crate::terminal::PtySessionState::Exited { code } => serde_json::json!({"type":"exit","target":target,"exit":{"code":code,"signal":null}}),
-                        _ => serde_json::json!({"type":"status","status":"disconnected","target":target}),
+                        crate::terminal::PtySessionState::Exited { code } => {
+                            serde_json::json!({"type":"exit","target":target,"exit":{"code":code,"signal":null}})
+                        }
+                        _ => {
+                            serde_json::json!({"type":"status","status":"disconnected","target":target})
+                        }
                     };
                     if let Ok(status) = machine_control(machine_control_message(status)) {
                         let _ = machine_send(&mut sender, status, &mut termination).await;
@@ -1577,15 +1763,20 @@ async fn handle_machine_terminal_socket(
     let (input_tx, mut input_rx) = mpsc::channel(if cfg!(test) { 1 } else { 64 });
     let read = async {
         loop {
-            let message = match tokio::time::timeout(Duration::from_secs(60), receiver.next()).await {
+            let message = match tokio::time::timeout(Duration::from_secs(60), receiver.next()).await
+            {
                 Ok(Some(Ok(msg))) => msg,
                 _ => return,
             };
-            if matches!(message, Message::Close(_)) { return; }
+            if matches!(message, Message::Close(_)) {
+                return;
+            }
             // One bounded in-flight frame; all pending input is dropped when
             // either the reader, writer, grant or controller lifetime ends.
             #[cfg(test)]
-            if input_tx.capacity() == 0 { machine_input_probe::queue_full(&target.session_id); }
+            if input_tx.capacity() == 0 {
+                machine_input_probe::queue_full(&target.session_id);
+            }
             // Preserve ordinary bursts with bounded backpressure, but keep one
             // lookahead read live so Close/EOF can cancel a saturated writer.
             // Further data beyond this bounded window ends the socket; it is
@@ -1607,51 +1798,110 @@ async fn handle_machine_terminal_socket(
     };
     let receive = async {
         loop {
-            let Some(message) = input_rx.recv().await else { return; };
-            if matches!(&message, Message::Text(text) if text.len() > 16 * 1024) { return; }
+            let Some(message) = input_rx.recv().await else {
+                return;
+            };
+            if matches!(&message, Message::Text(text) if text.len() > 16 * 1024) {
+                return;
+            }
             let controllers = services.sessions.machine_controllers.lock().await;
-            if controllers.get(&target.session_id).is_none_or(|c| c.device != device.id || c.generation != generation || c.disconnected.lock().is_some()) { return; }
+            if controllers.get(&target.session_id).is_none_or(|c| {
+                c.device != device.id
+                    || c.generation != generation
+                    || c.disconnected.lock().is_some()
+            }) {
+                return;
+            }
             let authority = controllers[&target.session_id].cancelled.subscribe();
             drop(controllers);
-            if services.sessions.validate_machine_target(target).await.is_err() { return; }
-            let operation = async { match message {
-                Message::Binary(bytes) if bytes.len() <= 64 * 1024 => {
-                    let input = pty.write_input_cancellable(&bytes);
-                    #[cfg(test)]
-                    let input = machine_input_probe::observe(&target.session_id, input);
-                    input.await.map_err(|error| error.to_string())
-                }
-                Message::Text(text) if text.len() <= 16 * 1024 => {
-                    match serde_json::from_str::<MachineTerminalControl>(&text) {
-                        Ok(MachineTerminalControl::Resize { generation: supplied, cols, rows }) if supplied.0 == generation && cols > 0 && rows > 0 && cols <= 1000 && rows <= 1000 => state.session_backend.resize(&target.session_id, cols, rows).await,
-                        Ok(MachineTerminalControl::Signal { generation: supplied, signal }) if supplied.0 == generation && signal == "interrupt" => state.session_backend.signal(&target.session_id, TerminalSignal::Interrupt).await,
-                        Ok(MachineTerminalControl::Ping) => {
-                            let control = machine_control(machine_control_message(serde_json::json!({"type":"pong"}))).map_err(|_| "CONTROL_OVERFLOW".to_owned())?;
-                            controls.try_send(control).map_err(|_| "CONTROL_OVERFLOW".to_owned())?;
-                            Ok(())
-                        }
-                        _ => Err("INVALID_CONTROL_OR_GENERATION".into()),
+            if services
+                .sessions
+                .validate_machine_target(target)
+                .await
+                .is_err()
+            {
+                return;
+            }
+            let operation = async {
+                match message {
+                    Message::Binary(bytes) if bytes.len() <= 64 * 1024 => {
+                        let input = pty.write_input_cancellable(&bytes);
+                        #[cfg(test)]
+                        let input = machine_input_probe::observe(&target.session_id, input);
+                        input.await.map_err(|error| error.to_string())
                     }
+                    Message::Text(text) if text.len() <= 16 * 1024 => {
+                        match serde_json::from_str::<MachineTerminalControl>(&text) {
+                            Ok(MachineTerminalControl::Resize {
+                                generation: supplied,
+                                cols,
+                                rows,
+                            }) if supplied.0 == generation
+                                && cols > 0
+                                && rows > 0
+                                && cols <= 1000
+                                && rows <= 1000 =>
+                            {
+                                state
+                                    .session_backend
+                                    .resize(&target.session_id, cols, rows)
+                                    .await
+                            }
+                            Ok(MachineTerminalControl::Signal {
+                                generation: supplied,
+                                signal,
+                            }) if supplied.0 == generation && signal == "interrupt" => {
+                                state
+                                    .session_backend
+                                    .signal(&target.session_id, TerminalSignal::Interrupt)
+                                    .await
+                            }
+                            Ok(MachineTerminalControl::Ping) => {
+                                let control = machine_control(machine_control_message(
+                                    serde_json::json!({"type":"pong"}),
+                                ))
+                                .map_err(|_| "CONTROL_OVERFLOW".to_owned())?;
+                                controls
+                                    .try_send(control)
+                                    .map_err(|_| "CONTROL_OVERFLOW".to_owned())?;
+                                Ok(())
+                            }
+                            _ => Err("INVALID_CONTROL_OR_GENERATION".into()),
+                        }
+                    }
+                    Message::Ping(bytes) => {
+                        let control = machine_control(Message::Pong(bytes))
+                            .map_err(|_| "CONTROL_OVERFLOW".to_owned())?;
+                        controls
+                            .try_send(control)
+                            .map_err(|_| "CONTROL_OVERFLOW".to_owned())?;
+                        Ok(())
+                    }
+                    Message::Pong(_) => Ok(()),
+                    _ => Err("INVALID_CONTROL".into()),
                 }
-                Message::Ping(bytes) => {
-                    let control = machine_control(Message::Pong(bytes)).map_err(|_| "CONTROL_OVERFLOW".to_owned())?;
-                    controls.try_send(control).map_err(|_| "CONTROL_OVERFLOW".to_owned())?; Ok(())
-                }
-                Message::Pong(_) => Ok(()),
-                _ => Err("INVALID_CONTROL".into()),
-            } };
+            };
             tokio::pin!(operation);
             // The per-generation watch read guard covers each IO poll, never
             // an await. Replacement's send_replace takes its write guard, so
             // fencing cannot race a stale IO poll after authority is revoked.
             let result = std::future::poll_fn(|cx| {
                 let cancelled = authority.borrow();
-                if *cancelled { return std::task::Poll::Ready(Err("STALE_GENERATION".into())); }
+                if *cancelled {
+                    return std::task::Poll::Ready(Err("STALE_GENERATION".into()));
+                }
                 std::future::Future::poll(operation.as_mut(), cx)
-            }).await;
+            })
+            .await;
             if let Err(code) = result {
-                let Ok(control) = machine_control(machine_control_message(serde_json::json!({"type":"error","code":code}))) else { return; };
-                if controls.try_send(control).is_err() { return; }
+                let Ok(control) = machine_control(machine_control_message(
+                    serde_json::json!({"type":"error","code":code}),
+                )) else {
+                    return;
+                };
+                if controls.try_send(control).is_err() {
+                    return;
+                }
             }
         }
     };
@@ -1907,9 +2157,7 @@ fn grid_text_message(frame: RemoteGridFrame) -> Message {
 fn enqueue_grid_operation<E>(
     mirror: &Arc<parking_lot::Mutex<RemoteTerminalMirror>>,
     outbound_tx: &mpsc::UnboundedSender<Message>,
-    operation: impl FnOnce(
-        &mut RemoteTerminalMirror,
-    ) -> Result<RemoteGridFrame, E>,
+    operation: impl FnOnce(&mut RemoteTerminalMirror) -> Result<RemoteGridFrame, E>,
 ) -> bool {
     let mut mirror = mirror.lock();
     let frame = match operation(&mut mirror) {
@@ -2393,11 +2641,13 @@ async fn get_terminal_preferences(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
 ) -> Result<Json<crate::terminal::TerminalPreferences>, (StatusCode, String)> {
-    let token = extract_token(&headers)
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let token =
+        extract_token(&headers).ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     crate::ipc::run_blocking(move || {
         Ok((|| {
-            state.auth_manager.validate_token(&token)
+            state
+                .auth_manager
+                .validate_token(&token)
                 .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
             let preferences = crate::terminal::load_terminal_preferences();
             // This legacy display endpoint is not machine execution configuration.
@@ -2406,11 +2656,20 @@ async fn get_terminal_preferences(
                 default_shell: None,
                 ..preferences
             };
-            state.auth_manager.validate_token(&token)
+            state
+                .auth_manager
+                .validate_token(&token)
                 .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
             Ok(Json(remote))
         })())
-    }).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Preferences unavailable".into()))?
+    })
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Preferences unavailable".into(),
+        )
+    })?
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2423,8 +2682,8 @@ async fn push_subscribe(
     headers: HeaderMap,
     Json(payload): Json<PushSubscriptionInfo>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let token = extract_token(&headers)
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let token =
+        extract_token(&headers).ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let _device = state
         .auth_manager
         .validate_token(&token)
@@ -2438,8 +2697,8 @@ async fn push_unsubscribe(
     headers: HeaderMap,
     Json(payload): Json<PushUnsubscribeRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let token = extract_token(&headers)
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let token =
+        extract_token(&headers).ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let _device = state
         .auth_manager
         .validate_token(&token)
@@ -2450,13 +2709,27 @@ async fn push_unsubscribe(
 
 pub(super) fn machine_error(status: StatusCode, code: &str) -> Response {
     use crate::remote::machine_protocol::{ErrorEnvelope, MachineError};
-    (status, [(header::CACHE_CONTROL, "no-store")], Json(ErrorEnvelope {
-        error: MachineError {
-            code: code.into(), message: code.into(),
-            retryable: matches!(code, "TIMEOUT" | "HOST_UNAVAILABLE" | "MACHINE_SERVICE_UNAVAILABLE" | "RATE_LIMITED" | "CAPACITY_EXCEEDED"),
-            request_id: uuid::Uuid::new_v4().to_string(), details: serde_json::Map::new(),
-        },
-    })).into_response()
+    (
+        status,
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(ErrorEnvelope {
+            error: MachineError {
+                code: code.into(),
+                message: code.into(),
+                retryable: matches!(
+                    code,
+                    "TIMEOUT"
+                        | "HOST_UNAVAILABLE"
+                        | "MACHINE_SERVICE_UNAVAILABLE"
+                        | "RATE_LIMITED"
+                        | "CAPACITY_EXCEEDED"
+                ),
+                request_id: uuid::Uuid::new_v4().to_string(),
+                details: serde_json::Map::new(),
+            },
+        }),
+    )
+        .into_response()
 }
 
 pub(super) fn machine_error_with_details(
@@ -2466,23 +2739,38 @@ pub(super) fn machine_error_with_details(
     details: serde_json::Map<String, serde_json::Value>,
 ) -> Response {
     use crate::remote::machine_protocol::{ErrorEnvelope, MachineError};
-    (status, [(header::CACHE_CONTROL, "no-store")], Json(ErrorEnvelope {
-        error: MachineError {
-            code: code.into(),
-            message: message.into(),
-            retryable: matches!(code, "TIMEOUT" | "HOST_UNAVAILABLE" | "MACHINE_SERVICE_UNAVAILABLE" | "RATE_LIMITED" | "CAPACITY_EXCEEDED"),
-            request_id: uuid::Uuid::new_v4().to_string(),
-            details,
-        },
-    })).into_response()
+    (
+        status,
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(ErrorEnvelope {
+            error: MachineError {
+                code: code.into(),
+                message: message.into(),
+                retryable: matches!(
+                    code,
+                    "TIMEOUT"
+                        | "HOST_UNAVAILABLE"
+                        | "MACHINE_SERVICE_UNAVAILABLE"
+                        | "RATE_LIMITED"
+                        | "CAPACITY_EXCEEDED"
+                ),
+                request_id: uuid::Uuid::new_v4().to_string(),
+                details,
+            },
+        }),
+    )
+        .into_response()
 }
 
 pub(super) fn authenticate_machine_request(
     state: &RemoteGatewayState,
     headers: &HeaderMap,
 ) -> Result<DeviceInfo, Response> {
-    let token = extract_token(headers).ok_or_else(|| machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
-    state.auth_manager.validate_token(&token)
+    let token = extract_token(headers)
+        .ok_or_else(|| machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
+    state
+        .auth_manager
+        .validate_token(&token)
         .map_err(|_| machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))
 }
 
@@ -2509,6 +2797,11 @@ async fn get_capabilities(
                 capabilities.push("terminalCreateV1");
                 capabilities.push("terminalStreamV1");
             }
+            // DAG frames are pushed from this machine's own journal watcher, so the
+            // capability is only real when the catalog that resolves roots is readable.
+            if state.machine_services.as_ref().is_some_and(|services| services.workspaces.catalog().is_ok()) {
+                capabilities.push(super::dag_api::DAG_STREAM_CAPABILITY);
+            }
             capabilities
         } else { vec![] },
         "browser": {
@@ -2522,16 +2815,29 @@ async fn get_capabilities(
     }))).into_response())
 }
 
-pub(super) async fn load_gateway_identity(state: Arc<RemoteGatewayState>) -> Result<crate::remote::auth::MachineIdentity, Response> {
+pub(super) async fn load_gateway_identity(
+    state: Arc<RemoteGatewayState>,
+) -> Result<crate::remote::auth::MachineIdentity, Response> {
     crate::ipc::run_blocking(move || {
         #[cfg(test)]
-        if let Some(probe) = state.identity_probe.read().clone() { probe(); }
+        if let Some(probe) = state.identity_probe.read().clone() {
+            probe();
+        }
         let dir = match &state.identity_dir {
             Some(dir) => dir.clone(),
-            None => crate::remote::auth::canonical_identity_dir().map_err(crate::ipc::IpcError::internal)?,
+            None => crate::remote::auth::canonical_identity_dir()
+                .map_err(crate::ipc::IpcError::internal)?,
         };
-        crate::remote::auth::load_or_generate_machine_identity(&dir).map_err(crate::ipc::IpcError::internal)
-    }).await.map_err(|_| machine_error(StatusCode::SERVICE_UNAVAILABLE, "MACHINE_SERVICE_UNAVAILABLE"))
+        crate::remote::auth::load_or_generate_machine_identity(&dir)
+            .map_err(crate::ipc::IpcError::internal)
+    })
+    .await
+    .map_err(|_| {
+        machine_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MACHINE_SERVICE_UNAVAILABLE",
+        )
+    })
 }
 
 async fn list_sessions(
@@ -2543,16 +2849,31 @@ async fn list_sessions(
     let auth_headers = headers.clone();
     // This is an existing legacy route: until a grant selects the machine
     // projection, retain its original missing/invalid-credential response.
-    let device = crate::ipc::run_blocking(move || Ok((|| {
-        let token = extract_token(&auth_headers)
-            .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Missing auth token").into_response())?;
-        auth_state.auth_manager.validate_token(&token)
-            .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token").into_response())
-    })())).await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Session authorization unavailable").into_response())??;
+    let device = crate::ipc::run_blocking(move || {
+        Ok((|| {
+            let token = extract_token(&auth_headers)
+                .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Missing auth token").into_response())?;
+            auth_state
+                .auth_manager
+                .validate_token(&token)
+                .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token").into_response())
+        })())
+    })
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Session authorization unavailable",
+        )
+            .into_response()
+    })??;
     if device.access_scope == DeviceAccessScope::Machine {
         super::session_api::list(State(state), headers, uri).await
     } else {
-        list_legacy_sessions(State(state), headers).await.map(IntoResponse::into_response).map_err(IntoResponse::into_response)
+        list_legacy_sessions(State(state), headers)
+            .await
+            .map(IntoResponse::into_response)
+            .map_err(IntoResponse::into_response)
     }
 }
 
@@ -2560,10 +2881,15 @@ async fn list_sessions(
 // rejection; domain successes and errors pass through unchanged. In particular,
 // do not normalize arbitrary responses from legacy routes in middleware.
 
-pub(super) async fn project_body(request: axum::extract::Request, admission: &super::workspace_api::Admission) -> Result<axum::body::Bytes, Response> {
+pub(super) async fn project_body(
+    request: axum::extract::Request,
+    admission: &super::workspace_api::Admission,
+) -> Result<axum::body::Bytes, Response> {
     use axum::extract::FromRequest;
     let mut revoked = admission.revoked.clone();
-    let deadline = admission.deadline.min(std::time::Instant::now() + Duration::from_secs(10));
+    let deadline = admission
+        .deadline
+        .min(std::time::Instant::now() + Duration::from_secs(10));
     let extracted = tokio::select! {
         biased;
         _ = revoked.wait_for(|v| *v) => return Err(machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED")),
@@ -2571,59 +2897,126 @@ pub(super) async fn project_body(request: axum::extract::Request, admission: &su
     };
     extracted.map_err(|error| {
         let too_large = error.status() == StatusCode::PAYLOAD_TOO_LARGE;
-        if too_large { machine_error(StatusCode::PAYLOAD_TOO_LARGE, "PAYLOAD_TOO_LARGE") }
-        else { machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST") }
+        if too_large {
+            machine_error(StatusCode::PAYLOAD_TOO_LARGE, "PAYLOAD_TOO_LARGE")
+        } else {
+            machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST")
+        }
     })
 }
 
-async fn worktree_mutation_boundary(State(state): State<Arc<RemoteGatewayState>>, headers: HeaderMap, request: axum::extract::Request) -> Result<Response, Response> {
+async fn worktree_mutation_boundary(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+) -> Result<Response, Response> {
     let deadline = std::time::Instant::now() + Duration::from_secs(40);
     let auth_state = state.clone();
     let auth_headers = headers.clone();
-    let permit = super::workspace_api::AUTH_SLOTS.clone().try_acquire_owned().map_err(|_| machine_error(StatusCode::TOO_MANY_REQUESTS, "CAPACITY_EXCEEDED"))?;
-    let device = tokio::time::timeout(Duration::from_secs(10), crate::ipc::run_blocking(move || {
-        let _permit = permit;
-        Ok(authenticate_machine_request(&auth_state, &auth_headers))
-    })).await.map_err(|_| machine_error(StatusCode::GATEWAY_TIMEOUT, "TIMEOUT"))?
-        .map_err(|_| machine_error(StatusCode::SERVICE_UNAVAILABLE, "MACHINE_SERVICE_UNAVAILABLE"))??;
+    let permit = super::workspace_api::AUTH_SLOTS
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| machine_error(StatusCode::TOO_MANY_REQUESTS, "CAPACITY_EXCEEDED"))?;
+    let device = tokio::time::timeout(
+        Duration::from_secs(10),
+        crate::ipc::run_blocking(move || {
+            let _permit = permit;
+            Ok(authenticate_machine_request(&auth_state, &auth_headers))
+        }),
+    )
+    .await
+    .map_err(|_| machine_error(StatusCode::GATEWAY_TIMEOUT, "TIMEOUT"))?
+    .map_err(|_| {
+        machine_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MACHINE_SERVICE_UNAVAILABLE",
+        )
+    })??;
     let delete = request.method() == axum::http::Method::DELETE;
     if device.access_scope == DeviceAccessScope::Machine {
-        let admission = super::workspace_api::admit_until(state.clone(), headers.clone(), true, &uuid::Uuid::new_v4().to_string(), deadline).await?;
+        let admission = super::workspace_api::admit_until(
+            state.clone(),
+            headers.clone(),
+            true,
+            &uuid::Uuid::new_v4().to_string(),
+            deadline,
+        )
+        .await?;
         let body = project_body(request, &admission).await?;
-        return Ok(super::workspace_api::ADMISSION.scope(admission, super::workspace_api::worktrees::mutate_worktree(state, headers, body, delete)).await);
+        return Ok(super::workspace_api::ADMISSION
+            .scope(
+                admission,
+                super::workspace_api::worktrees::mutate_worktree(state, headers, body, delete),
+            )
+            .await);
     }
     use axum::extract::FromRequest;
     if state.machine_services.is_some() {
-        let body = tokio::time::timeout(Duration::from_secs(10), axum::body::Bytes::from_request(request, &())).await
-            .map_err(|_| machine_error(StatusCode::GATEWAY_TIMEOUT, "TIMEOUT"))?
-            .map_err(IntoResponse::into_response)?;
-        return Ok(super::workspace_api::worktrees::legacy(state, headers, body, delete, deadline).await);
+        let body = tokio::time::timeout(
+            Duration::from_secs(10),
+            axum::body::Bytes::from_request(request, &()),
+        )
+        .await
+        .map_err(|_| machine_error(StatusCode::GATEWAY_TIMEOUT, "TIMEOUT"))?
+        .map_err(IntoResponse::into_response)?;
+        return Ok(
+            super::workspace_api::worktrees::legacy(state, headers, body, delete, deadline).await,
+        );
     }
-    let revoked = state.auth_manager.device_revocation(&device.id)
+    let revoked = state
+        .auth_manager
+        .device_revocation(&device.id)
         .map_err(|_| machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
-    let cancelled = super::workspace_api::CancelWork(Arc::new(std::sync::atomic::AtomicBool::new(false)), Arc::new(tokio::sync::Notify::new()));
-    let budget = crate::worktree::git::GitBudget { deadline, revoked, cancelled: cancelled.0.clone(), cancellation: Some(cancelled.1.clone()) };
-    let body = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), axum::body::to_bytes(request.into_body(), super::machine_protocol::MACHINE_JSON_MAX_BYTES)).await
+    let cancelled = super::workspace_api::CancelWork(
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(tokio::sync::Notify::new()),
+    );
+    let budget = crate::worktree::git::GitBudget {
+        deadline,
+        revoked,
+        cancelled: cancelled.0.clone(),
+        cancellation: Some(cancelled.1.clone()),
+    };
+    let body = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        axum::body::to_bytes(
+            request.into_body(),
+            super::machine_protocol::MACHINE_JSON_MAX_BYTES,
+        ),
+    )
+    .await
+    .map_err(|_| machine_error(StatusCode::GATEWAY_TIMEOUT, "TIMEOUT"))?
+    .map_err(|_| machine_error(StatusCode::PAYLOAD_TOO_LARGE, "PAYLOAD_TOO_LARGE"))?;
+    let worker = crate::ipc::run_blocking(move || {
+        Ok(crate::worktree::git::with_git_budget(budget, || {
+            let auth_state = state.clone();
+            let token = extract_token(&headers)
+                .ok_or_else(|| machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
+            let response = if delete {
+                let payload = serde_json::from_slice::<RemoteDeleteWorktreeRequest>(&body)
+                    .map_err(|_| machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST"))?;
+                delete_worktree_blocking(State(state), headers, Json(payload)).into_response()
+            } else {
+                let payload = serde_json::from_slice::<RemoteCreateWorktreeRequest>(&body)
+                    .map_err(|_| machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST"))?;
+                create_worktree_blocking(State(state), headers, Json(payload)).into_response()
+            };
+            auth_state
+                .auth_manager
+                .validate_token(&token)
+                .map_err(|_| machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
+            Ok(response)
+        }))
+    });
+    tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), worker)
+        .await
         .map_err(|_| machine_error(StatusCode::GATEWAY_TIMEOUT, "TIMEOUT"))?
-        .map_err(|_| machine_error(StatusCode::PAYLOAD_TOO_LARGE, "PAYLOAD_TOO_LARGE"))?;
-    let worker = crate::ipc::run_blocking(move || Ok(crate::worktree::git::with_git_budget(budget, || {
-        let auth_state = state.clone();
-        let token = extract_token(&headers).ok_or_else(|| machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
-        let response = if delete {
-            let payload = serde_json::from_slice::<RemoteDeleteWorktreeRequest>(&body)
-                .map_err(|_| machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST"))?;
-            delete_worktree_blocking(State(state), headers, Json(payload)).into_response()
-        } else {
-            let payload = serde_json::from_slice::<RemoteCreateWorktreeRequest>(&body)
-                .map_err(|_| machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST"))?;
-            create_worktree_blocking(State(state), headers, Json(payload)).into_response()
-        };
-        auth_state.auth_manager.validate_token(&token).map_err(|_| machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
-        Ok(response)
-    })));
-    tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), worker).await
-        .map_err(|_| machine_error(StatusCode::GATEWAY_TIMEOUT, "TIMEOUT"))?
-        .map_err(|_| machine_error(StatusCode::SERVICE_UNAVAILABLE, "MACHINE_SERVICE_UNAVAILABLE"))?
+        .map_err(|_| {
+            machine_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "MACHINE_SERVICE_UNAVAILABLE",
+            )
+        })?
 }
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2633,7 +3026,11 @@ struct DesktopWorktreeListQuery {
     workspace_id_snake: Option<String>,
 }
 
-async fn worktree_list_boundary(State(state): State<Arc<RemoteGatewayState>>, headers: HeaderMap, uri: axum::http::Uri) -> Response {
+async fn worktree_list_boundary(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> Response {
     let token = match extract_token(&headers) {
         Some(t) => t,
         None => return machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"),
@@ -2644,13 +3041,20 @@ async fn worktree_list_boundary(State(state): State<Arc<RemoteGatewayState>>, he
     };
 
     if device.access_scope == DeviceAccessScope::Machine && state.machine_services.is_some() {
-        return super::workspace_api::worktrees::read(state, headers, uri.query().map(str::to_owned), false).await;
+        return super::workspace_api::worktrees::read(
+            state,
+            headers,
+            uri.query().map(str::to_owned),
+            false,
+        )
+        .await;
     }
 
-    let axum::extract::Query(q) = match axum::extract::Query::<DesktopWorktreeListQuery>::try_from_uri(&uri) {
-        Ok(q) => q,
-        Err(_) => return machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST"),
-    };
+    let axum::extract::Query(q) =
+        match axum::extract::Query::<DesktopWorktreeListQuery>::try_from_uri(&uri) {
+            Ok(q) => q,
+            Err(_) => return machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST"),
+        };
     let workspace_id = match q.workspace_id.or(q.workspace_id_snake) {
         Some(id) if !id.trim().is_empty() => id,
         _ => return machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST"),
@@ -2659,16 +3063,18 @@ async fn worktree_list_boundary(State(state): State<Arc<RemoteGatewayState>>, he
     if let Ok(manager) = state.workspace_registry.manager(&workspace_id) {
         let manager_clone = manager.clone();
         let ws_id = workspace_id.clone();
-        let rows_result: Result<Vec<crate::worktree::Worktree>, crate::ipc::IpcError> = crate::ipc::run_blocking(move || {
-            manager.list_worktrees().map_err(crate::ipc::IpcError::from)
-        })
-        .await;
+        let rows_result: Result<Vec<crate::worktree::Worktree>, crate::ipc::IpcError> =
+            crate::ipc::run_blocking(move || {
+                manager.list_worktrees().map_err(crate::ipc::IpcError::from)
+            })
+            .await;
 
         let rows = match rows_result {
             Ok(rows) => rows,
             Err(ipc_err) => {
                 let status_code = match ipc_err.code {
-                    crate::ipc::IpcErrorCode::WorkspaceNotFound | crate::ipc::IpcErrorCode::WorktreeNotFound => StatusCode::NOT_FOUND,
+                    crate::ipc::IpcErrorCode::WorkspaceNotFound
+                    | crate::ipc::IpcErrorCode::WorktreeNotFound => StatusCode::NOT_FOUND,
                     _ => StatusCode::INTERNAL_SERVER_ERROR,
                 };
                 let mut details = serde_json::Map::new();
@@ -2729,7 +3135,10 @@ async fn worktree_list_boundary(State(state): State<Arc<RemoteGatewayState>>, he
 
     if crate::ssh::projects::is_remote(&workspace_id) {
         if let Ok(ssh_projects) = super::ssh::projects(&state).await {
-            if let Some(project) = ssh_projects.into_iter().find(|p| p.workspace_id == workspace_id) {
+            if let Some(project) = ssh_projects
+                .into_iter()
+                .find(|p| p.workspace_id == workspace_id)
+            {
                 let label = super::ssh::label(&project);
                 let worktrees = vec![crate::remote::machine_protocol::Worktree {
                     workspace_id: workspace_id.clone(),
@@ -2759,30 +3168,90 @@ async fn worktree_list_boundary(State(state): State<Arc<RemoteGatewayState>>, he
 
     machine_error(StatusCode::NOT_FOUND, "PROJECT_NOT_FOUND")
 }
-async fn worktree_status_boundary(State(state): State<Arc<RemoteGatewayState>>, headers: HeaderMap, uri: axum::http::Uri) -> Response {
-    super::workspace_api::worktrees::read(state, headers, uri.query().map(str::to_owned), true).await
+async fn worktree_status_boundary(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> Response {
+    super::workspace_api::worktrees::read(state, headers, uri.query().map(str::to_owned), true)
+        .await
 }
 
-async fn register_project_boundary(State(state): State<Arc<RemoteGatewayState>>, headers: HeaderMap, request: axum::extract::Request) -> Result<Response, Response> {
-    let admission = super::workspace_api::admit(state.clone(), headers.clone(), true, &uuid::Uuid::new_v4().to_string()).await?;
+async fn register_project_boundary(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+) -> Result<Response, Response> {
+    let admission = super::workspace_api::admit(
+        state.clone(),
+        headers.clone(),
+        true,
+        &uuid::Uuid::new_v4().to_string(),
+    )
+    .await?;
     #[cfg(test)]
-    if let Some(probe) = state.machine_services.as_ref().expect("admitted").workspaces.transaction_probe.read().clone() { probe("bodyEntry"); }
+    if let Some(probe) = state
+        .machine_services
+        .as_ref()
+        .expect("admitted")
+        .workspaces
+        .transaction_probe
+        .read()
+        .clone()
+    {
+        probe("bodyEntry");
+    }
     let body = project_body(request, &admission).await?;
-    Ok(super::workspace_api::ADMISSION.scope(admission, super::workspace_api::register(State(state), headers, body)).await)
+    Ok(super::workspace_api::ADMISSION
+        .scope(
+            admission,
+            super::workspace_api::register(State(state), headers, body),
+        )
+        .await)
 }
 
-async fn unregister_project_boundary(State(state): State<Arc<RemoteGatewayState>>, path: Result<AxumPath<String>, axum::extract::rejection::PathRejection>, headers: HeaderMap, request: axum::extract::Request) -> Result<Response, Response> {
-    let admission = super::workspace_api::admit(state.clone(), headers.clone(), true, &uuid::Uuid::new_v4().to_string()).await?;
+async fn unregister_project_boundary(
+    State(state): State<Arc<RemoteGatewayState>>,
+    path: Result<AxumPath<String>, axum::extract::rejection::PathRejection>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+) -> Result<Response, Response> {
+    let admission = super::workspace_api::admit(
+        state.clone(),
+        headers.clone(),
+        true,
+        &uuid::Uuid::new_v4().to_string(),
+    )
+    .await?;
     let path = path.map_err(|_| machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST"))?;
     let body = project_body(request, &admission).await?;
-    Ok(super::workspace_api::ADMISSION.scope(admission, super::workspace_api::unregister(State(state), path, headers, body)).await)
+    Ok(super::workspace_api::ADMISSION
+        .scope(
+            admission,
+            super::workspace_api::unregister(State(state), path, headers, body),
+        )
+        .await)
 }
 
-async fn operation_boundary(State(state): State<Arc<RemoteGatewayState>>, path: Result<AxumPath<String>, axum::extract::rejection::PathRejection>, headers: HeaderMap) -> Result<Response, Response> {
-    let id = path.as_ref().ok().map(|p| p.0.clone()).filter(|id| uuid::Uuid::parse_str(id).is_ok()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+async fn operation_boundary(
+    State(state): State<Arc<RemoteGatewayState>>,
+    path: Result<AxumPath<String>, axum::extract::rejection::PathRejection>,
+    headers: HeaderMap,
+) -> Result<Response, Response> {
+    let id = path
+        .as_ref()
+        .ok()
+        .map(|p| p.0.clone())
+        .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let admission = super::workspace_api::admit(state.clone(), headers.clone(), false, &id).await?;
     let path = path.map_err(|_| machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST"))?;
-    Ok(super::workspace_api::ADMISSION.scope(admission, super::workspace_api::operation(State(state), path, headers)).await)
+    Ok(super::workspace_api::ADMISSION
+        .scope(
+            admission,
+            super::workspace_api::operation(State(state), path, headers),
+        )
+        .await)
 }
 
 async fn paste_upload_boundary(
@@ -2799,8 +3268,11 @@ async fn paste_upload_boundary(
     .await?;
     let body = project_body(request, &admission).await?;
     let req: super::machine_protocol::PasteUploadChunkRequest =
-        super::machine_protocol::decode_json(&body, super::machine_protocol::MACHINE_JSON_MAX_BYTES)
-            .map_err(|_| machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST"))?;
+        super::machine_protocol::decode_json(
+            &body,
+            super::machine_protocol::MACHINE_JSON_MAX_BYTES,
+        )
+        .map_err(|_| machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST"))?;
 
     use base64::Engine;
     let chunk_bytes = base64::engine::general_purpose::STANDARD
@@ -2853,8 +3325,13 @@ fn derive_desktop_scope(state: &RemoteGatewayState) -> Option<DesktopScope> {
 /// The shared inventory the current desktop scope authorizes, as browser IDs.
 async fn authorized_browser_inventory(
     state: &RemoteGatewayState,
-) -> Result<(DesktopScope, Vec<super::browser_backend::RemoteBrowserSessionSummary>), RemoteBrowserError>
-{
+) -> Result<
+    (
+        DesktopScope,
+        Vec<super::browser_backend::RemoteBrowserSessionSummary>,
+    ),
+    RemoteBrowserError,
+> {
     let Some(scope) = derive_desktop_scope(state) else {
         return Err(RemoteBrowserError::Forbidden(
             "No desktop browser sharing scope is active".into(),
@@ -2947,8 +3424,8 @@ async fn list_browser_sessions(
     headers: HeaderMap,
     Query(_query): Query<BrowserSessionsQuery>,
 ) -> Result<Response, (StatusCode, String)> {
-    let token = extract_token(&headers)
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let token =
+        extract_token(&headers).ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let _device = state
         .auth_manager
         .validate_token(&token)
@@ -2982,8 +3459,8 @@ async fn identify_browser_session(
     headers: HeaderMap,
     Query(_query): Query<BrowserSessionsQuery>,
 ) -> Result<Response, (StatusCode, String)> {
-    let token = extract_token(&headers)
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let token =
+        extract_token(&headers).ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
     let _device = state
         .auth_manager
         .validate_token(&token)
@@ -3107,7 +3584,10 @@ async fn run_browser_ws_session(
     admission.ensure_connected_remote_service();
 
     let backend_caps = backend.capabilities().await;
-    let desktop_epoch_str = state.daemon_epoch.load(std::sync::atomic::Ordering::SeqCst).to_string();
+    let desktop_epoch_str = state
+        .daemon_epoch
+        .load(std::sync::atomic::Ordering::SeqCst)
+        .to_string();
     let default_scope = crate::remote::browser_backend::DesktopScope {
         workspace_id: "".into(),
         worktree_slug: "".into(),
@@ -3439,13 +3919,18 @@ async fn run_browser_ws_session(
     drop(server_msg_tx);
     drop(raw_msg_tx);
     const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
-    if tokio::time::timeout(DRAIN_TIMEOUT, &mut writer_task).await.is_err() {
+    if tokio::time::timeout(DRAIN_TIMEOUT, &mut writer_task)
+        .await
+        .is_err()
+    {
         writer_task.abort();
     }
 }
 
 async fn remote_fallback(method: axum::http::Method, uri: axum::http::Uri) -> Response {
-    if uri.path().starts_with("/api/") { return machine_error(StatusCode::NOT_FOUND, "NOT_FOUND"); }
+    if uri.path().starts_with("/api/") {
+        return machine_error(StatusCode::NOT_FOUND, "NOT_FOUND");
+    }
     if method != axum::http::Method::GET && method != axum::http::Method::HEAD {
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
     }
@@ -3465,14 +3950,48 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
     Router::new()
         .route("/api/v1/health", get(health_check))
         .route("/api/v1/capabilities", get(get_capabilities))
-        .route("/api/v1/fs/directories", get(super::filesystem::directories))
+        .route(
+            "/api/v1/fs/directories",
+            get(super::filesystem::directories),
+        )
         .route("/api/v1/pair/exchange", post(pair_exchange))
-        .route("/api/v1/sessions", get(list_sessions).post(super::session_api::create).layer(axum::extract::DefaultBodyLimit::max(super::machine_protocol::MACHINE_JSON_MAX_BYTES)))
-        .route("/api/v1/sessions/{sessionId}", get(super::session_api::detail).delete(super::session_api::close).layer(axum::extract::DefaultBodyLimit::max(super::machine_protocol::MACHINE_JSON_MAX_BYTES)))
+        .route(
+            "/api/v1/sessions",
+            get(list_sessions).post(super::session_api::create).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    super::machine_protocol::MACHINE_JSON_MAX_BYTES,
+                ),
+            ),
+        )
+        .route(
+            "/api/v1/sessions/{sessionId}",
+            get(super::session_api::detail)
+                .delete(super::session_api::close)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    super::machine_protocol::MACHINE_JSON_MAX_BYTES,
+                )),
+        )
         .route("/api/v1/workspace/state", get(get_workspace_state))
-        .route("/api/v1/workspace/projects", get(super::workspace_api::list).post(register_project_boundary).layer(axum::extract::DefaultBodyLimit::max(super::machine_protocol::MACHINE_JSON_MAX_BYTES)))
-        .route("/api/v1/workspace/projects/{workspaceId}", axum::routing::delete(unregister_project_boundary).layer(axum::extract::DefaultBodyLimit::max(super::machine_protocol::MACHINE_JSON_MAX_BYTES)))
-        .route("/api/v1/workspace/operations/{requestId}", get(operation_boundary))
+        .route(
+            "/api/v1/workspace/projects",
+            get(super::workspace_api::list)
+                .post(register_project_boundary)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    super::machine_protocol::MACHINE_JSON_MAX_BYTES,
+                )),
+        )
+        .route(
+            "/api/v1/workspace/projects/{workspaceId}",
+            axum::routing::delete(unregister_project_boundary).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    super::machine_protocol::MACHINE_JSON_MAX_BYTES,
+                ),
+            ),
+        )
+        .route(
+            "/api/v1/workspace/operations/{requestId}",
+            get(operation_boundary),
+        )
         .route(
             "/api/v1/workspace/paste-upload",
             post(paste_upload_boundary).layer(axum::extract::DefaultBodyLimit::max(
@@ -3487,9 +4006,17 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         )
         .route(
             "/api/v1/workspace/worktrees",
-            get(worktree_list_boundary).post(worktree_mutation_boundary).delete(worktree_mutation_boundary).layer(axum::extract::DefaultBodyLimit::max(super::machine_protocol::MACHINE_JSON_MAX_BYTES)),
+            get(worktree_list_boundary)
+                .post(worktree_mutation_boundary)
+                .delete(worktree_mutation_boundary)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    super::machine_protocol::MACHINE_JSON_MAX_BYTES,
+                )),
         )
-        .route("/api/v1/workspace/worktrees/status", get(worktree_status_boundary))
+        .route(
+            "/api/v1/workspace/worktrees/status",
+            get(worktree_status_boundary),
+        )
         .route("/api/v1/devices", get(list_devices))
         .route("/api/v1/devices/{id}/revoke", post(revoke_device))
         .route("/api/v1/socket-ticket", post(issue_socket_ticket))
@@ -3498,12 +4025,18 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route("/api/v1/browser/sessions", get(list_browser_sessions))
         .route("/api/v1/browser/identify", get(identify_browser_session))
         .route("/api/v1/browser/{browserId}", get(ws_browser_handler))
+        .route(
+            "/api/v1/workspace/dag",
+            get(super::dag_api::ws_dag_handler),
+        )
         .route("/api/push/subscribe", post(push_subscribe))
         .route("/api/push/unsubscribe", post(push_unsubscribe))
         .fallback(remote_fallback)
         .method_not_allowed_fallback(remote_method_not_allowed)
         .layer(cors)
-        .layer(axum::Extension(Arc::new(super::filesystem::BrowseLimits::default())))
+        .layer(axum::Extension(Arc::new(
+            super::filesystem::BrowseLimits::default(),
+        )))
         .with_state(state)
 }
 
@@ -3687,8 +4220,11 @@ pub async fn start_remote_server_with_resolver_and_insecure_opt_in(
         .ok()
         .filter(|token| !token.trim().is_empty());
     let relay_identity = if config.mode == RemoteNetworkMode::Relay {
-        Some(load_gateway_identity(Arc::clone(&state)).await
-            .map_err(|_| "Machine identity unavailable".to_string())?)
+        Some(
+            load_gateway_identity(Arc::clone(&state))
+                .await
+                .map_err(|_| "Machine identity unavailable".to_string())?,
+        )
     } else {
         None
     };
@@ -3793,7 +4329,9 @@ pub async fn start_remote_server_with_resolver_and_insecure_opt_in(
                 ),
                 None => crate::remote::relay_client::RelayClient::with_identity(
                     url,
-                    relay_identity.clone().expect("relay identity loaded before binding"),
+                    relay_identity
+                        .clone()
+                        .expect("relay identity loaded before binding"),
                     primary_local_addr.to_string(),
                 ),
             };
@@ -3842,7 +4380,8 @@ pub async fn start_remote_server_strict_with_resolver(
 }
 
 #[cfg(test)]
-pub(crate) static DIRECT_GATE_TEST_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(crate) static DIRECT_GATE_TEST_MUTEX: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
 
 #[cfg(test)]
 #[path = "p19_insecure_direct_tests.rs"]
@@ -3869,34 +4408,53 @@ mod tests {
         use futures_util::FutureExt;
         let root = tempfile::tempdir().unwrap();
         let server = crate::daemon::server::DaemonServer::new_with_paths(
-            Some(root.path().join("data/config")), Some(root.path().join("data/auth")),
+            Some(root.path().join("data/config")),
+            Some(root.path().join("data/auth")),
         );
         let state = server.remote_state().clone();
         let mut grants = Vec::new();
         for scope in [DeviceAccessScope::Machine, DeviceAccessScope::Mirror] {
-            let pin = state.auth_manager.create_scoped_pairing_code(DevicePermission::Control, scope).unwrap();
-            grants.push(state.auth_manager.exchange_pairing_code(&pin, "boundary").unwrap());
+            let pin = state
+                .auth_manager
+                .create_scoped_pairing_code(DevicePermission::Control, scope)
+                .unwrap();
+            grants.push(
+                state
+                    .auth_manager
+                    .exchange_pairing_code(&pin, "boundary")
+                    .unwrap(),
+            );
         }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let mut task = tokio::spawn(async move {
             // Inject complete bodies ahead of the real router, without TCP upload races.
-            let router = create_remote_router(state).layer(axum::middleware::from_fn(|mut request: axum::extract::Request, next: axum::middleware::Next| async move {
-                if let Some(size) = request.headers_mut().remove("x-r3-body-size") {
-                    let size = size.to_str().unwrap().parse::<usize>().unwrap();
-                    assert!(matches!(size, 65_537 | 2_097_153));
-                    request.headers_mut().remove(header::CONTENT_LENGTH);
-                    let bytes = axum::body::Bytes::from(vec![b' '; size]);
-                    *request.body_mut() = if request.headers_mut().remove("x-r3-stream").is_some() {
-                        axum::body::Body::from_stream(futures_util::stream::once(async move { Ok::<_, std::convert::Infallible>(bytes) }))
-                    } else {
-                        axum::body::Body::from(bytes)
-                    };
-                }
-                next.run(request).await
-            }));
-            axum::serve(listener, router).with_graceful_shutdown(async { let _ = stopped.await; }).await.unwrap();
+            let router = create_remote_router(state).layer(axum::middleware::from_fn(
+                |mut request: axum::extract::Request, next: axum::middleware::Next| async move {
+                    if let Some(size) = request.headers_mut().remove("x-r3-body-size") {
+                        let size = size.to_str().unwrap().parse::<usize>().unwrap();
+                        assert!(matches!(size, 65_537 | 2_097_153));
+                        request.headers_mut().remove(header::CONTENT_LENGTH);
+                        let bytes = axum::body::Bytes::from(vec![b' '; size]);
+                        *request.body_mut() =
+                            if request.headers_mut().remove("x-r3-stream").is_some() {
+                                axum::body::Body::from_stream(futures_util::stream::once(
+                                    async move { Ok::<_, std::convert::Infallible>(bytes) },
+                                ))
+                            } else {
+                                axum::body::Body::from(bytes)
+                            };
+                    }
+                    next.run(request).await
+                },
+            ));
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async {
+                    let _ = stopped.await;
+                })
+                .await
+                .unwrap();
         });
         let result = std::panic::AssertUnwindSafe(async {
             let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(10)).build().unwrap();
@@ -3986,12 +4544,21 @@ mod tests {
             assert!(failures.is_empty(), "boundary failures: {failures:?}");
         }).catch_unwind().await;
         stop.send(()).unwrap();
-        if tokio::time::timeout(Duration::from_secs(10), &mut task).await.is_err() { task.abort(); let _ = task.await; panic!("boundary listener shutdown timed out"); }
+        if tokio::time::timeout(Duration::from_secs(10), &mut task)
+            .await
+            .is_err()
+        {
+            task.abort();
+            let _ = task.await;
+            panic!("boundary listener shutdown timed out");
+        }
         assert!(tokio::net::TcpStream::connect(addr).await.is_err());
         drop(server);
         root.close().unwrap();
         println!("R3 CLEANUP listener_joined=true connection_refused=true private_root_removed=true no_pty=true");
-        if let Err(panic) = result { std::panic::resume_unwind(panic); }
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
     }
     #[cfg(not(feature = "native-terminal"))]
     use std::time::Duration;
@@ -4005,10 +4572,15 @@ mod tests {
         let request: PairExchangeRequest = serde_json::from_value(serde_json::json!({
             "code": code, "deviceName": "forged desktop", "installationId": "attacker",
             "accessScope": "machine", "permission": "control", "clientType": "desktop"
-        })).unwrap();
-        let (_, device) = auth.exchange_pairing_code_with_installation(
-            &request.code, &request.device_name, request.installation_id.as_deref(),
-        ).unwrap();
+        }))
+        .unwrap();
+        let (_, device) = auth
+            .exchange_pairing_code_with_installation(
+                &request.code,
+                &request.device_name,
+                request.installation_id.as_deref(),
+            )
+            .unwrap();
         assert_eq!(device.access_scope, DeviceAccessScope::Mirror);
     }
 
@@ -4024,7 +4596,9 @@ mod tests {
         token: Option<&str>,
     ) -> (StatusCode, tokio::net::TcpStream) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let mut stream = tokio::net::TcpStream::connect(addr).await.expect("tcp connect");
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("tcp connect");
         let auth = token
             .map(|t| format!("Authorization: Bearer {t}\r\n"))
             .unwrap_or_default();
@@ -4082,12 +4656,14 @@ mod tests {
             .exchange_pairing_code(&pin, "s5-device")
             .unwrap();
         let test_backend = Arc::new(crate::remote::browser_backend::InProcessTestBackend::new());
-        test_backend.sessions.lock().await.push(crate::remote::browser_backend::RemoteBrowserSessionSummary {
-            browser_id: "b1".into(),
-            title: Some("B1".into()),
-            url: Some("https://example.com".into()),
-            visible: true,
-        });
+        test_backend.sessions.lock().await.push(
+            crate::remote::browser_backend::RemoteBrowserSessionSummary {
+                browser_id: "b1".into(),
+                title: Some("B1".into()),
+                url: Some("https://example.com".into()),
+                visible: true,
+            },
+        );
         state.set_browser_backend(test_backend.clone());
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -4096,7 +4672,9 @@ mod tests {
         let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
         let server_task = tokio::spawn(async move {
             axum::serve(listener, router)
-                .with_graceful_shutdown(async { let _ = stop_rx.await; })
+                .with_graceful_shutdown(async {
+                    let _ = stop_rx.await;
+                })
                 .await
                 .unwrap();
         });
@@ -4121,7 +4699,11 @@ mod tests {
         // 2. (a) Valid single-use ticket connects and upgrades with 101 Switching Protocols + BrowserHello
         let path_with_ticket = format!("/api/v1/browser/b1?ticket={ticket}");
         let (status, mut stream) = raw_ws_handshake(addr, &path_with_ticket, None).await;
-        assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS, "valid ticket must succeed with 101");
+        assert_eq!(
+            status,
+            StatusCode::SWITCHING_PROTOCOLS,
+            "valid ticket must succeed with 101"
+        );
         let hello_msg = read_ws_text_frame(&mut stream).await;
         let hello_json: serde_json::Value = serde_json::from_str(&hello_msg).unwrap();
         assert_eq!(hello_json["type"], "browserHello");
@@ -4129,19 +4711,34 @@ mod tests {
 
         // 3. (b) Replay of same ticket must be rejected (single-use)
         let (replayed_status, _) = raw_ws_handshake(addr, &path_with_ticket, None).await;
-        assert_eq!(replayed_status, StatusCode::UNAUTHORIZED, "replayed single-use ticket must be rejected with 401");
+        assert_eq!(
+            replayed_status,
+            StatusCode::UNAUTHORIZED,
+            "replayed single-use ticket must be rejected with 401"
+        );
 
         // 4. Connect without ticket or credentials must be rejected
         let (no_auth_status, _) = raw_ws_handshake(addr, "/api/v1/browser/b1", None).await;
-        assert_eq!(no_auth_status, StatusCode::UNAUTHORIZED, "unauthenticated connect must be rejected with 401");
+        assert_eq!(
+            no_auth_status,
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated connect must be rejected with 401"
+        );
 
         // 5. Connect with invalid ticket must be rejected
-        let (fake_ticket_status, _) = raw_ws_handshake(addr, "/api/v1/browser/b1?ticket=fake-ticket-123", None).await;
-        assert_eq!(fake_ticket_status, StatusCode::UNAUTHORIZED, "invalid ticket must be rejected with 401");
+        let (fake_ticket_status, _) =
+            raw_ws_handshake(addr, "/api/v1/browser/b1?ticket=fake-ticket-123", None).await;
+        assert_eq!(
+            fake_ticket_status,
+            StatusCode::UNAUTHORIZED,
+            "invalid ticket must be rejected with 401"
+        );
 
         // 6. Direct HTTP listing when backend is active
         let list_resp = client
-            .get(format!("http://{addr}/api/v1/browser/sessions?workspaceId=ws1&worktreeSlug=main"))
+            .get(format!(
+                "http://{addr}/api/v1/browser/sessions?workspaceId=ws1&worktreeSlug=main"
+            ))
             .header("Authorization", format!("Bearer {token}"))
             .send()
             .await
@@ -4149,16 +4746,24 @@ mod tests {
         assert_eq!(list_resp.status(), reqwest::StatusCode::OK);
 
         // 7. When GUI exits: browsers become unavailable (UnavailableBrowserBackend)
-        state.set_browser_backend(Arc::new(crate::remote::browser_backend::UnavailableBrowserBackend));
+        state.set_browser_backend(Arc::new(
+            crate::remote::browser_backend::UnavailableBrowserBackend,
+        ));
         state.bump_browser_service_epoch();
 
         let list_unavail = client
-            .get(format!("http://{addr}/api/v1/browser/sessions?workspaceId=ws1&worktreeSlug=main"))
+            .get(format!(
+                "http://{addr}/api/v1/browser/sessions?workspaceId=ws1&worktreeSlug=main"
+            ))
             .header("Authorization", format!("Bearer {token}"))
             .send()
             .await
             .unwrap();
-        assert_eq!(list_unavail.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE, "unavailable backend must return 503");
+        assert_eq!(
+            list_unavail.status(),
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable backend must return 503"
+        );
 
         let _ = stop_tx.send(());
         let _ = server_task.await;
@@ -4200,19 +4805,24 @@ mod tests {
             self.viewer_subs.load(std::sync::atomic::Ordering::SeqCst)
         }
 
-        fn matching(&self, scope: &DesktopScope) -> Vec<crate::remote::browser_backend::RemoteBrowserSessionSummary> {
+        fn matching(
+            &self,
+            scope: &DesktopScope,
+        ) -> Vec<crate::remote::browser_backend::RemoteBrowserSessionSummary> {
             let title = self.title_override.lock().unwrap().clone();
             self.inventory
                 .lock()
                 .unwrap()
                 .iter()
                 .filter(|(_, ws, slug)| ws == &scope.workspace_id && slug == &scope.worktree_slug)
-                .map(|(id, _, _)| crate::remote::browser_backend::RemoteBrowserSessionSummary {
-                    browser_id: id.clone(),
-                    title: title.clone().or_else(|| Some(format!("title-{id}"))),
-                    url: Some("https://example.com/page".into()),
-                    visible: true,
-                })
+                .map(
+                    |(id, _, _)| crate::remote::browser_backend::RemoteBrowserSessionSummary {
+                        browser_id: id.clone(),
+                        title: title.clone().or_else(|| Some(format!("title-{id}"))),
+                        url: Some("https://example.com/page".into()),
+                        visible: true,
+                    },
+                )
                 .collect()
         }
     }
@@ -4223,7 +4833,10 @@ mod tests {
             scope: &'a DesktopScope,
         ) -> crate::remote::browser_backend::BoxFuture<
             'a,
-            Result<Vec<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>,
+            Result<
+                Vec<crate::remote::browser_backend::RemoteBrowserSessionSummary>,
+                RemoteBrowserError,
+            >,
         > {
             Box::pin(async move {
                 self.seen_scopes.lock().unwrap().push(scope.clone());
@@ -4236,7 +4849,10 @@ mod tests {
             scope: &'a DesktopScope,
         ) -> crate::remote::browser_backend::BoxFuture<
             'a,
-            Result<Option<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>,
+            Result<
+                Option<crate::remote::browser_backend::RemoteBrowserSessionSummary>,
+                RemoteBrowserError,
+            >,
         > {
             Box::pin(async move {
                 self.seen_scopes.lock().unwrap().push(scope.clone());
@@ -4362,8 +4978,10 @@ mod tests {
 
         fn capabilities(
             &self,
-        ) -> crate::remote::browser_backend::BoxFuture<'_, crate::remote::browser_backend::BrowserCapabilities>
-        {
+        ) -> crate::remote::browser_backend::BoxFuture<
+            '_,
+            crate::remote::browser_backend::BrowserCapabilities,
+        > {
             Box::pin(async move {
                 crate::remote::browser_backend::BrowserCapabilities {
                     browser_available: true,
@@ -4378,7 +4996,11 @@ mod tests {
 
     async fn spawn_browser_test_gateway(
         state: Arc<RemoteGatewayState>,
-    ) -> (SocketAddr, tokio::sync::oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+    ) -> (
+        SocketAddr,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let router = create_remote_router(state);
@@ -4403,7 +5025,10 @@ mod tests {
             .post(format!("http://{addr}/api/v1/socket-ticket"))
             .header("Authorization", format!("Bearer {token}"))
             .header("Content-Type", "application/json")
-            .body(serde_json::json!({ "target": format!("/api/v1/browser/{browser_id}") }).to_string())
+            .body(
+                serde_json::json!({ "target": format!("/api/v1/browser/{browser_id}") })
+                    .to_string(),
+            )
             .send()
             .await
             .unwrap();
@@ -4421,7 +5046,9 @@ mod tests {
             Arc::new(TerminalService::default()),
             WorkspaceRegistry::new(),
         ));
-        let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+        let pin = state
+            .auth_manager
+            .create_pairing_code(DevicePermission::Control);
         let (token, _) = state
             .auth_manager
             .exchange_pairing_code(&pin, "scope-device")
@@ -4477,7 +5104,10 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(forged[0]["browserId"], "b-shared", "forged scope must not widen visibility");
+        assert_eq!(
+            forged[0]["browserId"], "b-shared",
+            "forged scope must not widen visibility"
+        );
         for scope in backend.seen_scopes() {
             assert_eq!(
                 (scope.workspace_id.as_str(), scope.worktree_slug.as_str()),
@@ -4580,7 +5210,9 @@ mod tests {
             Arc::new(TerminalService::default()),
             WorkspaceRegistry::new(),
         ));
-        let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+        let pin = state
+            .auth_manager
+            .create_pairing_code(DevicePermission::Control);
         let (token, device) = state
             .auth_manager
             .exchange_pairing_code(&pin, "revoke-device")
@@ -4598,10 +5230,11 @@ mod tests {
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let ticket = mint_browser_ticket(&client, addr, &token, "b1").await;
 
-        let (mut ws, _) =
-            tokio_tungstenite::connect_async(format!("ws://{addr}/api/v1/browser/b1?ticket={ticket}"))
-                .await
-                .expect("ws upgrade");
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!(
+            "ws://{addr}/api/v1/browser/b1?ticket={ticket}"
+        ))
+        .await
+        .expect("ws upgrade");
         let _hello = ws.next().await.expect("hello").expect("hello frame");
 
         // Subscribe to take a real viewer slot, then observe capture start.
@@ -4663,7 +5296,9 @@ mod tests {
             Arc::new(TerminalService::default()),
             WorkspaceRegistry::new(),
         ));
-        let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+        let pin = state
+            .auth_manager
+            .create_pairing_code(DevicePermission::Control);
         let (token, _) = state
             .auth_manager
             .exchange_pairing_code(&pin, "viewer-device")
@@ -4681,10 +5316,11 @@ mod tests {
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
 
         let ticket = mint_browser_ticket(&client, addr, &token, "b1").await;
-        let (mut ws, _) =
-            tokio_tungstenite::connect_async(format!("ws://{addr}/api/v1/browser/b1?ticket={ticket}"))
-                .await
-                .unwrap();
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!(
+            "ws://{addr}/api/v1/browser/b1?ticket={ticket}"
+        ))
+        .await
+        .unwrap();
         let _hello = ws.next().await.unwrap().unwrap();
 
         // Attached but not subscribed: no frame receiver, no viewer slot, no capture.
@@ -4749,16 +5385,29 @@ mod tests {
     #[tokio::test]
     async fn a03_machine_auth_errors_are_private_json() {
         let state = Arc::new(RemoteGatewayState::new(
-            Arc::new(TerminalService::default()), WorkspaceRegistry::new(),
+            Arc::new(TerminalService::default()),
+            WorkspaceRegistry::new(),
         ));
-        let response = get_capabilities(State(state), HeaderMap::new()).await.unwrap_err();
+        let response = get_capabilities(State(state), HeaderMap::new())
+            .await
+            .unwrap_err();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(response.headers().get(header::CACHE_CONTROL).and_then(|v| v.to_str().ok()), Some("no-store"));
-        let bytes = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store")
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["error"]["code"], "UNAUTHORIZED");
-        let typed = crate::remote::machine_protocol::decode_json::<crate::remote::machine_protocol::ErrorEnvelope>(&bytes, 4096)
-            .expect("actual authentication response must satisfy A02 error contract");
+        let typed = crate::remote::machine_protocol::decode_json::<
+            crate::remote::machine_protocol::ErrorEnvelope,
+        >(&bytes, 4096)
+        .expect("actual authentication response must satisfy A02 error contract");
         assert_eq!(typed.error.code, "UNAUTHORIZED");
     }
 
@@ -4766,11 +5415,18 @@ mod tests {
     async fn a03_identity_runs_offthread_and_revocation_fences_response() {
         let dir = tempfile::tempdir().unwrap();
         let state = Arc::new(RemoteGatewayState::new_with_paths(
-            Arc::new(TerminalService::default()), WorkspaceRegistry::new(),
-            Some(dir.path().join("config.json")), Some(dir.path().join("auth.json")),
+            Arc::new(TerminalService::default()),
+            WorkspaceRegistry::new(),
+            Some(dir.path().join("config.json")),
+            Some(dir.path().join("auth.json")),
         ));
-        let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
-        let (token, device) = state.auth_manager.exchange_pairing_code(&pin, "fixture").unwrap();
+        let pin = state
+            .auth_manager
+            .create_pairing_code(DevicePermission::Control);
+        let (token, device) = state
+            .auth_manager
+            .exchange_pairing_code(&pin, "fixture")
+            .unwrap();
         let runtime_thread = std::thread::current().id();
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let entered_tx = std::sync::Mutex::new(Some(entered_tx));
@@ -4778,47 +5434,97 @@ mod tests {
         let release_rx = std::sync::Mutex::new(release_rx);
         *state.identity_probe.write() = Some(Arc::new(move || {
             let offthread = std::thread::current().id() != runtime_thread;
-            if let Some(tx) = entered_tx.lock().unwrap().take() { let _ = tx.send(offthread); }
-            if offthread { release_rx.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap(); }
+            if let Some(tx) = entered_tx.lock().unwrap().take() {
+                let _ = tx.send(offthread);
+            }
+            if offthread {
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap();
+            }
         }));
         let mut headers = HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
         let request_state = Arc::clone(&state);
-        let request = tokio::spawn(async move { get_capabilities(State(request_state), headers).await });
+        let request =
+            tokio::spawn(async move { get_capabilities(State(request_state), headers).await });
         let entered = tokio::time::timeout(Duration::from_secs(5), entered_rx).await;
         state.auth_manager.revoke_device(&device.id);
         let released = release_tx.send(());
         let response = tokio::time::timeout(Duration::from_secs(5), request).await;
-        assert!(entered.unwrap().unwrap(), "identity work must run off reactor");
+        assert!(
+            entered.unwrap().unwrap(),
+            "identity work must run off reactor"
+        );
         released.unwrap();
         let response = response.unwrap().unwrap().unwrap_err();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(response.headers().get(header::CACHE_CONTROL).unwrap(), "no-store");
-        *state.identity_probe.write() = Some(Arc::new(|| panic!("revoked request probed identity")));
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        *state.identity_probe.write() =
+            Some(Arc::new(|| panic!("revoked request probed identity")));
         let mut headers = HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
-        assert_eq!(get_capabilities(State(state), headers).await.unwrap_err().status(), StatusCode::UNAUTHORIZED);
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        assert_eq!(
+            get_capabilities(State(state), headers)
+                .await
+                .unwrap_err()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     #[tokio::test]
     async fn a03_absent_machine_service_is_private_and_unavailable() {
         let state = Arc::new(RemoteGatewayState::new(
-            Arc::new(TerminalService::default()), WorkspaceRegistry::new(),
+            Arc::new(TerminalService::default()),
+            WorkspaceRegistry::new(),
         ));
-        let pin = state.auth_manager.create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine).unwrap();
-        let (token, _) = state.auth_manager.exchange_pairing_code(&pin, "machine").unwrap();
+        let pin = state
+            .auth_manager
+            .create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine)
+            .unwrap();
+        let (token, _) = state
+            .auth_manager
+            .exchange_pairing_code(&pin, "machine")
+            .unwrap();
         let mut headers = HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
-        let request = axum::http::Request::builder().method("POST").uri("/api/v1/sessions")
-            .body(axum::body::Body::empty()).unwrap();
-        let response = super::super::session_api::create(State(state), headers, request).await.unwrap_err();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/v1/sessions")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = super::super::session_api::create(State(state), headers, request)
+            .await
+            .unwrap_err();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(response.headers().get(header::CACHE_CONTROL).unwrap(), "no-store");
-        let bytes = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["error"]["code"], "MACHINE_SERVICE_UNAVAILABLE");
-        let typed = crate::remote::machine_protocol::decode_json::<crate::remote::machine_protocol::ErrorEnvelope>(&bytes, 4096)
-            .expect("actual service response must satisfy A02 error contract");
+        let typed = crate::remote::machine_protocol::decode_json::<
+            crate::remote::machine_protocol::ErrorEnvelope,
+        >(&bytes, 4096)
+        .expect("actual service response must satisfy A02 error contract");
         assert_eq!(typed.error.code, "MACHINE_SERVICE_UNAVAILABLE");
     }
 
@@ -5133,7 +5839,10 @@ mod tests {
             .expect("get_workspace_state succeeds");
         let ws_state = res.0;
 
-        let session_id = ws_state.active_context.session_id.expect("session_id populated");
+        let session_id = ws_state
+            .active_context
+            .session_id
+            .expect("session_id populated");
         assert_eq!(ws_state.active_context.terminal_tabs.len(), 1);
         assert_eq!(ws_state.active_context.terminal_tabs[0].id, session_id);
         assert_eq!(ws_state.active_context.terminal_tabs[0].label, "Terminal");
@@ -5183,12 +5892,17 @@ mod tests {
             "close signal must NOT fire within the test window on transient None, but received: {:?}",
             fired
         );
-        assert!(!watcher.is_finished(), "watcher task should remain active on transient None");
+        assert!(
+            !watcher.is_finished(),
+            "watcher task should remain active on transient None"
+        );
 
         // (b) send Some(other) -> close signal fires
-        tx.send(Some("other-session".to_string())).expect("send other session");
+        tx.send(Some("other-session".to_string()))
+            .expect("send other session");
 
-        let fired = tokio::time::timeout(std::time::Duration::from_millis(500), close_rx.recv()).await;
+        let fired =
+            tokio::time::timeout(std::time::Duration::from_millis(500), close_rx.recv()).await;
         assert_eq!(
             fired,
             Ok(Some(())),
@@ -5316,12 +6030,16 @@ mod tests {
             worktrees.iter().any(|wt| {
                 wt["identity"]["slug"] == "feat-b"
                     || wt["branch"] == "refs/heads/orca/workspace-b/feat-b"
-                    || wt["path"].as_str().is_some_and(|p: &str| p.contains("wt_b"))
+                    || wt["path"]
+                        .as_str()
+                        .is_some_and(|p: &str| p.contains("wt_b"))
             }),
             "expected workspace-b worktrees to contain feat-b, got: {json_b:?}"
         );
         assert!(
-            !worktrees.iter().any(|wt| wt["workspaceId"] == "workspace-a"),
+            !worktrees
+                .iter()
+                .any(|wt| wt["workspaceId"] == "workspace-a"),
             "expected no workspace-a worktrees in workspace-b response, got: {json_b:?}"
         );
 
@@ -5377,10 +6095,7 @@ mod tests {
         let pty = Arc::new(crate::terminal::PtyManager::new());
         let hub = Arc::new(TerminalOutputHub::default());
         let terminal_service = Arc::new(TerminalService::new(pty, hub));
-        let state = Arc::new(RemoteGatewayState::new(
-            terminal_service,
-            registry,
-        ));
+        let state = Arc::new(RemoteGatewayState::new(terminal_service, registry));
         {
             let mut conf = state.config.write();
             conf.mode = crate::remote::state::RemoteNetworkMode::LocalNetwork;
@@ -5442,7 +6157,10 @@ mod tests {
         // Absent scope: must FAIL CLOSED (deny attachment)
         assert!(state.active_selection().is_none());
         let authorized = attachment_is_authorized(&state, "b-shared").await.unwrap();
-        assert!(!authorized, "absent scope must fail closed, denying attachment");
+        assert!(
+            !authorized,
+            "absent scope must fail closed, denying attachment"
+        );
 
         // Set scope to ws-shared, main:
         state.set_active_selection(RemoteActiveDesktopSelection {
@@ -5455,7 +6173,12 @@ mod tests {
         assert!(attachment_is_authorized(&state, "b-shared").await.unwrap());
 
         // b-other-wt has same workspace but different worktree: MUST BE DENIED
-        assert!(!attachment_is_authorized(&state, "b-other-wt").await.unwrap(), "different worktree must be denied");
+        assert!(
+            !attachment_is_authorized(&state, "b-other-wt")
+                .await
+                .unwrap(),
+            "different worktree must be denied"
+        );
     }
 
     #[tokio::test]
@@ -5466,15 +6189,19 @@ mod tests {
             Arc::new(TerminalService::default()),
             WorkspaceRegistry::new(),
         ));
-        let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+        let pin = state
+            .auth_manager
+            .create_pairing_code(DevicePermission::Control);
         let (token, _) = state
             .auth_manager
             .exchange_pairing_code(&pin, "scope-watch-device")
             .unwrap();
 
-        let backend = Arc::new(ScopeProbeBackend::with_inventory(&[
-            ("b-shared", "ws-shared", "main"),
-        ]));
+        let backend = Arc::new(ScopeProbeBackend::with_inventory(&[(
+            "b-shared",
+            "ws-shared",
+            "main",
+        )]));
         state.set_browser_backend(backend.clone());
         state.set_active_selection(RemoteActiveDesktopSelection {
             workspace_id: Some("ws-shared".into()),
@@ -5525,15 +6252,19 @@ mod tests {
             Arc::new(TerminalService::default()),
             WorkspaceRegistry::new(),
         ));
-        let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+        let pin = state
+            .auth_manager
+            .create_pairing_code(DevicePermission::Control);
         let (token, _) = state
             .auth_manager
             .exchange_pairing_code(&pin, "barrier-device")
             .unwrap();
 
-        let backend = Arc::new(ScopeProbeBackend::with_inventory(&[
-            ("b-shared", "ws-shared", "main"),
-        ]));
+        let backend = Arc::new(ScopeProbeBackend::with_inventory(&[(
+            "b-shared",
+            "ws-shared",
+            "main",
+        )]));
         state.set_browser_backend(backend.clone());
         state.set_active_selection(RemoteActiveDesktopSelection {
             workspace_id: Some("ws-shared".into()),
@@ -5587,7 +6318,10 @@ mod tests {
         // The gateway must tear down without blocking the writer task
         let _ = stop_tx.send(());
         let shutdown_res = tokio::time::timeout(Duration::from_secs(2), task).await;
-        assert!(shutdown_res.is_ok(), "teardown must not hang awaiting blocked writer");
+        assert!(
+            shutdown_res.is_ok(),
+            "teardown must not hang awaiting blocked writer"
+        );
     }
 
     #[tokio::test]
@@ -5598,7 +6332,9 @@ mod tests {
             Arc::new(TerminalService::default()),
             WorkspaceRegistry::new(),
         ));
-        let pin = state.auth_manager.create_pairing_code(DevicePermission::Control);
+        let pin = state
+            .auth_manager
+            .create_pairing_code(DevicePermission::Control);
         let (token, _) = state
             .auth_manager
             .exchange_pairing_code(&pin, "scope-interrupt-device")
@@ -5612,33 +6348,59 @@ mod tests {
             fn list_sessions<'a>(
                 &'a self,
                 scope: &'a DesktopScope,
-            ) -> crate::remote::browser_backend::BoxFuture<'a, Result<Vec<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>> {
+            ) -> crate::remote::browser_backend::BoxFuture<
+                'a,
+                Result<
+                    Vec<crate::remote::browser_backend::RemoteBrowserSessionSummary>,
+                    RemoteBrowserError,
+                >,
+            > {
                 self.inner.list_sessions(scope)
             }
             fn identify_session<'a>(
                 &'a self,
                 scope: &'a DesktopScope,
-            ) -> crate::remote::browser_backend::BoxFuture<'a, Result<Option<crate::remote::browser_backend::RemoteBrowserSessionSummary>, RemoteBrowserError>> {
+            ) -> crate::remote::browser_backend::BoxFuture<
+                'a,
+                Result<
+                    Option<crate::remote::browser_backend::RemoteBrowserSessionSummary>,
+                    RemoteBrowserError,
+                >,
+            > {
                 self.inner.identify_session(scope)
             }
             fn get_state<'a>(
                 &'a self,
                 browser_id: &'a str,
                 scope: &'a DesktopScope,
-            ) -> crate::remote::browser_backend::BoxFuture<'a, Result<crate::remote::browser_backend::BrowserRemoteState, RemoteBrowserError>> {
+            ) -> crate::remote::browser_backend::BoxFuture<
+                'a,
+                Result<crate::remote::browser_backend::BrowserRemoteState, RemoteBrowserError>,
+            > {
                 self.inner.get_state(browser_id, scope)
             }
             fn execute_command(
                 &self,
                 _ctx: crate::remote::browser_backend::BrowserCommandContext,
-            ) -> crate::remote::browser_backend::BoxFuture<'_, Result<crate::remote::browser_backend::BrowserCommandResult, RemoteBrowserError>> {
+            ) -> crate::remote::browser_backend::BoxFuture<
+                '_,
+                Result<crate::remote::browser_backend::BrowserCommandResult, RemoteBrowserError>,
+            > {
                 Box::pin(async move {
                     // Hang awaiting until cancelled
                     std::future::pending::<()>().await;
-                    Ok(crate::remote::browser_backend::BrowserCommandResult { success: true, value: None })
+                    Ok(crate::remote::browser_backend::BrowserCommandResult {
+                        success: true,
+                        value: None,
+                    })
                 })
             }
-            fn capabilities(&self) -> crate::remote::browser_backend::BoxFuture<'_, crate::remote::browser_backend::BrowserCapabilities> {
+            fn capabilities(
+                &self,
+            ) -> crate::remote::browser_backend::BoxFuture<
+                '_,
+                crate::remote::browser_backend::BrowserCapabilities,
+            > {
                 self.inner.capabilities()
             }
         }
@@ -5672,8 +6434,12 @@ mod tests {
                 "requestId": "r-sub",
                 "viewerInstanceId": "v-1",
                 "options": { "format": "jpeg" }
-            }).to_string().into()
-        )).await.unwrap();
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
 
         let sub_resp = ws.next().await.unwrap().unwrap().into_text().unwrap();
         assert!(sub_resp.contains("browserSubscribed"));
@@ -5684,8 +6450,12 @@ mod tests {
                 "type": "browserSnapshot",
                 "requestId": "snap-hang",
                 "browserId": "b-interrupt"
-            }).to_string().into()
-        )).await.unwrap();
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
 
         // While snapshot is hanging in dispatch_raw_text, change scope!
         tokio::time::sleep(Duration::from_millis(50)).await;

@@ -121,7 +121,11 @@ pub fn read_worktree_admin_fingerprint(repo_root: &Path) -> Option<String> {
             let mut names: Vec<String> = entries
                 .filter_map(|entry| entry.ok())
                 .filter_map(|entry| {
-                    if entry.file_type().map(|file_type| file_type.is_dir()).unwrap_or(false) {
+                    if entry
+                        .file_type()
+                        .map(|file_type| file_type.is_dir())
+                        .unwrap_or(false)
+                    {
                         entry.file_name().into_string().ok()
                     } else {
                         None
@@ -129,10 +133,15 @@ pub fn read_worktree_admin_fingerprint(repo_root: &Path) -> Option<String> {
                 })
                 .collect();
             names.sort();
-            parts.push(format!("entries:{}", names.join(&FINGERPRINT_SEP.to_string())));
+            parts.push(format!(
+                "entries:{}",
+                names.join(&FINGERPRINT_SEP.to_string())
+            ));
             for name in &names {
                 let entry_dir = worktrees_dir.join(name);
-                let head = read_file_stable(&entry_dir.join("HEAD"))?.trim().to_string();
+                let head = read_file_stable(&entry_dir.join("HEAD"))?
+                    .trim()
+                    .to_string();
                 parts.push(format!("head:{name}:{head}"));
                 let gitdir = read_file_stable(&entry_dir.join("gitdir"))?
                     .trim()
@@ -186,8 +195,14 @@ pub fn read_worktree_admin_fingerprint(repo_root: &Path) -> Option<String> {
     parts.push(format!("root-exists:{}", repo_root.exists()));
 
     // Packed ref storage: branch tips moved while loose refs are packed away.
-    parts.push(store_entry_fingerprint(&common_dir.join("packed-refs"), "packed-refs")?);
-    parts.push(store_entry_fingerprint(&common_dir.join("reftable"), "reftable")?);
+    parts.push(store_entry_fingerprint(
+        &common_dir.join("packed-refs"),
+        "packed-refs",
+    )?);
+    parts.push(store_entry_fingerprint(
+        &common_dir.join("reftable"),
+        "reftable",
+    )?);
 
     Some(parts.join(&FINGERPRINT_SEP.to_string()))
 }
@@ -240,7 +255,11 @@ fn resolve_git_dir(repo_root: &Path) -> Option<PathBuf> {
             let target = contents.lines().next()?.trim();
             let target = target.strip_prefix("gitdir:")?.trim();
             let path = PathBuf::from(target);
-            Some(if path.is_absolute() { path } else { repo_root.join(path) })
+            Some(if path.is_absolute() {
+                path
+            } else {
+                repo_root.join(path)
+            })
         }
         Err(_) => None,
     }
@@ -296,11 +315,7 @@ fn ref_fingerprint(common_dir: &Path, head_value: &str) -> Option<String> {
 
 fn store_entry_fingerprint(path: &Path, label: &str) -> Option<String> {
     match std::fs::metadata(path) {
-        Ok(meta) => Some(format!(
-            "{label}:{:?}:{}",
-            meta.modified().ok(),
-            meta.len()
-        )),
+        Ok(meta) => Some(format!("{label}:{:?}:{}", meta.modified().ok(), meta.len())),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             Some(format!("{label}:absent"))
         }
@@ -439,7 +454,9 @@ where
     let repo_root = manager.repo_root().to_path_buf();
     let prior_worktrees = {
         let entries = cache.entries.lock();
-        entries.get(workspace_id).map(|entry| entry.worktrees.clone())
+        entries
+            .get(workspace_id)
+            .map(|entry| entry.worktrees.clone())
     };
 
     // Read the cached gate state without holding the lock across IO.
@@ -649,21 +666,28 @@ mod tests {
         git::run_git(&wt_path, &["add", "."]).unwrap();
         git::run_git(&wt_path, &["commit", "-m", "wip"]).unwrap();
         let after_commit = read_worktree_admin_fingerprint(&root).expect("fingerprint");
-        assert_ne!(with_wt, after_commit, "branch tip movement must change fingerprint");
+        assert_ne!(
+            with_wt, after_commit,
+            "branch tip movement must change fingerprint"
+        );
 
         git::run_git(&wt_path, &["checkout", "-b", "renamed-task"]).unwrap();
         let after_switch = read_worktree_admin_fingerprint(&root).expect("fingerprint");
-        assert_ne!(after_commit, after_switch, "checkout must change fingerprint");
+        assert_ne!(
+            after_commit, after_switch,
+            "checkout must change fingerprint"
+        );
 
-        git::run_git(&root, &["worktree", "lock", wt_path.to_str().unwrap()])
-            .unwrap();
+        git::run_git(&root, &["worktree", "lock", wt_path.to_str().unwrap()]).unwrap();
         let after_lock = read_worktree_admin_fingerprint(&root).expect("fingerprint");
         assert_ne!(after_switch, after_lock, "locking must change fingerprint");
 
-        git::run_git(&root, &["worktree", "unlock", wt_path.to_str().unwrap()])
-            .unwrap();
+        git::run_git(&root, &["worktree", "unlock", wt_path.to_str().unwrap()]).unwrap();
         let after_unlock = read_worktree_admin_fingerprint(&root).expect("fingerprint");
-        assert_ne!(after_lock, after_unlock, "unlocking must change fingerprint");
+        assert_ne!(
+            after_lock, after_unlock,
+            "unlocking must change fingerprint"
+        );
     }
 
     #[test]
@@ -684,11 +708,18 @@ mod tests {
             .create_worktree(CreateWorktreeOptions::new("ws-a", "task-2", &other))
             .unwrap();
         let after = read_worktree_admin_fingerprint(&wt_path).expect("linked root fingerprint");
-        assert_ne!(before, after, "admin store growth must be visible from a linked root");
+        assert_ne!(
+            before, after,
+            "admin store growth must be visible from a linked root"
+        );
 
         manager.safe_delete(&other).unwrap();
-        let after_delete = read_worktree_admin_fingerprint(&wt_path).expect("linked root fingerprint");
-        assert_ne!(after, after_delete, "admin store shrink must be visible from a linked root");
+        let after_delete =
+            read_worktree_admin_fingerprint(&wt_path).expect("linked root fingerprint");
+        assert_ne!(
+            after, after_delete,
+            "admin store shrink must be visible from a linked root"
+        );
 
         let _ = root;
     }
@@ -697,18 +728,49 @@ mod tests {
     fn fingerprint_is_none_for_non_git_directories() {
         let plain = tempfile::TempDir::new().unwrap();
         assert_eq!(read_worktree_admin_fingerprint(plain.path()), None);
-        assert_eq!(read_worktree_admin_fingerprint(&plain.path().join("missing")), None);
+        assert_eq!(
+            read_worktree_admin_fingerprint(&plain.path().join("missing")),
+            None
+        );
     }
 
     #[test]
     fn diff_worktrees_reports_created_removed_updated_and_external_identities() {
-        let kept = worktree_from(Path::new("/repo/wt-kept"), "aaa", Some("refs/heads/orca/ws/kept"));
-        let removed = worktree_from(Path::new("/repo/wt-removed"), "bbb", Some("refs/heads/orca/ws/removed"));
-        let updated_old = worktree_from(Path::new("/repo/wt-moved"), "ccc", Some("refs/heads/orca/ws/moved"));
-        let updated_new = worktree_from(Path::new("/repo/wt-moved"), "ddd", Some("refs/heads/orca/ws/moved"));
-        let created = worktree_from(Path::new("/repo/wt-created"), "eee", Some("refs/heads/orca/ws/created"));
-        let external = worktree_from(Path::new("/repo/wt-ext"), "fff", Some("refs/heads/feature-x"));
-        let external_new = worktree_from(Path::new("/repo/wt-ext"), "ggg", Some("refs/heads/feature-x"));
+        let kept = worktree_from(
+            Path::new("/repo/wt-kept"),
+            "aaa",
+            Some("refs/heads/orca/ws/kept"),
+        );
+        let removed = worktree_from(
+            Path::new("/repo/wt-removed"),
+            "bbb",
+            Some("refs/heads/orca/ws/removed"),
+        );
+        let updated_old = worktree_from(
+            Path::new("/repo/wt-moved"),
+            "ccc",
+            Some("refs/heads/orca/ws/moved"),
+        );
+        let updated_new = worktree_from(
+            Path::new("/repo/wt-moved"),
+            "ddd",
+            Some("refs/heads/orca/ws/moved"),
+        );
+        let created = worktree_from(
+            Path::new("/repo/wt-created"),
+            "eee",
+            Some("refs/heads/orca/ws/created"),
+        );
+        let external = worktree_from(
+            Path::new("/repo/wt-ext"),
+            "fff",
+            Some("refs/heads/feature-x"),
+        );
+        let external_new = worktree_from(
+            Path::new("/repo/wt-ext"),
+            "ggg",
+            Some("refs/heads/feature-x"),
+        );
 
         let old = vec![kept.clone(), removed.clone(), updated_old, external.clone()];
         let new = vec![kept, updated_new, created, external_new];
@@ -716,22 +778,34 @@ mod tests {
 
         assert!(changes.contains(&DetectedWorktreeChange {
             workspace_id: "ws-a".into(),
-            identity: WorktreeIdentity { ws_id: "ws".into(), slug: "removed".into() },
+            identity: WorktreeIdentity {
+                ws_id: "ws".into(),
+                slug: "removed".into()
+            },
             kind: WorktreeChangeKind::Pruned,
         }));
         assert!(changes.contains(&DetectedWorktreeChange {
             workspace_id: "ws-a".into(),
-            identity: WorktreeIdentity { ws_id: "ws".into(), slug: "created".into() },
+            identity: WorktreeIdentity {
+                ws_id: "ws".into(),
+                slug: "created".into()
+            },
             kind: WorktreeChangeKind::Created,
         }));
         assert!(changes.contains(&DetectedWorktreeChange {
             workspace_id: "ws-a".into(),
-            identity: WorktreeIdentity { ws_id: "ws".into(), slug: "moved".into() },
+            identity: WorktreeIdentity {
+                ws_id: "ws".into(),
+                slug: "moved".into()
+            },
             kind: WorktreeChangeKind::Updated,
         }));
         assert!(changes.contains(&DetectedWorktreeChange {
             workspace_id: "ws-a".into(),
-            identity: WorktreeIdentity { ws_id: DETECTED_WORKSPACE_ID.into(), slug: "wt-ext".into() },
+            identity: WorktreeIdentity {
+                ws_id: DETECTED_WORKSPACE_ID.into(),
+                slug: "wt-ext".into()
+            },
             kind: WorktreeChangeKind::Updated,
         }));
         assert_eq!(changes.len(), 4);
@@ -751,7 +825,10 @@ mod tests {
         {
             let entries = cache.entries.lock();
             assert!(entries.contains_key("ws-a"));
-            assert!(!entries.contains_key("plain"), "non-git workspaces are never scanned");
+            assert!(
+                !entries.contains_key("plain"),
+                "non-git workspaces are never scanned"
+            );
         }
 
         let wt_path = manager.worktree_path_for("ws-a", "ext-task").unwrap();
@@ -764,7 +841,10 @@ mod tests {
             changes,
             vec![DetectedWorktreeChange {
                 workspace_id: "ws-a".into(),
-                identity: WorktreeIdentity { ws_id: "ws-a".into(), slug: "ext-task".into() },
+                identity: WorktreeIdentity {
+                    ws_id: "ws-a".into(),
+                    slug: "ext-task".into()
+                },
                 kind: WorktreeChangeKind::Created,
             }]
         );
@@ -794,7 +874,10 @@ mod tests {
             changes,
             vec![DetectedWorktreeChange {
                 workspace_id: "ws-a".into(),
-                identity: WorktreeIdentity { ws_id: "ws-a".into(), slug: "moving".into() },
+                identity: WorktreeIdentity {
+                    ws_id: "ws-a".into(),
+                    slug: "moving".into()
+                },
                 kind: WorktreeChangeKind::Updated,
             }]
         );
@@ -819,7 +902,10 @@ mod tests {
             changes,
             vec![DetectedWorktreeChange {
                 workspace_id: "ws-a".into(),
-                identity: WorktreeIdentity { ws_id: "ws-a".into(), slug: "doomed".into() },
+                identity: WorktreeIdentity {
+                    ws_id: "ws-a".into(),
+                    slug: "doomed".into()
+                },
                 kind: WorktreeChangeKind::Pruned,
             }]
         );
@@ -845,13 +931,20 @@ mod tests {
         };
 
         assert!(sweep_with_probe(&cache, &registry, now, &probe).is_empty());
-        assert_eq!(probe_calls.load(Ordering::SeqCst), 1, "baseline always scans");
+        assert_eq!(
+            probe_calls.load(Ordering::SeqCst),
+            1,
+            "baseline always scans"
+        );
 
         // The probe lies (claims unchanged) while the real admin state changes;
         // the gate must trust it and skip the scan.
         manager.safe_delete(&wt_path).unwrap();
         let changes = sweep_with_probe(&cache, &registry, now + Duration::from_secs(30), &probe);
-        assert!(changes.is_empty(), "gate must suppress while the fingerprint claims unchanged");
+        assert!(
+            changes.is_empty(),
+            "gate must suppress while the fingerprint claims unchanged"
+        );
 
         // Past the reconcile interval the real scan runs anyway and surfaces
         // the removal the fingerprint failed to report.
@@ -886,17 +979,24 @@ mod tests {
         manager.safe_delete(&wt_path).unwrap();
 
         for seconds in (30..RECONCILE_INTERVAL.as_secs()).step_by(30) {
-            let changes =
-                sweep_with_probe(&cache, &registry, now + Duration::from_secs(seconds), &probe);
+            let changes = sweep_with_probe(
+                &cache,
+                &registry,
+                now + Duration::from_secs(seconds),
+                &probe,
+            );
             assert!(
                 changes.is_empty(),
                 "suppression must hold before the reconcile bound (t=+{seconds}s)"
             );
         }
 
-        let changes =
-            sweep_with_probe(&cache, &registry, now + RECONCILE_INTERVAL, &probe);
-        assert_eq!(changes.len(), 1, "reconciliation must fire despite gate extensions");
+        let changes = sweep_with_probe(&cache, &registry, now + RECONCILE_INTERVAL, &probe);
+        assert_eq!(
+            changes.len(),
+            1,
+            "reconciliation must fire despite gate extensions"
+        );
         assert_eq!(changes[0].kind, WorktreeChangeKind::Pruned);
 
         // The next sweep is a fresh 5-minute window; suppression resumes.
@@ -932,8 +1032,16 @@ mod tests {
             .unwrap();
 
         let changes = sweep_with_probe(&cache, &registry, now + Duration::from_secs(30), &probe);
-        assert_eq!(probe_calls.load(Ordering::SeqCst), 1, "wedged workspaces never probe again");
-        assert_eq!(changes.len(), 1, "wedged workspaces always reconcile with a real scan");
+        assert_eq!(
+            probe_calls.load(Ordering::SeqCst),
+            1,
+            "wedged workspaces never probe again"
+        );
+        assert_eq!(
+            changes.len(),
+            1,
+            "wedged workspaces always reconcile with a real scan"
+        );
         assert_eq!(changes[0].kind, WorktreeChangeKind::Created);
         assert!(cache.wedged.lock().contains("ws-a"));
 

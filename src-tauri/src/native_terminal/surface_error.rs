@@ -19,9 +19,9 @@ pub(crate) fn classify_surface_error(
         wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => Err(
             NativeTerminalError::GpuPipelineError("Native terminal surface recovery failed".into()),
         ),
-        wgpu::CurrentSurfaceTexture::Validation => {
-            Err(NativeTerminalError::GpuPipelineError("Surface validation error".into()))
-        }
+        wgpu::CurrentSurfaceTexture::Validation => Err(NativeTerminalError::GpuPipelineError(
+            "Surface validation error".into(),
+        )),
         wgpu::CurrentSurfaceTexture::Success(_) | wgpu::CurrentSurfaceTexture::Suboptimal(_) => {
             Ok(SurfaceFrameAction::Retry)
         }
