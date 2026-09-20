@@ -577,8 +577,19 @@ describe("remote terminal grid contract", () => {
     fireEvent.input(sink, { target: { value: "ㄱ" } });
     expect(screen.getByTestId("remote-terminal-preedit")).toHaveTextContent("ㄱ");
     fireEvent.compositionEnd(sink, { data: "ㄱ" });
+    // A commit made only of jamo is unfinished text: the syllable can still grow, so it stays in the
+    // overlay instead of being shipped a jamo at a time (see the mobile IME suite).
+    expect(screen.getByTestId("remote-terminal-preedit")).toHaveTextContent("ㄱ");
+    expect(socket().send).not.toHaveBeenCalled();
+    fireEvent.input(sink, { target: { value: " " } });
     expect(screen.queryByTestId("remote-terminal-preedit")).toBeNull();
-    expect(socket().send).toHaveBeenCalledWith(new TextEncoder().encode("ㄱ"));
+    expect(socket().send).toHaveBeenCalledWith(new TextEncoder().encode("ㄱ "));
+  });
+
+  it("shows the build stamp of the client it is running", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+    expect(screen.getByTestId("remote-terminal-build-stamp").textContent).not.toBe("");
   });
 
   it("sends non-composing sink input as text without keydown duplication", () => {

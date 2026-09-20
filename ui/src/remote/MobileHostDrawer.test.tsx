@@ -55,6 +55,9 @@ describe("MobileHostDrawer", () => {
 
     expect(screen.getByTestId("mobile-host-drawer")).toBeInTheDocument();
     expect(screen.getByTestId("mobile-host-option-local")).toBeInTheDocument();
+    // The build identity of the client this phone is running; "dev" outside a stamped build.
+    expect(screen.getByTestId("mobile-host-drawer-build")).toBeInTheDocument();
+    expect(screen.getByTestId("mobile-host-drawer-build").textContent).not.toBe("");
 
     const host1 = screen.getByTestId("mobile-host-option-host-1");
     expect(host1).toHaveTextContent("Studio Mac");

@@ -215,4 +215,121 @@ describe("mobile terminal input lifecycle", () => {
     expect(Socket.latest.send).toHaveBeenLastCalledWith(new TextEncoder().encode("cd "));
     expect(input).toHaveValue("");
   });
+
+  // Android WebKit and Gboard commit one jamo per composition and clear the field between commits;
+  // emitting each commit as it arrives is what shards 이렇게 into ㅇㅣㄹㅓㅎㄱㅔ in the PTY.
+  it("reassembles jamo an IME commits one at a time into syllables", () => {
+    render(<RemoteTerminal sessionId="a" token="token-a" />);
+    const input = sink();
+    const commitJamo = (jamo: string) => {
+      fireEvent.compositionStart(input);
+      fireEvent.input(input, { target: { value: jamo }, isComposing: true, inputType: "insertCompositionText" });
+      fireEvent.compositionEnd(input, { data: jamo });
+      fireEvent.input(input, { target: { value: jamo }, inputType: "insertFromComposition" });
+    };
+
+    for (const jamo of "ㅇㅣㄹㅓㅎㄱㅔ") commitJamo(jamo);
+    expect(Socket.latest.send).not.toHaveBeenCalled();
+    expect(screen.getByTestId("remote-terminal-preedit")).toHaveTextContent("이렇게");
+
+    fireEvent.input(input, { target: { value: " " }, inputType: "insertText" });
+    expect(Socket.latest.send.mock.calls).toEqual([[new TextEncoder().encode("이렇게 ")]]);
+    expect(screen.queryByTestId("remote-terminal-preedit")).toBeNull();
+  });
+
+  it("sends the reassembled jamo run before the key that ends the line", () => {
+    render(<RemoteTerminal sessionId="a" token="token-a" />);
+    const input = sink();
+    const commitJamo = (jamo: string) => {
+      fireEvent.compositionStart(input);
+      fireEvent.input(input, { target: { value: jamo }, isComposing: true, inputType: "insertCompositionText" });
+      fireEvent.compositionEnd(input, { data: jamo });
+      fireEvent.input(input, { target: { value: jamo }, inputType: "insertFromComposition" });
+    };
+
+    for (const jamo of "ㅁㅗㅂㅏㅇㅣㄹ") commitJamo(jamo);
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(Socket.latest.send.mock.calls.map(([data]) => new TextDecoder().decode(data as Uint8Array)))
+      .toEqual(["모바일", "\r"]);
+  });
+
+  it("deletes one committed jamo per Backspace while the sink is empty", () => {
+    render(<RemoteTerminal sessionId="a" token="token-a" />);
+    const input = sink();
+    const commitJamo = (jamo: string) => {
+      fireEvent.compositionStart(input);
+      fireEvent.input(input, { target: { value: jamo }, isComposing: true, inputType: "insertCompositionText" });
+      fireEvent.compositionEnd(input, { data: jamo });
+      fireEvent.input(input, { target: { value: jamo }, inputType: "insertFromComposition" });
+    };
+
+    for (const jamo of "ㅇㅣㄹ") commitJamo(jamo);
+    expect(screen.getByTestId("remote-terminal-preedit")).toHaveTextContent("일");
+
+    fireEvent.keyDown(input, { key: "Backspace" });
+    expect(Socket.latest.send).not.toHaveBeenCalled();
+    expect(input).toHaveValue("");
+    expect(screen.getByTestId("remote-terminal-preedit")).toHaveTextContent("이");
+
+    fireEvent.keyDown(input, { key: "Backspace" });
+    fireEvent.keyDown(input, { key: "Backspace" });
+    expect(screen.queryByTestId("remote-terminal-preedit")).toBeNull();
+    expect(Socket.latest.send).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(input, { key: "Backspace" });
+    expect(Socket.latest.send).toHaveBeenCalledWith(new TextEncoder().encode("\u007f"));
+  });
+
+  it("keeps repeated jamo in a held run instead of treating them as duplicates", () => {
+    render(<RemoteTerminal sessionId="a" token="token-a" />);
+    const input = sink();
+    const commitJamo = (jamo: string, inputType = "insertFromComposition") => {
+      fireEvent.compositionStart(input);
+      fireEvent.input(input, { target: { value: jamo }, isComposing: true, inputType: "insertCompositionText" });
+      fireEvent.compositionEnd(input, { data: jamo });
+      fireEvent.input(input, { target: { value: jamo }, inputType });
+    };
+
+    commitJamo("ㅋ");
+    commitJamo("ㅋ");
+    expect(screen.getByTestId("remote-terminal-preedit")).toHaveTextContent("ㅋㅋ");
+
+    fireEvent.input(input, { target: { value: " " }, inputType: "insertText" });
+    expect(Socket.latest.send.mock.calls).toEqual([[new TextEncoder().encode("ㅋㅋ ")]]);
+  });
+
+  it("does not double a commit whose mirror insertion carries no input type", () => {
+    render(<RemoteTerminal sessionId="a" token="token-a" />);
+    const input = sink();
+    const commitJamo = (jamo: string) => {
+      fireEvent.compositionStart(input);
+      fireEvent.input(input, { target: { value: jamo }, isComposing: true, inputType: "insertCompositionText" });
+      fireEvent.compositionEnd(input, { data: jamo });
+      // WebKit reports some mirrors with an empty input type; the commit is still already held.
+      fireEvent.input(input, { target: { value: jamo }, inputType: "" });
+    };
+
+    for (const jamo of "ㅁㅗㅂㅏㅇㅣㄹ") commitJamo(jamo);
+    expect(sink()).toHaveValue("");
+    expect(Socket.latest.send).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(Socket.latest.send.mock.calls.map(([data]) => new TextDecoder().decode(data as Uint8Array)))
+      .toEqual(["모바일", "\r"]);
+  });
+
+  it("composes jamo a composition-free IME accumulates in the sink", () => {
+    render(<RemoteTerminal sessionId="a" token="token-a" />);
+    const input = sink();
+    const jamo = "ㅇㅣㄹㅓㅎㄱㅔ";
+    for (let end = 1; end <= jamo.length; end += 1) {
+      fireEvent.input(input, { target: { value: jamo.slice(0, end) }, inputType: "insertText" });
+    }
+    expect(Socket.latest.send).not.toHaveBeenCalled();
+    expect(screen.getByTestId("remote-terminal-preedit")).toHaveTextContent("이렇게");
+
+    fireEvent.input(input, { target: { value: `${jamo} ` }, inputType: "insertText" });
+    expect(Socket.latest.send.mock.calls).toEqual([[new TextEncoder().encode("이렇게 ")]]);
+    expect(sink()).toHaveValue("");
+  });
 });

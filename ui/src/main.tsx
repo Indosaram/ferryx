@@ -1,6 +1,7 @@
 import "./lib/uuid";
 import React from "react";
 import ReactDOM from "react-dom/client";
+import { BUILD_STAMP } from "./lib/buildStamp";
 import { installSettingsRuntimeBridge } from "./lib/settingsRuntimeBridge";
 import { isMacShortcutPlatform } from "./lib/shortcuts";
 import { installShortcutDiagnostics } from "./lib/shortcutDiagnostics";
@@ -15,6 +16,9 @@ installSettingsRuntimeBridge();
 applyCachedTerminalBackground();
 
 const isTauriApp = typeof window !== "undefined" && Boolean((window as any).__TAURI_INTERNALS__);
+// Build identity is exposed for support: a stale phone bundle is then visible on the device itself.
+document.documentElement.dataset.ferryxBuild = BUILD_STAMP;
+console.info(`Ferryx ${isTauriApp ? "desktop" : "remote client"} build ${BUILD_STAMP}`);
 // TEMPORARY-DIAGNOSTIC: install before App import, without changing routing.
 if (isTauriApp) {
   const stop = installShortcutDiagnostics();
