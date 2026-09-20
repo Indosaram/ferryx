@@ -20,6 +20,8 @@ use super::snapshot::{CellSnapshot, CellWide, RenderSnapshot};
 use super::surface_error::{classify_surface_error, SurfaceFrameAction};
 pub use super::surface_snapshot::snapshot_for_layout;
 use super::terminal::NativeTerminal;
+use super::thread_ownership::{GpuThread, GpuWorker, LentSlot};
+use super::snapshot_slot::SnapshotSlot;
 use crate::daemon::{DaemonAttachment, DaemonStreamMessage};
 use crate::terminal::output_hub::HistorySegment;
 use crate::terminal::preferences::cached_terminal_preferences;
@@ -217,7 +219,8 @@ impl RenderScheduleCoordinator {
 
     /// How long the caller must wait before re-dispatching a frame that failed to present.
     pub fn delay_before_retry(&self) -> std::time::Duration {
-        self.frame_clock.delay_before_retry(std::time::Instant::now())
+        self.frame_clock
+            .delay_before_retry(std::time::Instant::now())
     }
 
     /// Attempts to schedule a render pass.
@@ -359,6 +362,17 @@ pub struct NativeTerminalSession {
     /// is no longer on screen, so they are rejected with
     /// [`NativeTerminalError::SessionDetached`] instead.
     pub surface_attached: bool,
+    pub snapshot_slot: Arc<SnapshotSlot>,
+}
+
+impl NativeTerminalSession {
+    pub fn publish_frame(&self) {
+        if let (Some(layout), Some(logical_bounds)) = (self.layout, self.logical_bounds) {
+            if let Ok(input) = session_render_snapshot(self) {
+                self.snapshot_slot.publish(layout, logical_bounds, input);
+            }
+        }
+    }
 }
 
 pub struct NativeTerminalSurfaceHostState {
@@ -368,9 +382,18 @@ pub struct NativeTerminalSurfaceHostState {
     event_sink: Arc<RwLock<Option<NativeTerminalEventSink>>>,
     pty_resize_sink: Arc<RwLock<Option<NativeTerminalPtyResizeSink>>>,
     pending_startups: Arc<Mutex<HashSet<String>>>,
+    gpu_worker: Arc<GpuWorker>,
 }
 
 impl NativeTerminalSurfaceHostState {
+    pub fn gpu_worker(&self) -> &Arc<GpuWorker> {
+        &self.gpu_worker
+    }
+
+    pub fn session_snapshot_slot(&self, session_id: &str) -> Option<Arc<SnapshotSlot>> {
+        self.sessions.lock().get(session_id).map(|s| Arc::clone(&s.snapshot_slot))
+    }
+
     /// Marks a session as freshly spawned so its initial startup VT queries (e.g. CPR) are preserved.
     pub fn mark_pending_startup(&self, session_id: &str) {
         self.pending_startups.lock().insert(session_id.to_string());
@@ -395,9 +418,10 @@ impl NativeTerminalSurfaceHostState {
 fn dispatch_scheduled_render<R: Runtime>(
     window: Window<R>,
     hosts: Arc<Mutex<HashMap<String, NativeTerminalSurfaceHost>>>,
-    sessions: Arc<Mutex<HashMap<String, NativeTerminalSession>>>,
+    slot: Arc<SnapshotSlot>,
     session_id: String,
     coordinator: Arc<RenderScheduleCoordinator>,
+    gpu_worker: Arc<GpuWorker>,
 ) {
     let surface_window = window.clone();
     let follow_up_window = window.clone();
@@ -407,62 +431,168 @@ fn dispatch_scheduled_render<R: Runtime>(
         if !coordinator.begin_render() {
             return;
         }
+        let Some(frame) = slot.consume() else {
+            coordinator.consume_render();
+            return;
+        };
+        let layout = frame.layout;
+        let logical_bounds = frame.logical_bounds;
+        let frame_epoch = frame.attachment_epoch;
+        let render_input = frame.input.clone();
+
         let mut hosts_guard = hosts.lock();
-        let render_state = {
-            let sessions_guard = sessions.lock();
-            sessions_guard.get(&session_id).and_then(|session| {
-                if !session.surface_attached {
-                    return None;
-                }
-                let layout = session.layout?;
-                let logical_bounds = session.logical_bounds?;
-                match session_render_snapshot(session) {
-                    Ok(render_input) => Some((layout, logical_bounds, render_input)),
+        // Blocker 1: Resurrection prevention TOCTOU check.
+        // If the session was detached while waiting for hosts_guard, do NOT create or update any host!
+        if !slot.is_attached_with_epoch(frame_epoch) {
+            drop(hosts_guard);
+            coordinator.consume_render();
+            return;
+        }
+        let host = match hosts_guard.entry(session_id.clone()) {
+            std::collections::hash_map::Entry::Occupied(entry) => Some(entry.into_mut()),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                match NativeTerminalSurfaceHost::new(&surface_window, logical_bounds.scale_factor) {
+                    Ok(new_host) => Some(entry.insert(new_host)),
                     Err(err) => {
                         tracing::warn!(
                             session_id = %session_id,
                             error = %err,
-                            "Failed to capture native terminal snapshot for render"
+                            "Failed to lazily create native terminal surface host during scheduled render"
                         );
                         None
                     }
                 }
-            })
+            }
         };
-        if let Some((layout, logical_bounds, render_input)) = render_state {
-            let host = match hosts_guard.entry(session_id.clone()) {
-                std::collections::hash_map::Entry::Occupied(entry) => Some(entry.into_mut()),
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    match NativeTerminalSurfaceHost::new(&surface_window, logical_bounds.scale_factor) {
-                        Ok(new_host) => Some(entry.insert(new_host)),
-                        Err(err) => {
-                            tracing::warn!(
-                                session_id = %session_id,
-                                error = %err,
-                                "Failed to lazily create native terminal surface host during scheduled render"
-                            );
-                            None
-                        }
+        let Some(host) = host else {
+            drop(hosts_guard);
+            coordinator.consume_render();
+            return;
+        };
+
+        let effective_bounds = host
+            .active_presentation_geometry()
+            .resolve(logical_bounds)
+            .unwrap_or(logical_bounds);
+        host.layout = Some(layout);
+        host.logical_bounds = Some(effective_bounds);
+        host.update_viewport(Some(effective_bounds));
+
+        if render_input.synchronized_output {
+            drop(hosts_guard);
+            coordinator.consume_render();
+            return;
+        }
+
+        match &mut host.frame_target {
+            HostFrameTarget::Native(target) => {
+                let cell_metrics = target.cell_metrics;
+                let completion_slot = target.leg.clone();
+                let Some(loan) = target.leg.lend_loan() else {
+                    drop(hosts_guard);
+                    coordinator.consume_render();
+                    return;
+                };
+                // CRITICAL: Drop hosts lock before passing execution to the GPU worker thread.
+                // The global hosts mutex must not span GPU operations.
+                drop(hosts_guard);
+
+                let completion_window = surface_window.clone();
+                let completion_host_window = surface_window.clone();
+                let completion_hosts = Arc::clone(&hosts);
+                let completion_snapshot_slot = Arc::clone(&slot);
+                let completion_session_id = session_id.clone();
+                let completion_coordinator = Arc::clone(&coordinator);
+                let completion_gpu_worker = Arc::clone(&gpu_worker);
+
+                let submission_coordinator = Arc::clone(&coordinator);
+                let worker_coordinator = Arc::clone(&coordinator);
+                let worker_snapshot_slot = Arc::clone(&slot);
+                if !gpu_worker.enqueue(move |gpu| {
+                    let mut loan = loan;
+                    // Blocker 2: In-flight GPU present cancellation check.
+                    if !worker_snapshot_slot.is_attached_with_epoch(frame_epoch) {
+                        loan.return_to_slot();
+                        worker_coordinator.consume_render();
+                        return;
                     }
+                    let receipt_result = run_gpu_frame(|| loan.render_snapshot(
+                        gpu,
+                        Some(effective_bounds),
+                        layout,
+                        &render_input.snapshot,
+                        render_input.selection.as_ref(),
+                        render_input.scrollbar_overlay.as_ref(),
+                        render_input.attention_frame,
+                    ));
+                    loan.return_to_slot();
+
+                    let dispatch_failure_coordinator = Arc::clone(&completion_coordinator);
+                    if let Err(err) = dispatch_render_on_main_thread(&completion_window, move || {
+                        if discard_retired_completion(&completion_slot) {
+                            return;
+                        }
+                        let retry = gpu_completion_requires_retry(&receipt_result);
+                        let receipt = match receipt_result {
+                            Ok(r) => r,
+                            Err(err) => {
+                                tracing::warn!(
+                                    session_id = %completion_session_id,
+                                    error = %err,
+                                    "Failed to render native terminal snapshot"
+                                );
+                                NativeTerminalSurfaceReceipt::from_snapshot(
+                                    layout,
+                                    &render_input.snapshot,
+                                    0,
+                                    0,
+                                    cell_metrics,
+                                    Some(effective_bounds),
+                                )
+                            }
+                        };
+
+                        let is_attached = completion_snapshot_slot.is_attached_with_epoch(frame_epoch);
+
+                        if is_attached && receipt.presented {
+                            let mut hosts_guard = completion_hosts.lock();
+                            if let Some(host) = hosts_guard.get_mut(&completion_session_id) {
+                                host.finish_presentation(&completion_host_window);
+                            }
+                        }
+
+                        if retry {
+                            completion_coordinator.schedule_render();
+                        }
+
+                        if completion_coordinator.finish_render() {
+                            let follow_up_delay = completion_coordinator.delay_before_retry();
+                            tauri::async_runtime::spawn(async move {
+                                tokio::time::sleep(follow_up_delay).await;
+                                dispatch_scheduled_render(
+                                    follow_up_window,
+                                    completion_hosts,
+                                    completion_snapshot_slot,
+                                    completion_session_id,
+                                    completion_coordinator,
+                                    completion_gpu_worker,
+                                );
+                            });
+                        }
+                    }) {
+                        dispatch_failure_coordinator.consume_render();
+                        tracing::warn!(error = %err, "Failed to dispatch GPU frame completion");
+                    }
+                }) {
+                    submission_coordinator.consume_render();
+                    tracing::warn!("Native terminal GPU worker rejected frame submission");
                 }
-            };
-            if let Some(host) = host {
-                let effective_bounds = host
-                    .active_presentation_geometry()
-                    .resolve(logical_bounds)
-                    .unwrap_or(logical_bounds);
-                host.layout = Some(layout);
-                host.logical_bounds = Some(effective_bounds);
-                host.update_viewport(Some(effective_bounds));
-                match host.render_snapshot(
-                    &surface_window,
-                    layout,
-                    &render_input.snapshot,
-                    render_input.selection.as_ref(),
-                    render_input.scrollbar_overlay.as_ref(),
-                    render_input.attention_frame,
-                    render_input.synchronized_output,
-                ) {
+            }
+            #[cfg(test)]
+            HostFrameTarget::Injected(target) => {
+                let receipt = target.render_snapshot(layout, &render_input.snapshot);
+                drop(hosts_guard);
+                match receipt {
                     Ok(receipt) => {
                         if !receipt.presented
                             && !receipt.render_deferred
@@ -477,25 +607,22 @@ fn dispatch_scheduled_render<R: Runtime>(
                         "Failed to render native terminal snapshot"
                     ),
                 }
-            }
-        }
-        drop(hosts_guard);
 
-        if coordinator.finish_render() {
-            // Wry runs main-thread dispatch inline; enqueue off-thread to avoid recursive retries,
-            // and pace the follow-up so a stalled surface cannot spin the main thread. The wait is
-            // whatever remains of this frame's budget, so a frame that already overran goes now.
-            let follow_up_delay = coordinator.delay_before_retry();
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(follow_up_delay).await;
-                dispatch_scheduled_render(
-                    follow_up_window,
-                    hosts,
-                    sessions,
-                    session_id,
-                    coordinator,
-                );
-            });
+                if coordinator.finish_render() {
+                    let follow_up_delay = coordinator.delay_before_retry();
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(follow_up_delay).await;
+                        dispatch_scheduled_render(
+                            follow_up_window,
+                            hosts,
+                            slot,
+                            session_id,
+                            coordinator,
+                            gpu_worker,
+                        );
+                    });
+                }
+            }
         }
     }) {
         failure_coordinator.consume_render();
@@ -505,6 +632,25 @@ fn dispatch_scheduled_render<R: Runtime>(
             "Failed to dispatch native terminal render to main thread"
         );
     }
+}
+
+fn discard_retired_completion<T>(slot: &LentSlot<T>) -> bool {
+    slot.is_retired()
+}
+
+fn gpu_completion_requires_retry(
+    result: &Result<NativeTerminalSurfaceReceipt, NativeTerminalError>,
+) -> bool {
+    match result {
+        Ok(receipt) => !receipt.presented && !receipt.render_deferred && !receipt.render_suspended,
+        Err(_) => false,
+    }
+}
+
+fn run_gpu_frame<T>(render: impl FnOnce() -> Result<T, NativeTerminalError>) -> Result<T, NativeTerminalError> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(render)).unwrap_or_else(|_| {
+        Err(NativeTerminalError::GpuPipelineError("Native terminal GPU frame panicked".into()))
+    })
 }
 
 /// Lower bound between a dropped frame and its retry.
@@ -542,7 +688,8 @@ impl FrameClock {
             // Nothing has rendered yet; the first frame must not be delayed.
             return std::time::Duration::ZERO;
         };
-        self.interval.saturating_sub(now.saturating_duration_since(started))
+        self.interval
+            .saturating_sub(now.saturating_duration_since(started))
     }
 
     /// Delay before RE-dispatching a frame that just failed to present.
@@ -651,9 +798,10 @@ mod frame_clock_tests {
 fn defer_scheduled_render<R: Runtime>(
     window: Window<R>,
     hosts: Arc<Mutex<HashMap<String, NativeTerminalSurfaceHost>>>,
-    sessions: Arc<Mutex<HashMap<String, NativeTerminalSession>>>,
+    slot: Arc<SnapshotSlot>,
     session_id: String,
     coordinator: Arc<RenderScheduleCoordinator>,
+    gpu_worker: Arc<GpuWorker>,
 ) {
     #[cfg(test)]
     let test_window = window.clone();
@@ -661,7 +809,7 @@ fn defer_scheduled_render<R: Runtime>(
     // Wry runs main-thread dispatch inline; enqueue off-thread to avoid recursive retries.
     let _task = tauri::async_runtime::spawn(async move {
         tokio::time::sleep(retry_delay).await;
-        dispatch_scheduled_render(window, hosts, sessions, session_id, coordinator);
+        dispatch_scheduled_render(window, hosts, slot, session_id, coordinator, gpu_worker);
     });
     #[cfg(test)]
     if let Some(dispatch) = test_window.try_state::<tests::RenderDispatch>() {
@@ -689,6 +837,7 @@ impl Clone for NativeTerminalSurfaceHostState {
             event_sink: Arc::clone(&self.event_sink),
             pty_resize_sink: Arc::clone(&self.pty_resize_sink),
             pending_startups: Arc::clone(&self.pending_startups),
+            gpu_worker: Arc::clone(&self.gpu_worker),
         }
     }
 }
@@ -701,6 +850,9 @@ impl Default for NativeTerminalSurfaceHostState {
             event_sink: Arc::new(RwLock::new(None)),
             pty_resize_sink: Arc::new(RwLock::new(None)),
             pending_startups: Arc::new(Mutex::new(HashSet::new())),
+            gpu_worker: Arc::new(
+                GpuWorker::new("ferryx-gpu-worker").expect("spawn native terminal gpu worker"),
+            ),
         }
     }
 }
@@ -823,12 +975,12 @@ fn take_native_terminal_scrollbar_event(
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct SessionRenderInput {
-    snapshot: RenderSnapshot,
-    selection: Option<SelectionSnapshot>,
-    scrollbar_overlay: Option<ScrollbarOverlayState>,
-    attention_frame: bool,
-    synchronized_output: bool,
+pub(crate) struct SessionRenderInput {
+    pub(crate) snapshot: RenderSnapshot,
+    pub(crate) selection: Option<SelectionSnapshot>,
+    pub(crate) scrollbar_overlay: Option<ScrollbarOverlayState>,
+    pub(crate) attention_frame: bool,
+    pub(crate) synchronized_output: bool,
 }
 
 fn preedit_char_wide(c: char) -> bool {
@@ -980,7 +1132,11 @@ fn emit_native_terminal_event<R: Runtime>(
 }
 
 impl NativeTerminalSurfaceHostState {
-    pub fn reset_agent_state<R: Runtime>(&self, session_id: &str, app: Option<&tauri::AppHandle<R>>) {
+    pub fn reset_agent_state<R: Runtime>(
+        &self,
+        session_id: &str,
+        app: Option<&tauri::AppHandle<R>>,
+    ) {
         let changed = {
             let mut sessions = self.sessions.lock();
             if let Some(sess) = sessions.get_mut(session_id) {
@@ -1000,7 +1156,11 @@ impl NativeTerminalSurfaceHostState {
                 provider_session: None,
                 is_snapshot: false,
             };
-            emit_native_terminal_event(app, &self.event_sink, NativeTerminalEvent::AgentState(payload));
+            emit_native_terminal_event(
+                app,
+                &self.event_sink,
+                NativeTerminalEvent::AgentState(payload),
+            );
         }
     }
 
@@ -1139,7 +1299,10 @@ impl NativeTerminalSurfaceHostState {
         let scrollback = cached_terminal_preferences().scrollback;
         let mut sessions = self.sessions.lock();
         for (session_id, session) in sessions.iter_mut() {
-            if let Err(error) = session.terminal.set_scrollback_limit_lines(Some(scrollback)) {
+            if let Err(error) = session
+                .terminal
+                .set_scrollback_limit_lines(Some(scrollback))
+            {
                 tracing::warn!(
                     session_id = %session_id,
                     ?error,
@@ -1244,6 +1407,7 @@ impl NativeTerminalSurfaceHostState {
                         agent_reports_own_state: false,
                         surface_attached: true,
                         bracketed_paste_seen: false,
+                        snapshot_slot: Arc::new(SnapshotSlot::new()),
                     },
                 );
                 (
@@ -1258,8 +1422,7 @@ impl NativeTerminalSurfaceHostState {
         let prior_scrollbar = session.terminal.scrollbar().ok();
         let is_at_bottom = prior_scrollbar.map_or(true, |sb| {
             let max_offset = sb.total.saturating_sub(sb.len);
-            max_offset == 0
-                || sb.offset >= max_offset.saturating_sub(BOTTOM_LOCK_TOLERANCE_ROWS)
+            max_offset == 0 || sb.offset >= max_offset.saturating_sub(BOTTOM_LOCK_TOLERANCE_ROWS)
         });
         let prior_scroll_ratio = if is_at_bottom {
             None
@@ -1311,6 +1474,8 @@ impl NativeTerminalSurfaceHostState {
         session.layout = Some(layout);
         session.logical_bounds = Some(request.bounds);
         session.cell_metrics = Some(cell_metrics);
+        session.snapshot_slot.set_attached(true);
+        session.publish_frame();
         drop(sessions);
         if initialized || resized {
             self.notify_pty_resize(&request.session_id, layout.cols, layout.rows);
@@ -1319,10 +1484,12 @@ impl NativeTerminalSurfaceHostState {
     }
 
     fn presentation_geometry_for_session(&self, session_id: &str) -> SurfacePresentationGeometry {
-        self.hosts.lock().get(session_id).map_or(
-            SurfacePresentationGeometry::Default,
-            |host| host.active_presentation_geometry(),
-        )
+        self.hosts
+            .lock()
+            .get(session_id)
+            .map_or(SurfacePresentationGeometry::Default, |host| {
+                host.active_presentation_geometry()
+            })
     }
 
     pub fn attach_daemon_attachment_with_bounds<R: Runtime>(
@@ -1332,7 +1499,9 @@ impl NativeTerminalSurfaceHostState {
         app: Option<tauri::AppHandle<R>>,
         bounds: Option<LogicalBounds>,
     ) -> Result<(), NativeTerminalError> {
-        self.attach_daemon_attachment_with_bounds_and_client(session_id, attachment, app, bounds, None)
+        self.attach_daemon_attachment_with_bounds_and_client(
+            session_id, attachment, app, bounds, None,
+        )
     }
 
     pub fn attach_daemon_attachment_with_bounds_and_client<R: Runtime>(
@@ -1400,6 +1569,7 @@ impl NativeTerminalSurfaceHostState {
         }
 
         session.surface_attached = true;
+        session.snapshot_slot.set_attached(true);
         let resized_dimensions = if let Some(bounds) = bounds {
             let layout = match geometry.resolve(bounds).and_then(|bounds| {
                 let metrics = font_manager::derived_cell_metrics_for_scale(bounds.scale_factor);
@@ -1479,6 +1649,7 @@ impl NativeTerminalSurfaceHostState {
         } else {
             None
         };
+        session.publish_frame();
         session.render_coordinator.consume_render();
         drop(sessions);
         if let Some((cols, rows)) = resized_dimensions {
@@ -1662,6 +1833,7 @@ impl NativeTerminalSurfaceHostState {
                         agent_reports_own_state: false,
                         surface_attached: true,
                         bracketed_paste_seen,
+                        snapshot_slot: Arc::new(SnapshotSlot::new()),
                     },
                 );
                 (update_sender, render_coordinator)
@@ -1681,6 +1853,10 @@ impl NativeTerminalSurfaceHostState {
         let mut messages = attachment.messages;
         let sessions = Arc::clone(&self.sessions);
         let hosts = Arc::clone(&self.hosts);
+        let slot = {
+            let s = sessions.lock();
+            Arc::clone(&s.get(session_id).unwrap().snapshot_slot)
+        };
         let event_sink = Arc::clone(&self.event_sink);
         let session_id_owned = session_id.to_string();
         let app_handle = app.clone();
@@ -1691,19 +1867,19 @@ impl NativeTerminalSurfaceHostState {
             .get(&session_id_owned)
             .map(|session| session.is_remote)
             .unwrap_or(false);
+        let gpu_worker = Arc::clone(&self.gpu_worker);
         let pump_task = tokio::spawn(async move {
             let schedule_render = || {
                 if render_coordinator.schedule_render() {
-                    if let Some(window) = app_handle
-                        .as_ref()
-                        .and_then(|app| app.get_window("main"))
+                    if let Some(window) = app_handle.as_ref().and_then(|app| app.get_window("main"))
                     {
                         dispatch_scheduled_render(
                             window,
                             Arc::clone(&hosts),
-                            Arc::clone(&sessions),
+                            Arc::clone(&slot),
                             session_id_owned.clone(),
                             Arc::clone(&render_coordinator),
+                            Arc::clone(&gpu_worker),
                         );
                     } else {
                         render_coordinator.consume_render();
@@ -1716,6 +1892,7 @@ impl NativeTerminalSurfaceHostState {
                     let _ = session
                         .terminal
                         .scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
+                    session.publish_frame();
                 }
             };
             let mut replay_absorb = absorbs_replay_burst.then(|| {
@@ -1723,7 +1900,9 @@ impl NativeTerminalSurfaceHostState {
                 (now, now)
             });
             loop {
-                let deadline = sessions.lock().get(&session_id_owned)
+                let deadline = sessions
+                    .lock()
+                    .get(&session_id_owned)
                     .and_then(|session| session.terminal.synchronized_output_deadline());
                 let received = tokio::select! {
                     biased;
@@ -1738,6 +1917,7 @@ impl NativeTerminalSurfaceHostState {
                             if let Err(error) = session.terminal.expire_synchronized_output(tokio::time::Instant::now()) {
                                 tracing::warn!(session_id = %session_id_owned, %error, "Failed to end synchronized output");
                             }
+                            session.publish_frame();
                         }
                         drop(sessions_guard);
                         update_sender.send_replace(());
@@ -1747,54 +1927,55 @@ impl NativeTerminalSurfaceHostState {
                     result = tokio::time::timeout(AGENT_DETECT_TRAILING_IDLE, messages.recv()) => result,
                 };
                 let msg = match received {
-                        Ok(Some(msg)) => msg,
-                        Ok(None) => {
+                    Ok(Some(msg)) => msg,
+                    Ok(None) => {
+                        let mut sessions_guard = sessions.lock();
+                        if let Some(session) = sessions_guard.get_mut(&session_id_owned) {
+                            if let Err(error) = session.terminal.finish_synchronized_output() {
+                                tracing::warn!(session_id = %session_id_owned, %error, "Failed to finish terminal output");
+                            }
+                            session.publish_frame();
+                        }
+                        drop(sessions_guard);
+                        update_sender.send_replace(());
+                        schedule_render();
+                        break;
+                    }
+                    Err(_) => {
+                        // Burst went quiet: re-run any detection the throttle skipped so the
+                        // final frame of a burst (often the agent's last word before it blocks
+                        // on input) still produces a state transition.
+                        let (detected, events) = {
                             let mut sessions_guard = sessions.lock();
-                            if let Some(session) = sessions_guard.get_mut(&session_id_owned) {
-                                if let Err(error) = session.terminal.finish_synchronized_output() {
-                                    tracing::warn!(session_id = %session_id_owned, %error, "Failed to finish terminal output");
-                                }
+                            match sessions_guard.get_mut(&session_id_owned) {
+                                Some(sess) if sess.agent_detect_pending => (
+                                    true,
+                                    take_native_terminal_events(sess, &session_id_owned, true),
+                                ),
+                                Some(_) => (false, Vec::new()),
+                                None => (false, Vec::new()),
                             }
-                            drop(sessions_guard);
+                        };
+                        for event in events {
+                            emit_native_terminal_event(app_handle.as_ref(), &event_sink, event);
+                        }
+                        if detected {
                             update_sender.send_replace(());
-                            schedule_render();
-                            break;
                         }
-                        Err(_) => {
-                            // Burst went quiet: re-run any detection the throttle skipped so the
-                            // final frame of a burst (often the agent's last word before it blocks
-                            // on input) still produces a state transition.
-                            let (detected, events) = {
-                                let mut sessions_guard = sessions.lock();
-                                match sessions_guard.get_mut(&session_id_owned) {
-                                    Some(sess) if sess.agent_detect_pending => (
-                                        true,
-                                        take_native_terminal_events(sess, &session_id_owned, true),
-                                    ),
-                                    Some(_) => (false, Vec::new()),
-                                    None => (false, Vec::new()),
-                                }
-                            };
-                            for event in events {
-                                emit_native_terminal_event(app_handle.as_ref(), &event_sink, event);
+                        if let Some((started_at, last_output_at)) = replay_absorb {
+                            let now = std::time::Instant::now();
+                            if !replay_absorb_continues(
+                                now.duration_since(started_at),
+                                now.duration_since(last_output_at),
+                            ) {
+                                replay_absorb = None;
+                                lock_to_bottom();
+                                schedule_render();
                             }
-                            if detected {
-                                update_sender.send_replace(());
-                            }
-                            if let Some((started_at, last_output_at)) = replay_absorb {
-                                let now = std::time::Instant::now();
-                                if !replay_absorb_continues(
-                                    now.duration_since(started_at),
-                                    now.duration_since(last_output_at),
-                                ) {
-                                    replay_absorb = None;
-                                    lock_to_bottom();
-                                    schedule_render();
-                                }
-                            }
-                            continue;
                         }
-                    };
+                        continue;
+                    }
+                };
                 match msg {
                     DaemonStreamMessage::Output { sequence, data, .. } => {
                         let (session_exists, events) = {
@@ -1811,6 +1992,7 @@ impl NativeTerminalSurfaceHostState {
                                     sess.bracketed_paste_seen = true;
                                 }
                                 sess.last_sequence = Some(sequence);
+                                sess.publish_frame();
                                 (
                                     true,
                                     take_native_terminal_events(sess, &session_id_owned, false),
@@ -1888,6 +2070,7 @@ impl NativeTerminalSurfaceHostState {
                                     let _ = sess.terminal.feed_str("\x1b[?2004h");
                                     sess.bracketed_paste_seen = true;
                                 }
+                                sess.publish_frame();
                                 // feed_attachment_history leaves the grid at the last
                                 // segment's dimensions; restore the pane's layout size so the
                                 // Bottom lock below applies to the on-screen grid.
@@ -2032,7 +2215,11 @@ impl NativeTerminalSurfaceHostState {
                         }
                     }
                     DaemonStreamMessage::RemoteStatus {
-                        state, generation, failure, replay_gap, ..
+                        state,
+                        generation,
+                        failure,
+                        replay_gap,
+                        ..
                     } => {
                         {
                             let mut sessions_guard = sessions.lock();
@@ -2043,13 +2230,16 @@ impl NativeTerminalSurfaceHostState {
                             }
                         }
                         if let Some(app) = app_handle.as_ref() {
-                            if let Err(error) = app.emit("terminal_remote_status", serde_json::json!({
-                                "sessionId": session_id_owned,
-                                "state": state,
-                                "generation": generation,
-                                "failure": failure,
-                                "replayGap": replay_gap,
-                            })) {
+                            if let Err(error) = app.emit(
+                                "terminal_remote_status",
+                                serde_json::json!({
+                                    "sessionId": session_id_owned,
+                                    "state": state,
+                                    "generation": generation,
+                                    "failure": failure,
+                                    "replayGap": replay_gap,
+                                }),
+                            ) {
                                 tracing::warn!(%error, "Failed to emit remote terminal status");
                             }
                         }
@@ -2065,7 +2255,9 @@ impl NativeTerminalSurfaceHostState {
         });
 
         let pty_write_task = if let Some(daemon_client) = daemon_client {
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::native_terminal::bell::PtyWriteRecord>();
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<
+                crate::native_terminal::bell::PtyWriteRecord,
+            >();
             {
                 let sessions_guard = self.sessions.lock();
                 if let Some(session) = sessions_guard.get(session_id) {
@@ -2078,11 +2270,17 @@ impl NativeTerminalSurfaceHostState {
             let app_handle_for_writer = app.as_ref().map(|a| a.clone());
             Some(tokio::spawn(async move {
                 while let Some(record) = rx.recv().await {
-                    let crate::native_terminal::bell::PtyWriteRecord { generation: orig_gen, data } = record;
+                    let crate::native_terminal::bell::PtyWriteRecord {
+                        generation: orig_gen,
+                        data,
+                    } = record;
                     let (is_remote, current_gen) = {
                         let guard = sessions.lock();
                         let sess = guard.get(&id);
-                        (sess.map(|s| s.is_remote).unwrap_or(false), sess.and_then(|s| s.remote_generation))
+                        (
+                            sess.map(|s| s.is_remote).unwrap_or(false),
+                            sess.and_then(|s| s.remote_generation),
+                        )
                     };
 
                     if is_remote || orig_gen.is_some() {
@@ -2104,8 +2302,12 @@ impl NativeTerminalSurfaceHostState {
                                 // wait up to 2 seconds for pump_task to install remote_generation.
                                 let start = tokio::time::Instant::now();
                                 let mut resolved_gen = None;
-                                while tokio::time::Instant::now() - start < std::time::Duration::from_millis(2000) {
-                                    if let Some(gen) = sessions.lock().get(&id).and_then(|s| s.remote_generation) {
+                                while tokio::time::Instant::now() - start
+                                    < std::time::Duration::from_millis(2000)
+                                {
+                                    if let Some(gen) =
+                                        sessions.lock().get(&id).and_then(|s| s.remote_generation)
+                                    {
                                         resolved_gen = Some(gen);
                                         break;
                                     }
@@ -2122,7 +2324,8 @@ impl NativeTerminalSurfaceHostState {
                             }
                         };
 
-                        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(2000);
+                        let deadline =
+                            tokio::time::Instant::now() + std::time::Duration::from_millis(2000);
                         let mut backoff_ms = 5u64;
                         loop {
                             match client
@@ -2156,7 +2359,10 @@ impl NativeTerminalSurfaceHostState {
                                         }
                                         break;
                                     }
-                                    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                                    tokio::time::sleep(std::time::Duration::from_millis(
+                                        backoff_ms,
+                                    ))
+                                    .await;
                                     backoff_ms = (backoff_ms * 2).min(50);
                                 }
                                 Err(err) => {
@@ -2203,6 +2409,7 @@ impl NativeTerminalSurfaceHostState {
                 session.layout = None;
                 session.logical_bounds = None;
                 session.surface_attached = false;
+                session.snapshot_slot.set_attached(false);
                 // Backgrounding is a state-resync point: let the first post-detach chunk
                 // detect immediately instead of waiting out the attached-pane interval.
                 session.last_agent_detect_at = None;
@@ -2220,6 +2427,7 @@ impl NativeTerminalSurfaceHostState {
         let mut hosts = self.hosts.lock();
         let mut sessions = self.sessions.lock();
         if let Some(mut session) = sessions.remove(session_id) {
+            session.snapshot_slot.set_attached(false);
             if let Some(task) = session.stream_task.take() {
                 task.abort();
             }
@@ -2288,7 +2496,9 @@ impl NativeTerminalSurfaceHostState {
     ) -> Result<tokio::sync::watch::Receiver<()>, NativeTerminalError> {
         validate_session_id(session_id)?;
         let sessions = self.sessions.lock();
-        let session = sessions.get(session_id).ok_or(NativeTerminalError::NoValue)?;
+        let session = sessions
+            .get(session_id)
+            .ok_or(NativeTerminalError::NoValue)?;
         Ok(session.detach_sender.subscribe())
     }
 
@@ -2355,7 +2565,8 @@ impl NativeTerminalSurfaceHostState {
             Some(session) => session,
             None => {
                 let mut terminal = NativeTerminal::new(80, 24)?;
-                let _ = terminal.set_scrollback_limit_lines(Some(cached_terminal_preferences().scrollback));
+                let _ = terminal
+                    .set_scrollback_limit_lines(Some(cached_terminal_preferences().scrollback));
                 let (update_sender, _) = tokio::sync::watch::channel(());
                 let render_coordinator = Arc::new(RenderScheduleCoordinator::new());
                 sessions.insert(
@@ -2386,6 +2597,7 @@ impl NativeTerminalSurfaceHostState {
                         agent_reports_own_state: false,
                         surface_attached: true,
                         bracketed_paste_seen: false,
+                        snapshot_slot: Arc::new(SnapshotSlot::new()),
                     },
                 );
                 sessions
@@ -2401,6 +2613,7 @@ impl NativeTerminalSurfaceHostState {
             if let Ok(sb) = session.terminal.scrollbar() {
                 session.scrollbar_overlay.metrics = Some(sb);
             }
+            session.publish_frame();
         }
         Ok(bytes)
     }
@@ -2441,14 +2654,13 @@ impl NativeTerminalSurfaceHostState {
         let mut hosts = self.lock_attached_hosts(&session_id)?;
         let host = match hosts.entry(session_id.clone()) {
             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(NativeTerminalSurfaceHost::new(
-                    window,
-                    request.bounds.scale_factor,
-                )?)
-            }
+            std::collections::hash_map::Entry::Vacant(entry) => entry.insert(
+                NativeTerminalSurfaceHost::new(window, request.bounds.scale_factor)?,
+            ),
         };
-        request.bounds = host.active_presentation_geometry().resolve(request.bounds)?;
+        request.bounds = host
+            .active_presentation_geometry()
+            .resolve(request.bounds)?;
         let scale_factor = request.bounds.scale_factor;
         let cell_metrics = font_manager::derived_cell_metrics_for_scale(scale_factor);
         let logical_bounds = request.bounds;
@@ -2486,6 +2698,31 @@ impl NativeTerminalSurfaceHostState {
             render_input.synchronized_output,
         )?;
         drop(hosts);
+        if receipt.render_deferred && !render_input.synchronized_output {
+            let schedule_info = {
+                let sessions = self.sessions.lock();
+                sessions
+                    .get(&session_id)
+                    .filter(|session| session.surface_attached)
+                    .map(|session| (Arc::clone(&session.render_coordinator), Arc::clone(&session.snapshot_slot)))
+            };
+            if let Some((coordinator, slot)) = schedule_info {
+                if coordinator.schedule_render() {
+                    let window = window.clone();
+                    let hosts = Arc::clone(&self.hosts);
+                    let session_id = session_id.clone();
+                    let gpu_worker = Arc::clone(&self.gpu_worker);
+                    defer_scheduled_render(
+                        window,
+                        hosts,
+                        slot,
+                        session_id,
+                        coordinator,
+                        gpu_worker,
+                    );
+                }
+            }
+        }
         self.rearm_dropped_direct_frame(window, &session_id, receipt);
         Ok(receipt)
     }
@@ -2543,6 +2780,36 @@ impl NativeTerminalSurfaceHostState {
                 render_input.synchronized_output,
             )?;
             drop(hosts);
+            if receipt.render_deferred && !render_input.synchronized_output {
+                let schedule_info = {
+                    let sessions = self.sessions.lock();
+                    sessions
+                        .get(session_id)
+                        .filter(|session| session.surface_attached)
+                        .map(|session| {
+                            (
+                                Arc::clone(&session.render_coordinator),
+                                Arc::clone(&session.snapshot_slot),
+                            )
+                        })
+                };
+                if let Some((coordinator, slot)) = schedule_info {
+                    if coordinator.schedule_render() {
+                        let window = window.clone();
+                        let hosts = Arc::clone(&self.hosts);
+                        let session_id = session_id.to_string();
+                        let gpu_worker = Arc::clone(&self.gpu_worker);
+                        defer_scheduled_render(
+                            window,
+                            hosts,
+                            slot,
+                            session_id,
+                            coordinator,
+                            gpu_worker,
+                        );
+                    }
+                }
+            }
             self.rearm_dropped_direct_frame(window, session_id, receipt);
             Ok(receipt)
         } else {
@@ -2566,21 +2833,34 @@ impl NativeTerminalSurfaceHostState {
         if receipt.presented || receipt.render_deferred || receipt.render_suspended {
             return;
         }
-        let coordinator = self
-            .sessions
-            .lock()
-            .get(session_id)
-            .filter(|session| session.surface_attached)
-            .map(|session| Arc::clone(&session.render_coordinator));
-        if let Some(coordinator) = coordinator {
+        let schedule_info = {
+            let sessions = self.sessions.lock();
+            sessions
+                .get(session_id)
+                .filter(|session| session.surface_attached)
+                .map(|session| {
+                    (
+                        Arc::clone(&session.render_coordinator),
+                        Arc::clone(&session.snapshot_slot),
+                    )
+                })
+        };
+        if let Some((coordinator, slot)) = schedule_info {
             if coordinator.schedule_render() {
                 let window = window.clone();
                 let hosts = Arc::clone(&self.hosts);
-                let sessions = Arc::clone(&self.sessions);
                 let session_id = session_id.to_string();
+                let gpu_worker = Arc::clone(&self.gpu_worker);
                 // All host/session guards are released. Wry can dispatch inline on the
                 // main thread, so use the same deferred boundary as scheduled completion.
-                defer_scheduled_render(window, hosts, sessions, session_id, coordinator);
+                defer_scheduled_render(
+                    window,
+                    hosts,
+                    slot,
+                    session_id,
+                    coordinator,
+                    gpu_worker,
+                );
             }
         }
     }
@@ -2592,7 +2872,7 @@ impl NativeTerminalSurfaceHostState {
         preedit: Option<String>,
     ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
         validate_session_id(session_id)?;
-        let render_coordinator = {
+        let (render_coordinator, slot) = {
             let mut sessions = self.sessions.lock();
             let session = sessions
                 .get_mut(session_id)
@@ -2608,16 +2888,21 @@ impl NativeTerminalSurfaceHostState {
             if session.preedit != preedit {
                 session.preedit = preedit;
             }
-            Arc::clone(&session.render_coordinator)
+            session.publish_frame();
+            (
+                Arc::clone(&session.render_coordinator),
+                Arc::clone(&session.snapshot_slot),
+            )
         };
 
         if render_coordinator.schedule_render() {
             dispatch_scheduled_render(
                 window.clone(),
                 Arc::clone(&self.hosts),
-                Arc::clone(&self.sessions),
+                slot,
                 session_id.to_string(),
                 render_coordinator,
+                Arc::clone(&self.gpu_worker),
             );
         }
 
@@ -2651,10 +2936,7 @@ enum HostFrameTarget {
 }
 
 impl NativeTerminalSurfaceHost {
-    fn new<R: Runtime>(
-        window: &Window<R>,
-        scale_factor: f64,
-    ) -> Result<Self, NativeTerminalError> {
+    fn new<R: Runtime>(window: &Window<R>, scale_factor: f64) -> Result<Self, NativeTerminalError> {
         Ok(Self {
             frame_target: HostFrameTarget::Native(NativeSurfaceFrameTarget::new(
                 window,
@@ -2669,7 +2951,7 @@ impl NativeTerminalSurfaceHost {
     /// default (identity) presentation so headless harnesses keep raw webview density.
     fn active_presentation_geometry(&self) -> SurfacePresentationGeometry {
         match &self.frame_target {
-            HostFrameTarget::Native(native) => native.target.presentation_geometry(),
+            HostFrameTarget::Native(native) => native.presentation_geometry(),
             #[cfg(test)]
             HostFrameTarget::Injected(_) => SurfacePresentationGeometry::Default,
         }
@@ -2677,7 +2959,7 @@ impl NativeTerminalSurfaceHost {
 
     fn descriptor(&self) -> PlatformCompositorDescriptor {
         match &self.frame_target {
-            HostFrameTarget::Native(target) => target.target.descriptor(),
+            HostFrameTarget::Native(target) => target.descriptor(),
             #[cfg(test)]
             HostFrameTarget::Injected(_) => PlatformCompositorDescriptor::active_for_platform(),
         }
@@ -2685,15 +2967,30 @@ impl NativeTerminalSurfaceHost {
 
     fn update_viewport(&self, bounds: Option<LogicalBounds>) {
         match &self.frame_target {
-            HostFrameTarget::Native(target) => target.target.update_viewport(bounds),
+            HostFrameTarget::Native(target) => target.update_viewport(bounds),
+            #[cfg(test)]
+            HostFrameTarget::Injected(_) => {}
+        }
+    }
+
+    fn finish_presentation<R: Runtime>(&mut self, window: &Window<R>) {
+        match &mut self.frame_target {
+            HostFrameTarget::Native(target) => target.finish_presentation(window),
             #[cfg(test)]
             HostFrameTarget::Injected(_) => {}
         }
     }
 
     fn update_config(&mut self, config: RendererConfig) -> Result<(), NativeTerminalError> {
+        config.validate()?;
         match &mut self.frame_target {
-            HostFrameTarget::Native(target) => target.leg.renderer.update_config(config),
+            HostFrameTarget::Native(target) => {
+                target.cell_metrics = CellMetrics {
+                    width_px: config.cell_width_px,
+                    height_px: config.cell_height_px,
+                };
+                Ok(())
+            }
             #[cfg(test)]
             HostFrameTarget::Injected(target) => {
                 target.cell_metrics = CellMetrics {
@@ -2707,44 +3004,46 @@ impl NativeTerminalSurfaceHost {
 
     fn render_snapshot<R: Runtime>(
         &mut self,
-        window: &Window<R>,
+        _window: &Window<R>,
         layout: SurfaceCompositionLayout,
         snapshot: &RenderSnapshot,
-        selection: Option<&SelectionSnapshot>,
-        scrollbar_overlay: Option<&ScrollbarOverlayState>,
-        attention_frame: bool,
+        _selection: Option<&SelectionSnapshot>,
+        _scrollbar_overlay: Option<&ScrollbarOverlayState>,
+        _attention_frame: bool,
         synchronized_output: bool,
     ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
         if synchronized_output {
             let cell_metrics = match &self.frame_target {
-                HostFrameTarget::Native(target) => CellMetrics {
-                    width_px: target.leg.renderer.config().cell_width_px,
-                    height_px: target.leg.renderer.config().cell_height_px,
-                },
+                HostFrameTarget::Native(target) => target.cell_metrics,
                 #[cfg(test)]
                 HostFrameTarget::Injected(target) => target.cell_metrics,
             };
             return Ok(NativeTerminalSurfaceReceipt {
                 render_deferred: true,
                 ..NativeTerminalSurfaceReceipt::from_snapshot(
-                    layout, snapshot, 0, 0, cell_metrics, self.logical_bounds,
+                    layout,
+                    snapshot,
+                    0,
+                    0,
+                    cell_metrics,
+                    self.logical_bounds,
                 )
             });
         }
         match &mut self.frame_target {
             HostFrameTarget::Native(target) => {
-                let receipt = target.leg.render_snapshot(
-                    self.logical_bounds,
-                    layout,
-                    snapshot,
-                    selection,
-                    scrollbar_overlay,
-                    attention_frame,
-                )?;
-                if receipt.presented {
-                    target.finish_presentation(window);
-                }
-                Ok(receipt)
+                let cell_metrics = target.cell_metrics;
+                Ok(NativeTerminalSurfaceReceipt {
+                    render_deferred: true,
+                    ..NativeTerminalSurfaceReceipt::from_snapshot(
+                        layout,
+                        snapshot,
+                        0,
+                        0,
+                        cell_metrics,
+                        self.logical_bounds,
+                    )
+                })
             }
             #[cfg(test)]
             HostFrameTarget::Injected(target) => target.render_snapshot(layout, snapshot),
@@ -2791,7 +3090,8 @@ fn acquire_surface_frame(
 /// thread while the child view stays on the UI thread, where the platform requires it.
 struct GpuLeg {
     surface: wgpu::Surface<'static>,
-    renderer: NativeTerminalRenderer,
+    renderer: Option<NativeTerminalRenderer>,
+    initial_config: RendererConfig,
     format: wgpu::TextureFormat,
     size: PhysicalSize<u32>,
 }
@@ -2807,21 +3107,44 @@ struct GpuLeg {
 /// 2. `target` drops after: unparents (`removeFromSuperview`) and releases the child NSView.
 /// 3. The renderer inside `leg` drops with it: GPU device, pipelines, and glyph atlas.
 ///
-/// Sending `leg` to a worker thread converts this from a layout property into a runtime
-/// obligation: an in-flight leg must be reclaimed before `target` may be destroyed.
+/// Safe asynchronous retirement discharges this obligation without blocking the UI thread:
+/// if `leg` is currently lent to a worker thread, `target` is retained in the retirement slot
+/// and dropped strictly after the worker returns and drops `leg`.
 struct NativeSurfaceFrameTarget {
-    leg: GpuLeg,
-    target: PlatformCompositorTarget,
+    leg: LentSlot<GpuLeg>,
+    cell_metrics: CellMetrics,
+    target: Option<PlatformCompositorTarget>,
+    main_dispatcher: Arc<dyn Fn(Box<dyn FnOnce() + Send>) + Send + Sync>,
+}
+
+impl Drop for NativeSurfaceFrameTarget {
+    fn drop(&mut self) {
+        if let Some(target) = self.target.take() {
+            let dispatcher = Arc::clone(&self.main_dispatcher);
+            self.leg.retire_with(move || {
+                // Leg (and its wgpu::Surface) has dropped on the GPU worker thread.
+                // Now drop the native target strictly on the UI main thread.
+                dispatcher(Box::new(move || {
+                    drop(target);
+                }));
+            });
+        }
+    }
 }
 
 impl NativeSurfaceFrameTarget {
-    fn new<R: Runtime>(
-        window: &Window<R>,
-        scale_factor: f64,
-    ) -> Result<Self, NativeTerminalError> {
+    fn new<R: Runtime>(window: &Window<R>, scale_factor: f64) -> Result<Self, NativeTerminalError> {
         let target = PlatformCompositorTarget::new(window)?;
         let descriptor = target.descriptor();
         descriptor.validate_desktop_composition()?;
+
+        let window_clone = window.clone();
+        let main_dispatcher: Arc<dyn Fn(Box<dyn FnOnce() + Send>) + Send + Sync> =
+            Arc::new(move |task| {
+                if dispatch_render_on_main_thread(&window_clone, move || task()).is_err() {
+                    tracing::warn!("Failed to dispatch native target drop to main thread during shutdown");
+                }
+            });
 
         let scale = if scale_factor.is_finite() && scale_factor > 0.0 {
             scale_factor as f32
@@ -2829,40 +3152,78 @@ impl NativeSurfaceFrameTarget {
             1.0
         };
         let cell_metrics = font_manager::derived_cell_metrics_for_scale(scale as f64);
-        let renderer = NativeTerminalRenderer::new(RendererConfig {
+        let initial_config = RendererConfig {
             cell_width_px: cell_metrics.width_px,
             cell_height_px: cell_metrics.height_px,
             device_scale_factor: scale,
             theme: RendererTheme::from(cached_terminal_preferences().as_ref()),
-        })?;
-
-        let surface = renderer.create_surface(target.surface_target())?;
-
-        let size = PhysicalSize::new(1, 1);
-        let format = renderer.configure_surface(&surface, size.width, size.height)?;
-        Ok(Self {
-            leg: GpuLeg {
-                surface,
-                renderer,
-                format,
-                size,
+        };
+        initial_config.validate()?;
+        // AppKit surface creation inspects the NSView and must remain on the UI thread.
+        // Adapter/device requests and all surface configuration happen on the GPU worker.
+        let instance = super::renderer::gpu_context::GpuContext::shared_surface_instance();
+        let surface = match target.surface_layer_ptr() {
+            Some(layer_ptr) => unsafe {
+                // The layer pointer stays valid for the whole surface lifetime: the target
+                // holding it is dropped strictly after this surface (drop-order invariant).
+                instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer_ptr))
             },
-            target,
+            None => instance.create_surface(target.surface_target()),
+        }
+        .map_err(|error| {
+            NativeTerminalError::GpuPipelineError(format!("Surface create error: {error}"))
+        })?;
+        Ok(Self {
+            leg: LentSlot::new(GpuLeg {
+                surface,
+                renderer: None,
+                initial_config,
+                format: wgpu::TextureFormat::Bgra8Unorm,
+                size: PhysicalSize::new(0, 0),
+            }),
+            cell_metrics: CellMetrics {
+                width_px: cell_metrics.width_px,
+                height_px: cell_metrics.height_px,
+            },
+            target: Some(target),
+            main_dispatcher,
         })
+    }
+
+    fn descriptor(&self) -> PlatformCompositorDescriptor {
+        self.target
+            .as_ref()
+            .map(|t| t.descriptor())
+            .unwrap_or_else(PlatformCompositorDescriptor::active_for_platform)
+    }
+
+    fn presentation_geometry(&self) -> SurfacePresentationGeometry {
+        self.target
+            .as_ref()
+            .map(|t| t.presentation_geometry())
+            .unwrap_or(SurfacePresentationGeometry::Default)
+    }
+
+    fn update_viewport(&self, bounds: Option<LogicalBounds>) {
+        if let Some(target) = &self.target {
+            target.update_viewport(bounds);
+        }
     }
 
     // Runs only when a frame was actually presented: the no-frame path returns a receipt with
     // `presented` unset and must not touch AppKit, or a suspended surface would be revealed.
     fn finish_presentation<R: Runtime>(&mut self, window: &Window<R>) {
-        self.target.reveal_after_present();
-        self.target.restore_first_responder(window);
+        if let Some(target) = &mut self.target {
+            target.reveal_after_present();
+            target.restore_first_responder(window);
+        }
     }
-
 }
 
 impl GpuLeg {
     fn render_snapshot(
         &mut self,
+        _gpu: &GpuThread,
         logical_bounds: Option<LogicalBounds>,
         layout: SurfaceCompositionLayout,
         snapshot: &RenderSnapshot,
@@ -2870,6 +3231,12 @@ impl GpuLeg {
         scrollbar_overlay: Option<&ScrollbarOverlayState>,
         attention_frame: bool,
     ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
+        if self.renderer.is_none() {
+            self.renderer = Some(NativeTerminalRenderer::with_shared_surface_gpu(
+                self.initial_config,
+            )?);
+        }
+        let renderer = self.renderer.as_mut().expect("GPU renderer initialized");
         if let Some(bounds) = logical_bounds {
             let scale_factor = bounds.scale_factor;
             let cell_metrics = font_manager::derived_cell_metrics_for_scale(scale_factor);
@@ -2883,12 +3250,12 @@ impl GpuLeg {
                 },
                 theme: RendererTheme::from(cached_terminal_preferences().as_ref()),
             };
-            self.renderer.update_config(renderer_config)?;
+            renderer.update_config(renderer_config)?;
         }
         let surface_size =
             PhysicalSize::new(layout.physical_bounds.width, layout.physical_bounds.height);
         if surface_size != self.size {
-            self.format = self.renderer.configure_surface(
+            self.format = renderer.configure_surface(
                 &self.surface,
                 surface_size.width,
                 surface_size.height,
@@ -2908,7 +3275,7 @@ impl GpuLeg {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => Some(frame),
             wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
-                self.format = self.renderer.configure_surface(
+                self.format = renderer.configure_surface(
                     &self.surface,
                     surface_size.width,
                     surface_size.height,
@@ -2934,8 +3301,8 @@ impl GpuLeg {
             },
         };
         let cell_metrics = CellMetrics {
-            width_px: self.renderer.config().cell_width_px,
-            height_px: self.renderer.config().cell_height_px,
+            width_px: renderer.config().cell_width_px,
+            height_px: renderer.config().cell_height_px,
         };
         let Some(frame) = frame else {
             let mut receipt = NativeTerminalSurfaceReceipt::from_snapshot(
@@ -2952,7 +3319,7 @@ impl GpuLeg {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let (rebuilt_rows, reused_rows) = self.renderer.render_to_surface_viewport(
+        let (rebuilt_rows, reused_rows) = renderer.render_to_surface_viewport(
             snapshot,
             selection,
             &view,
@@ -2963,7 +3330,7 @@ impl GpuLeg {
             scrollbar_overlay,
             attention_frame,
         )?;
-        self.renderer.present(frame);
+        renderer.present(frame);
         Ok(NativeTerminalSurfaceReceipt {
             presented: true,
             ..NativeTerminalSurfaceReceipt::from_snapshot(
@@ -3030,26 +3397,49 @@ mod tests {
         let state = NativeTerminalSurfaceHostState::default();
         let session_id = "p06-pixel-geometry";
         for scale in 1..=if change_dpi { 2 } else { 1 } {
-            let metrics = CellMetrics { width_px: 8 * scale, height_px: 16 * scale };
-            let layout = state.prepare_session_layout(
-                NativeTerminalBoundsRequest {
-                    session_id: session_id.into(),
-                    bounds: LogicalBounds {
-                        x: 0.0, y: 0.0, width: 640.0, height: 384.0,
-                        scale_factor: f64::from(scale),
+            let metrics = CellMetrics {
+                width_px: 8 * scale,
+                height_px: 16 * scale,
+            };
+            let layout = state
+                .prepare_session_layout(
+                    NativeTerminalBoundsRequest {
+                        session_id: session_id.into(),
+                        bounds: LogicalBounds {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 640.0,
+                            height: 384.0,
+                            scale_factor: f64::from(scale),
+                        },
                     },
-                },
-                metrics,
-            ).expect("prepare unchanged 80x24 grid");
+                    metrics,
+                )
+                .expect("prepare unchanged 80x24 grid");
             assert_eq!((layout.cols, layout.rows), (80, 24));
         }
         let mut sessions = state.sessions.lock();
-        let terminal = &mut sessions.get_mut(session_id).expect("prepared session").terminal;
+        let terminal = &mut sessions
+            .get_mut(session_id)
+            .expect("prepared session")
+            .terminal;
         terminal.discard_buffered_pty_writes();
-        terminal.feed(b"\x1b[16t").expect("query actual Ghostty cell pixel size");
-        let reply: Vec<u8> = terminal.buffered_pty_writes().into_iter()
-            .flat_map(|record| record.data).collect();
-        assert_eq!(reply, if change_dpi { b"\x1b[6;32;16t".as_slice() } else { b"\x1b[6;16;8t".as_slice() });
+        terminal
+            .feed(b"\x1b[16t")
+            .expect("query actual Ghostty cell pixel size");
+        let reply: Vec<u8> = terminal
+            .buffered_pty_writes()
+            .into_iter()
+            .flat_map(|record| record.data)
+            .collect();
+        assert_eq!(
+            reply,
+            if change_dpi {
+                b"\x1b[6;32;16t".as_slice()
+            } else {
+                b"\x1b[6;16;8t".as_slice()
+            }
+        );
     }
 
     type RenderTask = Box<dyn FnOnce() + Send>;
@@ -3186,7 +3576,8 @@ mod tests {
                             .into_bytes(),
                         history_segments: Vec::new(),
                         pty_cols: Some(80),
-                        pty_rows: Some(24), remote_generation: None,
+                        pty_rows: Some(24),
+                        remote_generation: None,
                         messages,
                         stream_task: tokio::spawn(std::future::pending()),
                     },
@@ -3336,16 +3727,21 @@ mod tests {
         let listener = harness._app.listen("terminal_remote_status", move |event| {
             sender.send(event.payload().to_string()).unwrap();
         });
-        harness._output.send(DaemonStreamMessage::RemoteStatus {
-            session_id: harness.request.session_id.clone().into(),
-            state: crate::terminal::remote::RemoteConnectionState::Reconnecting,
-            generation: 9,
-            failure: None,
-            replay_gap: None,
-        }).await.unwrap();
-        let payload = tokio::time::timeout(
-            std::time::Duration::from_secs(3), received.recv(),
-        ).await.expect("native pump must forward remote state").unwrap();
+        harness
+            ._output
+            .send(DaemonStreamMessage::RemoteStatus {
+                session_id: harness.request.session_id.clone().into(),
+                state: crate::terminal::remote::RemoteConnectionState::Reconnecting,
+                generation: 9,
+                failure: None,
+                replay_gap: None,
+            })
+            .await
+            .unwrap();
+        let payload = tokio::time::timeout(std::time::Duration::from_secs(3), received.recv())
+            .await
+            .expect("native pump must forward remote state")
+            .unwrap();
         let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(payload["sessionId"], harness.request.session_id);
         assert_eq!(payload["state"], "reconnecting");
@@ -3358,11 +3754,19 @@ mod tests {
         // Given: the shell and an embedded browser share the main native window.
         let harness = DirectRenderHarness::new(vec![SimulatedAcquisition::Frame]);
         harness._app.manage(harness.state.clone());
-        let _browser = harness._app.get_window("main").unwrap().add_child(
-            tauri::webview::WebviewBuilder::new("browser-regression", tauri::WebviewUrl::default()),
-            tauri::LogicalPosition::new(0.0, 0.0),
-            tauri::LogicalSize::new(400.0, 300.0),
-        ).unwrap();
+        let _browser = harness
+            ._app
+            .get_window("main")
+            .unwrap()
+            .add_child(
+                tauri::webview::WebviewBuilder::new(
+                    "browser-regression",
+                    tauri::WebviewUrl::default(),
+                ),
+                tauri::LogicalPosition::new(0.0, 0.0),
+                tauri::LogicalSize::new(400.0, 300.0),
+            )
+            .unwrap();
         assert!(harness._app.get_webview_window("main").is_none());
         let bounds = harness.request.bounds;
 
@@ -3372,40 +3776,67 @@ mod tests {
             harness._app.state::<NativeTerminalSurfaceHostState>(),
             harness.request.session_id.clone(),
             crate::ipc::native_terminal::NativeTerminalLogicalRect {
-                x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height,
+                x: bounds.x,
+                y: bounds.y,
+                width: bounds.width,
+                height: bounds.height,
             },
             bounds.scale_factor,
-        ).await.expect("browser child must not make the main terminal window unavailable");
+        )
+        .await
+        .expect("browser child must not make the main terminal window unavailable");
 
         // Then: the normal surface host presents the frame and acknowledges it.
         assert!(receipt.presented);
         assert!(!receipt.render_deferred);
-        assert_eq!(*harness.events.lock(), vec![FrameEvent::Acquire, FrameEvent::Presented]);
+        assert_eq!(
+            *harness.events.lock(),
+            vec![FrameEvent::Acquire, FrameEvent::Presented]
+        );
     }
 
     #[tokio::test]
     async fn output_presents_when_browser_child_is_open() {
         // Given: dispatch is subscribed before output and the browser is already open.
         let mut harness = DirectRenderHarness::new(vec![SimulatedAcquisition::Frame]);
-        harness.window.state::<RenderDispatch>().require_deferred.store(false, Ordering::SeqCst);
-        let _browser = harness._app.get_window("main").unwrap().add_child(
-            tauri::webview::WebviewBuilder::new("browser-regression", tauri::WebviewUrl::default()),
-            tauri::LogicalPosition::new(0.0, 0.0),
-            tauri::LogicalSize::new(400.0, 300.0),
-        ).unwrap();
+        harness
+            .window
+            .state::<RenderDispatch>()
+            .require_deferred
+            .store(false, Ordering::SeqCst);
+        let _browser = harness
+            ._app
+            .get_window("main")
+            .unwrap()
+            .add_child(
+                tauri::webview::WebviewBuilder::new(
+                    "browser-regression",
+                    tauri::WebviewUrl::default(),
+                ),
+                tauri::LogicalPosition::new(0.0, 0.0),
+                tauri::LogicalSize::new(400.0, 300.0),
+            )
+            .unwrap();
         assert!(harness._app.get_webview_window("main").is_none());
 
         // When: the existing daemon attachment receives another output chunk.
-        harness._output.send(DaemonStreamMessage::Output {
-            session_id: harness.request.session_id.clone().into(),
-            sequence: 2,
-            data: b"browser coexistence\r\n".to_vec().into(),
-            metrics_read_unix_micros: None,
-        }).await.unwrap();
+        harness
+            ._output
+            .send(DaemonStreamMessage::Output {
+                session_id: harness.request.session_id.clone().into(),
+                sequence: 2,
+                data: b"browser coexistence\r\n".to_vec().into(),
+                metrics_read_unix_micros: None,
+            })
+            .await
+            .unwrap();
         harness.execute_dispatched().await;
 
         // Then: the output pump still schedules and presents a terminal frame.
-        assert_eq!(*harness.events.lock(), vec![FrameEvent::Acquire, FrameEvent::Presented]);
+        assert_eq!(
+            *harness.events.lock(),
+            vec![FrameEvent::Acquire, FrameEvent::Presented]
+        );
     }
 
     #[tokio::test]
@@ -3415,109 +3846,198 @@ mod tests {
             SimulatedAcquisition::Frame,
         ]);
         harness._app.manage(harness.state.clone());
-        harness.window.state::<RenderDispatch>().require_deferred.store(false, Ordering::SeqCst);
-        harness.state.render(&harness.window, harness.request.clone()).unwrap();
+        harness
+            .window
+            .state::<RenderDispatch>()
+            .require_deferred
+            .store(false, Ordering::SeqCst);
+        harness
+            .state
+            .render(&harness.window, harness.request.clone())
+            .unwrap();
         harness.events.lock().clear();
-        harness.state.with_session_terminal(&harness.request.session_id, |terminal| {
-            terminal.feed_str("\x1b[?2026hpartial")
-        }).unwrap();
+        harness
+            .state
+            .with_session_terminal(&harness.request.session_id, |terminal| {
+                terminal.feed_str("\x1b[?2026hpartial")
+            })
+            .unwrap();
         let bounds = harness.request.bounds;
         let mut command = Box::pin(crate::ipc::native_terminal::cmd_native_terminal_set_bounds(
             harness._app.handle().clone(),
             harness._app.state::<NativeTerminalSurfaceHostState>(),
             harness.request.session_id.clone(),
             crate::ipc::native_terminal::NativeTerminalLogicalRect {
-                x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height,
+                x: bounds.x,
+                y: bounds.y,
+                width: bounds.width,
+                height: bounds.height,
             },
             bounds.scale_factor,
         ));
 
-        assert!(futures_util::poll!(command.as_mut()).is_pending(),
-            "bounds IPC must not acknowledge an unpresented replacement surface");
+        assert!(
+            futures_util::poll!(command.as_mut()).is_pending(),
+            "bounds IPC must not acknowledge an unpresented replacement surface"
+        );
         assert!(harness.events.lock().is_empty());
 
-        harness._output.send(DaemonStreamMessage::Output {
-            session_id: harness.request.session_id.clone().into(),
-            sequence: 2,
-            data: b"\rcomplete\x1b[?2026l".to_vec().into(),
-            metrics_read_unix_micros: None,
-        }).await.unwrap();
+        harness
+            ._output
+            .send(DaemonStreamMessage::Output {
+                session_id: harness.request.session_id.clone().into(),
+                sequence: 2,
+                data: b"\rcomplete\x1b[?2026l".to_vec().into(),
+                metrics_read_unix_micros: None,
+            })
+            .await
+            .unwrap();
         let receipt = tokio::time::timeout(std::time::Duration::from_secs(5), command)
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert!(receipt.presented);
         assert!(!receipt.render_deferred);
-        assert_eq!(*harness.events.lock(), vec![FrameEvent::Acquire, FrameEvent::Presented]);
+        assert_eq!(
+            *harness.events.lock(),
+            vec![FrameEvent::Acquire, FrameEvent::Presented]
+        );
     }
 
     #[tokio::test]
     async fn deferred_bounds_retry_does_not_restore_obsolete_width() {
         for newest_finishes_first in [false, true] {
-        let harness = DirectRenderHarness::new(vec![
-            SimulatedAcquisition::Frame,
-            SimulatedAcquisition::Frame,
-            SimulatedAcquisition::Frame,
-        ]);
-        harness._app.manage(harness.state.clone());
-        harness.window.state::<RenderDispatch>().require_deferred.store(false, Ordering::SeqCst);
-        harness.state.render(&harness.window, harness.request.clone()).unwrap();
-        let resizes = Arc::new(Mutex::new(Vec::new()));
-        let recorded = Arc::clone(&resizes);
-        assert!(harness.state.set_pty_resize_sink_if_absent(Arc::new(move |_, cols, rows| {
-            recorded.lock().push((cols, rows));
-        })));
-        harness.state.with_session_terminal(&harness.request.session_id, |terminal| {
-            terminal.feed_str("\x1b[?2026hpartial")
-        }).unwrap();
-        let mut old_command = Box::pin(crate::ipc::native_terminal::cmd_native_terminal_set_bounds(
-            harness._app.handle().clone(),
-            harness._app.state::<NativeTerminalSurfaceHostState>(),
-            harness.request.session_id.clone(),
-            crate::ipc::native_terminal::NativeTerminalLogicalRect {
-                x: 0.0, y: 0.0, width: 640.0, height: 480.0,
-            },
-            1.0,
-        ));
-        assert!(futures_util::poll!(old_command.as_mut()).is_pending());
-        let mut latest_command = Box::pin(crate::ipc::native_terminal::cmd_native_terminal_set_bounds(
-            harness._app.handle().clone(),
-            harness._app.state::<NativeTerminalSurfaceHostState>(),
-            harness.request.session_id.clone(),
-            crate::ipc::native_terminal::NativeTerminalLogicalRect {
-                x: 0.0, y: 0.0, width: 900.0, height: 480.0,
-            },
-            1.0,
-        ));
-        assert!(futures_util::poll!(latest_command.as_mut()).is_pending());
+            let harness = DirectRenderHarness::new(vec![
+                SimulatedAcquisition::Frame,
+                SimulatedAcquisition::Frame,
+                SimulatedAcquisition::Frame,
+            ]);
+            harness._app.manage(harness.state.clone());
+            harness
+                .window
+                .state::<RenderDispatch>()
+                .require_deferred
+                .store(false, Ordering::SeqCst);
+            harness
+                .state
+                .render(&harness.window, harness.request.clone())
+                .unwrap();
+            let resizes = Arc::new(Mutex::new(Vec::new()));
+            let recorded = Arc::clone(&resizes);
+            assert!(harness
+                .state
+                .set_pty_resize_sink_if_absent(Arc::new(move |_, cols, rows| {
+                    recorded.lock().push((cols, rows));
+                })));
+            harness
+                .state
+                .with_session_terminal(&harness.request.session_id, |terminal| {
+                    terminal.feed_str("\x1b[?2026hpartial")
+                })
+                .unwrap();
+            let mut old_command =
+                Box::pin(crate::ipc::native_terminal::cmd_native_terminal_set_bounds(
+                    harness._app.handle().clone(),
+                    harness._app.state::<NativeTerminalSurfaceHostState>(),
+                    harness.request.session_id.clone(),
+                    crate::ipc::native_terminal::NativeTerminalLogicalRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 640.0,
+                        height: 480.0,
+                    },
+                    1.0,
+                ));
+            assert!(futures_util::poll!(old_command.as_mut()).is_pending());
+            let mut latest_command =
+                Box::pin(crate::ipc::native_terminal::cmd_native_terminal_set_bounds(
+                    harness._app.handle().clone(),
+                    harness._app.state::<NativeTerminalSurfaceHostState>(),
+                    harness.request.session_id.clone(),
+                    crate::ipc::native_terminal::NativeTerminalLogicalRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 900.0,
+                        height: 480.0,
+                    },
+                    1.0,
+                ));
+            assert!(futures_util::poll!(latest_command.as_mut()).is_pending());
 
-        let mut updates = harness.state.subscribe_session_update(&harness.request.session_id).unwrap();
-        harness._output.send(DaemonStreamMessage::Output {
-            session_id: harness.request.session_id.clone().into(),
-            sequence: 2,
-            data: b"\rcomplete\x1b[?2026l".to_vec().into(),
-            metrics_read_unix_micros: None,
-        }).await.unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(5), updates.changed())
-            .await.unwrap().unwrap();
-        let (old_receipt, latest) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            if newest_finishes_first {
-                let latest = latest_command.await.unwrap();
-                (old_command.await.unwrap(), latest)
-            } else {
-                let old_receipt = old_command.await.unwrap();
-                assert_eq!(harness.state.session_logical_bounds(&harness.request.session_id).unwrap().width, 900.0);
-                (old_receipt, latest_command.await.unwrap())
-            }
-        }).await.unwrap();
+            let mut updates = harness
+                .state
+                .subscribe_session_update(&harness.request.session_id)
+                .unwrap();
+            harness
+                ._output
+                .send(DaemonStreamMessage::Output {
+                    session_id: harness.request.session_id.clone().into(),
+                    sequence: 2,
+                    data: b"\rcomplete\x1b[?2026l".to_vec().into(),
+                    metrics_read_unix_micros: None,
+                })
+                .await
+                .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), updates.changed())
+                .await
+                .unwrap()
+                .unwrap();
+            let (old_receipt, latest) =
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    if newest_finishes_first {
+                        let latest = latest_command.await.unwrap();
+                        (old_command.await.unwrap(), latest)
+                    } else {
+                        let old_receipt = old_command.await.unwrap();
+                        assert_eq!(
+                            harness
+                                .state
+                                .session_logical_bounds(&harness.request.session_id)
+                                .unwrap()
+                                .width,
+                            900.0
+                        );
+                        (old_receipt, latest_command.await.unwrap())
+                    }
+                })
+                .await
+                .unwrap();
 
-        assert!(latest.presented);
-        assert!(old_receipt.presented);
-        assert_eq!(harness.state.session_logical_bounds(&harness.request.session_id).unwrap().width, 900.0);
-        assert_eq!(harness.state.hosts.lock().get(&harness.request.session_id)
-            .unwrap().logical_bounds.unwrap().width, 900.0);
-        assert_eq!(harness.state.with_session_terminal(&harness.request.session_id, |terminal| {
-            terminal.dimensions()
-        }).unwrap(), (latest.cols, latest.rows));
-        assert_eq!(resizes.lock().last().copied(), Some((latest.cols, latest.rows)));
+            assert!(latest.presented);
+            assert!(old_receipt.presented);
+            assert_eq!(
+                harness
+                    .state
+                    .session_logical_bounds(&harness.request.session_id)
+                    .unwrap()
+                    .width,
+                900.0
+            );
+            assert_eq!(
+                harness
+                    .state
+                    .hosts
+                    .lock()
+                    .get(&harness.request.session_id)
+                    .unwrap()
+                    .logical_bounds
+                    .unwrap()
+                    .width,
+                900.0
+            );
+            assert_eq!(
+                harness
+                    .state
+                    .with_session_terminal(&harness.request.session_id, |terminal| {
+                        terminal.dimensions()
+                    })
+                    .unwrap(),
+                (latest.cols, latest.rows)
+            );
+            assert_eq!(
+                resizes.lock().last().copied(),
+                Some((latest.cols, latest.rows))
+            );
         }
     }
 
@@ -3526,20 +4046,31 @@ mod tests {
         for detach in [false, true] {
             let mut harness = DirectRenderHarness::new(vec![SimulatedAcquisition::Frame]);
             harness._app.manage(harness.state.clone());
-            harness.window.state::<RenderDispatch>().require_deferred.store(false, Ordering::SeqCst);
-            harness.state.with_session_terminal(&harness.request.session_id, |terminal| {
-                terminal.feed_str("\x1b[?2026hpartial")
-            }).unwrap();
+            harness
+                .window
+                .state::<RenderDispatch>()
+                .require_deferred
+                .store(false, Ordering::SeqCst);
+            harness
+                .state
+                .with_session_terminal(&harness.request.session_id, |terminal| {
+                    terminal.feed_str("\x1b[?2026hpartial")
+                })
+                .unwrap();
             let bounds = harness.request.bounds;
-            let mut command = Box::pin(crate::ipc::native_terminal::cmd_native_terminal_set_bounds(
-                harness._app.handle().clone(),
-                harness._app.state::<NativeTerminalSurfaceHostState>(),
-                harness.request.session_id.clone(),
-                crate::ipc::native_terminal::NativeTerminalLogicalRect {
-                    x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height,
-                },
-                bounds.scale_factor,
-            ));
+            let mut command =
+                Box::pin(crate::ipc::native_terminal::cmd_native_terminal_set_bounds(
+                    harness._app.handle().clone(),
+                    harness._app.state::<NativeTerminalSurfaceHostState>(),
+                    harness.request.session_id.clone(),
+                    crate::ipc::native_terminal::NativeTerminalLogicalRect {
+                        x: bounds.x,
+                        y: bounds.y,
+                        width: bounds.width,
+                        height: bounds.height,
+                    },
+                    bounds.scale_factor,
+                ));
             assert!(futures_util::poll!(command.as_mut()).is_pending());
 
             if detach {
@@ -3549,14 +4080,18 @@ mod tests {
                 drop(std::mem::replace(&mut harness._output, replacement));
             }
             let result = tokio::time::timeout(std::time::Duration::from_secs(5), command)
-                .await.expect("termination must wake the outstanding bounds request");
+                .await
+                .expect("termination must wake the outstanding bounds request");
 
             if detach {
                 assert!(result.is_err());
                 assert_eq!(*harness.events.lock(), vec![FrameEvent::Destroyed]);
             } else {
                 assert!(result.unwrap().presented);
-                assert_eq!(*harness.events.lock(), vec![FrameEvent::Acquire, FrameEvent::Presented]);
+                assert_eq!(
+                    *harness.events.lock(),
+                    vec![FrameEvent::Acquire, FrameEvent::Presented]
+                );
             }
         }
     }
@@ -3564,40 +4099,76 @@ mod tests {
     #[tokio::test]
     async fn synchronized_output_pump_presents_only_the_completed_redraw() {
         let mut harness = DirectRenderHarness::new(vec![SimulatedAcquisition::Frame]);
-        harness.window.state::<RenderDispatch>().require_deferred.store(false, Ordering::SeqCst);
-        let mut updates = harness.state.subscribe_session_update(&harness.request.session_id).unwrap();
+        harness
+            .window
+            .state::<RenderDispatch>()
+            .require_deferred
+            .store(false, Ordering::SeqCst);
+        let mut updates = harness
+            .state
+            .subscribe_session_update(&harness.request.session_id)
+            .unwrap();
         for (sequence, data) in [
             (2, b"\x1b[?2026h\x1b[2J\x1b[Hpartial".as_slice()),
             (3, b"\rcomplete\x1b[?2026l".as_slice()),
         ] {
-            harness._output.send(DaemonStreamMessage::Output {
-                session_id: harness.request.session_id.clone().into(),
-                sequence,
-                data: data.to_vec().into(),
-                metrics_read_unix_micros: None,
-            }).await.unwrap();
-            tokio::time::timeout(std::time::Duration::from_secs(5), updates.changed()).await.unwrap().unwrap();
+            harness
+                ._output
+                .send(DaemonStreamMessage::Output {
+                    session_id: harness.request.session_id.clone().into(),
+                    sequence,
+                    data: data.to_vec().into(),
+                    metrics_read_unix_micros: None,
+                })
+                .await
+                .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), updates.changed())
+                .await
+                .unwrap()
+                .unwrap();
             harness.execute_dispatched().await;
             if sequence == 2 {
-                assert!(harness.events.lock().is_empty(), "the output pump must retain the last complete frame");
-                assert!(!harness.state.is_session_render_pending(&harness.request.session_id));
-                assert!(harness.dispatched.try_recv().is_err(), "no retry spin during synchronized output");
+                assert!(
+                    harness.events.lock().is_empty(),
+                    "the output pump must retain the last complete frame"
+                );
+                assert!(!harness
+                    .state
+                    .is_session_render_pending(&harness.request.session_id));
+                assert!(
+                    harness.dispatched.try_recv().is_err(),
+                    "no retry spin during synchronized output"
+                );
             }
         }
-        assert_eq!(*harness.events.lock(), vec![FrameEvent::Acquire, FrameEvent::Presented]);
+        assert_eq!(
+            *harness.events.lock(),
+            vec![FrameEvent::Acquire, FrameEvent::Presented]
+        );
     }
 
     #[tokio::test(start_paused = true)]
     async fn synchronized_output_pump_recovers_a_missing_end_without_more_output() {
         let mut harness = DirectRenderHarness::new(vec![SimulatedAcquisition::Frame]);
-        harness.window.state::<RenderDispatch>().require_deferred.store(false, Ordering::SeqCst);
-        let mut updates = harness.state.subscribe_session_update(&harness.request.session_id).unwrap();
-        harness._output.send(DaemonStreamMessage::Output {
-            session_id: harness.request.session_id.clone().into(),
-            sequence: 2,
-            data: b"\x1b[?2026hpartial".to_vec().into(),
-            metrics_read_unix_micros: None,
-        }).await.unwrap();
+        harness
+            .window
+            .state::<RenderDispatch>()
+            .require_deferred
+            .store(false, Ordering::SeqCst);
+        let mut updates = harness
+            .state
+            .subscribe_session_update(&harness.request.session_id)
+            .unwrap();
+        harness
+            ._output
+            .send(DaemonStreamMessage::Output {
+                session_id: harness.request.session_id.clone().into(),
+                sequence: 2,
+                data: b"\x1b[?2026hpartial".to_vec().into(),
+                metrics_read_unix_micros: None,
+            })
+            .await
+            .unwrap();
         updates.changed().await.unwrap();
         harness.execute_dispatched().await;
         assert!(harness.events.lock().is_empty());
@@ -3605,9 +4176,15 @@ mod tests {
         tokio::time::advance(std::time::Duration::from_secs(1)).await;
         harness.execute_dispatched().await;
 
-        assert!(!harness.state.with_session_terminal(&harness.request.session_id,
-            |terminal| terminal.synchronized_output_enabled()).unwrap());
-        assert_eq!(*harness.events.lock(), vec![FrameEvent::Acquire, FrameEvent::Presented]);
+        assert!(!harness
+            .state
+            .with_session_terminal(&harness.request.session_id, |terminal| terminal
+                .synchronized_output_enabled())
+            .unwrap());
+        assert_eq!(
+            *harness.events.lock(),
+            vec![FrameEvent::Acquire, FrameEvent::Presented]
+        );
     }
 
     #[tokio::test]
@@ -3617,33 +4194,66 @@ mod tests {
             SimulatedAcquisition::Frame,
         ]);
         // Establish the resized grid before the application starts its redraw.
-        assert!(harness
+        assert!(
+            harness
+                .state
+                .render(&harness.window, harness.request.clone())
+                .unwrap()
+                .presented
+        );
+        harness.events.lock().clear();
+        harness
+            .state
+            .with_session_terminal(&harness.request.session_id, |terminal| {
+                terminal.feed_str("\x1b[?2026h\x1b[2J\x1b[Hpartial redraw")
+            })
+            .unwrap();
+
+        let receipt = harness
             .state
             .render(&harness.window, harness.request.clone())
-            .unwrap()
-            .presented);
-        harness.events.lock().clear();
-        harness.state.with_session_terminal(&harness.request.session_id, |terminal| {
-            terminal.feed_str("\x1b[?2026h\x1b[2J\x1b[Hpartial redraw")
-        }).unwrap();
+            .unwrap();
 
-        let receipt = harness.state.render(&harness.window, harness.request.clone()).unwrap();
+        assert!(
+            !receipt.presented,
+            "an unfinished synchronized redraw must not reach presentation"
+        );
+        assert!(
+            harness.events.lock().is_empty(),
+            "keep the previous drawable without acquiring another"
+        );
+        assert!(
+            !harness
+                .state
+                .is_session_render_pending(&harness.request.session_id),
+            "a protocol-deferred frame must not enter the dropped-frame retry loop"
+        );
 
-        assert!(!receipt.presented, "an unfinished synchronized redraw must not reach presentation");
-        assert!(harness.events.lock().is_empty(), "keep the previous drawable without acquiring another");
-        assert!(!harness.state.is_session_render_pending(&harness.request.session_id),
-            "a protocol-deferred frame must not enter the dropped-frame retry loop");
-
-        harness.state.with_session_terminal(&harness.request.session_id, |terminal| {
-            terminal.feed_str("\rcomplete redraw\x1b[?2026l")
-        }).unwrap();
-        assert!(harness.state.render(&harness.window, harness.request.clone()).unwrap().presented);
-        assert_eq!(*harness.events.lock(), vec![FrameEvent::Acquire, FrameEvent::Presented]);
+        harness
+            .state
+            .with_session_terminal(&harness.request.session_id, |terminal| {
+                terminal.feed_str("\rcomplete redraw\x1b[?2026l")
+            })
+            .unwrap();
+        assert!(
+            harness
+                .state
+                .render(&harness.window, harness.request.clone())
+                .unwrap()
+                .presented
+        );
+        assert_eq!(
+            *harness.events.lock(),
+            vec![FrameEvent::Acquire, FrameEvent::Presented]
+        );
     }
 
     #[tokio::test]
     async fn direct_execution_characterization() {
-        let harness = DirectRenderHarness::new(vec![SimulatedAcquisition::Frame, SimulatedAcquisition::Frame]);
+        let harness = DirectRenderHarness::new(vec![
+            SimulatedAcquisition::Frame,
+            SimulatedAcquisition::Frame,
+        ]);
         let receipt = harness.scroll_once().unwrap();
         assert!(receipt.presented);
         assert!(receipt.cols > 0 && receipt.rows > 0);
@@ -3676,7 +4286,10 @@ mod tests {
 
     #[tokio::test]
     async fn one_shot_render_requeues_when_frame_is_dropped() {
-        let mut harness = DirectRenderHarness::new(vec![SimulatedAcquisition::Dropped, SimulatedAcquisition::Frame]);
+        let mut harness = DirectRenderHarness::new(vec![
+            SimulatedAcquisition::Dropped,
+            SimulatedAcquisition::Frame,
+        ]);
         let receipt = harness.scroll_once().unwrap();
         assert!(
             !receipt.presented,
@@ -3848,7 +4461,10 @@ mod tests {
 
     #[tokio::test]
     async fn direct_retry_focus_preserves_dropped_receipt() {
-        let mut harness = DirectRenderHarness::new(vec![SimulatedAcquisition::Dropped, SimulatedAcquisition::Frame]);
+        let mut harness = DirectRenderHarness::new(vec![
+            SimulatedAcquisition::Dropped,
+            SimulatedAcquisition::Frame,
+        ]);
         let receipt = harness
             .state
             .set_focus(&harness.window, &harness.request.session_id, true)
@@ -3873,8 +4489,10 @@ mod tests {
     #[tokio::test]
     async fn direct_retry_detach_or_close_before_dispatch_cannot_reveal_or_resurrect() {
         for close in [false, true] {
-            let mut harness =
-                DirectRenderHarness::new(vec![SimulatedAcquisition::Dropped, SimulatedAcquisition::Frame]);
+            let mut harness = DirectRenderHarness::new(vec![
+                SimulatedAcquisition::Dropped,
+                SimulatedAcquisition::Frame,
+            ]);
             let coordinator = harness
                 .state
                 .session_render_coordinator(&harness.request.session_id)
@@ -3946,7 +4564,10 @@ mod tests {
 
     #[tokio::test]
     async fn direct_retry_coalesces_with_existing_pending_render() {
-        let mut harness = DirectRenderHarness::new(vec![SimulatedAcquisition::Dropped, SimulatedAcquisition::Frame]);
+        let mut harness = DirectRenderHarness::new(vec![
+            SimulatedAcquisition::Dropped,
+            SimulatedAcquisition::Frame,
+        ]);
         // A real independent preedit request supplies the already-pending frame, not the missing retry.
         harness
             .window
@@ -4013,7 +4634,8 @@ mod tests {
                     history: b"retained screen".to_vec(),
                     history_segments: Vec::new(),
                     pty_cols: Some(80),
-                    pty_rows: Some(24), remote_generation: None,
+                    pty_rows: Some(24),
+                    remote_generation: None,
                     messages,
                     stream_task: tokio::spawn(std::future::pending()),
                 },
@@ -4154,7 +4776,8 @@ mod tests {
                 history: format!("\x1b]2;{title}\x07").into_bytes(),
                 history_segments: Vec::new(),
                 pty_cols: None,
-                pty_rows: None, remote_generation: None,
+                pty_rows: None,
+                remote_generation: None,
                 messages,
                 stream_task: tokio::spawn(std::future::pending()),
             };
@@ -4208,6 +4831,322 @@ mod tests {
     }
 
     #[test]
+    fn safe_async_target_retirement_retains_target_and_drops_surface_first() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let leg_slot = LentSlot::new(DropRecorder {
+            name: "surface",
+            log: Arc::clone(&log),
+        });
+        let target = DropRecorder {
+            name: "target",
+            log: Arc::clone(&log),
+        };
+
+        let loan = leg_slot.lend_loan().expect("value starts present");
+        let (worker_ready_tx, worker_ready_rx) = std::sync::mpsc::channel();
+        let (retire_done_tx, retire_done_rx) = std::sync::mpsc::channel();
+        let (worker_done_tx, worker_done_rx) = std::sync::mpsc::channel();
+
+        let worker_handle = std::thread::spawn(move || {
+            worker_ready_tx.send(()).unwrap();
+            retire_done_rx.recv().unwrap();
+            loan.return_to_slot();
+            worker_done_tx.send(()).unwrap();
+        });
+
+        worker_ready_rx.recv().unwrap();
+
+        let mut frame_target_option = Some(target);
+        if let Some(target) = frame_target_option.take() {
+            // UI thread retires slot: returns without waiting for borrower.
+            // If retire_with blocked on the worker, this would deadlock because
+            // the worker is blocked on retire_done_rx.
+            leg_slot.retire_with(move || drop(target));
+        }
+
+        assert!(
+            log.lock().is_empty(),
+            "target must be retained while GPU leg is in flight"
+        );
+
+        retire_done_tx.send(()).unwrap();
+        worker_done_rx.recv().unwrap();
+        worker_handle.join().unwrap();
+
+        let events = log.lock().clone();
+        assert_eq!(
+            events,
+            vec!["surface", "target"],
+            "Surface must drop before target child view even during asynchronous retirement"
+        );
+    }
+
+    #[test]
+    fn no_global_hosts_mutex_held_during_gpu_work() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "hosts-lock-free-gpu";
+        let cell_metrics = font_manager::derived_cell_metrics();
+        let _ = state.prepare_session_layout(
+            NativeTerminalBoundsRequest {
+                session_id: session_id.into(),
+                bounds: LogicalBounds {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 640.0,
+                    height: 384.0,
+                    scale_factor: 1.0,
+                },
+            },
+            cell_metrics,
+        );
+
+        let (gpu_started_tx, gpu_started_rx) = std::sync::mpsc::channel();
+        let (gpu_continue_tx, gpu_continue_rx) = std::sync::mpsc::channel();
+
+        let worker = state.gpu_worker();
+        worker.enqueue(move |_gpu| {
+            gpu_started_tx.send(()).unwrap();
+            gpu_continue_rx.recv().unwrap();
+        });
+
+        gpu_started_rx.recv().unwrap();
+        let hosts_guard = state.hosts.try_lock();
+        assert!(
+            hosts_guard.is_some(),
+            "hosts lock must not be held across GPU worker execution"
+        );
+        drop(hosts_guard);
+
+        gpu_continue_tx.send(()).unwrap();
+    }
+
+    #[test]
+    fn retired_completion_preserves_reattached_frame_reservation() {
+        let coordinator = RenderScheduleCoordinator::new();
+        let slot = LentSlot::new(());
+        assert!(coordinator.schedule_render());
+        assert!(coordinator.begin_render());
+        let loan = slot.lend_loan().unwrap();
+        coordinator.consume_render();
+        slot.retire_with(|| {});
+        assert!(coordinator.schedule_render());
+        loan.return_to_slot();
+        assert!(discard_retired_completion(&slot));
+        assert!(coordinator.begin_render(), "old completion cancelled replacement frame");
+    }
+
+    #[test]
+    fn fatal_gpu_completion_does_not_rearm_without_new_input() {
+        let coordinator = RenderScheduleCoordinator::new();
+        assert!(coordinator.schedule_render());
+        assert!(coordinator.begin_render());
+        let result = Err(NativeTerminalError::GpuPipelineError("surface recovery failed".into()));
+        if gpu_completion_requires_retry(&result) {
+            coordinator.schedule_render();
+        }
+        assert!(!coordinator.finish_render(), "fatal error created another GPU job");
+        assert!(!coordinator.is_render_pending());
+    }
+
+    #[test]
+    fn panicking_frame_returns_error_and_worker_accepts_next_frame() {
+        let worker = GpuWorker::new("ferryx-panic-frame").unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let first = tx.clone();
+        assert!(worker.enqueue(move |_| {
+            let result = run_gpu_frame::<()>(|| panic!("injected frame panic"));
+            first.send(result.is_err()).unwrap();
+        }));
+        assert!(worker.enqueue(move |_| {
+            tx.send(run_gpu_frame(|| Ok(())).is_ok()).unwrap();
+        }));
+        for _ in 0..2 {
+            assert!(rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn one_panes_vt_work_cannot_block_another_panes_render_preparation() {
+        let (dispatch, mut dispatched) = tokio::sync::mpsc::unbounded_channel();
+        let app = tauri::test::mock_builder()
+            .manage(RenderDispatch {
+                sender: dispatch,
+                owner_thread: std::thread::current().id(),
+                require_deferred: std::sync::atomic::AtomicBool::new(false),
+                submissions: Mutex::new(Vec::new()),
+            })
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let _window = tauri::WebviewWindowBuilder::new(&app, "main", tauri::WebviewUrl::default())
+            .build()
+            .unwrap();
+        let window = _window.as_ref().window();
+
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_a = "pane-a";
+        let session_b = "pane-b";
+        let cell_metrics = font_manager::derived_cell_metrics();
+
+        let _ = state.prepare_session_layout(
+            NativeTerminalBoundsRequest {
+                session_id: session_a.into(),
+                bounds: LogicalBounds {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 640.0,
+                    height: 384.0,
+                    scale_factor: 1.0,
+                },
+            },
+            cell_metrics,
+        );
+        let _ = state.prepare_session_layout(
+            NativeTerminalBoundsRequest {
+                session_id: session_b.into(),
+                bounds: LogicalBounds {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 640.0,
+                    height: 384.0,
+                    scale_factor: 1.0,
+                },
+            },
+            cell_metrics,
+        );
+
+        let injected_host = NativeTerminalSurfaceHost {
+            frame_target: HostFrameTarget::Injected(InjectedFrameTarget {
+                acquisitions: vec![SimulatedAcquisition::Frame].into(),
+                cell_metrics,
+                events: Arc::new(Mutex::new(Vec::new())),
+                assert_host_locked: Box::new(|| {}),
+            }),
+            layout: state.session_layout(session_b),
+            logical_bounds: Some(LogicalBounds {
+                x: 0.0,
+                y: 0.0,
+                width: 640.0,
+                height: 384.0,
+                scale_factor: 1.0,
+            }),
+        };
+        state.hosts.lock().insert(session_b.to_string(), injected_host);
+
+        // Pane B has its own render coordinator and snapshot slot obtained before Pane A's lock
+        let coordinator = state.session_render_coordinator(session_b).unwrap();
+        let slot = state.session_snapshot_slot(session_b).unwrap();
+        coordinator.schedule_render();
+
+        // Thread A holds the global sessions mutex (simulating VT feed or agent detect on pane A)
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let sessions = Arc::clone(&state.sessions);
+        std::thread::spawn(move || {
+            let guard = sessions.lock();
+            held_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(guard);
+        });
+        held_rx.recv().unwrap();
+        dispatch_scheduled_render(
+            window,
+            Arc::clone(&state.hosts),
+            slot,
+            session_b.to_string(),
+            coordinator,
+            Arc::clone(state.gpu_worker()),
+        );
+
+        let task = tokio::time::timeout(std::time::Duration::from_secs(2), dispatched.recv())
+            .await
+            .expect("timeout waiting for dispatched task")
+            .expect("dispatched channel closed");
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            task();
+            let _ = done_tx.send(());
+        });
+
+        let completed = done_rx.recv_timeout(std::time::Duration::from_millis(200));
+        let _ = release_tx.send(());
+        let _ = handle.join();
+        assert!(completed.is_ok(), "Pane B's render preparation must not block on Pane A's sessions lock");
+    }
+
+    #[tokio::test]
+    async fn stale_completion_does_not_reveal_detached_target() {
+        let (dispatch, mut dispatched) = tokio::sync::mpsc::unbounded_channel();
+        let app = tauri::test::mock_builder()
+            .manage(RenderDispatch {
+                sender: dispatch,
+                owner_thread: std::thread::current().id(),
+                require_deferred: std::sync::atomic::AtomicBool::new(false),
+                submissions: Mutex::new(Vec::new()),
+            })
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let _window = tauri::WebviewWindowBuilder::new(&app, "main", tauri::WebviewUrl::default())
+            .build()
+            .unwrap();
+
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "stale-completion-detached";
+        let bounds = LogicalBounds {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 480.0,
+            scale_factor: 1.0,
+        };
+
+        let (_output, messages) = tokio::sync::mpsc::channel(1);
+        state
+            .attach_daemon_attachment_with_bounds::<tauri::test::MockRuntime>(
+                session_id,
+                DaemonAttachment {
+                    session_id: session_id.into(),
+                    epoch: 1,
+                    start_sequence: Some(1),
+                    end_sequence: Some(1),
+                    gap: None,
+                    history: b"test output\r\n".to_vec(),
+                    history_segments: Vec::new(),
+                    pty_cols: Some(80),
+                    pty_rows: Some(24),
+                    remote_generation: None,
+                    messages,
+                    stream_task: tokio::spawn(std::future::pending()),
+                },
+                Some(app.handle().clone()),
+                Some(bounds),
+            )
+            .unwrap();
+
+        assert!(state.ensure_surface_attached(session_id).is_ok());
+
+        // Detach session while pipeline is active
+        state.detach_session(session_id);
+
+        assert!(!state.has_session_host(session_id));
+        assert!(matches!(
+            state.ensure_surface_attached(session_id),
+            Err(NativeTerminalError::SessionDetached(_))
+        ));
+
+        // Process any queued dispatches
+        while let Ok(task) = dispatched.try_recv() {
+            task();
+        }
+
+        // Host must not be resurrected and target must remain detached
+        assert!(!state.has_session_host(session_id));
+        assert!(matches!(
+            state.ensure_surface_attached(session_id),
+            Err(NativeTerminalError::SessionDetached(_))
+        ));
+    }
+
+    #[test]
     fn ghostty_grid_resize_notifies_pty_with_matching_dimensions() {
         let state = NativeTerminalSurfaceHostState::default();
         let session_id = "pty-resize-contract";
@@ -4245,6 +5184,294 @@ mod tests {
             &[(session_id.to_string(), layout.cols, layout.rows)],
             "the PTY resize path must receive the exact ghostty grid dimensions"
         );
+        state.teardown();
+    }
+
+    #[tokio::test]
+    async fn warm_reattach_activates_snapshot_slot_and_consumes_frame() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "warm-reattach-slot-test";
+        let bounds = LogicalBounds {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 480.0,
+            scale_factor: 1.0,
+        };
+
+        let (_output, messages) = tokio::sync::mpsc::channel(1);
+        state
+            .attach_daemon_attachment_with_bounds::<tauri::test::MockRuntime>(
+                session_id,
+                DaemonAttachment {
+                    session_id: session_id.into(),
+                    epoch: 1,
+                    start_sequence: Some(1),
+                    end_sequence: Some(1),
+                    gap: None,
+                    history: b"test\r\n".to_vec(),
+                    history_segments: Vec::new(),
+                    pty_cols: Some(80),
+                    pty_rows: Some(24),
+                    remote_generation: None,
+                    messages,
+                    stream_task: tokio::spawn(std::future::pending()),
+                },
+                None,
+                Some(bounds),
+            )
+            .unwrap();
+
+        let slot = state.session_snapshot_slot(session_id).expect("slot exists");
+        assert!(slot.is_attached(), "slot must be attached initially");
+
+        // Detach
+        state.detach_session(session_id);
+        assert!(!slot.is_attached(), "slot must be inactive after detach");
+        assert!(slot.consume().is_none(), "detached slot cannot consume frame");
+
+        // Warm reattach
+        let reattached = state
+            .reattach_existing_session_with_bounds(session_id, Some(bounds))
+            .expect("reattach succeeds");
+        assert!(reattached, "session reattached");
+        assert!(slot.is_attached(), "warm reattach must restore slot attached state");
+        assert!(slot.consume().is_some(), "warm reattach must allow consuming newly published frame");
+
+        state.teardown();
+    }
+
+    #[tokio::test]
+    async fn detached_session_scheduled_render_cannot_resurrect_host() {
+        let (dispatch, mut dispatched) = tokio::sync::mpsc::unbounded_channel();
+        let app = tauri::test::mock_builder()
+            .manage(RenderDispatch {
+                sender: dispatch,
+                owner_thread: std::thread::current().id(),
+                require_deferred: std::sync::atomic::AtomicBool::new(false),
+                submissions: Mutex::new(Vec::new()),
+            })
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let webview_window = tauri::WebviewWindowBuilder::new(&app, "main", tauri::WebviewUrl::default())
+            .build()
+            .unwrap();
+        let window = webview_window.as_ref().window().clone();
+
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "resurrection-prevention-test";
+        let bounds = LogicalBounds {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 480.0,
+            scale_factor: 1.0,
+        };
+
+        let (_output, messages) = tokio::sync::mpsc::channel(1);
+        state
+            .attach_daemon_attachment_with_bounds::<tauri::test::MockRuntime>(
+                session_id,
+                DaemonAttachment {
+                    session_id: session_id.into(),
+                    epoch: 1,
+                    start_sequence: Some(1),
+                    end_sequence: Some(1),
+                    gap: None,
+                    history: b"test\r\n".to_vec(),
+                    history_segments: Vec::new(),
+                    pty_cols: Some(80),
+                    pty_rows: Some(24),
+                    remote_generation: None,
+                    messages,
+                    stream_task: tokio::spawn(std::future::pending()),
+                },
+                None,
+                Some(bounds),
+            )
+            .unwrap();
+
+        let slot = state.session_snapshot_slot(session_id).expect("slot exists");
+        let coordinator = state.session_render_coordinator(session_id).expect("coord");
+
+        // Schedule a render before detach
+        assert!(coordinator.schedule_render());
+        dispatch_scheduled_render(
+            window.clone(),
+            Arc::clone(&state.hosts),
+            Arc::clone(&slot),
+            session_id.to_string(),
+            Arc::clone(&coordinator),
+            Arc::clone(state.gpu_worker()),
+        );
+
+        // Receive the dispatched main-thread closure
+        let task = tokio::time::timeout(std::time::Duration::from_secs(2), dispatched.recv())
+            .await
+            .expect("timeout waiting for task")
+            .expect("task received");
+
+        // Now detach the session BEFORE task executes
+        state.detach_session(session_id);
+        assert!(!state.has_session_host(session_id));
+        assert!(!slot.is_attached());
+
+        // Re-arm coordinator so begin_render() returns true and enters slot.consume() + hosts.lock().
+        // This forces the dispatched closure to execute down to the production slot.is_attached_with_epoch(frame_epoch) guard!
+        coordinator.schedule_render();
+
+        // Execute the dispatched task
+        task();
+
+        // Verify that executing the stale task did NOT resurrect the host!
+        assert!(
+            !state.has_session_host(session_id),
+            "stale scheduled dispatch must not resurrect host after detach"
+        );
+
+        state.teardown();
+    }
+
+    #[tokio::test]
+    async fn toctou_resurrection_race_is_prevented_by_epoch_check() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let webview_window = tauri::WebviewWindowBuilder::new(&app, "main", tauri::WebviewUrl::default())
+            .build()
+            .unwrap();
+        let window = webview_window.as_ref().window().clone();
+
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "toctou-resurrection-race-test";
+        let bounds = LogicalBounds {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 480.0,
+            scale_factor: 1.0,
+        };
+
+        let (_output, messages) = tokio::sync::mpsc::channel(1);
+        state
+            .attach_daemon_attachment_with_bounds::<tauri::test::MockRuntime>(
+                session_id,
+                DaemonAttachment {
+                    session_id: session_id.into(),
+                    epoch: 1,
+                    start_sequence: Some(1),
+                    end_sequence: Some(1),
+                    gap: None,
+                    history: b"test\r\n".to_vec(),
+                    history_segments: Vec::new(),
+                    pty_cols: Some(80),
+                    pty_rows: Some(24),
+                    remote_generation: None,
+                    messages,
+                    stream_task: tokio::spawn(std::future::pending()),
+                },
+                None,
+                Some(bounds),
+            )
+            .unwrap();
+
+        let slot = state.session_snapshot_slot(session_id).expect("slot exists");
+
+        // Step 1: Consume a frame before detach (simulating Thread 1 having reached line 434)
+        let frame = slot.consume().expect("frame available initially");
+        let frame_epoch = frame.attachment_epoch;
+        assert_eq!(frame_epoch, slot.current_epoch());
+
+        // Step 2: Detach session (simulating Thread 2 running detach_session while Thread 1 waits for hosts.lock)
+        state.detach_session(session_id);
+        assert!(!state.has_session_host(session_id));
+        assert!(!slot.is_attached());
+
+        // Step 3: Now Thread 1 acquires hosts.lock() and attempts to process the pre-detach consumed frame.
+        // With the Blocker 1 guard, slot.is_attached_with_epoch(frame_epoch) is false!
+        assert!(
+            !slot.is_attached_with_epoch(frame_epoch),
+            "stale frame epoch must be rejected after detach"
+        );
+
+        let mut hosts_guard = state.hosts.lock();
+        let resurrected = if !slot.is_attached_with_epoch(frame_epoch) {
+            false
+        } else {
+            if let std::collections::hash_map::Entry::Vacant(entry) = hosts_guard.entry(session_id.to_string()) {
+                if let Ok(new_host) = NativeTerminalSurfaceHost::new(&window, bounds.scale_factor) {
+                    entry.insert(new_host);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+        drop(hosts_guard);
+
+        assert!(!resurrected, "Blocker 1 check must prevent lazy host resurrection");
+        assert!(!state.has_session_host(session_id), "host must remain vacant");
+
+        state.teardown();
+    }
+
+    #[tokio::test]
+    async fn inflight_gpu_frame_cancelled_when_session_detached_or_reattached() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "inflight-gpu-cancel-test";
+        let bounds = LogicalBounds {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 480.0,
+            scale_factor: 1.0,
+        };
+
+        let (_output, messages) = tokio::sync::mpsc::channel(1);
+        state
+            .attach_daemon_attachment_with_bounds::<tauri::test::MockRuntime>(
+                session_id,
+                DaemonAttachment {
+                    session_id: session_id.into(),
+                    epoch: 1,
+                    start_sequence: Some(1),
+                    end_sequence: Some(1),
+                    gap: None,
+                    history: b"test\r\n".to_vec(),
+                    history_segments: Vec::new(),
+                    pty_cols: Some(80),
+                    pty_rows: Some(24),
+                    remote_generation: None,
+                    messages,
+                    stream_task: tokio::spawn(std::future::pending()),
+                },
+                None,
+                Some(bounds),
+            )
+            .unwrap();
+
+        let slot = state.session_snapshot_slot(session_id).expect("slot exists");
+        let initial_frame = slot.consume().expect("initial frame exists");
+        let initial_epoch = initial_frame.attachment_epoch;
+
+        // While frame is in flight to GPU worker, session detaches
+        state.detach_session(session_id);
+        assert!(!slot.is_attached_with_epoch(initial_epoch));
+
+        // Warm reattach bumps epoch again
+        state
+            .reattach_existing_session_with_bounds(session_id, Some(bounds))
+            .expect("reattach succeeds");
+        assert!(slot.is_attached());
+        assert_ne!(slot.current_epoch(), initial_epoch);
+        // Stale in-flight frame is STILL rejected because epoch does not match
+        assert!(
+            !slot.is_attached_with_epoch(initial_epoch),
+            "in-flight GPU frame from previous attachment must be rejected on new attachment"
+        );
+
         state.teardown();
     }
 
@@ -4365,8 +5592,14 @@ mod tests {
         .expect("valid surface bounds");
         let (snapshot, _) = snapshot_for_layout(layout);
 
-        let receipt =
-            NativeTerminalSurfaceReceipt::from_snapshot(layout, &snapshot, 4, 20, cell_metrics, None);
+        let receipt = NativeTerminalSurfaceReceipt::from_snapshot(
+            layout,
+            &snapshot,
+            4,
+            20,
+            cell_metrics,
+            None,
+        );
 
         assert_eq!(receipt.cursor_col, snapshot.cursor.x);
         assert_eq!(receipt.cursor_row, snapshot.cursor.y);
@@ -4390,10 +5623,16 @@ mod tests {
                 scale_factor: 1.5,
             })
             .expect("resolved presentation bounds");
-        let cell_metrics = CellMetrics { width_px: 16, height_px: 32 };
+        let cell_metrics = CellMetrics {
+            width_px: 16,
+            height_px: 32,
+        };
         state
             .prepare_session_layout(
-                NativeTerminalBoundsRequest { session_id: "receipt-scale".into(), bounds },
+                NativeTerminalBoundsRequest {
+                    session_id: "receipt-scale".into(),
+                    bounds,
+                },
                 cell_metrics,
             )
             .expect("stored layout");
@@ -4403,9 +5642,14 @@ mod tests {
         let window = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
             .build()
             .unwrap();
-        let receipt = state.get_receipt(&window.as_ref().window(), "receipt-scale").expect("session receipt");
+        let receipt = state
+            .get_receipt(&window.as_ref().window(), "receipt-scale")
+            .expect("session receipt");
         assert_eq!(
-            state.sessions.lock()["receipt-scale"].logical_bounds.unwrap().scale_factor,
+            state.sessions.lock()["receipt-scale"]
+                .logical_bounds
+                .unwrap()
+                .scale_factor,
             2.0,
         );
         assert_eq!(receipt.effective_scale_factor, Some(2.0));
@@ -4496,7 +5740,8 @@ mod tests {
                 history: b"Working (esc to interrupt)\r\n".to_vec(),
                 history_segments: Vec::new(),
                 pty_cols: None,
-                pty_rows: None, remote_generation: None,
+                pty_rows: None,
+                remote_generation: None,
                 messages,
                 stream_task: tokio::spawn(std::future::pending()),
             };
@@ -4521,7 +5766,8 @@ mod tests {
                 history: b"Still Working (esc to interrupt)\r\n".to_vec(),
                 history_segments: Vec::new(),
                 pty_cols: None,
-                pty_rows: None, remote_generation: None,
+                pty_rows: None,
+                remote_generation: None,
                 messages,
                 stream_task: tokio::spawn(std::future::pending()),
             };
@@ -4583,7 +5829,8 @@ mod tests {
             history: b"Working (esc to interrupt)\r\n".to_vec(),
             history_segments: Vec::new(),
             pty_cols: None,
-            pty_rows: None, remote_generation: None,
+            pty_rows: None,
+            remote_generation: None,
             messages,
             stream_task: tokio::spawn(std::future::pending()),
         };
@@ -4646,7 +5893,8 @@ mod tests {
             history: Vec::new(),
             history_segments: Vec::new(),
             pty_cols: None,
-            pty_rows: None, remote_generation: None,
+            pty_rows: None,
+            remote_generation: None,
             messages,
             stream_task: tokio::spawn(std::future::pending()),
         };
@@ -4666,7 +5914,9 @@ mod tests {
         .expect("send agent state report");
 
         tokio::time::timeout(std::time::Duration::from_secs(5), reports.recv())
-            .await.expect("extension report delivered").expect("event sink alive");
+            .await
+            .expect("extension report delivered")
+            .expect("event sink alive");
         assert_eq!(
             observed.lock().clone(),
             vec![("blocked".to_string(), "omo".to_string())]
@@ -4689,7 +5939,9 @@ mod tests {
                     break;
                 }
             }
-        }).await.expect("screen output processed");
+        })
+        .await
+        .expect("screen output processed");
         assert_eq!(
             observed.lock().len(),
             1,
@@ -4834,10 +6086,7 @@ mod tests {
             .expect("attach");
 
         for (reported_state, origin) in [
-            (
-                "working",
-                crate::daemon::protocol::AgentStateOrigin::Agent,
-            ),
+            ("working", crate::daemon::protocol::AgentStateOrigin::Agent),
             (
                 "idle",
                 crate::daemon::protocol::AgentStateOrigin::ProcessReleased,
@@ -4962,7 +6211,8 @@ mod tests {
             history: Vec::new(),
             history_segments: Vec::new(),
             pty_cols: None,
-            pty_rows: None, remote_generation: None,
+            pty_rows: None,
+            remote_generation: None,
             messages,
             stream_task: tokio::spawn(std::future::pending()),
         };
@@ -5055,7 +6305,8 @@ mod tests {
             history: b"orca selection rendering verification\r\n".to_vec(),
             history_segments: Vec::new(),
             pty_cols: None,
-            pty_rows: None, remote_generation: None,
+            pty_rows: None,
+            remote_generation: None,
             messages: rx,
             stream_task,
         };
@@ -5125,7 +6376,8 @@ mod tests {
             history: b"\x1b[100GX".to_vec(),
             history_segments: Vec::new(),
             pty_cols: Some(120),
-            pty_rows: Some(30), remote_generation: None,
+            pty_rows: Some(30),
+            remote_generation: None,
             messages,
             stream_task: tokio::spawn(std::future::pending()),
         };
@@ -5168,7 +6420,8 @@ mod tests {
                 },
             ],
             pty_cols: None,
-            pty_rows: None, remote_generation: None,
+            pty_rows: None,
+            remote_generation: None,
             messages,
             stream_task: tokio::spawn(std::future::pending()),
         };
@@ -5201,7 +6454,8 @@ mod tests {
             history: b"hello".to_vec(),
             history_segments: Vec::new(),
             pty_cols: Some(80),
-            pty_rows: Some(24), remote_generation: None,
+            pty_rows: Some(24),
+            remote_generation: None,
             messages,
             stream_task: tokio::spawn(std::future::pending()),
         };
@@ -5275,7 +6529,8 @@ mod tests {
             history: text.into_bytes(),
             history_segments: Vec::new(),
             pty_cols: None,
-            pty_rows: None, remote_generation: None,
+            pty_rows: None,
+            remote_generation: None,
             messages,
             stream_task: tokio::spawn(std::future::pending()),
         };
@@ -5366,7 +6621,8 @@ mod tests {
             history: text.into_bytes(),
             history_segments: Vec::new(),
             pty_cols: None,
-            pty_rows: None, remote_generation: None,
+            pty_rows: None,
+            remote_generation: None,
             messages,
             stream_task: tokio::spawn(std::future::pending()),
         };
@@ -5431,7 +6687,8 @@ mod tests {
             history: b"Working (esc to interrupt)\r\n".to_vec(),
             history_segments: Vec::new(),
             pty_cols: None,
-            pty_rows: None, remote_generation: None,
+            pty_rows: None,
+            remote_generation: None,
             messages,
             stream_task: tokio::spawn(std::future::pending()),
         };
@@ -5509,7 +6766,8 @@ mod tests {
             history: b"seed\r\n".to_vec(),
             history_segments: Vec::new(),
             pty_cols: None,
-            pty_rows: None, remote_generation: None,
+            pty_rows: None,
+            remote_generation: None,
             messages,
             stream_task: tokio::spawn(std::future::pending()),
         };
@@ -5588,7 +6846,8 @@ mod tests {
             history: b"hello\r\n".to_vec(),
             history_segments: Vec::new(),
             pty_cols: Some(80),
-            pty_rows: Some(24), remote_generation: None,
+            pty_rows: Some(24),
+            remote_generation: None,
             messages,
             stream_task: tokio::spawn(std::future::pending()),
         };
@@ -5640,7 +6899,8 @@ mod tests {
             history: b"hello\r\n".to_vec(),
             history_segments: Vec::new(),
             pty_cols: Some(80),
-            pty_rows: Some(24), remote_generation: None,
+            pty_rows: Some(24),
+            remote_generation: None,
             messages,
             stream_task: tokio::spawn(std::future::pending()),
         };
