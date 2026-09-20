@@ -146,4 +146,73 @@ describe("mobile terminal input lifecycle", () => {
     fireEvent.compositionEnd(sink(), { data: "하" });
     expect(Socket.latest.send).toHaveBeenCalledWith(new TextEncoder().encode("하"));
   });
+
+  // WKWebView's Korean IME (iOS/iPadOS) fires no composition events at all - it rewrites the sink
+  // in place through plain input events whose isComposing is false (xtermjs/xterm.js#6084).
+  it("holds the mutable Hangul tail of a composition-free IME instead of shipping lone jamo", () => {
+    render(<RemoteTerminal sessionId="a" token="token-a" />);
+    const input = sink();
+    const rewrite = (value: string) => fireEvent.input(input, { target: { value }, inputType: "insertText" });
+
+    rewrite("ㅎ");
+    rewrite("하");
+    rewrite("한");
+    rewrite("한ㄱ"); // the next syllable began; 한 can still absorb this consonant
+    rewrite("한그");
+    rewrite("한글");
+    expect(Socket.latest.send).not.toHaveBeenCalled();
+    expect(screen.getByTestId("remote-terminal-preedit")).toHaveTextContent("한글");
+
+    rewrite("한글 "); // a non-Hangul insertion settles the run
+    expect(Socket.latest.send).toHaveBeenCalledTimes(1);
+    expect(Socket.latest.send).toHaveBeenLastCalledWith(new TextEncoder().encode("한글 "));
+    expect(sink()).toHaveValue("");
+    expect(screen.queryByTestId("remote-terminal-preedit")).toBeNull();
+  });
+
+  it("commits a held Hangul run before the key that ends the line", () => {
+    render(<RemoteTerminal sessionId="a" token="token-a" />);
+    const input = sink();
+    const rewrite = (value: string) => fireEvent.input(input, { target: { value }, inputType: "insertText" });
+
+    rewrite("ㅁ");
+    rewrite("모");
+    rewrite("모바일");
+    expect(Socket.latest.send).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(Socket.latest.send.mock.calls.map(([data]) => new TextDecoder().decode(data as Uint8Array)))
+      .toEqual(["모바일", "\r"]);
+    expect(sink()).toHaveValue("");
+    expect(screen.queryByTestId("remote-terminal-preedit")).toBeNull();
+  });
+
+  it("lets Backspace edit a pending IME tail instead of deleting echoed terminal content", () => {
+    render(<RemoteTerminal sessionId="a" token="token-a" />);
+    const input = sink();
+    fireEvent.input(input, { target: { value: "한" }, inputType: "insertText" });
+    expect(Socket.latest.send).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(input, { key: "Backspace" });
+    expect(Socket.latest.send).not.toHaveBeenCalled();
+    fireEvent.input(input, { target: { value: "하" }, inputType: "deleteContentBackward" });
+    fireEvent.input(input, { target: { value: "" }, inputType: "deleteContentBackward" });
+    expect(Socket.latest.send).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(input, { key: "Backspace" });
+    expect(Socket.latest.send).toHaveBeenCalledWith(new TextEncoder().encode("\u007f"));
+  });
+
+  it("keeps settled ASCII immediate and never forwards WebKit's U+00A0 space", () => {
+    render(<RemoteTerminal sessionId="a" token="token-a" />);
+    const input = sink();
+
+    fireEvent.input(input, { target: { value: "l" }, inputType: "insertText" });
+    expect(Socket.latest.send).toHaveBeenLastCalledWith(new TextEncoder().encode("l"));
+    expect(input).toHaveValue("");
+
+    fireEvent.input(input, { target: { value: "cd\u00a0" }, inputType: "insertText" });
+    expect(Socket.latest.send).toHaveBeenLastCalledWith(new TextEncoder().encode("cd "));
+    expect(input).toHaveValue("");
+  });
 });

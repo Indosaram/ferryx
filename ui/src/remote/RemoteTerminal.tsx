@@ -173,6 +173,30 @@ function controlByteForChar(ch: string): number | null {
   }
 }
 
+// Hangul code points an IME can still rewrite in place: compatibility jamo (ㅁ, ㅗ), conjoining
+// jamo, and precomposed syllables (한).
+function isHangulChar(code: number): boolean {
+  return (code >= 0x3131 && code <= 0x318e)
+    || (code >= 0x1100 && code <= 0x11ff)
+    || (code >= 0xac00 && code <= 0xd7a3);
+}
+
+// Index where the trailing Hangul run begins. A Korean IME can rewrite from the last cluster
+// boundary onward - typing ㅏ after 갓 yields 가사, carrying the final consonant into the next
+// syllable - so the whole trailing run counts as mutable until the IME settles it.
+function hangulTailStart(text: string): number {
+  let index = text.length;
+  while (index > 0 && isHangulChar(text.charCodeAt(index - 1))) index -= 1;
+  return index;
+}
+
+function commonPrefixLength(left: string, right: string): number {
+  const limit = Math.min(left.length, right.length);
+  let index = 0;
+  while (index < limit && left.charCodeAt(index) === right.charCodeAt(index)) index += 1;
+  return index;
+}
+
 function terminalSocketUrl(sessionId: string, token: string, geometry: GridGeometry, transportUrl: string, signal: AbortSignal): string | Promise<string> {
   const base = new URL(transportUrl);
   const target = `/api/v1/terminal/${sessionId}`;
@@ -303,6 +327,8 @@ export function RemoteTerminal({
   const inputSinkRef = useRef<HTMLTextAreaElement>(null);
   const isComposingRef = useRef(false);
   const pendingCompositionInputRef = useRef<string | null>(null);
+  const sinkEmittedCharsRef = useRef(0);
+  const sinkValueRef = useRef("");
   const requestResizeRef = useRef<() => void>(() => {});
   const lastSentGeometryRef = useRef<GridGeometry | null>(null);
   const scheduledSocketRequestRef = useRef<SocketRequest | null>(null);
@@ -340,6 +366,11 @@ export function RemoteTerminal({
   const focusInput = useCallback(() => {
     inputSinkRef.current?.focus({ preventScroll: true });
   }, []);
+
+  useLayoutEffect(() => {
+    // A held tail belongs to the session that was on screen; never leak it into the next one.
+    resetSinkState();
+  }, [sessionId, activeTabId]);
 
   useLayoutEffect(() => {
     // Software keyboards must be opened by an explicit tap, not lifecycle work.
@@ -647,13 +678,80 @@ export function RemoteTerminal({
     socket.send(new TextEncoder().encode(text));
   };
 
+  /// WebKit inserts U+00A0 for typed spaces; a PTY line must never receive one.
+  const emitSinkRange = (text: string, from: number, to: number) => {
+    if (to <= from) return;
+    sendText(text.slice(from, to).replace(/\u00a0/g, " "));
+  };
+
+  const resetSinkState = () => {
+    const sink = inputSinkRef.current;
+    if (sink) sink.value = "";
+    sinkEmittedCharsRef.current = 0;
+    sinkValueRef.current = "";
+    setPreedit(null);
+  };
+
+  /// True while the sink holds text the IME has not settled or we have not forwarded.
+  const sinkHasPendingText = () => {
+    const sink = inputSinkRef.current;
+    return sink !== null && sink.value.length > sinkEmittedCharsRef.current;
+  };
+
+  /// Forward everything the IME can no longer rewrite, holding the trailing Hangul run.
+  ///
+  /// WKWebView's Korean IME (iOS/iPadOS, and Tauri's own webview) fires no composition events at
+  /// all: it rewrites the sink in place through plain `input` events whose `isComposing` is false
+  /// (xtermjs/xterm.js#6084). Emitting the sink value per event therefore ships lone jamo and
+  /// clears the field mid-syllable, which desyncs the IME into committing jamo one keypress at a
+  /// time. The trailing run stays pending instead (rendered as local preedit) until the IME
+  /// settles it: a new non-Hangul insertion, a composition end, or a key we forward ourselves.
+  const settleSinkText = (sink: HTMLTextAreaElement) => {
+    const text = sink.value;
+    // Never re-emit text the IME rewrote behind our back.
+    let emitted = Math.min(sinkEmittedCharsRef.current, commonPrefixLength(sinkValueRef.current, text));
+    const holdFrom = hangulTailStart(text);
+    if (holdFrom > emitted) {
+      emitSinkRange(text, emitted, holdFrom);
+      emitted = holdFrom;
+    }
+    sinkEmittedCharsRef.current = emitted;
+    sinkValueRef.current = text;
+    if (emitted >= text.length) {
+      // Nothing left the IME can still change: keep the sink pristine.
+      resetSinkState();
+      return;
+    }
+    setPreedit(text.slice(emitted));
+  };
+
+  /// Commit a pending IME tail before anything that must not overtake it (keys, paste, blur).
+  const flushSinkText = () => {
+    const sink = inputSinkRef.current;
+    if (sink) {
+      const emitted = Math.min(sinkEmittedCharsRef.current, sink.value.length);
+      emitSinkRange(sink.value, emitted, sink.value.length);
+    }
+    resetSinkState();
+  };
+
   const commitComposition = (data: string) => {
     isComposingRef.current = false;
-    setPreedit(null);
     const sink = inputSinkRef.current;
     // Empty compositionend is cancellation, never a request to send preedit.
     pendingCompositionInputRef.current = data;
-    if (sink) sink.value = "";
+    const emitted = sink
+      ? Math.min(sinkEmittedCharsRef.current, commonPrefixLength(sinkValueRef.current, sink.value))
+      : 0;
+    const remainder = sink ? sink.value.slice(emitted) : "";
+    resetSinkState();
+    if (data.length === 0) return;
+    // The sink is authoritative while it still carries the committed text; browsers that clear it
+    // themselves only report the commit through compositionend's payload.
+    if (remainder.includes(data)) {
+      emitSinkRange(remainder, 0, remainder.length);
+      return;
+    }
     sendText(data);
   };
 
@@ -666,19 +764,24 @@ export function RemoteTerminal({
       return;
     }
     const text = sink.value;
-    sink.value = "";
     const committed = pendingCompositionInputRef.current;
     pendingCompositionInputRef.current = null;
     // WebKit/Chromium can deliver the final insertion after compositionend.
     // Consume only that matching insertion, not the next unrelated edit.
     if (committed !== null && text === committed &&
-        (input.inputType === "insertFromComposition" || input.inputType === "insertText" || input.inputType === "insertCompositionText")) return;
-    sendText(text);
+        (input.inputType === "insertFromComposition" || input.inputType === "insertText" || input.inputType === "insertCompositionText")) {
+      resetSinkState();
+      return;
+    }
+    settleSinkText(sink);
   };
 
   const sendKey = (key: string) => {
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
+
+    // A held IME tail was typed first and must reach the PTY before this key.
+    flushSinkText();
 
     if (key === "ctrl-c") {
       socket.send(JSON.stringify({ type: "signal", signal: "interrupt" }));
@@ -782,6 +885,9 @@ export function RemoteTerminal({
               event.preventDefault();
               sendKey("\u001b[Z");
             } else if (BROWSER_KEY_NAMES[event.key]) {
+              // Backspace/Delete belongs to the editable while it still holds a pending IME tail;
+              // deleting echoed terminal content instead would lose what the user just typed.
+              if ((event.key === "Backspace" || event.key === "Delete") && sinkHasPendingText()) return;
               event.preventDefault();
               sendKey(event.key);
             } else if (event.altKey && !event.ctrlKey) {
@@ -816,6 +922,8 @@ export function RemoteTerminal({
         }}
         onPaste={(event) => {
           event.preventDefault();
+          // Text typed before the paste must not be overtaken by it.
+          flushSinkText();
           const text =
             event.clipboardData?.getData("text/plain") ||
             event.clipboardData?.getData("text") ||
@@ -893,11 +1001,12 @@ export function RemoteTerminal({
           }}
           onInput={handleSinkInput}
           onBlur={() => {
+            // A live composition is canceled; a held IME tail is text the user typed, so it is
+            // committed before the next surface (dock key, paste, tab) takes over.
+            if (isComposingRef.current) resetSinkState();
+            else flushSinkText();
             isComposingRef.current = false;
             pendingCompositionInputRef.current = null;
-            setPreedit(null);
-            const sink = inputSinkRef.current;
-            if (sink) sink.value = "";
           }}
         />
         {grid?.lines.map((line) => (
