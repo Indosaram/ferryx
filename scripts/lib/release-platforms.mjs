@@ -577,6 +577,11 @@ function parseBuildResult(stdout) {
 }
 
 export function createLinuxBuildScript({ workspaceDir, plan, hostConfig }) {
+  const signingKey = process.env.TAURI_SIGNING_PRIVATE_KEY;
+  const signingPassword = process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD;
+  const signingEnv = signingKey
+    ? `export TAURI_SIGNING_PRIVATE_KEY=${quoteSh(signingKey)}\nexport TAURI_SIGNING_PRIVATE_KEY_PASSWORD=${quoteSh(signingPassword ?? "")}`
+    : "";
   const pathPrefix = hostConfig.path ? `export PATH=${quoteSh(hostConfig.path)}:$PATH\n` : "";
   const targetDir = hostConfig.root ? `${hostConfig.root}/cargo-target` : `"$workspace/cargo-target"`;
   const targetDirCode = hostConfig.root
@@ -585,6 +590,7 @@ export function createLinuxBuildScript({ workspaceDir, plan, hostConfig }) {
   return `set -euo pipefail
 umask 077
 ${pathPrefix}workspace=${quoteSh(workspaceDir)}
+${signingEnv}
 source_dir="$workspace/source"
 ghostty_dir="$workspace/ghostty"
 out_dir="$workspace/out"
@@ -632,6 +638,11 @@ printf '%s\\n' '---BUILD_RESULT---' "{\\"node\\":\\"$(node --version | sed 's/^v
 }
 
 export function createWindowsBuildScript({ workspaceDir, plan, hostConfig }) {
+  const signingKey = process.env.TAURI_SIGNING_PRIVATE_KEY;
+  const signingPassword = process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD;
+  const signingEnv = signingKey
+    ? `$env:TAURI_SIGNING_PRIVATE_KEY = ${quotePowerShell(signingKey)}\n$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ${quotePowerShell(signingPassword ?? "")}`
+    : "";
   const pathPrefix = hostConfig.path
     ? `$env:PATH = ${quotePowerShell(`${hostConfig.path};`)} + $env:PATH\n`
     : "";
@@ -648,6 +659,7 @@ Copy-Item -LiteralPath $nsis[0].FullName -Destination (Join-Path $outDir 'Ferryx
     : "";
   return `$ErrorActionPreference = 'Stop'
 ${pathPrefix}$workspace = ${quotePowerShell(workspaceDir)}
+${signingEnv}
 $sourceDir = Join-Path $workspace 'source'
 $ghosttyDir = Join-Path $workspace 'ghostty'
 $outDir = Join-Path $workspace 'out'
