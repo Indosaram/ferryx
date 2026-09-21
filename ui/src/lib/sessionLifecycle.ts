@@ -3,7 +3,7 @@ import { useSyncExternalStore } from "react";
 import type { TerminalActivityState } from "./activity";
 import { loadGeneralSettings } from "./generalSettings";
 import { isPairedWorkspaceId, isRemoteWorkspaceId } from "./remoteProject";
-import { getTerminalHistorySnapshot, hibernateTerminal, onNativeTerminalAgentState, suspendTerminal, resumeTerminal, closeTerminal, spawnTerminalDetailed } from "./tauri";
+import { describeTerminal, getTerminalHistorySnapshot, hibernateTerminal, onNativeTerminalAgentState, suspendTerminal, resumeTerminal, closeTerminal, spawnTerminalDetailed } from "./tauri";
 import type { SessionProcessState, TerminalSession } from "./types";
 import { safeRandomUUID } from "./uuid";
 
@@ -42,6 +42,8 @@ type RegisteredSession = {
   session: TerminalSession;
   active: boolean;
   idleSince: number | null;
+  /** Last activity state observed for this session; a working session is never a sweep candidate. */
+  activityState: TerminalActivityState | "idle" | "blocked" | null;
 };
 
 const registeredSessions = new Map<string, RegisteredSession>();
@@ -146,6 +148,7 @@ export function registerSessionSnapshot(
     session,
     active: previous?.active ?? false,
     idleSince,
+    activityState: activityState ?? previous?.activityState ?? null,
   });
   ensureLifecycleMonitoring();
 }
@@ -166,6 +169,7 @@ export function markSessionActivity(
 ): void {
   const entry = registeredSessions.get(sessionId);
   if (!entry) return;
+  entry.activityState = state;
   entry.idleSince = activityIsIdle(state) ? entry.idleSince ?? Date.now() : null;
 }
 
@@ -346,17 +350,45 @@ export async function hibernateRegisteredSession(sessionId: string): Promise<voi
 
 async function sweepIdleSessions(): Promise<void> {
   const timeoutMs = loadGeneralSettings().sessionIdleTimeoutMinutes * 60_000;
+  // 0 (or negative) is the explicit "off" setting: never auto-suspend.
+  if (timeoutMs <= 0) return Promise.resolve();
   const now = Date.now();
   const candidates = [...registeredSessions.entries()].filter(([, entry]) =>
     !entry.active &&
     entry.idleSince !== null &&
     now - entry.idleSince >= timeoutMs &&
+    // A session whose latest known activity is working/waiting/blocked is by
+    // definition not idle, even if a stale idleSince survived an event gap.
+    entry.activityState !== "working" &&
+    entry.activityState !== "waiting" &&
+    entry.activityState !== "blocked" &&
     Boolean(entry.session.backendSessionId) &&
     !isStandbyBackendSessionId(entry.session.backendSessionId) &&
     !isRemoteWorkspaceId(entry.session.workspaceId) &&
     !isPairedWorkspaceId(entry.session.workspaceId),
   );
-  await Promise.allSettled(candidates.map(([sessionId]) => suspendRegisteredSession(sessionId)));
+  // Ground truth before pulling the trigger: recent PTY output vetoes
+  // suspension regardless of what any screen/extension classifier reported.
+  // A working agent keeps writing (spinners, redraws), so this closes the
+  // "working session got auto-suspended" hole. Query failure also vetoes:
+  // never suspend a session whose activity we could not verify.
+  const verdicts = await Promise.all(
+    candidates.map(async ([sessionId, entry]) => {
+      const backendSessionId = entry.session.backendSessionId;
+      if (!backendSessionId || isStandbyBackendSessionId(backendSessionId)) return null;
+      try {
+        const details = await describeTerminal(backendSessionId);
+        if (!details) return null;
+        const lastOutputAgeMs = details.lastOutputAgeMs;
+        if (lastOutputAgeMs != null && lastOutputAgeMs < timeoutMs) return null;
+        return sessionId;
+      } catch {
+        return null;
+      }
+    }),
+  );
+  const confirmed = verdicts.filter((sessionId): sessionId is string => sessionId !== null);
+  await Promise.allSettled(confirmed.map((sessionId) => suspendRegisteredSession(sessionId)));
 }
 
 function ensureLifecycleMonitoring(): void {
@@ -365,6 +397,7 @@ function ensureLifecycleMonitoring(): void {
   void Promise.resolve(onNativeTerminalAgentState((payload) => {
     const entry = findRegisteredByBackend(payload.sessionId);
     if (!entry) return;
+    entry.activityState = payload.state;
     entry.idleSince = payload.state === "idle" ? entry.idleSince ?? Date.now() : null;
   })).catch(() => undefined);
   idleSweepTimer = setInterval(() => {

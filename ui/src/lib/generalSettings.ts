@@ -11,9 +11,12 @@ export type SessionRestorePolicy = "lazy" | "activeOnly" | "eager";
 export type GeneralSettings = {
   confirmCloseTab: boolean;
   sessionRestorePolicy: SessionRestorePolicy;
+  /** Minutes of idle inactivity before auto-suspend. 0 disables auto-suspend. */
   sessionIdleTimeoutMinutes: number;
 };
 
+/** `sessionIdleTimeoutMinutes` value that turns auto-suspend off. */
+export const SESSION_IDLE_TIMEOUT_OFF_MINUTES = 0;
 export const MIN_SESSION_IDLE_TIMEOUT_MINUTES = 1;
 export const MAX_SESSION_IDLE_TIMEOUT_MINUTES = 24 * 60;
 
@@ -44,9 +47,11 @@ function normalizeGeneralSettings(value: unknown): GeneralSettings {
       ? source.confirmCloseTab
       : DEFAULT_GENERAL_SETTINGS.confirmCloseTab,
     sessionRestorePolicy,
+    // 0 (and any non-positive value) means auto-suspend is disabled; positive
+    // values clamp into the 1..MAX minute range.
     sessionIdleTimeoutMinutes: Math.min(
       MAX_SESSION_IDLE_TIMEOUT_MINUTES,
-      Math.max(MIN_SESSION_IDLE_TIMEOUT_MINUTES, timeout),
+      Math.max(SESSION_IDLE_TIMEOUT_OFF_MINUTES, timeout),
     ),
   };
 }

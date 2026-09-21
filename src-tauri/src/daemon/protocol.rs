@@ -105,6 +105,10 @@ pub struct DaemonSessionDetails {
     pub running: bool,
     pub start_sequence: Option<u64>,
     pub end_sequence: Option<u64>,
+    /// Milliseconds since the session last produced PTY output. `None` when the
+    /// owning daemon has not observed any output yet (or predates this field).
+    #[serde(default)]
+    pub last_output_age_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1341,11 +1345,28 @@ mod tests {
                 running: true,
                 start_sequence: Some(5),
                 end_sequence: Some(50),
+                last_output_age_ms: None,
             },
         };
         let desc_resp_json = serde_json::to_string(&desc_resp).expect("serialize describe resp");
         assert!(desc_resp_json.contains(r#""running":true"#));
         assert!(desc_resp_json.contains(r#""startSequence":5"#));
+    }
+
+    #[test]
+    fn describe_details_decode_without_last_output_age_ms() {
+        // Older daemons (pre-last-output field) must still deserialize: the
+        // auto-suspend ground-truth guard treats a missing field as unknown.
+        let decoded: DaemonResponse = serde_json::from_str(
+            r#"{"type":"describeSessionOk","session":{"sessionId":"s","cols":80,"rows":24,"running":true}}"#,
+        )
+        .expect("legacy describe response must decode");
+        match decoded {
+            DaemonResponse::DescribeSessionOk { session } => {
+                assert_eq!(session.last_output_age_ms, None);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
     }
 
     #[test]

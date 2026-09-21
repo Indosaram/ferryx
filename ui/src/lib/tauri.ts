@@ -167,6 +167,8 @@ export type TerminalDescribeResult = {
   running: boolean;
   startSequence?: number | null;
   endSequence?: number | null;
+  /** Milliseconds since the daemon last read PTY output. Null/absent = unknown. */
+  lastOutputAgeMs?: number | null;
 };
 
 export function isTauriRuntime() {

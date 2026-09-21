@@ -1029,6 +1029,7 @@ async fn remote_terminal_spawn_forwards_worktree_and_cwd_to_daemon() {
                                     running: true,
                                     start_sequence: None,
                                     end_sequence: None,
+                                    last_output_age_ms: None,
                                 },
                             },
                             DaemonRequest::Attach { .. } => DaemonResponse::AttachOk {

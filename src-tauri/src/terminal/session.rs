@@ -3,8 +3,9 @@ use parking_lot::Mutex;
 use portable_pty::{Child, MasterPty, PtySize};
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 #[cfg(windows)]
@@ -136,9 +137,30 @@ pub struct PtySession {
     worktree_path: Option<PathBuf>,
     reader_finished: Arc<AtomicBool>,
     reaped: Arc<AtomicBool>,
+    /// Epoch millis of the last PTY output chunk read from the child (0 = none).
+    last_output_at: Arc<AtomicU64>,
     state: Arc<Mutex<PtySessionState>>,
     cols: Arc<Mutex<u16>>,
     rows: Arc<Mutex<u16>>,
+}
+
+fn record_output_millis(target: &AtomicU64) {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    target.store(millis, Ordering::Relaxed);
+}
+
+fn last_output_age_from(last_output_millis: u64) -> Option<u64> {
+    if last_output_millis == 0 {
+        return None;
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(last_output_millis);
+    Some(now.saturating_sub(last_output_millis))
 }
 
 impl PtySession {
@@ -163,6 +185,9 @@ impl PtySession {
         let metrics_session_id = config.id.clone();
         let reader_finished = Arc::new(AtomicBool::new(false));
         let reader_finished_task = Arc::clone(&reader_finished);
+        let reader_last_output_at = Arc::new(AtomicU64::new(0));
+        let last_output_at = Arc::clone(&reader_last_output_at);
+        let task_last_output_at = Arc::clone(&last_output_at);
         let reader_task = tokio::task::spawn_blocking(move || {
             let mut reader = reader;
             let mut buf = [0u8; 4096];
@@ -170,6 +195,7 @@ impl PtySession {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
+                        record_output_millis(&task_last_output_at);
                         crate::terminal::metrics::record_pty_read(&metrics_session_id, n);
                         if reader_tx.blocking_send(buf[..n].to_vec()).is_err() {
                             break;
@@ -208,6 +234,7 @@ impl PtySession {
             output_tx,
             worktree_path: config.worktree_path,
             reader_finished,
+            last_output_at,
             reaped: Arc::new(AtomicBool::new(false)),
             state: Arc::new(Mutex::new(PtySessionState::Starting)),
             cols: Arc::new(Mutex::new(config.cols)),
@@ -217,6 +244,14 @@ impl PtySession {
 
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// Milliseconds since the PTY child last produced output, or `None` when no
+    /// output has been read yet. Ground truth for auto-suspend decisions: a
+    /// working agent keeps writing (spinners, redraws), so recent output must
+    /// veto suspension even when a screen classifier mislabels the session idle.
+    pub fn last_output_age_ms(&self) -> Option<u64> {
+        last_output_age_from(self.last_output_at.load(Ordering::Relaxed))
     }
 
     pub fn state(&self) -> PtySessionState {
@@ -600,5 +635,32 @@ impl Drop for PtySession {
         if let Some(handle) = self.reader_task.lock().take() {
             handle.abort();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_age_is_none_before_first_output() {
+        assert_eq!(last_output_age_from(0), None);
+    }
+
+    #[test]
+    fn output_age_measures_elapsed_since_last_chunk() {
+        let now_millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let age = last_output_age_from(now_millis - 5_000).expect("age must be set for a stamped output");
+        assert!(age >= 5_000, "age must count from the stamped output, got {age}");
+    }
+
+    #[test]
+    fn record_output_millis_stamps_a_fresh_timestamp() {
+        let target = AtomicU64::new(0);
+        record_output_millis(&target);
+        assert_ne!(target.load(Ordering::Relaxed), 0);
     }
 }

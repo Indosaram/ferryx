@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -10,10 +10,12 @@ import {
 } from "lucide-react";
 
 import {
+  DEFAULT_GENERAL_SETTINGS,
   loadSidebarOpenStartup,
   MAX_SESSION_IDLE_TIMEOUT_MINUTES,
   MIN_SESSION_IDLE_TIMEOUT_MINUTES,
   saveSidebarOpenStartup,
+  SESSION_IDLE_TIMEOUT_OFF_MINUTES,
   useGeneralSettings,
 } from "../../lib/generalSettings";
 import {
@@ -259,6 +261,15 @@ export function CliLauncherCard() {
 export function GeneralSection() {
   const { settings, updateSettings } = useGeneralSettings();
   const [sidebarOpenStartup, setSidebarOpenStartup] = useState<boolean>(() => loadSidebarOpenStartup());
+  const autoSuspendEnabled = settings.sessionIdleTimeoutMinutes > 0;
+  // Preserve the user's last custom timeout so toggling auto-suspend back on
+  // restores it instead of silently resetting to the default.
+  const lastEnabledIdleMinutesRef = useRef(
+    autoSuspendEnabled ? settings.sessionIdleTimeoutMinutes : DEFAULT_GENERAL_SETTINGS.sessionIdleTimeoutMinutes,
+  );
+  useEffect(() => {
+    if (autoSuspendEnabled) lastEnabledIdleMinutesRef.current = settings.sessionIdleTimeoutMinutes;
+  }, [autoSuspendEnabled, settings.sessionIdleTimeoutMinutes]);
 
   return (
     <section aria-labelledby="settings-general-heading" aria-label="General">
@@ -314,8 +325,8 @@ export function GeneralSection() {
             </Select>
           </SettingRow>
           <SettingRow
-            label="Auto-hibernate idle sessions"
-            description="Background sessions that have completed work are hibernated after this many minutes of inactivity."
+            label="Auto-suspend idle sessions"
+            description="Background sessions that have completed work are suspended (paused, resumable on focus) after this many minutes of inactivity. Turn off to keep them running."
           >
             <div className="flex items-center gap-2">
               <Input
@@ -323,14 +334,29 @@ export function GeneralSection() {
                 type="number"
                 min={MIN_SESSION_IDLE_TIMEOUT_MINUTES}
                 max={MAX_SESSION_IDLE_TIMEOUT_MINUTES}
-                value={settings.sessionIdleTimeoutMinutes}
+                value={autoSuspendEnabled ? settings.sessionIdleTimeoutMinutes : lastEnabledIdleMinutesRef.current}
+                disabled={!autoSuspendEnabled}
                 onChange={(event) => {
                   const next = Number(event.target.value);
-                  if (Number.isFinite(next)) updateSettings({ sessionIdleTimeoutMinutes: next });
+                  // The switch is the only way to disable auto-suspend; transient
+                  // edits (empty field, 0) must not silently turn it off.
+                  if (Number.isFinite(next) && next > 0) updateSettings({ sessionIdleTimeoutMinutes: next });
                 }}
-                className="h-8 w-20 text-right text-[12px]"
+                className="h-8 w-20 text-right text-[12px] disabled:opacity-50"
               />
               <span className="text-[11px] text-muted-foreground">min</span>
+              <Switch
+                id="general-auto-suspend"
+                aria-label="Auto-suspend idle sessions"
+                checked={autoSuspendEnabled}
+                onCheckedChange={(checked) =>
+                  updateSettings({
+                    sessionIdleTimeoutMinutes: checked
+                      ? lastEnabledIdleMinutesRef.current
+                      : SESSION_IDLE_TIMEOUT_OFF_MINUTES,
+                  })
+                }
+              />
             </div>
           </SettingRow>
         </div>

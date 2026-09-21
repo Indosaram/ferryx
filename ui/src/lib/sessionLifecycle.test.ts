@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as tauri from "./tauri";
+import * as generalSettingsModule from "./generalSettings";
 
 import {
   clearSleepingSessions,
@@ -141,5 +142,117 @@ describe("sessionLifecycle", () => {
     setSessionRebindHandler(null);
     closeSpy.mockRestore();
     spawnSpy.mockRestore();
+  });
+
+  describe("idle sweep", () => {
+    function useIdleSettings(minutes: number): () => void {
+      const spy = vi
+        .spyOn(generalSettingsModule, "loadGeneralSettings")
+        .mockReturnValue({
+          confirmCloseTab: false,
+          sessionRestorePolicy: "lazy",
+          sessionIdleTimeoutMinutes: minutes,
+        });
+      return () => spy.mockRestore();
+    }
+
+    function armSpies(describeResult: Promise<unknown>) {
+      const suspendSpy = vi.spyOn(tauri, "suspendTerminal").mockResolvedValue(undefined as any);
+      const describeSpy = vi.spyOn(tauri, "describeTerminal").mockReturnValue(describeResult as any);
+      const historySpy = vi.spyOn(tauri, "getTerminalHistorySnapshot").mockResolvedValue(null as any);
+      return { suspendSpy, describeSpy, historySpy };
+    }
+
+    function disarmSpies(spies: ReturnType<typeof armSpies>): void {
+      spies.suspendSpy.mockRestore();
+      spies.describeSpy.mockRestore();
+      spies.historySpy.mockRestore();
+    }
+
+    it("never suspends when the idle timeout is 0 (off)", async () => {
+      vi.useFakeTimers();
+      const restoreSettings = useIdleSettings(0);
+      const spies = armSpies(Promise.resolve({
+        sessionId: "backend-live-1", cols: 80, rows: 24, running: true, lastOutputAgeMs: null,
+      }));
+      try {
+        const live = session("backend-live-1", "running");
+        registerSessionSnapshot(live, "idle");
+        await vi.advanceTimersByTimeAsync(31 * 60_000);
+        expect(spies.describeSpy).not.toHaveBeenCalled();
+        expect(spies.suspendSpy).not.toHaveBeenCalled();
+        expect(isSessionSleeping(live.id)).toBe(false);
+      } finally {
+        vi.useRealTimers();
+        restoreSettings();
+        disarmSpies(spies);
+      }
+    });
+
+    it("vetoes suspension when the session produced recent PTY output despite an idle classifier", async () => {
+      // Regression: a working omo subagent keeps redrawing its TUI, but the
+      // classifier can report "idle" during long tool turns. The daemon-side
+      // output ground truth (read 1 minute ago) must beat the classifier.
+      vi.useFakeTimers();
+      const restoreSettings = useIdleSettings(30);
+      const spies = armSpies(Promise.resolve({
+        sessionId: "backend-live-1", cols: 80, rows: 24, running: true, lastOutputAgeMs: 60_000,
+      }));
+      try {
+        const live = session("backend-live-1", "running");
+        registerSessionSnapshot(live, "idle");
+        await vi.advanceTimersByTimeAsync(31 * 60_000);
+        expect(spies.describeSpy).toHaveBeenCalled();
+        expect(spies.suspendSpy).not.toHaveBeenCalled();
+        expect(isSessionSleeping(live.id)).toBe(false);
+      } finally {
+        vi.useRealTimers();
+        restoreSettings();
+        disarmSpies(spies);
+      }
+    });
+
+    it("suspends when classifier and output ground truth agree on inactivity", async () => {
+      vi.useFakeTimers();
+      const restoreSettings = useIdleSettings(30);
+      const spies = armSpies(Promise.resolve({
+        sessionId: "backend-live-1", cols: 80, rows: 24, running: true, lastOutputAgeMs: 45 * 60_000,
+      }));
+      try {
+        const live = session("backend-live-1", "running");
+        registerSessionSnapshot(live, "idle");
+        await vi.advanceTimersByTimeAsync(31 * 60_000);
+        expect(spies.suspendSpy).toHaveBeenCalledWith("backend-live-1");
+        expect(isSessionSleeping(live.id)).toBe(true);
+      } finally {
+        vi.useRealTimers();
+        restoreSettings();
+        disarmSpies(spies);
+      }
+    });
+
+    it("vetoes suspension when the output ground truth cannot be verified", async () => {
+      vi.useFakeTimers();
+      const restoreSettings = useIdleSettings(30);
+      const suspendSpy = vi.spyOn(tauri, "suspendTerminal").mockResolvedValue(undefined as any);
+      const describeSpy = vi
+        .spyOn(tauri, "describeTerminal")
+        .mockImplementation(() => Promise.reject(new Error("ipc down")));
+      const historySpy = vi.spyOn(tauri, "getTerminalHistorySnapshot").mockResolvedValue(null as any);
+      try {
+        const live = session("backend-live-1", "running");
+        registerSessionSnapshot(live, "idle");
+        await vi.advanceTimersByTimeAsync(31 * 60_000);
+        expect(describeSpy).toHaveBeenCalled();
+        expect(suspendSpy).not.toHaveBeenCalled();
+        expect(isSessionSleeping(live.id)).toBe(false);
+      } finally {
+        vi.useRealTimers();
+        restoreSettings();
+        suspendSpy.mockRestore();
+        describeSpy.mockRestore();
+        historySpy.mockRestore();
+      }
+    });
   });
 });

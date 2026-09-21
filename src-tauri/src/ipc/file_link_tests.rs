@@ -18,6 +18,7 @@ fn details(workspace_id: Option<&str>, cwd: Option<&str>) -> DaemonSessionDetail
         running: true,
         start_sequence: None,
         end_sequence: None,
+        last_output_age_ms: None,
     }
 }
 

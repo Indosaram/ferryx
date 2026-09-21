@@ -1974,6 +1974,7 @@ impl DaemonSessionService {
                         == crate::terminal::remote::RemoteConnectionState::Connected,
                     start_sequence,
                     end_sequence,
+                    last_output_age_ms: None,
                 },
             };
         }
@@ -1996,6 +1997,7 @@ impl DaemonSessionService {
                         running,
                         start_sequence,
                         end_sequence,
+                        last_output_age_ms: None,
                     },
                 };
             }
@@ -2050,6 +2052,7 @@ impl DaemonSessionService {
                 running,
                 start_sequence,
                 end_sequence,
+                last_output_age_ms: pty_session.last_output_age_ms(),
             },
         }
     }

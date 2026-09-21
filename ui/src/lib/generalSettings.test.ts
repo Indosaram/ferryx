@@ -37,9 +37,19 @@ describe("generalSettings", () => {
       sessionRestorePolicy: "activeOnly",
       sessionIdleTimeoutMinutes: 0,
     }));
+    // 0 is the explicit "off" value and must survive normalization.
     expect(loadGeneralSettings()).toMatchObject({
       sessionRestorePolicy: "activeOnly",
-      sessionIdleTimeoutMinutes: 1,
+      sessionIdleTimeoutMinutes: 0,
+    });
+
+    localStorage.setItem(GENERAL_SETTINGS_STORAGE_KEY, JSON.stringify({
+      sessionRestorePolicy: "eager",
+      sessionIdleTimeoutMinutes: -5,
+    }));
+    expect(loadGeneralSettings()).toMatchObject({
+      sessionRestorePolicy: "eager",
+      sessionIdleTimeoutMinutes: 0,
     });
 
     localStorage.setItem(GENERAL_SETTINGS_STORAGE_KEY, JSON.stringify({
