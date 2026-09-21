@@ -46,10 +46,15 @@ describe("SSH recovery", () => {
     expect(restored.sessions.pane.remoteConnectionState).toBe("reconnecting");
     expect(restored.layout.tabs[0].id).toBe("tab");
   });
-  it.each(["missing", "expired", "legacyLost"] as const)("keeps genuine %s loss distinct from a transport outage", stateName => {
+  it.each(["expired", "legacyLost"] as const)("keeps genuine %s loss distinct from a transport outage", stateName => {
     const state: WorkspaceState = { worktrees: [], activeWorktreePath: "/srv", layout: createLayoutState(), unreadTabIds: {}, unreadWorktreePaths: {}, sessions: { pane: session } };
     const next = workspaceReducer(state, { type: "SESSION_REMOTE_STATUS", status: { sessionId: "stable", state: stateName, generation: 3, failure: null, replayGap: null } });
     expect(next.sessions.pane).toMatchObject({ backendSessionId: "stable", lifecycle: "exited", remoteConnectionState: stateName, agentSessionId: "agent-owned" });
+  });
+  it("treats an unknown-to-this-daemon session as recoverable rather than dead", () => {
+    const state: WorkspaceState = { worktrees: [], activeWorktreePath: "/srv", layout: createLayoutState(), unreadTabIds: {}, unreadWorktreePaths: {}, sessions: { pane: session } };
+    const next = workspaceReducer(state, { type: "SESSION_REMOTE_STATUS", status: { sessionId: "stable", state: "missing", generation: 3, failure: null, replayGap: null } });
+    expect(next.sessions.pane).toMatchObject({ backendSessionId: "stable", lifecycle: session.lifecycle, remoteConnectionState: "missing", agentSessionId: "agent-owned" });
   });
   it("does not preserve agent references when an arbitrary different SSH backend is assigned", () => {
     const state: WorkspaceState = { worktrees: [], activeWorktreePath: "/srv", layout: createLayoutState(), unreadTabIds: {}, unreadWorktreePaths: {}, sessions: { pane: session } };
@@ -79,6 +84,57 @@ describe("SSH recovery", () => {
     });
     await recovery.ready;
     expect(dispatch.mock.calls.at(-1)?.[0]).toMatchObject({ type: "SESSION_REMOTE_STATUS", daemonEpoch: "new", status: { sessionId: "stable", state: "connected", generation: 4 } });
+    recovery.stop();
+  });
+  it("retries once and dispatches the re-probed status when the daemon does not know the session", async () => {
+    const dispatch = vi.fn();
+    const retry = vi.fn(async () => ({ type: "retryRemoteSessionOk" as const }));
+    const connected = { type: "remoteSessionDetailsOk" as const, legacyDirectSsh: false,
+      details: { state: "connected" as const, generation: 7, failure: null, replayGap: null, attempts: 1, pid: 42,
+        descriptor: { backendSessionId: "stable", target: { hostId: "h", ownerId: "o", backendSessionId: "remote", epoch: "1" }, config: {}, clientRequestId: "request", remoteCursor: "0", cols: 80, rows: 24 } } };
+    const status = vi.fn()
+      .mockResolvedValueOnce({ type: "remoteSessionDetailsOk", details: null, legacyDirectSsh: false })
+      .mockResolvedValueOnce(connected);
+    const recovery = startSshRecovery({ sessions: [session], dispatch, onError: error => { throw error; },
+      subscribe: async () => () => {}, status: status as any, retry,
+      list: async () => [{ sessionId: "stable", daemonEpoch: "new" }],
+    });
+    await recovery.ready;
+    expect(retry).toHaveBeenCalledExactlyOnceWith("stable");
+    expect(status).toHaveBeenCalledTimes(2);
+    // Only the settled re-probe reaches the store; the transient `missing` is never dispatched.
+    expect(dispatch.mock.calls.some(([action]) => action.status.state === "missing")).toBe(false);
+    expect(dispatch.mock.calls.at(-1)?.[0]).toMatchObject({ type: "SESSION_REMOTE_STATUS", daemonEpoch: "new", status: { sessionId: "stable", state: "connected", generation: 7 } });
+    recovery.stop();
+  });
+  it("swallows a structured retry failure and still applies the re-probed status", async () => {
+    const dispatch = vi.fn();
+    const retry = vi.fn(async () => { throw { code: "IO_ERROR", message: "daemon busy", details: {} }; });
+    const status = vi.fn()
+      .mockResolvedValueOnce({ type: "remoteSessionDetailsOk", details: null, legacyDirectSsh: false })
+      .mockResolvedValueOnce({ type: "remoteSessionDetailsOk", details: null, legacyDirectSsh: false });
+    const onError = vi.fn();
+    const recovery = startSshRecovery({ sessions: [session], dispatch, onError,
+      subscribe: async () => () => {}, status: status as any, retry,
+      list: async () => [{ sessionId: "stable", daemonEpoch: "new" }],
+    });
+    await recovery.ready;
+    expect(retry).toHaveBeenCalledOnce();
+    expect(onError).not.toHaveBeenCalled();
+    expect(dispatch.mock.calls.at(-1)?.[0]).toMatchObject({ type: "SESSION_REMOTE_STATUS", status: { sessionId: "stable", state: "missing" } });
+    recovery.stop();
+  });
+  it("does not retry a legacy direct SSH session", async () => {
+    const dispatch = vi.fn();
+    const retry = vi.fn(async () => undefined);
+    const recovery = startSshRecovery({ sessions: [session], dispatch, onError: error => { throw error; },
+      subscribe: async () => () => {},
+      status: async () => ({ type: "remoteSessionDetailsOk", details: null, legacyDirectSsh: true }),
+      retry, list: async () => [{ sessionId: "stable", daemonEpoch: "new" }],
+    });
+    await recovery.ready;
+    expect(retry).not.toHaveBeenCalled();
+    expect(dispatch.mock.calls.at(-1)?.[0]).toMatchObject({ status: { state: "legacyLost" } });
     recovery.stop();
   });
 });

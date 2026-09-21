@@ -82,7 +82,7 @@ function exitedState(lifecycle: "exited" | "failed" = "exited"): WorkspaceState 
 }
 
 describe("remote status death clears live agent work", () => {
-  it.each(["missing", "expired", "legacyLost"] as const)(
+  it.each(["expired", "legacyLost"] as const)(
     "settles the working activity when the daemon reports the remote session %s",
     (lostState) => {
       const next = workspaceReducer(remoteState(), {
@@ -95,6 +95,20 @@ describe("remote status death clears live agent work", () => {
       expect(resolveActivityIndicator(selectWorktreeActivitySummaries(next)[worktree.path])).not.toBe("working");
     },
   );
+
+  it("keeps live remote work when the queried daemon merely does not know the session", () => {
+    // `missing` is not death: a draining predecessor daemon may still own this session, or restore
+    // has not completed. Only `expired` is a daemon-confirmed process exit.
+    const next = workspaceReducer(remoteState(), {
+      type: "SESSION_REMOTE_STATUS",
+      status: { sessionId: "backend-a", state: "missing", generation: 0, failure: null, replayGap: null },
+    });
+
+    expect(next.sessions["session-a"].lifecycle).toBe("working");
+    expect(next.sessions["session-a"].remoteConnectionState).toBe("missing");
+    expect(next.activityBySessionId?.["session-a"]?.state).toBe("working");
+    expect(resolveActivityIndicator(selectWorktreeActivitySummaries(next)[worktree.path])).toBe("working");
+  });
 
   it.each(["disconnected", "reconnecting"] as const)(
     "keeps live remote work while the transport is merely %s",

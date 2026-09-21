@@ -105,9 +105,12 @@ export function TerminalPane({
   const isSpawning = session.reconnectLifecycle === "spawning" || session.reconnectLifecycle === "validating";
   const remoteState = session.remoteConnectionState;
   const isSshReconnecting = isSshSession && (remoteState === "reconnecting" || isSpawning);
+  // `missing` means the daemon we queried does not know this session (a draining predecessor may
+  // still own it, or restore has not completed). That is a recoverable transport-level outage, so
+  // it takes the same recoverable branch as `disconnected` and never the terminal expired branch.
   const isSshDisconnected =
-    isSshSession && !isSpawning && (remoteState === "disconnected" || (!remoteState && (session.backendSessionId === null || session.lifecycle === "exited")));
-  const isSshExpired = isSshSession && !isSpawning && (remoteState === "expired" || remoteState === "missing");
+    isSshSession && !isSpawning && (remoteState === "disconnected" || remoteState === "missing" || (!remoteState && (session.backendSessionId === null || session.lifecycle === "exited")));
+  const isSshExpired = isSshSession && !isSpawning && remoteState === "expired";
   const isSshLegacyLost = isSshSession && !isSpawning && remoteState === "legacyLost";
   const showSshOverlay = isSshSession && (isSshReconnecting || isSshDisconnected || isSshExpired || isSshLegacyLost);
   const isExited = isSshSession ? showSshOverlay : session.backendSessionId === null || isStandbyBackendSessionId(session.backendSessionId) || session.lifecycle === "exited";

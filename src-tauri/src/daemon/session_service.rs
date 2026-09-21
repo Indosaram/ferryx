@@ -168,6 +168,113 @@ struct DurableRemoteSession {
     metadata: Option<StoredSessionMeta>,
 }
 
+/// Blocking cross-process guard for durable remote snapshot read-modify-write
+/// cycles. During a drain chain two live daemons share one durable file; the
+/// in-process tokio mutex cannot serialize across processes.
+struct RemoteSnapshotFileLock(std::fs::File);
+
+impl RemoteSnapshotFileLock {
+    fn acquire(path: &std::path::Path) -> std::io::Result<Self> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+
+            // SAFETY:
+            // Category: Foreign Function Interface (FFI) / Invalid File Descriptor.
+            // Invariant: `file.as_raw_fd()` returns a valid open file descriptor
+            // borrowed from `file`, which remains open and valid for the duration of
+            // the `libc::flock` call. The blocking variant waits instead of failing
+            // because snapshot cycles are short and contention is rare.
+            let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+            if ret != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Foundation::HANDLE;
+            use windows_sys::Win32::Storage::FileSystem::{
+                LockFileEx, LOCKFILE_EXCLUSIVE_LOCK,
+            };
+            use windows_sys::Win32::System::IO::OVERLAPPED;
+
+            let handle = file.as_raw_handle() as HANDLE;
+            // SAFETY:
+            // Category: Uninitialized Memory.
+            // Invariant: `OVERLAPPED` is a C-compatible repr(C) struct whose all-zero
+            // bit pattern is valid memory representing zero offset and null hEvent.
+            let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+
+            // SAFETY:
+            // Category: Foreign Function Interface (FFI) / Invalid Handle Dereference.
+            // Invariant: `handle` is a valid open Win32 file handle owned by `file`,
+            // which remains open and valid for the duration of the LockFileEx call.
+            // Without LOCKFILE_FAIL_IMMEDIATELY the call blocks until the range is free.
+            let ret = unsafe {
+                LockFileEx(
+                    handle,
+                    LOCKFILE_EXCLUSIVE_LOCK,
+                    0,
+                    1,
+                    0,
+                    &mut overlapped,
+                )
+            };
+            if ret == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        Ok(Self(file))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for RemoteSnapshotFileLock {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+
+        // SAFETY:
+        // Category: Foreign Function Interface (FFI) / Invalid File Descriptor.
+        // Invariant: `self.0.as_raw_fd()` is a valid open file descriptor owned by
+        // `self.0`, which has not been closed yet; clearing the flock before the
+        // descriptor is closed by the `File` drop.
+        unsafe {
+            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for RemoteSnapshotFileLock {
+    fn drop(&mut self) {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::HANDLE;
+        use windows_sys::Win32::Storage::FileSystem::UnlockFileEx;
+        use windows_sys::Win32::System::IO::OVERLAPPED;
+
+        let handle = self.0.as_raw_handle() as HANDLE;
+        // SAFETY:
+        // Category: Uninitialized Memory.
+        // Invariant: `OVERLAPPED` is a C-compatible repr(C) struct whose all-zero bit
+        // pattern is valid memory representing zero offset and null hEvent.
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+
+        // SAFETY:
+        // Category: Foreign Function Interface (FFI) / Invalid Handle Dereference.
+        // Invariant: `handle` is a valid open Win32 file handle owned by `self.0`;
+        // the unlock range (0, 1 byte) exactly matches the locked range.
+        unsafe {
+            UnlockFileEx(handle, 0, 1, 0, &mut overlapped);
+        }
+    }
+}
+
 /// Entries share disconnect state only with their own socket generation.
 pub(crate) struct MachineController {
     pub device: String,
@@ -726,23 +833,89 @@ impl DaemonSessionService {
     }
 
     pub(super) async fn persist_remote_sessions_at(&self, path: PathBuf) -> Result<(), String> {
-        let _guard = self.remote_persistence_lock.lock().await;
-        let records: Vec<_> = self
-            .terminal_service
-            .remote()
+        Self::checkpoint_remote_sessions(
+            path,
+            Arc::clone(&self.remote_persistence_lock),
+            Arc::clone(self.terminal_service.remote()),
+            Arc::clone(&self.session_metadata),
+        )
+        .await
+    }
+
+    /// Single ownership-agnostic checkpoint used by explicit saves and watcher
+    /// checkpoints alike. The durable snapshot is ADDITIVE: prior records are
+    /// preserved (a draining predecessor or a successor daemon may own sessions
+    /// this runtime has never seen), locally owned records win on id conflict.
+    /// Record removal happens only through `remove_persisted_remote_record`, the
+    /// targeted teardown path with positive evidence that a session ended.
+    async fn checkpoint_remote_sessions(
+        path: PathBuf,
+        lock: Arc<tokio::sync::Mutex<()>>,
+        runtime: Arc<crate::terminal::remote::RemoteRuntime>,
+        metadata: Arc<RwLock<HashMap<String, StoredSessionMeta>>>,
+    ) -> Result<(), String> {
+        let _guard = lock.lock().await;
+        // Read failures must never become destructive writes: an unreadable or
+        // mis-shaped durable snapshot aborts the checkpoint so the prior bytes
+        // survive for diagnosis and the next attempt.
+        //
+        // The flock sidecar spans the whole read-modify-write: during a drain
+        // chain two live daemons share one durable file, and the in-process tokio
+        // mutex cannot serialize across processes.
+        let sidecar = path.with_extension("lock");
+        let read_path = path.clone();
+        let (durable_records, _file_lock) = crate::ipc::run_blocking(move || {
+            let file_lock =
+                RemoteSnapshotFileLock::acquire(&sidecar).map_err(|error| {
+                    crate::ipc::IpcError::internal(format!(
+                        "Failed to lock durable remote snapshot: {error}"
+                    ))
+                })?;
+            let records = {
+                let Some(mut persisted) = load_session_from_path(&read_path)? else {
+                    return Ok((Vec::new(), file_lock));
+                };
+                let value = persisted
+                    .extra
+                    .remove("remoteSessions")
+                    .ok_or_else(|| {
+                        crate::ipc::IpcError::internal(
+                            "durable remote snapshot is missing the remoteSessions key",
+                        )
+                    })?;
+                serde_json::from_value::<Vec<DurableRemoteSession>>(value).map_err(|error| {
+                    crate::ipc::IpcError::internal(format!(
+                        "durable remote snapshot failed to decode: {error}"
+                    ))
+                })?
+            };
+            Ok::<_, crate::ipc::IpcError>((records, file_lock))
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+        let records: Vec<_> = runtime
             .list()
             .iter()
             .filter_map(|id| {
-                self.terminal_service
-                    .remote()
-                    .details(id)
-                    .map(|d| DurableRemoteSession {
-                        descriptor: d.descriptor,
-                        metadata: self.session_metadata.read().get(id).cloned(),
-                    })
+                runtime.details(id).map(|d| DurableRemoteSession {
+                    descriptor: d.descriptor,
+                    metadata: metadata.read().get(id).cloned(),
+                })
             })
             .collect();
+        let mut merged: std::collections::BTreeMap<String, DurableRemoteSession> =
+            std::collections::BTreeMap::new();
+        for record in durable_records {
+            merged.insert(record.descriptor.backend_session_id.clone(), record);
+        }
+        for record in records {
+            merged.insert(record.descriptor.backend_session_id.clone(), record);
+        }
+        let records: Vec<DurableRemoteSession> = merged.into_values().collect();
         crate::ipc::run_blocking(move || {
+            // Hold the cross-process lock (acquired above, moved in here) across
+            // the write so no other daemon interleaves a snapshot replacement.
+            let _held = _file_lock;
             let mut session = crate::session::PersistedWorkspaceSession::default();
             session.version = 3;
             session.extra.insert(
@@ -756,7 +929,56 @@ impl DaemonSessionService {
         .map_err(|e| e.to_string())
     }
 
+    /// Targeted durable-record removal used by the session teardown path.
+    /// Removal carries positive evidence that this exact session ended, so it
+    /// deletes exactly one record and never rewrites predecessor/successor
+    /// entries it knows nothing about.
+    pub(super) async fn remove_persisted_remote_record(
+        path: PathBuf,
+        lock: Arc<tokio::sync::Mutex<()>>,
+        session_id: String,
+    ) -> Result<(), String> {
+        let _guard = lock.lock().await;
+        let sidecar = path.with_extension("lock");
+        crate::ipc::run_blocking(move || {
+            let _file_lock =
+                RemoteSnapshotFileLock::acquire(&sidecar).map_err(|error| {
+                    crate::ipc::IpcError::internal(format!(
+                        "Failed to lock durable remote snapshot: {error}"
+                    ))
+                })?;
+            let Some(mut persisted) = load_session_from_path(&path)? else {
+                return Ok(());
+            };
+            let Some(value) = persisted.extra.remove("remoteSessions") else {
+                return Ok(());
+            };
+            let mut records: Vec<DurableRemoteSession> =
+                serde_json::from_value(value).map_err(|error| {
+                    crate::ipc::IpcError::internal(format!(
+                        "durable remote snapshot failed to decode: {error}"
+                    ))
+                })?;
+            let before = records.len();
+            records.retain(|record| record.descriptor.backend_session_id != session_id);
+            if records.len() == before {
+                return Ok(());
+            }
+            let mut session = crate::session::PersistedWorkspaceSession::default();
+            session.version = 3;
+            session.extra.insert(
+                "remoteSessions".into(),
+                serde_json::to_value(records)
+                    .map_err(|e| crate::ipc::IpcError::internal(e.to_string()))?,
+            );
+            save_session_to_path(&path, &session)
+        })
+        .await
+        .map_err(|error| error.to_string())
+    }
+
     pub(super) async fn restore_remote_sessions_at(&self, path: PathBuf) -> Result<(), String> {
+        self.migrate_legacy_remote_persistence(&path).await?;
         let paired_path = path.with_file_name("paired_descriptors.json");
         self.terminal_service.paired().set_store_path(paired_path);
         let records: Vec<DurableRemoteSession> = crate::ipc::run_blocking(move || {
@@ -796,6 +1018,100 @@ impl DaemonSessionService {
         Ok(())
     }
 
+    /// One-time relocation of remote persistence out of the reboot-volatile runtime dir.
+    ///
+    /// `get_runtime_dir()` lives under `/tmp`, which the OS wipes on reboot: the daemon then
+    /// restored zero remote descriptors even though the host-side helper daemons (and their
+    /// PTYs) were still alive. The durable location is derived from the machine identity dir.
+    /// Copy rather than move, so a predecessor daemon still reading the legacy file keeps it.
+    async fn migrate_legacy_remote_persistence(&self, path: &Path) -> Result<(), String> {
+        // Test builds run against isolated fixtures: never pull the developer's live
+        // /tmp runtime state into them. The migration test points FERRYX_RUNTIME_DIR at
+        // its own fake runtime directory, which is exactly this opt-in.
+        #[cfg(test)]
+        if std::env::var_os("FERRYX_RUNTIME_DIR").is_none() {
+            return Ok(());
+        }
+        let _guard = self.remote_persistence_lock.lock().await;
+        let legacy_dir = crate::daemon::get_runtime_dir();
+        let targets = [
+            (
+                legacy_dir.join("remote_sessions.json"),
+                path.to_path_buf(),
+            ),
+            (
+                legacy_dir.join("paired_descriptors.json"),
+                path.with_file_name("paired_descriptors.json"),
+            ),
+        ];
+        let sidecar = path.with_extension("lock");
+        crate::ipc::run_blocking(move || {
+            // The flock sidecar serializes against successor checkpoints that
+            // publish valid snapshots concurrently (handover boot overlap).
+            let sidecar_lock =
+                RemoteSnapshotFileLock::acquire(&sidecar).map_err(|error| {
+                    crate::ipc::IpcError::internal(format!(
+                        "Failed to lock durable remote persistence for migration: {error}"
+                    ))
+                })?;
+            for (legacy, durable) in targets {
+                if legacy == durable || !legacy.is_file() {
+                    continue;
+                }
+                // A durable snapshot that parses is authoritative. An unparseable
+                // leftover from an interrupted previous migration must not suppress
+                // re-migration: after a reboot the volatile source may be all that
+                // is left, and a partial file would parse as zero records.
+                let durable_parses = std::fs::read(&durable)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .is_some();
+                if durable_parses {
+                    continue;
+                }
+                if let Some(parent) = durable.parent() {
+                    fs::create_dir_all(parent).map_err(|error| {
+                        crate::ipc::IpcError::internal(format!(
+                            "Failed to create durable remote persistence directory {}: {error}",
+                            parent.display()
+                        ))
+                    })?;
+                }
+                // Stage, fsync, then atomically publish, so an interrupted copy can
+                // never leave a half-written durable snapshot behind.
+                let staging = durable.with_extension(format!(
+                    "json.migrating-{}",
+                    std::process::id()
+                ));
+                let publish = || -> std::io::Result<()> {
+                    fs::copy(&legacy, &staging)?;
+                    let staged = fs::File::open(&staging)?;
+                    staged.sync_all()?;
+                    drop(staged);
+                    fs::rename(&staging, &durable)?;
+                    // Complete the durable-publication sequence: the rename must be
+                    // durable itself before the sidecar lock is released.
+                    if let Some(parent) = durable.parent() {
+                        fs::File::open(parent)?.sync_all()?;
+                    }
+                    Ok(())
+                };
+                publish().map_err(|error| {
+                    let _ = fs::remove_file(&staging);
+                    crate::ipc::IpcError::internal(format!(
+                        "Failed to migrate {} to {}: {error}",
+                        legacy.display(),
+                        durable.display()
+                    ))
+                })?;
+            }
+            drop(sidecar_lock);
+            Ok(())
+        })
+        .await
+        .map_err(|error| error.to_string())
+    }
+
     pub(super) fn watch_remote_session(&self, id: &str) -> Result<(), String> {
         let mut rx = self
             .terminal_service
@@ -808,59 +1124,67 @@ impl DaemonSessionService {
         let path = self.remote_sessions_path.clone();
         let lock = self.remote_persistence_lock.clone();
         let cleanup_session_id = id.to_string();
+        let mut record_removable = false;
         tokio::spawn(async move {
             loop {
                 let details = rx.borrow_and_update().clone();
                 // A naturally expired session keeps the subscription sender alive, so the
                 // loop would never reach the teardown below without this explicit check.
-                let expired =
-                    details.state == crate::terminal::remote::RemoteConnectionState::Expired;
-                let vanished = match runtime.upgrade() {
-                    Some(runtime) => runtime.details(cleanup_session_id.as_str()).is_none(),
-                    None => true,
+                let (expired, vanished) = match runtime.upgrade() {
+                    Some(runtime) => (
+                        details.state
+                            == crate::terminal::remote::RemoteConnectionState::Expired,
+                        runtime.details(cleanup_session_id.as_str()).is_none(),
+                    ),
+                    // The runtime itself is gone (daemon teardown): keep durable
+                    // records so a restart can restore them.
+                    None => (false, false),
                 };
                 if expired || vanished {
+                    record_removable = true;
                     break;
                 }
+                // Checkpoints share the same additive merge implementation as
+                // explicit saves; a local-only snapshot here would erase durable
+                // descriptors owned by other daemon generations.
+                let Some(runtime_arc) = runtime.upgrade() else {
+                    break;
+                };
+                if let Err(error) = Self::checkpoint_remote_sessions(
+                    path.clone(),
+                    Arc::clone(&lock),
+                    runtime_arc,
+                    Arc::clone(&metadata),
+                )
+                .await
                 {
-                    let _guard = lock.lock().await;
-                    let Some(runtime) = runtime.upgrade() else {
-                        break;
-                    };
-                    let records: Vec<_> = runtime
-                        .list()
-                        .iter()
-                        .filter_map(|id| {
-                            runtime.details(id).map(|d| DurableRemoteSession {
-                                descriptor: d.descriptor,
-                                metadata: metadata.read().get(id).cloned(),
-                            })
-                        })
-                        .collect();
-                    drop(runtime);
-                    let path = path.clone();
-                    if let Err(error) = crate::ipc::run_blocking(move || {
-                        let mut session = crate::session::PersistedWorkspaceSession::default();
-                        session.version = 3;
-                        session.extra.insert(
-                            "remoteSessions".into(),
-                            serde_json::to_value(records)
-                                .map_err(|e| crate::ipc::IpcError::internal(e.to_string()))?,
-                        );
-                        save_session_to_path(&path, &session)
-                    })
-                    .await
-                    {
-                        tracing::error!(%error, "Remote session checkpoint persistence failed");
-                    }
+                    tracing::error!(%error, "Remote session checkpoint persistence failed");
                 }
                 let _ = tx.send(DaemonRemoteEvent { event: "terminal_remote_status".into(), payload: serde_json::json!({"sessionId":details.descriptor.backend_session_id,"state":details.state,"generation":details.generation,"failure":details.failure,"replayGap":details.replay_gap}) });
                 if rx.changed().await.is_err() {
+                    // The entry's sender dropped: either the session was closed out
+                    // of a live runtime (remove its record), or the whole runtime is
+                    // being torn down (keep records for restart).
+                    record_removable = runtime
+                        .upgrade()
+                        .map(|runtime| runtime.details(cleanup_session_id.as_str()).is_none())
+                        .unwrap_or(false);
                     break;
                 }
             }
             // The remote session ended (or its runtime was dropped): a forwarding child must
             // never outlive its session, whether or not a close/hibernate path ran.
+            if record_removable {
+                if let Err(error) = Self::remove_persisted_remote_record(
+                    path,
+                    lock,
+                    cleanup_session_id.clone(),
+                )
+                .await
+                {
+                    tracing::error!(%error, "Remote session record removal failed");
+                }
+            }
             crate::ssh::agent_forward::detach(&cleanup_session_id).await;
         });
         Ok(())

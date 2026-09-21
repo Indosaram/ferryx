@@ -22,6 +22,162 @@ fn write_hosts(path: &Path, hosts: Vec<SshHost>) {
 #[path = "remote_ssh_qa.rs"]
 mod qa;
 
+const PERSISTENCE_CHILD: &str = "FERRYX_REMOTE_PERSISTENCE_CHILD";
+const PERSISTENCE_PARTIAL: &str = "FERRYX_REMOTE_PERSISTENCE_PARTIAL";
+
+/// Child half of [`remote_persistence_migrates_out_of_volatile_runtime_dir`].
+///
+/// Runs in its own process because it has to point `FERRYX_RUNTIME_DIR` at a fake
+/// runtime directory, and that resolution is process-global.
+#[tokio::test]
+async fn remote_persistence_migration_child() {
+    let Some(root) = std::env::var_os(PERSISTENCE_CHILD) else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    let legacy_dir = crate::daemon::get_runtime_dir();
+    assert_eq!(legacy_dir, root.join("runtime"), "child runs with a fake runtime dir");
+    std::fs::create_dir_all(&legacy_dir).unwrap();
+    let descriptor = serde_json::json!({
+        "backendSessionId": "migrated-remote-session",
+        "target": {"hostId":"host","ownerId":"owner","epoch":"1","backendSessionId":"migrated-target"},
+        "config": {"host":{"id":"host","label":"host","hostname":"127.0.0.1","port":1,"source":"manual","authMethod":"agent"},"environment":{"platform":"posix","executor":"sh","version":"test","home":"/tmp","temp":"/tmp","git":true},"helper":{"executable":"/helper","root":"/root"},"projectId":"ssh:abcd","projectPath":"/project","worktree":null,"agentIdentity":null},
+        "clientRequestId": "migrated-request",
+        "remoteCursor": "11",
+        "cols": 80,
+        "rows": 24
+    });
+    std::fs::write(
+        legacy_dir.join("remote_sessions.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "version": 3,
+            "timestamp": 0,
+            "activeWorkspaceId": "",
+            "workspaces": {},
+            "remoteSessions": [{"descriptor": descriptor, "metadata": null}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(legacy_dir.join("paired_descriptors.json"), b"{}").unwrap();
+
+    let isolated = root.join("durable");
+    std::fs::create_dir_all(&isolated).unwrap();
+    let durable = isolated.join("remote_sessions.json");
+    if std::env::var_os(PERSISTENCE_PARTIAL).is_some() {
+        // Leftover from an interrupted earlier migration: an unparseable tail that
+        // must not suppress re-migration (the reboot-volatile source may be gone).
+        std::fs::write(
+            &durable,
+            b"{\"version\":3,\"timestamp\":0,\"activeWorkspa",
+        )
+        .unwrap();
+    } else {
+        assert!(!durable.exists(), "durable location starts empty");
+    }
+    let daemon = DaemonServer::new_with_paths(
+        Some(isolated.join("config")),
+        Some(isolated.join("auth")),
+    );
+    daemon
+        .restore_remote_sessions_at(durable.clone())
+        .await
+        .unwrap();
+
+    assert!(
+        durable.is_file(),
+        "legacy remote_sessions.json must be migrated to the durable path"
+    );
+    serde_json::from_str::<serde_json::Value>(
+        &std::fs::read_to_string(&durable).unwrap(),
+    )
+    .expect("migrated durable snapshot must parse");
+    assert!(
+        isolated.join("paired_descriptors.json").is_file(),
+        "paired descriptors must be migrated alongside remote sessions"
+    );
+    assert!(
+        legacy_dir.join("remote_sessions.json").is_file(),
+        "migration copies; a draining predecessor still reads the legacy file"
+    );
+    let details = daemon
+        .terminal_service
+        .remote()
+        .details("migrated-remote-session")
+        .expect("migrated descriptor restored into the remote runtime");
+    assert_eq!(
+        details.state,
+        crate::terminal::remote::RemoteConnectionState::Reconnecting
+    );
+    assert_eq!(details.descriptor.target.backend_session_id, "migrated-target");
+}
+
+/// An unparseable leftover (e.g. from an interrupted earlier migration) must not
+/// suppress re-migration: after a reboot the volatile source may be all that is left.
+#[tokio::test]
+async fn remote_persistence_migration_recovers_from_partial_durable_file() {
+    let root = tempfile::tempdir().unwrap();
+    let output = tokio::time::timeout(
+        Duration::from_secs(60),
+        tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "daemon::server::remote_ssh_tests::remote_persistence_migration_child",
+                "--nocapture",
+            ])
+            .env(PERSISTENCE_CHILD, root.path())
+            .env("FERRYX_RUNTIME_DIR", root.path().join("runtime"))
+            .env("FERRYX_DATA_DIR", root.path().join("data"))
+            .env("HOME", root.path())
+            .env("TMPDIR", root.path())
+            .env(PERSISTENCE_PARTIAL, "1")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .expect("bounded child test")
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "child stdout:\n{}\nchild stderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `/tmp/rorca-{uid}` is wiped on reboot, so remote descriptors persisted there vanished
+/// while the host-side helper daemons survived. Persistence must move to the durable
+/// identity directory, migrating whatever the previous location still holds.
+#[tokio::test]
+async fn remote_persistence_migrates_out_of_volatile_runtime_dir() {
+    let root = tempfile::tempdir().unwrap();
+    let output = tokio::time::timeout(
+        Duration::from_secs(60),
+        tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "daemon::server::remote_ssh_tests::remote_persistence_migration_child",
+                "--nocapture",
+            ])
+            .env(PERSISTENCE_CHILD, root.path())
+            .env("FERRYX_RUNTIME_DIR", root.path().join("runtime"))
+            .env("FERRYX_DATA_DIR", root.path().join("data"))
+            .env("HOME", root.path())
+            .env("TMPDIR", root.path())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .expect("bounded child test")
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "child stdout:\n{}\nchild stderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[path = "remote_ssh_gateway_qa.rs"]
 mod gateway_qa;
 

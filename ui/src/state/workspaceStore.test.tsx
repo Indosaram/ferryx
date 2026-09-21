@@ -1602,6 +1602,49 @@ describe("worktree tab and session isolation", () => {
       });
     });
 
+    it("SESSION_REMOTE_STATUS missing records the transport state without ending the session", () => {
+      // A daemon that does not know the session says nothing about the remote process: a draining
+      // predecessor may still own it. Only `expired` is a daemon-confirmed process exit.
+      const initialState: WorkspaceState = {
+        worktrees: [worktree],
+        activeWorktreePath: worktree.path,
+        sessions: {
+          "remote-pane": {
+            id: "remote-pane",
+            cwd: "/srv/project",
+            worktreePath: worktree.path,
+            workspaceId: "ssh:host-one:project",
+            worktree: null,
+            backendSessionId: "remote-backend",
+            lifecycle: "working",
+            remoteConnectionState: "connected",
+            remoteGeneration: 3,
+          },
+        },
+        layout: createLayoutState([
+          { kind: "terminal", id: "tab-remote", label: "SSH", sessionId: "remote-pane" },
+        ]),
+        unreadTabIds: {},
+        unreadWorktreePaths: {},
+        activityBySessionId: {
+          "remote-pane": { state: "working", title: "Claude", isAgent: true, agentType: "claude" },
+        },
+      };
+
+      const nextState = workspaceReducer(initialState, {
+        type: "SESSION_REMOTE_STATUS",
+        status: { sessionId: "remote-backend", state: "missing", generation: 4, failure: null, replayGap: null },
+      });
+
+      expect(nextState.sessions["remote-pane"]).toMatchObject({
+        backendSessionId: "remote-backend",
+        remoteConnectionState: "missing",
+        remoteGeneration: 4,
+        lifecycle: "working",
+      });
+      expect(nextState.activityBySessionId?.["remote-pane"]?.state).toBe("working");
+    });
+
     it("ensureSessionBackends calls spawnTerminal exactly once for sessions with null backendSessionId and rebinds them", async () => {
       const { services } = createServices();
       const { result } = renderHook(() =>

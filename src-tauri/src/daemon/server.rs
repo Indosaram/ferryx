@@ -1254,10 +1254,16 @@ impl DaemonServer {
             machine_controllers: tokio::sync::Mutex::new(HashMap::new()),
             machine_lifecycles: Arc::new(Mutex::new(HashMap::new())),
             remote_persistence_lock: Arc::new(tokio::sync::Mutex::new(())),
+            // The runtime dir (/tmp/rorca-{uid}) is wiped on reboot, which erased every
+            // persisted remote descriptor even though the host-side helper daemons survived.
+            // Durable remote identity belongs next to the machine identity.
             remote_sessions_path: isolated_dir
                 .clone()
                 .or_else(session_dir_override)
-                .unwrap_or_else(get_runtime_dir)
+                .unwrap_or_else(|| {
+                    crate::remote::auth::canonical_identity_dir()
+                        .expect("daemon requires a private data directory")
+                })
                 .join("remote_sessions.json"),
             ssh_store_path: isolated_dir
                 .clone()
@@ -1804,9 +1810,39 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::RemoteSessionDetails { session_id }) => {
-                    let details = self.terminal_service.remote().details(&session_id);
-                    let legacy_direct_ssh = details.is_none() && self.session_metadata.read().get(&session_id).is_some_and(|m| crate::ssh::projects::is_remote(&m.workspace_id));
-                    DaemonResponse::RemoteSessionDetailsOk { details, legacy_direct_ssh }
+                    let local_details = self.terminal_service.remote().details(&session_id);
+                    // A rolling handover leaves live remote sessions with the draining
+                    // predecessor (restore_remote_sessions_at skips them on purpose), so the
+                    // local runtime legitimately has no entry. Answering `details: null` would
+                    // make the GUI treat the session as missing and respawn it; route the query
+                    // to the daemon that still owns the controller instead.
+                    let routed = match local_details.is_none()
+                        .then(|| self.session_service.router().find_legacy_peer_for_session(&session_id))
+                        .flatten()
+                    {
+                        Some(peer) => match peer.send_request(&DaemonRequest::RemoteSessionDetails { session_id: session_id.clone() }).await {
+                            Ok(response) => match &response {
+                                // The peer does not know this session either: fall back to the
+                                // local answer (including the legacy direct-SSH classification).
+                                // Only the structured discriminator counts; message text must
+                                // never reclassify an unrelated peer error as "session absent".
+                                DaemonResponse::Error { code, .. }
+                                    if code.as_deref() == Some("SESSION_NOT_FOUND") => None,
+                                _ => Some(response),
+                            },
+                            // A transport failure is not evidence of absence; never degrade it
+                            // into `details: null`.
+                            Err(error) => Some(daemon_error(format!("Legacy peer remote session details failed: {error}"))),
+                        },
+                        None => None,
+                    };
+                    match routed {
+                        Some(response) => response,
+                        None => {
+                            let legacy_direct_ssh = local_details.is_none() && self.session_metadata.read().get(&session_id).is_some_and(|m| crate::ssh::projects::is_remote(&m.workspace_id));
+                            DaemonResponse::RemoteSessionDetailsOk { details: local_details, legacy_direct_ssh }
+                        }
+                    }
                 }
                 Ok(DaemonRequest::MachineGateway) => {
                     if let Err(error) = write_half.write_all(b"{\"type\":\"machineGatewayOk\"}\n").await {
@@ -1835,11 +1871,22 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::RetryRemoteSession { session_id }) => {
-                    match self.validate_session_ssh_target(&session_id).await {
-                        Err(e) => daemon_error(e.to_string()),
-                        Ok(()) => match self.terminal_service.remote().retry(&session_id) {
-                            Ok(()) => DaemonResponse::RetryRemoteSessionOk,
-                            Err(failure) => DaemonResponse::RemoteSessionError { failure },
+                    // Retry must reach the daemon that owns the controller: during a rolling
+                    // handover that is the draining predecessor, not this runtime.
+                    match (!self.terminal_service.remote().contains(&session_id))
+                        .then(|| self.session_service.router().find_legacy_peer_for_session(&session_id))
+                        .flatten()
+                    {
+                        Some(peer) => match peer.send_request(&DaemonRequest::RetryRemoteSession { session_id: session_id.clone() }).await {
+                            Ok(response) => response,
+                            Err(error) => daemon_error(format!("Legacy peer remote session retry failed: {error}")),
+                        },
+                        None => match self.validate_session_ssh_target(&session_id).await {
+                            Err(e) => daemon_error(e.to_string()),
+                            Ok(()) => match self.terminal_service.remote().retry(&session_id) {
+                                Ok(()) => DaemonResponse::RetryRemoteSessionOk,
+                                Err(failure) => DaemonResponse::RemoteSessionError { failure },
+                            }
                         }
                     }
                 },

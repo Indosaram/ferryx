@@ -209,6 +209,9 @@ mod tests {
     fn full_log_discards_old_records_before_appending() {
         // Given: an existing log at its disk limit, including across daemon restarts.
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
+        // Fresh worktrees have no target/ inside the manifest dir (CARGO_TARGET_DIR may
+        // point elsewhere); tempfile_in requires the directory to exist.
+        std::fs::create_dir_all(&root).unwrap();
         let mut file = tempfile::tempfile_in(root).unwrap();
         file.set_len(MAX_BYTES).unwrap();
         // When: another record is persisted.

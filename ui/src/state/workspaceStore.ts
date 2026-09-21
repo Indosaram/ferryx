@@ -2281,10 +2281,13 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       const lostSessionIds: string[] = [];
       for (const [id, session] of Object.entries(sessions)) {
         if (session.backendSessionId !== action.status.sessionId || !isRemoteWorkspaceId(session.workspaceId)) continue;
-        // `missing`/`expired`/`legacyLost` is the daemon reporting the remote session itself is
-        // gone, which kills the process running in it. `disconnected`/`reconnecting` is only the
-        // control channel dropping: the remote agent keeps working, so its activity must survive.
-        const lost = ["missing", "expired", "legacyLost"].includes(action.status.state);
+        // `expired` is the daemon confirming the remote process itself exited and `legacyLost` is a
+        // pre-reattach session that can never be restored: both kill the process running in it.
+        // `missing` only says the daemon we queried does not know this session, which is transient
+        // (a draining predecessor daemon may still own it, or restore has not completed), so it must
+        // not be read as process death. `disconnected`/`reconnecting` is only the control channel
+        // dropping: in all three cases the remote agent keeps working and its activity must survive.
+        const lost = ["expired", "legacyLost"].includes(action.status.state);
         if (lost) lostSessionIds.push(id);
         const epochChanged = action.daemonEpoch != null && action.daemonEpoch !== session.daemonEpoch;
         sessions[id] = {

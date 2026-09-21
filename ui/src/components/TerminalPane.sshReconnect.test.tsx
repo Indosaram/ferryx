@@ -214,6 +214,20 @@ describe("SSH reconnect after daemon exit", () => {
     expect(screen.queryByRole("button", { name: "Reconnect SSH" })).toBeNull();
   });
 
+  it("shows a recoverable pane when the queried daemon does not know the session", () => {
+    // `missing` is transient (a draining predecessor daemon may still own the session), so the pane
+    // must offer reattachment instead of declaring the remote process dead.
+    const missingSession: TerminalSession = {
+      ...connectedWorkspace().sessions.pane,
+      remoteConnectionState: "missing",
+    };
+    render(<TerminalPane session={missingSession} active onReconnect={vi.fn()} />);
+
+    expect(screen.queryByText("Remote session expired")).toBeNull();
+    expect(screen.getByText("Remote connection lost. Retry to reattach to the running session.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reconnect SSH" })).toBeEnabled();
+  });
+
   it("still rejects replacing a local agent with a fresh shell", async () => {
     const session: TerminalSession = {
       ...connectedWorkspace().sessions.pane,
