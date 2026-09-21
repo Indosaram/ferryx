@@ -85,6 +85,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let app = control_app.clone();
                     let _ = control_window.run_on_main_thread(move || {
                         match command.trim() {
+                            "show" => {
+                                window.set_always_on_top(true).expect("QA foreground");
+                                window.show().expect("QA show");
+                                println!("QA_SHOW");
+                            }
                             "resize" => {
                                 let _ = window.set_size(tauri::LogicalSize::new(640.0, 360.0));
                                 println!("QA_RESIZE_REQUESTED");
@@ -92,6 +97,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "detach" => {
                                 state.detach_session("isolated-native-qa");
                                 println!("QA_DETACHED");
+                            }
+                            "back" => {
+                                let size = window.inner_size().expect("QA window size");
+                                let scale = window.scale_factor().expect("QA window scale");
+                                let bounds = LogicalBounds {
+                                    x: 0.0,
+                                    y: 0.0,
+                                    width: size.width as f64 / scale,
+                                    height: size.height as f64 / scale,
+                                    scale_factor: scale,
+                                };
+                                state.reattach_existing_session_with_bounds(
+                                    "isolated-native-qa", Some(bounds),
+                                ).expect("QA warm reattach");
+                                println!("QA_BACK {:?}", state.render(&window,
+                                    NativeTerminalBoundsRequest {
+                                        session_id: "isolated-native-qa".into(), bounds,
+                                    }));
                             }
                             "render" => {
                                 println!("QA_RENDER {:?}", state.render_current(&window, "isolated-native-qa"));

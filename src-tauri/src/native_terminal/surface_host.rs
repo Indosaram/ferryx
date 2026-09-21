@@ -207,6 +207,7 @@ const RENDER_FOLLOW_UP: u8 = 3;
 pub struct RenderScheduleCoordinator {
     state: AtomicU8,
     frame_clock: FrameClock,
+    ownership: Mutex<u64>,
 }
 
 impl RenderScheduleCoordinator {
@@ -214,6 +215,7 @@ impl RenderScheduleCoordinator {
         Self {
             state: AtomicU8::new(RENDER_IDLE),
             frame_clock: FrameClock::default(),
+            ownership: Mutex::new(0),
         }
     }
 
@@ -232,6 +234,7 @@ impl RenderScheduleCoordinator {
             let state = self.state.load(Ordering::SeqCst);
             match state {
                 RENDER_IDLE => {
+                    let mut ownership = self.ownership.lock();
                     if self
                         .state
                         .compare_exchange(
@@ -242,6 +245,7 @@ impl RenderScheduleCoordinator {
                         )
                         .is_ok()
                     {
+                        *ownership = ownership.wrapping_add(1);
                         return true;
                     }
                 }
@@ -308,12 +312,180 @@ impl RenderScheduleCoordinator {
     ///
     /// Returns `true` if work was cancelled, or `false` if the coordinator was already idle.
     pub fn consume_render(&self) -> bool {
+        let mut ownership = self.ownership.lock();
+        *ownership = ownership.wrapping_add(1);
         self.state.swap(RENDER_IDLE, Ordering::SeqCst) != RENDER_IDLE
+    }
+
+    fn begin_owned_render(&self) -> Option<u64> {
+        let ownership = self.ownership.lock();
+        self.begin_render().then_some(*ownership)
+    }
+
+    // Lifecycle cancellation and late GPU callbacks share this lock so an old frame cannot
+    // release, finish, or retry a newer attachment's work, including an already active frame.
+    fn abandon_render(&self, owner: u64) -> bool {
+        let ownership = self.ownership.lock();
+        if *ownership != owner {
+            return false;
+        }
+        self.state.swap(RENDER_IDLE, Ordering::SeqCst) != RENDER_IDLE
+    }
+
+    fn finish_owned_render(&self, owner: u64, retry: bool) -> bool {
+        let mut ownership = self.ownership.lock();
+        if *ownership != owner {
+            return false;
+        }
+        loop {
+            let state = self.state.load(Ordering::SeqCst);
+            let (next, follow_up) = match state {
+                RENDERING if retry => (RENDER_SCHEDULED, true),
+                RENDERING => (RENDER_IDLE, false),
+                RENDER_FOLLOW_UP => (RENDER_SCHEDULED, true),
+                _ => return false,
+            };
+            if self
+                .state
+                .compare_exchange(state, next, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                if follow_up {
+                    *ownership = ownership.wrapping_add(1);
+                }
+                return follow_up;
+            }
+        }
     }
 
     /// Returns `true` if a render pass is scheduled, active, or awaiting a follow-up.
     pub fn is_render_pending(&self) -> bool {
         self.state.load(Ordering::SeqCst) != RENDER_IDLE
+    }
+}
+
+#[cfg(test)]
+mod render_schedule_coordinator_tests {
+    use super::RenderScheduleCoordinator;
+
+    #[test]
+    fn dropped_frame_retries_without_new_output() {
+        let coordinator = RenderScheduleCoordinator::new();
+        assert!(coordinator.schedule_render());
+        let owner = coordinator.begin_owned_render().unwrap();
+
+        assert!(coordinator.finish_owned_render(owner, true));
+
+        assert!(coordinator.begin_owned_render().is_some());
+    }
+
+    #[test]
+    fn cancelled_geometry_frame_preserves_requested_follow_up() {
+        let coordinator = RenderScheduleCoordinator::new();
+        assert!(coordinator.schedule_render());
+        let owner = coordinator.begin_owned_render().unwrap();
+        assert!(!coordinator.schedule_render());
+
+        assert!(coordinator.finish_owned_render(owner, false));
+
+        assert!(coordinator.begin_owned_render().is_some());
+    }
+
+    #[test]
+    fn retired_completion_cannot_finish_or_retry_the_live_frame() {
+        let coordinator = RenderScheduleCoordinator::new();
+        assert!(coordinator.schedule_render());
+        let retired = coordinator.begin_owned_render().unwrap();
+        coordinator.consume_render();
+        assert!(coordinator.schedule_render());
+        let current = coordinator.begin_owned_render().unwrap();
+
+        assert!(!coordinator.finish_owned_render(retired, true));
+
+        assert!(coordinator.is_render_pending());
+        assert!(!coordinator.finish_owned_render(current, false));
+        assert!(!coordinator.is_render_pending());
+    }
+
+    #[test]
+    fn retired_frame_does_not_cancel_a_new_attachment_already_rendering() {
+        // Given an old GPU frame still outstanding across detach and reattach.
+        let coordinator = RenderScheduleCoordinator::new();
+        assert!(coordinator.schedule_render());
+        let retired = coordinator.begin_owned_render().unwrap();
+        coordinator.consume_render();
+        assert!(coordinator.schedule_render());
+        assert!(coordinator.begin_render());
+        assert!(!coordinator.schedule_render());
+
+        // When the old frame discovers that its attachment was retired.
+        coordinator.abandon_render(retired);
+
+        // Then the live frame still owns its requested follow-up.
+        assert!(coordinator.finish_render());
+        assert!(coordinator.begin_render());
+    }
+
+    #[test]
+    fn a_retired_frame_must_not_cancel_the_next_attachments_scheduled_render() {
+        // The corruption after a worktree switch away and back. The coordinator is owned by the
+        // session, not by the surface, so it is the same object across both attachments.
+        let coordinator = RenderScheduleCoordinator::new();
+
+        // Attachment 1 has a frame in flight on the GPU worker.
+        assert!(coordinator.schedule_render());
+        let retired = coordinator.begin_owned_render().unwrap();
+
+        // Switching away detaches the pane: the lifecycle event cancels attachment 1's work.
+        assert!(coordinator.consume_render());
+
+        // Switching back re-attaches and schedules the new attachment's first frame.
+        assert!(
+            coordinator.schedule_render(),
+            "the reattached pane must be able to schedule its first frame"
+        );
+
+        // Only now does the GPU worker notice the frame it still holds belongs to the attachment
+        // that is gone, and abandons it.
+        assert!(
+            !coordinator.abandon_render(retired),
+            "a frame the coordinator no longer owns must release nothing"
+        );
+
+        // The new attachment's frame must survive that, or nothing ever paints it.
+        assert!(
+            coordinator.begin_render(),
+            "a retired frame must not erase the schedule a live attachment is waiting on"
+        );
+    }
+
+    #[test]
+    fn abandoning_a_frame_returns_the_coordinator_to_idle() {
+        let coordinator = RenderScheduleCoordinator::new();
+        assert!(coordinator.schedule_render());
+        let owner = coordinator.begin_owned_render().unwrap();
+        assert!(coordinator.abandon_render(owner));
+        assert!(
+            !coordinator.is_render_pending(),
+            "an abandoned frame must not leave the coordinator stuck mid-render"
+        );
+        assert!(
+            coordinator.schedule_render(),
+            "a released coordinator must accept the next frame"
+        );
+    }
+
+    #[test]
+    fn abandoning_a_frame_drops_its_own_pending_follow_up() {
+        // Output that arrived during the abandoned frame belongs to it, not to a later
+        // generation, so it is released with the frame rather than left dangling as a
+        // RENDER_SCHEDULED that no dispatch is waiting to pick up.
+        let coordinator = RenderScheduleCoordinator::new();
+        assert!(coordinator.schedule_render());
+        let owner = coordinator.begin_owned_render().unwrap();
+        assert!(!coordinator.schedule_render(), "marks a coalesced follow-up");
+        assert!(coordinator.abandon_render(owner));
+        assert!(!coordinator.is_render_pending());
     }
 }
 
@@ -423,16 +595,34 @@ fn dispatch_scheduled_render<R: Runtime>(
     coordinator: Arc<RenderScheduleCoordinator>,
     gpu_worker: Arc<GpuWorker>,
 ) {
+    let owner = *coordinator.ownership.lock();
+    dispatch_owned_render(window, hosts, slot, session_id, coordinator, gpu_worker, owner);
+}
+
+fn dispatch_owned_render<R: Runtime>(
+    window: Window<R>,
+    hosts: Arc<Mutex<HashMap<String, NativeTerminalSurfaceHost>>>,
+    slot: Arc<SnapshotSlot>,
+    session_id: String,
+    coordinator: Arc<RenderScheduleCoordinator>,
+    gpu_worker: Arc<GpuWorker>,
+    dispatch_owner: u64,
+) {
     let surface_window = window.clone();
     let follow_up_window = window.clone();
     let failure_coordinator = Arc::clone(&coordinator);
     let failure_session_id = session_id.clone();
     if let Err(err) = dispatch_render_on_main_thread(&window, move || {
-        if !coordinator.begin_render() {
-            return;
-        }
+        let mut hosts_guard = hosts.lock();
+        let owner = {
+            let ownership = coordinator.ownership.lock();
+            if *ownership != dispatch_owner || !coordinator.begin_render() {
+                return;
+            }
+            *ownership
+        };
         let Some(frame) = slot.consume() else {
-            coordinator.consume_render();
+            coordinator.abandon_render(owner);
             return;
         };
         let layout = frame.layout;
@@ -441,12 +631,11 @@ fn dispatch_scheduled_render<R: Runtime>(
         let frame_generation = frame.generation;
         let render_input = frame.input.clone();
 
-        let mut hosts_guard = hosts.lock();
         // Blocker 1: Resurrection prevention TOCTOU check.
         // If the session was detached while waiting for hosts_guard, do NOT create or update any host!
         if !slot.is_attached_with_epoch(frame_epoch) {
             drop(hosts_guard);
-            coordinator.consume_render();
+            coordinator.abandon_render(owner);
             return;
         }
         let host = match hosts_guard.entry(session_id.clone()) {
@@ -467,7 +656,7 @@ fn dispatch_scheduled_render<R: Runtime>(
         };
         let Some(host) = host else {
             drop(hosts_guard);
-            coordinator.consume_render();
+            coordinator.abandon_render(owner);
             return;
         };
 
@@ -481,7 +670,7 @@ fn dispatch_scheduled_render<R: Runtime>(
 
         if render_input.synchronized_output {
             drop(hosts_guard);
-            coordinator.consume_render();
+            coordinator.abandon_render(owner);
             return;
         }
 
@@ -491,7 +680,7 @@ fn dispatch_scheduled_render<R: Runtime>(
                 let completion_slot = target.leg.clone();
                 let Some(loan) = target.leg.lend_loan() else {
                     drop(hosts_guard);
-                    coordinator.consume_render();
+                    coordinator.abandon_render(owner);
                     return;
                 };
                 // CRITICAL: Drop hosts lock before passing execution to the GPU worker thread.
@@ -507,25 +696,31 @@ fn dispatch_scheduled_render<R: Runtime>(
                 let completion_gpu_worker = Arc::clone(&gpu_worker);
 
                 let submission_coordinator = Arc::clone(&coordinator);
-                let worker_coordinator = Arc::clone(&coordinator);
                 let worker_snapshot_slot = Arc::clone(&slot);
                 if !gpu_worker.enqueue(move |gpu| {
                     let mut loan = loan;
-                    // Blocker 2: In-flight GPU present cancellation check.
-                    if !worker_snapshot_slot.is_attached_with_epoch(frame_epoch) {
-                        loan.return_to_slot();
-                        worker_coordinator.consume_render();
-                        return;
-                    }
-                    let receipt_result = run_gpu_frame(|| loan.render_snapshot(
-                        gpu,
-                        Some(effective_bounds),
-                        layout,
-                        &render_input.snapshot,
-                        render_input.selection.as_ref(),
-                        render_input.scrollbar_overlay.as_ref(),
-                        render_input.attention_frame,
-                    ));
+                    let receipt_result = if worker_snapshot_slot.is_attached_with_epoch(frame_epoch) {
+                        run_gpu_frame(|| loan.render_snapshot(
+                            gpu,
+                            Some(effective_bounds),
+                            layout,
+                            &render_input.snapshot,
+                            render_input.selection.as_ref(),
+                            render_input.scrollbar_overlay.as_ref(),
+                            render_input.attention_frame,
+                        ))
+                    } else {
+                        // Bounds can advance the epoch without retiring the surface. Complete
+                        // the cancelled frame normally so its queued geometry update still runs.
+                        Ok(NativeTerminalSurfaceReceipt::from_snapshot(
+                            layout,
+                            &render_input.snapshot,
+                            0,
+                            0,
+                            cell_metrics,
+                            Some(effective_bounds),
+                        ))
+                    };
                     loan.return_to_slot();
 
                     let dispatch_failure_coordinator = Arc::clone(&completion_coordinator);
@@ -574,30 +769,27 @@ fn dispatch_scheduled_render<R: Runtime>(
                             );
                         }
 
-                        if retry {
-                            completion_coordinator.schedule_render();
-                        }
-
-                        if completion_coordinator.finish_render() {
+                        if completion_coordinator.finish_owned_render(owner, retry) {
                             let follow_up_delay = completion_coordinator.delay_before_retry();
                             tauri::async_runtime::spawn(async move {
                                 tokio::time::sleep(follow_up_delay).await;
-                                dispatch_scheduled_render(
+                                dispatch_owned_render(
                                     follow_up_window,
                                     completion_hosts,
                                     completion_snapshot_slot,
                                     completion_session_id,
                                     completion_coordinator,
                                     completion_gpu_worker,
+                                    owner.wrapping_add(1),
                                 );
                             });
                         }
                     }) {
-                        dispatch_failure_coordinator.consume_render();
+                        dispatch_failure_coordinator.abandon_render(owner);
                         tracing::warn!(error = %err, "Failed to dispatch GPU frame completion");
                     }
                 }) {
-                    submission_coordinator.consume_render();
+                    submission_coordinator.abandon_render(owner);
                     tracing::warn!("Native terminal GPU worker rejected frame submission");
                 }
             }
@@ -605,16 +797,11 @@ fn dispatch_scheduled_render<R: Runtime>(
             HostFrameTarget::Injected(target) => {
                 let receipt = target.render_snapshot(layout, &render_input.snapshot);
                 drop(hosts_guard);
+                let retry = gpu_completion_requires_retry(&receipt);
                 match receipt {
                     Ok(receipt) => {
                         if receipt.presented {
                             slot.publish_presentation(frame_generation, frame_epoch, receipt);
-                        }
-                        if !receipt.presented
-                            && !receipt.render_deferred
-                            && !receipt.render_suspended
-                        {
-                            coordinator.schedule_render();
                         }
                     }
                     Err(err) => tracing::warn!(
@@ -624,24 +811,25 @@ fn dispatch_scheduled_render<R: Runtime>(
                     ),
                 }
 
-                if coordinator.finish_render() {
+                if coordinator.finish_owned_render(owner, retry) {
                     let follow_up_delay = coordinator.delay_before_retry();
                     tauri::async_runtime::spawn(async move {
                         tokio::time::sleep(follow_up_delay).await;
-                        dispatch_scheduled_render(
+                        dispatch_owned_render(
                             follow_up_window,
                             hosts,
                             slot,
                             session_id,
                             coordinator,
                             gpu_worker,
+                            owner.wrapping_add(1),
                         );
                     });
                 }
             }
         }
     }) {
-        failure_coordinator.consume_render();
+        failure_coordinator.abandon_render(dispatch_owner);
         tracing::warn!(
             session_id = %failure_session_id,
             error = %err,
@@ -822,10 +1010,11 @@ fn defer_scheduled_render<R: Runtime>(
     #[cfg(test)]
     let test_window = window.clone();
     let retry_delay = coordinator.delay_before_retry();
+    let owner = *coordinator.ownership.lock();
     // Wry runs main-thread dispatch inline; enqueue off-thread to avoid recursive retries.
     let _task = tauri::async_runtime::spawn(async move {
         tokio::time::sleep(retry_delay).await;
-        dispatch_scheduled_render(window, hosts, slot, session_id, coordinator, gpu_worker);
+        dispatch_owned_render(window, hosts, slot, session_id, coordinator, gpu_worker, owner);
     });
     #[cfg(test)]
     if let Some(dispatch) = test_window.try_state::<tests::RenderDispatch>() {
