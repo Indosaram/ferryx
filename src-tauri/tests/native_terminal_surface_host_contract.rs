@@ -176,6 +176,7 @@ async fn native_session_handles_replay_gaps_and_session_cleanup_deterministicall
         end_sequence: Some(5),
         history: Bytes::from_static(b"recovered fresh stream\r\n"),
         segments: Vec::new(),
+        replay_is_delta: None,
     })
     .await
     .expect("send lagged recovery message");

@@ -3371,6 +3371,11 @@ impl DaemonServer {
                         hub.subscribe_with_sequence_ranges(&session_id, last_seen_sequence)
                     {
                         rx = att.receiver;
+                        // Captured before `last_seen_sequence` is overwritten below: a delta claim
+                        // is only meaningful relative to what this subscriber actually asked for.
+                        // A `None` request is a full-history replay, never a delta, no matter what
+                        // the snapshot's gap field says.
+                        let requested_cursor = last_seen_sequence;
                         let requested_after_sequence = last_seen_sequence.unwrap_or(0);
                         if att.snapshot.history_end_sequence.is_some() {
                             last_seen_sequence = att.snapshot.history_end_sequence;
@@ -3399,6 +3404,9 @@ impl DaemonServer {
                             end_sequence: att.snapshot.history_end_sequence,
                             history: lag_history,
                             segments,
+                            replay_is_delta: Some(
+                                requested_cursor.is_some() && att.snapshot.gap.is_none(),
+                            ),
                         };
                         frame_buf.clear();
                         if serde_json::to_writer(&mut frame_buf, &msg).is_err() {

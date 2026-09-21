@@ -621,6 +621,13 @@ pub enum DaemonStreamMessage<'a> {
         history: Bytes,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         segments: Vec<HistorySegmentWire>,
+        /// Authoritative statement from the producer about whether this replay continues the
+        /// subscriber's stream without loss. `available_from_sequence` cannot answer this: the
+        /// server derives it from the snapshot start, which is indistinguishable from a sequence
+        /// merely allocated by a resize ledger entry. `None` marks a legacy producer, where the
+        /// only safe reading is a full rebuild.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replay_is_delta: Option<bool>,
     },
     #[serde(rename_all = "camelCase")]
     AgentState {
@@ -996,6 +1003,7 @@ mod tests {
             end_sequence: Some(100),
             history: bytes::Bytes::from_static(b"history bytes"),
             segments: Vec::new(),
+            replay_is_delta: Some(false),
         };
         let json = serde_json::to_string(&replay).expect("serialize replay gap");
         assert!(!json.contains('['));
@@ -1010,6 +1018,60 @@ mod tests {
         let deserialized: DaemonStreamMessage =
             serde_json::from_str(&json).expect("deserialize replay gap");
         assert_eq!(deserialized, replay);
+    }
+
+    #[test]
+    fn test_daemon_stream_message_lagged_replay_is_delta_wire_states() {
+        let frame = |replay_is_delta| DaemonStreamMessage::Lagged {
+            session_id: Cow::Borrowed("s3"),
+            requested_after_sequence: 4,
+            available_from_sequence: 5,
+            start_sequence: Some(5),
+            end_sequence: Some(6),
+            history: bytes::Bytes::from_static(b"delta"),
+            segments: Vec::new(),
+            replay_is_delta,
+        };
+
+        let absent = serde_json::to_string(&frame(None)).expect("serialize absent marker");
+        assert!(
+            !absent.contains("replayIsDelta"),
+            "an absent marker must stay off the wire so legacy peers parse it unchanged: {absent}"
+        );
+        assert_eq!(
+            serde_json::from_str::<DaemonStreamMessage>(&absent).expect("parse absent marker"),
+            frame(None)
+        );
+
+        let delta = serde_json::to_string(&frame(Some(true))).expect("serialize delta marker");
+        assert!(delta.contains(r#""replayIsDelta":true"#));
+        assert_eq!(
+            serde_json::from_str::<DaemonStreamMessage>(&delta).expect("parse delta marker"),
+            frame(Some(true))
+        );
+
+        let gap = serde_json::to_string(&frame(Some(false))).expect("serialize gap marker");
+        assert!(gap.contains(r#""replayIsDelta":false"#));
+        assert_eq!(
+            serde_json::from_str::<DaemonStreamMessage>(&gap).expect("parse gap marker"),
+            frame(Some(false))
+        );
+    }
+
+    #[test]
+    fn test_legacy_lagged_payload_without_marker_parses_as_absent() {
+        let legacy = r#"{"type":"replayGap","sessionId":"s4","requestedAfterSequence":1,"availableFromSequence":2,"startSequence":2,"endSequence":3,"history":"aGk="}"#;
+        let parsed: DaemonStreamMessage =
+            serde_json::from_str(legacy).expect("legacy payload remains parseable");
+        match parsed {
+            DaemonStreamMessage::Lagged {
+                replay_is_delta, ..
+            } => assert_eq!(
+                replay_is_delta, None,
+                "a producer that never sets the marker must not be read as proving a delta"
+            ),
+            other => panic!("expected a Lagged frame, got {other:?}"),
+        }
     }
 
     #[test]

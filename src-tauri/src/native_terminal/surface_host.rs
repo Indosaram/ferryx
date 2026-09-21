@@ -502,6 +502,13 @@ pub struct NativeTerminalSession {
     pub is_remote: bool,
     pub remote_generation: Option<u64>,
     pub last_sequence: Option<u64>,
+    /// Daemon epoch the applied sequences belong to. Sequence numbers are only comparable within
+    /// one epoch, so a changed epoch invalidates `last_sequence` entirely rather than lowering it.
+    pub daemon_epoch: u64,
+    /// Incremented by every attach. The pump captures its value at spawn and stops applying output
+    /// once it no longer matches, so a pump aborted mid-message cannot advance `last_sequence`
+    /// past the replay cursor the new attach just established.
+    pub pump_generation: u64,
     pub update_sender: tokio::sync::watch::Sender<()>,
     detach_sender: tokio::sync::watch::Sender<()>,
     pub render_coordinator: Arc<RenderScheduleCoordinator>,
@@ -1290,6 +1297,83 @@ fn session_render_snapshot(
     })
 }
 
+/// Resolves a session only while `pump_generation` still owns it.
+///
+/// Every mutating pump branch goes through this: a retired pump can be parked on the `sessions`
+/// mutex at the moment a new attach takes ownership, so `get_mut` alone would hand it a session
+/// it no longer has any claim to. Aborting the task does not help, because cancellation is only
+/// observed at an await point and the branch has already passed its last one.
+fn session_owned_by<'a>(
+    sessions: &'a mut HashMap<String, NativeTerminalSession>,
+    session_id: &str,
+    pump_generation: u64,
+) -> Option<&'a mut NativeTerminalSession> {
+    sessions
+        .get_mut(session_id)
+        .filter(|session| session.pump_generation == pump_generation)
+}
+
+fn lock_replay_to_bottom(
+    sessions: &mut HashMap<String, NativeTerminalSession>,
+    session_id: &str,
+    pump_generation: u64,
+) {
+    if let Some(session) = session_owned_by(sessions, session_id, pump_generation) {
+        let _ = session.terminal.scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
+        session.publish_frame();
+    }
+}
+
+/// Ownership token minted by [`NativeTerminalSurfaceHostState::begin_replay_request`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplayRequestToken {
+    pub generation: u64,
+    pub epoch: u64,
+    pub last_sequence: Option<u64>,
+}
+
+/// How a replay offer relates to what the resident grid has already applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayVerdict {
+    /// Every offered byte is new and continues the applied stream: feed without resetting.
+    Delta,
+    /// The offer is already fully applied: feeding it again would duplicate output.
+    NoOp,
+    /// The resident grid cannot be reconciled with the offer, so the offer is the only truth.
+    Rebuild,
+}
+
+/// Classifies a replay offer against the resident grid's last applied sequence.
+///
+/// `is_delta` is the producer's own statement that no bytes were lost; sequence numbers alone
+/// cannot establish it, because a resize allocates a sequence without publishing a chunk and so
+/// leaves a legitimate hole that is indistinguishable from dropped output. Anything unproven
+/// resolves to [`ReplayVerdict::Rebuild`], which is what this code did unconditionally before.
+pub fn classify_replay(
+    last_applied: Option<u64>,
+    start_sequence: Option<u64>,
+    end_sequence: Option<u64>,
+    is_delta: Option<bool>,
+) -> ReplayVerdict {
+    let Some(last_applied) = last_applied else {
+        return ReplayVerdict::Rebuild;
+    };
+    if is_delta != Some(true) {
+        return ReplayVerdict::Rebuild;
+    }
+    // A stale snapshot may report an end at or below what the grid already has; replaying it
+    // would duplicate output, and adopting its end would rewind the cursor for the next offer.
+    if end_sequence.is_some_and(|end| end <= last_applied) {
+        return ReplayVerdict::NoOp;
+    }
+    match start_sequence {
+        // Segment payloads carry no per-sequence offsets, so an offer that straddles the applied
+        // boundary cannot be trimmed to its unapplied tail.
+        Some(start) if start > last_applied => ReplayVerdict::Delta,
+        _ => ReplayVerdict::Rebuild,
+    }
+}
+
 fn feed_attachment_history(
     terminal: &mut NativeTerminal,
     history: &[u8],
@@ -1599,6 +1683,8 @@ impl NativeTerminalSurfaceHostState {
                         is_remote: false,
                         remote_generation: None,
                         last_sequence: None,
+                        daemon_epoch: 0,
+                        pump_generation: 0,
                         update_sender,
                         detach_sender: tokio::sync::watch::channel(()).0,
                         render_coordinator,
@@ -1717,6 +1803,25 @@ impl NativeTerminalSurfaceHostState {
         bounds: Option<LogicalBounds>,
         daemon_client: Option<Arc<crate::daemon::DaemonClient>>,
     ) -> Result<(), NativeTerminalError> {
+        self.attach_daemon_attachment_with_bounds_client_and_token(
+            session_id,
+            attachment,
+            app,
+            bounds,
+            daemon_client,
+            None,
+        )
+    }
+
+    pub fn attach_daemon_attachment_with_bounds_client_and_token<R: Runtime>(
+        &self,
+        session_id: &str,
+        attachment: DaemonAttachment,
+        app: Option<tauri::AppHandle<R>>,
+        bounds: Option<LogicalBounds>,
+        daemon_client: Option<Arc<crate::daemon::DaemonClient>>,
+        token: Option<ReplayRequestToken>,
+    ) -> Result<(), NativeTerminalError> {
         validate_session_id(session_id)?;
         if let Some(bounds) = bounds {
             // Re-arm the surface before laying out: an attach following a detach must accept its own
@@ -1745,7 +1850,13 @@ impl NativeTerminalSurfaceHostState {
                 );
             }
         }
-        self.attach_daemon_attachment_with_client(session_id, attachment, app, daemon_client)
+        self.attach_daemon_attachment_with_client_and_token(
+            session_id,
+            attachment,
+            app,
+            daemon_client,
+            token,
+        )
     }
 
     pub fn reattach_existing_session_with_bounds(
@@ -1879,6 +1990,27 @@ impl NativeTerminalSurfaceHostState {
         app: Option<tauri::AppHandle<R>>,
         daemon_client: Option<Arc<crate::daemon::DaemonClient>>,
     ) -> Result<(), NativeTerminalError> {
+        self.attach_daemon_attachment_with_client_and_token(
+            session_id,
+            attachment,
+            app,
+            daemon_client,
+            None,
+        )
+    }
+
+    /// `token` is the ownership proof minted by [`Self::begin_replay_request`]. When present, the
+    /// attach refuses to install its stream unless the token still owns the session, so a replay
+    /// fetched against a cursor that a newer attach has already superseded is dropped instead of
+    /// being applied on top of the newer state.
+    pub fn attach_daemon_attachment_with_client_and_token<R: Runtime>(
+        &self,
+        session_id: &str,
+        attachment: DaemonAttachment,
+        app: Option<tauri::AppHandle<R>>,
+        daemon_client: Option<Arc<crate::daemon::DaemonClient>>,
+        token: Option<ReplayRequestToken>,
+    ) -> Result<(), NativeTerminalError> {
         validate_session_id(session_id)?;
 
         let is_fresh_startup = self.consume_pending_startup(session_id);
@@ -1886,8 +2018,23 @@ impl NativeTerminalSurfaceHostState {
         let initial_generation = attachment.remote_generation;
         let initial_dims = (80, 24);
 
-        let (update_sender, render_coordinator, events) = {
+        let (update_sender, render_coordinator, events, slot, pump_generation, absorbs_replay_burst) = {
             let mut sessions = self.sessions.lock();
+            // The ownership check lives INSIDE the mutation lock. Checking it under a separate
+            // lock first would leave a window where a newer attach takes ownership between the
+            // check and the mutation, which is the very race the token exists to close. A missing
+            // session is a rejection too: the pane was closed, and recreating it here would
+            // resurrect a session the user already dismissed.
+            if let Some(token) = token {
+                let owns = sessions
+                    .get(session_id)
+                    .is_some_and(|session| session.pump_generation == token.generation);
+                if !owns {
+                    drop(sessions);
+                    attachment.stream_task.abort();
+                    return Err(NativeTerminalError::SessionDetached(session_id.to_string()));
+                }
+            }
             let (update_sender, render_coordinator) = if let Some(session) =
                 sessions.get_mut(session_id)
             {
@@ -1927,17 +2074,42 @@ impl NativeTerminalSurfaceHostState {
                 }
                 let was_bracketed = session.bracketed_paste_seen
                     || session.terminal.bracketed_paste_enabled().unwrap_or(false);
+                // Aborting the old pump above is not enough: it may already be inside a message,
+                // holding no lock but about to write a sequence from the previous stream. Bumping
+                // the generation under this same lock fences those late writes out.
+                session.pump_generation = session.pump_generation.wrapping_add(1);
+                let epoch_changed = session.daemon_epoch != attachment.epoch;
+                session.daemon_epoch = attachment.epoch;
+                let verdict = if is_fresh_startup || epoch_changed {
+                    ReplayVerdict::Rebuild
+                } else {
+                    classify_replay(
+                        session.last_sequence,
+                        attachment.start_sequence,
+                        attachment.end_sequence,
+                        Some(attachment.gap.is_none()),
+                    )
+                };
+                let was_at_bottom = session.terminal.scrollbar().ok().map_or(true, |sb| {
+                    let max_offset = sb.total.saturating_sub(sb.len);
+                    max_offset == 0
+                        || sb.offset >= max_offset.saturating_sub(BOTTOM_LOCK_TOLERANCE_ROWS)
+                });
                 if !is_fresh_startup {
                     // An existing resident session re-attaching is display reconstruction:
                     // suppress and discard buffered writes so scrollback queries are not re-emitted.
                     session.terminal.discard_buffered_pty_writes();
                     session.terminal.set_pty_writes_suppressed(true);
-                    session.terminal.reset();
-                    feed_attachment_history(
-                        &mut session.terminal,
-                        &attachment.history,
-                        &attachment.history_segments,
-                    )?;
+                    if verdict == ReplayVerdict::Rebuild {
+                        session.terminal.reset();
+                    }
+                    if verdict != ReplayVerdict::NoOp {
+                        feed_attachment_history(
+                            &mut session.terminal,
+                            &attachment.history,
+                            &attachment.history_segments,
+                        )?;
+                    }
                     session.terminal.set_pty_writes_suppressed(false);
                     session.terminal.discard_buffered_pty_writes();
                 } else {
@@ -1966,10 +2138,24 @@ impl NativeTerminalSurfaceHostState {
                         )?;
                     }
                 }
-                let _ = session
-                    .terminal
-                    .scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
-                session.last_sequence = attachment.end_sequence;
+                if was_at_bottom || verdict == ReplayVerdict::Rebuild {
+                    let _ = session
+                        .terminal
+                        .scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
+                }
+                // Sequences only order within one epoch, and a stale snapshot may end below what
+                // the grid already applied; neither may rewind the replay cursor. A new epoch
+                // discards the old cursor outright, including when it carries no end of its own:
+                // keeping a number from a retired counter would fence out the new epoch's output.
+                session.last_sequence = if epoch_changed {
+                    attachment.end_sequence
+                } else {
+                    match (session.last_sequence, attachment.end_sequence) {
+                        (Some(applied), Some(offered)) => Some(applied.max(offered)),
+                        (applied, None) => applied,
+                        (None, offered) => offered,
+                    }
+                };
                 // The re-fed history is the session's whole visible state. Cancelling the
                 // scheduled render without republishing would leave the slot holding the
                 // pre-attach frame, so the first paint after attach shows stale content.
@@ -2029,6 +2215,8 @@ impl NativeTerminalSurfaceHostState {
                         is_remote,
                         remote_generation: initial_generation,
                         last_sequence: attachment.end_sequence,
+                        daemon_epoch: attachment.epoch,
+                        pump_generation: 0,
                         update_sender: update_sender.clone(),
                         detach_sender: tokio::sync::watch::channel(()).0,
                         render_coordinator: Arc::clone(&render_coordinator),
@@ -2051,7 +2239,20 @@ impl NativeTerminalSurfaceHostState {
                 .get_mut(session_id)
                 .ok_or(NativeTerminalError::NoValue)?;
             let events = take_native_terminal_events(session, session_id, true);
-            (update_sender, render_coordinator, events)
+            // Captured from the SAME transaction that mutated the session. Re-reading these under
+            // a fresh lock would sample state a newer attach may already own, so the pump would
+            // run with a generation that never fences it.
+            let slot = Arc::clone(&session.snapshot_slot);
+            let pump_generation = session.pump_generation;
+            let absorbs_replay_burst = session.is_remote;
+            (
+                update_sender,
+                render_coordinator,
+                events,
+                slot,
+                pump_generation,
+                absorbs_replay_burst,
+            )
         };
 
         for event in events {
@@ -2062,20 +2263,9 @@ impl NativeTerminalSurfaceHostState {
         let mut messages = attachment.messages;
         let sessions = Arc::clone(&self.sessions);
         let hosts = Arc::clone(&self.hosts);
-        let slot = {
-            let s = sessions.lock();
-            Arc::clone(&s.get(session_id).unwrap().snapshot_slot)
-        };
         let event_sink = Arc::clone(&self.event_sink);
         let session_id_owned = session_id.to_string();
         let app_handle = app.clone();
-        // Only a remote session streams its scrollback back after attach; a local attach already
-        // lands its whole history in one paint.
-        let absorbs_replay_burst = sessions
-            .lock()
-            .get(&session_id_owned)
-            .map(|session| session.is_remote)
-            .unwrap_or(false);
         let gpu_worker = Arc::clone(&self.gpu_worker);
         let pump_task = tokio::spawn(async move {
             let schedule_render = || {
@@ -2097,12 +2287,7 @@ impl NativeTerminalSurfaceHostState {
             };
             let lock_to_bottom = || {
                 let mut sessions_guard = sessions.lock();
-                if let Some(session) = sessions_guard.get_mut(&session_id_owned) {
-                    let _ = session
-                        .terminal
-                        .scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
-                    session.publish_frame();
-                }
+                lock_replay_to_bottom(&mut sessions_guard, &session_id_owned, pump_generation);
             };
             let mut replay_absorb = absorbs_replay_burst.then(|| {
                 let now = std::time::Instant::now();
@@ -2122,7 +2307,10 @@ impl NativeTerminalSurfaceHostState {
                         }
                     } => {
                         let mut sessions_guard = sessions.lock();
-                        if let Some(session) = sessions_guard.get_mut(&session_id_owned) {
+                        if let Some(session) = sessions_guard
+                            .get_mut(&session_id_owned)
+                            .filter(|session| session.pump_generation == pump_generation)
+                        {
                             if let Err(error) = session.terminal.expire_synchronized_output(tokio::time::Instant::now()) {
                                 tracing::warn!(session_id = %session_id_owned, %error, "Failed to end synchronized output");
                             }
@@ -2139,7 +2327,10 @@ impl NativeTerminalSurfaceHostState {
                     Ok(Some(msg)) => msg,
                     Ok(None) => {
                         let mut sessions_guard = sessions.lock();
-                        if let Some(session) = sessions_guard.get_mut(&session_id_owned) {
+                        if let Some(session) = sessions_guard
+                            .get_mut(&session_id_owned)
+                            .filter(|session| session.pump_generation == pump_generation)
+                        {
                             if let Err(error) = session.terminal.finish_synchronized_output() {
                                 tracing::warn!(session_id = %session_id_owned, %error, "Failed to finish terminal output");
                             }
@@ -2157,10 +2348,15 @@ impl NativeTerminalSurfaceHostState {
                         let (detected, events) = {
                             let mut sessions_guard = sessions.lock();
                             match sessions_guard.get_mut(&session_id_owned) {
-                                Some(sess) if sess.agent_detect_pending => (
-                                    true,
-                                    take_native_terminal_events(sess, &session_id_owned, true),
-                                ),
+                                Some(sess)
+                                    if sess.pump_generation == pump_generation
+                                        && sess.agent_detect_pending =>
+                                {
+                                    (
+                                        true,
+                                        take_native_terminal_events(sess, &session_id_owned, true),
+                                    )
+                                }
                                 Some(_) => (false, Vec::new()),
                                 None => (false, Vec::new()),
                             }
@@ -2189,7 +2385,16 @@ impl NativeTerminalSurfaceHostState {
                     DaemonStreamMessage::Output { sequence, data, .. } => {
                         let (session_exists, events) = {
                             let mut sessions_guard = sessions.lock();
-                            if let Some(sess) = sessions_guard.get_mut(&session_id_owned) {
+                            if let Some(sess) = sessions_guard
+                                .get_mut(&session_id_owned)
+                                .filter(|sess| sess.pump_generation == pump_generation)
+                                // A chunk at or below the watermark was already applied by the
+                                // replay this pump was started from. Feeding it would duplicate
+                                // output; adopting its sequence would rewind the cursor.
+                                .filter(|sess| {
+                                    sess.last_sequence.is_none_or(|applied| sequence > applied)
+                                })
+                            {
                                 if let Err(err) = sess.terminal.feed(&data) {
                                     tracing::warn!(
                                         session_id = %session_id_owned,
@@ -2243,15 +2448,38 @@ impl NativeTerminalSurfaceHostState {
                         }
                     }
                     DaemonStreamMessage::Lagged {
-                        history, segments, ..
+                        history,
+                        segments,
+                        start_sequence,
+                        end_sequence,
+                        replay_is_delta,
+                        ..
                     } => {
                         let (session_exists, events) = {
                             let mut sessions_guard = sessions.lock();
-                            if let Some(sess) = sessions_guard.get_mut(&session_id_owned) {
+                            if let Some(sess) = sessions_guard
+                                .get_mut(&session_id_owned)
+                                .filter(|sess| sess.pump_generation == pump_generation)
+                            {
+                                let verdict = classify_replay(
+                                    sess.last_sequence,
+                                    start_sequence,
+                                    end_sequence,
+                                    replay_is_delta,
+                                );
+                                let was_at_bottom =
+                                    sess.terminal.scrollbar().ok().map_or(true, |sb| {
+                                        let max_offset = sb.total.saturating_sub(sb.len);
+                                        max_offset == 0
+                                            || sb.offset >= max_offset
+                                                .saturating_sub(BOTTOM_LOCK_TOLERANCE_ROWS)
+                                    });
                                 let was_bracketed = sess.bracketed_paste_seen
                                     || sess.terminal.bracketed_paste_enabled().unwrap_or(false);
                                 sess.terminal.set_pty_writes_suppressed(true);
-                                sess.terminal.reset();
+                                if verdict == ReplayVerdict::Rebuild {
+                                    sess.terminal.reset();
+                                }
                                 let parsed_segments: Vec<HistorySegment> = segments
                                     .into_iter()
                                     .map(|s| HistorySegment {
@@ -2260,16 +2488,18 @@ impl NativeTerminalSurfaceHostState {
                                         bytes: s.bytes.to_vec(),
                                     })
                                     .collect();
-                                if let Err(err) = feed_attachment_history(
-                                    &mut sess.terminal,
-                                    &history,
-                                    &parsed_segments,
-                                ) {
-                                    tracing::warn!(
-                                        session_id = %session_id_owned,
-                                        error = %err,
-                                        "Failed to feed recovery history to native terminal"
-                                    );
+                                if verdict != ReplayVerdict::NoOp {
+                                    if let Err(err) = feed_attachment_history(
+                                        &mut sess.terminal,
+                                        &history,
+                                        &parsed_segments,
+                                    ) {
+                                        tracing::warn!(
+                                            session_id = %session_id_owned,
+                                            error = %err,
+                                            "Failed to feed recovery history to native terminal"
+                                        );
+                                    }
                                 }
                                 sess.terminal.set_pty_writes_suppressed(false);
                                 sess.terminal.discard_buffered_pty_writes();
@@ -2278,6 +2508,10 @@ impl NativeTerminalSurfaceHostState {
                                 {
                                     let _ = sess.terminal.feed_str("\x1b[?2004h");
                                     sess.bracketed_paste_seen = true;
+                                }
+                                if let Some(end) = end_sequence {
+                                    sess.last_sequence =
+                                        Some(sess.last_sequence.map_or(end, |last| last.max(end)));
                                 }
                                 sess.publish_frame();
                                 // feed_attachment_history leaves the grid at the last
@@ -2298,9 +2532,11 @@ impl NativeTerminalSurfaceHostState {
                                         }
                                     }
                                 }
-                                let _ = sess.terminal.scroll_viewport(
-                                    crate::native_terminal::ScrollViewport::Bottom,
-                                );
+                                if was_at_bottom || verdict == ReplayVerdict::Rebuild {
+                                    let _ = sess.terminal.scroll_viewport(
+                                        crate::native_terminal::ScrollViewport::Bottom,
+                                    );
+                                }
                                 (
                                     true,
                                     take_native_terminal_events(sess, &session_id_owned, true),
@@ -2320,7 +2556,10 @@ impl NativeTerminalSurfaceHostState {
                     DaemonStreamMessage::Gap { .. } => {
                         let (session_exists, events) = {
                             let mut sessions_guard = sessions.lock();
-                            if let Some(sess) = sessions_guard.get_mut(&session_id_owned) {
+                            if let Some(sess) = sessions_guard
+                                .get_mut(&session_id_owned)
+                                .filter(|sess| sess.pump_generation == pump_generation)
+                            {
                                 let was_bracketed = sess.bracketed_paste_seen
                                     || sess.terminal.bracketed_paste_enabled().unwrap_or(false);
                                 sess.terminal.reset();
@@ -2364,7 +2603,10 @@ impl NativeTerminalSurfaceHostState {
                         if let Some(reported) = reported {
                             let changed = {
                                 let mut sessions_guard = sessions.lock();
-                                match sessions_guard.get_mut(&session_id_owned) {
+                                match sessions_guard
+                                    .get_mut(&session_id_owned)
+                                    .filter(|sess| sess.pump_generation == pump_generation)
+                                {
                                     Some(sess) => {
                                         // Screen inference is the FALLBACK, not a tiebreaker, and
                                         // this flag suppresses it. Two producers claim the
@@ -2432,7 +2674,10 @@ impl NativeTerminalSurfaceHostState {
                     } => {
                         {
                             let mut sessions_guard = sessions.lock();
-                            if let Some(sess) = sessions_guard.get_mut(&session_id_owned) {
+                            if let Some(sess) = sessions_guard
+                                .get_mut(&session_id_owned)
+                                .filter(|sess| sess.pump_generation == pump_generation)
+                            {
                                 sess.is_remote = true;
                                 sess.remote_generation = Some(generation);
                                 sess.terminal.set_remote_generation(Some(generation));
@@ -2463,16 +2708,12 @@ impl NativeTerminalSurfaceHostState {
             }
         });
 
+        let mut pty_write_sender = None;
         let pty_write_task = if let Some(daemon_client) = daemon_client {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<
                 crate::native_terminal::bell::PtyWriteRecord,
             >();
-            {
-                let sessions_guard = self.sessions.lock();
-                if let Some(session) = sessions_guard.get(session_id) {
-                    session.terminal.set_pty_write_sender(tx);
-                }
-            }
+            pty_write_sender = Some(tx);
             let client = daemon_client.clone();
             let sessions = Arc::clone(&self.sessions);
             let id = session_id.to_string();
@@ -2596,7 +2837,26 @@ impl NativeTerminalSurfaceHostState {
 
         {
             let mut sessions = self.sessions.lock();
+            // Install only if this attach still owns the session. A newer attach may have bumped
+            // the generation while the pump/writer tasks were being spawned; overwriting its
+            // handles here would abandon the live stream and leave the pane fed by a pump this
+            // attach no longer has any claim to.
+            let owns = sessions.get(session_id).is_some_and(|session| {
+                session.pump_generation == pump_generation
+            });
+            if !owns {
+                drop(sessions);
+                stream_task.abort();
+                pump_task.abort();
+                if let Some(task) = pty_write_task {
+                    task.abort();
+                }
+                return Err(NativeTerminalError::SessionDetached(session_id.to_string()));
+            }
             if let Some(session) = sessions.get_mut(session_id) {
+                if let Some(sender) = pty_write_sender {
+                    session.terminal.set_pty_write_sender(sender);
+                }
                 session.stream_task = Some(stream_task);
                 session.pump_task = Some(pump_task);
                 session.pty_write_task = pty_write_task;
@@ -2746,6 +3006,50 @@ impl NativeTerminalSurfaceHostState {
     }
 
     /// Snapshot of all currently registered session ids (diagnostic helper).
+    /// Ownership token for one attach transaction.
+    ///
+    /// Reading the replay cursor and then awaiting the daemon is not sound: the old pump keeps
+    /// applying output across the await, so the response is a delta against a cursor the grid has
+    /// already passed. Minting a token fences the old pump and captures the cursor under one lock,
+    /// and the attach refuses to install its handles unless the token still owns the session.
+    pub fn begin_replay_request(&self, session_id: &str) -> Option<ReplayRequestToken> {
+        let mut sessions = self.sessions.lock();
+        let session = sessions.get_mut(session_id)?;
+        session.pump_generation = session.pump_generation.wrapping_add(1);
+        if let Some(task) = session.stream_task.take() {
+            task.abort();
+        }
+        if let Some(task) = session.pump_task.take() {
+            task.abort();
+        }
+        if let Some(task) = session.pty_write_task.take() {
+            task.abort();
+        }
+        Some(ReplayRequestToken {
+            generation: session.pump_generation,
+            epoch: session.daemon_epoch,
+            last_sequence: session.last_sequence,
+        })
+    }
+
+    /// Last daemon sequence applied to the resident grid, for an attach that must request only
+    /// the tail the grid has not seen.
+    pub fn session_last_sequence(&self, session_id: &str) -> Option<u64> {
+        self.sessions
+            .lock()
+            .get(session_id)
+            .and_then(|session| session.last_sequence)
+    }
+
+    /// Resident replay cursor as `(daemon_epoch, last_sequence)`. The epoch travels with the
+    /// sequence because a cursor is only meaningful inside the epoch that issued it.
+    pub fn session_replay_cursor(&self, session_id: &str) -> Option<(u64, u64)> {
+        self.sessions
+            .lock()
+            .get(session_id)
+            .and_then(|session| session.last_sequence.map(|seq| (session.daemon_epoch, seq)))
+    }
+
     pub fn registered_session_ids(&self) -> Vec<String> {
         self.sessions.lock().keys().cloned().collect()
     }
@@ -2793,6 +3097,8 @@ impl NativeTerminalSurfaceHostState {
                         is_remote: false,
                         remote_generation: None,
                         last_sequence: None,
+                        daemon_epoch: 0,
+                        pump_generation: 0,
                         update_sender,
                         detach_sender: tokio::sync::watch::channel(()).0,
                         render_coordinator,
@@ -3597,6 +3903,203 @@ impl NativeTerminalSurfaceHostState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn retired_replay_bottom_lock_preserves_new_generation_viewport() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let id = "retired-bottom-lock";
+        let (_tx, messages) = tokio::sync::mpsc::channel(1);
+        state.attach_daemon_attachment::<tauri::Wry>(id, DaemonAttachment {
+            session_id: id.into(), epoch: 1, start_sequence: Some(1), end_sequence: Some(1),
+            gap: None, history: bytes::Bytes::from("history\r\n".repeat(100)),
+            history_segments: Vec::new(), pty_cols: None, pty_rows: None,
+            remote_generation: None, messages,
+            stream_task: tokio::spawn(std::future::pending()),
+        }, None).unwrap();
+        let mut sessions = state.sessions.lock();
+        let session = sessions.get_mut(id).unwrap();
+        let retired = session.pump_generation;
+        session.pump_generation += 1;
+        let current = session.pump_generation;
+        session.terminal.scroll_viewport(crate::native_terminal::ScrollViewport::Top).unwrap();
+        let before = session.terminal.scrollbar().unwrap();
+        assert!(before.total > before.len);
+        lock_replay_to_bottom(&mut sessions, id, retired);
+        assert_eq!(sessions.get(id).unwrap().terminal.scrollbar().unwrap().offset, before.offset);
+        lock_replay_to_bottom(&mut sessions, id, current);
+        let after = sessions.get(id).unwrap().terminal.scrollbar().unwrap();
+        assert_eq!(after.offset, after.total.saturating_sub(after.len));
+    }
+
+    #[tokio::test]
+    async fn a_replay_fetched_against_a_superseded_token_is_refused() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "token-ownership-session";
+        let (_tx, messages) = tokio::sync::mpsc::channel(1);
+        state
+            .attach_daemon_attachment::<tauri::Wry>(
+                session_id,
+                DaemonAttachment {
+                    session_id: session_id.to_string(),
+                    epoch: 1,
+                    start_sequence: Some(1),
+                    end_sequence: Some(4),
+                    gap: None,
+                    history: bytes::Bytes::from_static(b"token-resident-line\r\n"),
+                    history_segments: Vec::new(),
+                    pty_cols: None,
+                    pty_rows: None,
+                    remote_generation: None,
+                    messages,
+                    stream_task: tokio::spawn(std::future::pending()),
+                },
+                None,
+            )
+            .expect("initial attach");
+
+        // Two attaches race: the first mints a token, the second supersedes it while the first
+        // is still awaiting the daemon. The first must not install its stream afterwards.
+        let stale_token = state
+            .begin_replay_request(session_id)
+            .expect("session exists");
+        let winner_token = state
+            .begin_replay_request(session_id)
+            .expect("session still exists");
+        assert_ne!(stale_token.generation, winner_token.generation);
+
+        let (_stale_tx, stale_messages) = tokio::sync::mpsc::channel(1);
+        let stale_stream = tokio::spawn(std::future::pending());
+        let result = state.attach_daemon_attachment_with_client_and_token::<tauri::Wry>(
+            session_id,
+            DaemonAttachment {
+                session_id: session_id.to_string(),
+                epoch: 1,
+                start_sequence: Some(5),
+                end_sequence: Some(6),
+                gap: None,
+                history: bytes::Bytes::from_static(b"stale-token-line\r\n"),
+                history_segments: Vec::new(),
+                pty_cols: None,
+                pty_rows: None,
+                remote_generation: None,
+                messages: stale_messages,
+                stream_task: stale_stream,
+            },
+            None,
+            None,
+            Some(stale_token),
+        );
+
+        assert!(
+            matches!(result, Err(NativeTerminalError::SessionDetached(_))),
+            "a replay whose token was superseded must be refused"
+        );
+        let text: String = state
+            .snapshot_for_session(session_id)
+            .unwrap()
+            .unwrap()
+            .grid
+            .iter()
+            .flat_map(|row| row.iter().map(|cell| cell.text.as_str()))
+            .collect();
+        assert!(
+            !text.contains("stale-token-line"),
+            "a refused replay must not reach the resident grid"
+        );
+        assert_eq!(state.session_last_sequence(session_id), Some(4));
+
+        // A closed pane is a rejection, not an invitation to recreate the session: the user
+        // already dismissed it, and `is_none_or` would have resurrected it here.
+        let orphan_token = state
+            .begin_replay_request(session_id)
+            .expect("session still exists");
+        state.close_session(session_id);
+        let (_orphan_tx, orphan_messages) = tokio::sync::mpsc::channel(1);
+        let orphan_result = state.attach_daemon_attachment_with_client_and_token::<tauri::Wry>(
+            session_id,
+            DaemonAttachment {
+                session_id: session_id.to_string(),
+                epoch: 1,
+                start_sequence: Some(5),
+                end_sequence: Some(6),
+                gap: None,
+                history: bytes::Bytes::from_static(b"orphan-line\r\n"),
+                history_segments: Vec::new(),
+                pty_cols: None,
+                pty_rows: None,
+                remote_generation: None,
+                messages: orphan_messages,
+                stream_task: tokio::spawn(std::future::pending()),
+            },
+            None,
+            None,
+            Some(orphan_token),
+        );
+        assert!(
+            matches!(orphan_result, Err(NativeTerminalError::SessionDetached(_))),
+            "a token attach against a closed session must be refused, not resurrect it"
+        );
+        assert!(
+            state.snapshot_for_session(session_id).unwrap().is_none(),
+            "a refused token attach must not recreate the closed session"
+        );
+
+        state.teardown();
+    }
+
+    #[test]
+    fn classify_replay_requires_the_producer_marker_and_tolerates_resize_holes() {
+        // A fresh grid has nothing to protect.
+        assert_eq!(
+            classify_replay(None, Some(1), Some(5), Some(true)),
+            ReplayVerdict::Rebuild
+        );
+
+        // Sequence arithmetic alone never authorises a delta: an unmarked or gap-marked offer
+        // rebuilds even though 6..=7 continues 5 by inspection.
+        for marker in [None, Some(false)] {
+            assert_eq!(
+                classify_replay(Some(5), Some(6), Some(7), marker),
+                ReplayVerdict::Rebuild,
+                "marker {marker:?} must not be read as proving a delta"
+            );
+        }
+
+        assert_eq!(
+            classify_replay(Some(5), Some(6), Some(7), Some(true)),
+            ReplayVerdict::Delta
+        );
+
+        // record_resize allocates a sequence without publishing, so 6 after applied 4 is a
+        // structural hole, not loss. A `start == last + 1` test would misread this as a gap.
+        assert_eq!(
+            classify_replay(Some(4), Some(6), Some(7), Some(true)),
+            ReplayVerdict::Delta
+        );
+
+        // Fully applied, and the stale-end case that must never rewind the cursor.
+        assert_eq!(
+            classify_replay(Some(10), Some(1), Some(10), Some(true)),
+            ReplayVerdict::NoOp
+        );
+        assert_eq!(
+            classify_replay(Some(10), Some(1), Some(6), Some(true)),
+            ReplayVerdict::NoOp
+        );
+
+        // Straddling the applied boundary: segments carry no per-sequence offsets, so the
+        // unapplied tail cannot be isolated and the whole offer must be rebuilt.
+        assert_eq!(
+            classify_replay(Some(5), Some(3), Some(7), Some(true)),
+            ReplayVerdict::Rebuild
+        );
+
+        // An unknown start is the same unproven case.
+        assert_eq!(
+            classify_replay(Some(5), None, Some(9), Some(true)),
+            ReplayVerdict::Rebuild
+        );
+    }
 
     #[test]
     fn replay_absorb_spans_the_burst_and_closes_on_idle_or_cap() {
@@ -7171,6 +7674,7 @@ mod tests {
                 rows: Some(10),
                 bytes: bytes::Bytes::from(b"replayed at narrow width\r\n".to_vec()),
             }],
+            replay_is_delta: None,
         })
         .await
         .expect("send lagged recovery");

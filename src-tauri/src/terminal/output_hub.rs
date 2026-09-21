@@ -81,6 +81,7 @@ pub struct BoundedBuffer {
     current_size: usize,
     next_sequence: u64,
     bracketed_paste_enabled: bool,
+    retained: retained_history::RetainedHistory,
 }
 
 pub fn scan_dec_mode_2004(bytes: &[u8]) -> Option<bool> {
@@ -114,12 +115,23 @@ pub fn scan_dec_mode_2004(bytes: &[u8]) -> Option<bool> {
 
 impl BoundedBuffer {
     pub fn new(capacity: usize) -> Self {
+        Self::with_retention(
+            capacity,
+            retained_history::RetentionBudget::from_text_capacity(capacity),
+        )
+    }
+
+    pub fn with_retention(
+        capacity: usize,
+        budget: retained_history::RetentionBudget,
+    ) -> Self {
         Self {
             capacity,
             chunks: VecDeque::new(),
             current_size: 0,
             next_sequence: 1,
             bracketed_paste_enabled: false,
+            retained: retained_history::RetainedHistory::new(budget),
         }
     }
 
@@ -157,6 +169,7 @@ impl BoundedBuffer {
         if let Some(enabled) = scan_dec_mode_2004(&chunk.bytes) {
             self.bracketed_paste_enabled = enabled;
         }
+        self.retained.push(sequence, &chunk.bytes);
         self.chunks.push_back(chunk.clone());
 
         while self.current_size > self.capacity && !self.chunks.is_empty() {
@@ -170,6 +183,20 @@ impl BoundedBuffer {
 
     pub fn start_sequence(&self) -> Option<u64> {
         self.chunks.front().map(|c| c.sequence)
+    }
+
+    /// Oldest sequence a *full* replay can reconstruct. Retention outlives the recovery ring,
+    /// so this is at or before [`Self::start_sequence`].
+    pub fn retained_start_sequence(&self) -> Option<u64> {
+        self.retained.start_sequence().or_else(|| self.start_sequence())
+    }
+
+    pub fn retained_text_bytes(&self) -> usize {
+        self.retained.text_bytes()
+    }
+
+    pub fn retained_image_bytes(&self) -> usize {
+        self.retained.image_bytes()
     }
 
     pub fn end_sequence(&self) -> Option<u64> {
@@ -215,7 +242,16 @@ impl BoundedBuffer {
         &self,
         after_sequence: Option<u64>,
     ) -> (Vec<u8>, Option<u64>, Option<u64>, Option<ReplayGap>) {
-        let (history, _, start, end, gap) = self.snapshot_after_ranges(after_sequence, &[]);
+        let (history, _, start, end, gap) = self.snapshot_after_ranges_impl(after_sequence, &[], false);
+        (history, start, end, gap)
+    }
+
+    pub(crate) fn snapshot_after_ring(
+        &self,
+        after_sequence: Option<u64>,
+    ) -> (Vec<u8>, Option<u64>, Option<u64>, Option<ReplayGap>) {
+        let (history, _, start, end, gap) =
+            self.snapshot_after_ranges_impl(after_sequence, &[], false);
         (history, start, end, gap)
     }
 
@@ -230,7 +266,11 @@ impl BoundedBuffer {
         Option<u64>,
         Option<ReplayGap>,
     ) {
-        let (history, ranges, start, end, gap) = self.snapshot_after_ranges(after_sequence, ledger);
+        let (history, ranges, start, end, gap) = if after_sequence.is_none() {
+            self.snapshot_after_ranges_retained(after_sequence, ledger)
+        } else {
+            self.snapshot_after_ranges(after_sequence, ledger)
+        };
         let segments = ranges.into_iter().map(|r| HistorySegment {
             cols: r.cols,
             rows: r.rows,
@@ -244,6 +284,23 @@ impl BoundedBuffer {
         after_sequence: Option<u64>,
         ledger: &[ResizePoint],
     ) -> (Vec<u8>, Vec<HistoryRange>, Option<u64>, Option<u64>, Option<ReplayGap>) {
+        self.snapshot_after_ranges_impl(after_sequence, ledger, true)
+    }
+
+    pub(crate) fn snapshot_after_ranges_retained(
+        &self,
+        after_sequence: Option<u64>,
+        ledger: &[ResizePoint],
+    ) -> (Vec<u8>, Vec<HistoryRange>, Option<u64>, Option<u64>, Option<ReplayGap>) {
+        self.snapshot_after_ranges_impl(after_sequence, ledger, true)
+    }
+
+    fn snapshot_after_ranges_impl(
+        &self,
+        after_sequence: Option<u64>,
+        ledger: &[ResizePoint],
+        from_retained: bool,
+    ) -> (Vec<u8>, Vec<HistoryRange>, Option<u64>, Option<u64>, Option<ReplayGap>) {
         let first = self.start_sequence();
         let last = self.end_sequence();
         let gap = after_sequence.zip(first).and_then(|(requested, first)| {
@@ -253,45 +310,99 @@ impl BoundedBuffer {
             })
         });
         let full = after_sequence.is_none() || gap.is_some();
-        let mut chunks = self.chunks.iter().filter(|c| full || Some(c.sequence) > after_sequence);
-        let Some(first_chunk) = chunks.next() else {
-            let ranges = ledger.last().filter(|p| after_sequence.is_none_or(|s| p.sequence > s))
-                .map(|p| vec![HistoryRange { cols: Some(p.cols), rows: Some(p.rows), start: 0, end: 0 }])
+        // Full reconstruction uses retained VT units; contiguous deltas and the
+        // separately budgeted machine transport continue to use exact ring bytes.
+        let retained_pending;
+        let (items, prefix): (Vec<(u64, &[u8])>, Vec<u8>) = if from_retained && full {
+            retained_pending = self.retained.pending();
+            let items = self.retained.records_with_pending(&retained_pending);
+            (items, self.retained.state_prelude())
+        } else {
+            (
+                self.chunks
+                    .iter()
+                    .filter(|c| full || Some(c.sequence) > after_sequence)
+                    .map(|c| (c.sequence, &*c.bytes))
+                    .collect(),
+                if full
+                    && self.bracketed_paste_enabled
+                    && !self.buffer_contains_active_bracketed_paste()
+                {
+                    b"\x1b[?2004h".to_vec()
+                } else {
+                    Vec::new()
+                },
+            )
+        };
+
+        if items.is_empty() && prefix.is_empty() {
+            let ranges = ledger
+                .last()
+                .filter(|p| after_sequence.is_none_or(|s| p.sequence > s))
+                .map(|p| {
+                    vec![HistoryRange {
+                        cols: Some(p.cols),
+                        rows: Some(p.rows),
+                        start: 0,
+                        end: 0,
+                    }]
+                })
                 .unwrap_or_default();
             return (Vec::new(), ranges, None, last, None);
-        };
-        let needs_prefix = full && self.bracketed_paste_enabled && !self.buffer_contains_active_bracketed_paste();
-        let mut history = Vec::with_capacity(self.current_size + if needs_prefix { 8 } else { 0 });
-        if needs_prefix { history.extend_from_slice(b"\x1b[?2004h"); }
+        }
+
+        let first_sequence = items.first().map(|(sequence, _)| *sequence).or(last);
+        let total: usize = items.iter().map(|(_, bytes)| bytes.len()).sum();
+        let mut history = Vec::with_capacity(prefix.len() + total);
+        history.extend_from_slice(&prefix);
+
         let mut li = 0;
         let mut size = (None, None);
-        while li < ledger.len() && ledger[li].sequence <= first_chunk.sequence {
-            size = (Some(ledger[li].cols), Some(ledger[li].rows));
-            li += 1;
+        if let Some(start) = first_sequence {
+            while li < ledger.len() && ledger[li].sequence <= start {
+                size = (Some(ledger[li].cols), Some(ledger[li].rows));
+                li += 1;
+            }
         }
         let mut ranges = Vec::new();
         let mut start = 0;
-        history.extend_from_slice(&first_chunk.bytes);
-        for chunk in chunks {
-            let mut next_size = size;
-            while li < ledger.len() && ledger[li].sequence <= chunk.sequence {
-                next_size = (Some(ledger[li].cols), Some(ledger[li].rows));
-                li += 1;
+        for (index, (sequence, bytes)) in items.iter().enumerate() {
+            if index > 0 {
+                let mut next_size = size;
+                while li < ledger.len() && ledger[li].sequence <= *sequence {
+                    next_size = (Some(ledger[li].cols), Some(ledger[li].rows));
+                    li += 1;
+                }
+                if next_size != size {
+                    ranges.push(HistoryRange {
+                        cols: size.0,
+                        rows: size.1,
+                        start,
+                        end: history.len(),
+                    });
+                    start = history.len();
+                    size = next_size;
+                }
             }
-            if next_size != size {
-                ranges.push(HistoryRange { cols: size.0, rows: size.1, start, end: history.len() });
-                start = history.len();
-                size = next_size;
-            }
-            history.extend_from_slice(&chunk.bytes);
+            history.extend_from_slice(bytes);
         }
-        ranges.push(HistoryRange { cols: size.0, rows: size.1, start, end: history.len() });
+        ranges.push(HistoryRange {
+            cols: size.0,
+            rows: size.1,
+            start,
+            end: history.len(),
+        });
         if let Some(point) = ledger.get(li..).and_then(|suffix| suffix.last()) {
             if (Some(point.cols), Some(point.rows)) != size {
-                ranges.push(HistoryRange { cols: Some(point.cols), rows: Some(point.rows), start: history.len(), end: history.len() });
+                ranges.push(HistoryRange {
+                    cols: Some(point.cols),
+                    rows: Some(point.rows),
+                    start: history.len(),
+                    end: history.len(),
+                });
             }
         }
-        (history, ranges, Some(first_chunk.sequence), last, gap)
+        (history, ranges, first_sequence, last, gap)
     }
 }
 
@@ -390,6 +501,15 @@ pub fn segment_history(
 #[path = "machine_output.rs"]
 pub mod machine_output;
 
+#[path = "retained_history.rs"]
+pub mod retained_history;
+
+#[path = "vt_state.rs"]
+pub mod vt_state;
+
+#[path = "vt_stream.rs"]
+pub mod vt_stream;
+
 struct SessionHub {
     machine_senders: Vec<machine_output::MachineSender>,
     buffer: BoundedBuffer,
@@ -404,6 +524,7 @@ pub struct TerminalOutputHub {
     sessions: Arc<RwLock<HashMap<String, Arc<RwLock<SessionHub>>>>>,
     transport_owners: Arc<RwLock<std::collections::HashSet<String>>>,
     capacity: usize,
+    retention: retained_history::RetentionBudget,
 }
 
 impl Default for TerminalOutputHub {
@@ -414,10 +535,23 @@ impl Default for TerminalOutputHub {
 
 impl TerminalOutputHub {
     pub fn new(capacity: usize) -> Self {
+        Self::new_with_retention(
+            capacity,
+            retained_history::RetentionBudget::from_text_capacity(capacity),
+        )
+    }
+
+    /// Recovery ring capacity and reconstruction retention are independent: the ring bounds
+    /// incremental replay and transport accounting, retention bounds full replay.
+    pub fn new_with_retention(
+        capacity: usize,
+        retention: retained_history::RetentionBudget,
+    ) -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             transport_owners: Arc::new(RwLock::new(std::collections::HashSet::new())),
             capacity,
+            retention,
         }
     }
 
@@ -445,7 +579,7 @@ impl TerminalOutputHub {
         let (raw_tx, raw_rx) = broadcast::channel(RAW_BROADCAST_CAPACITY);
         let hub = SessionHub {
             machine_senders: Vec::new(),
-            buffer: BoundedBuffer::new(self.capacity),
+            buffer: BoundedBuffer::with_retention(self.capacity, self.retention),
             sender: tx,
             raw_sender: raw_tx,
             resize_ledger: Vec::new(),
@@ -471,6 +605,7 @@ impl TerminalOutputHub {
         };
         hub.buffer.chunks.clear();
         hub.buffer.current_size = 0;
+        hub.buffer.retained.clear();
         let size = hub.resize_ledger.last().cloned();
         hub.resize_ledger.clear();
         if let Some(mut size) = size {
@@ -549,6 +684,7 @@ impl TerminalOutputHub {
         // Accepted boundary fuzz: a few in-flight bytes produced just before SIGWINCH may carry
         // sequences greater than the marker, identical to what the live pane experienced.
         let sequence = hub.buffer.allocate_sequence();
+        hub.buffer.retained.seal();
         if hub.resize_ledger.len() >= RESIZE_LEDGER_CAPACITY {
             hub.resize_ledger.remove(0);
         }
@@ -724,12 +860,57 @@ mod tests {
         for _ in 0..48 { buffer.push(vec![b'x'; retained / 48]); }
         let ledger = vec![ResizePoint { sequence: 1, cols: 80, rows: 24 }];
         CountingAlloc::enable();
-        let snapshot = buffer.snapshot_after_ranges(None, &ledger);
+        let snapshot = buffer.snapshot_after_ranges_retained(None, &ledger);
         let peak = CountingAlloc::disable();
         assert_eq!(snapshot.0.len(), retained);
         assert!(!snapshot.1.is_empty());
         println!("alloc peak: {peak}/{retained} = {:.6}x", peak as f64 / retained as f64);
         assert!(peak * 100 <= retained * 135, "peak_bytes={peak}, retained={retained}, ratio={:.6}", peak as f64 / retained as f64);
+    }
+
+    #[test]
+    fn attach_mid_transmission_then_live_continuation_reconstructs_without_leaking_payload() {
+        // Given: an image transmission still in flight when a restarted GUI attaches, whose
+        // payload already overflowed the retention ceiling.
+        let hub = TerminalOutputHub::new_with_retention(
+            8 * 1024,
+            retained_history::RetentionBudget {
+                text_bytes: 8 * 1024,
+                image_bytes: 8 * 1024,
+            },
+        );
+        hub.register_session("inflight");
+        hub.publish("inflight", b"VISIBLE-TEXT\r\n".to_vec());
+        hub.publish("inflight", b"\x1b_Ga=T,f=24,s=8,v=8,m=1;".to_vec());
+        hub.publish("inflight", vec![b'Q'; 64 * 1024]);
+
+        // When: the GUI attaches with no cursor and then receives the live continuation.
+        let attachment = hub
+            .subscribe_with_sequence("inflight", None)
+            .expect("attachment");
+        let history = attachment.snapshot.history;
+
+        // Then: the snapshot keeps the parser inside the string (the introducer survives the
+        // overflow), so the live tail is consumed as payload instead of printed as text.
+        assert!(history.windows(12).any(|w| w == b"VISIBLE-TEXT"));
+        let introducers = history.windows(2).filter(|w| *w == b"\x1b_").count();
+        assert_eq!(introducers, 1, "resync introducer missing from snapshot");
+        let terminators = history.windows(2).filter(|w| *w == b"\x1b\\").count();
+        assert_eq!(terminators, 0, "snapshot must not fabricate a terminator");
+        assert!(
+            history.iter().filter(|byte| **byte == b'Q').count() < 64 * 1024,
+            "overflowing payload must not be retained verbatim"
+        );
+
+        // And: once the real terminator arrives, retention resyncs and keeps new text.
+        hub.publish("inflight", b"\x1b\\AFTER-IMAGE\r\n".to_vec());
+        let resumed = hub
+            .subscribe_with_sequence("inflight", None)
+            .expect("attachment")
+            .snapshot
+            .history;
+        assert!(resumed.windows(11).any(|w| w == b"AFTER-IMAGE"));
+        assert_eq!(resumed.windows(2).filter(|w| *w == b"\x1b_").count(), 0);
     }
 
     #[test]

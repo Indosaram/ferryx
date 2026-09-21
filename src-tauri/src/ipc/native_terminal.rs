@@ -509,21 +509,54 @@ pub async fn cmd_native_terminal_attach<R: Runtime>(
         false => {}
     }
 
-    let after_seq = after_sequence.and_then(|s| s.parse::<u64>().ok());
-    let attachment = match daemon_client.attach(&session_id, after_seq).await {
+    // Fence the old pump and capture the replay cursor in one transaction BEFORE awaiting the
+    // daemon. Reading the cursor first and awaiting afterwards lets the old pump keep applying
+    // output across the await, so the response would be a delta against a cursor the grid has
+    // already passed — which classifies as an overlap and destroys resident scrollback.
+    let token = state.begin_replay_request(&session_id);
+    let after_seq = replay_request_cursor(token.map(|token| token.last_sequence), after_sequence);
+    let mut attachment = match daemon_client.attach(&session_id, after_seq).await {
         Ok(attachment) => attachment,
+        // The fence already aborted the old stream, so a failed request must not leave the pane
+        // stranded: fall back to a full replay, which needs no cursor to be correct.
+        Err(err) if after_seq.is_some() => {
+            tracing::warn!(
+                session_id,
+                %err,
+                "tail attach failed after fencing the resident stream; retrying with full history"
+            );
+            daemon_client.attach(&session_id, None).await?
+        }
         Err(err) => return Err(err),
     };
-    if let Err(err) = state.attach_daemon_attachment_with_bounds_and_client(
+    // A restarted daemon numbers sequences from scratch, so a cursor minted under the previous
+    // epoch selects an arbitrary point in a foreign sequence space: the tail it returns can be
+    // empty while carrying no gap, which would leave the pane blank. Re-request the full history
+    // once the response reveals the epoch actually served.
+    if let Some(token) = token {
+        if after_seq.is_some() && attachment.epoch != token.epoch {
+            attachment.stream_task.abort();
+            attachment = daemon_client.attach(&session_id, None).await?;
+        }
+    }
+    if let Err(err) = state.attach_daemon_attachment_with_bounds_client_and_token(
         &session_id,
         attachment,
         Some(app),
         logical_bounds,
         Some(daemon_client.inner().clone()),
+        token,
     ) {
         return Err(IpcError::internal(err.to_string()));
     }
     Ok(())
+}
+
+fn replay_request_cursor(resident: Option<Option<u64>>, explicit: Option<String>) -> Option<u64> {
+    match resident {
+        Some(cursor) => cursor,
+        None => explicit.and_then(|value| value.parse().ok()),
+    }
 }
 
 #[tauri::command]
@@ -1673,6 +1706,13 @@ fn into_ipc_receipt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resident_replay_watermark_overrides_stale_explicit_cursor() {
+        assert_eq!(replay_request_cursor(Some(Some(5)), Some("2".into())), Some(5));
+        assert_eq!(replay_request_cursor(Some(None), Some("900".into())), None);
+        assert_eq!(replay_request_cursor(None, Some("2".into())), Some(2));
+    }
     use crate::native_terminal::{MouseButton, MousePosition, MouseRendererSize};
 
     #[test]

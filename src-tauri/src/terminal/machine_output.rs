@@ -168,8 +168,9 @@ impl TerminalOutputHub {
                 &budget,
                 replay_bytes.saturating_add(8 + MACHINE_FRAME_OVERHEAD),
             )?;
-            let (history, history_start_sequence, history_end_sequence, gap) =
-                hub.buffer.snapshot_after(after_sequence);
+            let (history, history_start_sequence, history_end_sequence, gap) = hub
+                .buffer
+                .snapshot_after_ring(after_sequence);
             let gap = gap.or_else(|| {
                 hub.replay_gap.clone().filter(|gap| {
                     after_sequence.is_none_or(|after| after < gap.available_from_sequence - 1)
