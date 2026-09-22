@@ -1,7 +1,7 @@
 {
   "package": "ghostty",
   "repository": "https://github.com/ghostty-org/ghostty.git",
-  "commit": "6a508fd5e34c7e222c052a6d00bb3891ff3feace",
+  "commit": "26d5b3b33f043f969aa54f178f0b58d07fb91d5f",
   "zig_version": "0.16.0",
   "artifact": "libghostty-vt.a",
   "artifacts": {
