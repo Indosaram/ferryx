@@ -158,7 +158,8 @@ export function main(argv = process.argv.slice(2), { exec = run, env = process.e
     );
   }
 
-  const liveExecutors = exec(...liveExecutorCommand(options.dest)).out
+  const liveCmd = liveExecutorCommand(options.dest);
+  const liveExecutors = exec(liveCmd[0], liveCmd.slice(1)).out
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
