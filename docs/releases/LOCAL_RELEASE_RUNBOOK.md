@@ -240,6 +240,41 @@ produce an unsigned `Ferryx_x64.msix` for Store ingestion, but attaching it to G
 GitHub Release public does not submit it to the Store. Verify the reserved Store identity and
 MSIX version, then obtain Store-submission approval before uploading in Partner Center.
 
+## Installing locally onto this Mac
+
+`release-local.mjs` never replaces `/Applications/Ferryx.app`. Any local install
+MUST go through the notarization guard:
+
+```bash
+node scripts/install-macos-app.mjs --bundle <path/to/notarized/Ferryx.app>
+```
+
+The guard fails closed unless the bundle is Developer-ID signed for team
+`5DUM8WPB4C`, Gatekeeper-accepted with `source=Notarized Developer ID`, and
+stapled. Ad-hoc `cargo tauri build` output is rejected (this is how the
+2026-09-22 non-notarized install happened: a plain build was copied straight
+into /Applications). The escape hatch (`FERRYX_ALLOW_UNSIGNED_INSTALL=1` plus
+`--allow-unsigned`) exists for throwaway QA only and prints a warning.
+
+Install safety rules enforced by the script:
+
+- The live bundle is renamed (never deleted) into
+  `/Applications/.ferryx-previous-<ts>/` so draining daemons keep executing
+  their inode and their PTY sessions.
+- After installing, trigger the UDS handover
+  `{"type":"upgradeBinary","newBinaryPath":"/Applications/Ferryx.app/Contents/MacOS/ferryx"}`
+  before launching the GUI, then confirm `initial.ok` in
+  `/tmp/rorca-<uid>/boot-trace.log`.
+- Never `kill` a draining daemon: it retires itself when its sessions end.
+  The first launch after a notarized install may take several extra seconds
+  (Gatekeeper validation) - the readiness budget widening on main covers this.
+
+For a fully signed, notarized, stapled local build without a release run, use
+`node scripts/build-notarized-local.mjs <detached-worktree>` (builds from the
+worktree at merged main HEAD with `APPLE_SIGNING_IDENTITY`, re-signs every
+Mach-O, submits to notarytool, staples, and refuses to finish without
+`spctl` reporting `Notarized Developer ID`).
+
 ## Checks, cleanup, and recovery
 
 ### Completion checklist
