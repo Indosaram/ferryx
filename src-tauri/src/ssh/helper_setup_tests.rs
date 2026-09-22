@@ -3,7 +3,7 @@ use crate::ssh::runtime::{RemoteEnvironment, RemoteExecutor, RemotePlatform};
 use crate::ssh::{SshAuthMethod, SshHost, SshHostSource};
 use std::io::Write as _;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 fn sample_host(id: &str) -> SshHost {
     SshHost {
@@ -542,7 +542,10 @@ fn ssh_helper_setup_build_upload_script_contains_expected_tokens() {
     assert!(posix.contains("FERRYX_HELPER_PAYLOAD_EOF"));
     assert!(posix.contains("base64"));
     assert!(posix.contains("endpoint.json"));
-    assert!(posix.contains("kill"));
+    assert!(!posix.contains("kill \"$pid\""));
+    assert!(posix.contains("FERRYX_INSTALL_DEFERRED"));
+    assert!(posix.contains("live_daemon"));
+    assert!(posix.contains("FERRYX_INSTALL_OK"));
     assert!(posix.contains("mv -f"));
     assert!(posix.contains("chmod 700"));
 
@@ -553,9 +556,23 @@ fn ssh_helper_setup_build_upload_script_contains_expected_tokens() {
     let win = build_windows_upload_script(&win_loc, payload);
     assert!(win.contains("FromBase64String"));
     assert!(win.contains("endpoint.json"));
-    assert!(win.contains("taskkill /PID"));
+    assert!(!win.contains("taskkill"));
+    assert!(win.contains("FERRYX_INSTALL_DEFERRED"));
+    assert!(win.contains("live_daemon"));
+    assert!(win.contains("FERRYX_INSTALL_OK"));
     assert!(win.contains(".old"));
     assert!(win.contains("Move"));
+}
+
+struct ChildGuard(Option<std::process::Child>);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -626,6 +643,8 @@ fn posix_upload_script_skips_kill_for_foreign_process() {
         .spawn()
         .unwrap();
     let pid = sleeper.id();
+    let _guard = ChildGuard(Some(sleeper));
+
     std::fs::write(
         base.join("helper/endpoint.json"),
         format!("{{\"pid\":{pid}}}"),
@@ -660,40 +679,66 @@ fn posix_upload_script_skips_kill_for_foreign_process() {
     );
     // The identity check must refuse to kill an unrelated pid.
     assert!(process_alive(pid), "foreign process was killed");
-    let _ = Command::new("sh")
-        .args(["-c", &format!("kill {pid}")])
-        .status();
     let _ = std::fs::remove_dir_all(&base);
 }
 
+#[cfg(unix)]
 #[test]
-fn posix_upload_script_kills_only_helper_named_process() {
-    use std::process::{Command, Stdio};
-    let base = std::env::temp_dir().join(format!(
-        "ferryx-helper-test-{}-{}",
-        std::process::id(),
-        line!()
-    ));
+fn posix_upload_script_never_kills_live_daemon_and_defers_upgrade() {
+    use std::io::BufRead as _;
+    use std::process::Stdio;
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path();
     std::fs::create_dir_all(base.join("bin")).unwrap();
     std::fs::create_dir_all(base.join("helper")).unwrap();
-    // A binary named exactly like the helper (here: a copy of sleep) must be killed.
     let fake_helper = base.join("bin/ferryx-remote-helper");
-    std::fs::copy("/bin/sleep", &fake_helper).unwrap();
-    let mut sleeper = Command::new(&fake_helper)
-        .arg("30")
-        .stdout(Stdio::null())
-        .spawn()
-        .unwrap();
-    std::fs::write(
-        base.join("helper/endpoint.json"),
-        format!("{{\"pid\":{}}}", sleeper.id()),
+
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../remote-helper/target/debug/ferryx-remote-helper"),
+        &fake_helper,
     )
     .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake_helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(base, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(base.join("helper"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+    }
+
+    let mut daemon_child = Command::new(&fake_helper)
+        .arg("daemon")
+        .arg("--root")
+        .arg(base.join("helper"))
+        .args(["--host-id", "upgrade-preservation-test"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let daemon_pid = daemon_child.id();
+
+    let stdout = daemon_child.stdout.take().unwrap();
+    let _guard = ChildGuard(Some(daemon_child));
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut line = String::new();
+        let result = reader.read_line(&mut line).map(|_| line);
+        let _ = ready_tx.send(result);
+    });
+    let ready_line = ready_rx
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    let ready: serde_json::Value = serde_json::from_str(&ready_line).unwrap();
+    assert_eq!(ready["event"], "ready");
+
     let loc = HelperLocation {
         executable: fake_helper.to_string_lossy().to_string(),
         root: base.join("helper").to_string_lossy().to_string(),
     };
-    let script = build_posix_upload_script(&loc, b"PAYLOAD");
+    let script = build_posix_upload_script(&loc, b"NEW_UNSAFE_PAYLOAD");
     let mut child = Command::new("sh")
         .args(["-s"])
         .stdin(Stdio::piped())
@@ -708,17 +753,36 @@ fn posix_upload_script_kills_only_helper_named_process() {
         .write_all(script.as_bytes())
         .unwrap();
     let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
+        "script failed; stderr: {stderr}, stdout: {stdout}"
     );
-    let exited = sleeper.wait().map(|s| !s.success()).unwrap_or(true);
+
+    // CRITICAL: Live helper daemon process MUST NOT be killed!
     assert!(
-        exited || !process_alive(sleeper.id()),
-        "helper-named process survived"
+        process_alive(daemon_pid),
+        "helper daemon process was killed! Upgrade must NEVER kill active existing daemon/PTYs"
     );
-    assert_eq!(std::fs::read(&fake_helper).unwrap(), b"PAYLOAD");
+
+    // CRITICAL: Executable on disk was NOT overwritten!
+    assert_ne!(
+        std::fs::read(&fake_helper).unwrap(),
+        b"NEW_UNSAFE_PAYLOAD",
+        "helper binary was overwritten while live daemon was running"
+    );
+
+    // Structured fields assertion (machine contracts only, no prose assertions)
+    let err = parse_install_output(&output.stdout, &loc).expect_err("must defer");
+    assert_eq!(err.code, IpcErrorCode::Unsupported);
+    let details = err.details.expect("details");
+    assert_eq!(details["stage"], "helper_upgrade_deferred");
+    assert_eq!(details["reason"], "live_daemon");
+    assert_eq!(details["pid"], daemon_pid);
+    assert_eq!(details["executable"].as_str(), fake_helper.to_str());
+    assert_eq!(details["root"].as_str(), base.join("helper").to_str());
+
     let _ = std::fs::remove_dir_all(&base);
 }
 
@@ -751,7 +815,74 @@ fn windows_upload_script_verifies_identity_and_restores_on_failure() {
         root: "C:\\Users\\t\\.ferryx\\helper\\h".to_string(),
     };
     let script = build_windows_upload_script(&loc, b"X");
+    assert!(!script.contains("taskkill"));
     assert!(script.contains("Get-Process -Id $ep.pid"));
     assert!(script.contains("ProcessName -eq 'ferryx-remote-helper'"));
+    assert!(script.contains("FERRYX_INSTALL_DEFERRED"));
+    assert!(script.contains("live_daemon"));
     assert!(script.contains("[System.IO.File]::Move($old, $dest)"));
+}
+
+#[test]
+fn ssh_helper_setup_parse_install_output_success() {
+    let loc = HelperLocation {
+        executable: "/bin/helper".into(),
+        root: "/root".into(),
+    };
+    let stdout = b"Warning: test banner\nFERRYX_INSTALL_OK\n";
+    assert!(parse_install_output(stdout, &loc).is_ok());
+}
+
+#[test]
+fn ssh_helper_setup_parse_install_output_rejects_prefix_match() {
+    let loc = HelperLocation {
+        executable: "/bin/helper".into(),
+        root: "/root".into(),
+    };
+    // Exact match contract: starts_with is NOT enough
+    let stdout = b"FERRYX_INSTALL_OK_EXTRA_GARBAGE\n";
+    let err = parse_install_output(stdout, &loc).expect_err("must reject non-exact match");
+    assert_eq!(err.code, IpcErrorCode::IoError);
+}
+
+#[test]
+fn ssh_helper_setup_parse_install_output_deferred_live_daemon() {
+    let loc = HelperLocation {
+        executable: "/home/u/.ferryx/bin/helper".into(),
+        root: "/home/u/.ferryx/helper/h1".into(),
+    };
+    let stdout = b"FERRYX_INSTALL_DEFERRED:{\"reason\":\"live_daemon\",\"pid\":1234}\n";
+    let err = parse_install_output(stdout, &loc).expect_err("must defer");
+    assert_eq!(err.code, IpcErrorCode::Unsupported);
+    let details = err.details.expect("details");
+    // Machine contracts only: test structured fields, never pin whole prose message
+    assert_eq!(details["stage"], "helper_upgrade_deferred");
+    assert_eq!(details["reason"], "live_daemon");
+    assert_eq!(details["pid"], 1234);
+    assert_eq!(details["executable"], "/home/u/.ferryx/bin/helper");
+    assert_eq!(details["root"], "/home/u/.ferryx/helper/h1");
+}
+
+#[test]
+fn ssh_helper_setup_parse_install_output_rejects_unknown_deferred_reason() {
+    let loc = HelperLocation {
+        executable: "/bin/helper".into(),
+        root: "/root".into(),
+    };
+    // Unknown reason must error and never fallback to a default
+    let stdout =
+        b"FERRYX_INSTALL_DEFERRED:{\"reason\":\"unsupported_future_reason\",\"pid\":1234}\n";
+    let err = parse_install_output(stdout, &loc).expect_err("must error on unknown reason");
+    assert_eq!(err.code, IpcErrorCode::InternalError);
+}
+
+#[test]
+fn ssh_helper_setup_parse_install_output_rejects_missing_marker() {
+    let loc = HelperLocation {
+        executable: "/bin/helper".into(),
+        root: "/root".into(),
+    };
+    let stdout = b"Error: unexpected failure without marker\n";
+    let err = parse_install_output(stdout, &loc).expect_err("must error");
+    assert_eq!(err.code, IpcErrorCode::IoError);
 }

@@ -1447,3 +1447,354 @@ fn helper_dag_poll_suppresses_unchanged_known_snapshot() {
         .unwrap();
     assert!(result["runs"].as_array().unwrap().is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// SSH Input Isolation Regression Tests (TDD - Writer Lock Contention)
+// ---------------------------------------------------------------------------
+
+struct ControlledBlockingWriter {
+    inner: Box<dyn Write + Send>,
+    started_tx: std::sync::mpsc::SyncSender<()>,
+    release_rx: Arc<Mutex<std::sync::mpsc::Receiver<()>>>,
+    released: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Write for ControlledBlockingWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let _ = self.started_tx.try_send(());
+        if !self.released.load(std::sync::atomic::Ordering::SeqCst) {
+            if let Ok(rx) = self.release_rx.lock() {
+                if !self.released.load(std::sync::atomic::Ordering::SeqCst) {
+                    let _ = rx.recv();
+                    self.released.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        }
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+struct ReleaseOnDrop {
+    tx: Option<std::sync::mpsc::SyncSender<()>>,
+    released: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ReleaseOnDrop {
+    fn new(tx: std::sync::mpsc::SyncSender<()>, released: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        Self { tx: Some(tx), released }
+    }
+
+    fn release(&mut self) {
+        self.released.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+fn swap_session_writer(
+    runtime: &Runtime,
+    backend_session_id: &str,
+    new_writer: Box<dyn Write + Send>,
+) -> Box<dyn Write + Send> {
+    let session = {
+        let sessions = runtime.sessions.lock().unwrap();
+        sessions
+            .get(backend_session_id)
+            .cloned()
+            .expect("session must exist to swap writer")
+    };
+    let mut writer_guard = session.writer.lock().unwrap();
+    std::mem::replace(&mut *writer_guard, new_writer)
+}
+
+fn setup_session(runtime: &Runtime, token: &str, project_id: &str) -> (Value, String) {
+    let (prog, args) = shell_program_and_args();
+    let spawn = runtime
+        .handle(Request {
+            protocol: 1,
+            token: token.to_string(),
+            op: "pty.spawn".to_string(),
+            params: json!({
+                "projectId": project_id,
+                "program": prog,
+                "args": args,
+            }),
+        })
+        .unwrap();
+    let target = spawn["target"].clone();
+    let session_id = target["backendSessionId"].as_str().unwrap().to_string();
+    (target, session_id)
+}
+
+fn attach_blocked_writer(
+    runtime: &Runtime,
+    session_id: &str,
+) -> (
+    Box<dyn Write + Send>,
+    std::sync::mpsc::Receiver<()>,
+    std::sync::mpsc::SyncSender<()>,
+    Arc<std::sync::atomic::AtomicBool>,
+) {
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let orig_writer = swap_session_writer(
+        runtime,
+        session_id,
+        Box::new(ControlledBlockingWriter {
+            inner: Box::new(std::io::sink()),
+            started_tx,
+            release_rx: Arc::new(Mutex::new(release_rx)),
+            released: released.clone(),
+        }),
+    );
+    (orig_writer, started_rx, release_tx, released)
+}
+
+#[test]
+fn ssh_input_isolation_blocked_writer_does_not_stall_unrelated_session() {
+    let runtime_dir = tempfile::tempdir().unwrap();
+    let project_dir = tempfile::tempdir().unwrap();
+    let runtime = make_runtime(&runtime_dir, "tok-iso-unrel");
+    register_project(&runtime, "tok-iso-unrel", "p-iso", project_dir.path()).unwrap();
+
+    let (target_a, session_id_a) = setup_session(&runtime, "tok-iso-unrel", "p-iso");
+    let (target_b, _) = setup_session(&runtime, "tok-iso-unrel", "p-iso");
+
+    let (orig_writer_a, started_rx, release_tx, released) =
+        attach_blocked_writer(&runtime, &session_id_a);
+
+    std::thread::scope(|s| {
+        let mut release_guard = ReleaseOnDrop::new(release_tx, released);
+
+        let rt = &runtime;
+        let target_a_writer = target_a.clone();
+        let writer_thread = s.spawn(move || {
+            rt.handle(Request {
+                protocol: 1,
+                token: "tok-iso-unrel".to_string(),
+                op: "pty.write".to_string(),
+                params: json!({ "target": target_a_writer, "text": "blocked_input\n" }),
+            })
+        });
+
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("Session A writer must enter write()");
+
+        // Verify describe, read, and write on unrelated Session B complete without stalling
+        let (describe_tx, describe_rx) = std::sync::mpsc::sync_channel(1);
+        let target_b_desc = target_b.clone();
+        s.spawn(move || {
+            let res = rt.handle(Request {
+                protocol: 1,
+                token: "tok-iso-unrel".to_string(),
+                op: "pty.describe".to_string(),
+                params: json!({ "target": target_b_desc }),
+            });
+            let _ = describe_tx.send(res);
+        });
+        assert!(describe_rx
+            .recv_timeout(Duration::from_millis(300))
+            .expect("Unrelated Session B describe must not stall while Session A writer is blocked")
+            .is_ok());
+
+        let (read_b_tx, read_b_rx) = std::sync::mpsc::sync_channel(1);
+        let target_b_read = target_b.clone();
+        s.spawn(move || {
+            let res = rt.handle(Request {
+                protocol: 1,
+                token: "tok-iso-unrel".to_string(),
+                op: "pty.read".to_string(),
+                params: json!({ "target": target_b_read, "waitMs": 0 }),
+            });
+            let _ = read_b_tx.send(res);
+        });
+        assert!(read_b_rx
+            .recv_timeout(Duration::from_millis(300))
+            .expect("Unrelated Session B read must not stall while Session A writer is blocked")
+            .is_ok());
+
+        let (write_b_tx, write_b_rx) = std::sync::mpsc::sync_channel(1);
+        let target_b_write = target_b.clone();
+        s.spawn(move || {
+            let res = rt.handle(Request {
+                protocol: 1,
+                token: "tok-iso-unrel".to_string(),
+                op: "pty.write".to_string(),
+                params: json!({ "target": target_b_write, "text": "echo hello\n" }),
+            });
+            let _ = write_b_tx.send(res);
+        });
+        assert!(write_b_rx
+            .recv_timeout(Duration::from_millis(300))
+            .expect("Unrelated Session B write must not stall while Session A writer is blocked")
+            .is_ok());
+
+        release_guard.release();
+        assert!(writer_thread.join().unwrap().is_ok());
+    });
+
+    swap_session_writer(&runtime, &session_id_a, orig_writer_a);
+    let _ = runtime.handle(Request {
+        protocol: 1,
+        token: "tok-iso-unrel".to_string(),
+        op: "pty.stop".to_string(),
+        params: json!({ "target": target_a }),
+    });
+    let _ = runtime.handle(Request {
+        protocol: 1,
+        token: "tok-iso-unrel".to_string(),
+        op: "pty.stop".to_string(),
+        params: json!({ "target": target_b }),
+    });
+}
+
+#[test]
+fn ssh_input_isolation_blocked_writer_does_not_stall_same_session_describe_or_read() {
+    let runtime_dir = tempfile::tempdir().unwrap();
+    let project_dir = tempfile::tempdir().unwrap();
+    let runtime = make_runtime(&runtime_dir, "tok-iso-same");
+    register_project(&runtime, "tok-iso-same", "p-same", project_dir.path()).unwrap();
+
+    let (target_a, session_id_a) = setup_session(&runtime, "tok-iso-same", "p-same");
+    let (orig_writer_a, started_rx, release_tx, released) =
+        attach_blocked_writer(&runtime, &session_id_a);
+
+    std::thread::scope(|s| {
+        let mut release_guard = ReleaseOnDrop::new(release_tx, released);
+
+        let rt = &runtime;
+        let target_a_writer = target_a.clone();
+        let writer_thread = s.spawn(move || {
+            rt.handle(Request {
+                protocol: 1,
+                token: "tok-iso-same".to_string(),
+                op: "pty.write".to_string(),
+                params: json!({ "target": target_a_writer, "text": "blocked_input\n" }),
+            })
+        });
+
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("Session A writer must enter write()");
+
+        // Verify same-session describe and read complete without stalling
+        let (describe_tx, describe_rx) = std::sync::mpsc::sync_channel(1);
+        let target_a_desc = target_a.clone();
+        s.spawn(move || {
+            let res = rt.handle(Request {
+                protocol: 1,
+                token: "tok-iso-same".to_string(),
+                op: "pty.describe".to_string(),
+                params: json!({ "target": target_a_desc }),
+            });
+            let _ = describe_tx.send(res);
+        });
+        assert!(describe_rx
+            .recv_timeout(Duration::from_millis(300))
+            .expect("Same session describe must not stall while writer is blocked")
+            .is_ok());
+
+        let (read_tx, read_rx) = std::sync::mpsc::sync_channel(1);
+        let target_a_read = target_a.clone();
+        s.spawn(move || {
+            let res = rt.handle(Request {
+                protocol: 1,
+                token: "tok-iso-same".to_string(),
+                op: "pty.read".to_string(),
+                params: json!({ "target": target_a_read, "waitMs": 0 }),
+            });
+            let _ = read_tx.send(res);
+        });
+        assert!(read_rx
+            .recv_timeout(Duration::from_millis(300))
+            .expect("Same session read must not stall while writer is blocked")
+            .is_ok());
+
+        release_guard.release();
+        assert!(writer_thread.join().unwrap().is_ok());
+    });
+
+    swap_session_writer(&runtime, &session_id_a, orig_writer_a);
+    let _ = runtime.handle(Request {
+        protocol: 1,
+        token: "tok-iso-same".to_string(),
+        op: "pty.stop".to_string(),
+        params: json!({ "target": target_a }),
+    });
+}
+
+#[test]
+fn ssh_input_isolation_blocked_writer_does_not_stall_same_session_resize() {
+    let runtime_dir = tempfile::tempdir().unwrap();
+    let project_dir = tempfile::tempdir().unwrap();
+    let runtime = make_runtime(&runtime_dir, "tok-iso-resize");
+    register_project(&runtime, "tok-iso-resize", "p-resize", project_dir.path()).unwrap();
+
+    let (target_a, session_id_a) = setup_session(&runtime, "tok-iso-resize", "p-resize");
+    let (orig_writer_a, started_rx, release_tx, released) =
+        attach_blocked_writer(&runtime, &session_id_a);
+
+    std::thread::scope(|s| {
+        let mut release_guard = ReleaseOnDrop::new(release_tx, released);
+
+        let rt = &runtime;
+        let target_a_writer = target_a.clone();
+        let writer_thread = s.spawn(move || {
+            rt.handle(Request {
+                protocol: 1,
+                token: "tok-iso-resize".to_string(),
+                op: "pty.write".to_string(),
+                params: json!({ "target": target_a_writer, "text": "blocked_input\n" }),
+            })
+        });
+
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("Session A writer must enter write()");
+
+        // Verify same-session resize completes without stalling
+        let (resize_tx, resize_rx) = std::sync::mpsc::sync_channel(1);
+        let target_a_resize = target_a.clone();
+        s.spawn(move || {
+            let res = rt.handle(Request {
+                protocol: 1,
+                token: "tok-iso-resize".to_string(),
+                op: "pty.resize".to_string(),
+                params: json!({ "target": target_a_resize, "cols": 100, "rows": 30 }),
+            });
+            let _ = resize_tx.send(res);
+        });
+
+        let resize_res = resize_rx
+            .recv_timeout(Duration::from_millis(300))
+            .expect("Same session resize must not stall while writer is blocked");
+        assert!(resize_res.is_ok(), "resize on same session must succeed");
+        let resize_val = resize_res.unwrap();
+        assert_eq!(resize_val["cols"], 100);
+        assert_eq!(resize_val["rows"], 30);
+
+        release_guard.release();
+        assert!(writer_thread.join().unwrap().is_ok());
+    });
+
+    swap_session_writer(&runtime, &session_id_a, orig_writer_a);
+    let _ = runtime.handle(Request {
+        protocol: 1,
+        token: "tok-iso-resize".to_string(),
+        op: "pty.stop".to_string(),
+        params: json!({ "target": target_a }),
+    });
+}

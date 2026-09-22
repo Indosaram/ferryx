@@ -18,6 +18,9 @@ struct Fake {
     writes: AtomicUsize,
     stops: AtomicUsize,
     write_failure: parking_lot::Mutex<Option<BridgeError>>,
+    write_entered: parking_lot::Mutex<Option<Arc<tokio::sync::Notify>>>,
+    write_pause: parking_lot::Mutex<Option<Arc<tokio::sync::Notify>>>,
+    write_history: parking_lot::Mutex<Vec<Vec<u8>>>,
     resizes: AtomicUsize,
     last_resize: parking_lot::Mutex<Option<(u16, u16)>>,
 }
@@ -46,9 +49,19 @@ impl Transport for Fake {
                 .expect("test retains sender")
         })
     }
-    fn write<'a>(&'a self, _: &'a TargetRef, _: &'a [u8]) -> Rpc<'a, ()> {
+    fn write<'a>(&'a self, _: &'a TargetRef, bytes: &'a [u8]) -> Rpc<'a, ()> {
+        let entered = self.write_entered.lock().take();
+        let pause = self.write_pause.lock().take();
+        let payload = bytes.to_vec();
         Box::pin(async move {
             self.writes.fetch_add(1, Ordering::SeqCst);
+            self.write_history.lock().push(payload);
+            if let Some(entered) = entered {
+                entered.notify_one();
+            }
+            if let Some(pause) = pause {
+                pause.notified().await;
+            }
             if let Some(error) = self.write_failure.lock().take() {
                 return Err(error);
             }
@@ -112,6 +125,9 @@ fn fixture() -> (
         writes: AtomicUsize::new(0),
         stops: AtomicUsize::new(0),
         write_failure: parking_lot::Mutex::new(None),
+        write_entered: parking_lot::Mutex::new(None),
+        write_pause: parking_lot::Mutex::new(None),
+        write_history: parking_lot::Mutex::new(Vec::new()),
         resizes: AtomicUsize::new(0),
         last_resize: parking_lot::Mutex::new(None),
     });
@@ -171,15 +187,25 @@ async fn ssh_pane_resize_during_outage_is_applied_after_reconnect() {
     let connected = state(&mut rx, |d| d.state == RemoteConnectionState::Connected).await;
     // Force a transport outage; the redial parks on the delay clock.
     tx.send(Err(BridgeError::ConnectionClosed)).unwrap();
-    state(&mut rx, |d| {
+    let reconnecting = state(&mut rx, |d| {
         d.state == RemoteConnectionState::Reconnecting && d.generation > connected.generation
     })
     .await;
-    // The pane's resize arrives while the remote is dialing: it must be remembered,
-    // not dropped, so the remote PTY never stays at spawn defaults.
+    // A resize still carrying the pre-outage generation is stale: admission must
+    // reject it without remembering its geometry (covered by the dedicated stale
+    // regression below). The pane then re-issues at the live generation while the
+    // remote is dialing: that same-generation Disconnected outage must be
+    // remembered, not dropped, so the remote PTY never stays at spawn defaults.
     assert!(runtime
         .resize("local-stable", connected.generation, 132, 43)
         .is_err());
+    assert!(matches!(
+        runtime
+            .resize("local-stable", reconnecting.generation, 132, 43)
+            .err()
+            .map(|failure| failure.kind),
+        Some(RemoteFailureKind::Disconnected)
+    ));
     dialer.clock.add_permits(1);
     state(&mut rx, |d| {
         d.state == RemoteConnectionState::Connected && d.generation > connected.generation
@@ -191,6 +217,41 @@ async fn ssh_pane_resize_during_outage_is_applied_after_reconnect() {
     .await;
     assert_eq!(*dialer.fake.last_resize.lock(), Some((132, 43)));
     assert_eq!(detail.descriptor.target, descriptor().target);
+}
+
+#[tokio::test]
+async fn ssh_pane_sync_admission_stale_generation_resize_is_not_replayed_after_reconnect() {
+    let (runtime, _, dialer, tx) = fixture();
+    runtime.restore(descriptor()).unwrap();
+    let mut rx = runtime.subscribe("local-stable").unwrap();
+    let connected = state(&mut rx, |d| d.state == RemoteConnectionState::Connected).await;
+    // Force a transport outage; the redial parks on the delay clock.
+    tx.send(Err(BridgeError::ConnectionClosed)).unwrap();
+    state(&mut rx, |d| {
+        d.state == RemoteConnectionState::Reconnecting && d.generation > connected.generation
+    })
+    .await;
+    // A resize admitted on the synchronous path with a pre-outage generation was
+    // rejected as StaleGeneration: its geometry must never seed pending_size,
+    // otherwise the reconnect replays dimensions the newer generation never chose
+    // (the queue-worker dispatch path already enforces the same rule).
+    assert!(runtime
+        .resize("local-stable", connected.generation, 150, 50)
+        .is_err());
+    dialer.clock.add_permits(1);
+    let reconnected = state(&mut rx, |d| {
+        d.state == RemoteConnectionState::Connected && d.generation > connected.generation
+    })
+    .await;
+    assert_eq!(
+        *dialer.fake.last_resize.lock(),
+        Some((80, 24)),
+        "stale-generation geometry must not be replayed onto the new connection"
+    );
+    assert_eq!(
+        (reconnected.descriptor.cols, reconnected.descriptor.rows),
+        (80, 24)
+    );
 }
 
 #[tokio::test]
@@ -365,6 +426,10 @@ async fn ssh_process_survival_same_target_replay_and_close() {
             .bytes,
         b"record-1;"
     );
+    // Hold the dispatch gate from before admission so the queued write cannot race
+    // the outage: under eager FIFO dispatch the worker must never send this op, and
+    // the gate makes that ordering deterministic rather than poll-order dependent.
+    let gate = runtime.hold_dispatch_gate_for_test("local-stable").unwrap();
     let pending = runtime
         .write(
             "local-stable",
@@ -380,6 +445,7 @@ async fn ssh_process_survival_same_target_replay_and_close() {
     assert!(runtime
         .write("local-stable", connected.generation, b"outage".to_vec())
         .is_err());
+    drop(gate);
     assert_eq!(
         pending.await.unwrap_err().kind,
         RemoteFailureKind::StaleGeneration
@@ -542,4 +608,274 @@ async fn ssh_reconnect_safety_retry_budget_resets_after_successful_read() {
         assert_eq!(detail.attempts, 0);
     }
     assert_eq!(dialer.calls.load(Ordering::SeqCst), 7);
+}
+
+#[tokio::test]
+async fn ssh_remote_input_concurrent_writes_are_ordered_without_busy_drop() {
+    let (runtime, _, dialer, _tx) = fixture();
+    runtime.restore(descriptor()).unwrap();
+    let mut rx = runtime.subscribe("local-stable").unwrap();
+    let connected = state(&mut rx, |d| d.state == RemoteConnectionState::Connected).await;
+
+    let entered = Arc::new(tokio::sync::Notify::new());
+    *dialer.fake.write_entered.lock() = Some(entered.clone());
+    let pause = Arc::new(tokio::sync::Notify::new());
+    *dialer.fake.write_pause.lock() = Some(pause.clone());
+
+    let op1 = runtime
+        .write("local-stable", connected.generation, b"first".to_vec())
+        .expect("op1 admitted");
+
+    let op1_task = tokio::spawn(op1);
+
+    entered.notified().await;
+
+    // Under current remote.rs, op2 fails at admission because e.control.try_lock_owned() fails with Busy!
+    let op2 = runtime
+        .write("local-stable", connected.generation, b"second".to_vec())
+        .expect("op2 must be admitted into bounded queue without Busy error");
+
+    let op2_task = tokio::spawn(op2);
+
+    pause.notify_one();
+
+    let (res1, res2) = tokio::join!(op1_task, op2_task);
+    res1.unwrap().unwrap();
+    res2.unwrap().unwrap();
+
+    assert_eq!(dialer.fake.writes.load(Ordering::SeqCst), 2);
+    let history = dialer.fake.write_history.lock().clone();
+    assert_eq!(history, vec![b"first".to_vec(), b"second".to_vec()]);
+}
+
+#[tokio::test]
+async fn ssh_remote_input_queued_operation_rejected_on_generation_bump() {
+    let (runtime, _, dialer, tx) = fixture();
+    runtime.restore(descriptor()).unwrap();
+    let mut rx = runtime.subscribe("local-stable").unwrap();
+    let connected = state(&mut rx, |d| d.state == RemoteConnectionState::Connected).await;
+
+    let entered = Arc::new(tokio::sync::Notify::new());
+    *dialer.fake.write_entered.lock() = Some(entered.clone());
+    let pause = Arc::new(tokio::sync::Notify::new());
+    *dialer.fake.write_pause.lock() = Some(pause.clone());
+
+    let op1 = runtime
+        .write("local-stable", connected.generation, b"first".to_vec())
+        .expect("op1 admitted");
+    let op1_task = tokio::spawn(op1);
+
+    entered.notified().await;
+
+    let op2 = runtime
+        .write(
+            "local-stable",
+            connected.generation,
+            b"stale-queued".to_vec(),
+        )
+        .expect("op2 admitted into queue");
+    let op2_task = tokio::spawn(op2);
+
+    // Controlled failure on op1 to trigger reconnect without deadlocking on e.control
+    *dialer.fake.write_failure.lock() = Some(BridgeError::ConnectionClosed);
+    tx.send(Err(BridgeError::ConnectionClosed)).unwrap();
+
+    // Release op1 so it finishes with failure and releases e.control
+    pause.notify_one();
+    let err1 = op1_task.await.unwrap().unwrap_err();
+    assert_eq!(err1.kind, RemoteFailureKind::Transport);
+
+    // Now run() acquires e.control cleanly and advances generation
+    state(&mut rx, |d| {
+        d.state == RemoteConnectionState::Reconnecting && d.generation > connected.generation
+    })
+    .await;
+
+    // op2 was queued. It must safely not send to bridge, failing with Disconnected, StaleGeneration, or Transport
+    let op2_res = op2_task.await.unwrap();
+    let err2 = op2_res.expect_err("queued operation must fail safely under failure/bump");
+    assert!(
+        matches!(
+            err2.kind,
+            RemoteFailureKind::StaleGeneration
+                | RemoteFailureKind::Disconnected
+                | RemoteFailureKind::Transport
+        ),
+        "unexpected error kind: {:?}",
+        err2.kind
+    );
+
+    assert_eq!(dialer.fake.writes.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn ssh_remote_input_cancelled_middle_operation_skipped_without_bypass_or_stall() {
+    let (runtime, _, dialer, _tx) = fixture();
+    runtime.restore(descriptor()).unwrap();
+    let mut rx = runtime.subscribe("local-stable").unwrap();
+    let connected = state(&mut rx, |d| d.state == RemoteConnectionState::Connected).await;
+
+    let entered = Arc::new(tokio::sync::Notify::new());
+    *dialer.fake.write_entered.lock() = Some(entered.clone());
+    let pause = Arc::new(tokio::sync::Notify::new());
+    *dialer.fake.write_pause.lock() = Some(pause.clone());
+
+    let op1 = runtime
+        .write("local-stable", connected.generation, b"first".to_vec())
+        .expect("op1 admitted");
+    let op1_task = tokio::spawn(op1);
+
+    entered.notified().await;
+
+    let op2 = runtime
+        .write(
+            "local-stable",
+            connected.generation,
+            b"cancelled-middle".to_vec(),
+        )
+        .expect("op2 admitted");
+    let op2_task = tokio::spawn(op2);
+
+    let op3 = runtime
+        .write("local-stable", connected.generation, b"third".to_vec())
+        .expect("op3 admitted");
+    let op3_task = tokio::spawn(op3);
+
+    // Cancel op2 by aborting its task (which drops the oneshot receiver)
+    op2_task.abort();
+    let _ = op2_task.await;
+
+    // Release op1 so queue proceeds
+    pause.notify_one();
+
+    op1_task.await.unwrap().unwrap();
+    op3_task.await.unwrap().unwrap();
+
+    assert_eq!(dialer.fake.writes.load(Ordering::SeqCst), 2);
+    let history = dialer.fake.write_history.lock().clone();
+    assert_eq!(history, vec![b"first".to_vec(), b"third".to_vec()]);
+}
+
+#[tokio::test]
+async fn ssh_remote_input_bounded_queue_rejects_overflow() {
+    let (runtime, _, dialer, _tx) = fixture();
+    runtime.restore(descriptor()).unwrap();
+    let mut rx = runtime.subscribe("local-stable").unwrap();
+    let connected = state(&mut rx, |d| d.state == RemoteConnectionState::Connected).await;
+
+    let entered = Arc::new(tokio::sync::Notify::new());
+    *dialer.fake.write_entered.lock() = Some(entered.clone());
+    let pause = Arc::new(tokio::sync::Notify::new());
+    *dialer.fake.write_pause.lock() = Some(pause.clone());
+
+    let op1 = runtime
+        .write("local-stable", connected.generation, b"in-flight".to_vec())
+        .unwrap();
+    let op1_task = tokio::spawn(op1);
+
+    entered.notified().await;
+
+    const EXPECTED_QUEUE_CAPACITY: usize = 16;
+    let mut queued = Vec::new();
+    for i in 0..EXPECTED_QUEUE_CAPACITY {
+        let op = runtime
+            .write(
+                "local-stable",
+                connected.generation,
+                format!("q-{i}").into_bytes(),
+            )
+            .unwrap_or_else(|e| panic!("queued request {i} failed unexpectedly: {e:?}"));
+        queued.push(tokio::spawn(op));
+    }
+    assert_eq!(queued.len(), EXPECTED_QUEUE_CAPACITY);
+
+    // The (EXPECTED_QUEUE_CAPACITY + 1)th request must be rejected with Busy
+    let overflow_err = match runtime.write(
+        "local-stable",
+        connected.generation,
+        b"overflow-payload".to_vec(),
+    ) {
+        Ok(_) => panic!("queue bound must reject excess with Busy, but write was accepted"),
+        Err(e) => e,
+    };
+    assert_eq!(overflow_err.kind, RemoteFailureKind::Busy);
+
+    pause.notify_one();
+    op1_task.await.unwrap().unwrap();
+    for task in queued {
+        task.await.unwrap().unwrap();
+    }
+    assert_eq!(
+        dialer.fake.writes.load(Ordering::SeqCst),
+        1 + EXPECTED_QUEUE_CAPACITY
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn ssh_remote_input_expired_queue_never_dispatches_delayed_keys() {
+    let (runtime, _, dialer, _tx) = fixture();
+    runtime.restore(descriptor()).unwrap();
+    let mut rx = runtime.subscribe("local-stable").unwrap();
+    let connected = state(&mut rx, |d| d.state == RemoteConnectionState::Connected).await;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    *dialer.fake.write_entered.lock() = Some(entered.clone());
+    *dialer.fake.write_pause.lock() = Some(release.clone());
+    let first = runtime
+        .write("local-stable", connected.generation, b"first".to_vec())
+        .unwrap();
+    let first = tokio::spawn(first);
+    tokio::time::timeout(Duration::from_secs(1), entered.notified())
+        .await
+        .unwrap();
+    let late = runtime
+        .write("local-stable", connected.generation, b"too-late".to_vec())
+        .unwrap();
+    tokio::time::advance(Duration::from_secs(6)).await;
+    release.notify_one();
+    first.await.unwrap().unwrap();
+    assert!(late.await.is_err(), "expired input must not be dispatched");
+    assert_eq!(*dialer.fake.write_history.lock(), vec![b"first".to_vec()]);
+}
+
+#[tokio::test]
+async fn ssh_remote_input_stale_generation_resize_is_not_replayed_onto_new_connection() {
+    let (runtime, _, dialer, tx) = fixture();
+    runtime.restore(descriptor()).unwrap();
+    let mut rx = runtime.subscribe("local-stable").unwrap();
+    let connected = state(&mut rx, |d| d.state == RemoteConnectionState::Connected).await;
+
+    let gate = runtime.hold_dispatch_gate_for_test("local-stable").unwrap();
+    let resize = runtime
+        .resize("local-stable", connected.generation, 100, 30)
+        .unwrap();
+    tx.send(Err(BridgeError::ConnectionClosed)).unwrap();
+    state(&mut rx, |d| {
+        d.state == RemoteConnectionState::Reconnecting && d.generation > connected.generation
+    })
+    .await;
+    drop(gate);
+    assert!(
+        resize.await.is_err(),
+        "stale-generation resize must be rejected"
+    );
+
+    runtime.retry("local-stable").unwrap();
+    dialer.clock.add_permits(1);
+    let reconnected = state(&mut rx, |d| {
+        d.state == RemoteConnectionState::Connected && d.generation > connected.generation
+    })
+    .await;
+    assert_eq!(reconnected.generation, connected.generation + 1);
+    let last = dialer
+        .fake
+        .last_resize
+        .lock()
+        .clone()
+        .expect("dial must apply descriptor geometry");
+    assert_eq!(
+        last,
+        (80, 24),
+        "stale-generation geometry must not be replayed onto the new connection"
+    );
 }

@@ -16,6 +16,24 @@ pub struct HelperLocation {
     pub root: String,
 }
 
+/// Stdout marker printed by the upload script when installation succeeded.
+pub const INSTALL_READY_MARKER: &str = "FERRYX_INSTALL_OK";
+
+/// Stdout marker prefix printed when helper binary replacement was deferred.
+pub const INSTALL_DEFERRED_MARKER: &str = "FERRYX_INSTALL_DEFERRED:";
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeferredPayload {
+    reason: String,
+    #[serde(default)]
+    pid: Option<u32>,
+    #[serde(default)]
+    running_version: Option<String>,
+    #[serde(default)]
+    installed_version: Option<String>,
+}
+
 /// Honest Terminal Helper readiness from a bounded, non-installing remote check.
 ///
 /// `Installed` means the helper binary was observed present (and executable on
@@ -81,6 +99,82 @@ pub fn default_location(
     env.platform.validate_path(&executable)?;
     env.platform.validate_path(&root)?;
     Ok(HelperLocation { executable, root })
+}
+
+pub fn parse_install_output(stdout: &[u8], location: &HelperLocation) -> Result<(), IpcError> {
+    let text = std::str::from_utf8(stdout).map_err(|_| {
+        IpcError::new(
+            IpcErrorCode::IoError,
+            "Remote helper installation output is not valid UTF-8",
+        )
+    })?;
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix(INSTALL_DEFERRED_MARKER) {
+            let rest = rest.trim();
+            let payload: DeferredPayload = serde_json::from_str(rest).map_err(|e| {
+                IpcError::new(
+                    IpcErrorCode::ParseError,
+                    format!("Malformed helper deferral payload: {e}"),
+                )
+                .with_details(serde_json::json!({
+                    "stage": "install",
+                    "output": trimmed,
+                }))
+            })?;
+
+            if payload.reason != "live_daemon" {
+                return Err(IpcError::new(
+                    IpcErrorCode::InternalError,
+                    format!("Unrecognized helper deferral reason: {}", payload.reason),
+                )
+                .with_details(serde_json::json!({
+                    "stage": "install",
+                    "reason": payload.reason,
+                    "output": trimmed,
+                })));
+            }
+
+            let pid_str = payload
+                .pid
+                .map(|p| format!(" (PID {p})"))
+                .unwrap_or_default();
+            let running = payload.running_version.as_deref().unwrap_or("unknown");
+            let installed = payload.installed_version.as_deref().unwrap_or("unknown");
+
+            return Err(IpcError::new(
+                IpcErrorCode::Unsupported,
+                format!(
+                    "Remote helper upgrade deferred: helper daemon is already running{pid_str} (running version: {running}, installed version: {installed}). Existing sessions remain active and usable without interruption.",
+                ),
+            )
+            .with_details(serde_json::json!({
+                "stage": "helper_upgrade_deferred",
+                "reason": "live_daemon",
+                "pid": payload.pid,
+                "runningVersion": payload.running_version,
+                "installedVersion": payload.installed_version,
+                "executable": location.executable,
+                "root": location.root,
+            })));
+        }
+        if trimmed == INSTALL_READY_MARKER {
+            return Ok(());
+        }
+    }
+
+    Err(IpcError::new(
+        IpcErrorCode::IoError,
+        "Remote helper install script did not produce a valid installation marker",
+    )
+    .with_details(serde_json::json!({
+        "stage": "install",
+        "output": text.trim(),
+    })))
 }
 
 pub async fn install(
@@ -151,7 +245,7 @@ pub async fn install(
     };
 
     let plan = direct::ssh_plan(host, cmd, false)?;
-    direct::bounded_output_with_stdin(&plan, Duration::from_secs(60), input_bytes)
+    let output = direct::bounded_output_with_stdin(&plan, Duration::from_secs(60), input_bytes)
         .await
         .map_err(|mut err| {
             if let Some(details) = err.details.as_mut() {
@@ -161,7 +255,7 @@ pub async fn install(
             err
         })?;
 
-    Ok(())
+    parse_install_output(&output, location)
 }
 
 pub(crate) fn parse_ready_output(bytes: &[u8]) -> Result<(), IpcError> {
@@ -524,13 +618,19 @@ pub fn build_posix_upload_script(location: &HelperLocation, binary_bytes: &[u8])
 {}\
 FERRYX_HELPER_PAYLOAD_EOF\n\
          chmod 700 \"$tmp\" && \
+         daemon_pid=\"\" && \
          if [ -f \"$root/endpoint.json\" ]; then \
              pid=$(tr -d ' \\t\\r\\n' < \"$root/endpoint.json\" 2>/dev/null | sed -n 's/.*\"pid\":\\([0-9]\\{{1,\\}}\\).*/\\1/p'); \
              if [ -n \"$pid\" ] && [ \"$pid\" -gt 0 ] 2>/dev/null; then \
-                 if ps -p \"$pid\" -o comm= 2>/dev/null | grep -Eq '(^|/)ferryx-remote-h(elper)?$'; then \
-                     kill \"$pid\" 2>/dev/null || true; sleep 0.2; \
+                 if kill -0 \"$pid\" 2>/dev/null && ps -p \"$pid\" -o comm= 2>/dev/null | grep -Eq '(^|/)ferryx-remote-h(elper)?$'; then \
+                     daemon_pid=\"$pid\"; \
                  fi; \
              fi; \
+         fi; \
+         if [ -n \"$daemon_pid\" ]; then \
+             rm -f \"$tmp\"; \
+             printf 'FERRYX_INSTALL_DEFERRED:{{\"reason\":\"live_daemon\",\"pid\":%d}}\\n' \"$daemon_pid\"; \
+             exit 0; \
          fi; \
          mv -f \"$tmp\" \"$dest\" && printf 'FERRYX_INSTALL_OK\\n'",
         direct::quote_posix(&location.executable),
@@ -557,16 +657,23 @@ pub fn build_windows_upload_script(location: &HelperLocation, binary_bytes: &[u8
              $aclRes = & icacls $tmp /inheritance:r /grant:r \"$($env:USERNAME):(F)\" 2>&1; \
              if ($LASTEXITCODE -ne 0) {{ throw \"Failed to set private ACL on helper binary: $aclRes\" }}; \
              $epPath = Join-Path $root 'endpoint.json'; \
+             $daemonProc = $null; \
              if ([System.IO.File]::Exists($epPath)) {{ \
                  try {{ \
                      $ep = Get-Content -Raw $epPath | ConvertFrom-Json; \
                      if ($ep.pid) {{ \
-                         $helperProc = Get-Process -Id $ep.pid -ErrorAction SilentlyContinue; \
-                         if ($helperProc -and $helperProc.ProcessName -eq 'ferryx-remote-helper') {{ \
-                             taskkill /PID $ep.pid /F /T 2>&1 | Out-Null; Start-Sleep -Milliseconds 200; \
+                         $proc = Get-Process -Id $ep.pid -ErrorAction SilentlyContinue; \
+                         if ($proc -and $proc.ProcessName -eq 'ferryx-remote-helper') {{ \
+                             $daemonProc = $proc; \
                          }} \
                      }} \
                  }} catch {{}} \
+             }}; \
+             if ($daemonProc) {{ \
+                 if ([System.IO.File]::Exists($tmp)) {{ try {{ [System.IO.File]::Delete($tmp); }} catch {{}} }}; \
+                 $json = @{{ reason = 'live_daemon'; pid = [int]$daemonProc.Id }} | ConvertTo-Json -Compress; \
+                 [Console]::WriteLine(\"FERRYX_INSTALL_DEFERRED:$json\"); \
+                 exit 0; \
              }}; \
              $old = \"$dest.old\"; \
              if ([System.IO.File]::Exists($old)) {{ [System.IO.File]::Delete($old); }}; \

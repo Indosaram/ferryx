@@ -14,6 +14,7 @@ use crate::terminal::TerminalSignal;
 use crate::worktree::WorktreeIdentity;
 use bytes::Bytes;
 use serde_json::json;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -295,6 +296,15 @@ impl ActiveConnection {
         &mut self,
         req: &DaemonRequest,
     ) -> Result<DaemonResponse, RequestAttemptError> {
+        self.request_with_timeout(req, std::time::Duration::from_secs(15))
+            .await
+    }
+
+    async fn request_with_timeout(
+        &mut self,
+        req: &DaemonRequest,
+        timeout: std::time::Duration,
+    ) -> Result<DaemonResponse, RequestAttemptError> {
         let mut req_json = serde_json::to_string(req).map_err(|e| {
             RequestAttemptError::not_delivered(IpcError::new(
                 IpcErrorCode::ParseError,
@@ -321,16 +331,12 @@ impl ActiveConnection {
         // forever: without a response timeout, one stalled handler on the daemon
         // silently deadlocks every subsequent terminal request in this process.
         let mut line = String::new();
-        let read_result = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
-            self.reader.read_line(&mut line),
-        )
-        .await;
+        let read_result = tokio::time::timeout(timeout, self.reader.read_line(&mut line)).await;
         let bytes_read = match read_result {
             Err(_) => {
                 return Err(RequestAttemptError::ambiguous(IpcError::new(
                     IpcErrorCode::IoError,
-                    "Timed out waiting for daemon response (15s)",
+                    format!("Timed out waiting for daemon response ({timeout:?})"),
                 )))
             }
             Ok(result) => result.map_err(|e| {
@@ -441,14 +447,27 @@ pub(crate) fn parse_attach_error_response(
     }
 }
 
+struct ClientQueuePermits {
+    allocated_entries: usize,
+    allocated_bytes: usize,
+}
+
+const CLIENT_MAX_PENDING_OPERATIONS: usize = 17;
+const CLIENT_MAX_PENDING_BYTES: usize = 256 * 1024;
+
+struct RemoteSessionSlot {
+    connection: Mutex<Option<ActiveConnection>>,
+    permits: parking_lot::Mutex<ClientQueuePermits>,
+    active_refs: std::sync::atomic::AtomicUsize,
+    closed: std::sync::atomic::AtomicBool,
+}
+
 #[derive(Clone)]
 pub struct DaemonClient {
     socket_path: PathBuf,
     connection: Arc<Mutex<Option<ActiveConnection>>>,
-    /// Dedicated control connection for interactive per-session requests (keystroke
-    /// writes, resizes). A slow Spawn holding the shared connection mutex must never
-    /// head-of-line block keystrokes queued behind it (audit H7).
     interactive_connection: Arc<Mutex<Option<ActiveConnection>>>,
+    remote_connections: Arc<parking_lot::Mutex<HashMap<String, Arc<RemoteSessionSlot>>>>,
     epoch: Arc<parking_lot::RwLock<Option<u64>>>,
     upgrade_requested: Arc<AtomicBool>,
     spawn_lock: Arc<Mutex<()>>,
@@ -466,6 +485,7 @@ impl DaemonClient {
             socket_path: get_socket_path(),
             connection: Arc::new(Mutex::new(None)),
             interactive_connection: Arc::new(Mutex::new(None)),
+            remote_connections: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             epoch: Arc::new(parking_lot::RwLock::new(None)),
             upgrade_requested: Arc::new(AtomicBool::new(false)),
             spawn_lock: Arc::new(Mutex::new(())),
@@ -477,6 +497,7 @@ impl DaemonClient {
             socket_path,
             connection: Arc::new(Mutex::new(None)),
             interactive_connection: Arc::new(Mutex::new(None)),
+            remote_connections: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             epoch: Arc::new(parking_lot::RwLock::new(None)),
             upgrade_requested: Arc::new(AtomicBool::new(false)),
             spawn_lock: Arc::new(Mutex::new(())),
@@ -541,6 +562,11 @@ impl DaemonClient {
             + Self::PAIRED_HANDSHAKE_MARGIN_SECS,
     );
     pub const PAIRED_DEFAULT_OUTER_TIMEOUT: Duration = Duration::from_secs(45);
+    pub const REMOTE_CONTROL_OUTER_TIMEOUT: Duration = Duration::from_secs(
+        crate::ssh::bridge::DEFAULT_RPC_TIMEOUT.as_secs() * 2
+            + crate::terminal::remote::INPUT_QUEUE_TIMEOUT.as_secs()
+            + 5,
+    );
 
     pub fn outer_deadline_for_request(request: &DaemonRequest) -> Duration {
         match request {
@@ -552,6 +578,9 @@ impl DaemonClient {
                 }
             }
             DaemonRequest::PairedTerminalReattach { .. } => Self::PAIRED_REATTACH_OUTER_TIMEOUT,
+            DaemonRequest::RemoteWrite { .. } | DaemonRequest::RemoteResize { .. } => {
+                Self::REMOTE_CONTROL_OUTER_TIMEOUT
+            }
             _ => Self::PAIRED_DEFAULT_OUTER_TIMEOUT,
         }
     }
@@ -845,6 +874,7 @@ impl DaemonClient {
             socket_path: self.socket_path.clone(),
             connection: Arc::new(Mutex::new(None)),
             interactive_connection: Arc::new(Mutex::new(None)),
+            remote_connections: Arc::clone(&self.remote_connections),
             epoch: Arc::new(parking_lot::RwLock::new(None)),
             upgrade_requested: Arc::clone(&self.upgrade_requested),
             spawn_lock: Arc::new(Mutex::new(())),
@@ -1152,30 +1182,130 @@ impl DaemonClient {
     /// Interactive requests (keystroke writes, resizes) use a dedicated connection so
     /// a long-running request on the shared connection (e.g. a Spawn holding it for
     /// blocking canonicalize + PTY startup) cannot stall queued keystrokes.
+    fn remote_connection_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Arc<RemoteSessionSlot>, IpcError> {
+        let mut map = self.remote_connections.lock();
+        if let Some(slot) = map.get(session_id) {
+            if slot.closed.load(Ordering::SeqCst) {
+                return Err(IpcError::new(
+                    IpcErrorCode::SessionNotFound,
+                    format!("Remote session {session_id} is closed"),
+                ));
+            }
+            slot.active_refs.fetch_add(1, Ordering::SeqCst);
+            return Ok(Arc::clone(slot));
+        }
+        let slot = Arc::new(RemoteSessionSlot {
+            connection: Mutex::new(None),
+            permits: parking_lot::Mutex::new(ClientQueuePermits {
+                allocated_entries: 0,
+                allocated_bytes: 0,
+            }),
+            active_refs: std::sync::atomic::AtomicUsize::new(1),
+            closed: std::sync::atomic::AtomicBool::new(false),
+        });
+        map.insert(session_id.to_string(), Arc::clone(&slot));
+        Ok(slot)
+    }
+
+    pub fn remove_remote_connection_for_session(&self, session_id: &str) {
+        let mut map = self.remote_connections.lock();
+        if let Some(slot) = map.get(session_id) {
+            slot.closed.store(true, Ordering::SeqCst);
+            if slot.active_refs.load(Ordering::SeqCst) == 0 {
+                map.remove(session_id);
+            }
+        }
+    }
+
     async fn send_interactive_request(
         &self,
         req: DaemonRequest,
     ) -> Result<DaemonResponse, IpcError> {
-        if matches!(
-            req,
-            DaemonRequest::RemoteWrite { .. } | DaemonRequest::RemoteResize { .. }
-        ) {
-            // Remote control must never wait in the local interactive queue or
-            // retry ambiguous delivery. The request retains the input generation.
-            let mut slot = self.interactive_connection.try_lock().map_err(|_| {
-                IpcError::internal("Remote control is busy; input was not queued")
-                    .with_details(serde_json::json!({"kind":"busy", "inputWritten":false}))
-            })?;
-            // Take the connection out of the pool while awaiting the reply: if this
-            // future is cancelled mid-request, `active` is dropped, cleanly closing
-            // the socket instead of leaving a half-written request pooled with its
-            // unread response to corrupt the next request's framing.
+        if let DaemonRequest::RemoteWrite { ref session_id, .. }
+        | DaemonRequest::RemoteResize { ref session_id, .. } = req
+        {
+            let session_slot = self.remote_connection_for_session(session_id)?;
+
+            struct ActiveRefGuard<'a> {
+                client: &'a DaemonClient,
+                session_id: String,
+                slot: Arc<RemoteSessionSlot>,
+            }
+            impl<'a> Drop for ActiveRefGuard<'a> {
+                fn drop(&mut self) {
+                    let prev = self.slot.active_refs.fetch_sub(1, Ordering::SeqCst);
+                    if prev == 1 && self.slot.closed.load(Ordering::SeqCst) {
+                        let mut map = self.client.remote_connections.lock();
+                        if let Some(cur) = map.get(&self.session_id) {
+                            if Arc::ptr_eq(cur, &self.slot) {
+                                map.remove(&self.session_id);
+                            }
+                        }
+                    }
+                }
+            }
+            let _ref_guard = ActiveRefGuard {
+                client: self,
+                session_id: session_id.clone(),
+                slot: Arc::clone(&session_slot),
+            };
+
+            let req_bytes = match req {
+                DaemonRequest::RemoteWrite { ref data, .. } => data.len(),
+                _ => 32,
+            };
+
+            {
+                let mut permits = session_slot.permits.lock();
+                if permits.allocated_entries >= CLIENT_MAX_PENDING_OPERATIONS
+                    || permits.allocated_bytes + req_bytes > CLIENT_MAX_PENDING_BYTES
+                {
+                    return Err(IpcError::internal(
+                        "Remote control queue is full; input was not queued",
+                    )
+                    .with_details(serde_json::json!({
+                        "kind": "busy",
+                        "inputWritten": false,
+                    })));
+                }
+                permits.allocated_entries += 1;
+                permits.allocated_bytes += req_bytes;
+            }
+
+            struct PermitGuard {
+                slot: Arc<RemoteSessionSlot>,
+                bytes: usize,
+            }
+            impl Drop for PermitGuard {
+                fn drop(&mut self) {
+                    let mut p = self.slot.permits.lock();
+                    p.allocated_entries = p.allocated_entries.saturating_sub(1);
+                    p.allocated_bytes = p.allocated_bytes.saturating_sub(self.bytes);
+                }
+            }
+            let _permit_guard = PermitGuard {
+                slot: Arc::clone(&session_slot),
+                bytes: req_bytes,
+            };
+
+            let mut slot = session_slot.connection.lock().await;
+            if session_slot.closed.load(Ordering::SeqCst) {
+                return Err(IpcError::new(
+                    IpcErrorCode::SessionNotFound,
+                    "Remote session is closed",
+                ));
+            }
+
             let mut conn = slot.take();
             if conn.is_none() {
                 conn = Some(self.connect_and_handshake().await?);
             }
             let mut active = conn.expect("connected");
-            let res = active.request(&req).await;
+            let timeout = Self::REMOTE_CONTROL_OUTER_TIMEOUT;
+            let res = active.request_with_timeout(&req, timeout).await;
             return match res {
                 Ok(reply) => {
                     *slot = Some(active);
@@ -2164,6 +2294,8 @@ impl DaemonClient {
             }
         }
 
+        self.remove_remote_connection_for_session(session_id);
+
         let resp = self
             .send_request(DaemonRequest::Close {
                 session_id: session_id.to_string(),
@@ -2205,6 +2337,7 @@ impl DaemonClient {
     }
 
     pub async fn detach_terminal(&self, session_id: &str) -> Result<(), IpcError> {
+        self.remove_remote_connection_for_session(session_id);
         if !session_id.starts_with("daemon-session:") {
             return Err(IpcError::new(
                 IpcErrorCode::InvalidArgument,
@@ -2520,6 +2653,90 @@ mod tests {
     use tokio::net::UnixListener;
     use tokio::sync::oneshot;
 
+    #[tokio::test]
+    async fn remote_input_socket_sessions_do_not_block_each_other() {
+        let directory = tempdir().unwrap();
+        let socket = directory.path().join("isolated-input.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut entered = Some(entered_tx);
+            let mut release = Some(release_rx);
+            let mut peers = tokio::task::JoinSet::new();
+            for index in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let entered = if index == 0 { entered.take() } else { None };
+                let release = if index == 0 { release.take() } else { None };
+                peers.spawn(async move {
+                    let (read, mut write) = stream.into_split();
+                    let mut reader = BufReader::new(read);
+                    let mut line = String::new();
+                    reader.read_line(&mut line).await.unwrap();
+                    let handshake = DaemonResponse::HandshakeOk {
+                        version: DAEMON_PROTOCOL_VERSION,
+                        pid: std::process::id(),
+                        epoch: 1,
+                        binary_path: None,
+                        binary_mtime_ms: None,
+                        daemon_version: None,
+                    };
+                    write
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&handshake).unwrap()).as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    line.clear();
+                    reader.read_line(&mut line).await.unwrap();
+                    let request: DaemonRequest = serde_json::from_str(&line).unwrap();
+                    assert!(matches!(request, DaemonRequest::RemoteWrite { .. }));
+                    if let Some(entered) = entered {
+                        entered.send(()).unwrap();
+                    }
+                    if let Some(release) = release {
+                        release.await.unwrap();
+                    }
+                    write.write_all(b"{\"type\":\"pong\"}\n").await.unwrap();
+                });
+            }
+            while let Some(peer) = peers.join_next().await {
+                peer.unwrap();
+            }
+        });
+        let client = DaemonClient::new_with_socket(socket);
+        let first_client = client.clone();
+        let first = tokio::spawn(async move {
+            first_client
+                .send_interactive_request(DaemonRequest::RemoteWrite {
+                    session_id: "first".into(),
+                    generation: 1,
+                    data: b"a".to_vec(),
+                })
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let second = tokio::time::timeout(
+            Duration::from_secs(2),
+            client.send_interactive_request(DaemonRequest::RemoteWrite {
+                session_id: "second".into(),
+                generation: 1,
+                data: b"b".to_vec(),
+            }),
+        )
+        .await;
+        release_tx.send(()).unwrap();
+        assert!(matches!(second.unwrap().unwrap(), DaemonResponse::Pong));
+        assert!(matches!(
+            first.await.unwrap().unwrap(),
+            DaemonResponse::Pong
+        ));
+        server.await.unwrap();
+    }
+
     #[test]
     fn test_p09_outer_budget_covers_all_underlying_phase_budgets() {
         // Mutation performs: capabilities (45) + journal (45) + mutation (60) = 150s minimum before margin
@@ -2730,17 +2947,89 @@ mod tests {
 
     #[tokio::test]
     async fn ssh_reconnect_safety_desktop_remote_control_is_not_queued() {
-        let client =
-            DaemonClient::new_with_socket(std::path::PathBuf::from("/unused-desktop-test.sock"));
-        let _busy = client.interactive_connection.lock().await;
-        let error = tokio::time::timeout(
-            Duration::from_secs(1),
+        let dir = tempdir().unwrap();
+        let socket = dir.path().join("control-busy.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (ping_seen_tx, ping_seen_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let handshake = DaemonResponse::HandshakeOk {
+                version: DAEMON_PROTOCOL_VERSION,
+                pid: std::process::id(),
+                epoch: 1,
+                binary_path: None,
+                binary_mtime_ms: None,
+                daemon_version: None,
+            };
+            // Connection 1 (desktop control): answer the handshake, receive the Ping,
+            // and hold the reply so the control slot stays busy for the whole test.
+            // Its handling is parked on a subtask so the session connection below can
+            // still be accepted while the control reply is withheld.
+            let (control, _) = listener.accept().await.unwrap();
+            let (read, mut write) = control.into_split();
+            let mut reader = BufReader::new(read);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            write
+                .write_all(format!("{}\n", serde_json::to_string(&handshake).unwrap()).as_bytes())
+                .await
+                .unwrap();
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonRequest>(line.trim()).unwrap(),
+                DaemonRequest::Ping
+            ));
+            let ping_seen_tx = ping_seen_tx;
+            let release_rx = release_rx;
+            let control_task = tokio::spawn(async move {
+                ping_seen_tx.send(()).unwrap();
+                release_rx.await.unwrap();
+                write.write_all(b"{\"type\":\"pong\"}\n").await.unwrap();
+            });
+            // Connection 2 (session slot): the remote input must arrive here while the
+            // control connection is still pending.
+            let (session, _) = listener.accept().await.unwrap();
+            let (read, mut write) = session.into_split();
+            let mut reader = BufReader::new(read);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            write
+                .write_all(format!("{}\n", serde_json::to_string(&handshake).unwrap()).as_bytes())
+                .await
+                .unwrap();
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonRequest>(line.trim()).unwrap(),
+                DaemonRequest::RemoteWrite { .. }
+            ));
+            write.write_all(b"{\"type\":\"writeOk\"}\n").await.unwrap();
+            control_task.await.unwrap();
+        });
+        let client = DaemonClient::new_with_socket(socket);
+        let control = {
+            let client = client.clone();
+            tokio::spawn(async move { client.send_request(DaemonRequest::Ping).await })
+        };
+        tokio::time::timeout(Duration::from_secs(2), ping_seen_rx)
+            .await
+            .expect("control connection must deliver the Ping")
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(2),
             client.write_terminal_at_generation("remote", Some(7), b"key".to_vec()),
         )
         .await
-        .expect("remote input must reject immediately, not wait behind control")
-        .unwrap_err();
-        assert_eq!(error.details.unwrap()["kind"], "busy");
+        .expect("remote input must not wait behind a busy desktop control connection")
+        .expect("remote input must complete on its own session slot");
+        assert!(
+            !control.is_finished(),
+            "held control request must still be pending while remote input completes"
+        );
+        release_tx.send(()).unwrap();
+        control.await.unwrap().unwrap();
+        server.await.unwrap();
     }
 
     #[tokio::test]
@@ -4037,10 +4326,11 @@ mod tests {
 
         drop(rx);
 
-        let (workspace_id, project_path) = tokio::time::timeout(Duration::from_secs(5), teardown_rx)
-            .await
-            .expect("idle DAG transport must tear down after receiver drop")
-            .expect("teardown signal delivered");
+        let (workspace_id, project_path) =
+            tokio::time::timeout(Duration::from_secs(5), teardown_rx)
+                .await
+                .expect("idle DAG transport must tear down after receiver drop")
+                .expect("teardown signal delivered");
         assert_eq!(workspace_id, "ws-idle");
         assert_eq!(project_path, "/paired/project");
 

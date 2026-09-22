@@ -31,6 +31,7 @@ import { classifyNativeTerminalAttachError } from "../lib/nativeTerminalAttachPo
 import { isPairedWorkspaceId, isRemoteWorkspaceId, pasteClipboardImageLocally, pasteClipboardImageToRemote } from "../lib/remoteProject";
 import { useSleepingSessionIds } from "../lib/sessionLifecycle";
 import { extractIpcErrorMessage } from "../lib/sshHosts";
+import { terminalInputQueue, NativeTerminalStaleGenerationError } from "../lib/nativeTerminalInputQueue";
 import type { NativeTerminalScrollbarPayload, TerminalSession } from "../lib/types";
 
 export interface TerminalBounds {
@@ -462,10 +463,22 @@ const sessionInputRecoveries = new Map<string, Promise<void>>();
 const mountedNativeTerminalSessionCounts = new Map<string, number>();
 let lastFocusedNativeTerminalSessionId: string | null = null;
 
+function estimateInputBytes(input: NativeTerminalInput): number {
+  if ("text" in input && typeof input.text === "string") {
+    return Math.max(1, new TextEncoder().encode(input.text).length);
+  }
+  const utf8 = "keyEvent" in input ? (input.keyEvent as { readonly utf8?: unknown })?.utf8 : null;
+  if (typeof utf8 === "string" && utf8.length > 0) {
+    return Math.max(32, new TextEncoder().encode(utf8).length);
+  }
+  return 32;
+}
+
 export function resetNativeTerminalPaneForTest(): void {
   sessionInputRecoveries.clear();
   mountedNativeTerminalSessionCounts.clear();
   lastFocusedNativeTerminalSessionId = null;
+  terminalInputQueue.resetForTest();
 }
 
 export function NativeTerminalPane({
@@ -595,6 +608,12 @@ export function NativeTerminalPane({
       setError(null);
     }
   }, [isExited]);
+
+  useEffect(() => {
+    if (targetSessionId && typeof remoteGeneration === "number") {
+      terminalInputQueue.invalidateOldGenerations(targetSessionId, remoteGeneration);
+    }
+  }, [remoteGeneration, targetSessionId]);
 
   useEffect(() => {
     previousTargetSessionIdRef.current = targetSessionId;
@@ -942,16 +961,24 @@ export function NativeTerminalPane({
     const owner = surfaceOwnerRef.current;
     const isCurrentOwner = () => owner !== null && owner.sessionId === currentSessionId && surfaceOwnerRef.current === owner;
     const generation = isRemote ? session?.remoteGeneration ?? null : null;
+    const payloadBytes = estimateInputBytes(input);
 
     const executeInput = async (isRetry = false): Promise<void> => {
       if (!isCurrentOwner()) return;
       if (quarantinedBindingRef.current?.sessionId === currentSessionId) return;
       try {
-        const receipt = await invoke<NativeTerminalReceipt>("cmd_native_terminal_send_input", {
-          sessionId: currentSessionId,
-          input,
-          ...(generation != null ? { generation } : {}),
-        });
+        const receipt = await terminalInputQueue.enqueue(
+          currentSessionId,
+          generation,
+          payloadBytes,
+          async () => {
+            return invoke<NativeTerminalReceipt>("cmd_native_terminal_send_input", {
+              sessionId: currentSessionId,
+              input,
+              ...(generation != null ? { generation } : {}),
+            });
+          },
+        );
         if (!isCurrentOwner()) return;
         updateImeAnchor(receipt);
         switchDebug("terminal.surface.input.sent", {
@@ -966,7 +993,18 @@ export function NativeTerminalPane({
         setError(null);
       } catch (error: unknown) {
         if (!isCurrentOwner()) return;
-        if (!isRetry && isStructuredIpcError(error) && error.details?.inputWritten === false) {
+        if (error instanceof NativeTerminalStaleGenerationError) {
+          return;
+        }
+        if (isStructuredIpcError(error) && error.details?.inputWritten === true) {
+          switchDebug("terminal.surface.input.written_despite_error", {
+            backendSessionId: currentSessionId,
+            error: String(error),
+          });
+          setError(null);
+          return;
+        }
+        if (!isRetry && isStructuredIpcError(error) && error.details?.inputWritten === false && error.details?.kind !== "busy") {
           switchDebug("terminal.surface.input.error.recovering", {
             backendSessionId: currentSessionId,
             error: String(error),
@@ -1074,14 +1112,21 @@ export function NativeTerminalPane({
         return;
       }
       const generation = isRemote ? session?.remoteGeneration ?? null : null;
+      const payloadBytes = Math.max(1, new TextEncoder().encode(text).length);
 
-      void invoke<NativeTerminalReceipt>("cmd_native_terminal_paste", {
-        sessionId: targetSessionId,
-        text,
-        ...(generation != null ? { generation } : {}),
-      })
+      void terminalInputQueue
+        .enqueue(targetSessionId, generation, payloadBytes, () =>
+          invoke<NativeTerminalReceipt>("cmd_native_terminal_paste", {
+            sessionId: targetSessionId,
+            text,
+            ...(generation != null ? { generation } : {}),
+          }),
+        )
         .then(updateImeAnchor)
         .catch((error: unknown) => {
+          if (isStructuredIpcError(error) && error.details?.inputWritten === true) {
+            return;
+          }
           reportNativeTerminalIpcFailure("cmd_native_terminal_paste", error);
         });
     },
@@ -1197,33 +1242,42 @@ export function NativeTerminalPane({
     );
     if (isOutage) return;
     const generation = isRemote ? session?.remoteGeneration ?? null : null;
-    void invoke<{ readonly mouseTrackingEnabled?: boolean; readonly receipt?: NativeTerminalReceipt }>("cmd_native_terminal_mouse", {
-      sessionId: targetSessionId,
-      ...(generation != null ? { generation } : {}),
-      event: {
-        action,
-        button,
-        position: {
-          x: event.clientX - rect.left,
-          y: event.clientY - rect.top,
-        },
-        modifiers: {
-          shift: event.shiftKey,
-          ctrl: event.ctrlKey,
-          alt: event.altKey,
-          superKey: event.metaKey,
-          capsLock: event.getModifierState("CapsLock"),
-          numLock: event.getModifierState("NumLock"),
-        },
-        timestampNs,
+    const mousePayload = {
+      action,
+      button,
+      position: {
+        x: event.clientX - rect.left,
+        y: event.clientY - rect.top,
       },
-    })
+      modifiers: {
+        shift: event.shiftKey,
+        ctrl: event.ctrlKey,
+        alt: event.altKey,
+        superKey: event.metaKey,
+        capsLock: event.getModifierState("CapsLock"),
+        numLock: event.getModifierState("NumLock"),
+      },
+      timestampNs,
+    };
+
+    void terminalInputQueue
+      .enqueue(targetSessionId, generation, 64, () =>
+        invoke<{ readonly mouseTrackingEnabled?: boolean; readonly receipt?: NativeTerminalReceipt }>(
+          "cmd_native_terminal_mouse",
+          {
+            sessionId: targetSessionId,
+            ...(generation != null ? { generation } : {}),
+            event: mousePayload,
+          },
+        ),
+      )
       .then((receipt: { readonly mouseTrackingEnabled?: boolean; readonly receipt?: NativeTerminalReceipt } | undefined) => {
         if (action !== "Motion") {
           updateImeAnchor(receipt?.receipt);
         }
       })
       .catch((error: unknown) => {
+        if (error instanceof NativeTerminalStaleGenerationError) return;
         reportNativeTerminalIpcFailure("cmd_native_terminal_mouse", error);
       });
   }, [remoteConnectionState, remoteGeneration, targetSessionId, visible]);
@@ -2347,24 +2401,29 @@ export function NativeTerminalPane({
         if (!viewport) return;
         const rect = viewport.getBoundingClientRect();
         const generation = isRemoteWorkspaceId(session?.workspaceId) ? session?.remoteGeneration ?? null : null;
-        void invoke("cmd_native_terminal_scroll", {
-          sessionId: targetSessionId,
-          behavior: { type: "delta", rows },
-          wheel: {
-            position: { x: event.clientX - rect.left, y: event.clientY - rect.top },
-            modifiers: {
-              shift: event.shiftKey,
-              ctrl: event.ctrlKey,
-              alt: event.altKey,
-              superKey: event.metaKey,
-              capsLock: event.getModifierState("CapsLock"),
-              numLock: event.getModifierState("NumLock"),
-            },
+        const wheelPayload = {
+          position: { x: event.clientX - rect.left, y: event.clientY - rect.top },
+          modifiers: {
+            shift: event.shiftKey,
+            ctrl: event.ctrlKey,
+            alt: event.altKey,
+            superKey: event.metaKey,
+            capsLock: event.getModifierState("CapsLock"),
+            numLock: event.getModifierState("NumLock"),
           },
-          ...(generation != null ? { generation } : {}),
-        })
+        };
+
+        void terminalInputQueue.enqueue(targetSessionId, generation, 32, () =>
+          invoke("cmd_native_terminal_scroll", {
+            sessionId: targetSessionId,
+            behavior: { type: "delta", rows },
+            wheel: wheelPayload,
+            ...(generation != null ? { generation } : {}),
+          }),
+        )
           .then(refreshScrollbar)
           .catch((error: unknown) => {
+            if (error instanceof NativeTerminalStaleGenerationError) return;
             reportNativeTerminalIpcFailure("cmd_native_terminal_scroll", error);
           });
       }}

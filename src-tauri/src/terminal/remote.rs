@@ -4,8 +4,15 @@ use crate::scoped_contracts::TargetRef;
 use crate::ssh::{bridge::*, helper_setup::HelperLocation, runtime::RemoteEnvironment, SshHost};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, future::Future, path::PathBuf, pin::Pin, sync::Arc, time::Duration};
-use tokio::sync::{watch, Mutex as AsyncMutex};
+use std::{
+    collections::HashMap,
+    future::Future,
+    path::PathBuf,
+    pin::Pin,
+    sync::{Arc, Weak},
+    time::Duration,
+};
+use tokio::sync::{mpsc, oneshot, watch, Mutex as AsyncMutex};
 
 type Rpc<'a, T> = Pin<Box<dyn Future<Output = Result<T, BridgeError>> + Send + 'a>>;
 pub type RemoteOperation = Pin<Box<dyn Future<Output = Result<(), RemoteFailure>> + Send>>;
@@ -153,7 +160,7 @@ pub struct RemoteSessionDetails {
 pub struct RemoteExportState {
     pub descriptor: RemoteSessionDescriptor,
     pub generation: u64,
-    pub pending_size: Option<(u16, u16)>,
+    pub pending_size: Option<(u16, u16, u64)>,
     pub pid: Option<RemotePid>,
     pub bridge_transfer: Option<SshBridgeTransferState>,
 }
@@ -235,11 +242,35 @@ pub(crate) struct Session {
     /// session was disconnected or the in-flight RPC failed. Re-applied on the next
     /// successful connect so pane geometry survives the connection race instead of
     /// leaving the remote PTY at its spawn defaults.
-    pending_size: Option<(u16, u16)>,
+    pending_size: Option<(u16, u16, u64)>,
 }
+const MAX_PENDING_OPERATIONS: usize = 17;
+const MAX_PENDING_BYTES: usize = 256 * 1024;
+pub(crate) const INPUT_QUEUE_TIMEOUT: Duration = Duration::from_secs(5);
+
+struct QueuePermits {
+    allocated_entries: usize,
+    allocated_bytes: usize,
+}
+
+enum RemoteCommandKind {
+    Write(Vec<u8>),
+    Resize(u16, u16),
+}
+
+struct RemoteCommand {
+    generation: u64,
+    dispatch_deadline: tokio::time::Instant,
+    kind: RemoteCommandKind,
+    bytes: usize,
+    reply: oneshot::Sender<Result<(), RemoteFailure>>,
+}
+
 pub(crate) struct Entry {
     pub(crate) state: Mutex<Session>,
     control: Arc<AsyncMutex<()>>,
+    queue_tx: mpsc::UnboundedSender<RemoteCommand>,
+    queue_permits: Arc<parking_lot::Mutex<QueuePermits>>,
 }
 impl Entry {
     fn notify(s: &Session) {
@@ -363,6 +394,11 @@ impl RemoteRuntime {
             pid: None,
         };
         let (updates, _) = watch::channel(details.clone());
+        let (queue_tx, queue_rx) = mpsc::unbounded_channel();
+        let permits = Arc::new(parking_lot::Mutex::new(QueuePermits {
+            allocated_entries: 0,
+            allocated_bytes: 0,
+        }));
         let entry = Arc::new(Entry {
             state: Mutex::new(Session {
                 details,
@@ -372,7 +408,14 @@ impl RemoteRuntime {
                 pending_size: None,
             }),
             control: Arc::new(AsyncMutex::new(())),
+            queue_tx,
+            queue_permits: permits,
         });
+        tokio::spawn(queue_worker(
+            queue_rx,
+            Arc::downgrade(&entry),
+            self.hub.clone(),
+        ));
         map.insert(id, entry.clone());
         self.launch(&entry, transport);
         Ok(())
@@ -394,6 +437,22 @@ impl RemoteRuntime {
     #[cfg(test)]
     pub(crate) fn entry_for_test(&self, id: &str) -> Result<Arc<Entry>, RemoteFailure> {
         self.entry(id)
+    }
+    #[cfg(test)]
+    pub(crate) fn hold_dispatch_gate_for_test(
+        &self,
+        id: &str,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, RemoteFailure> {
+        self.entry(id)?
+            .control
+            .clone()
+            .try_lock_owned()
+            .map_err(|_| {
+                RemoteFailure::new(
+                    RemoteFailureKind::Busy,
+                    "test dispatch gate is already held",
+                )
+            })
     }
     pub fn subscribe(
         &self,
@@ -440,7 +499,9 @@ impl RemoteRuntime {
         let (attachment, ranges) = self
             .hub
             .subscribe_with_sequence_ranges(id, after_sequence)
-            .ok_or_else(|| RemoteFailure::new(RemoteFailureKind::Missing, "Session not found in hub"))?;
+            .ok_or_else(|| {
+                RemoteFailure::new(RemoteFailureKind::Missing, "Session not found in hub")
+            })?;
         Ok((attachment, ranges, generation))
     }
     fn launch(&self, entry: &Arc<Entry>, initial: Option<Arc<dyn Transport>>) {
@@ -502,76 +563,72 @@ impl RemoteRuntime {
         size: Option<(u16, u16)>,
     ) -> Result<RemoteOperation, RemoteFailure> {
         let e = self.entry(id)?;
-        let guard = e.control.clone().try_lock_owned().map_err(|_| {
-            RemoteFailure::new(
-                RemoteFailureKind::Busy,
-                "Remote control operation in flight; input was not queued",
-            )
-        })?;
+
         {
             let mut s = e.state.lock();
             if let Err(error) = check_connected(&s, generation) {
-                // A size request that could not be dispatched is still the pane's
-                // intent; remember it so the next connect re-applies it.
-                if size.is_some() {
-                    s.pending_size = size;
+                if let Some((cols, rows)) = size {
+                    // Only a same-generation outage may retain the desired geometry:
+                    // a stale-generation op must never seed pending_size, otherwise
+                    // its old geometry is replayed onto the next connection. The
+                    // queue-worker dispatch path applies the same rule.
+                    if error.kind == RemoteFailureKind::Disconnected {
+                        let overwrite = s
+                            .pending_size
+                            .as_ref()
+                            .map_or(true, |&(_, _, gen)| generation >= gen);
+                        if overwrite {
+                            s.pending_size = Some((cols, rows, generation));
+                        }
+                    }
                 }
                 return Err(error);
             }
         }
-        drop(guard);
-        let hub = self.hub.clone();
-        Ok(Box::pin(async move {
-            let _guard = e.control.clone().try_lock_owned().map_err(|_| {
-                RemoteFailure::new(
+
+        let payload_bytes = bytes.as_ref().map(|b| b.len()).unwrap_or(32);
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let kind = match (bytes, size) {
+            (Some(b), _) => RemoteCommandKind::Write(b),
+            (_, Some((c, r))) => RemoteCommandKind::Resize(c, r),
+            _ => unreachable!(),
+        };
+
+        let cmd = RemoteCommand {
+            generation,
+            dispatch_deadline: tokio::time::Instant::now() + INPUT_QUEUE_TIMEOUT,
+            kind,
+            bytes: payload_bytes,
+            reply: reply_tx,
+        };
+
+        {
+            let mut permits = e.queue_permits.lock();
+            if permits.allocated_entries >= MAX_PENDING_OPERATIONS
+                || permits.allocated_bytes + payload_bytes > MAX_PENDING_BYTES
+            {
+                return Err(RemoteFailure::new(
                     RemoteFailureKind::Busy,
-                    "Remote control is busy; input was not queued",
-                )
-            })?;
-            let (client, target) = {
-                let mut s = e.state.lock();
-                if let Err(error) = check_connected(&s, generation) {
-                    // The reconnect raced between admission and dispatch; the size
-                    // request must survive it exactly like the admission failure.
-                    if size.is_some() {
-                        s.pending_size = size;
-                    }
-                    return Err(error);
-                }
-                (
-                    s.transport.clone().unwrap(),
-                    s.details.descriptor.target.clone(),
-                )
-            };
-            // run() takes the same gate before replacing/invalidation of this generation.
-            let result = if let Some(bytes) = bytes {
-                client.write(&target, &bytes).await
-            } else {
-                let (c, r) = size.unwrap();
-                client.resize(&target, c, r).await
-            };
-            let mut s = e.state.lock();
-            match result {
-                Ok(()) => {
-                    if let Some((cols, rows)) = size {
-                        s.details.descriptor.cols = cols;
-                        s.details.descriptor.rows = rows;
-                        s.pending_size = None;
-                        hub.record_resize(&s.details.descriptor.backend_session_id, cols, rows);
-                        Entry::notify(&s);
-                    }
-                    Ok(())
-                }
-                Err(error) => {
-                    let failure = RemoteFailure::from_bridge(&error);
-                    // The request never reached the remote PTY; keep it for the
-                    // reconnect path so the size is not silently lost.
-                    if size.is_some() {
-                        s.pending_size = size;
-                    }
-                    fail(&mut s, failure.clone());
-                    Err(failure)
-                }
+                    "Remote control queue is full",
+                ));
+            }
+            if e.queue_tx.send(cmd).is_err() {
+                return Err(RemoteFailure::new(
+                    RemoteFailureKind::Disconnected,
+                    "Remote queue worker dropped",
+                ));
+            }
+            permits.allocated_entries += 1;
+            permits.allocated_bytes += payload_bytes;
+        }
+
+        Ok(Box::pin(async move {
+            match reply_rx.await {
+                Ok(res) => res,
+                Err(_) => Err(RemoteFailure::new(
+                    RemoteFailureKind::Disconnected,
+                    "Remote terminal operation cancelled",
+                )),
             }
         }))
     }
@@ -764,6 +821,11 @@ impl RemoteRuntime {
             pid: state.pid,
         };
         let (updates, _) = watch::channel(details.clone());
+        let (queue_tx, queue_rx) = mpsc::unbounded_channel();
+        let permits = Arc::new(parking_lot::Mutex::new(QueuePermits {
+            allocated_entries: 0,
+            allocated_bytes: 0,
+        }));
         let entry = Arc::new(Entry {
             state: Mutex::new(Session {
                 details,
@@ -773,7 +835,14 @@ impl RemoteRuntime {
                 pending_size: state.pending_size,
             }),
             control: Arc::new(AsyncMutex::new(())),
+            queue_tx,
+            queue_permits: permits,
         });
+        tokio::spawn(queue_worker(
+            queue_rx,
+            Arc::downgrade(&entry),
+            self.hub.clone(),
+        ));
         map.insert(id, entry.clone());
         if let Some(client) = transport {
             self.launch_live(&entry, client);
@@ -868,34 +937,52 @@ async fn run(
             let mut desired_size: Option<(u16, u16)> = None;
             {
                 let _gate = e.control.lock().await;
-                let mut s = e.state.lock();
-                if s.details.generation != generation {
-                    return Ok(());
-                }
-                s.transport = Some(client.clone());
-                s.details.pid = Some(info.pid);
-                s.details.state = RemoteConnectionState::Connected;
-                s.details.failure = None;
-                desired_size = Some(
-                    s.pending_size
-                        .take()
-                        .unwrap_or((s.details.descriptor.cols, s.details.descriptor.rows)),
-                );
-                Entry::notify(&s);
-            }
-            // Converge the remote PTY onto the last size the daemon knows about
-            // before streaming resumes: a reconnect must not leave the remote shell
-            // at stale spawn defaults while the pane renders a different grid.
-            if let Some((cols, rows)) = desired_size {
-                if client.resize(&d.target, cols, rows).await.is_ok() {
+                {
                     let mut s = e.state.lock();
                     if s.details.generation != generation {
                         return Ok(());
                     }
-                    s.details.descriptor.cols = cols;
-                    s.details.descriptor.rows = rows;
-                    hub.record_resize(&d.backend_session_id, cols, rows);
+                    s.transport = Some(client.clone());
+                    s.details.pid = Some(info.pid);
+                    s.details.state = RemoteConnectionState::Connected;
+                    s.details.failure = None;
+                    desired_size = Some(
+                        s.pending_size
+                            .take()
+                            .map(|(c, r, _)| (c, r))
+                            .unwrap_or((s.details.descriptor.cols, s.details.descriptor.rows)),
+                    );
                     Entry::notify(&s);
+                }
+                // Converge the remote PTY onto the last size the daemon knows about
+                // before streaming resumes: a reconnect must not leave the remote shell
+                // at stale spawn defaults while the pane renders a different grid.
+                // This runs while the control gate is still held (state lock released)
+                // so a concurrently dispatched newer resize cannot be overwritten by
+                // this older desired size, and a failed convergence restores the
+                // desired size instead of dropping it.
+                if let Some((cols, rows)) = desired_size {
+                    if client.resize(&d.target, cols, rows).await.is_ok() {
+                        let mut s = e.state.lock();
+                        if s.details.generation != generation {
+                            return Ok(());
+                        }
+                        s.details.descriptor.cols = cols;
+                        s.details.descriptor.rows = rows;
+                        hub.record_resize(&d.backend_session_id, cols, rows);
+                        Entry::notify(&s);
+                    } else {
+                        let mut s = e.state.lock();
+                        if s.details.generation == generation {
+                            let restore = s
+                                .pending_size
+                                .as_ref()
+                                .map_or(true, |&(_, _, gen)| generation >= gen);
+                            if restore {
+                                s.pending_size = Some((cols, rows, generation));
+                            }
+                        }
+                    }
                 }
             }
             // Subscribe before observing state so control-side failures cannot be lost
@@ -964,7 +1051,11 @@ async fn run(
         let Err(error) = outcome else {
             return;
         };
-        let _gate = e.control.lock().await;
+        // The outage transition must not wait behind the dispatch gate: an in-flight
+        // transport write on a dying connection may hold it for the full inner budget,
+        // which would stall session state, reconnect scheduling, and queued-input
+        // rejection. Correctness is preserved by the state lock plus the dispatch
+        // re-check (`check_connected`) every queued op performs under that lock.
         {
             let mut s = e.state.lock();
             if s.details.generation != generation {
@@ -991,7 +1082,6 @@ async fn run(
             generation = s.details.generation;
             Entry::notify(&s);
         }
-        drop(_gate);
         connector.delay(attempts - 1).await;
     }
 }
@@ -1019,7 +1109,7 @@ async fn run_live(
         let mut s = e.state.lock();
         s.pending_size.take()
     };
-    if let Some((cols, rows)) = pending_size {
+    if let Some((cols, rows, _)) = pending_size {
         if client.resize(&d.target, cols, rows).await.is_ok() {
             let mut s = e.state.lock();
             if s.details.generation == generation {
@@ -1261,7 +1351,7 @@ mod tests {
         {
             let mut s = entry.state.lock();
             s.details.generation = 9;
-            s.pending_size = Some((110, 35));
+            s.pending_size = Some((110, 35, 9));
             s.details.pid = Some(RemotePid(777));
         }
 
@@ -1272,7 +1362,7 @@ mod tests {
         assert_eq!(exported.descriptor.cols, 100);
         assert_eq!(exported.descriptor.rows, 30);
         assert_eq!(exported.generation, 9);
-        assert_eq!(exported.pending_size, Some((110, 35)));
+        assert_eq!(exported.pending_size, Some((110, 35, 9)));
         assert_eq!(exported.pid, Some(RemotePid(777)));
         assert_eq!(exported.descriptor.target.epoch, Epoch(42));
 
@@ -1473,5 +1563,124 @@ mod tests {
                 libc::kill(pid2 as i32, libc::SIGKILL);
             }
         }
+    }
+}
+
+async fn queue_worker(
+    mut rx: mpsc::UnboundedReceiver<RemoteCommand>,
+    entry_weak: Weak<Entry>,
+    hub: Arc<TerminalOutputHub>,
+) {
+    while let Some(cmd) = rx.recv().await {
+        let Some(e) = entry_weak.upgrade() else {
+            break;
+        };
+
+        struct PermitGuard {
+            permits: Arc<parking_lot::Mutex<QueuePermits>>,
+            bytes: usize,
+        }
+        impl Drop for PermitGuard {
+            fn drop(&mut self) {
+                let mut p = self.permits.lock();
+                p.allocated_entries = p.allocated_entries.saturating_sub(1);
+                p.allocated_bytes = p.allocated_bytes.saturating_sub(self.bytes);
+            }
+        }
+        let _guard = PermitGuard {
+            permits: e.queue_permits.clone(),
+            bytes: cmd.bytes,
+        };
+
+        if cmd.reply.is_closed() {
+            continue;
+        }
+
+        let gate = tokio::time::timeout_at(cmd.dispatch_deadline, e.control.lock()).await;
+        let Ok(_gate) = gate else {
+            let _ = cmd.reply.send(Err(RemoteFailure::new(
+                RemoteFailureKind::Busy,
+                "Remote input queue deadline exceeded; input was not sent",
+            )));
+            continue;
+        };
+        if tokio::time::Instant::now() >= cmd.dispatch_deadline {
+            let _ = cmd.reply.send(Err(RemoteFailure::new(
+                RemoteFailureKind::Busy,
+                "Remote input queue deadline exceeded; input was not sent",
+            )));
+            continue;
+        }
+        if cmd.reply.is_closed() {
+            continue;
+        }
+
+        let (client, target) = {
+            let mut s = e.state.lock();
+            if let Err(error) = check_connected(&s, cmd.generation) {
+                if let RemoteCommandKind::Resize(cols, rows) = cmd.kind {
+                    // Only a same-generation outage may retain the desired geometry:
+                    // a stale-generation op must never seed pending_size, otherwise
+                    // its old geometry is replayed onto the next connection and can
+                    // regress geometry the newer generation already applied.
+                    if error.kind == RemoteFailureKind::Disconnected {
+                        let overwrite = s
+                            .pending_size
+                            .as_ref()
+                            .map_or(true, |&(_, _, gen)| cmd.generation >= gen);
+                        if overwrite {
+                            s.pending_size = Some((cols, rows, cmd.generation));
+                        }
+                    }
+                }
+                let _ = cmd.reply.send(Err(error));
+                continue;
+            }
+            (
+                s.transport.clone().unwrap(),
+                s.details.descriptor.target.clone(),
+            )
+        };
+
+        let result = match cmd.kind {
+            RemoteCommandKind::Write(ref bytes) => client.write(&target, bytes).await,
+            RemoteCommandKind::Resize(cols, rows) => client.resize(&target, cols, rows).await,
+        };
+
+        let mut s = e.state.lock();
+        let outcome = match result {
+            Ok(()) => {
+                if let RemoteCommandKind::Resize(cols, rows) = cmd.kind {
+                    s.details.descriptor.cols = cols;
+                    s.details.descriptor.rows = rows;
+                    let clear = s
+                        .pending_size
+                        .as_ref()
+                        .map_or(true, |&(_, _, gen)| cmd.generation >= gen);
+                    if clear {
+                        s.pending_size = None;
+                    }
+                    hub.record_resize(&s.details.descriptor.backend_session_id, cols, rows);
+                    Entry::notify(&s);
+                }
+                Ok(())
+            }
+            Err(error) => {
+                let failure = RemoteFailure::from_bridge(&error);
+                if let RemoteCommandKind::Resize(cols, rows) = cmd.kind {
+                    let overwrite = s
+                        .pending_size
+                        .as_ref()
+                        .map_or(true, |&(_, _, gen)| cmd.generation >= gen);
+                    if overwrite {
+                        s.pending_size = Some((cols, rows, cmd.generation));
+                    }
+                }
+                fail(&mut s, failure.clone());
+                Err(failure)
+            }
+        };
+
+        let _ = cmd.reply.send(outcome);
     }
 }
