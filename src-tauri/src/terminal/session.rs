@@ -1,5 +1,6 @@
+use crate::terminal::output_hub::{SessionHubSnapshot, TerminalOutputHub};
 use crate::terminal::PtyError;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use portable_pty::{Child, MasterPty, PtySize};
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -81,13 +82,168 @@ mod windows_suspend {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum PtySessionState {
     Starting,
     Running,
     Closing,
     Exited { code: Option<i32> },
     Failed { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AdoptedProcess {
+    pub pid: u32,
+    pub process_group: Option<u32>,
+}
+
+#[cfg(unix)]
+impl AdoptedProcess {
+    pub fn is_alive(&self) -> bool {
+        let res = unsafe { libc::kill(self.pid as i32, 0) };
+        if res == 0 {
+            return true;
+        }
+        let err = std::io::Error::last_os_error();
+        err.raw_os_error() == Some(libc::EPERM)
+    }
+}
+
+pub(crate) enum ProcessHandle {
+    Spawned(Box<dyn Child + Send + Sync>),
+    Adopted(AdoptedProcess),
+}
+
+impl ProcessHandle {
+    pub fn pid(&self) -> Option<u32> {
+        match self {
+            Self::Spawned(child) => child.process_id(),
+            Self::Adopted(adopted) => Some(adopted.pid),
+        }
+    }
+
+    pub fn process_group(&self) -> Option<u32> {
+        match self {
+            Self::Spawned(_) => None,
+            Self::Adopted(adopted) => adopted.process_group,
+        }
+    }
+
+    pub fn kill(&mut self) -> Result<(), PtyError> {
+        match self {
+            Self::Spawned(child) => child
+                .kill()
+                .map_err(|e| PtyError::KillError(format!("Kill failed: {e}"))),
+            #[cfg(unix)]
+            Self::Adopted(adopted) => {
+                let pid = adopted.pid as i32;
+                if pid <= 1 {
+                    return Err(PtyError::KillError(format!("Invalid PID for kill: {pid}")));
+                }
+                if let Some(pg) = adopted.process_group {
+                    if pg > 1 {
+                        let target = -(pg as i32);
+                        let res = unsafe { libc::kill(target, libc::SIGKILL) };
+                        if res == 0 {
+                            return Ok(());
+                        }
+                    }
+                }
+                let res = unsafe { libc::kill(pid, libc::SIGKILL) };
+                if res == 0 {
+                    return Ok(());
+                }
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() == Some(libc::ESRCH) {
+                    Ok(())
+                } else {
+                    Err(PtyError::KillError(format!(
+                        "Failed to kill adopted process {pid}: {err}"
+                    )))
+                }
+            }
+            #[cfg(not(unix))]
+            Self::Adopted(_) => Err(PtyError::Other("Adopted process not supported on this platform".into())),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PtySessionSnapshot {
+    pub session_id: String,
+    pub pid: Option<u32>,
+    pub pgid: Option<u32>,
+    pub cols: u16,
+    pub rows: u16,
+    pub worktree_path: Option<PathBuf>,
+    pub state: PtySessionState,
+    pub hub_snapshot: Option<SessionHubSnapshot>,
+}
+
+pub type PtyAdoptSnapshot = PtySessionSnapshot;
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct PtySessionExport {
+    pub session_id: String,
+    pub pid: Option<u32>,
+    pub pgid: Option<u32>,
+    pub cols: u16,
+    pub rows: u16,
+    pub worktree_path: Option<PathBuf>,
+    pub state: PtySessionState,
+    pub hub_snapshot: Option<SessionHubSnapshot>,
+    pub master_raw_fd: std::os::fd::RawFd,
+    pub master_fd: std::os::fd::OwnedFd,
+}
+
+#[cfg(unix)]
+pub type ExportedPtySession = PtySessionExport;
+
+#[cfg(unix)]
+impl PtySessionExport {
+    pub fn snapshot(&self) -> PtySessionSnapshot {
+        PtySessionSnapshot {
+            session_id: self.session_id.clone(),
+            pid: self.pid,
+            pgid: self.pgid,
+            cols: self.cols,
+            rows: self.rows,
+            worktree_path: self.worktree_path.clone(),
+            state: self.state.clone(),
+            hub_snapshot: self.hub_snapshot.clone(),
+        }
+    }
+
+    pub fn into_parts(self) -> (std::os::fd::OwnedFd, PtySessionSnapshot) {
+        let snapshot = self.snapshot();
+        (self.master_fd, snapshot)
+    }
+
+    pub fn from_parts(snapshot: PtySessionSnapshot, master_fd: std::os::fd::OwnedFd) -> Self {
+        use std::os::fd::AsRawFd;
+        let master_raw_fd = master_fd.as_raw_fd();
+        Self {
+            session_id: snapshot.session_id,
+            pid: snapshot.pid,
+            pgid: snapshot.pgid,
+            cols: snapshot.cols,
+            rows: snapshot.rows,
+            worktree_path: snapshot.worktree_path,
+            state: snapshot.state,
+            hub_snapshot: snapshot.hub_snapshot,
+            master_raw_fd,
+            master_fd,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl From<PtySessionExport> for PtySessionSnapshot {
+    fn from(export: PtySessionExport) -> Self {
+        export.snapshot()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -131,7 +287,7 @@ pub struct PtySession {
     pub id: String,
     master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
     writer: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
-    child: Arc<Mutex<Option<Box<dyn Child + Send + Sync>>>>,
+    child: Arc<Mutex<Option<ProcessHandle>>>,
     reader_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     output_tx: Arc<Mutex<Option<mpsc::Sender<Vec<u8>>>>>,
     worktree_path: Option<PathBuf>,
@@ -142,6 +298,9 @@ pub struct PtySession {
     state: Arc<Mutex<PtySessionState>>,
     cols: Arc<Mutex<u16>>,
     rows: Arc<Mutex<u16>>,
+    output_hub: Arc<RwLock<Option<Arc<TerminalOutputHub>>>>,
+    pause_requested: Arc<AtomicBool>,
+    reader_paused: Arc<AtomicBool>,
 }
 
 fn record_output_millis(target: &AtomicU64) {
@@ -188,10 +347,24 @@ impl PtySession {
         let reader_last_output_at = Arc::new(AtomicU64::new(0));
         let last_output_at = Arc::clone(&reader_last_output_at);
         let task_last_output_at = Arc::clone(&last_output_at);
+        let pause_requested = Arc::new(AtomicBool::new(false));
+        let reader_paused = Arc::new(AtomicBool::new(false));
+        let pause_requested_task = Arc::clone(&pause_requested);
+        let reader_paused_task = Arc::clone(&reader_paused);
         let reader_task = tokio::task::spawn_blocking(move || {
             let mut reader = reader;
             let mut buf = [0u8; 4096];
             loop {
+                if pause_requested_task.load(Ordering::Acquire) {
+                    reader_paused_task.store(true, Ordering::Release);
+                    while pause_requested_task.load(Ordering::Acquire)
+                        && !reader_finished_task.load(Ordering::Acquire)
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    reader_paused_task.store(false, Ordering::Release);
+                }
+
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
@@ -229,7 +402,7 @@ impl PtySession {
             id: config.id,
             master: Arc::new(Mutex::new(Some(config.master))),
             writer: Arc::new(Mutex::new(Some(config.writer))),
-            child: Arc::new(Mutex::new(Some(config.child))),
+            child: Arc::new(Mutex::new(Some(ProcessHandle::Spawned(config.child)))),
             reader_task: Arc::new(Mutex::new(Some(reader_task))),
             output_tx,
             worktree_path: config.worktree_path,
@@ -239,6 +412,9 @@ impl PtySession {
             state: Arc::new(Mutex::new(PtySessionState::Starting)),
             cols: Arc::new(Mutex::new(config.cols)),
             rows: Arc::new(Mutex::new(config.rows)),
+            output_hub: Arc::new(RwLock::new(None)),
+            pause_requested,
+            reader_paused,
         }
     }
 
@@ -312,7 +488,52 @@ impl PtySession {
         self.child
             .lock()
             .as_ref()
-            .and_then(|child| child.process_id())
+            .and_then(|child| child.pid())
+    }
+
+    pub fn pgid(&self) -> Option<u32> {
+        self.child
+            .lock()
+            .as_ref()
+            .and_then(|child| child.process_group())
+            .or_else(|| {
+                #[cfg(unix)]
+                {
+                    self.foreground_process_group().ok().flatten()
+                }
+                #[cfg(not(unix))]
+                {
+                    None
+                }
+            })
+            .or_else(|| self.pid())
+    }
+
+    pub fn pause_reader(&self) {
+        self.pause_requested.store(true, Ordering::Release);
+    }
+
+    pub fn resume_reader(&self) {
+        self.pause_requested.store(false, Ordering::Release);
+    }
+
+    pub fn is_reader_paused(&self) -> bool {
+        self.reader_paused.load(Ordering::Acquire)
+    }
+
+    pub fn stop_reader(&self) {
+        if let Some(handle) = self.reader_task.lock().take() {
+            handle.abort();
+        }
+        self.reader_finished.store(true, Ordering::Release);
+    }
+
+    pub fn set_output_hub(&self, hub: Arc<TerminalOutputHub>) {
+        *self.output_hub.write() = Some(hub);
+    }
+
+    pub fn output_hub(&self) -> Option<Arc<TerminalOutputHub>> {
+        self.output_hub.read().clone()
     }
 
     pub fn worktree_path(&self) -> Option<PathBuf> {
@@ -490,9 +711,7 @@ impl PtySession {
         let Some(child) = child.as_mut() else {
             return Ok(());
         };
-        child
-            .kill()
-            .map_err(|e| PtyError::KillError(format!("Kill failed: {e}")))
+        child.kill()
     }
 
     #[cfg(unix)]
@@ -517,7 +736,15 @@ impl PtySession {
         // portable-pty creates the child as the PTY session/process-group leader on Unix.
         // Addressing the negative pid signals the whole job-control process group rather
         // than only the shell process.
-        let result = unsafe { libc::kill(-(pid as i32), sig) };
+        let group = self.child.lock().as_ref().and_then(|h| h.process_group());
+        let target = group.map(|g| -(g as i32)).unwrap_or(-(pid as i32));
+        let result = unsafe { libc::kill(target, sig) };
+        if result == 0 {
+            return Ok(());
+        }
+
+        // Fallback to direct PID if process group signaling failed
+        let result = unsafe { libc::kill(pid as i32, sig) };
         if result == 0 {
             return Ok(());
         }
@@ -556,39 +783,75 @@ impl PtySession {
 
     pub(crate) fn poll_exit_code(&self) -> Result<Option<i32>, PtyError> {
         let mut child_slot = self.child.lock();
-        let Some(child) = child_slot.as_mut() else {
+        let Some(process) = child_slot.as_mut() else {
             return Ok(match self.state() {
                 PtySessionState::Exited { code } => code,
                 _ => None,
             });
         };
 
-        let status = child
-            .try_wait()
-            .map_err(|e| PtyError::Other(format!("try_wait failed: {e}")))?;
-        let Some(status) = status else {
-            return Ok(None);
-        };
+        match process {
+            ProcessHandle::Spawned(child) => {
+                let status = child
+                    .try_wait()
+                    .map_err(|e| PtyError::Other(format!("try_wait failed: {e}")))?;
+                let Some(status) = status else {
+                    return Ok(None);
+                };
 
-        let code = status.exit_code() as i32;
-        child_slot.take();
-        self.reaped.store(true, Ordering::Release);
-        Ok(Some(code))
+                let code = status.exit_code() as i32;
+                child_slot.take();
+                self.reaped.store(true, Ordering::Release);
+                Ok(Some(code))
+            }
+            #[cfg(unix)]
+            ProcessHandle::Adopted(adopted) => {
+                if adopted.is_alive() {
+                    Ok(None)
+                } else {
+                    child_slot.take();
+                    self.reaped.store(true, Ordering::Release);
+                    let code = match self.state() {
+                        PtySessionState::Exited { code } => code,
+                        _ => Some(0),
+                    };
+                    Ok(code)
+                }
+            }
+            #[cfg(not(unix))]
+            ProcessHandle::Adopted(_) => Ok(None),
+        }
     }
 
     pub(crate) fn wait_and_reap(&self) -> Result<Option<i32>, PtyError> {
         let mut child_slot = self.child.lock();
-        let Some(mut child) = child_slot.take() else {
+        let Some(mut process) = child_slot.take() else {
             return Ok(match self.state() {
                 PtySessionState::Exited { code } => code,
                 _ => None,
             });
         };
 
-        let result = child
-            .wait()
-            .map(|status| Some(status.exit_code() as i32))
-            .map_err(|e| PtyError::Other(format!("wait failed: {e}")));
+        let result = match &mut process {
+            ProcessHandle::Spawned(child) => child
+                .wait()
+                .map(|status| Some(status.exit_code() as i32))
+                .map_err(|e| PtyError::Other(format!("wait failed: {e}"))),
+            #[cfg(unix)]
+            ProcessHandle::Adopted(adopted) => {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+                while adopted.is_alive() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                let code = match self.state() {
+                    PtySessionState::Exited { code } => code,
+                    _ => Some(0),
+                };
+                Ok(code)
+            }
+            #[cfg(not(unix))]
+            ProcessHandle::Adopted(_) => Ok(None),
+        };
         self.reaped.store(true, Ordering::Release);
         result
     }
@@ -625,6 +888,223 @@ impl PtySession {
     pub(crate) fn take_reader_task(&self) -> Option<JoinHandle<()>> {
         self.reader_task.lock().take()
     }
+
+    /// Exports session state, metadata, output-hub snapshot, and duplicated master raw fd
+    /// for ownership transfer to another daemon process (design doc sections 7.2, 9.2, 11).
+    #[cfg(unix)]
+    pub fn export_for_transfer(&self) -> Result<PtySessionExport, PtyError> {
+        let hub = self.output_hub.read().clone();
+        self.export_for_transfer_with_hub(hub.as_deref())
+    }
+
+    /// Variant of `export_for_transfer` allowing an explicit `TerminalOutputHub` reference.
+    #[cfg(unix)]
+    pub fn export_for_transfer_with_hub(
+        &self,
+        hub: Option<&TerminalOutputHub>,
+    ) -> Result<PtySessionExport, PtyError> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+
+        let master_raw_fd = {
+            let master_lock = self.master.lock();
+            let master = master_lock
+                .as_ref()
+                .ok_or_else(|| PtyError::IoError("PTY master is closed".into()))?;
+            let raw = master
+                .as_raw_fd()
+                .ok_or_else(|| PtyError::IoError("PTY descriptor unavailable".into()))?;
+            let dup_fd = unsafe { libc::fcntl(raw, libc::F_DUPFD_CLOEXEC, 0) };
+            if dup_fd < 0 {
+                return Err(PtyError::IoError(format!(
+                    "Failed to duplicate master PTY fd: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+            dup_fd
+        };
+
+        let master_fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(master_raw_fd) };
+
+        let pid = self.pid();
+        let pgid = self.pgid();
+        let (cols, rows) = self.get_size();
+        let worktree_path = self.worktree_path();
+        let state = self.state();
+
+        let hub_snapshot = hub.and_then(|h| h.export_session_state(&self.id));
+
+        Ok(PtySessionExport {
+            session_id: self.id.clone(),
+            pid,
+            pgid,
+            cols,
+            rows,
+            worktree_path,
+            state,
+            hub_snapshot,
+            master_raw_fd,
+            master_fd,
+        })
+    }
+
+    /// Adoption constructor that rebuilds a `PtySession` from an adopted master PTY descriptor
+    /// and snapshot WITHOUT spawning a command (design doc section 11 'Adopted process lifecycle').
+    /// Starts the reader task fresh from the transferred master and represents the child as an
+    /// `AdoptedProcess` whose liveness is observed via `libc::kill(pid, 0)`.
+    #[cfg(unix)]
+    pub fn adopt_from_transfer(
+        master: std::os::fd::OwnedFd,
+        snapshot: PtySessionSnapshot,
+    ) -> Result<(Self, mpsc::Receiver<Vec<u8>>), PtyError> {
+        use std::os::fd::{AsFd, AsRawFd, FromRawFd};
+
+        let _runtime = tokio::runtime::Handle::try_current().map_err(|error| {
+            PtyError::IoError(format!("Tokio runtime required for adoption: {error}"))
+        })?;
+
+        // Reconstruct UnixMasterPty from the transferred master OwnedFd
+        let mut master_pty = portable_pty::master_from_owned_fd(master, None)
+            .map_err(|e| PtyError::PtyCreationError(format!("Failed to adopt master PTY fd: {e}")))?;
+
+        // Mirror the existing nonblocking-input pattern in PtyManager::spawn_with_id_and_worktree
+        let raw = master_pty
+            .as_raw_fd()
+            .ok_or_else(|| PtyError::IoError("PTY descriptor unavailable".into()))?;
+        let duplicate = unsafe { libc::fcntl(raw, libc::F_DUPFD_CLOEXEC, 0) };
+        if duplicate < 0 {
+            return Err(PtyError::IoError(std::io::Error::last_os_error().to_string()));
+        }
+        let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(duplicate) };
+        let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+        if flags < 0
+            || unsafe {
+                libc::fcntl(
+                    fd.as_raw_fd(),
+                    libc::F_SETFL,
+                    flags | libc::O_NONBLOCK,
+                )
+            } < 0
+        {
+            return Err(PtyError::IoError(std::io::Error::last_os_error().to_string()));
+        }
+        let input = tokio::io::unix::AsyncFd::new(fd)
+            .map_err(|e| PtyError::IoError(e.to_string()))?;
+
+        let reader = master_pty
+            .try_clone_reader()
+            .map_err(|e| PtyError::IoError(format!("Failed to clone reader: {e}")))?;
+
+        let writer = master_pty
+            .take_writer()
+            .map_err(|e| PtyError::IoError(format!("Failed to take writer: {e}")))?;
+
+        if snapshot.cols > 0 && snapshot.rows > 0 {
+            let _ = master_pty.resize(PtySize {
+                rows: snapshot.rows,
+                cols: snapshot.cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            });
+        }
+
+        let (tx, rx) = mpsc::channel::<Vec<u8>>(1024);
+        let output_tx = Arc::new(Mutex::new(Some(tx)));
+        let reader_tx = output_tx
+            .lock()
+            .as_ref()
+            .expect("output sender must exist while starting reader")
+            .clone();
+
+        let reader_poll = input
+            .get_ref()
+            .as_fd()
+            .try_clone_to_owned()
+            .expect("duplicate PTY poll descriptor");
+
+        let metrics_session_id = snapshot.session_id.clone();
+        let reader_finished = Arc::new(AtomicBool::new(false));
+        let reader_finished_task = Arc::clone(&reader_finished);
+        let reader_last_output_at = Arc::new(AtomicU64::new(0));
+        let last_output_at = Arc::clone(&reader_last_output_at);
+        let task_last_output_at = Arc::clone(&last_output_at);
+        let pause_requested = Arc::new(AtomicBool::new(false));
+        let reader_paused = Arc::new(AtomicBool::new(false));
+        let pause_requested_task = Arc::clone(&pause_requested);
+        let reader_paused_task = Arc::clone(&reader_paused);
+
+        let reader_task = tokio::task::spawn_blocking(move || {
+            let mut reader = reader;
+            let mut buf = [0u8; 4096];
+            loop {
+                if pause_requested_task.load(Ordering::Acquire) {
+                    reader_paused_task.store(true, Ordering::Release);
+                    while pause_requested_task.load(Ordering::Acquire)
+                        && !reader_finished_task.load(Ordering::Acquire)
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    reader_paused_task.store(false, Ordering::Release);
+                }
+
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        record_output_millis(&task_last_output_at);
+                        crate::terminal::metrics::record_pty_read(&metrics_session_id, n);
+                        if reader_tx.blocking_send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        let mut poll = libc::pollfd {
+                            fd: reader_poll.as_raw_fd(),
+                            events: libc::POLLIN,
+                            revents: 0,
+                        };
+                        if unsafe { libc::poll(&mut poll, 1, -1) } < 0
+                            && std::io::Error::last_os_error().kind()
+                                != std::io::ErrorKind::Interrupted
+                        {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            reader_finished_task.store(true, Ordering::Release);
+        });
+
+        let child_handle = snapshot.pid.map(|pid| {
+            ProcessHandle::Adopted(AdoptedProcess {
+                pid,
+                process_group: snapshot.pgid,
+            })
+        });
+
+        let session = Self {
+            input,
+            input_gate: tokio::sync::Mutex::new(()),
+            id: snapshot.session_id,
+            master: Arc::new(Mutex::new(Some(master_pty))),
+            writer: Arc::new(Mutex::new(Some(writer))),
+            child: Arc::new(Mutex::new(child_handle)),
+            reader_task: Arc::new(Mutex::new(Some(reader_task))),
+            output_tx,
+            worktree_path: snapshot.worktree_path,
+            reader_finished,
+            last_output_at,
+            reaped: Arc::new(AtomicBool::new(false)),
+            state: Arc::new(Mutex::new(snapshot.state)),
+            cols: Arc::new(Mutex::new(snapshot.cols)),
+            rows: Arc::new(Mutex::new(snapshot.rows)),
+            output_hub: Arc::new(RwLock::new(None)),
+            pause_requested,
+            reader_paused,
+        };
+
+        Ok((session, rx))
+    }
 }
 
 impl Drop for PtySession {
@@ -638,7 +1118,7 @@ impl Drop for PtySession {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -662,5 +1142,40 @@ mod tests {
         let target = AtomicU64::new(0);
         record_output_millis(&target);
         assert_ne!(target.load(Ordering::Relaxed), 0);
+    }
+
+    fn test_adopted_process_liveness_observation() {
+        // Real process (current test process) must be observed as alive
+        let my_pid = std::process::id();
+        let alive_proc = AdoptedProcess {
+            pid: my_pid,
+            process_group: None,
+        };
+        assert!(alive_proc.is_alive(), "current process must be alive");
+
+        // Non-existent PID must be observed as dead (ESRCH)
+        let dead_proc = AdoptedProcess {
+            pid: 999_999_999,
+            process_group: None,
+        };
+        assert!(!dead_proc.is_alive(), "non-existent process must not be alive");
+    }
+
+    #[test]
+    fn test_session_snapshot_serialization_roundtrip() {
+        let snapshot = PtySessionSnapshot {
+            session_id: "test-roundtrip-id".to_string(),
+            pid: Some(12345),
+            pgid: Some(12340),
+            cols: 120,
+            rows: 40,
+            worktree_path: Some(PathBuf::from("/tmp/wt")),
+            state: PtySessionState::Running,
+            hub_snapshot: None,
+        };
+
+        let json = serde_json::to_string(&snapshot).expect("serialize snapshot");
+        let decoded: PtySessionSnapshot = serde_json::from_str(&json).expect("deserialize snapshot");
+        assert_eq!(decoded, snapshot);
     }
 }

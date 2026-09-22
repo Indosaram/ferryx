@@ -233,6 +233,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::SubscribeRemoteEvents => "subscribeRemoteEvents",
         DaemonRequest::UpgradeBinary { .. } => "upgradeBinary",
         DaemonRequest::PrepareHandover => "prepareHandover",
+        DaemonRequest::TransferSessions { .. } => "transferSessions",
         DaemonRequest::CommitHandover { .. } => "commitHandover",
         DaemonRequest::AbortHandover => "abortHandover",
         DaemonRequest::UploadClipboardImage { .. } => "uploadClipboardImage",
@@ -3865,7 +3866,13 @@ mod tests {
             reader.read_line(&mut line).await.unwrap();
             assert!(line.contains("handshake"));
             write
-                .write_all(b"{\"type\":\"handshakeOk\",\"version\":4,\"pid\":1,\"epoch\":1}\n")
+                .write_all(
+                    format!(
+                        "{{\"type\":\"handshakeOk\",\"version\":{},\"pid\":1,\"epoch\":1}}\n",
+                        DAEMON_PROTOCOL_VERSION
+                    )
+                    .as_bytes(),
+                )
                 .await
                 .unwrap();
 

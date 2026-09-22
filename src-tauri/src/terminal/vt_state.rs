@@ -22,10 +22,13 @@ enum Scan {
 /// DEC private modes whose loss visibly corrupts a reconstructed pane.
 const TRACKED_PRIVATE_MODES: [u16; 11] = [1, 7, 25, 1000, 1002, 1003, 1004, 1005, 1006, 1049, 2004];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct TerminalStatePrelude {
+    #[serde(default)]
     sgr: Vec<Vec<u8>>,
+    #[serde(default)]
     private_modes: Vec<(u16, bool)>,
+    #[serde(default)]
     utf8_charset: bool,
 }
 
@@ -95,6 +98,19 @@ impl TerminalStateRecorder {
 
     pub fn clear(&mut self) {
         *self = Self::new();
+    }
+
+    /// Restore a previously exported prelude as this recorder's base state so an imported
+    /// session rebuilds exactly the state its predecessor had accumulated across evictions.
+    /// Future observes layer on top of it, matching a session that never left memory.
+    pub fn restore(&mut self, prelude: TerminalStatePrelude) {
+        self.scan = Scan::Ground;
+        self.params.clear();
+        self.params_overflowed = false;
+        self.private = false;
+        self.sgr = prelude.sgr;
+        self.private_modes = prelude.private_modes;
+        self.utf8_charset = prelude.utf8_charset;
     }
 
     pub fn observe(&mut self, bytes: &[u8]) {

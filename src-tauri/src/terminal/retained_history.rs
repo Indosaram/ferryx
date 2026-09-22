@@ -95,6 +95,17 @@ impl RetainedHistory {
         self.evicted_state.prelude().encode()
     }
 
+    /// Structured form of the accumulated eviction state, carried across export/import so a
+    /// restored session reconstructs the same prelude its predecessor would have produced.
+    pub fn state(&self) -> super::vt_state::TerminalStatePrelude {
+        self.evicted_state.prelude()
+    }
+
+    /// Layer an exported prelude back in as the base eviction state after re-seeding records.
+    pub fn restore_state(&mut self, prelude: super::vt_state::TerminalStatePrelude) {
+        self.evicted_state.restore(prelude);
+    }
+
     /// Full protocol-safe reconstruction: state prelude, retained units in stream order,
     /// then the in-flight prefix. Replaying this into a fresh parser reproduces the pane.
     pub fn replay(&self) -> Vec<u8> {

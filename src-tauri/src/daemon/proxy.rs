@@ -701,6 +701,9 @@ impl SessionRouter {
 
     pub async fn adopt_routes_from_manifest(&self) -> Result<(), String> {
         let manifest_path = get_manifest_path();
+        if !manifest_path.exists() {
+            return Ok(());
+        }
         let manifest = crate::ipc::run_blocking(move || {
             HandoverManifest::update_at_path(&manifest_path, |manifest| {
                 manifest.prune_dead_routes();

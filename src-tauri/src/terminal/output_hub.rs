@@ -2,6 +2,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use thiserror::Error;
 use tokio::sync::broadcast;
 
 const DEFAULT_BUFFER_CAPACITY: usize = 512 * 1024; // 512 KiB
@@ -73,6 +74,151 @@ pub struct AttachmentSnapshot {
 pub struct SessionAttachment {
     pub snapshot: AttachmentSnapshot,
     pub receiver: broadcast::Receiver<OutputChunk>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum OutputHubSnapshotError {
+    #[error("next_sequence must be greater than 0, got {0}")]
+    InvalidNextSequence(u64),
+
+    #[error("chunk sequence must be greater than 0, got {0}")]
+    InvalidChunkSequence(u64),
+
+    #[error("chunk sequence {0} exceeds or equals next_sequence {1}")]
+    ChunkSequenceExceedsNextSequence(u64, u64),
+
+    #[error("chunk sequences must be strictly increasing: {0} <= {1}")]
+    ChunkSequenceNotMonotonic(u64, u64),
+
+    #[error("resize point sequence {0} exceeds or equals next_sequence {1}")]
+    ResizeSequenceExceedsNextSequence(u64, u64),
+
+    #[error("resize ledger must be ordered: sequence {0} < previous sequence {1}")]
+    ResizeLedgerNotOrdered(u64, u64),
+
+    #[error("retained chunks byte size ({actual} bytes) exceeds capacity ({capacity} bytes)")]
+    RetainedBytesExceedCapacity { actual: usize, capacity: usize },
+
+    #[error("invalid replay gap range: requested_after_sequence {requested} >= available_from_sequence {available}")]
+    InvalidReplayGapRange { requested: u64, available: u64 },
+
+    #[error("replay gap available_from_sequence {0} exceeds next_sequence")]
+    ReplayGapExceedsNextSequence(u64),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionHubSnapshot {
+    #[serde(default)]
+    pub capacity: usize,
+    pub chunks: Vec<OutputChunk>,
+    pub next_sequence: u64,
+    pub bracketed_paste_enabled: bool,
+    pub resize_ledger: Vec<ResizePoint>,
+    pub replay_gap: Option<ReplayGap>,
+    #[serde(default)]
+    pub transport_owner: bool,
+    /// Eviction-accumulated VT state. The full-snapshot reconstruction replays `retained`,
+    /// which derives its prelude from bytes that may already be gone from `chunks`; without
+    /// carrying it here an import loses that state (e.g. a bracketed-paste mode set before
+    /// its chunk was evicted from the ring).
+    #[serde(default)]
+    pub retained_state: Option<vt_state::TerminalStatePrelude>,
+}
+
+impl SessionHubSnapshot {
+    pub fn validate(&self) -> Result<(), OutputHubSnapshotError> {
+        self.validate_with_capacity(0)
+    }
+
+    pub fn validate_with_capacity(
+        &self,
+        fallback_capacity: usize,
+    ) -> Result<(), OutputHubSnapshotError> {
+        if self.next_sequence == 0 {
+            return Err(OutputHubSnapshotError::InvalidNextSequence(0));
+        }
+
+        let mut prev_chunk_seq = 0u64;
+        let mut total_bytes = 0usize;
+        for chunk in &self.chunks {
+            if chunk.sequence == 0 {
+                return Err(OutputHubSnapshotError::InvalidChunkSequence(0));
+            }
+            if chunk.sequence >= self.next_sequence {
+                return Err(OutputHubSnapshotError::ChunkSequenceExceedsNextSequence(
+                    chunk.sequence,
+                    self.next_sequence,
+                ));
+            }
+            if chunk.sequence <= prev_chunk_seq {
+                return Err(OutputHubSnapshotError::ChunkSequenceNotMonotonic(
+                    chunk.sequence,
+                    prev_chunk_seq,
+                ));
+            }
+            prev_chunk_seq = chunk.sequence;
+            total_bytes = total_bytes.saturating_add(chunk.bytes.len());
+
+            if let Some(gap) = &chunk.replay_gap {
+                if gap.requested_after_sequence >= gap.available_from_sequence {
+                    return Err(OutputHubSnapshotError::InvalidReplayGapRange {
+                        requested: gap.requested_after_sequence,
+                        available: gap.available_from_sequence,
+                    });
+                }
+                if gap.available_from_sequence > self.next_sequence {
+                    return Err(OutputHubSnapshotError::ReplayGapExceedsNextSequence(
+                        gap.available_from_sequence,
+                    ));
+                }
+            }
+        }
+
+        let mut prev_resize_seq = 0u64;
+        for (i, point) in self.resize_ledger.iter().enumerate() {
+            if point.sequence >= self.next_sequence {
+                return Err(OutputHubSnapshotError::ResizeSequenceExceedsNextSequence(
+                    point.sequence,
+                    self.next_sequence,
+                ));
+            }
+            if i > 0 && point.sequence < prev_resize_seq {
+                return Err(OutputHubSnapshotError::ResizeLedgerNotOrdered(
+                    point.sequence,
+                    prev_resize_seq,
+                ));
+            }
+            prev_resize_seq = point.sequence;
+        }
+
+        let max_capacity = if self.capacity > 0 {
+            self.capacity
+        } else {
+            fallback_capacity
+        };
+        if max_capacity > 0 && total_bytes > max_capacity {
+            return Err(OutputHubSnapshotError::RetainedBytesExceedCapacity {
+                actual: total_bytes,
+                capacity: max_capacity,
+            });
+        }
+
+        if let Some(gap) = &self.replay_gap {
+            if gap.requested_after_sequence >= gap.available_from_sequence {
+                return Err(OutputHubSnapshotError::InvalidReplayGapRange {
+                    requested: gap.requested_after_sequence,
+                    available: gap.available_from_sequence,
+                });
+            }
+            if gap.available_from_sequence > self.next_sequence {
+                return Err(OutputHubSnapshotError::ReplayGapExceedsNextSequence(
+                    gap.available_from_sequence,
+                ));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 pub struct BoundedBuffer {
@@ -213,6 +359,46 @@ impl BoundedBuffer {
 
     pub fn bracketed_paste_enabled(&self) -> bool {
         self.bracketed_paste_enabled
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    pub fn chunks(&self) -> &VecDeque<OutputChunk> {
+        &self.chunks
+    }
+
+    pub fn from_snapshot(
+        capacity: usize,
+        chunks: Vec<OutputChunk>,
+        next_sequence: u64,
+        bracketed_paste_enabled: bool,
+        retained_state: Option<vt_state::TerminalStatePrelude>,
+    ) -> Self {
+        let current_size = chunks.iter().map(|c| c.bytes.len()).sum();
+        let chunks = VecDeque::from(chunks);
+        // Rebuild retained VT units from the restored ring exactly as the live push path does,
+        // so a full-snapshot reconstruction (which replays retained, not the ring) sees history.
+        let mut retained = retained_history::RetainedHistory::new(
+            retained_history::RetentionBudget::from_text_capacity(capacity),
+        );
+        for chunk in &chunks {
+            retained.push(chunk.sequence, &chunk.bytes);
+        }
+        // Restore last: the exported prelude is authoritative for the predecessor's evicted
+        // state, which the surviving ring alone cannot reproduce.
+        if let Some(state) = retained_state {
+            retained.restore_state(state);
+        }
+        Self {
+            capacity,
+            chunks,
+            current_size,
+            next_sequence,
+            bracketed_paste_enabled,
+            retained,
+        }
     }
 
     fn buffer_contains_active_bracketed_paste(&self) -> bool {
@@ -510,13 +696,40 @@ pub mod vt_state;
 #[path = "vt_stream.rs"]
 pub mod vt_stream;
 
-struct SessionHub {
-    machine_senders: Vec<machine_output::MachineSender>,
-    buffer: BoundedBuffer,
-    sender: broadcast::Sender<OutputChunk>,
-    raw_sender: broadcast::Sender<Vec<u8>>,
-    resize_ledger: Vec<ResizePoint>,
-    replay_gap: Option<ReplayGap>,
+pub struct SessionHub {
+    pub(crate) machine_senders: Vec<machine_output::MachineSender>,
+    pub(crate) buffer: BoundedBuffer,
+    pub(crate) sender: broadcast::Sender<OutputChunk>,
+    pub(crate) raw_sender: broadcast::Sender<Vec<u8>>,
+    pub(crate) resize_ledger: Vec<ResizePoint>,
+    pub(crate) replay_gap: Option<ReplayGap>,
+}
+
+impl SessionHub {
+    pub fn export_state(&self) -> SessionHubSnapshot {
+        SessionHubSnapshot {
+            capacity: self.buffer.capacity,
+            chunks: self.buffer.chunks.iter().cloned().collect(),
+            next_sequence: self.buffer.next_sequence,
+            bracketed_paste_enabled: self.buffer.bracketed_paste_enabled,
+            resize_ledger: self.resize_ledger.clone(),
+            replay_gap: self.replay_gap.clone(),
+            transport_owner: false,
+            retained_state: Some(self.buffer.retained.state()),
+        }
+    }
+
+    pub fn buffer(&self) -> &BoundedBuffer {
+        &self.buffer
+    }
+
+    pub fn resize_ledger(&self) -> &[ResizePoint] {
+        &self.resize_ledger
+    }
+
+    pub fn replay_gap(&self) -> Option<&ReplayGap> {
+        self.replay_gap.as_ref()
+    }
 }
 
 #[derive(Clone)]
@@ -802,6 +1015,73 @@ impl TerminalOutputHub {
         };
         let enabled = session_hub.read().buffer.bracketed_paste_enabled();
         enabled
+    }
+
+    pub fn export_session_state(&self, session_id: &str) -> Option<SessionHubSnapshot> {
+        let session_hub = {
+            let sessions = self.sessions.read();
+            sessions.get(session_id).cloned()
+        }?;
+        let hub = session_hub.read();
+        let mut snapshot = hub.export_state();
+        snapshot.transport_owner = self.transport_owner(session_id);
+        Some(snapshot)
+    }
+
+    pub fn import_session_state(
+        &self,
+        session_id: &str,
+        snapshot: SessionHubSnapshot,
+    ) -> Result<(), OutputHubSnapshotError> {
+        snapshot.validate_with_capacity(self.capacity)?;
+
+        let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
+        let (raw_tx, _raw_rx) = broadcast::channel(BROADCAST_CAPACITY);
+
+        let capacity = if snapshot.capacity > 0 {
+            snapshot.capacity
+        } else {
+            self.capacity
+        };
+
+        let buffer = BoundedBuffer::from_snapshot(
+            capacity,
+            snapshot.chunks,
+            snapshot.next_sequence,
+            snapshot.bracketed_paste_enabled,
+            snapshot.retained_state,
+        );
+
+        let is_transport_owner = snapshot.transport_owner;
+        let hub = SessionHub {
+            machine_senders: Vec::new(),
+            buffer,
+            sender: tx,
+            raw_sender: raw_tx,
+            resize_ledger: snapshot.resize_ledger,
+            replay_gap: snapshot.replay_gap,
+        };
+
+        self.sessions
+            .write()
+            .insert(session_id.to_string(), Arc::new(RwLock::new(hub)));
+
+        if is_transport_owner {
+            self.transport_owners.write().insert(session_id.to_string());
+        } else {
+            self.transport_owners.write().remove(session_id);
+        }
+
+        Ok(())
+    }
+
+    pub fn session_next_sequence(&self, session_id: &str) -> Option<u64> {
+        let session_hub = {
+            let sessions = self.sessions.read();
+            sessions.get(session_id).cloned()
+        }?;
+        let hub = session_hub.read();
+        Some(hub.buffer.next_sequence())
     }
 }
 
@@ -1421,5 +1701,430 @@ mod tests {
             .try_recv()
             .expect("new subscriber receives the newest chunk");
         assert_eq!(&received[..], b"after-subscribe");
+    }
+
+    #[tokio::test]
+    async fn test_output_hub_state_export_import_roundtrip() {
+        let hub1 = TerminalOutputHub::new(1024);
+        let session_id = "test-session-handover";
+        let _rx = hub1.register_session(session_id);
+
+        // 1. Initial size ledger entry at sequence 0
+        hub1.record_initial_size(session_id, 80, 24);
+
+        // 2. Publish gap so SessionHub replay_gap is populated
+        let gap_chunk = hub1.publish_gap(session_id).expect("publish gap");
+        assert_eq!(gap_chunk.sequence, 1);
+
+        // 3. Bracketed paste mode set + chunks
+        let c1 = hub1
+            .publish(session_id, b"\x1b[?2004hfirst chunk ".to_vec())
+            .expect("publish c1");
+        assert_eq!(c1.sequence, 2);
+
+        let c2 = hub1
+            .publish(session_id, b"second chunk\n".to_vec())
+            .expect("publish c2");
+        assert_eq!(c2.sequence, 3);
+        assert!(hub1.is_bracketed_paste_enabled(session_id));
+
+        // 4. ResizePoint AFTER the last chunk
+        let resize_seq = hub1
+            .record_resize(session_id, 120, 40)
+            .expect("record resize");
+        assert_eq!(resize_seq, 4);
+        assert!(resize_seq > c2.sequence);
+
+        // Claim transport
+        assert!(hub1.claim_transport(session_id));
+        assert!(hub1.transport_owner(session_id));
+
+        // Predecessor next_sequence at freeze
+        let pred_next_seq = hub1
+            .session_next_sequence(session_id)
+            .expect("pred next seq");
+        assert_eq!(pred_next_seq, 5);
+
+        // Subscribe on predecessor before export to capture baseline attachment
+        let pred_attachment = hub1
+            .subscribe_with_sequence(session_id, None)
+            .expect("pred attachment");
+        assert!(pred_attachment.snapshot.gap.is_some());
+        assert_eq!(pred_attachment.snapshot.history_start_sequence, Some(2));
+        assert_eq!(pred_attachment.snapshot.history_end_sequence, Some(3));
+        assert_eq!(
+            pred_attachment.snapshot.history,
+            b"\x1b[?2004hfirst chunk second chunk\n"
+        );
+        assert_eq!(pred_attachment.snapshot.history_segments.len(), 2);
+        // Last segment is trailing empty segment from resize at seq 4
+        assert_eq!(
+            pred_attachment.snapshot.history_segments.last().unwrap().cols,
+            Some(120)
+        );
+        assert_eq!(
+            pred_attachment.snapshot.history_segments.last().unwrap().rows,
+            Some(40)
+        );
+        assert!(pred_attachment
+            .snapshot
+            .history_segments
+            .last()
+            .unwrap()
+            .bytes
+            .is_empty());
+
+        // Export state from hub1
+        let snapshot = hub1
+            .export_session_state(session_id)
+            .expect("export session state");
+        assert_eq!(snapshot.next_sequence, 5);
+        assert!(snapshot.bracketed_paste_enabled);
+        assert!(snapshot.replay_gap.is_some());
+        assert!(snapshot.transport_owner);
+        assert_eq!(snapshot.chunks.len(), 2);
+        assert_eq!(snapshot.resize_ledger.len(), 2);
+
+        // Serde roundtrip
+        let serialized = serde_json::to_string(&snapshot).expect("serialize snapshot");
+        let deserialized: SessionHubSnapshot =
+            serde_json::from_str(&serialized).expect("deserialize snapshot");
+        assert_eq!(snapshot, deserialized);
+
+        // Import into fresh successor hub
+        let hub2 = TerminalOutputHub::new(1024);
+        hub2.import_session_state(session_id, deserialized)
+            .expect("import session state");
+
+        // Successor next_sequence equals predecessor next_sequence at freeze
+        let succ_next_seq = hub2
+            .session_next_sequence(session_id)
+            .expect("succ next seq");
+        assert_eq!(succ_next_seq, pred_next_seq);
+        assert!(hub2.is_bracketed_paste_enabled(session_id));
+        assert!(hub2.transport_owner(session_id));
+
+        // subscribe_with_sequence(None) after import returns IDENTICAL history and snapshot
+        let mut succ_attachment = hub2
+            .subscribe_with_sequence(session_id, None)
+            .expect("succ attachment");
+        assert_eq!(
+            succ_attachment.snapshot.history,
+            pred_attachment.snapshot.history
+        );
+        assert_eq!(
+            succ_attachment.snapshot.history_segments,
+            pred_attachment.snapshot.history_segments
+        );
+        assert_eq!(
+            succ_attachment.snapshot.history_start_sequence,
+            pred_attachment.snapshot.history_start_sequence
+        );
+        assert_eq!(
+            succ_attachment.snapshot.history_end_sequence,
+            pred_attachment.snapshot.history_end_sequence
+        );
+        assert_eq!(succ_attachment.snapshot.gap, pred_attachment.snapshot.gap);
+        assert_eq!(succ_attachment.snapshot, pred_attachment.snapshot);
+
+        // First new publish on successor allocates EXACTLY next_sequence
+        let new_chunk = hub2
+            .publish(session_id, b"successor first publish\n".to_vec())
+            .expect("publish on successor");
+        assert_eq!(new_chunk.sequence, pred_next_seq);
+
+        // Fresh process-local broadcast senders deliver to the successor subscriber
+        let received = succ_attachment
+            .receiver
+            .recv()
+            .await
+            .expect("live chunk received on successor receiver");
+        assert_eq!(received.sequence, pred_next_seq);
+        assert_eq!(&*received.bytes, b"successor first publish\n");
+
+        // Next sequence has advanced to pred_next_seq + 1
+        assert_eq!(
+            hub2.session_next_sequence(session_id),
+            Some(pred_next_seq + 1)
+        );
+    }
+
+    #[test]
+    fn test_session_hub_direct_export_state() {
+        let hub = TerminalOutputHub::new(512);
+        hub.register_session("s_direct");
+        hub.publish("s_direct", b"abc".to_vec());
+        hub.record_resize("s_direct", 80, 25);
+
+        let session_hub = {
+            let sessions = hub.sessions.read();
+            sessions.get("s_direct").cloned().unwrap()
+        };
+        let hub_guard = session_hub.read();
+        let snapshot = hub_guard.export_state();
+        assert_eq!(snapshot.chunks.len(), 1);
+        assert_eq!(snapshot.chunks[0].sequence, 1);
+        assert_eq!(snapshot.resize_ledger.len(), 1);
+        assert_eq!(snapshot.resize_ledger[0].sequence, 2);
+        assert_eq!(snapshot.next_sequence, 3);
+        assert!(!snapshot.transport_owner);
+        assert_eq!(hub_guard.buffer().next_sequence(), 3);
+        assert_eq!(hub_guard.resize_ledger().len(), 1);
+        assert!(hub_guard.replay_gap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_output_hub_evicted_bracketed_paste_export_import_roundtrip() {
+        let hub1 = TerminalOutputHub::new(64);
+        let session_id = "bracketed-evict-handover";
+        let _rx = hub1.register_session(session_id);
+
+        hub1.publish(session_id, b"\x1b[?2004hprefix> ".to_vec())
+            .expect("enable 2004h");
+        assert!(hub1.is_bracketed_paste_enabled(session_id));
+
+        // Flood to evict the initial chunk
+        for i in 0..10 {
+            hub1.publish(session_id, format!("flood {}\r\n", i).into_bytes())
+                .expect("publish flood");
+        }
+        assert!(hub1.is_bracketed_paste_enabled(session_id));
+
+        let pred_attach = hub1
+            .subscribe_with_sequence(session_id, None)
+            .expect("pred attach");
+        assert!(pred_attach.snapshot.history.starts_with(b"\x1b[?2004h"));
+
+        let snapshot = hub1
+            .export_session_state(session_id)
+            .expect("export state");
+        assert!(snapshot.bracketed_paste_enabled);
+
+        let serialized = serde_json::to_string(&snapshot).expect("serialize");
+        let deserialized: SessionHubSnapshot =
+            serde_json::from_str(&serialized).expect("deserialize");
+
+        let hub2 = TerminalOutputHub::new(64);
+        hub2.import_session_state(session_id, deserialized)
+            .expect("import state");
+
+        assert!(hub2.is_bracketed_paste_enabled(session_id));
+        let succ_attach = hub2
+            .subscribe_with_sequence(session_id, None)
+            .expect("succ attach");
+        assert_eq!(succ_attach.snapshot.history, pred_attach.snapshot.history);
+        assert_eq!(
+            succ_attach.snapshot.history_segments,
+            pred_attach.snapshot.history_segments
+        );
+    }
+
+    #[test]
+    fn test_output_hub_import_validation_failures() {
+        let valid_chunk = OutputChunk {
+            sequence: 1,
+            bytes: Arc::from(b"data".as_slice()),
+            metrics_read_unix_micros: None,
+            replay_gap: None,
+        };
+
+        // 1. Invalid next_sequence == 0
+        let snap_zero_next = SessionHubSnapshot {
+          capacity: 512,
+          chunks: Vec::new(),
+          next_sequence: 0,
+          bracketed_paste_enabled: false,
+          resize_ledger: Vec::new(),
+          replay_gap: None,
+          transport_owner: false,
+          retained_state: None,
+        };
+        assert_eq!(
+            snap_zero_next.validate(),
+            Err(OutputHubSnapshotError::InvalidNextSequence(0))
+        );
+
+        // 2. Chunk sequence == 0
+        let snap_zero_chunk_seq = SessionHubSnapshot {
+          capacity: 512,
+          chunks: vec![OutputChunk {
+              sequence: 0,
+              bytes: Arc::from(b"".as_slice()),
+              metrics_read_unix_micros: None,
+              replay_gap: None,
+          }],
+          next_sequence: 5,
+          bracketed_paste_enabled: false,
+          resize_ledger: Vec::new(),
+          replay_gap: None,
+          transport_owner: false,
+          retained_state: None,
+        };
+        assert_eq!(
+            snap_zero_chunk_seq.validate(),
+            Err(OutputHubSnapshotError::InvalidChunkSequence(0))
+        );
+
+        // 3. Chunk sequence >= next_sequence
+        let snap_chunk_seq_exceeds = SessionHubSnapshot {
+          capacity: 512,
+          chunks: vec![valid_chunk.clone(), OutputChunk {
+              sequence: 5,
+              bytes: Arc::from(b"exceed".as_slice()),
+              metrics_read_unix_micros: None,
+              replay_gap: None,
+          }],
+          next_sequence: 5,
+          bracketed_paste_enabled: false,
+          resize_ledger: Vec::new(),
+          replay_gap: None,
+          transport_owner: false,
+          retained_state: None,
+        };
+        assert_eq!(
+            snap_chunk_seq_exceeds.validate(),
+            Err(OutputHubSnapshotError::ChunkSequenceExceedsNextSequence(5, 5))
+        );
+
+        // 4. Non-monotonic chunk sequences
+        let snap_non_monotonic = SessionHubSnapshot {
+          capacity: 512,
+          chunks: vec![
+              OutputChunk {
+                  sequence: 3,
+                  bytes: Arc::from(b"a".as_slice()),
+                  metrics_read_unix_micros: None,
+                  replay_gap: None,
+              },
+              OutputChunk {
+                  sequence: 2,
+                  bytes: Arc::from(b"b".as_slice()),
+                  metrics_read_unix_micros: None,
+                  replay_gap: None,
+              },
+          ],
+          next_sequence: 10,
+          bracketed_paste_enabled: false,
+          resize_ledger: Vec::new(),
+          replay_gap: None,
+          transport_owner: false,
+          retained_state: None,
+        };
+        assert_eq!(
+            snap_non_monotonic.validate(),
+            Err(OutputHubSnapshotError::ChunkSequenceNotMonotonic(2, 3))
+        );
+
+        // 5. ResizePoint sequence >= next_sequence
+        let snap_resize_exceeds = SessionHubSnapshot {
+          capacity: 512,
+          chunks: vec![valid_chunk.clone()],
+          next_sequence: 5,
+          bracketed_paste_enabled: false,
+          resize_ledger: vec![ResizePoint {
+              sequence: 5,
+              cols: 80,
+              rows: 24,
+          }],
+          replay_gap: None,
+          transport_owner: false,
+          retained_state: None,
+        };
+        assert_eq!(
+            snap_resize_exceeds.validate(),
+            Err(OutputHubSnapshotError::ResizeSequenceExceedsNextSequence(5, 5))
+        );
+
+        // 6. Resize ledger not ordered
+        let snap_resize_unordered = SessionHubSnapshot {
+          capacity: 512,
+          chunks: vec![valid_chunk.clone()],
+          next_sequence: 10,
+          bracketed_paste_enabled: false,
+          resize_ledger: vec![
+              ResizePoint {
+                  sequence: 4,
+                  cols: 80,
+                  rows: 24,
+              },
+              ResizePoint {
+                  sequence: 2,
+                  cols: 100,
+                  rows: 30,
+              },
+          ],
+          replay_gap: None,
+          transport_owner: false,
+          retained_state: None,
+        };
+        assert_eq!(
+            snap_resize_unordered.validate(),
+            Err(OutputHubSnapshotError::ResizeLedgerNotOrdered(2, 4))
+        );
+
+        // 7. Retained bytes exceed capacity
+        let snap_bytes_exceed = SessionHubSnapshot {
+          capacity: 5,
+          chunks: vec![OutputChunk {
+              sequence: 1,
+              bytes: Arc::from(b"123456".as_slice()),
+              metrics_read_unix_micros: None,
+              replay_gap: None,
+          }],
+          next_sequence: 2,
+          bracketed_paste_enabled: false,
+          resize_ledger: Vec::new(),
+          replay_gap: None,
+          transport_owner: false,
+          retained_state: None,
+        };
+        assert_eq!(
+            snap_bytes_exceed.validate(),
+            Err(OutputHubSnapshotError::RetainedBytesExceedCapacity {
+                actual: 6,
+                capacity: 5,
+            })
+        );
+
+        // 8. Invalid replay gap range (requested >= available)
+        let snap_invalid_gap = SessionHubSnapshot {
+          capacity: 512,
+          chunks: Vec::new(),
+          next_sequence: 10,
+          bracketed_paste_enabled: false,
+          resize_ledger: Vec::new(),
+          replay_gap: Some(ReplayGap {
+              requested_after_sequence: 5,
+              available_from_sequence: 5,
+          }),
+          transport_owner: false,
+          retained_state: None,
+        };
+        assert_eq!(
+            snap_invalid_gap.validate(),
+            Err(OutputHubSnapshotError::InvalidReplayGapRange {
+                requested: 5,
+                available: 5,
+            })
+        );
+
+        // 9. Replay gap available > next_sequence
+        let snap_gap_future = SessionHubSnapshot {
+          capacity: 512,
+          chunks: Vec::new(),
+          next_sequence: 10,
+          bracketed_paste_enabled: false,
+          resize_ledger: Vec::new(),
+          replay_gap: Some(ReplayGap {
+              requested_after_sequence: 8,
+              available_from_sequence: 11,
+          }),
+          transport_owner: false,
+          retained_state: None,
+        };
+        assert_eq!(
+            snap_gap_future.validate(),
+            Err(OutputHubSnapshotError::ReplayGapExceedsNextSequence(11))
+        );
     }
 }

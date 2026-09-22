@@ -276,9 +276,10 @@ pub fn save_session_to_path(
                         format!("Cannot overwrite unreadable session ({e}); preserving it at {} failed: {io}", backup.display()),
                     )
                 })?;
-                eprintln!(
-                    "Warning: unreadable session state file ({e}); preserved at {}.",
-                    backup.display()
+                tracing::warn!(
+                    backup = %backup.display(),
+                    error = %e,
+                    "Unreadable session state file preserved"
                 );
             }
         }

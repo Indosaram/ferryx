@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::path::PathBuf;
 
-pub const DAEMON_PROTOCOL_VERSION: u32 = 4;
+pub const DAEMON_PROTOCOL_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -346,6 +346,10 @@ pub enum DaemonRequest {
     },
     PrepareHandover,
     #[serde(rename_all = "camelCase")]
+    TransferSessions {
+        handover_socket_path: String,
+    },
+    #[serde(rename_all = "camelCase")]
     CommitHandover {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         legacy_socket_path: Option<String>,
@@ -416,6 +420,10 @@ pub enum DaemonResponse {
     PairedHostForgetOk,
     PairedHostError {
         error: crate::paired_host::service::ServiceError,
+    },
+    #[serde(rename_all = "camelCase")]
+    TransferSessionsOk {
+        transferred_count: usize,
     },
     #[serde(rename_all = "camelCase")]
     UploadClipboardImageOk {
@@ -1371,7 +1379,7 @@ mod tests {
 
     #[test]
     fn test_protocol_v4_handshake_and_list_sessions_epoch() {
-        assert_eq!(DAEMON_PROTOCOL_VERSION, 4);
+        assert_eq!(DAEMON_PROTOCOL_VERSION, 5);
 
         let hs = DaemonResponse::HandshakeOk {
             version: DAEMON_PROTOCOL_VERSION,
@@ -1383,7 +1391,7 @@ mod tests {
         };
         let hs_json = serde_json::to_string(&hs).expect("serialize handshake");
         assert!(hs_json.contains(r#""epoch":777777"#));
-        assert!(hs_json.contains(r#""version":4"#));
+        assert!(hs_json.contains(r#""version":5"#));
         assert!(hs_json.contains(r#""binaryPath":"/bin/ferryx""#));
         assert!(hs_json.contains(r#""binaryMtimeMs":1700000000000"#));
         assert!(hs_json.contains(r#""daemonVersion":"2026.902.2""#));
@@ -1478,7 +1486,7 @@ mod tests {
             _ => panic!("Expected Spawn variant"),
         }
 
-        assert_eq!(DAEMON_PROTOCOL_VERSION, 4);
+        assert_eq!(DAEMON_PROTOCOL_VERSION, 5);
     }
 
     #[test]

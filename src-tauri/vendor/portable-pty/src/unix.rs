@@ -9,12 +9,12 @@ use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::os::fd::AsFd;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::io::{AsRawFd, FromRawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::{io, mem, ptr};
 
-pub use std::os::unix::io::RawFd;
+pub use std::os::unix::io::{OwnedFd, RawFd};
 
 #[derive(Default)]
 pub struct UnixPtySystem {}
@@ -102,6 +102,16 @@ impl Read for PtyFd {
             }
             x => x,
         }
+    }
+}
+
+impl Write for PtyFd {
+    fn write(&mut self, buf: &[u8]) -> Result<usize, io::Error> {
+        self.0.write(buf)
+    }
+
+    fn flush(&mut self) -> Result<(), io::Error> {
+        self.0.flush()
     }
 }
 
@@ -300,16 +310,120 @@ impl PtyFd {
 
 /// Represents the master end of a pty.
 /// The file descriptor will be closed when the Pty is dropped.
-struct UnixMasterPty {
+pub struct UnixMasterPty {
     fd: PtyFd,
     took_writer: RefCell<bool>,
     tty_name: Option<PathBuf>,
 }
 
+impl UnixMasterPty {
+    /// Constructs a `UnixMasterPty` directly from an owned file descriptor and optional slave `tty_name`.
+    ///
+    /// Takes ownership of the descriptor, validates PTY semantics via `libc::isatty`,
+    /// sets the `FD_CLOEXEC` flag, and wraps the descriptor for master PTY operations.
+    pub fn new(fd: OwnedFd, tty_name: Option<PathBuf>) -> Result<Self, Error> {
+        let raw = fd.as_raw_fd();
+
+        // Validate PTY semantics: must be an open terminal descriptor.
+        if unsafe { libc::isatty(raw) } != 1 {
+            bail!(
+                "file descriptor {} is not a tty: {:?}",
+                raw,
+                io::Error::last_os_error()
+            );
+        }
+
+        // Ensure close-on-exec is set.
+        cloexec(raw)?;
+
+        // Transfer descriptor ownership to FileDescriptor.
+        let raw = fd.into_raw_fd();
+        let file_desc = unsafe { FileDescriptor::from_raw_fd(raw) };
+
+        Ok(Self {
+            fd: PtyFd(file_desc),
+            took_writer: RefCell::new(false),
+            tty_name,
+        })
+    }
+
+    /// Reconstructs a master PTY trait object from an owned file descriptor.
+    ///
+    /// Takes ownership, validates PTY semantics (`libc::isatty`), sets `FD_CLOEXEC`,
+    /// and implements the existing `MasterPty` trait by reusing `UnixMasterPty` internals.
+    pub fn from_owned_fd(fd: OwnedFd) -> Result<Box<dyn MasterPty + Send>, Error> {
+        Self::from_owned_fd_with_tty_name(fd, None)
+    }
+
+    /// Reconstructs a master PTY trait object from an owned file descriptor and optional slave `tty_name`.
+    ///
+    /// Takes ownership, validates PTY semantics (`libc::isatty`), sets `FD_CLOEXEC`,
+    /// and implements the existing `MasterPty` trait by reusing `UnixMasterPty` internals.
+    pub fn from_owned_fd_with_tty_name(
+        fd: OwnedFd,
+        tty_name: Option<PathBuf>,
+    ) -> Result<Box<dyn MasterPty + Send>, Error> {
+        let master = Self::new(fd, tty_name)?;
+        Ok(Box::new(master))
+    }
+
+    /// Reconstructs a master PTY trait object from a raw file descriptor.
+    ///
+    /// # Safety
+    /// Caller must ensure `fd` is a valid, open descriptor and transfers ownership.
+    pub unsafe fn from_raw_fd(fd: RawFd) -> Result<Box<dyn MasterPty + Send>, Error> {
+        let owned = OwnedFd::from_raw_fd(fd);
+        Self::from_owned_fd(owned)
+    }
+}
+
+/// Convenience constructor to reconstruct a master PTY from an owned file descriptor
+/// and optional slave `tty_name` path (design doc section 11 'PTY master adoption').
+pub fn master_from_owned_fd(
+    fd: OwnedFd,
+    tty_name: Option<PathBuf>,
+) -> Result<Box<dyn MasterPty + Send>, Error> {
+    UnixMasterPty::from_owned_fd_with_tty_name(fd, tty_name)
+}
+
 /// Represents the slave end of a pty.
 /// The file descriptor will be closed when the Pty is dropped.
-struct UnixSlavePty {
+pub struct UnixSlavePty {
     fd: PtyFd,
+}
+
+impl UnixSlavePty {
+    /// Obtain a readable handle to the slave end.
+    pub fn try_clone_reader(&self) -> Result<Box<dyn Read + Send>, Error> {
+        let fd = PtyFd(self.fd.try_clone()?);
+        Ok(Box::new(fd))
+    }
+
+    /// Obtain a writable handle to the slave end.
+    pub fn try_clone_writer(&self) -> Result<Box<dyn Write + Send>, Error> {
+        let fd = PtyFd(self.fd.try_clone()?);
+        Ok(Box::new(fd))
+    }
+
+    /// Returns the raw file descriptor for the slave end.
+    pub fn as_raw_fd(&self) -> RawFd {
+        self.fd.0.as_raw_fd()
+    }
+}
+
+impl Read for UnixSlavePty {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.fd.read(buf)
+    }
+}
+
+impl Write for UnixSlavePty {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.fd.0.write(buf)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.fd.0.flush()
+    }
 }
 
 /// Helper function to set the close-on-exec flag for a raw descriptor
@@ -337,6 +451,11 @@ impl SlavePty for UnixSlavePty {
         builder: CommandBuilder,
     ) -> Result<Box<dyn Child + Send + Sync>, Error> {
         Ok(Box::new(self.fd.spawn_command(builder)?))
+    }
+
+    #[cfg(unix)]
+    fn as_raw_fd(&self) -> Option<RawFd> {
+        Some(self.fd.0.as_raw_fd())
     }
 }
 
@@ -410,5 +529,259 @@ impl Write for UnixMasterWriter {
     }
     fn flush(&mut self) -> Result<(), io::Error> {
         self.fd.flush()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    #[test]
+    fn test_master_from_owned_fd_roundtrip_and_resize() -> Result<(), Error> {
+        let pty_system = UnixPtySystem::default();
+        let initial_size = PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+
+        // 1. Open a real PTY via the crate's existing openpty path.
+        let pair = pty_system.openpty(initial_size)?;
+        let master_raw = pair
+            .master
+            .as_raw_fd()
+            .expect("master raw fd should be available");
+        let slave_raw = pair
+            .slave
+            .as_raw_fd()
+            .expect("slave raw fd should be available");
+        let tty_name = pair.master.tty_name();
+
+        // 2. Put the slave in raw mode so that bytes roundtrip without echo or line editing.
+        let mut termios: libc::termios = unsafe { mem::zeroed() };
+        let rc = unsafe { libc::tcgetattr(slave_raw, &mut termios) };
+        assert_eq!(rc, 0, "tcgetattr on slave failed");
+        unsafe { libc::cfmakeraw(&mut termios) };
+        let rc = unsafe { libc::tcsetattr(slave_raw, libc::TCSANOW, &termios) };
+        assert_eq!(rc, 0, "tcsetattr on slave failed");
+
+        // 3. dup() the master fd into an OwnedFd.
+        let dup_fd = unsafe { libc::dup(master_raw) };
+        assert!(
+            dup_fd >= 0,
+            "dup failed: {:?}",
+            io::Error::last_os_error()
+        );
+
+        // Verify that plain dup() does not have FD_CLOEXEC set.
+        let initial_flags = unsafe { libc::fcntl(dup_fd, libc::F_GETFD) };
+        assert!(initial_flags >= 0);
+        assert_eq!(
+            initial_flags & libc::FD_CLOEXEC,
+            0,
+            "plain dup() should not have FD_CLOEXEC"
+        );
+
+        let owned_fd = unsafe { OwnedFd::from_raw_fd(dup_fd) };
+
+        // Drop the original master to prove the adopted master operates independently.
+        drop(pair.master);
+
+        // 4. Construct a new master from the dup'd OwnedFd.
+        let adopted_master =
+            UnixMasterPty::from_owned_fd_with_tty_name(owned_fd, tty_name.clone())?;
+
+        // Verify FD_CLOEXEC was set by the constructor.
+        let adopted_fd = adopted_master
+            .as_raw_fd()
+            .expect("adopted master as_raw_fd");
+        let adopted_flags = unsafe { libc::fcntl(adopted_fd, libc::F_GETFD) };
+        assert!(adopted_flags >= 0);
+        assert_ne!(
+            adopted_flags & libc::FD_CLOEXEC,
+            0,
+            "adopted master descriptor must have FD_CLOEXEC set"
+        );
+
+        // Verify tty_name matches if passed.
+        assert_eq!(adopted_master.tty_name(), tty_name);
+
+        // 5. Assert write -> read roundtrip through the slave.
+        // Step 5a: Write from adopted master -> read from slave.
+        let test_payload_m2s = b"hello slave from adopted master";
+        let mut master_writer = adopted_master.take_writer()?;
+        master_writer.write_all(test_payload_m2s)?;
+        master_writer.flush()?;
+
+        let mut slave_buf = vec![0u8; test_payload_m2s.len()];
+        let mut bytes_read = 0;
+        while bytes_read < slave_buf.len() {
+            let n = unsafe {
+                libc::read(
+                    slave_raw,
+                    slave_buf[bytes_read..].as_mut_ptr() as *mut libc::c_void,
+                    slave_buf.len() - bytes_read,
+                )
+            };
+            assert!(n > 0, "read from slave failed or returned EOF");
+            bytes_read += n as usize;
+        }
+        assert_eq!(&slave_buf, test_payload_m2s);
+
+        // Drop master writer after slave has read the payload
+        drop(master_writer);
+
+        // Step 5b: Write from slave -> read from adopted master.
+        let test_payload_s2m = b"hello adopted master from slave";
+        let n_written = unsafe {
+            libc::write(
+                slave_raw,
+                test_payload_s2m.as_ptr() as *const libc::c_void,
+                test_payload_s2m.len(),
+            )
+        };
+        assert_eq!(n_written as usize, test_payload_s2m.len());
+
+        let mut master_reader = adopted_master.try_clone_reader()?;
+        let mut master_buf = vec![0u8; test_payload_s2m.len()];
+        master_reader.read_exact(&mut master_buf)?;
+        assert_eq!(&master_buf, test_payload_s2m);
+
+        // 6. Assert resize and get_size on the adopted master.
+        let current_size = adopted_master.get_size()?;
+        assert_eq!(current_size.rows, 24);
+        assert_eq!(current_size.cols, 80);
+
+        let new_size = PtySize {
+            rows: 42,
+            cols: 132,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        adopted_master.resize(new_size)?;
+
+        let updated_size = adopted_master.get_size()?;
+        assert_eq!(updated_size.rows, 42);
+        assert_eq!(updated_size.cols, 132);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_owned_fd_roundtrip_with_unix_slave_pty() -> Result<(), Error> {
+        let (orig_master, slave) = openpty(PtySize {
+            rows: 25,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })?;
+        let master_raw = orig_master.as_raw_fd().unwrap();
+
+        // Put slave in raw mode
+        let slave_raw = slave.as_raw_fd();
+        let mut termios: libc::termios = unsafe { mem::zeroed() };
+        unsafe {
+            assert_eq!(libc::tcgetattr(slave_raw, &mut termios), 0);
+            libc::cfmakeraw(&mut termios);
+            assert_eq!(libc::tcsetattr(slave_raw, libc::TCSANOW, &termios), 0);
+        }
+
+        let dup_fd = unsafe { libc::dup(master_raw) };
+        assert!(dup_fd >= 0);
+        let owned_fd = unsafe { OwnedFd::from_raw_fd(dup_fd) };
+        drop(orig_master);
+
+        let adopted = UnixMasterPty::from_owned_fd(owned_fd)?;
+
+        // Write from adopted master, read via slave's try_clone_reader
+        let mut master_writer = adopted.take_writer()?;
+        master_writer.write_all(b"roundtrip_direct")?;
+        master_writer.flush()?;
+
+        let mut slave_reader = slave.try_clone_reader()?;
+        let mut buf = [0u8; 16];
+        slave_reader.read_exact(&mut buf)?;
+        assert_eq!(&buf, b"roundtrip_direct");
+
+        drop(master_writer);
+
+        // Write via slave's try_clone_writer, read from adopted master
+        let mut slave_writer = slave.try_clone_writer()?;
+        slave_writer.write_all(b"roundtrip_reply!")?;
+        slave_writer.flush()?;
+
+        let mut master_reader = adopted.try_clone_reader()?;
+        let mut reply_buf = [0u8; 16];
+        master_reader.read_exact(&mut reply_buf)?;
+        assert_eq!(&reply_buf, b"roundtrip_reply!");
+
+        // Resize and get_size check
+        let resize_target = PtySize {
+            rows: 35,
+            cols: 95,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        adopted.resize(resize_target)?;
+        let got_size = adopted.get_size()?;
+        assert_eq!(got_size.rows, 35);
+        assert_eq!(got_size.cols, 95);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_master_from_owned_fd_function() -> Result<(), Error> {
+        let (orig_master, orig_slave) = openpty(PtySize::default())?;
+        let master_raw = orig_master.as_raw_fd().unwrap();
+        let tty_name = orig_master.tty_name();
+
+        let dup_fd = unsafe { libc::dup(master_raw) };
+        assert!(dup_fd >= 0);
+        let owned_fd = unsafe { OwnedFd::from_raw_fd(dup_fd) };
+        drop(orig_master);
+
+        let adopted = master_from_owned_fd(owned_fd, tty_name.clone())?;
+        assert_eq!(adopted.tty_name(), tty_name);
+        assert_eq!(adopted.get_size()?, PtySize::default());
+
+        drop(orig_slave);
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_owned_fd_rejects_non_tty() {
+        let mut pipe_fds = [-1; 2];
+        let rc = unsafe { libc::pipe(pipe_fds.as_mut_ptr()) };
+        assert_eq!(rc, 0);
+
+        let pipe_read = unsafe { OwnedFd::from_raw_fd(pipe_fds[0]) };
+        let pipe_write = unsafe { OwnedFd::from_raw_fd(pipe_fds[1]) };
+
+        let result = UnixMasterPty::from_owned_fd(pipe_read);
+        assert!(
+            result.is_err(),
+            "pipe descriptor must not be accepted as a PTY master"
+        );
+
+        drop(pipe_write);
+    }
+
+    #[test]
+    fn test_from_raw_fd_unsafe() -> Result<(), Error> {
+        let (orig_master, orig_slave) = openpty(PtySize::default())?;
+        let master_raw = orig_master.as_raw_fd().unwrap();
+
+        let dup_fd = unsafe { libc::dup(master_raw) };
+        assert!(dup_fd >= 0);
+        drop(orig_master);
+
+        let adopted = unsafe { UnixMasterPty::from_raw_fd(dup_fd)? };
+        assert_eq!(adopted.get_size()?, PtySize::default());
+
+        drop(orig_slave);
+        Ok(())
     }
 }

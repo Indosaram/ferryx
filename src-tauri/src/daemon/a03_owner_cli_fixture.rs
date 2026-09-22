@@ -192,6 +192,9 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
         let local_capabilities = {
             let mut capabilities = vec!["machinePairingV1", "sshPasswordV1", "dagStreamingV1"];
             if server.paired_hosts.available().await { capabilities.push("pairedHostInventoryV1"); }
+            // Mirrors the daemon's GetCapabilities surface: handover advertises ownership transfer.
+            #[cfg(unix)]
+            capabilities.push("sessionOwnershipTransferV1");
             capabilities
         };
         handshake(&socket, &local_capabilities).await?;

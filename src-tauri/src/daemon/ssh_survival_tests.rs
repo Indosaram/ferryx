@@ -193,7 +193,7 @@ fn ssh_reconnect_safety_retry_is_additive_protocol() {
     assert!(
         matches!(request, DaemonRequest::RetryRemoteSession { session_id } if session_id == "original")
     );
-    assert_eq!(DAEMON_PROTOCOL_VERSION, 4);
+    assert_eq!(DAEMON_PROTOCOL_VERSION, 5);
 }
 
 /// In-process stand-in for a draining predecessor daemon: binds a real UDS socket in a

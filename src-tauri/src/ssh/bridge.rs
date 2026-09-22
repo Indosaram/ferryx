@@ -11,9 +11,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(unix)]
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+#[cfg(not(unix))]
+pub type RawFd = i32;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::Mutex;
 
@@ -317,6 +322,9 @@ pub enum BridgeError {
 
     #[error("Connection closed or poisoned")]
     ConnectionClosed,
+
+    #[error("Bridge connection is not transferable: {0}")]
+    NotTransferable(String),
 }
 
 impl From<IpcError> for BridgeError {
@@ -400,15 +408,136 @@ pub async fn read_frame_async<R: AsyncRead + Unpin>(
     .map_err(|_| BridgeError::Timeout("Frame read timed out".into()))?
 }
 
+/// Duplicates a raw file descriptor and sets FD_CLOEXEC on the duplicate.
+#[cfg(unix)]
+pub fn dup_fd(fd: std::os::unix::io::RawFd) -> Result<std::os::unix::io::RawFd, std::io::Error> {
+    let new_fd = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+    if new_fd < 0 {
+        let duped = unsafe { libc::dup(fd) };
+        if duped < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let _ = unsafe { libc::fcntl(duped, libc::F_SETFD, libc::FD_CLOEXEC) };
+        Ok(duped)
+    } else {
+        Ok(new_fd)
+    }
+}
+
+#[cfg(not(unix))]
+pub fn dup_fd(_fd: i32) -> Result<i32, std::io::Error> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "Unix only"))
+}
+
+/// Underlying stream for BridgeConnection BufReader that can supply captured
+/// prefetch bytes before delegating to the live child stdout pipe.
+pub enum BridgeReaderStream {
+    Child(tokio::process::ChildStdout),
+    Prefetched(tokio::io::Chain<std::io::Cursor<Vec<u8>>, tokio::process::ChildStdout>),
+}
+
+impl AsyncRead for BridgeReaderStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            BridgeReaderStream::Child(c) => Pin::new(c).poll_read(cx, buf),
+            BridgeReaderStream::Prefetched(p) => Pin::new(p).poll_read(cx, buf),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl std::os::unix::io::AsRawFd for BridgeReaderStream {
+    fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
+        match self {
+            BridgeReaderStream::Child(c) => c.as_raw_fd(),
+            BridgeReaderStream::Prefetched(p) => p.get_ref().1.as_raw_fd(),
+        }
+    }
+}
+
+/// Transfer state for a single BridgeConnection containing duplicated raw file descriptors
+/// and buffer/child snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BridgeConnectionTransferState {
+    pub stdin_fd: i32,
+    pub stdout_fd: i32,
+    pub stderr_fd: i32,
+    pub child_pid: Option<u32>,
+    pub captured_stderr: Vec<u8>,
+    pub prefetch: Vec<u8>,
+}
+
+impl BridgeConnectionTransferState {
+    pub fn close_fds(&mut self) {
+        #[cfg(unix)]
+        unsafe {
+            if self.stdin_fd >= 0 {
+                libc::close(self.stdin_fd);
+                self.stdin_fd = -1;
+            }
+            if self.stdout_fd >= 0 {
+                libc::close(self.stdout_fd);
+                self.stdout_fd = -1;
+            }
+            if self.stderr_fd >= 0 {
+                libc::close(self.stderr_fd);
+                self.stderr_fd = -1;
+            }
+        }
+    }
+}
+
+/// Full direct SSH bridge transfer state containing six duplicated raw file descriptors
+/// (three for control, three for reader), child process identity, buffers, and handshake identity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshBridgeTransferState {
+    pub control: BridgeConnectionTransferState,
+    pub reader: BridgeConnectionTransferState,
+    pub host_id: String,
+    pub owner_id: String,
+    pub epoch: Epoch,
+    pub handshake: HandshakeResult,
+}
+
+impl SshBridgeTransferState {
+    pub fn raw_fds(&self) -> [i32; 6] {
+        [
+            self.control.stdin_fd,
+            self.control.stdout_fd,
+            self.control.stderr_fd,
+            self.reader.stdin_fd,
+            self.reader.stdout_fd,
+            self.reader.stderr_fd,
+        ]
+    }
+
+    pub fn close_fds(&mut self) {
+        self.control.close_fds();
+        self.reader.close_fds();
+    }
+}
+
 /// A single framed SSH bridge connection managing an owned SSH child process.
 pub struct BridgeConnection {
     writer: Option<BufWriter<tokio::process::ChildStdin>>,
-    reader: Option<BufReader<tokio::process::ChildStdout>>,
+    reader: Option<BufReader<BridgeReaderStream>>,
     child: Option<tokio::process::Child>,
+    child_pid: Option<u32>,
+    stderr_fd: Option<RawFd>,
     stderr_capture: Arc<std::sync::Mutex<Vec<u8>>>,
     stderr_task: Option<tokio::task::JoinHandle<()>>,
+    prefetched_bytes: Vec<u8>,
+    captured_stderr_prefix: Vec<u8>,
     closed: bool,
     poisoned: bool,
+    paused: bool,
+    detached: bool,
 }
 
 impl BridgeConnection {
@@ -439,6 +568,14 @@ impl BridgeConnection {
             .take()
             .ok_or_else(|| BridgeError::ProcessSpawn("Child stderr not available".into()))?;
 
+        #[cfg(unix)]
+        let stderr_fd = {
+            use std::os::unix::io::AsRawFd;
+            Some(dup_fd(stderr.as_raw_fd())?)
+        };
+        #[cfg(not(unix))]
+        let stderr_fd = None;
+
         let stderr_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
         let stderr_sink = Arc::clone(&stderr_capture);
 
@@ -457,20 +594,28 @@ impl BridgeConnection {
             }
         });
 
+        let child_pid = child.id();
+
         Ok(Self {
             writer: Some(BufWriter::new(stdin)),
-            reader: Some(BufReader::new(stdout)),
+            reader: Some(BufReader::new(BridgeReaderStream::Child(stdout))),
             child: Some(child),
+            child_pid,
+            stderr_fd,
             stderr_capture,
             stderr_task: Some(stderr_task),
+            prefetched_bytes: Vec::new(),
+            captured_stderr_prefix: Vec::new(),
             closed: false,
             poisoned: false,
+            paused: false,
+            detached: false,
         })
     }
 
     /// Returns the OS process ID of the owned child process, if still active.
     pub fn child_id(&self) -> Option<u32> {
-        self.child.as_ref().and_then(|c| c.id())
+        self.child.as_ref().and_then(|c| c.id()).or(self.child_pid)
     }
 
     fn check_stderr(&self) -> String {
@@ -490,7 +635,7 @@ impl BridgeConnection {
         params: Value,
         timeout_dur: Duration,
     ) -> Result<Value, BridgeError> {
-        if self.closed || self.poisoned {
+        if self.closed || self.poisoned || self.paused {
             let _ = self.close().await;
             return Err(BridgeError::ConnectionClosed);
         }
@@ -538,6 +683,20 @@ impl BridgeConnection {
                 let stderr = self.check_stderr();
                 let exit_code = if let Some(child) = self.child.as_mut() {
                     child.try_wait().ok().flatten().and_then(|s| s.code())
+                } else if let Some(pid) = self.child_pid {
+                    #[cfg(unix)]
+                    {
+                        let ret = unsafe { libc::kill(pid as i32, 0) };
+                        if ret != 0 {
+                            Some(1)
+                        } else {
+                            None
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        None
+                    }
                 } else {
                     None
                 };
@@ -753,6 +912,282 @@ impl BridgeConnection {
             .map_err(|e| BridgeError::Protocol(format!("Invalid pty.list response: {e}")))
     }
 
+    /// Cooperatively pauses the bridge connection for handover transfer.
+    ///
+    /// Ensures:
+    /// 1. Connection is not poisoned, closed, or mid-frame.
+    /// 2. Any in-flight frame write is flushed and BufWriter buffer is empty.
+    /// 3. BufReader prefetch bytes and captured stderr prefix are safely saved.
+    /// 4. Background stderr pump is stopped.
+    /// 5. Subsequent request or read calls are rejected before the next read.
+    pub async fn pause_for_transfer(&mut self) -> Result<(), BridgeError> {
+        if self.closed || self.poisoned {
+            return Err(BridgeError::NotTransferable(
+                "Connection is closed or poisoned".into(),
+            ));
+        }
+        if self.paused {
+            return Ok(());
+        }
+
+        // Flush BufWriter
+        if let Some(w) = self.writer.as_mut() {
+            w.flush()
+                .await
+                .map_err(|e| BridgeError::NotTransferable(format!("Failed to flush writer: {e}")))?;
+            if !w.buffer().is_empty() {
+                return Err(BridgeError::NotTransferable(
+                    "Writer buffer contains unsent bytes".into(),
+                ));
+            }
+        } else {
+            return Err(BridgeError::NotTransferable("Writer missing".into()));
+        }
+
+        // Capture BufReader prefetch
+        let prefetch = if let Some(r) = self.reader.as_ref() {
+            r.buffer().to_vec()
+        } else {
+            return Err(BridgeError::NotTransferable("Reader missing".into()));
+        };
+
+        // Pause stderr pump and capture prefix
+        if let Some(task) = self.stderr_task.take() {
+            task.abort();
+            let _ = tokio::time::timeout(Duration::from_millis(100), task).await;
+        }
+        let captured_stderr = self.stderr_capture.lock().unwrap().clone();
+
+        self.prefetched_bytes = prefetch;
+        self.captured_stderr_prefix = captured_stderr;
+        self.paused = true;
+
+        Ok(())
+    }
+
+    /// Exports transfer state yielding duplicated raw file descriptors for stdin, stdout,
+    /// and stderr, child process PID, captured stderr prefix, and reader prefetch.
+    ///
+    /// Must only be called after `pause_for_transfer()`. Returns `NotTransferable` if
+    /// the connection is poisoned, closed, or not paused.
+    pub fn export_transfer_state(&self) -> Result<BridgeConnectionTransferState, BridgeError> {
+        if self.closed || self.poisoned {
+            return Err(BridgeError::NotTransferable(
+                "Connection is closed or poisoned".into(),
+            ));
+        }
+        if !self.paused {
+            return Err(BridgeError::NotTransferable(
+                "Connection must be paused before export".into(),
+            ));
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let stdin_fd = match self.writer.as_ref() {
+                Some(w) => dup_fd(w.get_ref().as_raw_fd())?,
+                None => return Err(BridgeError::NotTransferable("Writer missing".into())),
+            };
+
+            let stdout_fd = match self.reader.as_ref() {
+                Some(r) => match dup_fd(r.get_ref().as_raw_fd()) {
+                    Ok(fd) => fd,
+                    Err(e) => {
+                        unsafe { libc::close(stdin_fd) };
+                        return Err(BridgeError::Io(e));
+                    }
+                },
+                None => {
+                    unsafe { libc::close(stdin_fd) };
+                    return Err(BridgeError::NotTransferable("Reader missing".into()));
+                }
+            };
+
+            let stderr_fd = match self.stderr_fd {
+                Some(fd) => match dup_fd(fd) {
+                    Ok(duped) => duped,
+                    Err(e) => {
+                        unsafe {
+                            libc::close(stdin_fd);
+                            libc::close(stdout_fd);
+                        }
+                        return Err(BridgeError::Io(e));
+                    }
+                },
+                None => {
+                    unsafe {
+                        libc::close(stdin_fd);
+                        libc::close(stdout_fd);
+                    }
+                    return Err(BridgeError::NotTransferable("Stderr FD missing".into()));
+                }
+            };
+
+            Ok(BridgeConnectionTransferState {
+                stdin_fd,
+                stdout_fd,
+                stderr_fd,
+                child_pid: self.child_id(),
+                captured_stderr: self.captured_stderr_prefix.clone(),
+                prefetch: self.prefetched_bytes.clone(),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Err(BridgeError::NotTransferable(
+                "Bridge transfer is only supported on Unix".into(),
+            ))
+        }
+    }
+
+    /// Detaches the connection without killing the local SSH child process.
+    ///
+    /// Bypasses `impl Drop for BridgeConnection`'s child.start_kill() so that transferred
+    /// file descriptors and child processes remain active after handover delivery.
+    pub fn detach_without_kill(&mut self) {
+        self.detached = true;
+        if let Some(task) = self.stderr_task.take() {
+            task.abort();
+        }
+        #[cfg(unix)]
+        if let Some(fd) = self.stderr_fd.take() {
+            unsafe {
+                libc::close(fd);
+            }
+        }
+        drop(self.writer.take());
+        drop(self.reader.take());
+        if let Some(child) = self.child.take() {
+            // Disarm drop kill: child is now owned by successor via transferred FDs.
+            std::mem::forget(child);
+        }
+    }
+
+    /// Resumes the connection if handover transfer was aborted before final commit.
+    pub fn unpause_after_rollback(&mut self) {
+        if !self.detached && !self.closed && !self.poisoned {
+            self.paused = false;
+        }
+    }
+
+    /// Rebuilds a live `BridgeConnection` from transferred raw file descriptors and captured state.
+    pub fn from_transfer_state(state: BridgeConnectionTransferState) -> Result<Self, BridgeError> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::{FromRawFd, OwnedFd};
+
+            let tokio_stdin = {
+                let std_stdin: std::process::ChildStdin =
+                    unsafe { OwnedFd::from_raw_fd(state.stdin_fd).into() };
+                match tokio::process::ChildStdin::from_std(std_stdin) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        unsafe {
+                            libc::close(state.stdout_fd);
+                            libc::close(state.stderr_fd);
+                        }
+                        return Err(BridgeError::ProcessSpawn(format!(
+                            "Failed to import stdin fd: {e}"
+                        )));
+                    }
+                }
+            };
+
+            let tokio_stdout = {
+                let std_stdout: std::process::ChildStdout =
+                    unsafe { OwnedFd::from_raw_fd(state.stdout_fd).into() };
+                match tokio::process::ChildStdout::from_std(std_stdout) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        unsafe {
+                            libc::close(state.stderr_fd);
+                        }
+                        return Err(BridgeError::ProcessSpawn(format!(
+                            "Failed to import stdout fd: {e}"
+                        )));
+                    }
+                }
+            };
+
+            let (tokio_stderr, stored_stderr_fd) = {
+                let stored = match dup_fd(state.stderr_fd) {
+                    Ok(fd) => fd,
+                    Err(e) => {
+                        unsafe { libc::close(state.stderr_fd) };
+                        return Err(BridgeError::Io(e));
+                    }
+                };
+                let std_stderr: std::process::ChildStderr =
+                    unsafe { OwnedFd::from_raw_fd(state.stderr_fd).into() };
+                let ts = match tokio::process::ChildStderr::from_std(std_stderr) {
+                    Ok(ts) => ts,
+                    Err(e) => {
+                        unsafe { libc::close(stored) };
+                        return Err(BridgeError::ProcessSpawn(format!(
+                            "Failed to import stderr fd: {e}"
+                        )));
+                    }
+                };
+                (ts, stored)
+            };
+
+            let stream = if state.prefetch.is_empty() {
+                BridgeReaderStream::Child(tokio_stdout)
+            } else {
+                BridgeReaderStream::Prefetched(
+                    std::io::Cursor::new(state.prefetch).chain(tokio_stdout),
+                )
+            };
+
+            let stderr_capture = Arc::new(std::sync::Mutex::new(state.captured_stderr));
+            let stderr_sink = Arc::clone(&stderr_capture);
+            let stderr_task = tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                let mut stderr = tokio_stderr;
+                while let Ok(n) = stderr.read(&mut buf).await {
+                    if n == 0 {
+                        break;
+                    }
+                    let mut lock = stderr_sink.lock().unwrap();
+                    let remaining = MAX_STDERR_BYTES.saturating_sub(lock.len());
+                    if remaining > 0 {
+                        let to_copy = n.min(remaining);
+                        lock.extend_from_slice(&buf[..to_copy]);
+                    }
+                }
+            });
+
+            Ok(Self {
+                writer: Some(BufWriter::new(tokio_stdin)),
+                reader: Some(BufReader::new(stream)),
+                child: None,
+                child_pid: state.child_pid,
+                stderr_fd: Some(stored_stderr_fd),
+                stderr_capture,
+                stderr_task: Some(stderr_task),
+                prefetched_bytes: Vec::new(),
+                captured_stderr_prefix: Vec::new(),
+                closed: false,
+                poisoned: false,
+                paused: false,
+                detached: false,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = state;
+            Err(BridgeError::NotTransferable(
+                "Bridge transfer is only supported on Unix".into(),
+            ))
+        }
+    }
+
+    #[cfg(test)]
+    pub fn poison_for_test(&mut self) {
+        self.poisoned = true;
+    }
+
     /// Explicitly closes the connection and boundedly reaps all owned resources.
     /// Idempotency is governed by `Option::take()` on resources, never by early
     /// return on `closed`.
@@ -763,19 +1198,30 @@ impl BridgeConnection {
         drop(self.writer.take());
         drop(self.reader.take());
 
+        #[cfg(unix)]
+        if let Some(fd) = self.stderr_fd.take() {
+            unsafe {
+                libc::close(fd);
+            }
+        }
+
         if let Some(task) = self.stderr_task.take() {
             task.abort();
             let _ = tokio::time::timeout(Duration::from_millis(200), task).await;
         }
 
-        if let Some(mut child) = self.child.take() {
-            // First bounded wait for child to exit on stdin closure
-            let first_wait = tokio::time::timeout(Duration::from_millis(500), child.wait()).await;
-            if first_wait.is_err() {
-                let _ = child.start_kill();
-                // Bounded wait after kill signal; NEVER unbounded!
-                let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+        if !self.detached {
+            if let Some(mut child) = self.child.take() {
+                // First bounded wait for child to exit on stdin closure
+                let first_wait = tokio::time::timeout(Duration::from_millis(500), child.wait()).await;
+                if first_wait.is_err() {
+                    let _ = child.start_kill();
+                    // Bounded wait after kill signal; NEVER unbounded!
+                    let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+                }
             }
+        } else {
+            self.child.take();
         }
 
         Ok(())
@@ -790,12 +1236,21 @@ impl Drop for BridgeConnection {
         drop(self.writer.take());
         drop(self.reader.take());
 
+        #[cfg(unix)]
+        if let Some(fd) = self.stderr_fd.take() {
+            unsafe {
+                libc::close(fd);
+            }
+        }
+
         if let Some(task) = self.stderr_task.take() {
             task.abort();
         }
 
-        if let Some(mut child) = self.child.take() {
-            let _ = child.start_kill();
+        if !self.detached {
+            if let Some(mut child) = self.child.take() {
+                let _ = child.start_kill();
+            }
         }
     }
 }
@@ -805,12 +1260,12 @@ impl Drop for BridgeConnection {
 /// - `reader`: dedicated to long-poll `pty.read` frames so input is never blocked
 #[derive(Clone)]
 pub struct SshBridgeClient {
-    control: Arc<Mutex<BridgeConnection>>,
-    reader: Arc<Mutex<BridgeConnection>>,
-    host_id: String,
-    owner_id: String,
-    epoch: Epoch,
-    handshake: HandshakeResult,
+    pub(crate) control: Arc<Mutex<BridgeConnection>>,
+    pub(crate) reader: Arc<Mutex<BridgeConnection>>,
+    pub(crate) host_id: String,
+    pub(crate) owner_id: String,
+    pub(crate) epoch: Epoch,
+    pub(crate) handshake: HandshakeResult,
 }
 
 impl SshBridgeClient {
@@ -1228,6 +1683,76 @@ impl SshBridgeClient {
             .unwrap_or_default();
         Ok((max_mtime, runs))
     }
+
+    /// Cooperatively pauses both dual transport connections for handover transfer.
+    pub async fn pause_for_transfer(&self) -> Result<(), BridgeError> {
+        let mut ctrl = self.control.lock().await;
+        let mut rdr = self.reader.lock().await;
+        ctrl.pause_for_transfer().await?;
+        if let Err(e) = rdr.pause_for_transfer().await {
+            ctrl.unpause_after_rollback();
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Resumes dual transport connections if transfer was aborted or failed.
+    pub async fn unpause_after_rollback(&self) {
+        let mut ctrl = self.control.lock().await;
+        let mut rdr = self.reader.lock().await;
+        ctrl.unpause_after_rollback();
+        rdr.unpause_after_rollback();
+    }
+
+    /// Exports full dual-connection transfer state with six duplicated raw file descriptors
+    /// (three for control, three for reader), child PIDs, buffers, and handshake identity.
+    pub async fn export_transfer_state(&self) -> Result<SshBridgeTransferState, BridgeError> {
+        let ctrl = self.control.lock().await;
+        let rdr = self.reader.lock().await;
+        let mut control = ctrl.export_transfer_state()?;
+        let reader = match rdr.export_transfer_state() {
+            Ok(r) => r,
+            Err(e) => {
+                control.close_fds();
+                return Err(e);
+            }
+        };
+        Ok(SshBridgeTransferState {
+            control,
+            reader,
+            host_id: self.host_id.clone(),
+            owner_id: self.owner_id.clone(),
+            epoch: self.epoch,
+            handshake: self.handshake.clone(),
+        })
+    }
+
+    /// Detaches both dual connections without killing the local SSH child processes.
+    pub async fn detach_without_kill(&self) {
+        let mut ctrl = self.control.lock().await;
+        let mut rdr = self.reader.lock().await;
+        ctrl.detach_without_kill();
+        rdr.detach_without_kill();
+    }
+
+    /// Rebuilds an `SshBridgeClient` from transferred state without reconnecting.
+    pub fn from_transfer_state(state: SshBridgeTransferState) -> Result<Self, BridgeError> {
+        let control = BridgeConnection::from_transfer_state(state.control)?;
+        let reader = match BridgeConnection::from_transfer_state(state.reader) {
+            Ok(r) => r,
+            Err(e) => {
+                return Err(e);
+            }
+        };
+        Ok(Self {
+            host_id: state.host_id,
+            owner_id: state.owner_id,
+            epoch: state.epoch,
+            handshake: state.handshake,
+            control: Arc::new(Mutex::new(control)),
+            reader: Arc::new(Mutex::new(reader)),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1392,5 +1917,240 @@ impl DagSubscription {
         self.closed = true;
         let _ = self.connection.close().await;
         result
+    }
+}
+
+#[cfg(test)]
+mod transfer_tests {
+    use super::*;
+
+    fn spawn_cat_child() -> tokio::process::Child {
+        tokio::process::Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn cat child")
+    }
+
+    fn spawn_echo_stderr_and_cat_child() -> tokio::process::Child {
+        tokio::process::Command::new("/bin/sh")
+            .args(["-c", "echo 'prefix-stderr-content' >&2; exec cat"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn echo stderr and cat child")
+    }
+
+    #[tokio::test]
+    async fn test_bridge_freeze_export_import_roundtrip() {
+        let child = spawn_echo_stderr_and_cat_child();
+        let mut conn = BridgeConnection::from_child(child).expect("from_child");
+        let pid = conn.child_id().expect("child pid");
+
+        // Wait a few ms for stderr to be pumped
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Write a test frame through the connection
+        let msg1 = json!({"ok": true, "stage": "pre-freeze", "seq": 1});
+        write_frame_async(conn.writer.as_mut().unwrap(), &msg1, Duration::from_secs(2))
+            .await
+            .expect("write frame 1");
+        let resp1 = read_frame_async(conn.reader.as_mut().unwrap(), Duration::from_secs(2))
+            .await
+            .expect("read frame 1");
+        assert_eq!(resp1, Some(msg1));
+
+        // Freeze / pause for transfer
+        conn.pause_for_transfer().await.expect("pause_for_transfer");
+        assert!(conn.paused);
+
+        // Export state
+        let state = conn.export_transfer_state().expect("export_transfer_state");
+        assert_eq!(state.child_pid, Some(pid));
+        assert!(state.stdin_fd >= 0);
+        assert!(state.stdout_fd >= 0);
+        assert!(state.stderr_fd >= 0);
+        let captured = String::from_utf8_lossy(&state.captured_stderr);
+        assert!(
+            captured.contains("prefix-stderr-content"),
+            "stderr capture should contain prefix: {captured}"
+        );
+
+        // Detach without kill
+        conn.detach_without_kill();
+        drop(conn);
+
+        // Child process should still be alive
+        #[cfg(unix)]
+        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, 0);
+
+        // Import into new BridgeConnection
+        let mut imported =
+            BridgeConnection::from_transfer_state(state).expect("from_transfer_state");
+        assert_eq!(imported.child_id(), Some(pid));
+        let imported_stderr = imported.check_stderr();
+        assert!(
+            imported_stderr.contains("prefix-stderr-content"),
+            "imported stderr should match: {imported_stderr}"
+        );
+
+        // Write another frame through imported connection
+        let msg2 = json!({"ok": true, "stage": "post-import", "seq": 2});
+        write_frame_async(
+            imported.writer.as_mut().unwrap(),
+            &msg2,
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("write frame 2");
+        let resp2 = read_frame_async(imported.reader.as_mut().unwrap(), Duration::from_secs(2))
+            .await
+            .expect("read frame 2");
+        assert_eq!(resp2, Some(msg2));
+
+        // Cleanup
+        imported.close().await.expect("close imported");
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bridge_poisoned_connection_export_rejected() {
+        let child = spawn_cat_child();
+        let mut conn = BridgeConnection::from_child(child).expect("from_child");
+        let pid = conn.child_id().expect("child pid");
+
+        // Manually poison connection
+        conn.poison_for_test();
+
+        // Pause must fail
+        let pause_err = conn.pause_for_transfer().await.unwrap_err();
+        assert!(
+            matches!(pause_err, BridgeError::NotTransferable(_)),
+            "Expected NotTransferable error, got: {pause_err:?}"
+        );
+
+        // Export must fail
+        let export_err = conn.export_transfer_state().unwrap_err();
+        assert!(
+            matches!(export_err, BridgeError::NotTransferable(_)),
+            "Expected NotTransferable error, got: {export_err:?}"
+        );
+
+        conn.detach_without_kill();
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bridge_drop_after_detach_does_not_kill_child() {
+        let child = spawn_cat_child();
+        let mut conn = BridgeConnection::from_child(child).expect("from_child");
+        let pid = conn.child_id().expect("child pid");
+
+        // Process is alive
+        #[cfg(unix)]
+        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, 0);
+
+        // Pause and export
+        conn.pause_for_transfer().await.expect("pause_for_transfer");
+        let mut state = conn.export_transfer_state().expect("export_transfer_state");
+
+        // Detach without kill
+        conn.detach_without_kill();
+
+        // Drop original connection
+        drop(conn);
+
+        // Wait a short duration to ensure any async kill would have fired
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Process MUST still be alive!
+        #[cfg(unix)]
+        {
+            let res = unsafe { libc::kill(pid as i32, 0) };
+            assert_eq!(res, 0, "Child process was killed by drop after detach!");
+        }
+
+        // Clean up exported FDs and kill the test child
+        state.close_fds();
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ssh_bridge_client_transfer_roundtrip() {
+        let c_child = spawn_cat_child();
+        let r_child = spawn_cat_child();
+        let c_pid = c_child.id().unwrap();
+        let r_pid = r_child.id().unwrap();
+
+        let ctrl = BridgeConnection::from_child(c_child).expect("ctrl");
+        let rdr = BridgeConnection::from_child(r_child).expect("rdr");
+
+        let handshake = HandshakeResult {
+            protocol: PROTOCOL_VERSION,
+            capabilities: vec!["sshHelperV1".into()],
+            host_id: "test-host-id".into(),
+            owner_id: "test-owner-id".into(),
+            epoch: Epoch(12345),
+            os: "darwin".into(),
+            arch: "arm64".into(),
+        };
+
+        let client = SshBridgeClient {
+            control: Arc::new(Mutex::new(ctrl)),
+            reader: Arc::new(Mutex::new(rdr)),
+            host_id: "test-host-id".into(),
+            owner_id: "test-owner-id".into(),
+            epoch: Epoch(12345),
+            handshake: handshake.clone(),
+        };
+
+        // Pause for transfer
+        client.pause_for_transfer().await.expect("pause_for_transfer");
+
+        // Export state
+        let state = client
+            .export_transfer_state()
+            .await
+            .expect("export_transfer_state");
+        assert_eq!(state.raw_fds().len(), 6);
+        assert_eq!(state.host_id, "test-host-id");
+        assert_eq!(state.epoch, Epoch(12345));
+        assert_eq!(state.handshake, handshake);
+
+        // Detach without kill
+        client.detach_without_kill().await;
+        drop(client);
+
+        // Children must still be alive
+        #[cfg(unix)]
+        {
+            assert_eq!(unsafe { libc::kill(c_pid as i32, 0) }, 0);
+            assert_eq!(unsafe { libc::kill(r_pid as i32, 0) }, 0);
+        }
+
+        // Reconstruct client from state
+        let imported = SshBridgeClient::from_transfer_state(state).expect("from_transfer_state");
+        assert_eq!(imported.host_id(), "test-host-id");
+        assert_eq!(imported.owner_id(), "test-owner-id");
+        assert_eq!(imported.epoch(), Epoch(12345));
+
+        // Clean up
+        imported.close().await.expect("close imported");
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(c_pid as i32, libc::SIGKILL);
+            libc::kill(r_pid as i32, libc::SIGKILL);
+        }
     }
 }
