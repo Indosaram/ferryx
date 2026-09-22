@@ -96,7 +96,12 @@ pub struct DaemonSpawnResult {
     pub epoch: u64,
     pub session: DaemonSessionDetails,
 }
-const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(5);
+// The first launch of a freshly installed bundle pays Gatekeeper/XProtect signature
+// validation before the daemon can emit its readiness token, which regularly exceeds a
+// few seconds on a cold cache. A daemon that genuinely fails to start closes stdout and is
+// reported immediately by wait_for_daemon_ready, so this budget only bounds a live but slow
+// start; it never delays a real failure.
+const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(30);
 
 async fn wait_for_daemon_ready<R>(reader: R, timeout: Duration) -> Result<(), IpcError>
 where
@@ -2882,6 +2887,44 @@ mod tests {
         assert!(!wait.is_finished(), "near-match must not signal readiness");
         writer.write_all(b"FERRYX_DAEMON_READY\n").await.unwrap();
         wait.await.unwrap().expect("exact token signals readiness");
+    }
+
+    #[test]
+    fn test_daemon_ready_budget_covers_first_launch_signature_validation() {
+        // The first launch of a freshly installed (re-signed or re-notarized) bundle pays
+        // Gatekeeper/XProtect validation before the daemon can emit its readiness token.
+        // A budget under that cost makes spawn_daemon_process kill the daemon it just
+        // spawned, which surfaces as "daemon startup timed out waiting for readiness signal"
+        // and leaves a stale socket behind.
+        assert!(
+            DAEMON_READY_TIMEOUT >= Duration::from_secs(20),
+            "readiness budget {DAEMON_READY_TIMEOUT:?} is too tight for first-launch signature validation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_daemon_readiness_fails_immediately_when_daemon_process_dies() {
+        // A wider budget must not slow down genuine failures: a daemon that exits without
+        // emitting the token closes stdout, and that EOF has to fail right away instead of
+        // burning the whole readiness budget.
+        let (writer, reader) = tokio::io::duplex(256);
+        drop(writer);
+
+        let started = std::time::Instant::now();
+        let error = wait_for_daemon_ready(BufReader::new(reader), DAEMON_READY_TIMEOUT)
+            .await
+            .expect_err("closed stdout must not be reported as readiness");
+
+        assert!(
+            error.message.contains("stdout closed"),
+            "unexpected error: {}",
+            error.message
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "EOF must fail fast, took {:?}",
+            started.elapsed()
+        );
     }
 
     #[tokio::test]
