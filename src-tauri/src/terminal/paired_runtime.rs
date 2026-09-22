@@ -533,11 +533,14 @@ impl Runtime {
     }
     /// Detach only; deliberately not remote session close.
     pub async fn detach(&self, id: &str) -> Result<(), String> {
-        let mut owner = self
-            .owners
-            .lock()
-            .remove(id)
-            .ok_or("PAIRED_PROXY_MISSING")?;
+        // Detach is idempotent: a proxy that is already gone (never registered in
+        // this daemon incarnation, reaped while idle, or detached earlier) already
+        // satisfies the caller's desired end state. Erroring here stranded callers
+        // that only want the proxy gone, e.g. closing a pane restored from a
+        // previous daemon generation.
+        let Some(mut owner) = self.owners.lock().remove(id) else {
+            return Ok(());
+        };
         if owner.task.is_finished() {
             return Ok(());
         }
@@ -834,6 +837,23 @@ mod tests {
         // corrupt-but-recoverable file with live memory.
         let after = std::fs::read(&store_path).unwrap();
         assert_eq!(after, b"{not-json", "corrupt store must be left untouched");
+    }
+
+    #[tokio::test]
+    async fn detach_of_unknown_proxy_is_idempotent_success() {
+        // Closing a pane restored from a previous daemon generation hands the
+        // runtime a proxy id it never registered. Detach must satisfy the caller
+        // (the proxy is already gone) instead of stranding the close with
+        // PAIRED_PROXY_MISSING.
+        let runtime = Runtime::new(None);
+        runtime
+            .detach("daemon-session:never-registered")
+            .await
+            .expect("first detach of an unknown proxy must succeed");
+        runtime
+            .detach("daemon-session:never-registered")
+            .await
+            .expect("second detach must also succeed");
     }
 
     #[tokio::test]

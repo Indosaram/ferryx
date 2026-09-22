@@ -290,3 +290,54 @@ fn malformed_epochs_and_oversized_json_are_rejected() {
         Err(DecodeError::PayloadTooLarge)
     ));
 }
+
+#[test]
+fn request_ids_must_be_bare_hyphenated_uuids_on_the_host_wire() {
+    let uuid = "2f9a1c3e-4b5d-4e6f-8a90-1b2c3d4e5f60";
+    assert!(is_hyphenated_uuid(uuid));
+    for bad in [
+        format!("shell-replacement-{uuid}"),
+        format!("restart-session-1-{uuid}"),
+        uuid.replace('-', ""),
+        format!("{uuid} "),
+        String::new(),
+    ] {
+        assert!(!is_hyphenated_uuid(&bad), "{bad} must not pass the wire contract");
+    }
+}
+
+#[test]
+fn host_request_id_rewrites_only_non_conforming_ids() {
+    let uuid = "2f9a1c3e-4b5d-4e6f-8a90-1b2c3d4e5f60";
+    assert_eq!(host_request_id(uuid), uuid, "conforming ids pass through unchanged");
+    let prefixed = format!("shell-replacement-{uuid}");
+    let rewritten = host_request_id(&prefixed);
+    assert_ne!(rewritten, prefixed);
+    assert!(is_hyphenated_uuid(&rewritten));
+    assert_ne!(host_request_id(""), host_request_id(""), "fresh ids stay unique");
+}
+
+#[test]
+fn create_session_request_rejects_prefixed_request_ids() {
+    let uuid = "2f9a1c3e-4b5d-4e6f-8a90-1b2c3d4e5f60";
+    let wire = |request_id: String| {
+        json!({
+            "requestId": request_id,
+            "workspaceId": "ws",
+            "worktree": null,
+            "cols": 80,
+            "rows": 24,
+            "inheritFromSessionId": null,
+            "cwdRelative": null,
+            "startup": {"kind": "shell"}
+        })
+    };
+    assert!(serde_json::from_value::<CreateSessionRequest>(wire(uuid.to_string())).is_ok());
+    assert!(
+        serde_json::from_value::<CreateSessionRequest>(wire(format!("shell-replacement-{uuid}")))
+            .is_err(),
+        "the host validator rejects prefixed ids; submits must normalize first"
+    );
+    let normalized = host_request_id(&format!("restart-s1-{uuid}"));
+    assert!(serde_json::from_value::<CreateSessionRequest>(wire(normalized)).is_ok());
+}

@@ -1,7 +1,12 @@
 // allow: SIZE_OK — Tauri IPC integration tests for terminal, worktree, and daemon commands
 use crate::daemon::client::DaemonClient;
 use crate::daemon::server::DaemonServer;
-use crate::ipc::terminal::{get_cached_cwd, process_cwd};
+use crate::ipc::terminal::{
+    get_cached_cwd,
+    is_retryable_paired_transport_error,
+    process_cwd,
+    should_reconcile_create_error,
+};
 use crate::ipc::*;
 use crate::remote::{RemoteNetworkMode, RemoteRestartPolicy};
 use crate::worktree::{run_git, WorkspaceRegistry, WorktreeIdentity};
@@ -3510,4 +3515,47 @@ async fn test_p13_attach_hub_absence_returns_proxy_pending_unknown() {
     );
 
     server.abort();
+}
+
+#[test]
+fn paired_create_retry_policy_covers_lost_responses() {
+    // Transport failures where the response never arrived intact are retryable:
+    // the host journal dedups by request id, so a resubmit is idempotent.
+    for code in [
+        "PAIRED_HOST_INVALID_RESPONSE",
+        "TIMEOUT",
+        "HOST_UNAVAILABLE",
+    ] {
+        assert!(
+            is_retryable_paired_transport_error(code),
+            "{code} must be retried"
+        );
+    }
+    for code in [
+        "INVALID_REQUEST",
+        "WORKTREE_NOT_FOUND",
+        "SESSION_NOT_FOUND",
+        "UNAUTHORIZED",
+    ] {
+        assert!(
+            !is_retryable_paired_transport_error(code),
+            "{code} is a definitive host verdict and must not be retried"
+        );
+    }
+}
+
+#[test]
+fn paired_create_reconcile_policy_covers_lost_responses() {
+    // A create response that never arrived intact must flow into the bounded
+    // journal reconcile instead of failing the user action outright.
+    assert!(should_reconcile_create_error(false, "PAIRED_HOST_INVALID_RESPONSE"));
+    assert!(should_reconcile_create_error(false, "TIMEOUT"));
+    assert!(should_reconcile_create_error(false, "OPERATION_OUTCOME_UNKNOWN"));
+    assert!(should_reconcile_create_error(true, "ANYTHING"));
+    for code in ["INVALID_REQUEST", "WORKSPACE_NOT_FOUND", "UNAUTHORIZED"] {
+        assert!(
+            !should_reconcile_create_error(false, code),
+            "{code} is terminal and must surface to the user"
+        );
+    }
 }

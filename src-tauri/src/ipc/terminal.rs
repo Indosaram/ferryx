@@ -779,6 +779,27 @@ pub(crate) fn resolve_paired_spawn_target(
     }
 }
 
+/// Transport-level paired-op failures where the host may or may not have applied
+/// the request: the host journal dedups by request id, so resubmitting the same
+/// id is idempotent and a journal reconcile is safe to attempt.
+pub(crate) fn is_retryable_paired_transport_error(code: &str) -> bool {
+    matches!(
+        code,
+        "PAIRED_HOST_INVALID_RESPONSE" | "TIMEOUT" | "HOST_UNAVAILABLE"
+    )
+}
+
+/// A create response that never arrived intact is not proof the request was
+/// rejected — the journal may still complete it. Such codes must flow into the
+/// bounded journal reconcile instead of failing the user action outright.
+pub(crate) fn should_reconcile_create_error(ambiguous: bool, code: &str) -> bool {
+    ambiguous
+        || matches!(
+            code,
+            "TIMEOUT" | "OPERATION_OUTCOME_UNKNOWN" | "PAIRED_HOST_INVALID_RESPONSE"
+        )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PendingCreateStatus {
@@ -1717,10 +1738,14 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
             ));
         }
 
-        let client_request_id = request
-            .client_request_id
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        // The paired host journal only accepts bare hyphenated UUIDs as request
+        // ids, while local flows carry descriptive ids such as
+        // `shell-replacement-<uuid>` or `restart-<session>-<uuid>`. Normalize at
+        // this boundary so the host submit, journal reconciliation, and pending
+        // create records all share the same host-safe id.
+        let client_request_id = crate::remote::machine_protocol::host_request_id(
+            request.client_request_id.as_deref().unwrap_or_default(),
+        );
 
         let target_cwd = request.cwd.as_deref();
         let effective_repo_root = effective_paired_repo_root(&repo_root, target_cwd);
@@ -1788,20 +1813,48 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                 } else {
                     // External worktree or path outside repo_root:
                     // Register the worktree path on the paired machine so it can serve as a workspace target.
-                    let reg_op = crate::paired_host::client::Operation::RegisterProject {
+                    // The host journal dedups by request id, so a bounded resubmit after a transport-level
+                    // failure (malformed or lost response) is idempotent and keeps a transient tunnel
+                    // hiccup from failing the user's worktree open.
+                    let reg_request_id = uuid::Uuid::new_v4().to_string();
+                    let reg_op = || crate::paired_host::client::Operation::RegisterProject {
                         request: crate::remote::machine_protocol::RegisterRequest {
-                            request_id: uuid::Uuid::new_v4().to_string(),
+                            request_id: reg_request_id.clone(),
                             repo_path: cwd_str.to_string(),
                         },
                     };
-                    match daemon_client
+                    let mut reg_resp = daemon_client
                         .paired_host_operation(crate::paired_host::client::OperationRequest {
                             host_id: host_id.clone(),
                             generation: host.generation,
-                            operation: reg_op,
+                            operation: reg_op(),
                         })
-                        .await
+                        .await;
                     {
+                        let mut resubmits = 0;
+                        loop {
+                            let retryable = match &reg_resp {
+                                Err(e) => is_retryable_paired_transport_error(&e.code),
+                                Ok(_) => false,
+                            };
+                            if !retryable || resubmits >= 2 {
+                                break;
+                            }
+                            resubmits += 1;
+                            tokio::time::sleep(std::time::Duration::from_millis(300 * resubmits))
+                                .await;
+                            reg_resp = daemon_client
+                                .paired_host_operation(
+                                    crate::paired_host::client::OperationRequest {
+                                        host_id: host_id.clone(),
+                                        generation: host.generation,
+                                        operation: reg_op(),
+                                    },
+                                )
+                                .await;
+                        }
+                    }
+                    match reg_resp {
                         Ok(crate::paired_host::client::OperationResponse {
                             result:
                                 crate::paired_host::client::OperationResult::RegisterProject(data),
@@ -1896,6 +1949,35 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
             })
             .await;
 
+        // Bounded transport retry: PAIRED_HOST_INVALID_RESPONSE / TIMEOUT / HOST_UNAVAILABLE
+        // mean the response was lost or malformed, not that the request was rejected.
+        // The host journal dedups by request id, so resubmitting the same id is
+        // idempotent; without this, a transient tunnel hiccup surfaces as a failed
+        // user action.
+        {
+            let mut resubmits = 0;
+            loop {
+                let retryable = match &op_resp {
+                    Err(e) => is_retryable_paired_transport_error(&e.code),
+                    Ok(_) => false,
+                };
+                if !retryable || resubmits >= 2 {
+                    break;
+                }
+                resubmits += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(300 * resubmits)).await;
+                op_resp = daemon_client
+                    .paired_host_operation(crate::paired_host::client::OperationRequest {
+                        host_id: host_id.clone(),
+                        generation: host.generation,
+                        operation: crate::paired_host::client::Operation::CreateSession {
+                            request: create_request.clone(),
+                        },
+                    })
+                    .await;
+            }
+        }
+
         if let Err(ref e) = op_resp {
             if !e.ambiguous
                 && resolved_inherit.is_some()
@@ -1938,10 +2020,7 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                     )));
                 }
             },
-            Err(ref e)
-                if e.ambiguous
-                    || matches!(e.code.as_str(), "TIMEOUT" | "OPERATION_OUTCOME_UNKNOWN") =>
-            {
+            Err(ref e) if should_reconcile_create_error(e.ambiguous, &e.code) => {
                 match reconcile_ambiguous_create(
                     &daemon_client,
                     &host_id,
@@ -1985,7 +2064,7 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
             Err(e)
                 if matches!(
                     e.code.as_str(),
-                    "TIMEOUT" | "HOST_UNAVAILABLE" | "PAIRED_PROXY_UNAVAILABLE"
+                    "TIMEOUT" | "HOST_UNAVAILABLE" | "PAIRED_PROXY_UNAVAILABLE" | "PAIRED_HOST_INVALID_RESPONSE"
                 ) =>
             {
                 tracing::warn!(

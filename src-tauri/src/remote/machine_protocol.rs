@@ -54,17 +54,38 @@ fn text_list<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::E
     }
     Ok(value)
 }
-fn request_id<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
-    let s = required(d)?;
-    if s.len() != 36
-        || !s.bytes().enumerate().all(|(i, b)| {
+/// The host wire contract for request ids: a bare hyphenated UUID (36 chars,
+/// hyphens at 8/13/18/23, hex elsewhere). Callers may carry richer local ids
+/// (for example `shell-replacement-<uuid>` or `restart-<session>-<uuid>`), so
+/// every submit boundary must normalize through [`host_request_id`] before a
+/// machine request is serialized.
+pub fn is_hyphenated_uuid(s: &str) -> bool {
+    s.len() == 36
+        && s.bytes().enumerate().all(|(i, b)| {
             if [8, 13, 18, 23].contains(&i) {
                 b == b'-'
             } else {
                 b.is_ascii_hexdigit()
             }
         })
-    {
+}
+
+/// Maps a caller-owned request id onto the host wire contract. Valid bare
+/// UUIDs pass through unchanged so journal reconciliation keeps matching;
+/// anything else (prefixed or otherwise non-conforming local ids) is replaced
+/// with a fresh UUID that every downstream step — submit, journal poll, and
+/// pending-create records — then shares.
+pub fn host_request_id(candidate: &str) -> String {
+    if is_hyphenated_uuid(candidate) {
+        candidate.to_string()
+    } else {
+        uuid::Uuid::new_v4().to_string()
+    }
+}
+
+fn request_id<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let s = required(d)?;
+    if !is_hyphenated_uuid(&s) {
         return Err(serde::de::Error::custom("hyphenated UUID required"));
     }
     Ok(s)

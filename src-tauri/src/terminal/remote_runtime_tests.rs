@@ -494,3 +494,52 @@ async fn ssh_reconnect_safety_authentication_on_redial_stops_retries() {
     );
     assert_eq!(dialer.calls.load(Ordering::SeqCst), 2);
 }
+
+#[tokio::test]
+async fn ssh_reconnect_safety_retry_budget_resets_after_successful_read() {
+    let (runtime, _, dialer, tx) = fixture();
+    runtime.restore(descriptor()).unwrap();
+    let mut rx = runtime.subscribe("local-stable").unwrap();
+    state(&mut rx, |d| {
+        d.state == RemoteConnectionState::Connected && d.attempts == 0
+    })
+    .await;
+
+    // Recover more independent outages than the consecutive-failure limit.
+    for cycle in 1..=6u64 {
+        tx.send(Err(BridgeError::ConnectionClosed)).unwrap();
+        state(&mut rx, |d| {
+            d.state == RemoteConnectionState::Reconnecting && d.attempts == 1
+        })
+        .await;
+
+        dialer.clock.add_permits(1);
+
+        // Describe succeeds: state is Connected, but read has not succeeded yet,
+        // so attempts must still be 1 (cap test invariant preserved).
+        state(&mut rx, |d| {
+            d.state == RemoteConnectionState::Connected && d.attempts == 1
+        })
+        .await;
+
+        // Alternate output and empty long-poll responses. Both prove recovery.
+        let mut read = output(cycle, false);
+        if cycle % 2 == 0 {
+            read.chunks.clear();
+            read.cursor = RemoteCursor(cycle - 1);
+            read.after_sequence = cycle - 1;
+        }
+        let expected_cursor = read.cursor;
+        tx.send(Ok(read)).unwrap();
+
+        // Valid read must reset attempts to 0
+        let detail = state(&mut rx, |d| {
+            d.state == RemoteConnectionState::Connected
+                && d.attempts == 0
+                && d.descriptor.remote_cursor == expected_cursor
+        })
+        .await;
+        assert_eq!(detail.attempts, 0);
+    }
+    assert_eq!(dialer.calls.load(Ordering::SeqCst), 7);
+}

@@ -933,6 +933,10 @@ async fn run(
                         "Invalid remote output ordering or identity".into(),
                     ));
                 }
+                if attempts != 0 {
+                    attempts = 0;
+                    s.details.attempts = 0;
+                }
                 if read.gap {
                     hub.publish_gap(&d.backend_session_id);
                     s.details.replay_gap = Some(RemoteReplayGap {
