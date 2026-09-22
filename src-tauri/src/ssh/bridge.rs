@@ -19,7 +19,7 @@ use tokio::sync::Mutex;
 
 pub const MAX_FRAME: usize = 1024 * 1024;
 pub const PROTOCOL_VERSION: u32 = 1;
-const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(15);
+pub(crate) const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(15);
 const DAG_SUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(15);
 /// Mirrors the helper's own blocking-wait ceiling.
 pub const MAX_DAG_WAIT_MS: u64 = 10_000;

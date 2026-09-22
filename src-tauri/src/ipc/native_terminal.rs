@@ -957,32 +957,19 @@ pub fn mouse_tracking_enabled_for_attached_session(
     state.with_session_terminal(session_id, |term| term.mouse_tracking_enabled())
 }
 
-#[tauri::command]
-pub async fn cmd_native_terminal_send_input<R: Runtime>(
-    app: AppHandle<R>,
-    daemon_client: State<'_, Arc<DaemonClient>>,
-    state: State<'_, NativeTerminalSurfaceHostState>,
-    session_id: String,
-    input: NativeTerminalInput,
-    generation: Option<u64>,
+pub async fn dispatch_native_terminal_receipt<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &NativeTerminalSurfaceHostState,
+    session_id: &str,
 ) -> Result<NativeTerminalBoundsReceipt, IpcError> {
-    let bytes = encode_attached_native_input(state.inner(), &session_id, &input)?;
-    state.emit_scrollbar_if_changed(Some(&app), &session_id);
-    if let Err(err) = daemon_client
-        .write_terminal_at_generation(&session_id, generation, bytes)
-        .await
-    {
-        return Err(err);
-    }
-
     let window = match app.get_window("main") {
         Some(window) => window,
         None => return Err(IpcError::internal("Main Ferryx window is unavailable")),
     };
-    let state_inner = state.inner().clone();
+    let state_inner = state.clone();
     let surface_window = window.clone();
     let (sender, receiver) = oneshot::channel();
-    let session_id_clone = session_id.clone();
+    let session_id_clone = session_id.to_string();
     if let Err(error) = window.run_on_main_thread(move || {
         let result = state_inner
             .get_receipt(&surface_window, &session_id_clone)
@@ -1000,6 +987,49 @@ pub async fn cmd_native_terminal_send_input<R: Runtime>(
             "Main thread stopped before native terminal input completed",
         )),
     }
+}
+
+pub async fn send_native_terminal_input_with_writer<R: Runtime, F, Fut>(
+    app: &AppHandle<R>,
+    state: &NativeTerminalSurfaceHostState,
+    session_id: &str,
+    input: &NativeTerminalInput,
+    write_op: F,
+) -> Result<NativeTerminalBoundsReceipt, IpcError>
+where
+    F: FnOnce(Vec<u8>) -> Fut,
+    Fut: std::future::Future<Output = Result<(), IpcError>>,
+{
+    let bytes = encode_attached_native_input(state, session_id, input)?;
+    state.emit_scrollbar_if_changed(Some(app), session_id);
+    write_op(bytes).await?;
+    dispatch_native_terminal_receipt(app, state, session_id)
+        .await
+        .map_err(|error| error.with_details(serde_json::json!({ "inputWritten": true })))
+}
+
+#[tauri::command]
+pub async fn cmd_native_terminal_send_input<R: Runtime>(
+    app: AppHandle<R>,
+    daemon_client: State<'_, Arc<DaemonClient>>,
+    state: State<'_, NativeTerminalSurfaceHostState>,
+    session_id: String,
+    input: NativeTerminalInput,
+    generation: Option<u64>,
+) -> Result<NativeTerminalBoundsReceipt, IpcError> {
+    let write_session_id = session_id.clone();
+    send_native_terminal_input_with_writer(
+        &app,
+        state.inner(),
+        &session_id,
+        &input,
+        |bytes| async move {
+            daemon_client
+                .write_terminal_at_generation(&write_session_id, generation, bytes)
+                .await
+        },
+    )
+    .await
 }
 
 /// Wheel context is pane-local logical pixels, matching the mouse IPC contract.
@@ -1085,11 +1115,13 @@ pub async fn cmd_native_terminal_scroll<R: Runtime>(
         })
         .map_err(|err| IpcError::internal(err.to_string()))?;
 
+    let mut wrote_pty = false;
     match outcome {
         TerminalWheelOutcome::WritePty(bytes) => {
             daemon_client
                 .write_terminal_at_generation(&session_id, generation, bytes)
                 .await?;
+            wrote_pty = true;
         }
         TerminalWheelOutcome::ScrollViewport(v_behavior) => {
             if let Err(err) =
@@ -1101,9 +1133,23 @@ pub async fn cmd_native_terminal_scroll<R: Runtime>(
         TerminalWheelOutcome::None => {}
     }
 
+    // A post-write receipt/render failure must still report whether the PTY
+    // write itself succeeded, matching send_input and paste semantics. The
+    // view-only scroll path never touches the PTY, so it explicitly reports
+    // inputWritten: false instead of omitting the field.
+    let input_written_details = if wrote_pty {
+        serde_json::json!({ "inputWritten": true })
+    } else {
+        serde_json::json!({ "inputWritten": false })
+    };
     let window = match app.get_window("main") {
         Some(window) => window,
-        None => return Err(IpcError::internal("Main Ferryx window is unavailable")),
+        None => {
+            return Err(
+                IpcError::internal("Main Ferryx window is unavailable")
+                    .with_details(input_written_details.clone()),
+            )
+        }
     };
     let state_inner = state.inner().clone();
     let surface_window = window.clone();
@@ -1132,14 +1178,17 @@ pub async fn cmd_native_terminal_scroll<R: Runtime>(
     }) {
         return Err(IpcError::internal(format!(
             "Could not dispatch native terminal scroll render: {error}"
-        )));
+        ))
+        .with_details(input_written_details.clone()));
     }
 
     match receiver.await {
-        Ok(receipt_result) => receipt_result,
+        Ok(receipt_result) => receipt_result
+            .map_err(|error| error.with_details(input_written_details.clone())),
         Err(_) => Err(IpcError::internal(
             "Main thread stopped before native terminal scroll completed",
-        )),
+        )
+        .with_details(input_written_details)),
     }
 }
 
@@ -1329,31 +1378,9 @@ pub async fn cmd_native_terminal_paste<R: Runtime>(
         return Err(err);
     }
 
-    let window = match app.get_window("main") {
-        Some(window) => window,
-        None => return Err(IpcError::internal("Main Ferryx window is unavailable")),
-    };
-    let state_inner = state.inner().clone();
-    let surface_window = window.clone();
-    let (sender, receiver) = oneshot::channel();
-    let session_id_clone = session_id.clone();
-    if let Err(error) = window.run_on_main_thread(move || {
-        let result = state_inner
-            .get_receipt(&surface_window, &session_id_clone)
-            .map(|receipt| into_ipc_receipt(session_id_clone.clone(), receipt))
-            .map_err(|error| IpcError::internal(error.to_string()));
-        let _ = sender.send(result);
-    }) {
-        return Err(IpcError::internal(format!(
-            "Could not dispatch native terminal paste receipt: {error}"
-        )));
-    }
-    match receiver.await {
-        Ok(receipt_result) => receipt_result,
-        Err(_) => Err(IpcError::internal(
-            "Main thread stopped before native terminal paste completed",
-        )),
-    }
+    dispatch_native_terminal_receipt(&app, state.inner(), &session_id)
+        .await
+        .map_err(|error| error.with_details(serde_json::json!({ "inputWritten": true })))
 }
 
 pub(crate) fn authoritative_mouse_event(
@@ -1709,7 +1736,10 @@ mod tests {
 
     #[test]
     fn resident_replay_watermark_overrides_stale_explicit_cursor() {
-        assert_eq!(replay_request_cursor(Some(Some(5)), Some("2".into())), Some(5));
+        assert_eq!(
+            replay_request_cursor(Some(Some(5)), Some("2".into())),
+            Some(5)
+        );
         assert_eq!(replay_request_cursor(Some(None), Some("900".into())), None);
         assert_eq!(replay_request_cursor(None, Some("2".into())), Some(2));
     }
@@ -2331,6 +2361,68 @@ mod tests {
             unchanged,
             Some("first cmd-c selection to pasteboard".to_string()),
             "pasteboard content must remain untouched on empty selection"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_write_receipt_failure_retains_input_written_true_without_fabricated_bounds() {
+        use crate::native_terminal::composition::SurfacePresentationGeometry;
+
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "test-post-write-receipt";
+        let bounds = SurfacePresentationGeometry::WaylandSubsurface
+            .resolve(LogicalBounds {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 480.0,
+                scale_factor: 1.0,
+            })
+            .expect("resolved presentation bounds");
+        state
+            .prepare_session_layout(
+                NativeTerminalBoundsRequest {
+                    session_id: session_id.into(),
+                    bounds,
+                },
+                CellMetrics {
+                    width_px: 16,
+                    height_px: 32,
+                },
+            )
+            .expect("stored layout");
+
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+
+        let input = NativeTerminalInput::Text {
+            text: "a".to_string(),
+        };
+
+        let mut write_invoked = false;
+        let result = send_native_terminal_input_with_writer(
+            app.handle(),
+            &state,
+            session_id,
+            &input,
+            |_bytes| {
+                write_invoked = true;
+                async { Ok(()) }
+            },
+        )
+        .await;
+
+        assert!(write_invoked, "terminal write must have been executed");
+        let error = result.expect_err("receipt collection without main window must fail");
+        assert_eq!(
+            error
+                .details
+                .as_ref()
+                .and_then(|d| d.get("inputWritten"))
+                .and_then(|v| v.as_bool()),
+            Some(true),
+            "post-write receipt failure must retain inputWritten: true"
         );
     }
 }

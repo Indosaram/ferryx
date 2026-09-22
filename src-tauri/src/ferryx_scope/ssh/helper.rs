@@ -75,11 +75,10 @@ struct Session {
     target: TargetRef,
     pid: u32,
     cwd: PathBuf,
-    cols: u16,
-    rows: u16,
-    master: Box<dyn portable_pty::MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
-    child: Box<dyn portable_pty::Child + Send + Sync>,
+    dimensions: Mutex<(u16, u16)>,
+    master: Mutex<Box<dyn portable_pty::MasterPty + Send>>,
+    writer: Mutex<Box<dyn Write + Send>>,
+    child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
     output: Arc<(Mutex<Output>, Condvar)>,
 }
 
@@ -125,7 +124,7 @@ pub struct Runtime {
     owner: String,
     epoch: Epoch,
     token: String,
-    sessions: Mutex<HashMap<String, Session>>,
+    sessions: Mutex<HashMap<String, Arc<Session>>>,
     projects: Mutex<HashMap<String, PathBuf>>,
     spawns: Mutex<HashMap<String, SpawnState>>,
     spawns_cv: Condvar,
@@ -520,17 +519,16 @@ impl Runtime {
 
                 self.sessions.lock().map_err(|e| e.to_string())?.insert(
                     id,
-                    Session {
+                    Arc::new(Session {
                         target: target.clone(),
                         pid,
                         cwd,
-                        cols,
-                        rows,
-                        master: pair.master,
-                        writer,
-                        child,
+                        dimensions: Mutex::new((cols, rows)),
+                        master: Mutex::new(pair.master),
+                        writer: Mutex::new(writer),
+                        child: Mutex::new(child),
                         output,
-                    },
+                    }),
                 );
 
                 if let Some(guard) = reservation_guard.as_mut() {
@@ -550,27 +548,31 @@ impl Runtime {
                 Ok(json!({ "target": target, "pid": pid }))
             }
             "pty.list" => {
-                let sessions = self.sessions.lock().map_err(|e| e.to_string())?;
+                let sessions: Vec<Arc<Session>> = {
+                    let sessions = self.sessions.lock().map_err(|e| e.to_string())?;
+                    sessions.values().cloned().collect()
+                };
                 let list: Vec<_> = sessions
-                    .values()
+                    .iter()
                     .map(|s| {
+                        let (cols, rows) = *s.dimensions.lock().map_err(|e| e.to_string())?;
                         let (lock, _) = &*s.output;
                         let (cursor, exited) = if let Ok(state) = lock.lock() {
                             (state.next.saturating_sub(1).to_string(), state.exited)
                         } else {
                             ("0".to_string(), false)
                         };
-                        json!({
+                        Ok::<_, String>(json!({
                             "target": s.target,
                             "pid": s.pid,
                             "cwd": s.cwd,
-                            "cols": s.cols,
-                            "rows": s.rows,
+                            "cols": cols,
+                            "rows": rows,
                             "cursor": cursor,
                             "exited": exited,
-                        })
+                        }))
                     })
-                    .collect();
+                    .collect::<Result<_, _>>()?;
                 Ok(json!(list))
             }
             "pty.read" | "pty.write" | "pty.resize" | "pty.stop" | "pty.describe" => {
@@ -588,27 +590,24 @@ impl Runtime {
                     return Err("TARGET_EXPIRED".into());
                 }
 
-                let mut sessions = self.sessions.lock().map_err(|e| e.to_string())?;
-                let session = sessions
-                    .get_mut(&target.backend_session_id)
-                    .ok_or("NOT_FOUND")?;
+                let session = {
+                    let sessions = self.sessions.lock().map_err(|e| e.to_string())?;
+                    sessions
+                        .get(&target.backend_session_id)
+                        .cloned()
+                        .ok_or("NOT_FOUND")?
+                };
 
                 match op {
                     "pty.describe" => {
-                        let output = session.output.clone();
-                        let pid = session.pid;
-                        let cwd = session.cwd.clone();
-                        let cols = session.cols;
-                        let rows = session.rows;
-                        drop(sessions);
-
-                        let (lock, _) = &*output;
+                        let (cols, rows) = *session.dimensions.lock().map_err(|e| e.to_string())?;
+                        let (lock, _) = &*session.output;
                         let state = lock.lock().map_err(|e| e.to_string())?;
                         let cursor = state.next.saturating_sub(1).to_string();
                         Ok(json!({
                             "target": target,
-                            "pid": pid,
-                            "cwd": cwd,
+                            "pid": session.pid,
+                            "cwd": session.cwd,
                             "cols": cols,
                             "rows": rows,
                             "cursor": cursor,
@@ -627,10 +626,10 @@ impl Runtime {
                         } else {
                             return Err("INVALID_REQUEST: data (base64) or text required".into());
                         };
-                        session
-                            .writer
+                        let mut writer = session.writer.lock().map_err(|e| e.to_string())?;
+                        writer
                             .write_all(&bytes)
-                            .and_then(|_| session.writer.flush())
+                            .and_then(|_| writer.flush())
                             .map_err(|e| e.to_string())?;
                         Ok(json!({ "accepted": true }))
                     }
@@ -642,8 +641,8 @@ impl Runtime {
                                 "INVALID_REQUEST: cols and rows must be between 1 and 65535".into(),
                             );
                         }
-                        session
-                            .master
+                        let master = session.master.lock().map_err(|e| e.to_string())?;
+                        master
                             .resize(PtySize {
                                 rows,
                                 cols,
@@ -651,19 +650,18 @@ impl Runtime {
                                 pixel_height: 0,
                             })
                             .map_err(|e| e.to_string())?;
-                        session.cols = cols;
-                        session.rows = rows;
+                        *session.dimensions.lock().map_err(|e| e.to_string())? = (cols, rows);
                         Ok(json!({ "cols": cols, "rows": rows }))
                     }
                     "pty.stop" => {
-                        if session
-                            .child
+                        let mut child = session.child.lock().map_err(|e| e.to_string())?;
+                        if child
                             .try_wait()
                             .map_err(|e| e.to_string())?
                             .is_none()
                         {
-                            session.child.kill().map_err(|e| e.to_string())?;
-                            session.child.wait().map_err(|e| e.to_string())?;
+                            child.kill().map_err(|e| e.to_string())?;
+                            child.wait().map_err(|e| e.to_string())?;
                         }
                         Ok(json!({ "stopped": true }))
                     }
@@ -671,7 +669,6 @@ impl Runtime {
                         let output = session.output.clone();
                         let pid = session.pid;
                         let cwd = session.cwd.clone();
-                        drop(sessions);
 
                         let after = parse_cursor(p)?;
                         let wait = p

@@ -925,7 +925,10 @@ async fn ssh_bridge_dag_subscription_streams_inventory_updates_and_cancels() {
         .expect("same-mtime update crosses the real bridge");
     assert!(!update.resync);
     assert_eq!(update.runs.len(), 1, "expected exactly the changed run");
-    assert!(update.sequence > inventory.sequence, "sequence must advance");
+    assert!(
+        update.sequence > inventory.sequence,
+        "sequence must advance"
+    );
     let changed = crate::dag::journal::parse_run_checkpoint(&update.runs[0].to_string())
         .expect("update frame parses through parse_run_checkpoint");
     assert_eq!(changed.status, crate::dag::journal::DagRunStatus::Completed);
@@ -1041,10 +1044,7 @@ async fn ssh_bridge_dag_subscription_drop_releases_helper_and_keeps_pty_alive() 
     assert_eq!(describe.pid, spawn_res.pid);
     assert!(!describe.exited, "DAG teardown must not kill the PTY");
 
-    client
-        .pty_stop(&spawn_res.target)
-        .await
-        .expect("pty_stop");
+    client.pty_stop(&spawn_res.target).await.expect("pty_stop");
     client.close().await.expect("close client");
 }
 
@@ -1186,6 +1186,102 @@ async fn ssh_bridge_dag_subscription_released_after_eof_during_blocked_next() {
         released,
         "helper must release subscription {subscription_id} after consumer EOF"
     );
+
+    client.close().await.expect("close client");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ssh_bridge_real_pty_large_session_writes_do_not_block_other_session() {
+    let fixture = TestFixture::new("backpressure-iso");
+    let client = fixture.create_client().await;
+    client
+        .project_register("proj-iso", fixture.project_dir.to_str().unwrap())
+        .await
+        .expect("register project");
+
+    let program = Some("/bin/cat".to_string());
+    async fn spawn_one(
+        client: &SshBridgeClient,
+        program: &Option<String>,
+        rid: &'static str,
+    ) -> SpawnResult {
+        client
+            .pty_spawn(&SpawnParams {
+                project_id: "proj-iso".into(),
+                worktree: Some(".".into()),
+                cols: Some(80),
+                rows: Some(24),
+                program: program.clone(),
+                args: Some(vec![]),
+                env: None,
+                client_request_id: Some(rid.into()),
+            })
+            .await
+            .expect("pty_spawn")
+    }
+    let session_a = spawn_one(&client, &program, "req-iso-a").await;
+    let session_b = spawn_one(&client, &program, "req-iso-b").await;
+
+    let mut conn_a = fixture.spawn_bridge_connection();
+    let _ = conn_a.handshake().await.expect("handshake a");
+    let mut conn_b = fixture.spawn_bridge_connection();
+    let _ = conn_b.handshake().await.expect("handshake b");
+
+    // Queue a burst of large line-terminated writes on session A's own connection
+    // (no reader drains A yet). The claim under test is cross-session non-blockage:
+    // session B's write and stream must complete while A's burst is being serviced.
+    // The burst handle is awaited before close so no write outlives the test body.
+    let (first_write_in_flight, first_write_in_flight_rx) = tokio::sync::oneshot::channel();
+    let saturate = {
+        let target = session_a.target.clone();
+        tokio::spawn(async move {
+            let mut first = vec![b'x'; 3900];
+            first.extend_from_slice(b"-L0\n");
+            let first_ok = conn_a.pty_write(&target, &first).await.is_ok();
+            let _ = first_write_in_flight.send(first_ok);
+            for k in 1..8 {
+                let mut chunk = vec![b'x'; 3900];
+                chunk.extend_from_slice(format!("-L{k}\n").as_bytes());
+                if conn_a.pty_write(&target, &chunk).await.is_err() {
+                    break;
+                }
+            }
+            conn_a
+        })
+    };
+    // Deterministic contention: session A's first large write must actually be in
+    // flight (or have failed) before session B proceeds, so the cross-session
+    // claim below can no longer pass by scheduling luck.
+    let first_ok = first_write_in_flight_rx.await.unwrap_or(false);
+    assert!(first_ok, "session A's first large write must succeed");
+
+    // Session B must stay fully interactive while A's burst is in flight or queued.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    conn_b
+        .pty_write(&session_b.target, b"b-ping\n")
+        .await
+        .expect("write b while a burst is in flight");
+    let mut transcript_b: Vec<u8> = Vec::new();
+    let mut cursor_b = RemoteCursor(0);
+    while tokio::time::Instant::now() < deadline {
+        if transcript_b.windows(6).any(|w| w == b"b-ping") {
+            break;
+        }
+        let read = conn_b
+            .pty_read(&session_b.target, cursor_b, 400)
+            .await
+            .expect("read b while a burst is in flight");
+        cursor_b = read.cursor;
+        transcript_b.extend(read.decoded_bytes());
+    }
+    assert!(
+        transcript_b.windows(6).any(|w| w == b"b-ping"),
+        "session B output must stream while session A services large writes"
+    );
+
+    // Join the burst task before closing so every A write is settled.
+    let _conn_a = saturate.await.expect("burst task");
 
     client.close().await.expect("close client");
 }

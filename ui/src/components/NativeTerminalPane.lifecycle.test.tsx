@@ -430,10 +430,15 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     const view = render(<NativeTerminalPane session={session("owner-a")} />);
     await act(async () => {});
     await startPendingInput(view, boundary);
+    // The bounded frontend queue dispatches per session in FIFO order, so the second
+    // input is admitted now but only reaches the IPC boundary after the first one
+    // settles. The shared-recovery contract is exercised through that order: the first
+    // failure opens the recovery, and the second failure must reuse it instead of
+    // opening another attach.
+    fireEvent.input(view.getByTestId("native-terminal-focus-sink"), { target: { value: "y" } });
     await act(async () => {
-      fireEvent.input(view.getByTestId("native-terminal-focus-sink"), { target: { value: "y" } });
-      await secondStarted.promise;
       boundary.input.reject(INPUT_NOT_WRITTEN);
+      await secondStarted.promise;
       secondInput.reject(INPUT_NOT_WRITTEN);
       await boundary.recoveryStarted.promise;
     });
@@ -471,7 +476,14 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     // Then: no reattachment or replay can turn cancellation into termination.
     expect(writes).toEqual(["c"]);
     expect(lifecycleCalls().filter(([cmd]) => cmd === "cmd_native_terminal_attach")).toHaveLength(1);
-    expect(view.getByRole("alert")).toBeInTheDocument();
+    if (typeof failure === "object" && "details" in failure && failure.details?.inputWritten === true) {
+      // The bytes reached the PTY; the failure is a lost receipt only, so the pane
+      // must suppress the error banner (real-surface regression: "failed to send
+      // to terminal" shown after successful PTY writes).
+      expect(view.queryByRole("alert")).toBeNull();
+    } else {
+      expect(view.getByRole("alert")).toBeInTheDocument();
+    }
   });
 
   it("retains the outgoing pane until a dropped frame is retried and presented", async () => {
