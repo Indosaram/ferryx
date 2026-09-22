@@ -430,7 +430,7 @@ function seedSidebarBrowserTab(workspaceId: string) {
   });
 }
 
-const { App } = await import("./App");
+const { App, ensureLocalProjectsRegistered } = await import("./App");
 const { resetWorkspaceRestore } = await import("./state/workspaceRestore");
 
 afterEach(() => {
@@ -565,6 +565,34 @@ describe("App project workspace flow", () => {
     native.writeTerminal.mockResolvedValue(undefined);
     native.isTauriRuntime.mockReset();
     native.isTauriRuntime.mockReturnValue(false);
+  });
+
+  it("awaits the local registration heal before publishing the bootstrap in both boot branches", () => {
+    const appSource = readFileSync(resolve(import.meta.dirname ?? ".", "App.tsx"), "utf-8");
+    const branches = appSource.split("triggerSshRegistrationHeal(prepared.projects);").slice(1);
+    expect(branches).toHaveLength(2);
+    for (const branch of branches) {
+      const upToBootstrap = branch.slice(0, branch.indexOf("setBootstrap(prepared)"));
+      expect(upToBootstrap).toContain("await withTimeout(");
+      expect(upToBootstrap).toContain("ensureLocalProjectsRegistered(prepared.projects)");
+    }
+  });
+
+  it("dedupes repeated local registration heals and skips placeholder projects", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+    native.registerProject.mockClear();
+    await ensureLocalProjectsRegistered([
+      { workspaceId: "heal-unit-a", repoRoot: "/repo/heal-unit-a", gitRoot: null },
+      { workspaceId: "default", repoRoot: ".", gitRoot: null },
+    ]);
+    await ensureLocalProjectsRegistered([
+      { workspaceId: "heal-unit-a", repoRoot: "/repo/heal-unit-a", gitRoot: null },
+      { workspaceId: "heal-unit-b", repoRoot: "/repo/heal-unit-b", gitRoot: null },
+    ]);
+    expect(native.registerProject).toHaveBeenCalledTimes(2);
+    expect(native.registerProject).toHaveBeenCalledWith({ workspaceId: "heal-unit-a", repoPath: "/repo/heal-unit-a" });
+    expect(native.registerProject).toHaveBeenCalledWith({ workspaceId: "heal-unit-b", repoPath: "/repo/heal-unit-b" });
+    expect(native.registerProject).not.toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "default" }));
   });
 
   describe("P05 focused browser shortcut targeting on Windows", () => {
@@ -1374,9 +1402,12 @@ describe("App project workspace flow", () => {
     await waitFor(() => {
       expect(localStorage.getItem(PROJECTS_STORAGE_KEY)).toBe("[]");
     });
-    // Exactly one registration (the boot project); no default re-registration after removal.
-    expect(native.registerProject).toHaveBeenCalledTimes(1);
-    expect(native.registerProject).toHaveBeenCalledWith({ workspaceId: "only-project", repoPath: "/repos/only" });
+    // The boot heal and the active-project registration may both target the boot project,
+    // but the default (".") must never be registered after removal.
+    expect(native.registerProject.mock.calls.length).toBeGreaterThanOrEqual(1);
+    for (const [request] of native.registerProject.mock.calls) {
+      expect(request).toEqual({ workspaceId: "only-project", repoPath: "/repos/only" });
+    }
   });
 
   it("scopes WorktreeDeleteDialog workspaceId to the owning project of the deleted worktree", async () => {

@@ -299,6 +299,34 @@ function triggerSshRegistrationHeal(projects: RegisteredProject[]): void {
   });
 }
 
+const healedLocalWorkspaceIds = new Set<string>();
+
+// Restored workspace tabs spawn as soon as the shell mounts, so every stored local project
+// must be registered before the bootstrap is published; otherwise the spawn races the
+// registration and fails with WORKSPACE_NOT_FOUND.
+export async function ensureLocalProjectsRegistered(projects: RegisteredProject[]): Promise<void> {
+  if (!isTauriRuntime()) return;
+  const pending = projects.filter(
+    (project) =>
+      project.repoRoot !== "" &&
+      project.repoRoot !== "." &&
+      project.workspaceId !== DEFAULT_WORKSPACE_ID &&
+      !isRemoteWorkspaceId(project.workspaceId) &&
+      !isPairedWorkspaceId(project.workspaceId) &&
+      !healedLocalWorkspaceIds.has(project.workspaceId),
+  );
+  await Promise.all(
+    pending.map(async (project) => {
+      try {
+        await registerProject({ workspaceId: project.workspaceId, repoPath: project.repoRoot });
+        healedLocalWorkspaceIds.add(project.workspaceId);
+      } catch (error) {
+        console.warn("Local workspace registration skipped:", project.workspaceId, error);
+      }
+    }),
+  );
+}
+
 export function App() {
   useApplyAppearanceSettings();
   const [isNativeRuntime] = useState(() => isTauriRuntime());
@@ -343,6 +371,13 @@ export function App() {
           },
         );
         triggerSshRegistrationHeal(prepared.projects);
+        await withTimeout(
+          ensureLocalProjectsRegistered(prepared.projects),
+          STARTUP_TIMEOUT_MS,
+          "local workspace registration heal",
+        ).catch((error) => {
+          console.warn("Local workspace registration heal skipped:", error);
+        });
         if (!cancelled) setBootstrap(prepared);
       })
       .catch(async (error) => {
@@ -379,6 +414,13 @@ export function App() {
             console.warn("Workspace session preload fallback skipped:", preloadError);
           });
           triggerSshRegistrationHeal(prepared.projects);
+          await withTimeout(
+            ensureLocalProjectsRegistered(prepared.projects),
+            STARTUP_TIMEOUT_MS,
+            "local workspace registration heal",
+          ).catch((error) => {
+            console.warn("Local workspace registration heal skipped:", error);
+          });
           if (!cancelled) setBootstrap(prepared);
         }
       });
