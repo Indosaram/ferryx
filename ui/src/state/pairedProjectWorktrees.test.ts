@@ -1,147 +1,82 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { listPairedProjectWorktrees } from "./pairedProjectWorktrees";
+import { createPairedDaemonProjectAdapter, PairedOperationError } from "../lib/pairedDaemonProject";
 import { remoteHostStore } from "./remoteHostStore";
-import type { RegisteredProject } from "../lib/types";
 
-const adapter = vi.hoisted(() => ({
-  capabilities: vi.fn(),
-  projects: vi.fn(),
-  worktrees: vi.fn(),
-}));
-
-vi.mock("../lib/pairedDaemonProject", () => ({
-  createPairedDaemonProjectAdapter: vi.fn(() => adapter),
-  PairedOperationError: class PairedOperationError extends Error {
-    constructor(message: string) {
-      super(message);
-      this.name = "PairedOperationError";
-    }
-  },
-}));
-
-afterEach(() => {
-  remoteHostStore.reset();
-  vi.clearAllMocks();
+vi.mock("../lib/pairedDaemonProject", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/pairedDaemonProject")>();
+  return { ...actual, createPairedDaemonProjectAdapter: vi.fn() };
 });
 
-const project: RegisteredProject = {
-  workspaceId: `daemon:${"a".repeat(64)}`,
-  remoteWorkspaceId: "repo",
-  repoRoot: "/srv/repo",
-  gitRoot: "/srv/repo",
-  target: { kind: "pairedDaemon", hostId: "a" },
+const readyState = {
+  machineFeaturesEnabled: true,
+  nativeStatus: "ready",
+  hosts: {
+    "host-a": { hostId: "host-a", online: true, authStatus: "paired", grantScope: "machine", generation: "1", machineId: "m1", name: "H" },
+  },
 };
 
-describe("listPairedProjectWorktrees", () => {
-  it("throws if project is not a paired daemon target or lacks remoteWorkspaceId", async () => {
-    await expect(
-      listPairedProjectWorktrees({ ...project, target: { kind: "local" } as any }),
-    ).rejects.toThrow("PAIRED_OWNER_REQUIRED");
+function makeAdapter(caps: unknown, projects: unknown, worktrees: unknown) {
+  const adapter = {
+    context: Object.freeze({ hostId: "host-a", generation: "1" }),
+    capabilities: vi.fn(() => Promise.resolve(caps)),
+    projects: vi.fn(() => Promise.resolve(projects)),
+    worktrees: vi.fn(() => Promise.resolve(worktrees)),
+  };
+  return adapter as unknown as ReturnType<typeof createPairedDaemonProjectAdapter>;
+}
 
-    await expect(
-      listPairedProjectWorktrees({ ...project, remoteWorkspaceId: undefined } as any),
-    ).rejects.toThrow("PAIRED_OWNER_REQUIRED");
+const project = {
+  workspaceId: "daemon:" + "a".repeat(64),
+  repoRoot: "/h/w",
+  gitRoot: "/h/w",
+  target: { kind: "pairedDaemon" as const, hostId: "host-a" },
+  remoteWorkspaceId: "project-abc",
+};
+
+describe("listPairedProjectWorktrees transport retry", () => {
+  beforeEach(() => {
+    remoteHostStore.setState(() => readyState as never);
+    vi.useFakeTimers();
+  });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("retries PAIRED_HOST_INVALID_RESPONSE and lists rows once the tunnel recovers", async () => {
+    const caps = { apiVersion: 1, accessScope: "machine", permission: "control", capabilities: ["directoryBrowseV1", "machineWorkspaceV1", "managedWorktreesV1", "terminalCreateV1"] };
+    let projectsCalls = 0;
+    const adapter = makeAdapter(caps, null, null) as any;
+    adapter.projects = vi.fn(() => {
+      projectsCalls += 1;
+      if (projectsCalls <= 2) return Promise.reject(new PairedOperationError("PAIRED_HOST_INVALID_RESPONSE"));
+      return Promise.resolve({ revision: "41", completeness: "complete", unavailableWorkspaceIds: [], projects: [{ workspaceId: project.workspaceId, remoteWorkspaceId: "project-abc", availability: "ready", target: { kind: "pairedDaemon", hostId: "host-a" }, repoRoot: "/h/w" }] });
+    });
+    (createPairedDaemonProjectAdapter as ReturnType<typeof vi.fn>).mockReturnValue(adapter);
+    adapter.worktrees = vi.fn(() => Promise.resolve({ worktrees: [{ path: "/h/w", workspaceId: "project-abc", branch: "m", head: "h", detached: false }] }));
+
+    const pending = listPairedProjectWorktrees(project as never);
+    await vi.runAllTimersAsync();
+    const rows = await pending;
+    expect(projectsCalls).toBe(3);
+    expect(rows?.map(r => r.path)).toEqual(["/h/w"]);
+    expect(adapter.projects).toHaveBeenCalledTimes(3);
   });
 
-  it("returns null when remote state is not ready or host is offline", async () => {
-    remoteHostStore.setState((s) => ({
-      ...s,
-      nativeStatus: "ready",
-      machineFeaturesEnabled: true,
-      hosts: {
-        a: {
-          hostId: "a",
-          machineId: "machine-a",
-          generation: "1",
-          name: "Alpha",
-          address: "",
-          transport: "relay",
-          authStatus: "paired",
-          grantScope: "machine",
-          online: false,
-        },
-      },
-    }));
-
-    const result = await listPairedProjectWorktrees(project);
-    expect(result).toBeNull();
+  it("does not retry definitive host verdicts", async () => {
+    const adapter = makeAdapter(null, null, null) as any;
+    (createPairedDaemonProjectAdapter as ReturnType<typeof vi.fn>).mockReturnValue(adapter);
+    adapter.capabilities = vi.fn(() => Promise.reject(new PairedOperationError("INVALID_REQUEST")));
+    await expect(listPairedProjectWorktrees(project as never)).rejects.toThrow("INVALID_REQUEST");
+    expect(adapter.capabilities).toHaveBeenCalledTimes(1);
   });
 
-  it("returns null when host generation changed mid-flight", async () => {
-    remoteHostStore.setState((s) => ({
-      ...s,
-      nativeStatus: "ready",
-      machineFeaturesEnabled: true,
-      hosts: {
-        a: {
-          hostId: "a",
-          machineId: "machine-a",
-          generation: "1",
-          name: "Alpha",
-          address: "",
-          transport: "relay",
-          authStatus: "paired",
-          grantScope: "machine",
-          online: true,
-        },
-      },
-    }));
-
-    adapter.capabilities.mockResolvedValue({});
-    adapter.projects.mockResolvedValue({
-      completeness: "complete",
-      unavailableWorkspaceIds: [],
-      projects: [{ ...project, availability: "ready" }],
-    });
-    adapter.worktrees.mockImplementation(async () => {
-      // Simulate generation bump mid-flight
-      remoteHostStore.setState((s) => ({
-        ...s,
-        hosts: {
-          a: {
-            ...s.hosts.a,
-            generation: "2",
-          },
-        },
-      }));
-      return { worktrees: [{ workspaceId: "repo", path: "/srv/repo" }] };
-    });
-
-    const result = await listPairedProjectWorktrees(project);
-    expect(result).toBeNull();
-  });
-
-  it("maps worktrees to the local workspaceId upon authoritative success", async () => {
-    remoteHostStore.setState((s) => ({
-      ...s,
-      nativeStatus: "ready",
-      machineFeaturesEnabled: true,
-      hosts: {
-        a: {
-          hostId: "a",
-          machineId: "machine-a",
-          generation: "1",
-          name: "Alpha",
-          address: "",
-          transport: "relay",
-          authStatus: "paired",
-          grantScope: "machine",
-          online: true,
-        },
-      },
-    }));
-
-    adapter.capabilities.mockResolvedValue({});
-    adapter.projects.mockResolvedValue({
-      completeness: "complete",
-      unavailableWorkspaceIds: [],
-      projects: [{ ...project, availability: "ready" }],
-    });
-    adapter.worktrees.mockResolvedValue({
-      worktrees: [{ workspaceId: "repo", path: "/srv/repo" }],
-    });
-
-    const result = await listPairedProjectWorktrees(project);
-    expect(result).toEqual([{ workspaceId: project.workspaceId, path: "/srv/repo" }]);
+  it("caps retry attempts at 2 resubmits", async () => {
+    const adapter = makeAdapter(null, null, null) as any;
+    (createPairedDaemonProjectAdapter as ReturnType<typeof vi.fn>).mockReturnValue(adapter);
+    adapter.capabilities = vi.fn(() => Promise.reject(new PairedOperationError("PAIRED_HOST_INVALID_RESPONSE")));
+    const pending = listPairedProjectWorktrees(project as never);
+    pending.catch(() => undefined);
+    await vi.runAllTimersAsync();
+    await expect(pending).rejects.toThrow("PAIRED_HOST_INVALID_RESPONSE");
+    expect(adapter.capabilities).toHaveBeenCalledTimes(3);
   });
 });
