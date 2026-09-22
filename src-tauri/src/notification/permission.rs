@@ -1,9 +1,60 @@
 //! Authoritative notification permission queries.
 
+use std::sync::mpsc::Receiver;
+use std::time::Duration;
+
 use super::model::{
     NotificationAuthorization, NotificationPermissionRequestDto, NotificationPermissionStatusDto,
     NotificationPlatform,
 };
+
+/// How long a user-facing authorization dialog is allowed to stay open.
+///
+/// Five minutes, not five seconds: the user is reading the macOS prompt.
+pub(crate) fn authorization_wait() -> Duration {
+    Duration::from_secs(5 * 60)
+}
+
+/// Runs the authorization *start* on the main thread. The wait stays off that thread.
+pub trait MainThreadScheduler {
+    fn schedule(&self, work: Box<dyn FnOnce() + Send>);
+}
+
+/// Start `begin` on `scheduler`, then wait for the user without blocking that thread.
+pub(crate) fn request_authorization_with(
+    scheduler: &impl MainThreadScheduler,
+    begin: impl FnOnce() -> Result<Receiver<Result<bool, String>>, String> + Send + 'static,
+    timeout: Duration,
+) -> (bool, Option<String>) {
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+    scheduler.schedule(Box::new(move || {
+        let _ = started_tx.send(begin());
+    }));
+    let started = match started_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(started) => started,
+        Err(_) => {
+            return (
+                false,
+                Some("failed to schedule authorization on the main thread".to_string()),
+            );
+        }
+    };
+    match started {
+        Ok(rx) => wait_for_authorization(rx, timeout),
+        Err(error) => (false, Some(error)),
+    }
+}
+
+pub(crate) fn wait_for_authorization(
+    rx: Receiver<Result<bool, String>>,
+    timeout: Duration,
+) -> (bool, Option<String>) {
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(granted)) => (granted, None),
+        Ok(Err(message)) => (false, Some(message)),
+        Err(_) => (false, Some("authorization request timed out".to_string())),
+    }
+}
 
 /// Seam over the OS permission backend.
 pub trait NotificationPermissionProvider: Send + Sync {
@@ -107,6 +158,33 @@ pub mod macos {
         }
     }
 
+    /// Start the OS authorization prompt. Must run on the main thread. Does not wait.
+    pub fn begin_authorization_request() -> Result<Receiver<Result<bool, String>>, String> {
+        if !has_bundle_identity() {
+            return Err("notifications require a bundled .app".into());
+        }
+
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<bool, String>>(1);
+        let handler = RcBlock::new(move |granted: objc2::runtime::Bool, error: *mut NSError| {
+            let outcome = if error.is_null() {
+                Ok(granted.as_bool())
+            } else {
+                Err(unsafe { (*error).localizedDescription() }.to_string())
+            };
+            let _ = tx.try_send(outcome);
+        });
+
+        let options = authorization_options();
+        let dispatched = objc2::exception::catch(std::panic::AssertUnwindSafe(|| {
+            let center = UNUserNotificationCenter::currentNotificationCenter();
+            center.requestAuthorizationWithOptions_completionHandler(options, &handler);
+        }));
+        if dispatched.is_err() {
+            return Err("notification authorization request failed".into());
+        }
+        Ok(rx)
+    }
+
     pub fn has_bundle_identity() -> bool {
         // Only consider it a real bundled macOS app if the bundle identifier is present
         // AND the bundle path is actually inside a .app wrapper directory.
@@ -202,35 +280,10 @@ pub mod macos {
                 };
             }
 
-            let (tx, rx) = mpsc::sync_channel::<Result<bool, String>>(1);
-            let handler =
-                RcBlock::new(move |granted: objc2::runtime::Bool, error: *mut NSError| {
-                    let outcome = if error.is_null() {
-                        Ok(granted.as_bool())
-                    } else {
-                        Err(unsafe { (*error).localizedDescription() }.to_string())
-                    };
-                    let _ = tx.try_send(outcome);
-                });
-
-            let options = authorization_options();
-            let dispatched = objc2::exception::catch(std::panic::AssertUnwindSafe(|| {
-                let center = UNUserNotificationCenter::currentNotificationCenter();
-                center.requestAuthorizationWithOptions_completionHandler(options, &handler);
-            }));
-
-            if dispatched.is_err() {
-                return NotificationPermissionRequestDto {
-                    granted: false,
-                    status: dev_fallback_status(),
-                    error: Some("notification authorization request failed".into()),
-                };
-            }
-
-            let (granted, error) = match rx.recv_timeout(CALLBACK_TIMEOUT) {
-                Ok(Ok(granted)) => (granted, None),
-                Ok(Err(message)) => (false, Some(message)),
-                Err(_) => (false, Some("authorization request timed out".to_string())),
+            let started = begin_authorization_request();
+            let (granted, error) = match started {
+                Ok(rx) => wait_for_authorization(rx, authorization_wait()),
+                Err(error) => (false, Some(error)),
             };
 
             let status = query_settings().unwrap_or_else(dev_fallback_status);
@@ -246,5 +299,81 @@ pub mod macos {
                 error,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod authorization_wait_tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, mpsc};
+    use std::thread;
+    use std::time::Duration;
+
+    use super::{authorization_wait, request_authorization_with, MainThreadScheduler};
+
+    struct RecordingScheduler {
+        entered: Arc<AtomicBool>,
+    }
+
+    impl MainThreadScheduler for RecordingScheduler {
+        fn schedule(&self, work: Box<dyn FnOnce() + Send>) {
+            self.entered.store(true, Ordering::SeqCst);
+            work();
+        }
+    }
+
+    #[test]
+    fn user_authorization_wait_accepts_a_grant_after_six_seconds() {
+        let entered = Arc::new(AtomicBool::new(false));
+        let began_inside = Arc::new(AtomicBool::new(false));
+        let entered_flag = Arc::clone(&entered);
+        let began = Arc::clone(&began_inside);
+        let scheduler = RecordingScheduler { entered };
+
+        let (granted, error) = request_authorization_with(
+            &scheduler,
+            move || {
+                began.store(entered_flag.load(Ordering::SeqCst), Ordering::SeqCst);
+                let (tx, rx) = mpsc::sync_channel(1);
+                thread::spawn(move || {
+                    thread::sleep(Duration::from_secs(6));
+                    let _ = tx.send(Ok(true));
+                });
+                Ok(rx)
+            },
+            authorization_wait(),
+        );
+
+        assert!(
+            began_inside.load(Ordering::SeqCst),
+            "authorization begin ran outside the scheduler"
+        );
+        assert!(granted, "{error:?}");
+        assert!(error.is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn unbundled_begin_reports_bundled_app_without_prompting() {
+        if super::macos::has_bundle_identity() {
+            return;
+        }
+        let error = super::macos::begin_authorization_request()
+            .expect_err("unbundled cargo test must not start a prompt");
+        assert_eq!(error, "notifications require a bundled .app");
+    }
+
+    #[test]
+    fn authorization_begin_error_is_returned_without_waiting() {
+        let scheduler = RecordingScheduler {
+            entered: Arc::new(AtomicBool::new(false)),
+        };
+        let (granted, error) = request_authorization_with(
+            &scheduler,
+            || Err("notifications require a bundled .app".to_string()),
+            authorization_wait(),
+        );
+        assert!(!granted);
+        assert_eq!(error.as_deref(), Some("notifications require a bundled .app"));
     }
 }

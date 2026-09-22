@@ -63,6 +63,7 @@ export function PermissionsSection() {
   const [status, setStatus] = useState<SystemPermissionsStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [requestError, setRequestError] = useState<string | null>(null);
   const isMountedRef = useRef(true);
   const isMac = isMacShortcutPlatform();
 
@@ -131,11 +132,13 @@ export function PermissionsSection() {
   }, [fetchStatus]);
 
   const handleRequestNotifications = useCallback(async () => {
+    setRequestError(null);
     try {
-      await requestNotificationPermission();
+      const result = await requestNotificationPermission();
+      if (result?.error) setRequestError(result.error);
       void fetchStatus();
-    } catch {
-      setStatus(null);
+    } catch (err) {
+      setRequestError(err instanceof Error ? err.message : "Notification permission request failed.");
     }
   }, [fetchStatus]);
 
@@ -278,6 +281,11 @@ export function PermissionsSection() {
                 {status?.notifications.description ||
                   (loading ? "Checking permission status…" : "Allows desktop alerts for agent task completions and updates.")}
               </p>
+              {requestError ? (
+                <p role="alert" className="text-xs text-amber-400">
+                  {requestError}
+                </p>
+              ) : null}
             </div>
             {status ? (
               <div className="shrink-0 flex items-center gap-2">

@@ -11,11 +11,13 @@ import type { NotificationSettings } from "./notificationSettings";
 vi.mock("./tauri", () => ({
   dispatchNotification: vi.fn(() => Promise.resolve()),
   playNotificationSound: vi.fn(() => Promise.resolve()),
+  requestNotificationPermission: vi.fn(() => Promise.resolve({ granted: false })),
 }));
 
-const { dispatchNotification, playNotificationSound } = await import("./tauri");
+const { dispatchNotification, playNotificationSound, requestNotificationPermission } = await import("./tauri");
 const dispatchMock = vi.mocked(dispatchNotification);
 const soundMock = vi.mocked(playNotificationSound);
+const requestMock = vi.mocked(requestNotificationPermission);
 
 function settings(overrides: Partial<NotificationSettings> = {}): NotificationSettings {
   return { ...DEFAULT_NOTIFICATION_SETTINGS, ...overrides };
@@ -38,6 +40,7 @@ beforeEach(() => {
   vi.setSystemTime(new Date(1_000_000));
   dispatchMock.mockClear();
   soundMock.mockClear();
+  requestMock.mockClear();
 });
 
 afterEach(() => {
@@ -481,7 +484,7 @@ describe("reset", () => {
 
   it("surfaces a rejected dispatch result (submitted:false) with its reason through onError", async () => {
     const errorSpy = vi.fn();
-    dispatchMock.mockResolvedValueOnce({ submitted: false, reason: "permission-required" });
+    dispatchMock.mockResolvedValueOnce({ submitted: false, reason: "backend-error" });
     const { instance } = coordinator({
       getSettings: () => settings({ agentTaskComplete: true }),
       onError: errorSpy,
@@ -498,7 +501,67 @@ describe("reset", () => {
     await Promise.resolve();
 
     expect(errorSpy).toHaveBeenCalledWith(expect.any(Error), "dispatch");
-    expect(String(errorSpy.mock.calls[0]?.[0])).toContain("permission-required");
+    expect(String(errorSpy.mock.calls[0]?.[0])).toContain("backend-error");
+  });
+
+  it("requests permission once and retries dispatch instead of reporting a runtime error", async () => {
+    const errorSpy = vi.fn();
+    dispatchMock
+      .mockResolvedValueOnce({ submitted: false, reason: "permission-required" })
+      .mockResolvedValueOnce({ submitted: true });
+    requestMock.mockResolvedValueOnce({ granted: true });
+    const { instance } = coordinator({
+      getSettings: () => settings({ agentTaskComplete: true }),
+      onError: errorSpy,
+    });
+
+    instance.handleAgentStateChange({
+      sessionId: "s1",
+      previousState: "running",
+      nextState: "done",
+    });
+
+    for (let i = 0; i < 8; i += 1) await Promise.resolve();
+
+    expect(requestMock).toHaveBeenCalledTimes(1);
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(dispatchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("coalesces an in-flight permission request and does not toast a denial", async () => {
+    const errorSpy = vi.fn();
+    let resolveRequest: (value: { granted: boolean }) => void = () => {};
+    requestMock.mockImplementation(
+      () => new Promise((resolve) => {
+        resolveRequest = resolve;
+      }),
+    );
+    dispatchMock.mockResolvedValue({ submitted: false, reason: "permission-required" });
+    const { instance } = coordinator({
+      getSettings: () => settings({ agentTaskComplete: true, terminalBell: true }),
+      onError: errorSpy,
+    });
+
+    instance.handleAgentStateChange({
+      sessionId: "s1",
+      previousState: "running",
+      nextState: "done",
+    });
+    instance.handleTerminalBell({ sessionId: "s2", tabId: "t2" });
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(requestMock).toHaveBeenCalledTimes(1);
+    expect(errorSpy).not.toHaveBeenCalled();
+
+    resolveRequest({ granted: false });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(requestMock).toHaveBeenCalledTimes(1);
+    expect(errorSpy).not.toHaveBeenCalled();
   });
 
   it("does not treat the default system sound's played:false as an error", async () => {

@@ -1,4 +1,4 @@
-import { dispatchNotification, playNotificationSound } from './tauri';
+import { dispatchNotification, playNotificationSound, requestNotificationPermission } from './tauri';
 import { type NotificationSettings, loadNotificationSettings } from './notificationSettings';
 import type { DispatchNotificationArgs } from './types';
 
@@ -57,11 +57,60 @@ export class NotificationCoordinator {
   private lastBellTimestamp = new Map<string, number>();
   private lastAgentState = new Map<string, string>();
   private lastAgentCompletionTimestamp = new Map<string, number>();
+  private permissionRequest: Promise<boolean> | null = null;
+  private permissionDenied = false;
 
   private readonly bellThrottleMs = 1000;
   private readonly bellAgentSuppressionMs = 1500;
 
   constructor(private options: NotificationCoordinatorOptions = {}) {}
+
+  private isExpectedPermissionRejection(reason: string | undefined): boolean {
+    return reason === 'permission-required' || reason === 'blocked-by-system';
+  }
+
+  private ensureNotificationPermission(): Promise<boolean> {
+    if (this.permissionDenied) return Promise.resolve(false);
+    if (!this.permissionRequest) {
+      this.permissionRequest = Promise.resolve(requestNotificationPermission())
+        .then((result) => {
+          const granted = result?.granted === true;
+          if (!granted && !result?.error) this.permissionDenied = true;
+          return granted;
+        })
+        .finally(() => {
+          this.permissionRequest = null;
+        });
+    }
+    return this.permissionRequest;
+  }
+
+  private deliverDesktopNotification(dispatchArgs: DispatchNotificationArgs): void {
+    Promise.resolve(dispatchNotification(dispatchArgs))
+      .then(async (result) => {
+        if (!result || result.submitted) return;
+        if (result.reason === 'permission-required') {
+          const granted = await this.ensureNotificationPermission();
+          if (!granted) return;
+          const retried = await dispatchNotification(dispatchArgs);
+          if (retried && !retried.submitted && !this.isExpectedPermissionRejection(retried.reason)) {
+            this.options.onError?.(
+              new Error(`desktop notification not submitted (${retried.reason ?? 'unknown'})`),
+              'dispatch',
+            );
+          }
+          return;
+        }
+        if (this.isExpectedPermissionRejection(result.reason)) return;
+        this.options.onError?.(
+          new Error(`desktop notification not submitted (${result.reason ?? 'unknown'})`),
+          'dispatch',
+        );
+      })
+      .catch((err) => {
+        this.options.onError?.(err, 'dispatch');
+      });
+  }
 
   // A click can only navigate when both the frontend workspace and session identities are
   // known. Probes and identity-less events still dispatch, just without a navigation target.
@@ -143,20 +192,7 @@ export class NotificationCoordinator {
           terminalTitle: params.terminalTitle,
           ...this.navigationTarget(params.workspaceId, params.sessionId),
         };
-        Promise.resolve(dispatchNotification(dispatchArgs))
-          .then((result) => {
-            // The backend rejects with an Ok result (e.g. permission-required),
-            // not an IPC error — surface the reason or it disappears silently.
-            if (result && !result.submitted) {
-              this.options.onError?.(
-                new Error(`desktop notification not submitted (${result.reason ?? 'unknown'})`),
-                'dispatch',
-              );
-            }
-          })
-          .catch((err) => {
-            this.options.onError?.(err, 'dispatch');
-          });
+        this.deliverDesktopNotification(dispatchArgs);
       }
     }
     return decision;
@@ -245,18 +281,7 @@ export class NotificationCoordinator {
           agentLabel: params.agentLabel,
           ...this.navigationTarget(params.workspaceId, params.sessionId),
         };
-        Promise.resolve(dispatchNotification(dispatchArgs))
-          .then((result) => {
-            if (result && !result.submitted) {
-              this.options.onError?.(
-                new Error(`desktop notification not submitted (${result.reason ?? 'unknown'})`),
-                'dispatch',
-              );
-            }
-          })
-          .catch((err) => {
-            this.options.onError?.(err, 'dispatch');
-          });
+        this.deliverDesktopNotification(dispatchArgs);
       }
     }
     return decision;
@@ -266,6 +291,8 @@ export class NotificationCoordinator {
     this.lastBellTimestamp.clear();
     this.lastAgentState.clear();
     this.lastAgentCompletionTimestamp.clear();
+    this.permissionRequest = null;
+    this.permissionDenied = false;
   }
 }
 

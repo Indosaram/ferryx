@@ -112,6 +112,60 @@ describe("NotificationsSection", () => {
     expect(previewButton).toBeDisabled();
   });
 
+  it("requests permission and probes again when a test notification needs permission", async () => {
+    saveNotificationSettings({ enabled: true });
+    native.getNotificationPermissionStatus.mockResolvedValue({
+      authorization: "not-determined",
+      authoritative: true,
+      supported: true,
+    });
+    native.probeNotificationDelivery
+      .mockResolvedValueOnce({ outcome: "permission-required", testSubmitted: false })
+      .mockResolvedValueOnce({ outcome: "submitted", testSubmitted: true });
+    native.requestNotificationPermission.mockResolvedValue({ granted: true });
+
+    render(<NotificationsSection />);
+    fireEvent.click(await screen.findByRole("button", { name: /send test notification/i }));
+
+    await waitFor(() => {
+      expect(native.requestNotificationPermission).toHaveBeenCalledTimes(1);
+    });
+    expect(native.probeNotificationDelivery).toHaveBeenCalledTimes(2);
+  });
+
+  it("requests permission when the master switch is turned on while authorization is not determined", async () => {
+    saveNotificationSettings({ enabled: false });
+    native.getNotificationPermissionStatus.mockResolvedValue({
+      authorization: "not-determined",
+      authoritative: true,
+      supported: true,
+    });
+
+    render(<NotificationsSection />);
+    fireEvent.click(await screen.findByRole("switch", { name: /^enable notifications$/i }));
+
+    await waitFor(() => {
+      expect(native.requestNotificationPermission).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("shows the structured permission error instead of swallowing it", async () => {
+    native.getNotificationPermissionStatus.mockResolvedValue({
+      authorization: "not-determined",
+      authoritative: true,
+      supported: true,
+    });
+    native.requestNotificationPermission.mockResolvedValue({
+      granted: false,
+      error: "notifications require a bundled .app",
+    });
+
+    render(<NotificationsSection />);
+    fireEvent.click(await screen.findByRole("button", { name: /request permission/i }));
+
+    expect(await screen.findByText("notifications require a bundled .app")).toBeDefined();
+  });
+
   it("reports why a test notification did not appear when the OS withholds permission", async () => {
     saveNotificationSettings({ enabled: true });
     native.probeNotificationDelivery.mockResolvedValue({

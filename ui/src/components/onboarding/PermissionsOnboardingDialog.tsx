@@ -115,12 +115,18 @@ export function PermissionsOnboardingDialog({
     }
   }, [fetchStatus]);
 
+  const [requestError, setRequestError] = useState<string | null>(null);
+
   const handleRequestNotifications = useCallback(async () => {
+    setRequestError(null);
     try {
-      await requestNotificationPermission();
+      const result = await requestNotificationPermission();
+      if (result?.error) setRequestError(result.error);
       void fetchStatus();
-    } catch {
-      if (isMountedRef.current) setStatus(null);
+    } catch (err) {
+      if (isMountedRef.current) {
+        setRequestError(err instanceof Error ? err.message : "Notification permission request failed.");
+      }
     }
   }, [fetchStatus]);
 
@@ -231,6 +237,11 @@ export function PermissionsOnboardingDialog({
             <p className="mt-1.5 text-xs text-muted-foreground leading-relaxed">
               Allows desktop alerts for agent task completions and updates.
             </p>
+            {requestError ? (
+              <p role="alert" className="mt-1.5 text-xs text-amber-400">
+                {requestError}
+              </p>
+            ) : null}
             {!status?.notifications.granted ? (
               <div className="mt-3 flex justify-end gap-2">
                 {status?.notifications.canRequest ? (

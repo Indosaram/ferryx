@@ -98,8 +98,12 @@ export function NotificationsSection() {
     const preClickAuth = auth;
     setRequestNotice(null);
     try {
-      await requestNotificationPermission();
+      const result = await requestNotificationPermission();
       await refreshPermission();
+      if (result?.error) {
+        setRequestNotice(result.error);
+        return;
+      }
       if (preClickAuth === "authorized" || preClickAuth === "provisional") {
         setRequestNotice(
           "macOS does not re-prompt apps that already have permission. The badge capability was registered — enable 'Badge application icon' under System Settings → Notifications → Ferryx if the Dock badge is missing."
@@ -149,7 +153,15 @@ export function NotificationsSection() {
     setIsTesting(true);
     setTestResult(null);
     try {
-      const result = await probeNotificationDelivery(true, settings.customSoundId === "system" ? "system" : "silent");
+      let result = await probeNotificationDelivery(true, settings.customSoundId === "system" ? "system" : "silent");
+      if (result?.outcome === "permission-required") {
+        const requested = await requestNotificationPermission();
+        if (requested?.error) {
+          setTestResult({ tone: "error", message: requested.error });
+          return;
+        }
+        result = await probeNotificationDelivery(true, settings.customSoundId === "system" ? "system" : "silent");
+      }
       setTestResult(describeProbeOutcome(result?.outcome));
       // "system" delivers the OS default sound with the banner and "none" is muted;
       // only an explicit custom file goes through the audio player.
@@ -286,7 +298,12 @@ export function NotificationsSection() {
           <Switch
             aria-label="Enable Notifications"
             checked={settings.enabled}
-            onCheckedChange={(checked) => updateSettings({ enabled: checked })}
+            onCheckedChange={(checked) => {
+              updateSettings({ enabled: checked });
+              if (checked && auth === "not-determined") {
+                void handleRequestPermission();
+              }
+            }}
           />
         </SettingRow>
 

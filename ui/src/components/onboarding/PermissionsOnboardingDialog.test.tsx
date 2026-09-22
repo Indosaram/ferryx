@@ -118,6 +118,20 @@ describe("PermissionsOnboardingDialog", () => {
     expect(onClose).toHaveBeenCalledWith(false);
   });
 
+  it("shows the structured notification error instead of clearing the dialog", async () => {
+    mockTauri.getSystemPermissionsStatus.mockResolvedValue(mockStatusNotGranted);
+    mockTauri.requestNotificationPermission.mockResolvedValue({
+      granted: false,
+      error: "notifications require a bundled .app",
+    });
+
+    render(<PermissionsOnboardingDialog open onClose={vi.fn()} />);
+    fireEvent.click(await screen.findByTestId("onboarding-request-notifications"));
+
+    expect(await screen.findByText("notifications require a bundled .app")).toBeDefined();
+    expect(screen.getByText("Notifications")).toBeDefined();
+  });
+
   it("renders Get Started and calls onClose(true) when all granted", async () => {
     mockTauri.getSystemPermissionsStatus.mockResolvedValue(mockStatusAllGranted);
     const onClose = vi.fn();

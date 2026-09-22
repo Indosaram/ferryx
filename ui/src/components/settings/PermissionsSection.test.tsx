@@ -205,6 +205,62 @@ describe("PermissionsSection", () => {
     expect(screen.queryByTestId("request-notifications")).toBeNull();
   });
 
+  it("replaces Enable Notifications with Open System Settings after a denial refresh", async () => {
+    const canRequestStatus: SystemPermissionsStatus = {
+      ...mockStatusNotGranted,
+      notifications: {
+        ...mockStatusNotGranted.notifications,
+        status: "not_determined",
+        canRequest: true,
+        granted: false,
+      },
+    };
+    const deniedStatus: SystemPermissionsStatus = {
+      ...canRequestStatus,
+      notifications: {
+        ...canRequestStatus.notifications,
+        status: "denied",
+        canRequest: false,
+        granted: false,
+      },
+    };
+    mockTauri.requestNotificationPermission.mockResolvedValue({ granted: false });
+    await renderStatus(canRequestStatus);
+    expect(screen.getByTestId("request-notifications")).toBeDefined();
+
+    mockTauri.getSystemPermissionsStatus.mockResolvedValue(deniedStatus);
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("request-notifications"));
+    });
+
+    expect(await screen.findByTestId("open-notifications-settings")).toBeDefined();
+    expect(screen.queryByTestId("request-notifications")).toBeNull();
+  });
+
+  it("shows the structured notification error instead of clearing status", async () => {
+    const canRequestStatus: SystemPermissionsStatus = {
+      ...mockStatusNotGranted,
+      notifications: {
+        ...mockStatusNotGranted.notifications,
+        status: "not_determined",
+        canRequest: true,
+        granted: false,
+      },
+    };
+    mockTauri.requestNotificationPermission.mockResolvedValue({
+      granted: false,
+      error: "notifications require a bundled .app",
+    });
+    await renderStatus(canRequestStatus);
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("request-notifications"));
+    });
+
+    expect(await screen.findByText("notifications require a bundled .app")).toBeDefined();
+    expect(screen.getByText("Desktop Notifications")).toBeDefined();
+  });
+
   it("renders Windows notifications-only surface with OS-managed badge", async () => {
     // Given / When: non-authoritative Windows capabilities arrive through IPC.
     await renderStatus(mockStatusWindows);

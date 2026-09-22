@@ -119,15 +119,49 @@ pub async fn cmd_notification_get_permission_status<R: Runtime>(
     run_blocking(move || Ok(service_for(&app).permission_status())).await
 }
 
+/// Posts the authorization *start* onto the main thread and returns immediately.
+#[cfg(target_os = "macos")]
+struct AppMainThread<R: Runtime>(AppHandle<R>);
+
+#[cfg(target_os = "macos")]
+impl<R: Runtime> crate::notification::MainThreadScheduler for AppMainThread<R> {
+    fn schedule(&self, work: Box<dyn FnOnce() + Send>) {
+        let _ = self.0.run_on_main_thread(move || work());
+    }
+}
+
 /// Request notification authorization.
 ///
 /// Only ever invoked from an explicit user action (master switch, test
 /// notification, or "Allow notifications") - never at startup.
+/// The macOS prompt is started on the main thread; the wait stays off it.
 #[tauri::command]
 pub async fn cmd_notification_request_permission<R: Runtime>(
     app: AppHandle<R>,
 ) -> Result<NotificationPermissionRequestDto, IpcError> {
-    run_blocking(move || Ok(service_for(&app).request_permission())).await
+    #[cfg(target_os = "macos")]
+    {
+        let scheduler = AppMainThread(app);
+        run_blocking(move || {
+            let (granted, error) = crate::notification::request_authorization_with(
+                &scheduler,
+                crate::notification::permission::macos::begin_authorization_request,
+                crate::notification::permission::authorization_wait(),
+            );
+            crate::notification::invalidate_permission_cache();
+            let status = crate::notification::platform_permission_provider().status();
+            Ok(NotificationPermissionRequestDto {
+                granted,
+                status,
+                error,
+            })
+        })
+        .await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        run_blocking(move || Ok(service_for(&app).request_permission())).await
+    }
 }
 
 /// Report notification readiness, optionally sending a visible test.
