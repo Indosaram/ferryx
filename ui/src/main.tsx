@@ -6,7 +6,7 @@ import { installSettingsRuntimeBridge } from "./lib/settingsRuntimeBridge";
 import { isMacShortcutPlatform } from "./lib/shortcuts";
 import { installShortcutDiagnostics } from "./lib/shortcutDiagnostics";
 import { switchDebug } from "./lib/switchDebug";
-import { bootTrace } from "./lib/tauri";
+import { bootTrace, describeRejection } from "./lib/tauri";
 import { applyCachedTerminalBackground } from "./lib/terminalSettings";
 import "./index.css";
 import "./settings-runtime.css";
@@ -35,7 +35,7 @@ window.addEventListener("error", (event) => {
 });
 window.addEventListener("unhandledrejection", (event) => {
   switchDebug("shortcut.webview.unhandledrejection", { errorType: event.reason instanceof Error ? event.reason.name : typeof event.reason });
-  void bootTrace("unhandled.rejection", { reason: String(event.reason).slice(0, 200) });
+  void bootTrace("unhandled.rejection", { reason: describeRejection(event.reason).slice(0, 200) });
 });
 
 async function boot() {

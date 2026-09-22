@@ -194,6 +194,15 @@ export async function getInitialProject() {
   return invokeCommand<RegisteredProject>("cmd_project_initial");
 }
 
+export function describeRejection(reason: unknown): string {
+  if (reason instanceof Error) return `${reason.name}: ${reason.message}`;
+  try {
+    return JSON.stringify(reason) ?? String(reason);
+  } catch {
+    return String(reason);
+  }
+}
+
 export async function bootTrace(
   stage: string,
   details?: Record<string, unknown>,

@@ -3,6 +3,7 @@ target/
 src-tauri/target/
 **/*.rs.bk
 Cargo.lock
+!/src-tauri/Cargo.lock
 
 # Node
 node_modules/

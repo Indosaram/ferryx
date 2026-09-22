@@ -50,7 +50,27 @@ import {
   writeTerminalRemote,
   resizeTerminalRemote,
   onTerminalRemoteStatus,
+  describeRejection,
 } from "./tauri";
+
+describe("describeRejection", () => {
+  it("serializes structured rejection objects as JSON", () => {
+    expect(describeRejection({ code: "PAIRED_PROXY_MISSING", message: "gone", details: { sessionId: "s1" } })).toBe(
+      '{"code":"PAIRED_PROXY_MISSING","message":"gone","details":{"sessionId":"s1"}}',
+    );
+  });
+
+  it("formats Error rejections as name and message", () => {
+    expect(describeRejection(new TypeError("probe failed"))).toBe("TypeError: probe failed");
+  });
+
+  it("falls back to String for circular and undefined reasons", () => {
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    expect(describeRejection(circular)).toBe("[object Object]");
+    expect(describeRejection(undefined)).toBe("undefined");
+  });
+});
 
 describe("Tauri IPC wrapper contract", () => {
   it("routes remote status, retry and generation-fenced control without remapping arguments", async () => {
