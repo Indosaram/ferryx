@@ -1259,4 +1259,44 @@ mod tests {
         assert!(line.starts_with("        alpha/one.ts:1:1"));
         assert_eq!(&line[8..24], "alpha/one.ts:1:1");
     }
+
+    #[test]
+    fn partial_scroll_region_never_creates_scrollback() {
+        // DECSTBM with a bottom margin below the last row (as bottom-anchored
+        // TUIs use to pin status/input bars) must scroll strictly in place:
+        // no padding rows or stale frames may ever reach the physical
+        // scrollback history. This guards the vendored Ghostty index()/scrollUp()
+        // partial-region policy that previously dumped margin rows into history.
+        let mut terminal = NativeTerminal::new(10, 5).expect("create native terminal");
+        // Region rows 1..=4 (1-based) => 0-indexed top=0, bottom=3 on a 5-row
+        // screen, so bottom < rows - 1 (partial region).
+        terminal.feed_str("\x1b[1;4r").expect("set scroll region");
+        for i in 0..8 {
+            terminal
+                .feed(format!("L{}\r\n", i).as_bytes())
+                .expect("feed output");
+        }
+        assert_eq!(
+            terminal.scrollback_rows().expect("query scrollback"),
+            0,
+            "partial-region scrolling must not push rows into scrollback"
+        );
+    }
+
+    #[test]
+    fn full_screen_region_still_creates_scrollback() {
+        // Control: the default full-screen region keeps the standard
+        // scroll-on-linefeed history behavior unchanged by the partial-region
+        // fix.
+        let mut terminal = NativeTerminal::new(10, 5).expect("create native terminal");
+        for i in 0..8 {
+            terminal
+                .feed(format!("L{}\r\n", i).as_bytes())
+                .expect("feed output");
+        }
+        assert!(
+            terminal.scrollback_rows().expect("query scrollback") > 0,
+            "full-screen scrolling must retain scrollback history"
+        );
+    }
 }

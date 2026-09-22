@@ -974,6 +974,23 @@ pub async fn cmd_native_terminal_send_input<R: Runtime>(
     {
         return Err(err);
     }
+    // Keystroke parity with standard terminals (ghostty
+    // scroll-to-bottom.keystroke=true): typing while the viewport is
+    // scrolled up snaps back to the live edge so the echoed input is
+    // visible. The write above already succeeded, so a snap failure is
+    // cosmetic and must not fail the command.
+    if require_attached_surface(state.inner(), &session_id).is_ok() {
+        if let Err(err) =
+            scroll_attached_native_terminal(state.inner(), &session_id, ScrollViewport::Bottom)
+        {
+            tracing::warn!(
+                session_id,
+                %err,
+                "Failed to snap native terminal viewport to bottom after input"
+            );
+        }
+        state.emit_scrollbar_if_changed(Some(&app), &session_id);
+    }
 
     let window = match app.get_window("main") {
         Some(window) => window,
