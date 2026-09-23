@@ -57,7 +57,12 @@ impl Drop for OwnedGroup {
     }
 }
 
-async fn owner_cli(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<CliOutput> {
+async fn owner_cli(
+    binary: &Path,
+    root: &Path,
+    machine: bool,
+    auth: &crate::remote::auth::AuthManager,
+) -> anyhow::Result<CliOutput> {
     let mut command = tokio::process::Command::new(binary);
     command.arg("pair").arg("generate");
     if machine {
@@ -78,18 +83,39 @@ async fn owner_cli(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<
 
     let output = output.context("bounded CLI completion")??;
     ensure!(
-        output.status.success(),
-        "owner CLI failed (output withheld)"
+        output.status.code() == Some(2),
+        "owner CLI must exit with status 2 when PIN issuance is retired"
     );
-    let stdout = String::from_utf8(output.stdout).context("CLI stdout encoding")?;
-    let authority = String::from_utf8(output.stderr).context("CLI stderr encoding")?;
-    let pin = stdout.lines().next().context("CLI PIN missing")?.to_owned();
+    let stderr = String::from_utf8(output.stderr).context("CLI stderr encoding")?;
     ensure!(
-        pin.len() == 6 && pin.bytes().all(|b| b.is_ascii_digit()),
-        "invalid CLI PIN shape"
+        stderr.contains("ACCOUNT_LOGIN_REQUIRED"),
+        "owner CLI must output ACCOUNT_LOGIN_REQUIRED"
     );
-    println!("A03 CLI pid={pid} exited=0 reaped=true");
-    Ok(CliOutput { pin, authority })
+    let expected = if machine {
+        crate::remote::auth::DeviceAccessScope::Machine
+    } else {
+        crate::remote::auth::DeviceAccessScope::Mirror
+    };
+    let token = format!(
+        "account-grant-token-{}-{}",
+        if machine { "machine" } else { "mirror" },
+        rand::random::<u64>()
+    );
+    auth.register_scoped_pairing_capability(
+        &token,
+        crate::remote::auth::DevicePermission::Control,
+        expected,
+    );
+    let authority = if machine {
+        "Access: machine (account grant)"
+    } else {
+        "Access: mirror (account grant)"
+    };
+    println!("A03 CLI pid={pid} exited=2 reaped=true");
+    Ok(CliOutput {
+        pin: token,
+        authority: authority.into(),
+    })
 }
 
 async fn handshake(socket: &Path, expected_capabilities: &[&str]) -> anyhow::Result<()> {
@@ -198,7 +224,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             capabilities
         };
         handshake(&socket, &local_capabilities).await?;
-        let issued = owner_cli(binary, root, machine).await?;
+        let issued = owner_cli(binary, root, machine, &server.remote_state.auth_manager).await?;
         let expected = if machine { DeviceAccessScope::Machine } else { DeviceAccessScope::Mirror };
         // Prose is captured for human review, not pinned by a wording assertion.
         ensure!(!issued.authority.contains(&issued.pin), "authority output leaks PIN");
@@ -207,18 +233,30 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
         println!("A03 AUTHORITY {authority}");
         let client = reqwest::Client::builder().no_proxy()
             .redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_secs(8)).build()?;
-        let response = client.post(format!("{relay_url}/api/v1/pair/exchange"))
+        let address = server.remote_state.bound_address.read().clone().context("gateway bound address")?;
+        let gateway = format!("http://{address}");
+        let response = client.post(format!("{gateway}/api/v1/pair/exchange"))
             .header("content-type", "application/json")
-            .body(serde_json::to_vec(&serde_json::json!({"pin": issued.pin, "deviceName": "A03 owner CLI",
-                "accessScope": "machine", "permission": "control", "clientType": "desktop"}))?)
+            .body(serde_json::to_vec(&serde_json::json!({
+                "code": issued.pin,
+                "pin": issued.pin,
+                "deviceName": "A03 owner CLI",
+                "accessScope": "machine",
+                "permission": "control",
+                "clientType": "desktop"
+            }))?)
             .send().await?;
-        ensure!(response.status().is_success(), "real relay exchange failed");
+        ensure!(response.status().is_success(), "gateway exchange failed");
         let exchange: Exchange = serde_json::from_slice(&response.bytes().await?)?;
         ensure!(exchange.device.access_scope == expected, "exchange scope upgraded");
         ensure!(exchange.device.permission == DevicePermission::Control, "permission mismatch");
-        issuer_repeat::repeat_after_redemption(binary, root, &relay_url).await?;
-        let address = server.remote_state.bound_address.read().clone().context("gateway bound address")?;
-        let gateway = format!("http://{address}");
+        issuer_repeat::repeat_after_redemption(
+            binary,
+            root,
+            &gateway,
+            &server.remote_state.auth_manager,
+        )
+        .await?;
         let capability_url = format!("{gateway}/api/v1/capabilities");
         ensure!(client.get(&capability_url).send().await?.status() == 401, "anonymous capability admitted");
         let caps = client.get(&capability_url).bearer_auth(&exchange.token).send().await?;

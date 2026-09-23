@@ -7,7 +7,8 @@ use std::time::Duration;
 pub(super) async fn repeat_after_redemption(
     binary: &Path,
     root: &Path,
-    relay_url: &str,
+    gateway_url: &str,
+    auth: &crate::remote::auth::AuthManager,
 ) -> anyhow::Result<()> {
     // Given: the shared daemon coordinator has already issued a redeemed PIN.
     let client = reqwest::Client::builder()
@@ -15,16 +16,19 @@ pub(super) async fn repeat_after_redemption(
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(8))
         .build()?;
-    let endpoint = format!("{relay_url}/api/v1/pair/exchange");
+    let endpoint = format!("{gateway_url}/api/v1/pair/exchange");
     for issuance in 1..=2 {
         // When: the owner issues machine access again without changing coordinator state.
-        let issued = owner_cli(binary, root, true).await?;
+        let issued = owner_cli(binary, root, true, auth).await?;
         let response = client
             .post(&endpoint)
             .header("content-type", "application/json")
             .body(serde_json::to_vec(&serde_json::json!({
-                "pin": issued.pin, "deviceName": "A13 repeated owner CLI",
-                "permission": "view", "accessScope": "mirror"
+                "code": issued.pin,
+                "pin": issued.pin,
+                "deviceName": "A13 repeated owner CLI",
+                "permission": "view",
+                "accessScope": "mirror"
             }))?)
             .send()
             .await?;
@@ -46,7 +50,9 @@ pub(super) async fn repeat_after_redemption(
             .post(&endpoint)
             .header("content-type", "application/json")
             .body(serde_json::to_vec(&serde_json::json!({
-                "pin": issued.pin, "deviceName": "A13 stale redemption"
+                "code": issued.pin,
+                "pin": issued.pin,
+                "deviceName": "A13 stale redemption"
             }))?)
             .send()
             .await?;
