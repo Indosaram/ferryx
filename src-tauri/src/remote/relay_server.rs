@@ -82,6 +82,10 @@ pub struct IncomingSessionNotice {
 enum HalfKind {
     Data,
     Client,
+    /// The account client's half of a session whose traffic it encrypts end to end. Kept
+    /// distinct from `Client` so a plain session can never be taken over the opaque route
+    /// and an opaque session can never be taken over the plain one.
+    Opaque,
 }
 
 /// An issued session, retained through reservation and active transfer.
@@ -95,6 +99,9 @@ struct WaitingHalf {
     control_generation: u64,
     created_at: Instant,
     kind: Option<HalfKind>,
+    /// True when the allocation asked for the encrypted attach path. The relay then only
+    /// ever splices frames for this session and never parses them.
+    opaque: bool,
     notify: Option<oneshot::Sender<WebSocket>>,
     active: bool,
 }
@@ -748,6 +755,7 @@ impl RelayState {
                 control_generation: channel.generation,
                 created_at: Instant::now(),
                 kind: None,
+                opaque,
                 notify: None,
                 active: false,
             },
@@ -766,6 +774,14 @@ impl RelayState {
         let channels = self.inner.control_channels.lock();
         let mut sessions = self.inner.pending_sessions.lock();
         let waiting = sessions.get_mut(session_id).ok_or(StatusCode::NOT_FOUND)?;
+        // An allocation for the encrypted path is only ever taken by the opaque route, and a
+        // plain allocation is never taken by it: the two carry different traffic and must not
+        // be interchangeable.
+        match kind {
+            HalfKind::Opaque if !waiting.opaque => return Err(StatusCode::NOT_FOUND),
+            HalfKind::Client if waiting.opaque => return Err(StatusCode::NOT_FOUND),
+            _ => {}
+        }
         if waiting.active || waiting.kind == Some(kind) {
             return Err(StatusCode::CONFLICT);
         }
@@ -1066,6 +1082,7 @@ impl RelayState {
                     kind: Some(HalfKind::Client),
                     notify: Some(tx),
                     active: false,
+                    opaque: false,
                 },
             );
             channel
@@ -2011,6 +2028,7 @@ pub fn relay_router(state: RelayState) -> Router {
         .route("/tunnel/control", get(control_handler))
         .route("/tunnel/data/{session_id}", get(data_handler))
         .route("/tunnel/client/{session_id}", get(client_handler))
+        .route("/tunnel/opaque/{session_id}", get(opaque_handler))
         .fallback(axum::routing::get(
             crate::remote::server::serve_static_or_index,
         ))
@@ -2315,6 +2333,22 @@ async fn client_handler(
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
     upgrade_half(ws, state, session_id, HalfKind::Client)
+}
+
+/// `GET /tunnel/opaque/:session_id` - the account client's channel for a session whose
+/// traffic it encrypts end to end. The relay splices frames verbatim through
+/// `proxy_sockets` and never runs a WebSocket handshake over them, so no plaintext of this
+/// session passes through the relay.
+async fn opaque_handler(
+    ws: WebSocketUpgrade,
+    AxumPath(session_id): AxumPath<String>,
+    peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
+    State(state): State<RelayState>,
+) -> Result<Response, StatusCode> {
+    if !state.admit(peer_ip(peer), Instant::now()) {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+    upgrade_half(ws, state, session_id, HalfKind::Opaque)
 }
 
 fn upgrade_half(
@@ -3759,6 +3793,46 @@ mod tests {
                 registration(current_time_secs() + MAX_PAIRING_LEASE - 5)
             )
             .is_ok());
+    }
+
+    #[tokio::test]
+    async fn an_opaque_session_splices_frames_the_relay_never_parses() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (generation, _notices, _grants) = state.register_control_channel("opaque-load".into());
+        let session = "opaque-session-1";
+        assert!(state.issue_session("opaque-load", session, Some(generation), true));
+
+        let (mut daemon, _) = tokio_tungstenite::connect_async(format!("{base}/tunnel/data/{session}"))
+            .await
+            .unwrap();
+        let (mut client, _) = tokio_tungstenite::connect_async(format!("{base}/tunnel/opaque/{session}"))
+            .await
+            .unwrap();
+
+        // The client's bytes reach the daemon verbatim: the relay splices and never parses.
+        let sentinel = b"FERRYX_E2EE_SENTINEL".to_vec();
+        client.send(TMessage::Binary(sentinel.clone().into())).await.unwrap();
+        let seen = timeout(Duration::from_secs(5), daemon.next()).await.unwrap().unwrap().unwrap();
+        assert_eq!(seen.into_data().as_ref(), sentinel.as_slice());
+
+        // The daemon's reply travels back the same way.
+        let reply = b"FERRYX_E2EE_REPLY".to_vec();
+        daemon.send(TMessage::Binary(reply.clone().into())).await.unwrap();
+        let back = timeout(Duration::from_secs(5), client.next()).await.unwrap().unwrap().unwrap();
+        assert_eq!(back.into_data().as_ref(), reply.as_slice());
+
+        // A plain session is never served over the opaque route, and an opaque session is
+        // never served over the plain client route.
+        let plain = "plain-session-1";
+        assert!(state.issue_session("opaque-load", plain, Some(generation), false));
+        assert!(tokio_tungstenite::connect_async(format!("{base}/tunnel/opaque/{plain}"))
+            .await
+            .is_err());
+        assert!(tokio_tungstenite::connect_async(format!("{base}/tunnel/client/{session}"))
+            .await
+            .is_err());
+        server.abort();
     }
 
     #[tokio::test]
