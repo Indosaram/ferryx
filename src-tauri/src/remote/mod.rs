@@ -19,6 +19,7 @@ pub mod protocol;
 pub mod push;
 pub mod relay_client;
 pub mod sealed_offer;
+pub mod session_transport;
 pub mod relay_server;
 pub mod server;
 pub(crate) mod session_api;
