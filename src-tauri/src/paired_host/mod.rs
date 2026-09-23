@@ -1,6 +1,7 @@
 //! Local daemon credential authority. Run filesystem methods on a blocking worker.
 pub mod attach;
 pub mod client;
+pub mod path_select;
 pub mod inventory;
 pub mod projects;
 pub mod service;
