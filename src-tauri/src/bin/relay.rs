@@ -12,11 +12,14 @@
 //! `FERRYX_RELAY_MACHINE_TOKENS` environment variable; tokens from both the
 //! environment and `--machine-token` flags are accepted.
 
-use ferryx_lib::remote::relay_server::{relay_router, spawn_session_reaper, RelayState};
+use ferryx_lib::remote::relay_server::{
+    relay_router_with_grant_key, spawn_session_reaper, RelayState,
+};
 
 struct RelayConfig {
     port: u16,
     machine_tokens: Vec<String>,
+    account_public_key: Option<String>,
 }
 
 fn parse_args(args: &[String]) -> Result<RelayConfig, String> {
@@ -34,6 +37,9 @@ fn parse_args(args: &[String]) -> Result<RelayConfig, String> {
                 .collect()
         })
         .unwrap_or_default();
+    let mut account_public_key = std::env::var("FERRYX_RELAY_ACCOUNT_PUBLIC_KEY")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
 
     let mut i = 0;
     while i < args.len() {
@@ -54,6 +60,13 @@ fn parse_args(args: &[String]) -> Result<RelayConfig, String> {
                     .ok_or_else(|| "--machine-token requires a value".to_string())?;
                 machine_tokens.push(value.clone());
             }
+            "--account-public-key" => {
+                i += 1;
+                let value = args
+                    .get(i)
+                    .ok_or_else(|| "--account-public-key requires a value".to_string())?;
+                account_public_key = Some(value.clone());
+            }
             other => {
                 return Err(format!("unrecognized argument: {other}"));
             }
@@ -64,6 +77,7 @@ fn parse_args(args: &[String]) -> Result<RelayConfig, String> {
     Ok(RelayConfig {
         port,
         machine_tokens,
+        account_public_key,
     })
 }
 
@@ -89,7 +103,7 @@ async fn main() {
 
     let state = RelayState::new(config.machine_tokens);
     spawn_session_reaper(state.clone());
-    let router = relay_router(state);
+    let router = relay_router_with_grant_key(state, config.account_public_key);
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], config.port));
     let listener = match tokio::net::TcpListener::bind(addr).await {
