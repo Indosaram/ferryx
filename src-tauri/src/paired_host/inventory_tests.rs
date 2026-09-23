@@ -28,6 +28,44 @@ fn fixture() -> tempfile::TempDir {
 }
 
 #[test]
+fn linking_a_saved_ssh_host_is_explicit_and_survives_restart() {
+    let root = fixture();
+    let input = pairing("machine-ssh-link");
+    let mut store = Inventory::open(root.path()).unwrap();
+    let row = store.pair(&input).unwrap();
+    assert_eq!(
+        row.ssh_host_id, None,
+        "nothing may link an SSH host without an explicit action"
+    );
+    let before: serde_json::Value =
+        serde_json::from_slice(&fs::read(path(root.path())).unwrap()).unwrap();
+    assert!(
+        before["hosts"][&row.host_id].get("sshHostId").is_none(),
+        "an unlinked machine carries no sshHostId on disk"
+    );
+
+    store
+        .set_ssh_host_id(&row.host_id, row.generation, Some("ssh-host-7".into()))
+        .unwrap();
+    assert_eq!(store.list()[0].ssh_host_id.as_deref(), Some("ssh-host-7"));
+    let disk: serde_json::Value =
+        serde_json::from_slice(&fs::read(path(root.path())).unwrap()).unwrap();
+    assert_eq!(disk["hosts"][&row.host_id]["sshHostId"], "ssh-host-7");
+
+    drop(store);
+    let mut reopened = Inventory::open(root.path()).unwrap();
+    assert_eq!(
+        reopened.list()[0].ssh_host_id.as_deref(),
+        Some("ssh-host-7"),
+        "the link survives a restart"
+    );
+    reopened
+        .set_ssh_host_id(&row.host_id, row.generation, None)
+        .unwrap();
+    assert_eq!(reopened.list()[0].ssh_host_id, None);
+}
+
+#[test]
 fn real_private_persistence_restart_and_secret_exclusion() {
     let root = fixture();
     let input = pairing("a /猫!");

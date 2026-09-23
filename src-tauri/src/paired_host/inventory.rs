@@ -58,6 +58,8 @@ pub struct HostView {
     pub generation: Epoch,
     pub auth_status: AuthStatus,
     pub online: bool,
+    /// Set only when the user explicitly links a saved SSH host to this machine.
+    pub ssh_host_id: Option<String>,
 }
 
 // Deliberately no Debug or outward Serialize on inputs or credential leases.
@@ -93,6 +95,8 @@ struct Record {
     device_token: Option<String>,
     generation: Epoch,
     auth_status: AuthStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ssh_host_id: Option<String>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -248,6 +252,7 @@ fn pairing_record(
                 GrantScope::Machine => AuthStatus::Paired,
                 GrantScope::Mirror => AuthStatus::NeedsMachineGrant,
             },
+            ssh_host_id: None,
         },
     ))
 }
@@ -327,6 +332,7 @@ impl Inventory {
                     row.auth_status
                 },
                 online: !self.fenced && self.online.get(id).copied().unwrap_or(true),
+                ssh_host_id: row.ssh_host_id.clone(),
             })
             .collect()
     }
@@ -367,6 +373,23 @@ impl Inventory {
         self.validate_generation(id, generation)?;
         self.online.insert(id.to_owned(), online);
         Ok(())
+    }
+    /// Links or unlinks a saved SSH host for this machine. Nothing infers an SSH target from a
+    /// hostname or scans for one: only an explicit caller action sets this.
+    pub fn set_ssh_host_id(
+        &mut self,
+        id: &str,
+        generation: Epoch,
+        ssh_host_id: Option<String>,
+    ) -> Result<()> {
+        self.validate_generation(id, generation)?;
+        let mut candidate = self.disk.clone();
+        candidate
+            .hosts
+            .get_mut(id)
+            .ok_or(InventoryError::StaleGeneration)?
+            .ssh_host_id = ssh_host_id;
+        self.commit(candidate, id)
     }
     pub fn capture(&mut self, id: &str, generation: Epoch) -> Result<CredentialLease> {
         self.validate_generation(id, generation)?;
