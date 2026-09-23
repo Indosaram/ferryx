@@ -63,7 +63,12 @@ fn normalize_account_origin(value: &str) -> Result<String, AccountOriginError> {
             message: "ferryx.dev is not configured by this build".into(),
         });
     }
-    Ok(format!("{}://{}", url.scheme(), url.host_str().unwrap_or(host)))
+    let mut origin = format!("{}://{}", url.scheme(), host);
+    if let Some(port) = url.port() {
+        origin.push(':');
+        origin.push_str(&port.to_string());
+    }
+    Ok(origin)
 }
 
 #[cfg(test)]
@@ -97,7 +102,8 @@ mod tests {
         std::env::set_var("FERRYX_ACCOUNT_ORIGIN", "http://127.0.0.1:9");
         assert_eq!(
             account_origin().expect("loopback").as_str(),
-            "http://127.0.0.1"
+            "http://127.0.0.1:9",
+            "a non-default port must survive normalization, or peers sign a different origin"
         );
     }
 
