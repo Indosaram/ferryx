@@ -306,6 +306,8 @@ pub struct DeviceInfo {
     pub revoked: bool,
     #[serde(default)]
     pub installation_id: Option<String>,
+    #[serde(default)]
+    pub attach_public_key: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -320,6 +322,8 @@ struct PairingCode {
     lifetime: Duration,
     #[serde(default)]
     approved_token: Option<String>,
+    #[serde(default)]
+    attach_public_key: Option<String>,
 }
 
 // Preserve monotonic expiry in-process while storing portable wall-clock timestamps.
@@ -503,6 +507,7 @@ impl AuthManager {
                 access_scope,
                 lifetime: pairing_code_lifetime(access_scope),
                 approved_token: None,
+                attach_public_key: None,
             },
         );
         drop(window);
@@ -527,7 +532,7 @@ impl AuthManager {
         token: &str,
         permission: DevicePermission,
     ) {
-        self.issue_pairing_capability(token, permission, DeviceAccessScope::Mirror);
+        self.issue_pairing_capability(token, permission, DeviceAccessScope::Mirror, None);
     }
 
     pub(crate) fn register_scoped_pairing_capability(
@@ -537,7 +542,19 @@ impl AuthManager {
         access_scope: DeviceAccessScope,
     ) -> Result<(), MachineGrantError> {
         validate_machine_grant(permission, access_scope)?;
-        self.issue_pairing_capability(token, permission, access_scope);
+        self.issue_pairing_capability(token, permission, access_scope, None);
+        Ok(())
+    }
+
+    pub(crate) fn register_scoped_pairing_capability_with_attach(
+        &self,
+        token: &str,
+        permission: DevicePermission,
+        access_scope: DeviceAccessScope,
+        attach_public_key: Option<String>,
+    ) -> Result<(), MachineGrantError> {
+        validate_machine_grant(permission, access_scope)?;
+        self.issue_pairing_capability(token, permission, access_scope, attach_public_key);
         Ok(())
     }
 
@@ -546,6 +563,7 @@ impl AuthManager {
         token: &str,
         permission: DevicePermission,
         access_scope: DeviceAccessScope,
+        attach_public_key: Option<String>,
     ) {
         let _transaction = self.begin_transaction().ok();
         let mut window = self.pairing_window.write();
@@ -559,6 +577,7 @@ impl AuthManager {
                 access_scope,
                 lifetime: pairing_code_lifetime(access_scope),
                 approved_token: None,
+                attach_public_key,
             },
         );
         drop(window);
@@ -648,6 +667,7 @@ impl AuthManager {
                     last_seen_at: now,
                     revoked: false,
                     installation_id: effective_installation_id,
+                    attach_public_key: pairing.attach_public_key.clone(),
                 };
                 self.devices
                     .write()
@@ -720,6 +740,7 @@ impl AuthManager {
             last_seen_at: now,
             revoked: false,
             installation_id: effective_installation_id,
+            attach_public_key: pairing.attach_public_key.clone(),
         };
 
         self.devices.write().insert(device_id.clone(), info.clone());
@@ -796,6 +817,7 @@ impl AuthManager {
             last_seen_at: now,
             revoked: false,
             installation_id: None,
+            attach_public_key: pairing.attach_public_key.clone(),
         };
 
         self.devices.write().insert(device_id.clone(), info.clone());
@@ -850,6 +872,23 @@ impl AuthManager {
         }
 
         Ok(result)
+    }
+
+    pub fn device_for_attach_key(&self, attach_public_key: &str) -> Option<DeviceInfo> {
+        let key = attach_public_key.trim();
+        if key.is_empty() {
+            return None;
+        }
+        let now = unix_now();
+        self.devices
+            .read()
+            .values()
+            .find(|device| {
+                !device.revoked
+                    && now.saturating_sub(device.last_seen_at) <= DEVICE_IDLE_EXPIRY_SECS
+                    && device.attach_public_key.as_deref() == Some(key)
+            })
+            .cloned()
     }
 
     pub fn list_devices(&self) -> Vec<DeviceInfo> {

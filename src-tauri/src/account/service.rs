@@ -635,6 +635,7 @@ pub async fn issue_grant(
             installation_id: request.installation_id.clone(),
             grant_scope: request.grant_scope,
             expires_at: grant.expires_at,
+            device_attach_public_key: request.attach_public_key.clone(),
         };
         Ok((grant, pairing_token, machine, offer))
     })?;

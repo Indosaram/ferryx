@@ -91,10 +91,16 @@ pub fn apply_grant_offer(
     enrollment_epoch: &str,
     envelope: &AccountGrantOfferEnvelope,
     now: u64,
-) -> Result<AccountGrantOfferAck, OfferError> {    let offer = open_grant_offer(attach, envelope, machine_id, enrollment_epoch, now)?;
+) -> Result<AccountGrantOfferAck, OfferError> {
+    let offer = open_grant_offer(attach, envelope, machine_id, enrollment_epoch, now)?;
     let (permission, scope) = scope_pairing(offer.grant_scope);
-    auth.register_scoped_pairing_capability(&offer.pairing_token, permission, scope)
-        .map_err(|_| OfferError::GrantRefused)?;
+    auth.register_scoped_pairing_capability_with_attach(
+        &offer.pairing_token,
+        permission,
+        scope,
+        Some(offer.device_attach_public_key.clone()),
+    )
+    .map_err(|_| OfferError::GrantRefused)?;
     Ok(AccountGrantOfferAck {
         grant_id: offer.grant_id,
         status: "ready".to_string(),
@@ -159,6 +165,7 @@ mod tests {
             installation_id: "install-1".into(),
             grant_scope: scope,
             expires_at,
+            device_attach_public_key: STANDARD.encode([9u8; 32]),
         };
         let plaintext = serde_json::to_vec(&offer).expect("serialize");
         let sealed = seal_offer(&attach.public_key, machine_id, epoch, &plaintext).expect("seal");
@@ -194,6 +201,20 @@ mod tests {
             .expect("the registered capability redeems");
         assert_eq!(device.access_scope, DeviceAccessScope::Machine);
         assert_eq!(device.permission, DevicePermission::Control);
+        let attach_key = STANDARD.encode([9u8; 32]);
+        assert_eq!(
+            device.attach_public_key.as_deref(),
+            Some(attach_key.as_str()),
+            "the grant's device attach key must land on the issued device"
+        );
+        assert!(
+            manager.device_for_attach_key(&attach_key).is_some(),
+            "the device that holds the attach key must be findable"
+        );
+        assert!(
+            manager.device_for_attach_key("unknown-key").is_none(),
+            "an unknown attach key must not resolve to a device"
+        );
     }
 
     #[test]

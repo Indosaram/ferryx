@@ -81,6 +81,7 @@ pub struct AccountGrantOffer {
     pub installation_id: String,
     pub grant_scope: AccountGrantScope,
     pub expires_at: u64,
+    pub device_attach_public_key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
