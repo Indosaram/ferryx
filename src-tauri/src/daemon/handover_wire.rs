@@ -291,22 +291,37 @@ unsafe fn recv_header_with_control_capacity(
         return Err(HandoverWireError::Closed);
     }
     let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
+    // A truncated control message may report a length larger than the buffer that actually
+    // holds it, and the kernel closes the descriptors that did not fit. Reading past the
+    // buffer would wrap already-closed numbers, whose drop aborts the process; so collect
+    // raw numbers here, bounded by the space the caller really provided, and wrap them only
+    // once the truncation flag has been checked.
+    let capacity = control_len
+        .saturating_sub(unsafe { libc::CMSG_LEN(0) } as usize)
+        / std::mem::size_of::<RawFd>();
+    let mut raw_fds: Vec<RawFd> = Vec::new();
     while !cmsg.is_null() {
         if (*cmsg).cmsg_level == libc::SOL_SOCKET && (*cmsg).cmsg_type == libc::SCM_RIGHTS {
             let data_start = unsafe { libc::CMSG_DATA(cmsg) } as *const RawFd;
             let header_bytes = unsafe { libc::CMSG_LEN(0) } as usize;
             let data_len = (*cmsg).cmsg_len as usize - header_bytes;
-            let count = data_len / std::mem::size_of::<RawFd>();
+            let count = (data_len / std::mem::size_of::<RawFd>()).min(capacity - raw_fds.len());
             for index in 0..count {
-                let raw = unsafe { data_start.add(index).read() };
-                received.push(unsafe { OwnedFd::from_raw_fd(raw) });
+                raw_fds.push(unsafe { data_start.add(index).read() });
             }
         }
         cmsg = unsafe { libc::CMSG_NXTHDR(&msg, cmsg) };
     }
     if msg.msg_flags & libc::MSG_CTRUNC != 0 {
-        received.clear();
+        // These received descriptors are still ours, so close them without wrapping: a number
+        // the kernel already reclaimed must not reach an OwnedFd drop.
+        for raw in raw_fds {
+            unsafe { libc::close(raw) };
+        }
         return Err(HandoverWireError::TruncatedControl);
+    }
+    for raw in raw_fds {
+        received.push(unsafe { OwnedFd::from_raw_fd(raw) });
     }
     if n < HANDOVER_HEADER_BYTES {
         return Err(HandoverWireError::Closed);
