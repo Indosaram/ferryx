@@ -683,6 +683,30 @@ impl DaemonClient {
             }),
         }
     }
+    pub async fn remote_allocate_attach_session(
+        &self,
+    ) -> crate::paired_host::service::Result<crate::remote::attach_client::AttachSession> {
+        match self
+            .paired_host_request(DaemonRequest::RemoteAllocateAttachSession)
+            .await?
+        {
+            DaemonResponse::RemoteAttachSessionOk {
+                session_id,
+                machine_id,
+                machine_attach_public_key,
+                enrollment_epoch,
+                relay_origin,
+            } => Ok(crate::remote::attach_client::AttachSession {
+                session_id,
+                machine_id,
+                machine_attach_public_key,
+                enrollment_epoch,
+                relay_origin,
+            }),
+            _ => Err(crate::paired_host::service::ServiceError::unavailable()),
+        }
+    }
+
     pub async fn paired_host_list(
         &self,
     ) -> crate::paired_host::service::Result<Vec<crate::paired_host::inventory::HostView>> {

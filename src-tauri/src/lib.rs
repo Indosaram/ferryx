@@ -1279,6 +1279,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         crate::ipc::paired_host::paired_host_pair,
         crate::ipc::paired_host::paired_host_migrate_legacy,
         crate::ipc::paired_host::paired_host_forget,
+        crate::ipc::paired_host::paired_host_attach_session,
         crate::ipc::file_preview::cmd_file_preview_open,
         crate::ipc::file_preview::cmd_file_preview_open_child,
         crate::ipc::file_preview::cmd_file_preview_open_child_document,

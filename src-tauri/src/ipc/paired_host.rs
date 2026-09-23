@@ -265,3 +265,10 @@ pub async fn cmd_daemon_paste_clipboard_image<R: tauri::Runtime>(
         ))),
     }
 }
+
+#[tauri::command]
+pub async fn paired_host_attach_session(
+    daemon: State<'_, Arc<DaemonClient>>,
+) -> Result<crate::remote::attach_client::AttachSession> {
+    daemon.remote_allocate_attach_session().await
+}

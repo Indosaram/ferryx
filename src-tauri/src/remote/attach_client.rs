@@ -8,8 +8,16 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use super::attach_crypto::{AttachError, AttachInitiator, SecureStream, WebSocketByteStream};
 use super::attach_identity::AttachIdentity;
 
-pub fn load_or_generate_client_attach_identity(base_dir: &Path) -> Result<AttachIdentity, String> {
-    super::attach_identity::load_or_generate_attach_identity(base_dir)
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AttachSession {
+    pub session_id: String,
+    pub machine_id: String,
+    pub machine_attach_public_key: String,
+    pub enrollment_epoch: String,
+    pub relay_origin: String,
+}
+
+pub fn load_or_generate_client_attach_identity(base_dir: &Path) -> Result<AttachIdentity, String> {    super::attach_identity::load_or_generate_attach_identity(base_dir)
 }
 
 /// Completes the attach handshake on an already-open tunnel socket and returns the only stream
