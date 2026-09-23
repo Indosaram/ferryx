@@ -58,6 +58,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn path_select_picks_fastest_authenticated() {
+        let outcomes = [
+            PathOutcome::reachable(AttachPath::Relay, Duration::from_millis(40)),
+            PathOutcome::reachable(AttachPath::SshForward, Duration::from_millis(10)),
+            PathOutcome::unreachable(AttachPath::Lan),
+        ];
+        assert_eq!(
+            select_path(&outcomes),
+            Some(AttachPath::SshForward),
+            "Injected RTTs of relay 40ms, SSH 10ms, LAN timeout select SSH"
+        );
+    }
+
+    #[test]
     fn the_lowest_measured_round_trip_wins() {
         let outcomes = [
             PathOutcome::reachable(AttachPath::Relay, Duration::from_millis(40)),
