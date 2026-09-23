@@ -44,6 +44,11 @@ pub struct PairingSessionInfo {
     pub expires_at: u64,
 }
 
+pub struct AttachSessionRequest {
+    pub opaque: bool,
+    pub ack: oneshot::Sender<Result<String, String>>,
+}
+
 #[derive(Clone)]
 pub struct PairingCoordinator {
     state: Arc<RwLock<PairingState>>,
@@ -318,6 +323,8 @@ pub struct RelayClient {
     identity: Option<MachineIdentity>,
     pairing: PairingCoordinator,
     register_rx: Arc<Mutex<mpsc::Receiver<RegisterPairingPinRequest>>>,
+    attach_tx: mpsc::Sender<AttachSessionRequest>,
+    attach_rx: Arc<Mutex<mpsc::Receiver<AttachSessionRequest>>>,
 }
 
 impl RelayClient {
@@ -338,6 +345,7 @@ impl RelayClient {
     ) -> Self {
         let machine_token = machine_token.into();
         let (tx, rx) = mpsc::channel(1);
+        let (attach_tx, attach_rx) = mpsc::channel(1);
         Self {
             relay_url: relay_url.into(),
             pairing: PairingCoordinator::new(machine_token.clone(), tx),
@@ -345,6 +353,8 @@ impl RelayClient {
             gateway_addr: gateway_addr.into(),
             identity: None,
             register_rx: Arc::new(Mutex::new(rx)),
+            attach_tx,
+            attach_rx: Arc::new(Mutex::new(attach_rx)),
         }
     }
 
@@ -487,10 +497,29 @@ impl RelayClient {
     /// errors. Each incoming [`SessionRequest`] spawns an independent task
     /// that opens a data channel and proxies it against the local gateway,
     /// so a slow or stuck session cannot block subsequent notifications.
+    /// Asks the relay for a session the caller can attach to with the account handshake, and
+    /// returns its id. The relay mints the id; the daemon only carries the request and the
+    /// answer, so the client learns the id from the machine it is attaching to.
+    pub async fn allocate_opaque_session(&self) -> anyhow::Result<String> {
+        let (ack, wait) = oneshot::channel::<Result<String, String>>();
+        self.attach_tx
+            .send(AttachSessionRequest { opaque: true, ack })
+            .await
+            .map_err(|_| anyhow::anyhow!("relay control channel is not running"))?;
+        match tokio::time::timeout(Duration::from_secs(10), wait).await {
+            Ok(Ok(Ok(session_id))) => Ok(session_id),
+            Ok(Ok(Err(error))) => Err(anyhow::anyhow!(error)),
+            Ok(Err(_)) => Err(anyhow::anyhow!("relay control channel dropped the request")),
+            Err(_) => Err(anyhow::anyhow!("relay did not allocate a session in time")),
+        }
+    }
+
     async fn run_control_session(&self) -> anyhow::Result<()> {
         let socket = self.connect_control().await?;
         let mut registrations = self.register_rx.lock().await;
+        let mut attachments = self.attach_rx.lock().await;
         let mut pending: Option<RegisterPairingPinRequest> = None;
+        let mut pending_attach: Option<AttachSessionRequest> = None;
         tracing::info!("relay control channel connected");
         let (mut write, mut read) = socket.split();
         // Dropping the control future also aborts its data channels.
@@ -504,6 +533,18 @@ impl RelayClient {
                     if let Err(err) = write.send(Message::Ping(Vec::new().into())).await {
                         tracing::warn!("relay control ping failed: {err}");
                         break;
+                    }
+                    continue;
+                }
+                request = attachments.recv(), if pending_attach.is_none() => {
+                    if let Some(request) = request {
+                        if request.ack.is_closed() { continue; }
+                        let payload = serde_json::json!({"type": "AllocateSession", "opaque": request.opaque});
+                        if let Err(err) = write.send(Message::Text(payload.to_string().into())).await {
+                            tracing::warn!("relay attach allocation failed: {err}");
+                            break;
+                        }
+                        pending_attach = Some(request);
                     }
                     continue;
                 }
@@ -582,6 +623,12 @@ impl RelayClient {
                     }
                     match serde_json::from_str::<SessionRequest>(&text) {
                         Ok(SessionRequest { session_id, opaque }) => {
+                            if opaque {
+                                if let Some(request) = pending_attach.take() {
+                                    let _ = request.ack.send(Ok(session_id));
+                                    continue;
+                                }
+                            }
                             let client = self.clone();
                             sessions.spawn(async move {
                                 if let Err(err) = client.handle_session(&session_id, opaque).await {
@@ -938,6 +985,48 @@ mod tests {
                 .unwrap();
         });
         (client, task)
+    }
+
+    #[tokio::test]
+    async fn an_opaque_allocation_returns_the_relays_session_id() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = RelayClient::new(format!("http://{}", listener.local_addr().unwrap()), "machine");
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            let request: serde_json::Value = loop {
+                match socket.next().await.unwrap().unwrap() {
+                    Message::Text(text) => break serde_json::from_str(&text).unwrap(),
+                    _ => continue,
+                }
+            };
+            assert_eq!(request["type"], "AllocateSession");
+            assert_eq!(request["opaque"], true);
+            socket
+                .send(Message::Text(
+                    serde_json::json!({"session_id": "opaque-1", "opaque": true})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            while let Some(message) = socket.next().await {
+                if message.is_err() {
+                    break;
+                }
+            }
+        });
+        let control = tokio::spawn({
+            let client = client.clone();
+            async move { client.run_control_session().await }
+        });
+        let id = tokio::time::timeout(Duration::from_secs(5), client.allocate_opaque_session())
+            .await
+            .expect("bounded allocation")
+            .expect("session id");
+        assert_eq!(id, "opaque-1");
+        control.abort();
+        server.abort();
     }
 
     #[tokio::test]
