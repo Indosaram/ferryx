@@ -3797,7 +3797,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_relay_carries_an_account_attach_only_as_ciphertext() {
-        use crate::remote::attach_crypto::{AttachInitiator, WebSocketByteStream};
+        use crate::remote::attach_crypto::WebSocketByteStream;
         use crate::remote::session_transport::{establish_session, SessionTransport};
         use base64::{engine::general_purpose::STANDARD, Engine as _};
 
@@ -3815,8 +3815,11 @@ mod tests {
             }
         };
         let device_secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
-        let device_private = device_secret.to_bytes();
         let device_public = STANDARD.encode(x25519_dalek::PublicKey::from(&device_secret).as_bytes());
+        let client_identity = crate::remote::attach_identity::AttachIdentity {
+            public_key: device_public.clone(),
+            private_key: STANDARD.encode(device_secret.to_bytes()),
+        };
 
         // The daemon half: the same responder `relay_client::handle_session` runs, reached
         // through the relay's data route.
@@ -3850,13 +3853,16 @@ mod tests {
         let (ws, _) = tokio_tungstenite::connect_async(format!("{base}/tunnel/opaque/{session}"))
             .await
             .unwrap();
-        let initiator =
-            AttachInitiator::new(&device_private, &machine.public_key, "opaque-load", session, "3")
-                .expect("initiator");
-        let (mut secure, _) = initiator
-            .connect(WebSocketByteStream::new(ws))
-            .await
-            .expect("account attach handshake");
+        let mut secure = crate::remote::attach_client::attach_opaque_session(
+            ws,
+            &client_identity,
+            &machine.public_key,
+            "opaque-load",
+            session,
+            "3",
+        )
+        .await
+        .expect("account attach handshake");
         let sentinel = b"FERRYX_E2EE_SENTINEL".to_vec();
         secure.send_frame(&sentinel).await.expect("send");
 
