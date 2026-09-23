@@ -1,4 +1,6 @@
-use tokio::io::{AsyncRead, AsyncWrite};
+use std::time::Duration;
+
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use super::attach_crypto::{AttachError, AttachResponder, SecureStream};
 use super::attach_identity::AttachIdentity;
@@ -40,6 +42,53 @@ where
     let (secure, device_key) = responder.accept(stream, authorize).await?;
     let _ = device_key;
     Ok(SessionTransport::Attached(secure))
+}
+
+/// Carries a completed attach session to the local gateway: frames arriving from the
+/// peer are written to `gateway`, and bytes read from `gateway` are sent back as frames.
+/// Nothing is interpreted on the way through, so the gateway only ever sees plaintext.
+pub async fn proxy_secure_to_gateway<S, T>(
+    mut secure: SecureStream<S>,
+    gateway: T,
+) -> Result<(), AttachError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (mut gateway_rx, mut gateway_tx) = tokio::io::split(gateway);
+    let (sender, mut receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+    let reader = tokio::spawn(async move {
+        let mut buffer = vec![0u8; 16 * 1024];
+        loop {
+            match gateway_rx.read(&mut buffer).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    if sender.send(buffer[..read].to_vec()).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    loop {
+        tokio::select! {
+            chunk = receiver.recv() => match chunk {
+                Some(bytes) => secure.send_frame(&bytes).await?,
+                None => break,
+            },
+            frame = secure.recv_frame() => match frame {
+                Ok(bytes) => {
+                    if gateway_tx.write_all(&bytes).await.is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            },
+        }
+    }
+    reader.abort();
+    Ok(())
 }
 
 #[cfg(test)]
@@ -118,6 +167,61 @@ mod tests {
         let outcome = initiator.connect(client).await;
         let responder = responder_task.await.expect("join");
         assert!(outcome.is_err() || responder.is_err(), "an unknown device must not attach");
+    }
+
+    #[tokio::test]
+    async fn a_proxied_session_moves_plaintext_both_ways() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let machine = attach_identity();
+        let device_secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let device_private = device_secret.to_bytes();
+
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let responder_task = tokio::spawn({
+            let machine = machine.clone();
+            async move {
+                establish_session(server, true, Some(&machine), "machine-1", "s1", "2", |_| true).await
+            }
+        });
+        let initiator = AttachInitiator::new(&device_private, &machine.public_key, "machine-1", "s1", "2")
+            .expect("initiator");
+        let (mut secure_client, _) = initiator.connect(client).await.expect("handshake");
+
+        let transport = responder_task.await.expect("join").expect("session");
+        let SessionTransport::Attached(secure_server) = transport else {
+            panic!("expected an attached transport");
+        };
+        let (mut gateway_peer, gateway_local) = tokio::io::duplex(64 * 1024);
+        let proxy = tokio::spawn(async move { proxy_secure_to_gateway(secure_server, gateway_local).await });
+
+        secure_client
+            .send_frame(b"GET / HTTP/1.1\r\n")
+            .await
+            .expect("client frame");
+        let mut from_peer = Vec::new();
+        let mut buffer = [0u8; 64];
+        while from_peer.len() < 16 {
+            let read = tokio::time::timeout(Duration::from_secs(5), gateway_peer.read(&mut buffer))
+                .await
+                .expect("gateway read timed out")
+                .expect("gateway read");
+            assert!(read > 0, "gateway closed early");
+            from_peer.extend_from_slice(&buffer[..read]);
+        }
+        assert_eq!(&from_peer[..16], b"GET / HTTP/1.1\r\n");
+
+        gateway_peer
+            .write_all(b"HTTP/1.1 200 OK\r\n")
+            .await
+            .expect("gateway write");
+        let reply = tokio::time::timeout(Duration::from_secs(5), secure_client.recv_frame())
+            .await
+            .expect("client read timed out")
+            .expect("client read");
+        assert_eq!(reply, b"HTTP/1.1 200 OK\r\n");
+
+        proxy.abort();
     }
 
     #[tokio::test]
