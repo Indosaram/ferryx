@@ -17,6 +17,7 @@ pub struct AccountGrantOfferAck {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OfferError {
+    NotEnrolled,
     WrongMachine,
     WrongEpoch,
     Sealed(String),
@@ -28,6 +29,7 @@ pub enum OfferError {
 impl OfferError {
     pub fn code(&self) -> &'static str {
         match self {
+            Self::NotEnrolled => "ACCOUNT_OFFER_NOT_ENROLLED",
             Self::WrongMachine => "ACCOUNT_OFFER_WRONG_MACHINE",
             Self::WrongEpoch => "ACCOUNT_OFFER_WRONG_EPOCH",
             Self::Sealed(_) => "ACCOUNT_OFFER_UNSEAL_FAILED",
@@ -89,8 +91,7 @@ pub fn apply_grant_offer(
     enrollment_epoch: &str,
     envelope: &AccountGrantOfferEnvelope,
     now: u64,
-) -> Result<AccountGrantOfferAck, OfferError> {
-    let offer = open_grant_offer(attach, envelope, machine_id, enrollment_epoch, now)?;
+) -> Result<AccountGrantOfferAck, OfferError> {    let offer = open_grant_offer(attach, envelope, machine_id, enrollment_epoch, now)?;
     let (permission, scope) = scope_pairing(offer.grant_scope);
     auth.register_scoped_pairing_capability(&offer.pairing_token, permission, scope)
         .map_err(|_| OfferError::GrantRefused)?;
@@ -98,6 +99,30 @@ pub fn apply_grant_offer(
         grant_id: offer.grant_id,
         status: "ready".to_string(),
     })
+}
+
+/// Applies an envelope that arrived for this machine, taking the machine id and epoch
+/// from the enrollment record written at enroll time rather than from the wire.
+pub fn apply_envelope_for_this_machine(
+    auth: &AuthManager,
+    envelope: &AccountGrantOfferEnvelope,
+    now: u64,
+) -> Result<AccountGrantOfferAck, OfferError> {
+    let record = crate::account::enroll_client::load_enrollment_record()
+        .ok_or(OfferError::NotEnrolled)?;
+    let attach = crate::remote::attach_identity::load_or_generate_canonical_attach_identity()
+        .map_err(OfferError::Sealed)?;
+    if record.machine_record_id.is_empty() || envelope.enrollment_epoch != record.enrollment_epoch {
+        return Err(OfferError::WrongEpoch);
+    }
+    apply_grant_offer(
+        auth,
+        &attach,
+        &envelope.machine_id,
+        &record.enrollment_epoch,
+        envelope,
+        now,
+    )
 }
 
 #[cfg(test)]
@@ -227,5 +252,57 @@ mod tests {
             apply_grant_offer(&manager, &attach, "machine-1", "1", &tampered, now).expect_err("tampered"),
             OfferError::Sealed("SEALED_OFFER_DECRYPT_FAILED".into())
         );
+    }
+
+    #[test]
+    fn envelope_for_this_machine_uses_the_enrollment_record() {
+        let dir = tempfile::tempdir().expect("temp");
+        let previous = std::env::var_os("FERRYX_DATA_DIR");
+        std::env::set_var("FERRYX_DATA_DIR", dir.path());
+
+        let remote = dir.path().join("remote");
+        std::fs::create_dir_all(&remote).expect("remote dir");
+        let identity = crate::remote::auth::load_or_generate_machine_identity(&remote)
+            .expect("machine identity");
+        let attach = crate::remote::attach_identity::load_or_generate_canonical_attach_identity()
+            .expect("attach identity");
+        let record = crate::account::enroll_client::AccountEnrollmentRecord {
+            account_id: "acct-1".into(),
+            machine_record_id: "record-1".into(),
+            account_origin: "https://account.example".into(),
+            relay_origin: "https://relay.checka.cc".into(),
+            enrollment_epoch: "4".into(),
+            enrolled_at: 1,
+        };
+        crate::remote::auth::write_private_json(
+            &crate::account::enroll_client::enrollment_record_path().expect("record path"),
+            &record,
+        )
+        .expect("write record");
+
+        let token = "6f".repeat(32);
+        let now = 1_700_000_000;
+        let envelope = envelope(
+            &attach,
+            &identity.machine_id,
+            "4",
+            &token,
+            AccountGrantScope::Machine,
+            now + 600,
+        );
+        let manager = AuthManager::with_persistence(Some(dir.path().join("remote-auth.json")));
+        let ack = apply_envelope_for_this_machine(&manager, &envelope, now).expect("apply");
+        assert_eq!(ack.status, "ready");
+
+        let (_bearer, device) = manager
+            .exchange_pairing_code_with_installation(&token, "MacBook", Some("install-1"))
+            .expect("redeem");
+        assert_eq!(device.access_scope, DeviceAccessScope::Machine);
+
+        if let Some(value) = previous {
+            std::env::set_var("FERRYX_DATA_DIR", value);
+        } else {
+            std::env::remove_var("FERRYX_DATA_DIR");
+        }
     }
 }
