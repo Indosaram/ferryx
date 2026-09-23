@@ -107,7 +107,10 @@ struct ControlChannel {
 #[derive(Deserialize)]
 #[serde(tag = "type")]
 enum ControlRequest {
-    AllocateSession,
+    AllocateSession {
+        #[serde(default)]
+        opaque: bool,
+    },
     RegisterPairingPin(RegisterPairingPin),
 }
 
@@ -639,7 +642,7 @@ impl RelayState {
     /// unpredictable ID and a machine identity with a live control channel.
     /// Registry insertion and notification are atomic with respect to admission.
     pub fn notify_incoming_session(&self, machine_token: &str, session_id: &str) -> bool {
-        self.issue_session(machine_token, session_id, None)
+        self.issue_session(machine_token, session_id, None, false)
     }
 
     fn issue_session(
@@ -647,6 +650,7 @@ impl RelayState {
         machine_token: &str,
         session_id: &str,
         generation: Option<u64>,
+        opaque: bool,
     ) -> bool {
         let channels = self.inner.control_channels.lock();
         let Some(channel) = channels.get(machine_token) else {
@@ -663,7 +667,7 @@ impl RelayState {
             .tx
             .try_send(IncomingSessionNotice {
                 session_id: session_id.into(),
-                opaque: false,
+                opaque,
             })
             .is_err()
         {
@@ -2142,9 +2146,9 @@ async fn handle_control_socket(
                         match serde_json::from_str::<ControlRequest>(&text).or_else(|_| {
                             serde_json::from_str::<RegisterPairingPin>(&text).map(ControlRequest::RegisterPairingPin)
                         }) {
-                            Ok(ControlRequest::AllocateSession) => {
+                            Ok(ControlRequest::AllocateSession { opaque }) => {
                                 let id = uuid::Uuid::new_v4().to_string();
-                                if !state.issue_session(&machine_token, &id, Some(generation)) {
+                                if !state.issue_session(&machine_token, &id, Some(generation), opaque) {
                                     tracing::warn!("relay session allocation rejected");
                                     break;
                                 }
@@ -3485,11 +3489,11 @@ mod tests {
             .lock()
             .insert(machine.to_owned(), ControlChannel { generation: 7, tx });
 
-        assert!(state.issue_session(machine, "session-gen-7", Some(7)));
+        assert!(state.issue_session(machine, "session-gen-7", Some(7), false));
         // Same generation still attaches.
         assert!(state.reserve_half("session-gen-7", HalfKind::Data).is_ok());
 
-        assert!(state.issue_session(machine, "session-stale", Some(7)));
+        assert!(state.issue_session(machine, "session-stale", Some(7), false));
         // The daemon reconnects: same machine, new control generation.
         let (new_tx, _new_rx) = mpsc::channel(4);
         state.inner.control_channels.lock().insert(
@@ -3506,7 +3510,7 @@ mod tests {
         );
 
         // The owner disconnecting entirely also invalidates its pending sessions.
-        assert!(state.issue_session(machine, "session-orphan", Some(8)));
+        assert!(state.issue_session(machine, "session-orphan", Some(8), false));
         state.inner.control_channels.lock().remove(machine);
         assert_eq!(
             state.reserve_half("session-orphan", HalfKind::Data).err(),
@@ -3666,6 +3670,26 @@ mod tests {
                 registration(current_time_secs() + MAX_PAIRING_LEASE - 5)
             )
             .is_ok());
+    }
+
+    #[tokio::test]
+    async fn an_opaque_allocation_tells_the_daemon_to_attach_securely() {
+        let state = test_state(vec![]);
+        let machine = "opaque-machine";
+        let (tx, mut rx) = mpsc::channel(4);
+        state
+            .inner
+            .control_channels
+            .lock()
+            .insert(machine.to_owned(), ControlChannel { generation: 1, tx });
+
+        assert!(state.issue_session(machine, "session-opaque", Some(1), true));
+        let notice = rx.try_recv().expect("opaque notice");
+        assert_eq!(notice.session_id, "session-opaque");
+        assert!(notice.opaque, "the daemon must be told to attach securely");
+
+        assert!(state.issue_session(machine, "session-plain", Some(1), false));
+        assert!(!rx.try_recv().expect("plain notice").opaque);
     }
 
     #[tokio::test]
@@ -4922,7 +4946,7 @@ mod tests {
         let (old, _old_rx) = state.register_control_channel("tok".into());
         let (new, mut rx) = state.register_control_channel("tok".into());
         state.unregister_control_channel("tok", old);
-        assert!(!state.issue_session("tok", "stale", Some(old)));
+        assert!(!state.issue_session("tok", "stale", Some(old), false));
         assert!(state.notify_incoming_session("tok", "session"));
         rx.try_recv().unwrap();
         let (generation, waiting) = state.reserve_half("session", HalfKind::Data).unwrap();
