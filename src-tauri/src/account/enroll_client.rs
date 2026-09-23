@@ -251,6 +251,30 @@ pub async fn request_machine_grant(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::remote::auth::{enrollment_code_hash, verify_account_enrollment};
+
+    #[test]
+    fn stored_machine_identity_signs_and_verifies() {
+        let dir = tempfile::tempdir().expect("temp");
+        let generated = load_or_generate_machine_identity(dir.path()).expect("generate");
+        let reloaded = load_or_generate_machine_identity(dir.path()).expect("reload");
+        assert_eq!(generated.machine_id, reloaded.machine_id, "reload must return the stored identity");
+        let hash = enrollment_code_hash("probe-code");
+        let signature = sign_account_enrollment(&reloaded, "http://127.0.0.1:43922", &hash, "n", 7)
+            .expect("sign");
+        assert!(
+            verify_account_enrollment(
+                &reloaded.public_key,
+                &reloaded.machine_id,
+                "http://127.0.0.1:43922",
+                &hash,
+                "n",
+                7,
+                &signature,
+            ),
+            "the key pair written by one process must verify the signature of another"
+        );
+    }
 
     #[test]
     fn account_enrollment_record_round_trips_beside_identity() {

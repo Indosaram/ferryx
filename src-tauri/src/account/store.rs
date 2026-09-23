@@ -235,7 +235,28 @@ mod tests {
             email: "a@b.co".into(),
             expires_at: now_secs() - 1,
         });
+        store.sessions.insert(
+            "session-hash".into(),
+            SessionRecord {
+                user_id: "u1".into(),
+                expires_at: now_secs() - 1,
+            },
+        );
+        store.enrollment_codes.insert(
+            "code-hash".into(),
+            EnrollmentCodeRecord {
+                user_id: "u1".into(),
+                account_origin: "https://account.example".into(),
+                expires_at: now_secs() - 1,
+            },
+        );
         store.purge_expired(now_secs());
-        assert!(store.login_codes.is_empty());
+        assert!(store.sessions.is_empty(), "expired sessions are dropped");
+        assert!(store.enrollment_codes.is_empty(), "expired enrollment codes are dropped");
+        assert_eq!(
+            store.login_codes.len(),
+            1,
+            "login codes stay so the consume path can report expiry instead of reuse"
+        );
     }
 }
