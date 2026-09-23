@@ -173,6 +173,64 @@ async fn tauri_mock_terminal_events_use_registered_workspace() {
 }
 
 #[tokio::test]
+async fn poisoned_requested_cwd_falls_back_to_the_worktree_root() {
+    use crate::ipc::terminal::{cmd_terminal_describe, cmd_terminal_spawn};
+
+    let (repo, registry) = setup_workspace();
+    let (_dir, daemon_client, server_task) = setup_test_daemon().await;
+    daemon_client
+        .register_workspace("workspace-test", &repo.path().to_string_lossy())
+        .await
+        .expect("register workspace on daemon");
+
+    let app = tauri::test::mock_builder()
+        .manage(daemon_client)
+        .manage(registry)
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("mock app");
+
+    let client_state = app.state::<Arc<DaemonClient>>().clone();
+    let registry_state = app.state::<WorkspaceRegistry>();
+
+    let spawned = cmd_terminal_spawn(
+        app.handle().clone(),
+        client_state.clone(),
+        registry_state,
+        SpawnTerminalRequest {
+            workspace_id: "workspace-test".into(),
+            worktree: None,
+            cwd: Some("cwd|rtd info error: No such file or directory".into()),
+            cols: Some(80),
+            rows: Some(24),
+            client_request_id: None,
+            shell: None,
+            startup: None,
+            inherit_from_session_id: None,
+        },
+    )
+    .await
+    .expect("a poisoned requested cwd must fall back to the worktree root instead of failing");
+
+    let details = cmd_terminal_describe(client_state.clone(), spawned.session_id.clone())
+        .await
+        .expect("describe spawned session");
+    let cwd = details.cwd.expect("session cwd");
+    assert!(
+        !cwd.contains("rtd info"),
+        "a poisoned cwd must never be stored or served: {cwd}"
+    );
+    assert_eq!(
+        std::fs::canonicalize(&cwd).expect("spawned cwd must exist"),
+        std::fs::canonicalize(repo.path()).expect("canonical repo root"),
+    );
+
+    cmd_terminal_close(client_state, spawned.session_id)
+        .await
+        .expect("close");
+    server_task.abort();
+}
+
+#[tokio::test]
 async fn tauri_mock_terminal_attach_returns_base64_history_and_decimal_sequences() {
     let (repo, registry) = setup_workspace();
     let (_dir, daemon_client, server_task) = setup_test_daemon().await;

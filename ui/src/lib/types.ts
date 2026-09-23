@@ -167,6 +167,8 @@ export type TerminalSession = {
   reconnectLifecycle?: ReconnectLifecycle;
   /** Transient structured error when reconnect fails. Never persisted. */
   reconnectError?: StructuredIpcError | null;
+  /** Transient reason the backing PTY went away (spawn or attach failure). Never persisted. */
+  backendUnavailableReason?: string | null;
   reconnectRequestId?: string | null;
   /** Transient SSH transport state, separate from process lifecycle. Never persisted. */
   remoteConnectionState?: SshRecoveryStatus["state"];

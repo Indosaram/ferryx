@@ -14,6 +14,7 @@ import { closeBrowser, createBrowser, navigateBrowser, reloadBrowser, type Brows
 import { closeTerminal, DEFAULT_WORKSPACE_ID, discoverAgentProviderSession, getTerminalCwd, onNativeTerminalAgentState, onNativeTerminalBell, onNativeTerminalFocus, onNativeTerminalTitle, spawnTerminal, toIpcError, waitForTerminalExit, type SpawnTerminalRequest } from "../lib/tauri";
 import * as tauriIpc from "../lib/tauri";
 import { ensureTerminalEvents, terminalEventBus } from "../lib/terminalEvents";
+import { isAbsoluteTerminalCwd } from "../lib/terminalCwd";
 import { switchDebug } from "../lib/switchDebug";
 import { isPairedWorkspaceId, isRemoteWorkspaceId, resolvePairedStartup } from "../lib/remoteProject";
 import { findGroupForWorkspace, groupProjects } from "../lib/projectGrouping";
@@ -2426,6 +2427,9 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         lifecycle: "exited",
         backendSessionId: null,
         reconnectLifecycle: "idle",
+        // Keep the failure on the pane. Without it a failed spawn or attach leaves the pane on the
+        // "Shell exited" overlay with no explanation of what went wrong.
+        backendUnavailableReason: action.reason ?? null,
       };
       let nextState: WorkspaceState = {
         ...state,
@@ -2498,12 +2502,13 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
             ...session,
             backendSessionId: action.backendSessionId,
             processState: "running",
-            cwd: action.cwd ?? session.cwd,
+            cwd: action.cwd && isAbsoluteTerminalCwd(action.cwd) ? action.cwd : session.cwd,
             daemonEpoch: action.daemonEpoch ?? null,
             lastOutputSequence: null,
             lifecycle: "running",
             reconnectLifecycle: "idle",
             reconnectError: null,
+            backendUnavailableReason: null,
             reconnectRequestId: null,
             ...(shouldClearAgent
               ? {

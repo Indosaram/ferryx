@@ -5,6 +5,7 @@ import type { WorkspaceState } from "../state/workspaceStore";
 import type { TerminalActivity } from "./activity";
 import { loadBrowserSettings, resolveSupportedBrowserProfileId, supportedBrowserProfiles } from "./browserSettings";
 import { normalizeSessionId, providerSessionKeyForAgent } from "./agentResume";
+import { isAbsoluteTerminalCwd } from "./terminalCwd";
 import { getSessionProcessState, getSessionRecentScrollback, restoreSessionRecentScrollback } from "./sessionLifecycle";
 import {
   createBrowserPaneContent,
@@ -502,9 +503,12 @@ export function deserializeWorkspaceState(
         : null
     );
     restoreSessionRecentScrollback(localSessionId, sess.recentScrollback);
+    // A cwd persisted before the value was validated can be probe output rather than a path
+    // (`cwd|rtd info error: …`); such a value must never become a pane's cwd again.
+    const restoredCwd = isAbsoluteTerminalCwd(sess.cwd) ? sess.cwd : null;
     sessions[localSessionId] = {
       id: localSessionId,
-      cwd: sess.cwd || worktreePath,
+      cwd: restoredCwd ?? worktreePath,
       worktreePath,
       workspaceId,
       worktree: matchingWorktree ? worktreeIdentity(matchingWorktree) : null,

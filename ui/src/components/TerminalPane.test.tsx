@@ -390,6 +390,26 @@ describe("TerminalPane native routing contract", () => {
     expect(screen.getByText("Shell exited")).toBeInTheDocument();
   });
 
+  it("explains the stored backend failure on an exited shell pane", () => {
+    const onOpenNewShell = vi.fn();
+    render(
+      <TerminalPane
+        session={createExitedSession({
+          agentType: null,
+          providerSession: null,
+          backendUnavailableReason:
+            "CWD does not exist: cwd|rtd info error: No such file or directory",
+        })}
+        active={true}
+        onOpenNewShell={onOpenNewShell}
+      />,
+    );
+
+    expect(screen.getByText("Shell exited")).toBeInTheDocument();
+    expect(screen.getByText(/CWD does not exist/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /open new shell/i })).toBeInTheDocument();
+  });
+
   it("keeps an exited shell action unavailable when the application did not wire replacement", () => {
     render(
       <TerminalPane

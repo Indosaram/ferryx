@@ -84,6 +84,18 @@ pub(super) struct StoredSessionMeta {
     pub(super) spawn_fingerprint: SpawnRequestFingerprint,
 }
 
+/// Serves a stored session cwd only when it can be a real local absolute path. A probe that captured
+/// command output planted values like `cwd|rtd info error: No such file or directory` on sessions,
+/// and serving such a value back made panes inherit a cwd they cannot spawn a shell from, so it is
+/// replaced by the worktree path.
+fn serveable_local_cwd(stored: &std::path::Path, worktree_cwd: Option<String>) -> Option<String> {
+    if crate::ipc::terminal::is_plausible_absolute_cwd(stored) {
+        Some(stored.to_string_lossy().to_string())
+    } else {
+        worktree_cwd
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) struct SpawnRequestFingerprint {
     pub(super) workspace_id: String,
@@ -2290,6 +2302,9 @@ impl DaemonSessionService {
                     worktree: meta.as_ref().and_then(|m| m.worktree.clone()),
                     cwd: Some(
                         meta.map(|m| m.cwd.to_string_lossy().into_owned())
+                            .filter(|cwd| {
+                                crate::ipc::terminal::is_plausible_session_cwd_text(cwd)
+                            })
                             .unwrap_or(d.config.project_path),
                     ),
                     cols: d.cols,
@@ -2350,19 +2365,16 @@ impl DaemonSessionService {
             .unwrap_or((None, None));
 
         let meta = self.session_metadata.read().get(session_id).cloned();
+        let worktree_cwd = pty_session
+            .worktree_path()
+            .map(|p| p.to_string_lossy().to_string());
         let (workspace_id, worktree, cwd) = match meta {
             Some(m) => (
                 Some(m.workspace_id),
                 m.worktree,
-                Some(m.cwd.to_string_lossy().to_string()),
+                serveable_local_cwd(&m.cwd, worktree_cwd),
             ),
-            None => (
-                None,
-                None,
-                pty_session
-                    .worktree_path()
-                    .map(|p| p.to_string_lossy().to_string()),
-            ),
+            None => (None, None, worktree_cwd),
         };
 
         DaemonResponse::DescribeSessionOk {

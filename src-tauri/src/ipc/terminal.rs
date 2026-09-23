@@ -8,7 +8,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::ipc::{Channel, Response};
@@ -62,6 +62,80 @@ pub fn invalidate_cached_cwd(session_id: &str) {
     if let Some(map) = guard.as_mut() {
         map.remove(session_id);
     }
+}
+
+/// A session cwd is only meaningful as an absolute path. A probe that captured command output
+/// (`cwd|rtd info error: No such file or directory`), a relative leftover, or anything carrying
+/// control characters must never be treated as a directory, served to callers, or inherited by
+/// another pane's spawn.
+pub(crate) fn is_plausible_absolute_cwd(path: &Path) -> bool {
+    path.is_absolute() && !path.to_string_lossy().chars().any(char::is_control)
+}
+
+/// [`is_plausible_absolute_cwd`] plus a filesystem check. Blocking: call it only from
+/// `run_blocking` contexts, never from the async request loop.
+pub(crate) fn is_usable_terminal_cwd(path: &Path) -> bool {
+    is_plausible_absolute_cwd(path) && path.is_dir()
+}
+
+/// Discards a requested cwd that is not an existing directory. An inherited cwd (or one pinned by
+/// the frontend from stale state) can be a probe's captured error text rather than a path, and
+/// treating that as a cwd aborts the spawn after its pane already exists, which strands the pane on
+/// the "Shell exited" overlay. Returning `None` makes the caller fall back to the worktree root.
+pub(crate) fn select_requested_cwd(requested: Option<PathBuf>) -> Option<PathBuf> {
+    match requested {
+        Some(cwd) if is_usable_terminal_cwd(&cwd) => Some(cwd),
+        Some(rejected) => {
+            eprintln!(
+                "[cmd_terminal_spawn] stage=discard_cwd reason=not_a_directory value={:?}",
+                rejected.to_string_lossy()
+            );
+            None
+        }
+        None => None,
+    }
+}
+
+/// Resolves the cwd a spawn will use. A discarded requested cwd makes the pane spawn in the
+/// worktree root, while a requested cwd that exists but leaves the worktree still fails.
+fn resolve_spawn_cwd(
+    requested: Option<PathBuf>,
+    worktree_root: PathBuf,
+    canonicalize: impl FnOnce(&Path) -> Result<PathBuf, IpcError>,
+) -> Result<PathBuf, IpcError> {
+    let Some(requested) = select_requested_cwd(requested) else {
+        return Ok(worktree_root);
+    };
+    let canonical = canonicalize(&requested)?;
+    if canonical != worktree_root && !canonical.starts_with(&worktree_root) {
+        return Err(IpcError::from(WorktreeError::PathOutsideWorkspace {
+            path: requested,
+            root: worktree_root,
+        }));
+    }
+    if !canonical.is_dir() {
+        return Err(IpcError::from(WorktreeError::InvalidPath {
+            path: canonical,
+            reason: "terminal cwd must be a directory".into(),
+        }));
+    }
+    Ok(canonical)
+}
+
+/// Shape check for a *stored* session cwd that may point at another host (an SSH/paired remote
+/// root is a Windows path). Rejects the output-text shapes probes capture (`… error: No such file
+/// or directory`) so a poisoned value is never served back to a pane as its cwd.
+pub(crate) fn is_plausible_session_cwd_text(value: &str) -> bool {
+    if value.is_empty() || value.chars().any(char::is_control) || value.contains('|') {
+        return false;
+    }
+    if Path::new(value).is_absolute() {
+        return true;
+    }
+    // Windows-style absolute paths are not `is_absolute()` when the host is POSIX.
+    let bytes = value.as_bytes();
+    (bytes.len() >= 3 && bytes[1] == b':' && matches!(bytes[2], b'\\' | b'/'))
+        || value.starts_with("\\\\")
 }
 
 struct PumpHandle {
@@ -2222,27 +2296,15 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
         let worktree_for_validation = worktree_manager.clone();
         let worktree_root_for_validation = worktree_root.clone();
         let cwd = match run_blocking(move || {
-            let Some(requested) = requested_cwd else {
-                return Ok(worktree_root_for_validation);
-            };
-            let canonical = worktree_for_validation
-                .canonical_allowed_path(&requested)
-                .map_err(IpcError::from)?;
-            if canonical != worktree_root_for_validation
-                && !canonical.starts_with(&worktree_root_for_validation)
-            {
-                return Err(IpcError::from(WorktreeError::PathOutsideWorkspace {
-                    path: requested,
-                    root: worktree_root_for_validation,
-                }));
-            }
-            if !canonical.is_dir() {
-                return Err(IpcError::from(WorktreeError::InvalidPath {
-                    path: canonical,
-                    reason: "terminal cwd must be a directory".into(),
-                }));
-            }
-            Ok(canonical)
+            resolve_spawn_cwd(
+                requested_cwd,
+                worktree_root_for_validation,
+                |requested| {
+                    worktree_for_validation
+                        .canonical_allowed_path(requested)
+                        .map_err(IpcError::from)
+                },
+            )
         })
         .await
         {
@@ -2536,7 +2598,10 @@ pub async fn cmd_terminal_get_cwd(
     session_id: String,
 ) -> Result<TerminalCwdResponse, IpcError> {
     if let Some(cwd) = get_cached_cwd(&session_id) {
-        return Ok(TerminalCwdResponse { cwd });
+        if is_plausible_absolute_cwd(&cwd) {
+            return Ok(TerminalCwdResponse { cwd });
+        }
+        invalidate_cached_cwd(&session_id);
     }
 
     let details = daemon_client.describe_session(&session_id).await?;
@@ -2544,6 +2609,9 @@ pub async fn cmd_terminal_get_cwd(
         .cwd
         .ok_or_else(|| IpcError::internal("terminal cwd is unavailable"))?;
     let cwd = PathBuf::from(cwd_str);
+    if !is_plausible_absolute_cwd(&cwd) {
+        return Err(IpcError::internal("terminal cwd is unavailable"));
+    }
     update_cached_cwd(session_id, cwd.clone());
     Ok(TerminalCwdResponse { cwd })
 }
@@ -3116,5 +3184,75 @@ mod tests {
         let data_offset = 20 + session_id_len;
         assert_eq!(&frame[data_offset..], data);
         assert_eq!(frame.len(), data_offset + data.len());
+    }
+
+    #[test]
+    fn poisoned_session_cwd_is_never_treated_as_a_path() {
+        let poisoned = PathBuf::from("cwd|rtd info error: No such file or directory");
+        assert!(!is_plausible_absolute_cwd(&poisoned));
+        assert!(!is_usable_terminal_cwd(&poisoned));
+        assert!(!is_plausible_session_cwd_text(&poisoned.to_string_lossy()));
+        assert_eq!(select_requested_cwd(Some(poisoned)), None);
+    }
+
+    #[test]
+    fn relative_and_absent_cwds_fall_back_to_the_worktree_root() {
+        assert_eq!(select_requested_cwd(Some(PathBuf::from("relative/path"))), None);
+        assert_eq!(
+            select_requested_cwd(Some(PathBuf::from("/ferryx-absent-cwd-for-test"))),
+            None
+        );
+        let existing = std::env::temp_dir();
+        assert_eq!(select_requested_cwd(Some(existing.clone())), Some(existing));
+    }
+
+    #[test]
+    fn session_cwd_text_accepts_posix_and_windows_absolute_paths() {
+        assert!(is_plausible_session_cwd_text("/home/indo/project"));
+        assert!(is_plausible_session_cwd_text("C:\\Users\\sook\\work\\steam"));
+        assert!(is_plausible_session_cwd_text("\\\\host\\share"));
+        assert!(!is_plausible_session_cwd_text(""));
+        assert!(!is_plausible_session_cwd_text("cwd|rtd info error: No such file or directory"));
+        assert!(!is_plausible_session_cwd_text("/tmp/with\nnewline"));
+    }
+
+    #[test]
+    fn poisoned_requested_cwd_spawns_in_the_worktree_root() {
+        let root = PathBuf::from("/repo");
+        let mut canonicalized = false;
+        let resolved = resolve_spawn_cwd(
+            Some(PathBuf::from("cwd|rtd info error: No such file or directory")),
+            root.clone(),
+            |_| {
+                canonicalized = true;
+                Ok(root.clone())
+            },
+        );
+        assert_eq!(resolved, Ok(root));
+        assert!(!canonicalized, "a discarded cwd must not reach canonicalization");
+    }
+
+    #[test]
+    fn usable_requested_cwd_is_canonicalized() {
+        let root = tempfile::tempdir().expect("root");
+        let inside = root.path().join("sub");
+        std::fs::create_dir_all(&inside).expect("create sub dir");
+        let canonical = std::fs::canonicalize(&inside).expect("canonicalize");
+        let resolved = resolve_spawn_cwd(Some(inside), canonical.clone(), |_| Ok(canonical.clone()));
+        assert_eq!(resolved, Ok(canonical));
+    }
+
+    #[test]
+    fn existing_requested_cwd_outside_the_worktree_is_rejected() {
+        let root = tempfile::tempdir().expect("root");
+        let outside = tempfile::tempdir().expect("outside");
+        let outside_path = outside.path().to_path_buf();
+        let err = resolve_spawn_cwd(
+            Some(outside_path.clone()),
+            root.path().to_path_buf(),
+            |requested| Ok(requested.to_path_buf()),
+        )
+        .expect_err("an existing cwd outside the worktree must be rejected");
+        assert_eq!(err.code, IpcErrorCode::PathOutsideWorkspace);
     }
 }

@@ -1546,6 +1546,7 @@ describe("worktree tab and session isolation", () => {
         processState: "running",
         reconnectLifecycle: "idle",
         reconnectError: null,
+        backendUnavailableReason: null,
         reconnectRequestId: null,
         daemonEpoch: null,
         lastOutputSequence: null,

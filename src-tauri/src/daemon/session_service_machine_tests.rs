@@ -2,6 +2,20 @@ use super::*;
 use crate::{daemon::server::DaemonServer, remote::machine_protocol::*, scoped_contracts::Epoch};
 use futures_util::FutureExt;
 
+#[test]
+fn served_session_cwd_falls_back_when_the_stored_value_is_probe_output() {
+    let poisoned = std::path::PathBuf::from("cwd|rtd info error: No such file or directory");
+    assert_eq!(
+        serveable_local_cwd(&poisoned, Some("/repo".to_string())),
+        Some("/repo".to_string())
+    );
+    assert_eq!(serveable_local_cwd(&poisoned, None), None);
+    assert_eq!(
+        serveable_local_cwd(std::path::Path::new("/repo/sub"), Some("/repo".to_string())),
+        Some("/repo/sub".to_string())
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[path = "session_service_crash_tests.rs"]
 mod crash;

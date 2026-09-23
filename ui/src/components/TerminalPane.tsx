@@ -132,8 +132,14 @@ export function TerminalPane({
   const isMonochrome = isMonochromeAgentLogo(effectiveAgentType);
 
   const isPending = pendingLocal || isSpawning || (isSshSession ? isSshReconnecting : affordance.isReconnecting);
+  const affordanceDescription = resolveAffordanceErrorDescription(affordance);
   const errorDescription =
-    replacementError ?? (isSshSession ? session.remoteFailure?.message ?? null : resolveAffordanceErrorDescription(affordance));
+    replacementError ??
+    (isSshSession
+      ? session.remoteFailure?.message ?? null
+      : isAgentSession
+        ? affordanceDescription ?? session.backendUnavailableReason ?? null
+        : session.backendUnavailableReason ?? affordanceDescription ?? null);
 
   const handleReconnect = async () => {
     if (isPending) return;
