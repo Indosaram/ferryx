@@ -21,7 +21,7 @@ use super::store::{
 };
 use crate::remote::account_protocol::{
     AccountEnrollChallenge, AccountEnrollRequest, AccountEnrollResponse, AccountGrantRequest,
-    AccountGrantResponse, AccountGrantScope, AccountMachineView,
+    AccountGrantResponse, AccountGrantScope,
 };
 
 pub const GRANT_TTL: Duration = Duration::from_secs(600);

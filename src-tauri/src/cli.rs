@@ -627,7 +627,15 @@ fn remote_auth_manager() -> Result<crate::remote::AuthManager, String> {
     )))
 }
 
-pub fn run_pair_cli(command: PairCliCommand) -> Result<(), String> {
+pub const ACCOUNT_LOGIN_REQUIRED: &str = "ACCOUNT_LOGIN_REQUIRED";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairCliOutcome {
+    Done,
+    AccountLoginRequired,
+}
+
+pub fn run_pair_cli(command: PairCliCommand) -> Result<PairCliOutcome, String> {
     let manager = remote_auth_manager()?;
     match command {
         PairCliCommand::List => {
@@ -639,96 +647,15 @@ pub fn run_pair_cli(command: PairCliCommand) -> Result<(), String> {
                     println!("{}\t{}\t{:?}", device.id, device.name, device.permission);
                 }
             }
-            Ok(())
+            Ok(PairCliOutcome::Done)
         }
         PairCliCommand::GeneratePin | PairCliCommand::GenerateMachinePin => {
-            let machine = command == PairCliCommand::GenerateMachinePin;
-            if let Ok(val) = std::env::var("FERRYX_RELAY_URL") {
-                if val.trim().is_empty() {
-                    return Err(
-                        "Pairing requires a configured relay URL (FERRYX_RELAY_URL)".to_string()
-                    );
-                }
-            }
-
-            let daemon_runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|error| error.to_string())?;
-
-            let answer = daemon_runtime.block_on(async {
-                let client = crate::daemon::client::DaemonClient::new();
-                if machine {
-                    use crate::daemon::protocol::{DaemonRequest, DaemonResponse};
-                    match client
-                        .send_request(DaemonRequest::RemoteCreateMachinePairingCode)
-                        .await?
-                    {
-                        DaemonResponse::RemotePairingCodeOk {
-                            code,
-                            pairing_token,
-                            machine_id,
-                            relay_url,
-                        } => Ok((code, pairing_token, machine_id, relay_url)),
-                        DaemonResponse::Error { message, .. } => Err(crate::ipc::IpcError::new(
-                            crate::ipc::IpcErrorCode::InternalError,
-                            message,
-                        )),
-                        _ => Err(crate::ipc::IpcError::new(
-                            crate::ipc::IpcErrorCode::InternalError,
-                            "Daemon does not support machine pairing",
-                        )),
-                    }
-                } else {
-                    client
-                        .remote_create_pairing_code_detailed(Some(
-                            crate::remote::auth::DevicePermission::Control,
-                        ))
-                        .await
-                }
-            });
-
-            match answer {
-                Ok((code, pairing_token, _machine_id, daemon_relay_url)) => {
-                    if machine {
-                        eprintln!("Access: machine; permits browsing and executing programs as the daemon OS user.");
-                    } else {
-                        eprintln!("Access: mirror; controls only exposed desktop sessions.");
-                    }
-                    println!("{code}");
-                    if let Some(token) = pairing_token {
-                        let relay_url = daemon_relay_url
-                            .filter(|s| !s.trim().is_empty())
-                            .or_else(|| {
-                                std::env::var("FERRYX_RELAY_URL")
-                                    .ok()
-                                    .filter(|s| !s.trim().is_empty())
-                            })
-                            .unwrap_or_else(|| crate::remote::state::DEFAULT_RELAY_URL.to_string());
-                        println!("{}#pair={token}", relay_url.trim_end_matches('/'));
-                    }
-                    eprintln!(
-                        "Pairing registered by the running daemon; it holds the relay control connection."
-                    );
-                    eprintln!("Enter this PIN in the desktop's Paired machines settings. Mirror PINs stay valid for one minute; machine PINs for ten minutes.");
-                    std::io::stdout()
-                        .flush()
-                        .map_err(|error| error.to_string())?;
-                    Ok(())
-                }
-                Err(error) => Err(format!(
-                    "The running daemon refused this pairing request: {}. \
-                     It owns this machine's relay identity, so pairing standalone \
-                     would replace its control connection and invalidate any PIN it \
-                     already issued.",
-                    error.message
-                )),
-            }
+            Ok(PairCliOutcome::AccountLoginRequired)
         }
         PairCliCommand::Approve { pin } => match manager.approve_pairing_code_cli(&pin) {
             Ok(_device) => {
                 println!("Pairing approved for {pin}; ready for remote client exchange");
-                Ok(())
+                Ok(PairCliOutcome::Done)
             }
             Err(error) => Err(format!("Failed to approve pairing: {error}")),
         },
@@ -767,6 +694,81 @@ where
         }
         Some("pair") => parse_pair_subcommand(&args, 3).map(RemoteCliCommand::Pair),
         _ => Err("expected `ferryx remote <status|pair>`".into()),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AccountCliCommand {
+    Enroll { code: String, origin: Option<String> },
+}
+
+const ACCOUNT_USAGE: &str = "expected `ferryx account enroll --code <code> [--origin <url>]`";
+
+pub fn parse_account_cli<I, T>(args: I) -> Result<AccountCliCommand, String>
+where
+    I: IntoIterator<Item = T>,
+    T: AsRef<str>,
+{
+    let args = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_string())
+        .collect::<Vec<_>>();
+    if args.get(1).is_none_or(|arg| arg != "account") {
+        return Err(ACCOUNT_USAGE.into());
+    }
+    if args.get(2).is_none_or(|arg| arg != "enroll") {
+        return Err(ACCOUNT_USAGE.into());
+    }
+    let mut code = None;
+    let mut origin = None;
+    let mut index = 3;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--code" if code.is_none() => {
+                let value = args.get(index + 1).ok_or("missing value for --code")?;
+                code = Some(value.clone());
+                index += 2;
+            }
+            "--origin" if origin.is_none() => {
+                let value = args.get(index + 1).ok_or("missing value for --origin")?;
+                origin = Some(value.clone());
+                index += 2;
+            }
+            other => return Err(format!("unknown account option `{other}`")),
+        }
+    }
+    let code = code.ok_or_else(|| ACCOUNT_USAGE.to_string())?;
+    if code.trim().is_empty() {
+        return Err("missing value for --code".into());
+    }
+    Ok(AccountCliCommand::Enroll { code, origin })
+}
+
+pub fn run_account_cli(command: AccountCliCommand) -> Result<(), String> {
+    match command {
+        AccountCliCommand::Enroll { code, origin } => {
+            let origin = match origin {
+                Some(value) => value,
+                None => crate::account::origin::account_origin()
+                    .map_err(|error| error.to_string())?,
+            };
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| error.to_string())?;
+            let record = runtime
+                .block_on(crate::account::enroll_client::enroll_machine(&origin, &code))
+                .map_err(|error| error.to_string())?;
+            println!("{}", record.account_id);
+            println!("{}", record.machine_record_id);
+            println!("{}", record.relay_origin);
+            println!("{}", record.enrollment_epoch);
+            eprintln!(
+                "Enrolled; the daemon keeps owning its identity and device tokens. \
+                 Existing paired devices and live terminals are unaffected."
+            );
+            Ok(())
+        }
     }
 }
 
@@ -853,7 +855,7 @@ pub fn run_remote_cli(command: RemoteCliCommand) -> Result<(), String> {
             }
             Ok(())
         }
-        RemoteCliCommand::Pair(pair_command) => run_pair_cli(pair_command),
+        RemoteCliCommand::Pair(pair_command) => run_pair_cli(pair_command).map(|_| ()),
     }
 }
 
@@ -2137,5 +2139,52 @@ mod tests {
                 worktree_path: Some("/path/from/env".into()),
             }
         );
+    }
+
+    #[test]
+    fn pair_generate_requires_account() {
+        let dir = tempfile::tempdir().expect("temp");
+        let previous = std::env::var_os("FERRYX_DATA_DIR");
+        std::env::set_var("FERRYX_DATA_DIR", dir.path());
+        let machine = run_pair_cli(PairCliCommand::GenerateMachinePin);
+        let mirror = run_pair_cli(PairCliCommand::GeneratePin);
+        if let Some(value) = previous {
+            std::env::set_var("FERRYX_DATA_DIR", value);
+        } else {
+            std::env::remove_var("FERRYX_DATA_DIR");
+        }
+        assert_eq!(machine.expect("machine pin"), PairCliOutcome::AccountLoginRequired);
+        assert_eq!(mirror.expect("mirror pin"), PairCliOutcome::AccountLoginRequired);
+    }
+
+    #[test]
+    fn account_enroll_cli_parses_code_and_optional_origin() {
+        assert_eq!(
+            parse_account_cli(["ferryx", "account", "enroll", "--code", "code-1"]).expect("parse"),
+            AccountCliCommand::Enroll {
+                code: "code-1".into(),
+                origin: None,
+            }
+        );
+        assert_eq!(
+            parse_account_cli([
+                "ferryx",
+                "account",
+                "enroll",
+                "--origin",
+                "https://account.example",
+                "--code",
+                "code-2",
+            ])
+            .expect("parse"),
+            AccountCliCommand::Enroll {
+                code: "code-2".into(),
+                origin: Some("https://account.example".into()),
+            }
+        );
+        assert!(parse_account_cli(["ferryx", "account", "enroll"]).is_err());
+        assert!(parse_account_cli(["ferryx", "account", "enroll", "--code"]).is_err());
+        assert!(parse_account_cli(["ferryx", "account", "enroll", "--code", "x", "--bogus"]).is_err());
+        assert!(parse_account_cli(["ferryx", "pair", "list"]).is_err());
     }
 }

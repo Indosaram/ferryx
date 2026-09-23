@@ -19,7 +19,15 @@ fn main() {
     }
     if args.get(1).is_some_and(|arg| arg == "pair") {
         match parse_pair_cli(&args).and_then(run_pair_cli) {
-            Ok(()) => return,
+            Ok(PairCliOutcome::Done) => return,
+            Ok(PairCliOutcome::AccountLoginRequired) => {
+                eprintln!(
+                    "ACCOUNT_LOGIN_REQUIRED: PIN issuance was retired. Sign in to the Ferryx account on the \
+                     desktop, issue an enrollment code, and run `ferryx account enroll --code <code>` on \
+                     the machine that should join."
+                );
+                std::process::exit(2);
+            }
             Err(error) => {
                 eprintln!("{error}");
                 std::process::exit(1);
