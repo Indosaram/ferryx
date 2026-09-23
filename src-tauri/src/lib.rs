@@ -1,3 +1,4 @@
+pub mod account;
 pub mod agent_detect;
 pub mod browser;
 pub mod cli;

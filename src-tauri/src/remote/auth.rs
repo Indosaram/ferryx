@@ -126,6 +126,69 @@ pub fn sign_control_challenge(
     )
 }
 
+pub const ACCOUNT_ENROLL_DOMAIN: &str = "ferryx-account-enroll-v1";
+
+pub fn enrollment_code_hash(code: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(code.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+pub fn sign_account_enrollment(
+    identity: &MachineIdentity,
+    account_origin: &str,
+    enrollment_code_hash: &str,
+    nonce: &str,
+    timestamp: u64,
+) -> Result<String, String> {
+    sign_message(
+        identity,
+        &account_enrollment_message(
+            &identity.machine_id,
+            account_origin,
+            enrollment_code_hash,
+            nonce,
+            timestamp,
+        ),
+    )
+}
+
+pub fn verify_account_enrollment(
+    public_key: &str,
+    machine_id: &str,
+    account_origin: &str,
+    enrollment_code_hash: &str,
+    nonce: &str,
+    timestamp: u64,
+    signature: &str,
+) -> bool {
+    verify_message(
+        public_key,
+        &account_enrollment_message(
+            machine_id,
+            account_origin,
+            enrollment_code_hash,
+            nonce,
+            timestamp,
+        ),
+        signature,
+    )
+}
+
+fn account_enrollment_message(
+    machine_id: &str,
+    account_origin: &str,
+    enrollment_code_hash: &str,
+    nonce: &str,
+    timestamp: u64,
+) -> String {
+    format!(
+        "{ACCOUNT_ENROLL_DOMAIN}:{machine_id}:{account_origin}:{enrollment_code_hash}:{nonce}:{timestamp}"
+    )
+}
+
 pub fn verify_control_challenge(
     public_key: &str,
     machine_id: &str,

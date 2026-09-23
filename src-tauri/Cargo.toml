@@ -22,6 +22,10 @@ name = "ferryx-cli"
 path = "src/bin/cli.rs"
 
 [[bin]]
+name = "ferryx-account"
+path = "src/bin/account.rs"
+
+[[bin]]
 name = "ferryx-relay"
 path = "src/bin/relay.rs"
 
@@ -80,9 +84,11 @@ tokio-tungstenite = { version = "0.29.0", features = ["rustls-tls-webpki-roots"]
 mime_guess = "2.0"
 tower-http = { version = "0.7", features = ["cors", "trace"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+url = "2"
 rand = "0.8"
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 sha2 = "0.10"
+x25519-dalek = { version = "2.0.1", features = ["static_secrets"] }
 futures-util = "0.3"
 cookie = "0.18"
 time = "0.3"

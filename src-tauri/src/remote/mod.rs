@@ -1,3 +1,5 @@
+pub mod account_protocol;
+pub mod attach_identity;
 pub mod auth;
 pub mod backend;
 pub mod browser_admission;
