@@ -75,6 +75,21 @@ pub struct RegisterPairingPinAck {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AccountGrantOfferDelivery {
+    pub machine_id: String,
+    pub envelope: crate::remote::account_protocol::AccountGrantOfferEnvelope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountGrantOfferDelivered {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_id: Option<String>,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ClaimPairingPin {
     pub pin: Option<String>,
     pub pairing_token: Option<String>,
@@ -406,6 +421,44 @@ pub enum RemoteGridFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_grant_delivery_wire_shape_is_stable() {
+        let envelope = crate::remote::account_protocol::AccountGrantOfferEnvelope {
+            machine_id: "machine-1".into(),
+            enrollment_epoch: "2".into(),
+            sealed: "c2VhbGVk".into(),
+        };
+        let delivery = AccountGrantOfferDelivery {
+            machine_id: "machine-1".into(),
+            envelope,
+        };
+        assert_wire(
+            delivery,
+            serde_json::json!({
+                "machineId": "machine-1",
+                "envelope": {
+                    "machineId": "machine-1",
+                    "enrollmentEpoch": "2",
+                    "sealed": "c2VhbGVk"
+                }
+            }),
+        );
+        assert_wire(
+            AccountGrantOfferDelivered {
+                grant_id: Some("grant-1".into()),
+                status: "ready".into(),
+            },
+            serde_json::json!({ "grantId": "grant-1", "status": "ready" }),
+        );
+        assert_wire(
+            AccountGrantOfferDelivered {
+                grant_id: None,
+                status: "ACCOUNT_OFFER_EXPIRED".into(),
+            },
+            serde_json::json!({ "status": "ACCOUNT_OFFER_EXPIRED" }),
+        );
+    }
 
     fn assert_wire<T>(value: T, expected: serde_json::Value)
     where

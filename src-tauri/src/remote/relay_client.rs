@@ -17,8 +17,8 @@ use crate::remote::auth::{
     canonical_auth_path, sign_control_challenge, AuthManager, DevicePermission, MachineIdentity,
 };
 use crate::remote::protocol::{
-    ControlAuth, ControlAuthResponse, ControlChallenge, PairingPinClaimed, PairingState,
-    RegisterPairingPin, RegisterPairingPinAck,
+    AccountGrantOfferDelivered, AccountGrantOfferDelivery, ControlAuth, ControlAuthResponse,
+    ControlChallenge, PairingPinClaimed, PairingState, RegisterPairingPin, RegisterPairingPinAck,
 };
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::RwLock;
@@ -548,6 +548,33 @@ impl RelayClient {
                             if let Err(error) = self.pairing.transition(PairingState::Claimed) {
                                 tracing::warn!("Invalid relay pairing claim: {error}");
                             }
+                        }
+                        continue;
+                    }
+                    if let Ok(delivery) = serde_json::from_str::<AccountGrantOfferDelivery>(&text) {
+                        if delivery.machine_id == self.pairing.machine_id {
+                            let now = crate::account::store::now_secs();
+                            let ack = match crate::account::offer_sink::apply_envelope_for_this_machine(
+                                &self.pairing.auth,
+                                &delivery.envelope,
+                                now,
+                            ) {
+                                Ok(ack) => AccountGrantOfferDelivered {
+                                    grant_id: Some(ack.grant_id),
+                                    status: ack.status,
+                                },
+                                Err(error) => {
+                                    tracing::warn!(
+                                        "Refused an account grant offer for this machine: {error}"
+                                    );
+                                    AccountGrantOfferDelivered {
+                                        grant_id: None,
+                                        status: error.code().to_string(),
+                                    }
+                                }
+                            };
+                            let encoded = serde_json::to_string(&ack)?;
+                            write.send(Message::Text(encoded.into())).await?;
                         }
                         continue;
                     }
