@@ -114,9 +114,9 @@ struct ControlChannel {
 
 /// A sealed account grant on its way to a daemon, with the slot its acknowledgement must
 /// fill. The relay only ever carries the sealed blob, never the plaintext pairing token.
-struct GrantDeliveryRequest {
-    delivery: AccountGrantOfferDelivery,
-    ack: oneshot::Sender<AccountGrantOfferDelivered>,
+pub struct GrantDeliveryRequest {
+    pub delivery: AccountGrantOfferDelivery,
+    pub ack: oneshot::Sender<AccountGrantOfferDelivered>,
 }
 
 /// How long a grant delivery waits for the daemon's acknowledgement before the caller is
@@ -639,7 +639,7 @@ impl RelayState {
             .any(|candidate| candidate == token)
     }
 
-    fn register_control_channel(
+    pub fn register_control_channel(
         &self,
         machine_id: String,
     ) -> (
@@ -719,7 +719,7 @@ impl RelayState {
         self.issue_session(machine_token, session_id, None, false)
     }
 
-    fn issue_session(
+    pub fn issue_session(
         &self,
         machine_token: &str,
         session_id: &str,

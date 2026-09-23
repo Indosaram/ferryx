@@ -16,9 +16,16 @@ pub async fn attach_relay_session(
 ) -> anyhow::Result<RelayAttachedStream> {
     let identity = load_or_generate_client_attach_identity(identity_dir)
         .map_err(|error| anyhow::anyhow!(error))?;
+    let ws_origin = if relay_origin.starts_with("http://") {
+        relay_origin.replacen("http://", "ws://", 1)
+    } else if relay_origin.starts_with("https://") {
+        relay_origin.replacen("https://", "wss://", 1)
+    } else {
+        relay_origin.to_string()
+    };
     let url = format!(
         "{}/tunnel/opaque/{session_id}",
-        relay_origin.trim_end_matches('/')
+        ws_origin.trim_end_matches('/')
     );
     let (stream, _) = tokio_tungstenite::connect_async(url).await?;
     attach_opaque_session(
