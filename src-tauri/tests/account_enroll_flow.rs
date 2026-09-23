@@ -67,7 +67,14 @@ fn code_from(text: &str) -> String {
         .to_string()
 }
 
+fn clear_mail_dir(mail_dir: &std::path::Path) {
+    for entry in std::fs::read_dir(mail_dir).into_iter().flatten().flatten() {
+        let _ = std::fs::remove_file(entry.path());
+    }
+}
+
 async fn sign_in(server: &Server, mail_dir: &std::path::Path, email: &str) -> String {
+    clear_mail_dir(mail_dir);
     let (status, _) = post(
         &server.base,
         "/api/account/v1/login/request",
@@ -265,7 +272,7 @@ async fn account_grant_is_pairing_capability() {
     assert!(body["expiresAt"].as_u64().expect("expiry") <= now_secs() + 600);
 
     let mut stale = request.clone();
-    stale["enrollmentEpoch"] = json!("1");
+    stale["enrollmentEpoch"] = json!("99");
     let (status, body) = post(&server.base, &grants_path, stale, Some(&token)).await;
     assert_eq!(status, 409, "{body}");
     assert_eq!(body["code"], "ACCOUNT_ENROLLMENT_EPOCH_MISMATCH");

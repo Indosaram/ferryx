@@ -284,6 +284,7 @@ pub async fn login_request(
 
     let expires_at = now_secs() + LOGIN_CODE_TTL.as_secs();
     state.mutate(|store| {
+        store.login_codes.retain(|_, code| code.expires_at > now_secs());
         store.login_codes.insert(
             token_hash(&code),
             LoginCodeRecord {

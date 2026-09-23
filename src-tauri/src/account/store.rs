@@ -133,7 +133,6 @@ impl AccountStore {
     }
 
     pub fn purge_expired(&mut self, now: u64) {
-        self.login_codes.retain(|_, code| code.expires_at > now);
         self.enrollment_codes
             .retain(|_, code| code.expires_at > now);
         self.sessions.retain(|_, session| session.expires_at > now);
