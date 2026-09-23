@@ -1990,6 +1990,16 @@ async fn relay_cors_middleware(request: Request<Body>, next: axum::middleware::N
 
 /// Builds the Axum router exposing the three tunnel endpoints.
 pub fn relay_router(state: RelayState) -> Router {
+    relay_router_with_grant_key(state, None)
+}
+
+/// The relay operator pins the account service's Ed25519 public key here; `None` keeps the grant
+/// route closed even if the route itself is reachable.
+pub fn relay_router_with_grant_key(state: RelayState, account_public_key: Option<String>) -> Router {
+    let grant_gate = crate::remote::account_grants::GrantGate {
+        account_public_key,
+        delivery: state.clone(),
+    };
     Router::new()
         .route("/api/v1/pair/exchange", post(pair_exchange_handler))
         .route(
@@ -2029,6 +2039,7 @@ pub fn relay_router(state: RelayState) -> Router {
         .route("/tunnel/data/{session_id}", get(data_handler))
         .route("/tunnel/client/{session_id}", get(client_handler))
         .route("/tunnel/opaque/{session_id}", get(opaque_handler))
+        .merge(crate::remote::account_grants::grant_gate_router(grant_gate).with_state(()))
         .fallback(axum::routing::get(
             crate::remote::server::serve_static_or_index,
         ))
