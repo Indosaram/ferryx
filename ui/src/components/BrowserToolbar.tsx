@@ -9,6 +9,8 @@ import {
   Target,
   RefreshCw,
   History as HistoryIcon,
+  Bug,
+  MousePointer2,
 } from "lucide-react";
 import {
   BROWSER_SHORTCUT_EVENT,
@@ -16,7 +18,12 @@ import {
   getBrowserState,
   goBackBrowser,
   goForwardBrowser,
+  finishBrowserElementPick,
+  injectBrowserElementPicker,
+  onBrowserElementPicked,
   onBrowserShortcutRequested,
+  openBrowserDevtools,
+  removeBrowserElementPicker,
   openExternalUrl,
   setBrowserZoom,
   type BrowserShortcutAction,
@@ -42,6 +49,8 @@ interface BrowserToolbarProps {
   onReload: () => void;
   onGoBack?: () => void;
   onGoForward?: () => void;
+  onToggleElementPick?: () => void;
+  elementPicking?: boolean;
 }
 
 export function BrowserToolbar({
@@ -50,6 +59,8 @@ export function BrowserToolbar({
   onReload,
   onGoBack,
   onGoForward,
+  onToggleElementPick,
+  elementPicking = false,
 }: BrowserToolbarProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [inputUrl, setInputUrl] = useState(tab.url);
@@ -164,6 +175,23 @@ export function BrowserToolbar({
     // The navigation handlers intentionally follow the current browser tab state.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [onReload, settings.rememberBrowsingHistory, tab.browserId, tab.canGoBack, tab.canGoForward]);
+
+  useEffect(() => {
+    if (!elementPicking) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void onBrowserElementPicked((payload) => {
+      if (payload.browserId !== tab.browserId) return;
+      void finishBrowserElementPick(tab.browserId);
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unlisten = cleanup;
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [elementPicking, tab.browserId]);
 
   const navigateFromAddress = (raw: string) => {
     const url = normalizeBrowserAddress(raw, settings);
@@ -351,6 +379,31 @@ export function BrowserToolbar({
           </button>
           <button type="button" onClick={handleSyncState} title="Sync browser state" aria-label="Sync browser state" className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">
             <RefreshCw className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              void openBrowserDevtools(tab.browserId);
+            }}
+            title="DevTools"
+            aria-label="DevTools"
+            className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <Bug className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              if (elementPicking) void removeBrowserElementPicker(tab.browserId);
+              else void injectBrowserElementPicker(tab.browserId);
+              onToggleElementPick?.();
+            }}
+            title="Select element"
+            aria-label="Select element"
+            aria-pressed={elementPicking}
+            className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <MousePointer2 className="w-3.5 h-3.5" />
           </button>
           <button type="button" onClick={handleExternalOpen} title="Open in default browser" aria-label="Open in external browser" className="p-1 rounded hover:bg-muted transition-colors">
             <ExternalLink className="w-3.5 h-3.5 text-muted-foreground" />

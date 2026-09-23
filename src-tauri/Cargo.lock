@@ -1515,6 +1515,7 @@ dependencies = [
  "ed25519-dalek",
  "futures-util",
  "gtk",
+ "image",
  "libc",
  "mime_guess",
  "notify",

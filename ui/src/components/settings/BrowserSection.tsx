@@ -248,13 +248,39 @@ export function BrowserSection() {
 
       <SettingsGroup title="Link Routing">
         <div className="border-b border-border">
-          <SettingRow label="Open links in built-in browser" description="HTTP(S) links opened inside Ferryx use a built-in browser tab by default.">
-            <Switch
-              id="browser-open-links-builtin"
-              aria-label="Open links in built-in browser"
-              checked={settings.openLinksInBuiltInBrowser}
-              onCheckedChange={(checked) => void update({ openLinksInBuiltInBrowser: checked })}
-            />
+          <SettingRow label="Click a link" description="Plain click in the embedded browser opens the chosen browser.">
+            <Select
+              value={settings.linkClickTarget}
+              onValueChange={(value) => {
+                const linkClickTarget = value === "external" ? "external" : "builtin";
+                void update({
+                  linkClickTarget,
+                  openLinksInBuiltInBrowser: linkClickTarget === "builtin",
+                });
+              }}
+            >
+              <SelectTrigger id="browser-link-click-target" aria-label="Click a link" className="h-8 w-[180px] text-[11px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="builtin">Built-in browser</SelectItem>
+                <SelectItem value="external">System browser</SelectItem>
+              </SelectContent>
+            </Select>
+          </SettingRow>
+          <SettingRow label="Command/Ctrl-click a link" description="On macOS this is Command-click. On Windows and Linux it is Ctrl-click.">
+            <Select
+              value={settings.modifierClickTarget}
+              onValueChange={(value) => void update({ modifierClickTarget: value === "builtin" ? "builtin" : "external" })}
+            >
+              <SelectTrigger id="browser-modifier-click-target" aria-label="Command or Ctrl-click a link" className="h-8 w-[180px] text-[11px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="builtin">Built-in browser</SelectItem>
+                <SelectItem value="external">System browser</SelectItem>
+              </SelectContent>
+            </Select>
           </SettingRow>
           <SettingRow label="Hold Shift to open in your web browser" description="Shift-click bypasses the built-in browser and opens the system default web browser.">
             <Switch

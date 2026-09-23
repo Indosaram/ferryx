@@ -4,16 +4,24 @@ pub const BROWSER_SESSION_CREATED_EVENT: &str = "browser_session_created";
 pub const BROWSER_OPEN_REQUESTED_EVENT: &str = "browser_open_requested";
 pub const BROWSER_DOWNLOAD_REQUESTED_EVENT: &str = "browser_download_requested";
 pub const BROWSER_SHORTCUT_REQUESTED_EVENT: &str = "browser_shortcut_requested";
+pub const BROWSER_ELEMENT_PICKED_EVENT: &str = "browser_element_picked";
+pub const BROWSER_LINK_CLICKED_EVENT: &str = "browser_link_clicked";
 
 const OPEN_HOST: &str = "open.ferryx.invalid";
 const DOWNLOAD_HOST: &str = "download.ferryx.invalid";
 const SHORTCUT_HOST: &str = "shortcut.ferryx.invalid";
+const PICK_HOST: &str = "pick.ferryx.invalid";
+const CLICK_HOST: &str = "click.ferryx.invalid";
+const MODCLICK_HOST: &str = "modclick.ferryx.invalid";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BrowserGuestAction {
     Open(String),
     Download(String),
     Shortcut(String),
+    ElementPick,
+    LinkClick(String),
+    ModifierLinkClick(String),
 }
 
 pub fn parse_browser_guest_action(url: &Url, expected_nonce: &str) -> Option<BrowserGuestAction> {
@@ -25,6 +33,9 @@ pub fn parse_browser_guest_action(url: &Url, expected_nonce: &str) -> Option<Bro
         OPEN_HOST => query_value(url, "url").map(BrowserGuestAction::Open),
         DOWNLOAD_HOST => query_value(url, "url").map(BrowserGuestAction::Download),
         SHORTCUT_HOST => query_value(url, "action").map(BrowserGuestAction::Shortcut),
+        PICK_HOST => Some(BrowserGuestAction::ElementPick),
+        CLICK_HOST => query_value(url, "url").map(BrowserGuestAction::LinkClick),
+        MODCLICK_HOST => query_value(url, "url").map(BrowserGuestAction::ModifierLinkClick),
         _ => None,
     }
 }
@@ -141,6 +152,7 @@ const BRIDGE_SCRIPT_TEMPLATE: &str = r#"
     const target = `https://${host}/?${key}=${enc(value)}&nonce=${__FERRYX_BROWSER_BRIDGE_NONCE__}`;
     assign(target);
   };
+  window.__ferryxRoute = route;
 
   const originalOpen = window.open.bind(window);
   window.open = (url, ...rest) => {
@@ -154,6 +166,7 @@ const BRIDGE_SCRIPT_TEMPLATE: &str = r#"
 
   addDocumentListener('click', (event) => {
     if (!isUserEvent(event)) return;
+    if (window.__ferryxPicker && window.__ferryxPicker.installed) return;
     const target = event.target;
     if (!(target instanceof Element)) return;
     const anchor = closestOf.call(target, 'a[href]');
@@ -165,10 +178,14 @@ const BRIDGE_SCRIPT_TEMPLATE: &str = r#"
       route('download.ferryx.invalid', 'url', url);
       return;
     }
-    if ((anchor.target || '').toLowerCase() === '_blank') {
-      event.preventDefault();
-      route('open.ferryx.invalid', 'url', url);
-    }
+    const isMac = typeof navigator !== 'undefined' && (
+      /Mac|iPhone|iPod|iPad/.test(navigator.platform || '') ||
+      /Macintosh/.test(navigator.userAgent || '')
+    );
+    const modifier = isMac ? (event.metaKey && !event.ctrlKey) : (event.ctrlKey && !event.metaKey);
+    const blank = (anchor.target || '').toLowerCase() === '_blank';
+    event.preventDefault();
+    route(modifier || blank ? 'modclick.ferryx.invalid' : 'click.ferryx.invalid', 'url', url);
   }, true);
 
   const isMac = typeof navigator !== 'undefined' && (
@@ -322,6 +339,25 @@ mod tests {
         assert_eq!(
             parse_browser_guest_action(&shortcut, TEST_NONCE),
             Some(BrowserGuestAction::Shortcut("find".into()))
+        );
+
+        let click = Url::parse(&format!(
+            "https://click.ferryx.invalid/?url=https%3A%2F%2Fexample.com%2Fdocs&nonce={TEST_NONCE}"
+        ))
+        .unwrap();
+        assert_eq!(
+            parse_browser_guest_action(&click, TEST_NONCE),
+            Some(BrowserGuestAction::LinkClick("https://example.com/docs".into()))
+        );
+        let modifier_click = Url::parse(&format!(
+            "https://modclick.ferryx.invalid/?url=https%3A%2F%2Fexample.com%2Fdocs&nonce={TEST_NONCE}"
+        ))
+        .unwrap();
+        assert_eq!(
+            parse_browser_guest_action(&modifier_click, TEST_NONCE),
+            Some(BrowserGuestAction::ModifierLinkClick(
+                "https://example.com/docs".into()
+            ))
         );
 
         // App-level and tab navigation chords ride the same shortcut host so the main

@@ -25,8 +25,8 @@ import { copyTextToClipboard } from "./lib/clipboard";
 import { useApplyAppearanceSettings } from "./lib/appearanceSettings";
 import { workspaceName } from "./lib/branchFilter";
 import { collectDagWatchRoots, isLocalDagProject, remoteProjectsWatchKey } from "./lib/dagWatchRoots";
-import { newBrowserTabUrl } from "./lib/browserSettings";
-import { BROWSER_SHORTCUT_EVENT, onBrowserOpenRequested, onBrowserSessionCreated, onBrowserShortcutRequested, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
+import { loadBrowserSettings, newBrowserTabUrl } from "./lib/browserSettings";
+import { BROWSER_SHORTCUT_EVENT, navigateBrowser, onBrowserLinkClicked, onBrowserOpenRequested, onBrowserSessionCreated, onBrowserShortcutRequested, openExternalUrl, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
 import { registerBuiltInBrowserLinkOpener } from "./lib/linkRouting";
 import { useGeneralSettings } from "./lib/generalSettings";
 import { NotificationCoordinator, isWindowForegroundFocused } from "./lib/notificationCoordinator";
@@ -2449,6 +2449,35 @@ function WorkspaceApp({
         profileId: payload.profileId,
         worktreePath: payload.worktreePath ?? undefined,
       }).catch(reportRuntimeError);
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unlisten = cleanup;
+    }).catch(reportRuntimeError);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [createBrowserTab, reportRuntimeError]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void onBrowserLinkClicked((payload) => {
+      if (activeRemoteHostRef.current) return;
+      const settings = loadBrowserSettings();
+      const target = payload.modifier ? settings.modifierClickTarget : settings.linkClickTarget;
+      if (target === "external") {
+        void openExternalUrl(payload.targetUrl).catch(reportRuntimeError);
+        return;
+      }
+      if (payload.modifier) {
+        void createBrowserTab(payload.targetUrl, undefined, {
+          profileId: payload.profileId,
+          worktreePath: payload.worktreePath ?? undefined,
+        }).catch(reportRuntimeError);
+        return;
+      }
+      void navigateBrowser(payload.browserId, payload.targetUrl).catch(reportRuntimeError);
     }).then((cleanup) => {
       if (disposed) cleanup();
       else unlisten = cleanup;

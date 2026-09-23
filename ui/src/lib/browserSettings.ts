@@ -16,6 +16,8 @@ export type BrowserSettingsState = {
   restoreTabsOnLaunch: boolean;
   rememberBrowsingHistory: boolean;
   openLinksInBuiltInBrowser: boolean;
+  linkClickTarget: "builtin" | "external";
+  modifierClickTarget: "builtin" | "external";
   shiftOpensSystemBrowser: boolean;
   showTerminalLinkActions: boolean;
   localhostWorktreeLabels: boolean;
@@ -34,6 +36,8 @@ export const DEFAULT_BROWSER_SETTINGS: BrowserSettingsState = {
   restoreTabsOnLaunch: false,
   rememberBrowsingHistory: true,
   openLinksInBuiltInBrowser: true,
+  linkClickTarget: "builtin",
+  modifierClickTarget: "external",
   shiftOpensSystemBrowser: true,
   showTerminalLinkActions: true,
   localhostWorktreeLabels: true,
@@ -167,6 +171,14 @@ export function normalizeBrowserSettings(value: unknown): BrowserSettingsState {
     openLinksInBuiltInBrowser: typeof source.openLinksInBuiltInBrowser === "boolean"
       ? source.openLinksInBuiltInBrowser
       : DEFAULT_BROWSER_SETTINGS.openLinksInBuiltInBrowser,
+    linkClickTarget: source.linkClickTarget === "external" || source.linkClickTarget === "builtin"
+      ? source.linkClickTarget
+      : (typeof source.openLinksInBuiltInBrowser === "boolean"
+        ? (source.openLinksInBuiltInBrowser ? "builtin" : "external")
+        : DEFAULT_BROWSER_SETTINGS.linkClickTarget),
+    modifierClickTarget: source.modifierClickTarget === "builtin" || source.modifierClickTarget === "external"
+      ? source.modifierClickTarget
+      : DEFAULT_BROWSER_SETTINGS.modifierClickTarget,
     shiftOpensSystemBrowser: typeof source.shiftOpensSystemBrowser === "boolean"
       ? source.shiftOpensSystemBrowser
       : DEFAULT_BROWSER_SETTINGS.shiftOpensSystemBrowser,

@@ -6,6 +6,7 @@ pub mod guest;
 pub mod linux;
 pub mod manager;
 pub mod model;
+pub mod picker;
 pub mod remote_bridge_protocol;
 pub mod remote_driver;
 pub mod remote_input;
@@ -25,7 +26,8 @@ pub use download::download_url_to_path;
 pub use find::{browser_find_script, parse_browser_find_callback, BROWSER_CLEAR_FIND_SCRIPT};
 pub use guest::{
     browser_guest_bridge_script, parse_browser_guest_action, BrowserGuestAction,
-    BROWSER_DOWNLOAD_REQUESTED_EVENT, BROWSER_OPEN_REQUESTED_EVENT,
+    BROWSER_DOWNLOAD_REQUESTED_EVENT, BROWSER_ELEMENT_PICKED_EVENT,
+    BROWSER_LINK_CLICKED_EVENT, BROWSER_OPEN_REQUESTED_EVENT,
     BROWSER_SHORTCUT_REQUESTED_EVENT,
 };
 pub use manager::BrowserManager;

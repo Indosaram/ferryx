@@ -218,6 +218,22 @@ pub struct BrowserShortcutRequestedPayload {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct BrowserElementPickedPayload {
+    pub browser_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserLinkClickedPayload {
+    pub browser_id: String,
+    pub target_url: String,
+    pub modifier: bool,
+    pub profile_id: BrowserProfileId,
+    pub worktree_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BrowserFindResult {
     pub match_count: usize,
     pub found: bool,

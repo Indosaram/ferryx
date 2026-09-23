@@ -14,6 +14,8 @@ export const BROWSER_SESSION_CREATED_EVENT = "browser_session_created";
 export const BROWSER_OPEN_REQUESTED_EVENT = "browser_open_requested";
 export const BROWSER_DOWNLOAD_REQUESTED_EVENT = "browser_download_requested";
 export const BROWSER_SHORTCUT_REQUESTED_EVENT = "browser_shortcut_requested";
+export const BROWSER_ELEMENT_PICKED_EVENT = "browser_element_picked";
+export const BROWSER_LINK_CLICKED_EVENT = "browser_link_clicked";
 export const BROWSER_SHORTCUT_EVENT = "ferryx:browser-shortcut";
 
 export type BrowserSessionCreatedPayload = {
@@ -108,6 +110,18 @@ export function browserWorkspaceSelectIndex(action: string): number | null {
 export type BrowserShortcutRequestedPayload = {
   browserId: string;
   action: BrowserShortcutAction;
+};
+
+export type BrowserElementPickedPayload = {
+  browserId: string;
+};
+
+export type BrowserLinkClickedPayload = {
+  browserId: string;
+  targetUrl: string;
+  modifier: boolean;
+  profileId?: string;
+  worktreePath?: string;
 };
 
 /** App-webview shortcuts always address one native browser, never broadcast an action. */
@@ -221,6 +235,22 @@ export async function focusBrowser(browserId: string): Promise<void> {
   return invoke<void>("cmd_browser_focus", { browserId });
 }
 
+export async function openBrowserDevtools(browserId: string): Promise<void> {
+  return invoke<void>("cmd_browser_open_devtools", { browserId });
+}
+
+export async function injectBrowserElementPicker(browserId: string): Promise<void> {
+  return invoke<void>("cmd_browser_inject_element_picker", { browserId });
+}
+
+export async function removeBrowserElementPicker(browserId: string): Promise<void> {
+  return invoke<void>("cmd_browser_remove_element_picker", { browserId });
+}
+
+export async function finishBrowserElementPick(browserId: string): Promise<void> {
+  return invoke<void>("cmd_browser_finish_element_pick", { browserId });
+}
+
 export async function getBrowserState(browserId: string): Promise<BrowserState> {
   return invoke<BrowserState>("cmd_browser_get_state", { browserId });
 }
@@ -282,6 +312,18 @@ export function onBrowserShortcutRequested(
   listener: (payload: BrowserShortcutRequestedPayload) => void,
 ): Promise<UnlistenFn> {
   return listen<BrowserShortcutRequestedPayload>(BROWSER_SHORTCUT_REQUESTED_EVENT, (event) => listener(event.payload));
+}
+
+export function onBrowserElementPicked(
+  listener: (payload: BrowserElementPickedPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<BrowserElementPickedPayload>(BROWSER_ELEMENT_PICKED_EVENT, (event) => listener(event.payload));
+}
+
+export function onBrowserLinkClicked(
+  listener: (payload: BrowserLinkClickedPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<BrowserLinkClickedPayload>(BROWSER_LINK_CLICKED_EVENT, (event) => listener(event.payload));
 }
 
 export async function browserAutomationSnapshot(

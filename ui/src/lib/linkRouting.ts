@@ -20,6 +20,7 @@ export type TerminalToken =
 
 export type LinkRoutingOptions = {
   shiftKey?: boolean;
+  modifierKey?: boolean;
   source?: LinkRoutingSource;
   destination?: LinkDestination;
 };
@@ -43,12 +44,17 @@ export async function routeHttpLink(url: string, options: LinkRoutingOptions = {
   if (!isHttpUrl(normalized)) throw new Error("Only http(s) links can be opened by the browser router.");
 
   const settings = loadBrowserSettings();
+  const preferred = options.modifierKey ? settings.modifierClickTarget : settings.linkClickTarget;
   const destination = options.destination
     ?? (options.shiftKey && settings.shiftOpensSystemBrowser
       ? "external"
-      : settings.openLinksInBuiltInBrowser && builtInBrowserOpener
+      : preferred === "builtin" && builtInBrowserOpener
         ? "builtin"
-        : "external");
+        : preferred === "external"
+          ? "external"
+          : settings.openLinksInBuiltInBrowser && builtInBrowserOpener
+            ? "builtin"
+            : "external");
 
   if (destination === "builtin") {
     if (!builtInBrowserOpener) {

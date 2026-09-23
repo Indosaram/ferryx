@@ -31,6 +31,19 @@ beforeEach(() => {
 });
 
 describe("HTTP link routing", () => {
+  it("routes a modifier click to the saved modifier target", async () => {
+    saveBrowserSettings({ linkClickTarget: "builtin", modifierClickTarget: "external" });
+    const openBuiltIn = vi.fn(() => Promise.resolve());
+    const unregister = registerBuiltInBrowserLinkOpener(openBuiltIn);
+    try {
+      await expect(routeHttpLink("https://example.com/docs", { modifierKey: true })).resolves.toBe("external");
+      expect(openExternalUrl).toHaveBeenCalledWith("https://example.com/docs");
+      expect(openBuiltIn).not.toHaveBeenCalled();
+    } finally {
+      unregister();
+    }
+  });
+
   it("routes ordinary links to the registered built-in browser by default", async () => {
     const openBuiltIn = vi.fn(() => Promise.resolve());
     const unregister = registerBuiltInBrowserLinkOpener(openBuiltIn);

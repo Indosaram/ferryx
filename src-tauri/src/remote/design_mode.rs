@@ -15,6 +15,10 @@ pub struct DesignModeSnapshot {
     pub session_id: String,
     pub timestamp_ms: u64,
     pub screenshot_png_base64: String,
+    #[serde(default)]
+    pub outer_html: String,
+    #[serde(default)]
+    pub css: String,
     pub dom_elements: Vec<DomElementBox>,
 }
 
@@ -39,6 +43,12 @@ impl DesignModeStagingStore {
     }
 }
 
+pub fn shared_staging_store() -> &'static DesignModeStagingStore {
+    use std::sync::OnceLock;
+    static STORE: OnceLock<DesignModeStagingStore> = OnceLock::new();
+    STORE.get_or_init(DesignModeStagingStore::new)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -49,6 +59,8 @@ mod tests {
             session_id: "session-123".to_string(),
             timestamp_ms: 1_694_012_345_678,
             screenshot_png_base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=".to_string(),
+            outer_html: String::new(),
+            css: String::new(),
             dom_elements: vec![
                 DomElementBox {
                     id: "el-1".to_string(),

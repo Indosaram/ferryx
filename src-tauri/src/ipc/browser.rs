@@ -3,14 +3,17 @@ use crate::browser::{
     parse_browser_find_callback, parse_browser_guest_action, parse_cookie_file,
     BrowserAutomationAction, BrowserAutomationElement, BrowserAutomationRequest,
     BrowserAutomationSnapshot, BrowserAutomationTarget, BrowserDownloadRequestedPayload,
-    BrowserError, BrowserFindResult, BrowserGuestAction, BrowserManager,
-    BrowserOpenRequestedPayload, BrowserProfileId, BrowserSessionSummary,
+    BrowserElementPickedPayload, BrowserError, BrowserFindResult, BrowserGuestAction,
+    BrowserLinkClickedPayload, BrowserManager, BrowserOpenRequestedPayload, BrowserProfileId,
+    BrowserSessionSummary,
     BrowserShortcutRequestedPayload, BrowserState, BrowserStateChangedPayload,
     CreateBrowserRequest, ImportBrowserCookiesRequest, ImportBrowserCookiesResult, LogicalRect,
-    BROWSER_CLEAR_FIND_SCRIPT, BROWSER_DOWNLOAD_REQUESTED_EVENT, BROWSER_OPEN_REQUESTED_EVENT,
+    SnapshotOptions, BROWSER_CLEAR_FIND_SCRIPT, BROWSER_DOWNLOAD_REQUESTED_EVENT,
+    BROWSER_ELEMENT_PICKED_EVENT, BROWSER_LINK_CLICKED_EVENT, BROWSER_OPEN_REQUESTED_EVENT,
     BROWSER_SHORTCUT_REQUESTED_EVENT,
 };
 use crate::ipc::error::{IpcError, IpcErrorCode};
+use base64::Engine;
 use parking_lot::Mutex;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -961,6 +964,7 @@ pub async fn create_browser_session<R: tauri::Runtime>(
             let builder = tauri::WebviewBuilder::new(label, parsed_url)
                 .user_agent(crate::browser::default_desktop_user_agent())
                 .incognito(incognito)
+                .devtools(true)
                 .initialization_script(browser_guest_bridge_script(&guest_bridge_nonce))
                 .on_navigation(
                     move |target| match parse_browser_guest_action(target, &nonce) {
@@ -992,6 +996,30 @@ pub async fn create_browser_session<R: tauri::Runtime>(
                                 BrowserShortcutRequestedPayload {
                                     browser_id: bridge_browser_id.clone(),
                                     action,
+                                },
+                            );
+                            false
+                        }
+                        Some(BrowserGuestAction::ElementPick) => {
+                            let _ = bridge_app.emit(
+                                BROWSER_ELEMENT_PICKED_EVENT,
+                                BrowserElementPickedPayload {
+                                    browser_id: bridge_browser_id.clone(),
+                                },
+                            );
+                            false
+                        }
+                        Some(BrowserGuestAction::LinkClick(target_url))
+                        | Some(BrowserGuestAction::ModifierLinkClick(target_url)) => {
+                            let modifier = target.host_str() == Some("modclick.ferryx.invalid");
+                            let _ = bridge_app.emit(
+                                BROWSER_LINK_CLICKED_EVENT,
+                                BrowserLinkClickedPayload {
+                                    browser_id: bridge_browser_id.clone(),
+                                    target_url,
+                                    modifier,
+                                    profile_id: bridge_profile_id.clone(),
+                                    worktree_path: bridge_worktree_path.clone(),
                                 },
                             );
                             false
@@ -1192,6 +1220,117 @@ pub async fn cmd_browser_create<R: tauri::Runtime>(
     request: CreateBrowserRequest,
 ) -> Result<BrowserState, IpcError> {
     create_browser_session(&app, manager.inner(), request).await
+}
+
+pub const fn browser_session_devtools_enabled() -> bool {
+    true
+}
+
+#[tauri::command]
+pub async fn cmd_browser_open_devtools<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    manager: State<'_, Arc<BrowserManager>>,
+    browser_id: String,
+) -> Result<(), IpcError> {
+    let state = manager.get_state(&browser_id)?;
+    let webview = app.get_webview(&state.webview_label).ok_or_else(|| {
+        IpcError::new(
+            IpcErrorCode::BrowserNotFound,
+            "browser webview is not open",
+        )
+    })?;
+    webview.open_devtools();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn cmd_browser_inject_element_picker<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    manager: State<'_, Arc<BrowserManager>>,
+    browser_id: String,
+) -> Result<(), IpcError> {
+    eval_browser_session(
+        &app,
+        manager.inner(),
+        &browser_id,
+        crate::browser::picker::ELEMENT_PICKER_SCRIPT,
+    )
+    .await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn cmd_browser_remove_element_picker<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    manager: State<'_, Arc<BrowserManager>>,
+    browser_id: String,
+) -> Result<(), IpcError> {
+    eval_browser_session(
+        &app,
+        manager.inner(),
+        &browser_id,
+        crate::browser::picker::ELEMENT_PICKER_REMOVE_SCRIPT,
+    )
+    .await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn cmd_browser_finish_element_pick<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    manager: State<'_, Arc<BrowserManager>>,
+    browser_id: String,
+    png_base64: Option<String>,
+) -> Result<crate::remote::design_mode::DesignModeSnapshot, IpcError> {
+    let state = manager.get_state(&browser_id)?;
+    let (raw, _) = eval_browser_session(
+        &app,
+        manager.inner(),
+        &browser_id,
+        "window.__ferryxElementPick",
+    )
+    .await?;
+    let json = raw
+        .as_deref()
+        .map(crate::browser::picker::unwrap_eval_json)
+        .filter(|value| !value.trim().is_empty() && value != "null" && value != "undefined")
+        .ok_or_else(|| IpcError::new(IpcErrorCode::ParseError, "element pick is empty"))?;
+    let _ = eval_browser_session(
+        &app,
+        manager.inner(),
+        &browser_id,
+        crate::browser::picker::ELEMENT_PICKER_REMOVE_SCRIPT,
+    )
+    .await;
+    let png = match png_base64.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        Some(encoded) => base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|e| IpcError::new(IpcErrorCode::ParseError, e.to_string()))?,
+        None => {
+            crate::browser::capture_browser_snapshot(&app, &state.webview_label, SnapshotOptions::png())
+                .await?
+                .bytes
+        }
+    };
+    let mut snapshot = crate::browser::picker::element_pick_report(&json, &png)
+        .map_err(|e| IpcError::new(IpcErrorCode::ParseError, e))?;
+    snapshot.session_id = browser_id;
+    snapshot.timestamp_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    crate::remote::design_mode::shared_staging_store().stage(snapshot.clone());
+    Ok(snapshot)
+}
+
+#[cfg(test)]
+mod devtools_tests {
+    use super::*;
+
+    #[test]
+    fn browser_sessions_enable_devtools() {
+        assert!(browser_session_devtools_enabled());
+    }
 }
 
 pub async fn navigate_browser_session<R: tauri::Runtime>(
