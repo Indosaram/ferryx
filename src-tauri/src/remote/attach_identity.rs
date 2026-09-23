@@ -103,7 +103,7 @@ impl Drop for AttachLock {
 }
 
 fn lock_path(base_dir: &Path) -> PathBuf {
-    base_dir.join("attach-identity.lock")
+    base_dir.join("attach-identity.tx.lock")
 }
 
 #[cfg(test)]
