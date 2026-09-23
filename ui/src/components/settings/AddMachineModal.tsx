@@ -68,8 +68,8 @@ export const DEFAULT_SSH_FORM: HostFormData = {
 
 const explanations: Record<string, string> = {
   NATIVE_CONTEXT_REQUIRED: "Native host inventory is unavailable. Use the desktop app with a compatible local daemon; browser mirror access cannot manage machines.",
-  PAIR_FAILED: "Could not pair. Check connectivity and daemon compatibility, obtain a fresh machine-access PIN, and retry.",
-  MACHINE_GRANT_REQUIRED: "Needs machine access. A mirror PIN cannot authorize projects. Re-pair with an owner-issued machine PIN; revoked credentials cannot reconnect.",
+  PAIR_FAILED: "Could not pair. Check connectivity and daemon compatibility, issue a fresh enrollment code from a signed-in desktop, and retry.",
+  MACHINE_GRANT_REQUIRED: "Needs machine access. This credential carries no machine grant. Pair again from a signed-in account; revoked credentials cannot reconnect.",
   UNSUPPORTED_CAPABILITY: "This relay, remote daemon, or local daemon does not advertise the required machine capabilities. Upgrade compatible components.",
   STALE_HOST_GENERATION: "Credentials changed during this request. Refresh the inventory and check capabilities again.",
   PAIRED_HOST_UNAVAILABLE: "The native host operation failed. Check the relay and daemon versions, connectivity, and PIN scope, then retry. Saved projects have not been removed.",
@@ -83,7 +83,7 @@ export function getModalErrorMessage(error: PairedHostError | string): string {
   switch (code) {
     case "PIN_EXPIRED":
     case "EXPIRED_PIN":
-      return "PIN expired. Obtain a fresh machine PIN on the remote machine ('ferryx-cli pair generate --access machine') and retry.";
+      return "Code expired. Sign in to your Ferryx account, issue a fresh enrollment code, and retry.";
     case "INVALID_PIN":
       return "Invalid PIN. Check the PIN entered and obtain a fresh machine PIN if needed.";
     case "WRONG_RELAY":
@@ -631,7 +631,7 @@ export function AddMachineModal({
               <span className="break-words">{error}</span>
               {structuredError?.code === "PIN_EXPIRED" || structuredError?.code === "EXPIRED_PIN" ? (
                 <span className="text-[11px] font-medium text-destructive/90">
-                  Action: Obtain a fresh PIN on the remote machine with &lsquo;ferryx-cli pair generate --access machine&rsquo; and enter it above.
+                  Action: Issue a fresh enrollment code from a signed-in desktop and enter it above.
                 </span>
               ) : structuredError?.code === "WRONG_RELAY" || structuredError?.code === "INVALID_RELAY_ORIGIN" ? (
                 <span className="text-[11px] font-medium text-destructive/90">
@@ -771,10 +771,11 @@ export function AddMachineModal({
               <form className="space-y-4 pt-2" onSubmit={handlePairSubmit}>
                 <div className="text-xs text-muted-foreground space-y-1">
                   <p>
-                    On the remote machine, ensure the daemon is running and generate a machine-access PIN:
+                    Sign in on a machine you already use, issue an enrollment code for this machine, then run
+                    this on the machine that should join:
                   </p>
                   <code className="block rounded bg-muted/60 px-2 py-1 font-mono text-[11px] text-foreground">
-                    ferryx-cli pair generate --access machine
+                    ferryx-cli account enroll --code &lt;CODE&gt;
                   </code>
                 </div>
 

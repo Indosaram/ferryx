@@ -21,8 +21,8 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 
 describe("AddMachineModal - P05 structured per-status error UX", () => {
   it("getModalErrorMessage maps each specific error code to actionable UX guidance", () => {
-    expect(getModalErrorMessage("PIN_EXPIRED")).toContain("PIN expired. Obtain a fresh machine PIN");
-    expect(getModalErrorMessage("EXPIRED_PIN")).toContain("PIN expired. Obtain a fresh machine PIN");
+    expect(getModalErrorMessage("PIN_EXPIRED")).toContain("Code expired. Sign in to your Ferryx account");
+    expect(getModalErrorMessage("EXPIRED_PIN")).toContain("Code expired. Sign in to your Ferryx account");
     expect(getModalErrorMessage("WRONG_RELAY")).toContain("Relay mismatch");
     expect(getModalErrorMessage("INVALID_RELAY_ORIGIN")).toContain("Relay mismatch");
     expect(getModalErrorMessage("DAEMON_UNAVAILABLE")).toContain("Remote daemon unavailable");
@@ -73,8 +73,8 @@ describe("AddMachineModal - P05 structured per-status error UX", () => {
     });
 
     const alert = screen.getByRole("alert");
-    expect(alert).toHaveTextContent(/PIN expired/i);
-    expect(alert).toHaveTextContent(/ferryx-cli pair generate --access machine/i);
+    expect(alert).toHaveTextContent(/expired/i);
+    expect(alert).toHaveTextContent(/sign in/i);
   });
 
   it("displays actionable per-status message when pairing fails with WRONG_RELAY", async () => {
