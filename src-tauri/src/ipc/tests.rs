@@ -1408,8 +1408,17 @@ async fn test_p10_ambiguous_create_session_reconciles_via_journal() {
                 while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                     let req: DaemonRequest = match serde_json::from_str(line.trim()) {
                         Ok(r) => r,
-                        Err(_) => {
+                        Err(error) => {
+                            let bytes = serde_json::to_vec(&DaemonResponse::Error {
+                                message: format!("unparsable request: {error}"),
+                                code: None,
+                                details: None,
+                            })
+                            .unwrap();
                             line.clear();
+                            let _ = write.write_all(&bytes).await;
+                            let _ = write.write_all(b"\n").await;
+                            let _ = write.flush().await;
                             continue;
                         }
                     };
@@ -1557,8 +1566,17 @@ async fn test_p10_background_reconciler_adopts_delayed_completed_session() {
                 while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                     let req: DaemonRequest = match serde_json::from_str(line.trim()) {
                         Ok(r) => r,
-                        Err(_) => {
+                        Err(error) => {
+                            let bytes = serde_json::to_vec(&DaemonResponse::Error {
+                                message: format!("unparsable request: {error}"),
+                                code: None,
+                                details: None,
+                            })
+                            .unwrap();
                             line.clear();
+                            let _ = write.write_all(&bytes).await;
+                            let _ = write.write_all(b"\n").await;
+                            let _ = write.flush().await;
                             continue;
                         }
                     };
@@ -1722,8 +1740,17 @@ async fn test_p10_background_reconciler_closes_cancelled_delayed_completed_sessi
                 while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                     let req: DaemonRequest = match serde_json::from_str(line.trim()) {
                         Ok(r) => r,
-                        Err(_) => {
+                        Err(error) => {
+                            let bytes = serde_json::to_vec(&DaemonResponse::Error {
+                                message: format!("unparsable request: {error}"),
+                                code: None,
+                                details: None,
+                            })
+                            .unwrap();
                             line.clear();
+                            let _ = write.write_all(&bytes).await;
+                            let _ = write.write_all(b"\n").await;
+                            let _ = write.flush().await;
                             continue;
                         }
                     };
@@ -1863,8 +1890,17 @@ async fn test_p11_reattach_failure_cleanup_reconciles_and_reaps_unknown() {
                 while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                     let req: DaemonRequest = match serde_json::from_str(line.trim()) {
                         Ok(r) => r,
-                        Err(_) => {
+                        Err(error) => {
+                            let bytes = serde_json::to_vec(&DaemonResponse::Error {
+                                message: format!("unparsable request: {error}"),
+                                code: None,
+                                details: None,
+                            })
+                            .unwrap();
                             line.clear();
+                            let _ = write.write_all(&bytes).await;
+                            let _ = write.write_all(b"\n").await;
+                            let _ = write.flush().await;
                             continue;
                         }
                     };
@@ -2021,8 +2057,17 @@ async fn test_p12_close_terminates_remote_session_while_detach_preserves_it() {
                 while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                     let req: DaemonRequest = match serde_json::from_str(line.trim()) {
                         Ok(r) => r,
-                        Err(_) => {
+                        Err(error) => {
+                            let bytes = serde_json::to_vec(&DaemonResponse::Error {
+                                message: format!("unparsable request: {error}"),
+                                code: None,
+                                details: None,
+                            })
+                            .unwrap();
                             line.clear();
+                            let _ = write.write_all(&bytes).await;
+                            let _ = write.write_all(b"\n").await;
+                            let _ = write.flush().await;
                             continue;
                         }
                     };
@@ -2185,8 +2230,17 @@ async fn test_p11_reaper_retains_exhausted_records_in_dead_letter_list() {
                 while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                     let req: DaemonRequest = match serde_json::from_str(line.trim()) {
                         Ok(r) => r,
-                        Err(_) => {
+                        Err(error) => {
+                            let bytes = serde_json::to_vec(&DaemonResponse::Error {
+                                message: format!("unparsable request: {error}"),
+                                code: None,
+                                details: None,
+                            })
+                            .unwrap();
                             line.clear();
+                            let _ = write.write_all(&bytes).await;
+                            let _ = write.write_all(b"\n").await;
+                            let _ = write.flush().await;
                             continue;
                         }
                     };
@@ -2346,8 +2400,17 @@ async fn test_p10_pending_create_reaper_resolves_still_pending_records() {
                 while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                     let req: DaemonRequest = match serde_json::from_str(line.trim()) {
                         Ok(r) => r,
-                        Err(_) => {
+                        Err(error) => {
+                            let bytes = serde_json::to_vec(&DaemonResponse::Error {
+                                message: format!("unparsable request: {error}"),
+                                code: None,
+                                details: None,
+                            })
+                            .unwrap();
                             line.clear();
+                            let _ = write.write_all(&bytes).await;
+                            let _ = write.write_all(b"\n").await;
+                            let _ = write.flush().await;
                             continue;
                         }
                     };
@@ -2475,8 +2538,17 @@ async fn test_p11_start_cleanup_reaper_schedules_background_resolution() {
                 while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                     let req: DaemonRequest = match serde_json::from_str(line.trim()) {
                         Ok(r) => r,
-                        Err(_) => {
+                        Err(error) => {
+                            let bytes = serde_json::to_vec(&DaemonResponse::Error {
+                                message: format!("unparsable request: {error}"),
+                                code: None,
+                                details: None,
+                            })
+                            .unwrap();
                             line.clear();
+                            let _ = write.write_all(&bytes).await;
+                            let _ = write.write_all(b"\n").await;
+                            let _ = write.flush().await;
                             continue;
                         }
                     };
@@ -2604,8 +2676,17 @@ async fn test_p12_close_definitive_remote_error_aborts_local_close() {
                 while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                     let req: DaemonRequest = match serde_json::from_str(line.trim()) {
                         Ok(r) => r,
-                        Err(_) => {
+                        Err(error) => {
+                            let bytes = serde_json::to_vec(&DaemonResponse::Error {
+                                message: format!("unparsable request: {error}"),
+                                code: None,
+                                details: None,
+                            })
+                            .unwrap();
                             line.clear();
+                            let _ = write.write_all(&bytes).await;
+                            let _ = write.write_all(b"\n").await;
+                            let _ = write.flush().await;
                             continue;
                         }
                     };
@@ -2728,8 +2809,17 @@ async fn test_p12_close_descriptor_lookup_failure_is_uncertain() {
                 while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                     let req: DaemonRequest = match serde_json::from_str(line.trim()) {
                         Ok(r) => r,
-                        Err(_) => {
+                        Err(error) => {
+                            let bytes = serde_json::to_vec(&DaemonResponse::Error {
+                                message: format!("unparsable request: {error}"),
+                                code: None,
+                                details: None,
+                            })
+                            .unwrap();
                             line.clear();
+                            let _ = write.write_all(&bytes).await;
+                            let _ = write.write_all(b"\n").await;
+                            let _ = write.flush().await;
                             continue;
                         }
                     };
@@ -2830,8 +2920,17 @@ async fn test_p12_close_operation_not_found_journal_stays_uncertain() {
                 while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                     let req: DaemonRequest = match serde_json::from_str(line.trim()) {
                         Ok(r) => r,
-                        Err(_) => {
+                        Err(error) => {
+                            let bytes = serde_json::to_vec(&DaemonResponse::Error {
+                                message: format!("unparsable request: {error}"),
+                                code: None,
+                                details: None,
+                            })
+                            .unwrap();
                             line.clear();
+                            let _ = write.write_all(&bytes).await;
+                            let _ = write.write_all(b"\n").await;
+                            let _ = write.flush().await;
                             continue;
                         }
                     };
@@ -2968,8 +3067,17 @@ async fn test_p12_close_ambiguous_remote_error_exhausts_and_aborts_local_close()
                 while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                     let req: DaemonRequest = match serde_json::from_str(line.trim()) {
                         Ok(r) => r,
-                        Err(_) => {
+                        Err(error) => {
+                            let bytes = serde_json::to_vec(&DaemonResponse::Error {
+                                message: format!("unparsable request: {error}"),
+                                code: None,
+                                details: None,
+                            })
+                            .unwrap();
                             line.clear();
+                            let _ = write.write_all(&bytes).await;
+                            let _ = write.write_all(b"\n").await;
+                            let _ = write.flush().await;
                             continue;
                         }
                     };
@@ -3118,8 +3226,17 @@ async fn test_p13_attach_routes_through_descriptor_and_reinstalls_proxy() {
                 while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                     let req: DaemonRequest = match serde_json::from_str(line.trim()) {
                         Ok(r) => r,
-                        Err(_) => {
+                        Err(error) => {
+                            let bytes = serde_json::to_vec(&DaemonResponse::Error {
+                                message: format!("unparsable request: {error}"),
+                                code: None,
+                                details: None,
+                            })
+                            .unwrap();
                             line.clear();
+                            let _ = write.write_all(&bytes).await;
+                            let _ = write.write_all(b"\n").await;
+                            let _ = write.flush().await;
                             continue;
                         }
                     };
@@ -3268,8 +3385,17 @@ async fn test_p13_attach_preserves_ambiguous_reattach_failure() {
                 while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                     let req: DaemonRequest = match serde_json::from_str(line.trim()) {
                         Ok(r) => r,
-                        Err(_) => {
+                        Err(error) => {
+                            let bytes = serde_json::to_vec(&DaemonResponse::Error {
+                                message: format!("unparsable request: {error}"),
+                                code: None,
+                                details: None,
+                            })
+                            .unwrap();
                             line.clear();
+                            let _ = write.write_all(&bytes).await;
+                            let _ = write.write_all(b"\n").await;
+                            let _ = write.flush().await;
                             continue;
                         }
                     };
@@ -3390,8 +3516,17 @@ async fn test_p13_attach_preserves_not_found_when_descriptor_none() {
                 while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                     let req: DaemonRequest = match serde_json::from_str(line.trim()) {
                         Ok(r) => r,
-                        Err(_) => {
+                        Err(error) => {
+                            let bytes = serde_json::to_vec(&DaemonResponse::Error {
+                                message: format!("unparsable request: {error}"),
+                                code: None,
+                                details: None,
+                            })
+                            .unwrap();
                             line.clear();
+                            let _ = write.write_all(&bytes).await;
+                            let _ = write.write_all(b"\n").await;
+                            let _ = write.flush().await;
                             continue;
                         }
                     };
@@ -3477,8 +3612,17 @@ async fn test_p13_attach_hub_absence_returns_proxy_pending_unknown() {
                 while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
                     let req: DaemonRequest = match serde_json::from_str(line.trim()) {
                         Ok(r) => r,
-                        Err(_) => {
+                        Err(error) => {
+                            let bytes = serde_json::to_vec(&DaemonResponse::Error {
+                                message: format!("unparsable request: {error}"),
+                                code: None,
+                                details: None,
+                            })
+                            .unwrap();
                             line.clear();
+                            let _ = write.write_all(&bytes).await;
+                            let _ = write.write_all(b"\n").await;
+                            let _ = write.flush().await;
                             continue;
                         }
                     };
