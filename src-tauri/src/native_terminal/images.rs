@@ -37,6 +37,28 @@ pub struct ImagePlacementSnapshot {
     pub pixel_height: u32,
     /// Source rectangle in original image pixels (x, y, width, height).
     pub source: [u32; 4],
+    /// Grid-relative pixel rectangle (x, y, width, height) for placements whose
+    /// aspect-preserved destination is not cell aligned, as unicode placeholder
+    /// tiles are. Takes precedence over the cell-based geometry.
+    pub dest_px: Option<[u32; 4]>,
+}
+
+/// A stored unicode-placeholder placement: its pixels and the grid it spans.
+/// Its screen position lives in the placeholder cells, so it is resolved per
+/// frame by `placeholders::resolve_placements`.
+#[derive(Clone, Debug)]
+pub struct VirtualPlacement {
+    pub image: Arc<TerminalImage>,
+    pub placement_id: u32,
+    pub grid_cols: u32,
+    pub grid_rows: u32,
+    pub z: i32,
+}
+
+#[derive(Default)]
+pub struct ImageCapture {
+    pub placements: Vec<ImagePlacementSnapshot>,
+    pub virtuals: Vec<VirtualPlacement>,
 }
 
 #[derive(Default)]
@@ -77,7 +99,8 @@ impl ImageCache {
     pub fn capture(
         &mut self,
         terminal: GhosttyTerminal,
-    ) -> Result<Vec<ImagePlacementSnapshot>, NativeTerminalError> {
+    ) -> Result<ImageCapture, NativeTerminalError> {
+        let mut capture = ImageCapture::default();
         let mut graphics: Graphics = std::ptr::null_mut();
         // SAFETY: Terminal is exclusively accessed for this capture. Each output
         // has the exact C ABI type and borrowed handles never escape this scope.
@@ -87,7 +110,7 @@ impl ImageCache {
         if result == GHOSTTY_NO_VALUE {
             self.images.clear();
             self.generation = 0;
-            return Ok(Vec::new());
+            return Ok(capture);
         }
         check(result)?;
         let mut generation = 0u64;
@@ -97,7 +120,7 @@ impl ImageCache {
         if generation == 0 {
             self.images.clear();
             self.generation = 0;
-            return Ok(Vec::new());
+            return Ok(capture);
         }
         let changed = self.generation != generation;
         let mut iter = std::ptr::null_mut();
@@ -198,6 +221,10 @@ impl ImageCache {
                     );
                 }
             }
+            let is_virtual = NativeTerminalError::decode_c_bool(
+                unsafe { placement_get(iter, PLACEMENT_IS_VIRTUAL)? },
+                "kitty virtual placement",
+            )?;
             let mut info = RenderInfo {
                 size: std::mem::size_of::<RenderInfo>(),
                 ..Default::default()
@@ -205,13 +232,23 @@ impl ImageCache {
             check(unsafe {
                 ghostty_kitty_graphics_placement_render_info(iter, raw_image, terminal, &mut info)
             })?;
+            let Some(image) = self.images.get(&id) else {
+                continue;
+            };
+            if is_virtual {
+                capture.virtuals.push(VirtualPlacement {
+                    image: Arc::clone(image),
+                    placement_id: unsafe { placement_get(iter, PLACEMENT_ID)? },
+                    grid_cols: info.grid_cols,
+                    grid_rows: info.grid_rows,
+                    z: unsafe { placement_get(iter, PLACEMENT_Z)? },
+                });
+                continue;
+            }
             if !NativeTerminalError::decode_c_bool(info.viewport_visible, "kitty viewport visible")?
             {
                 continue;
             }
-            let Some(image) = self.images.get(&id) else {
-                continue;
-            };
             placements.push(ImagePlacementSnapshot {
                 image: Arc::clone(image),
                 placement_id: unsafe { placement_get(iter, PLACEMENT_ID)? },
@@ -228,12 +265,14 @@ impl ImageCache {
                     info.source_width,
                     info.source_height,
                 ],
+                dest_px: None,
             });
         }
         self.images.retain(|id, _| retained.contains(id));
         self.generation = generation;
         placements.sort_by_key(|p| (p.z, p.image.id, p.placement_id));
-        Ok(placements)
+        capture.placements = placements;
+        Ok(capture)
     }
 }
 

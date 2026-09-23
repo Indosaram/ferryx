@@ -489,10 +489,25 @@ impl TerminalEngine for NativeTerminal {
 
     fn render_snapshot(&self) -> Result<RenderSnapshot, NativeTerminalError> {
         let mut snapshot = capture_render_snapshot(self.handle.as_ptr())?;
-        snapshot.images = self
+        let capture = self
             .image_cache
             .borrow_mut()
             .capture(self.handle.as_ptr())?;
+        let mut placeholder_tiles = super::placeholders::resolve_placements(
+            &snapshot.grid,
+            &capture.virtuals,
+            self.context
+                .cell_width
+                .load(std::sync::atomic::Ordering::Acquire),
+            self.context
+                .cell_height
+                .load(std::sync::atomic::Ordering::Acquire),
+        );
+        snapshot.images = capture.placements;
+        snapshot.images.append(&mut placeholder_tiles);
+        snapshot
+            .images
+            .sort_by_key(|placement| (placement.z, placement.image.id, placement.placement_id));
         Ok(snapshot)
     }
 

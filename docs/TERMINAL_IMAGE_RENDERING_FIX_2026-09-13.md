@@ -119,8 +119,9 @@ daemon restart is necessary for that manual capability override.
 
 This change covers native direct Kitty RGB/RGBA/PNG output. It does not add
 Sixel, iTerm2 inline images, web/mobile image transport, or resolve Kitty
-Unicode/virtual placements. The pinned C render-info API marks virtual
-placements invisible and offers no placeholder resolver. Windows/Linux source
+Unicode/virtual placements (that arrived separately, see
+`docs/TERMINAL_UNICODE_PLACEHOLDER_IMAGES_2026-09-23.md`). The pinned C render-info
+API marks virtual placements invisible and offers no placeholder resolver. Windows/Linux source
 paths are portable, but their GPU runtime was not executed in this macOS
 session. External Zig FFI and WGPU cannot be validated through Miri here.
 

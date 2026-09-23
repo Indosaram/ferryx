@@ -4,22 +4,30 @@ use ferryx_lib::terminal::PtyManager;
 use portable_pty::CommandBuilder;
 use std::time::Duration;
 
-async fn image_protocol_from_child(explicit: Option<&str>) -> String {
+async fn environment_from_child(overrides: &[(&str, &str)]) -> String {
     #[cfg(unix)]
     let mut command = {
         let mut command = CommandBuilder::new("/bin/sh");
-        command.args(["-c", "printf 'IMAGE_PROTOCOL=%s:END\\n' \"$PI_IMAGE_PROTOCOL\""]);
+        command.args([
+            "-c",
+            "printf 'IMAGE_PROTOCOL=%s TERM_PROGRAM=%s:END\\n' \"$PI_IMAGE_PROTOCOL\" \"$TERM_PROGRAM\"",
+        ]);
         command
     };
     #[cfg(windows)]
     let mut command = {
         let mut command = CommandBuilder::new("cmd.exe");
-        command.args(["/D", "/C", "echo IMAGE_PROTOCOL=%PI_IMAGE_PROTOCOL%:END"]);
+        command.args([
+            "/D",
+            "/C",
+            "echo IMAGE_PROTOCOL=%PI_IMAGE_PROTOCOL% TERM_PROGRAM=%TERM_PROGRAM%:END",
+        ]);
         command
     };
     command.env_remove("PI_IMAGE_PROTOCOL");
-    if let Some(value) = explicit {
-        command.env("PI_IMAGE_PROTOCOL", value);
+    command.env_remove("TERM_PROGRAM");
+    for (name, value) in overrides {
+        command.env(*name, *value);
     }
     let manager = PtyManager::new();
     let spawn_manager = manager.clone();
@@ -44,14 +52,24 @@ async fn image_protocol_from_child(explicit: Option<&str>) -> String {
 
 #[tokio::test]
 async fn native_pty_advertises_supported_images_to_pi_clients() {
-    // Given an unconfigured client, when it starts in a native PTY, then image output is enabled.
-    let output = image_protocol_from_child(None).await;
-    assert!(output.contains("IMAGE_PROTOCOL=kitty:END"), "{output:?}");
+    let output = environment_from_child(&[]).await;
+    assert!(output.contains("IMAGE_PROTOCOL=kitty"), "{output:?}");
+}
+
+#[tokio::test]
+async fn native_pty_advertises_the_terminal_identity_that_grants_placeholders() {
+    let output = environment_from_child(&[]).await;
+    assert!(output.contains("TERM_PROGRAM=ghostty"), "{output:?}");
 }
 
 #[tokio::test]
 async fn native_pty_preserves_explicit_image_opt_out() {
-    // Given an explicit opt-out, when the client starts, then the terminal preserves that choice.
-    let output = image_protocol_from_child(Some("none")).await;
-    assert!(output.contains("IMAGE_PROTOCOL=none:END"), "{output:?}");
+    let output = environment_from_child(&[("PI_IMAGE_PROTOCOL", "none")]).await;
+    assert!(output.contains("IMAGE_PROTOCOL=none "), "{output:?}");
+}
+
+#[tokio::test]
+async fn native_pty_preserves_an_explicit_terminal_identity() {
+    let output = environment_from_child(&[("TERM_PROGRAM", "my-terminal")]).await;
+    assert!(output.contains("TERM_PROGRAM=my-terminal"), "{output:?}");
 }

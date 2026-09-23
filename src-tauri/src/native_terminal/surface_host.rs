@@ -6430,6 +6430,8 @@ mod tests {
             wide: CellWide::SpacerHead,
             fg: Some(super::super::color::ColorRgb { r: 1, g: 2, b: 3 }),
             bg: Some(super::super::color::ColorRgb { r: 4, g: 5, b: 6 }),
+            fg_ident: None,
+            underline_ident: None,
             bold: true,
             italic: true,
             underline: false,

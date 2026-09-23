@@ -11,6 +11,8 @@ pub fn snapshot_for_layout(
         wide: CellWide::Narrow,
         fg: None,
         bg: None,
+        fg_ident: None,
+        underline_ident: None,
         bold: false,
         italic: false,
         underline: false,

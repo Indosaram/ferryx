@@ -229,6 +229,17 @@ impl PtyManager {
             cmd.env("PI_IMAGE_PROTOCOL", "kitty");
         }
 
+        // A Pi client only uses Kitty unicode placeholders for a VT engine it
+        // trusts, and that is the form Ferryx renders best: an image becomes
+        // placeholder cells, so it scrolls with its text and survives in the
+        // scrollback. Without it every inline image degrades to a cursor
+        // anchored overlay pinned to one content row. Ferryx's engine is
+        // libghostty-vt and its renderer resolves placeholder placements.
+        #[cfg(feature = "native-terminal")]
+        if cmd.get_env("TERM_PROGRAM").is_none() {
+            cmd.env("TERM_PROGRAM", "ghostty");
+        }
+
         let pty_size = PtySize {
             rows,
             cols,

@@ -45,6 +45,15 @@ pub struct CellSnapshot {
     pub fg: Option<ColorRgb>,
     /// Resolved background color, if explicitly set.
     pub bg: Option<ColorRgb>,
+    /// Protocol color identifier of the foreground color: the palette index for an
+    /// indexed color, otherwise the 24-bit RGB value. Kitty unicode placeholders
+    /// carry an image id here. `None` when the cell sets no foreground color.
+    #[serde(skip)]
+    pub fg_ident: Option<u32>,
+    /// Protocol color identifier of the underline color, which carries the
+    /// placement id for Kitty unicode placeholders. `None` when unset.
+    #[serde(skip)]
+    pub underline_ident: Option<u32>,
     /// Bold text decoration.
     pub bold: bool,
     /// Italic text decoration.
@@ -80,6 +89,8 @@ impl Default for CellSnapshot {
             wide: CellWide::Narrow,
             fg: None,
             bg: None,
+            fg_ident: None,
+            underline_ident: None,
             bold: false,
             italic: false,
             underline: false,

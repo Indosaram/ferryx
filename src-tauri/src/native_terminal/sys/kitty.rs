@@ -38,6 +38,7 @@ pub const PLACEMENT_ITERATOR: c_int = 1;
 pub const GENERATION: c_int = 2;
 pub const PLACEMENT_IMAGE_ID: c_int = 1;
 pub const PLACEMENT_ID: c_int = 2;
+pub const PLACEMENT_IS_VIRTUAL: c_int = 3;
 pub const PLACEMENT_X_OFFSET: c_int = 4;
 pub const PLACEMENT_Y_OFFSET: c_int = 5;
 pub const PLACEMENT_Z: c_int = 12;

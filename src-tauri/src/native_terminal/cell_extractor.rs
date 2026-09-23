@@ -5,11 +5,13 @@ use std::ffi::{c_int, c_void};
 use super::color::ColorRgb;
 use super::error::NativeTerminalError;
 use super::snapshot::{CellSnapshot, CellWide};
+use super::sys::constants::{GHOSTTY_STYLE_COLOR_PALETTE, GHOSTTY_STYLE_COLOR_RGB};
 use super::sys::ffi::{ghostty_cell_get, ghostty_render_state_row_cells_get};
 use super::sys::types::{
     GhosttyBuffer, GhosttyCell, GhosttyColorRgb, GhosttyRenderStateRowCells, GhosttyStyle,
-    GHOSTTY_CELL_DATA_WIDE, GHOSTTY_INVALID_VALUE, GHOSTTY_NO_VALUE, GHOSTTY_OUT_OF_SPACE,
-    GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_BG_COLOR, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_FG_COLOR,
+    GhosttyStyleColor, GHOSTTY_CELL_DATA_WIDE, GHOSTTY_INVALID_VALUE, GHOSTTY_NO_VALUE,
+    GHOSTTY_OUT_OF_SPACE, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_BG_COLOR,
+    GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_FG_COLOR,
     GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_UTF8, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW,
     GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_STYLE, GHOSTTY_SUCCESS,
 };
@@ -35,6 +37,17 @@ fn query_optional_color(
     } else {
         NativeTerminalError::from_c_result(res, ctx)?;
         Ok(None)
+    }
+}
+
+fn style_color_ident(color: GhosttyStyleColor) -> Option<u32> {
+    match color.tag {
+        GHOSTTY_STYLE_COLOR_PALETTE => Some(unsafe { color.value.palette } as u32),
+        GHOSTTY_STYLE_COLOR_RGB => {
+            let rgb = unsafe { color.value.rgb };
+            Some(((rgb.r as u32) << 16) | ((rgb.g as u32) << 8) | rgb.b as u32)
+        }
+        _ => None,
     }
 }
 
@@ -170,12 +183,16 @@ pub fn extract_cell_snapshot(
         NativeTerminalError::decode_c_bool(style.strikethrough, "style.strikethrough")?;
     let overline = NativeTerminalError::decode_c_bool(style.overline, "style.overline")?;
     let underline = decode_underline_mode(style.underline)?;
+    let fg_ident = style_color_ident(style.fg_color);
+    let underline_ident = style_color_ident(style.underline_color);
 
     Ok(CellSnapshot {
         text,
         wide,
         fg,
         bg,
+        fg_ident,
+        underline_ident,
         bold,
         italic,
         underline,

@@ -27,6 +27,7 @@ mod mouse_encoder;
 mod paste;
 #[cfg(feature = "native-terminal")]
 pub mod platform;
+mod placeholders;
 mod png_decoder;
 mod queries;
 mod render_pass;

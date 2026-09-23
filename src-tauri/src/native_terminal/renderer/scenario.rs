@@ -26,6 +26,8 @@ fn cell(
         wide: w,
         fg,
         bg,
+        fg_ident: None,
+        underline_ident: None,
         bold: b,
         italic: it,
         underline: false,

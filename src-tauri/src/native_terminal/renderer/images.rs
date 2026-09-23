@@ -37,12 +37,26 @@ impl ImageTextures {
         for placement in &snapshot.images {
             let image = &placement.image;
             let [sx, sy, sw, sh] = placement.source;
-            let x = placement.viewport_col as f32 * config.cell_width_px as f32
-                + placement.offset_x as f32;
-            let y = placement.viewport_row as f32 * config.cell_height_px as f32
-                + placement.offset_y as f32;
-            let w = placement.pixel_width as f32;
-            let h = placement.pixel_height as f32;
+            let (x, y, w, h) = match placement.dest_px {
+                Some([dest_x, dest_y, dest_width, dest_height]) => (
+                    dest_x as f32,
+                    dest_y as f32,
+                    dest_width as f32,
+                    dest_height as f32,
+                ),
+                None => {
+                    let x = placement.viewport_col as f32 * config.cell_width_px as f32
+                        + placement.offset_x as f32;
+                    let y = placement.viewport_row as f32 * config.cell_height_px as f32
+                        + placement.offset_y as f32;
+                    (
+                        x,
+                        y,
+                        placement.pixel_width as f32,
+                        placement.pixel_height as f32,
+                    )
+                }
+            };
             let left = x.max(0.0);
             let top = y.max(0.0);
             let right = (x + w).min(width);
