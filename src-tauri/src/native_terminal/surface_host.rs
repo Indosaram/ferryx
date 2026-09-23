@@ -1029,6 +1029,22 @@ fn defer_scheduled_render<R: Runtime>(
     }
 }
 
+#[cfg(test)]
+pub(crate) static RENDER_SNAPSHOT_CALL_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+pub fn dispatch_main_thread_receipt<R: Runtime>(
+    window: &Window<R>,
+    task: impl FnOnce() + Send + 'static,
+) -> tauri::Result<()> {
+    #[cfg(test)]
+    if let Some(dispatch) = window.try_state::<tests::RenderDispatch>() {
+        dispatch.submit_receipt(Box::new(task));
+        return Ok(());
+    }
+    window.run_on_main_thread(task)
+}
+
 fn dispatch_render_on_main_thread<R: Runtime>(
     window: &Window<R>,
     task: impl FnOnce() + Send + 'static,
@@ -1265,6 +1281,8 @@ fn session_render_snapshot(
                 },
             );
     let mut snapshot = session.terminal.render_snapshot()?;
+    #[cfg(test)]
+    RENDER_SNAPSHOT_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
     snapshot.cursor.visual_style = cursor_style_for_focus(session.focused);
     if session.focused {
         if let Some(preedit) = session
@@ -3067,6 +3085,48 @@ impl NativeTerminalSurfaceHostState {
         Ok(Some(render_input.snapshot))
     }
 
+    pub fn encode_attached_input(
+        &self,
+        session_id: &str,
+        input: &NativeTerminalInput,
+    ) -> Result<Vec<u8>, NativeTerminalError> {
+        validate_session_id(session_id)?;
+        let mut sessions = self.sessions.lock();
+        let session = match sessions.get_mut(session_id) {
+            Some(session) if session.surface_attached => session,
+            Some(_) | None => {
+                return Err(NativeTerminalError::SessionDetached(session_id.to_string()));
+            }
+        };
+        let bytes = input.encoded(&session.terminal)?;
+        if !bytes.is_empty() {
+            let _ = session
+                .terminal
+                .scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
+            if let Ok(sb) = session.terminal.scrollbar() {
+                session.scrollbar_overlay.metrics = Some(sb);
+            }
+            session.publish_frame();
+        }
+        Ok(bytes)
+    }
+
+    pub fn scroll_attached_terminal(
+        &self,
+        session_id: &str,
+        behavior: crate::native_terminal::ScrollViewport,
+    ) -> Result<(), NativeTerminalError> {
+        validate_session_id(session_id)?;
+        let mut sessions = self.sessions.lock();
+        let session = match sessions.get_mut(session_id) {
+            Some(session) if session.surface_attached => session,
+            Some(_) | None => {
+                return Err(NativeTerminalError::SessionDetached(session_id.to_string()));
+            }
+        };
+        session.terminal.scroll_viewport(behavior)
+    }
+
     pub fn encode_input(
         &self,
         session_id: &str,
@@ -3145,15 +3205,71 @@ impl NativeTerminalSurfaceHostState {
             .ok_or(NativeTerminalError::NoValue)?;
         let layout = session.layout.ok_or(NativeTerminalError::NoValue)?;
         let cell_metrics = session.cell_metrics.ok_or(NativeTerminalError::NoValue)?;
-        let snapshot = session.terminal.render_snapshot()?;
-        Ok(NativeTerminalSurfaceReceipt::from_snapshot(
-            layout,
-            &snapshot,
-            0,
-            0,
-            cell_metrics,
-            session.logical_bounds,
-        ))
+        let (cursor_col, cursor_row) = session
+            .terminal
+            .cursor_position()
+            .or_else(|_| {
+                session
+                    .snapshot_slot
+                    .consume()
+                    .map(|f| (f.input.snapshot.cursor.x, f.input.snapshot.cursor.y))
+                    .ok_or(NativeTerminalError::NoValue)
+            })
+            .unwrap_or((0, 0));
+        Ok(NativeTerminalSurfaceReceipt {
+            presented: false,
+            render_deferred: false,
+            render_suspended: false,
+            cols: layout.cols,
+            rows: layout.rows,
+            rebuilt_rows: 0,
+            reused_rows: 0,
+            cursor_col,
+            cursor_row,
+            cell_width_px: cell_metrics.width_px,
+            cell_height_px: cell_metrics.height_px,
+            effective_scale_factor: session.logical_bounds.map(|bounds| bounds.scale_factor),
+        })
+    }
+
+    pub fn degraded_receipt(&self, session_id: &str) -> NativeTerminalSurfaceReceipt {
+        let session_info = self.sessions.try_lock().and_then(|sessions| {
+            sessions.get(session_id).map(|session| {
+                let layout = session.layout;
+                let cell_metrics = session.cell_metrics;
+                let bounds = session.logical_bounds;
+                let cursor = session.terminal.cursor_position().ok().or_else(|| {
+                    session
+                        .snapshot_slot
+                        .consume()
+                        .map(|f| (f.input.snapshot.cursor.x, f.input.snapshot.cursor.y))
+                });
+                (layout, cell_metrics, bounds, cursor)
+            })
+        });
+
+        let (layout, cell_metrics, bounds, cursor) =
+            session_info.unwrap_or((None, None, None, None));
+        let default_metrics = font_manager::derived_cell_metrics();
+        let cell_metrics = cell_metrics.unwrap_or(default_metrics);
+        let cols = layout.map(|l| l.cols).unwrap_or(80);
+        let rows = layout.map(|l| l.rows).unwrap_or(24);
+        let (cursor_col, cursor_row) = cursor.unwrap_or((0, 0));
+
+        NativeTerminalSurfaceReceipt {
+            presented: false,
+            render_deferred: false,
+            render_suspended: false,
+            cols,
+            rows,
+            rebuilt_rows: 0,
+            reused_rows: 0,
+            cursor_col,
+            cursor_row,
+            cell_width_px: cell_metrics.width_px,
+            cell_height_px: cell_metrics.height_px,
+            effective_scale_factor: bounds.map(|b| b.scale_factor),
+        }
     }
 
     pub fn render<R: Runtime>(
@@ -3533,6 +3649,8 @@ impl NativeTerminalSurfaceHost {
         _attention_frame: bool,
         synchronized_output: bool,
     ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
+        #[cfg(test)]
+        RENDER_SNAPSHOT_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
         if synchronized_output {
             let cell_metrics = match &self.frame_target {
                 HostFrameTarget::Native(target) => target.cell_metrics,
@@ -4195,6 +4313,10 @@ mod tests {
             }
             self.sender.send(task).expect("dispatch receiver alive");
         }
+
+        pub fn submit_receipt(&self, task: RenderTask) {
+            self.sender.send(task).expect("dispatch receiver alive");
+        }
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4223,6 +4345,7 @@ mod tests {
             layout: SurfaceCompositionLayout,
             snapshot: &RenderSnapshot,
         ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
+            RENDER_SNAPSHOT_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
             (self.assert_host_locked)();
             let (frame, render_suspended) = acquire_surface_frame(
                 || {
@@ -7911,5 +8034,78 @@ mod tests {
         );
 
         state.teardown();
+    }
+
+    #[tokio::test]
+    async fn receipt_path_builds_zero_snapshots_while_render_path_builds_snapshots() {
+        let harness = DirectRenderHarness::new(vec![SimulatedAcquisition::Frame]);
+        RENDER_SNAPSHOT_CALL_COUNT.store(0, Ordering::SeqCst);
+
+        let receipt = harness
+            .state
+            .get_receipt(&harness.window, &harness.request.session_id)
+            .expect("receipt query");
+        assert_eq!(
+            RENDER_SNAPSHOT_CALL_COUNT.load(Ordering::SeqCst),
+            0,
+            "receipt path must build zero render snapshots"
+        );
+
+        let render_receipt = harness
+            .state
+            .render(&harness.window, harness.request.clone())
+            .expect("render frame");
+        assert!(
+            RENDER_SNAPSHOT_CALL_COUNT.load(Ordering::SeqCst) > 0,
+            "render path must build snapshots"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_input_blocked_main_thread_returns_degraded_error_within_bound() {
+        let harness = DirectRenderHarness::new(vec![]);
+        // Blocked main thread: queue the dispatch (never drained by this test) without
+        // requiring an off-thread origin, so the bounded rendezvous is what must fire.
+        harness
+            .window
+            .state::<RenderDispatch>()
+            .require_deferred
+            .store(false, Ordering::SeqCst);
+        let session_id = &harness.request.session_id;
+        let input = NativeTerminalInput::Text {
+            text: "x".to_string(),
+        };
+        let start = std::time::Instant::now();
+        let result = crate::ipc::native_terminal::send_native_terminal_input_with_writer(
+            harness._app.handle(),
+            &harness.state,
+            session_id,
+            &input,
+            |_bytes| async { Ok(()) },
+        )
+        .await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_millis(1500),
+            "command took too long: {elapsed:?}"
+        );
+        assert!(
+            elapsed >= std::time::Duration::from_millis(200),
+            "command should have waited for rendezvous timeout: {elapsed:?}"
+        );
+
+        let error = result.expect_err("blocked main thread must return an error");
+        assert_eq!(
+            error
+                .details
+                .as_ref()
+                .and_then(|d| d.get("inputWritten"))
+                .and_then(|v| v.as_bool()),
+            Some(true),
+            "degraded error must carry inputWritten: true"
+        );
+        let receipt = error.details.as_ref().and_then(|d| d.get("receipt"));
+        assert!(receipt.is_some(), "error details must carry a degraded receipt");
     }
 }

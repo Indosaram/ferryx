@@ -805,10 +805,8 @@ async fn ssh_remote_input_bounded_queue_rejects_overflow() {
     for task in queued {
         task.await.unwrap().unwrap();
     }
-    assert_eq!(
-        dialer.fake.writes.load(Ordering::SeqCst),
-        1 + EXPECTED_QUEUE_CAPACITY
-    );
+    // Coalesced queued writes produce at most 2 transport writes for 16 items.
+    assert_eq!(dialer.fake.writes.load(Ordering::SeqCst), 3);
 }
 
 #[tokio::test(start_paused = true)]
@@ -877,5 +875,55 @@ async fn ssh_remote_input_stale_generation_resize_is_not_replayed_onto_new_conne
         last,
         (80, 24),
         "stale-generation geometry must not be replayed onto the new connection"
+    );
+}
+
+#[tokio::test]
+async fn ssh_remote_input_coalesces_queued_writes_into_bounded_transport_batches() {
+    let (runtime, _, dialer, _tx) = fixture();
+    runtime.restore(descriptor()).unwrap();
+    let mut rx = runtime.subscribe("local-stable").unwrap();
+    let connected = state(&mut rx, |d| d.state == RemoteConnectionState::Connected).await;
+
+    // Hold dispatch gate so the 4 back-to-back writes enqueue before dispatch begins.
+    let gate = runtime.hold_dispatch_gate_for_test("local-stable").unwrap();
+
+    let op1 = runtime
+        .write("local-stable", connected.generation, b"key-1;".to_vec())
+        .expect("op1 admitted");
+    let op2 = runtime
+        .write("local-stable", connected.generation, b"key-2;".to_vec())
+        .expect("op2 admitted");
+    let op3 = runtime
+        .write("local-stable", connected.generation, b"key-3;".to_vec())
+        .expect("op3 admitted");
+    let op4 = runtime
+        .write("local-stable", connected.generation, b"key-4;".to_vec())
+        .expect("op4 admitted");
+
+    let t1 = tokio::spawn(op1);
+    let t2 = tokio::spawn(op2);
+    let t3 = tokio::spawn(op3);
+    let t4 = tokio::spawn(op4);
+
+    drop(gate);
+
+    t1.await.unwrap().unwrap();
+    t2.await.unwrap().unwrap();
+    t3.await.unwrap().unwrap();
+    t4.await.unwrap().unwrap();
+
+    let write_calls = dialer.fake.writes.load(Ordering::SeqCst);
+    assert!(
+        write_calls <= 2,
+        "4 back-to-back writes must produce at most 2 transport writes, got {write_calls}"
+    );
+
+    let history = dialer.fake.write_history.lock().clone();
+    let combined_bytes: Vec<u8> = history.into_iter().flatten().collect();
+    assert_eq!(
+        combined_bytes,
+        b"key-1;key-2;key-3;key-4;",
+        "concatenated bytes must match FIFO input order"
     );
 }

@@ -7,6 +7,7 @@ import { isTauriRuntime } from "../lib/tauri";
 import { BUILD_STAMP } from "../lib/buildStamp";
 import { composeJamoRuns, isUncomposedJamoRun } from "./hangulComposition";
 import { remoteSocketUrl } from "./remoteClient";
+import { MAX_OUTBOUND_BUFFER_BYTES } from "../lib/terminalTransport/remoteTransport";
 import {
   applyGridFrame,
   decodeGridAttrs,
@@ -33,6 +34,8 @@ type RemoteTerminalProps = {
     sessionId: string,
     state: "open" | "closed",
   ) => void;
+  readonly onInputOverflow?: (droppedBytes: number) => void;
+  readonly onInputDrop?: (droppedBytes: number) => void;
 };
 
 export const MIN_TERMINAL_FONT_SIZE = 10;
@@ -55,6 +58,8 @@ type GridGeometry = {
   readonly cols: number;
   readonly rows: number;
 };
+
+type OutboundPayload = string | Uint8Array;
 
 type SocketRequest = {
   readonly sessionId: string;
@@ -331,6 +336,8 @@ export function RemoteTerminal({
   onSwipeNextTab,
   onSwipePreviousTab,
   onSocketLifecycle,
+  onInputOverflow,
+  onInputDrop,
 }: RemoteTerminalProps) {
   const socketRef = useRef<WebSocket | null>(null);
   const wheelRemainderRowsRef = useRef(0);
@@ -354,9 +361,59 @@ export function RemoteTerminal({
   const [grid, setGrid] = useState<TerminalGridState | null>(null);
   const [cellMetrics, setCellMetrics] = useState<CellMetrics>({ width: 0, height: 0 });
   const [preedit, setPreedit] = useState<string | null>(null);
+  const outboundBufferRef = useRef<Array<{ readonly data: OutboundPayload; readonly byteLength: number }>>([]);
+  const outboundBytesRef = useRef(0);
+  const [pendingInputBytes, setPendingInputBytes] = useState(0);
+  const [inputOverflow, setInputOverflow] = useState(false);
+  const [, setDroppedInputBytes] = useState(0);
+  const droppedInputBytesRef = useRef(0);
   const { settings, refreshNativePreferences } = useTerminalSettings(
     isTauriRuntime() ? undefined : { baseUrl: transportUrl, token },
   );
+
+  const flushOutboundBuffer = useCallback(() => {
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    const queue = outboundBufferRef.current;
+    if (queue.length === 0) return;
+
+    outboundBufferRef.current = [];
+    outboundBytesRef.current = 0;
+    droppedInputBytesRef.current = 0;
+    setPendingInputBytes(0);
+    setInputOverflow(false);
+    setDroppedInputBytes(0);
+
+    for (const item of queue) {
+      socket.send(item.data);
+    }
+  }, []);
+
+  const sendPayload = useCallback((payload: OutboundPayload) => {
+    const byteLength = typeof payload === "string"
+      ? new TextEncoder().encode(payload).byteLength
+      : payload.byteLength;
+    if (byteLength === 0) return;
+
+    const socket = socketRef.current;
+    if (socket && socket.readyState === WebSocket.OPEN && outboundBufferRef.current.length === 0) {
+      socket.send(payload);
+      return;
+    }
+
+    if (outboundBytesRef.current + byteLength > MAX_OUTBOUND_BUFFER_BYTES) {
+      droppedInputBytesRef.current += byteLength;
+      setDroppedInputBytes(droppedInputBytesRef.current);
+      setInputOverflow(true);
+      onInputOverflow?.(byteLength);
+      onInputDrop?.(byteLength);
+      return;
+    }
+
+    outboundBufferRef.current.push({ data: payload, byteLength });
+    outboundBytesRef.current += byteLength;
+    setPendingInputBytes(outboundBytesRef.current);
+  }, [onInputDrop, onInputOverflow]);
 
   const [userFontSize, setUserFontSize] = useState<number | null>(null);
   const activeFontSize = clampTerminalFontSize(userFontSize ?? settings.fontSize);
@@ -386,6 +443,12 @@ export function RemoteTerminal({
   useLayoutEffect(() => {
     // A held tail belongs to the session that was on screen; never leak it into the next one.
     resetSinkState();
+    outboundBufferRef.current = [];
+    outboundBytesRef.current = 0;
+    droppedInputBytesRef.current = 0;
+    setPendingInputBytes(0);
+    setInputOverflow(false);
+    setDroppedInputBytes(0);
   }, [sessionId, activeTabId]);
 
   useLayoutEffect(() => {
@@ -503,6 +566,7 @@ export function RemoteTerminal({
         wheelRemainderRowsRef.current = 0;
         setConnected(true);
         onSocketLifecycle?.(socketRequest.sessionId, "open");
+        flushOutboundBuffer();
         requestResizeRef.current();
       };
       socket.onclose = () => {
@@ -689,9 +753,8 @@ export function RemoteTerminal({
   };
 
   const sendText = (text: string) => {
-    const socket = socketRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN || text.length === 0) return;
-    socket.send(new TextEncoder().encode(text));
+    if (text.length === 0) return;
+    sendPayload(new TextEncoder().encode(text));
   };
 
   /// WebKit inserts U+00A0 for typed spaces; a PTY line must never receive one. Jamo the IME never
@@ -842,33 +905,30 @@ export function RemoteTerminal({
   };
 
   const sendKey = (key: string) => {
-    const socket = socketRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN) return;
-
     // A held IME tail was typed first and must reach the PTY before this key.
     flushSinkText();
 
     if (key === "ctrl-c") {
-      socket.send(JSON.stringify({ type: "signal", signal: "interrupt" }));
+      sendPayload(JSON.stringify({ type: "signal", signal: "interrupt" }));
       return;
     }
     const modifiedDockSequence = modifiedDockNavigationSequence(key);
     if (modifiedDockSequence) {
-      socket.send(new TextEncoder().encode(modifiedDockSequence));
+      sendPayload(new TextEncoder().encode(modifiedDockSequence));
       return;
     }
     if (key.startsWith("alt-")) {
-      socket.send(new TextEncoder().encode(`\u001b${key.slice(4)}`));
+      sendPayload(new TextEncoder().encode(`\u001b${key.slice(4)}`));
       return;
     }
     if (key.startsWith("ctrl-")) {
       const byte = controlByteForChar(key.slice(5));
-      if (byte !== null) socket.send(new Uint8Array([byte]));
+      if (byte !== null) sendPayload(new Uint8Array([byte]));
       return;
     }
     const sequenceKey = BROWSER_KEY_NAMES[key] ?? key;
     const sequence = KEY_SEQUENCES[sequenceKey as keyof typeof KEY_SEQUENCES] ?? sequenceKey;
-    socket.send(new TextEncoder().encode(sequence));
+    sendPayload(new TextEncoder().encode(sequence));
   };
 
   return (
@@ -884,6 +944,25 @@ export function RemoteTerminal({
             <span className="truncate font-mono text-xs text-muted-foreground">{title ?? "Desktop terminal"}</span>
           </div>
           <span className="flex items-center gap-2">
+            {inputOverflow ? (
+              <span
+                data-testid="remote-terminal-overflow-indicator"
+                role="status"
+                className="flex items-center gap-1 rounded border border-rose-500/40 bg-rose-500/10 px-1.5 py-0.5 font-mono text-[10px] text-rose-300"
+              >
+                <span className="h-1.5 w-1.5 rounded-full bg-rose-400" />
+                <span>Input overflow</span>
+              </span>
+            ) : null}
+            {pendingInputBytes > 0 ? (
+              <span
+                data-testid="remote-terminal-buffered-indicator"
+                className="flex items-center gap-1 rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 font-mono text-[10px] text-amber-300"
+              >
+                <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
+                <span>Buffered input</span>
+              </span>
+            ) : null}
             <span data-testid="remote-terminal-build-stamp" className="font-mono text-[10px] text-muted-foreground/70">{BUILD_STAMP}</span>
             <span role="status" className="font-mono text-[10px] text-muted-foreground">
               {connected ? "Live" : "Connecting"}
@@ -1022,8 +1101,37 @@ export function RemoteTerminal({
         }}
       >
         {embedded && !connected ? (
-          <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-center pt-1.5">
+          <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-center gap-2 pt-1.5">
             <span role="status" className="rounded-full border border-border bg-card/95 px-2 py-0.5 font-mono text-[10px] leading-tight text-muted-foreground shadow-sm">Connecting</span>
+            {inputOverflow ? (
+              <span
+                data-testid="remote-terminal-overflow-indicator"
+                role="status"
+                className="rounded-full border border-rose-500/40 bg-rose-500/20 px-2 py-0.5 font-mono text-[10px] leading-tight text-rose-300 shadow-sm"
+              >
+                Input overflow
+              </span>
+            ) : null}
+            {pendingInputBytes > 0 ? (
+              <span
+                data-testid="remote-terminal-buffered-indicator"
+                className="rounded-full border border-amber-500/40 bg-amber-500/20 px-2 py-0.5 font-mono text-[10px] leading-tight text-amber-300 shadow-sm"
+              >
+                Buffered input
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+        {embedded && connected && inputOverflow ? (
+          <div className="pointer-events-none absolute top-1.5 right-2 z-20 flex items-center gap-1 rounded border border-rose-500/40 bg-rose-500/20 px-2 py-0.5 font-mono text-[10px] text-rose-300 shadow-sm">
+            <span className="h-1.5 w-1.5 rounded-full bg-rose-400" />
+            <span>Input overflow</span>
+          </div>
+        ) : null}
+        {embedded && connected && pendingInputBytes > 0 ? (
+          <div className="pointer-events-none absolute top-1.5 right-2 z-20 flex items-center gap-1 rounded border border-amber-500/40 bg-amber-500/20 px-2 py-0.5 font-mono text-[10px] text-amber-300 shadow-sm">
+            <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
+            <span>Buffered input</span>
           </div>
         ) : null}
         <span

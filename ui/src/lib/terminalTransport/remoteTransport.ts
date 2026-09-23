@@ -1,10 +1,21 @@
 import type { TerminalAttachment, TerminalTransport, Unsubscribe } from "./types";
 
+export const MAX_OUTBOUND_BUFFER_BYTES = 4096;
+
+type PendingPayload = {
+  readonly data: string | Uint8Array;
+  readonly byteLength: number;
+};
+
 export class WebSocketTerminalTransport implements TerminalTransport {
   private baseUrl: string;
   private token: string;
   private sockets: Map<string, WebSocket> = new Map();
   private outputListeners: Map<string, Set<(data: Uint8Array) => void>> = new Map();
+  private outboundBuffers: Map<string, PendingPayload[]> = new Map();
+  private outboundBufferBytes: Map<string, number> = new Map();
+  private outboundDropCounts: Map<string, number> = new Map();
+  private onOutboundDropCallback?: (sessionId: string, droppedBytes: number) => void;
 
   constructor(baseUrl: string, token: string) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
@@ -54,6 +65,23 @@ export class WebSocketTerminalTransport implements TerminalTransport {
     const listeners = this.outputListeners.get(sessionId) ?? new Set();
     this.outputListeners.set(sessionId, listeners);
 
+    const flush = () => {
+      this.flushOutboundBuffer(sessionId, ws);
+    };
+    if (typeof ws.addEventListener === "function") {
+      ws.addEventListener("open", flush);
+    }
+    const origOnOpen = ws.onopen;
+    ws.onopen = (event: Event) => {
+      flush();
+      if (typeof origOnOpen === "function") {
+        origOnOpen.call(ws, event);
+      }
+    };
+    if (ws.readyState === WebSocket.OPEN) {
+      flush();
+    }
+
     ws.onmessage = (event) => {
       let data: Uint8Array;
       if (typeof event.data === "string") {
@@ -70,26 +98,81 @@ export class WebSocketTerminalTransport implements TerminalTransport {
     return { sessionId };
   }
 
+  private enqueuePayload(sessionId: string, data: string | Uint8Array, byteLength: number): void {
+    const currentBytes = this.outboundBufferBytes.get(sessionId) ?? 0;
+    if (currentBytes + byteLength > MAX_OUTBOUND_BUFFER_BYTES) {
+      const drops = (this.outboundDropCounts.get(sessionId) ?? 0) + 1;
+      this.outboundDropCounts.set(sessionId, drops);
+      this.onOutboundDropCallback?.(sessionId, byteLength);
+      return;
+    }
+    const queue = this.outboundBuffers.get(sessionId) ?? [];
+    queue.push({ data, byteLength });
+    this.outboundBuffers.set(sessionId, queue);
+    this.outboundBufferBytes.set(sessionId, currentBytes + byteLength);
+  }
+
+  private flushOutboundBuffer(sessionId: string, ws: WebSocket): void {
+    const queue = this.outboundBuffers.get(sessionId);
+    if (!queue || queue.length === 0) return;
+    this.outboundBuffers.delete(sessionId);
+    this.outboundBufferBytes.delete(sessionId);
+    for (const item of queue) {
+      ws.send(item.data);
+    }
+  }
+
+  getOutboundDropCount(sessionId: string): number {
+    return this.outboundDropCounts.get(sessionId) ?? 0;
+  }
+
+  getOutboundBufferSize(sessionId: string): number {
+    return this.outboundBufferBytes.get(sessionId) ?? 0;
+  }
+
+  clearOutboundBuffer(sessionId: string): void {
+    this.outboundBuffers.delete(sessionId);
+    this.outboundBufferBytes.delete(sessionId);
+  }
+
+  setOnOutboundDrop(callback?: (sessionId: string, droppedBytes: number) => void): void {
+    this.onOutboundDropCallback = callback;
+  }
+
   write(sessionId: string, data: string | Uint8Array) {
-    const ws = this.sockets.get(sessionId);
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
     const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
-    ws.send(bytes);
+    const ws = this.sockets.get(sessionId);
+    if (ws && ws.readyState === WebSocket.OPEN && (this.outboundBufferBytes.get(sessionId) ?? 0) === 0) {
+      ws.send(bytes);
+      return;
+    }
+    this.enqueuePayload(sessionId, bytes, bytes.byteLength);
   }
 
   resize(sessionId: string, cols: number, rows: number) {
+    const payload = JSON.stringify({ type: "resize", cols, rows });
     const ws = this.sockets.get(sessionId);
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify({ type: "resize", cols, rows }));
+    if (ws && ws.readyState === WebSocket.OPEN && (this.outboundBufferBytes.get(sessionId) ?? 0) === 0) {
+      ws.send(payload);
+      return;
+    }
+    const byteLength = new TextEncoder().encode(payload).byteLength;
+    this.enqueuePayload(sessionId, payload, byteLength);
   }
 
   signal(sessionId: string, signal: "interrupt" | "terminate" | "kill") {
+    const payload = JSON.stringify({ type: "signal", signal });
     const ws = this.sockets.get(sessionId);
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify({ type: "signal", signal }));
+    if (ws && ws.readyState === WebSocket.OPEN && (this.outboundBufferBytes.get(sessionId) ?? 0) === 0) {
+      ws.send(payload);
+      return;
+    }
+    const byteLength = new TextEncoder().encode(payload).byteLength;
+    this.enqueuePayload(sessionId, payload, byteLength);
   }
 
   async close(sessionId: string) {
+    this.clearOutboundBuffer(sessionId);
     const ws = this.sockets.get(sessionId);
     if (ws) {
       ws.close();

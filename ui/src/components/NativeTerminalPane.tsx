@@ -31,7 +31,22 @@ import { classifyNativeTerminalAttachError } from "../lib/nativeTerminalAttachPo
 import { isPairedWorkspaceId, isRemoteWorkspaceId, pasteClipboardImageLocally, pasteClipboardImageToRemote } from "../lib/remoteProject";
 import { useSleepingSessionIds } from "../lib/sessionLifecycle";
 import { extractIpcErrorMessage } from "../lib/sshHosts";
-import { terminalInputQueue, NativeTerminalStaleGenerationError } from "../lib/nativeTerminalInputQueue";
+import {
+  terminalInputQueue,
+  NativeTerminalStaleGenerationError,
+  NativeTerminalQueueOverflowError,
+  recordTerminalInputDrop,
+  getTerminalInputDropCount,
+  getTerminalInputDropTotals,
+  resetTerminalInputDropCountsForTest,
+} from "../lib/nativeTerminalInputQueue";
+
+export {
+  getTerminalInputDropCount,
+  getTerminalInputDropTotals,
+  recordTerminalInputDrop,
+  resetTerminalInputDropCountsForTest,
+};
 import type { NativeTerminalScrollbarPayload, TerminalSession } from "../lib/types";
 
 export interface TerminalBounds {
@@ -479,6 +494,7 @@ export function resetNativeTerminalPaneForTest(): void {
   mountedNativeTerminalSessionCounts.clear();
   lastFocusedNativeTerminalSessionId = null;
   terminalInputQueue.resetForTest();
+  resetTerminalInputDropCountsForTest();
 }
 
 export function NativeTerminalPane({
@@ -918,16 +934,52 @@ export function NativeTerminalPane({
       return;
     }
 
-    void invoke("cmd_native_terminal_set_preedit", {
-      sessionId: targetSessionId,
-      preedit,
-    }).catch((error: unknown) => {
-      reportNativeTerminalIpcFailure("cmd_native_terminal_set_preedit", error);
-    });
-  }, [targetSessionId, visible]);
+    const isRemote = isRemoteWorkspaceId(session?.workspaceId);
+    const isOutage = isRemote && (
+      session?.remoteConnectionState === "disconnected" ||
+      session?.remoteConnectionState === "reconnecting" ||
+      session?.remoteConnectionState === "expired"
+    );
+    if (isOutage) {
+      return;
+    }
+
+    if (quarantinedBindingRef.current?.sessionId === targetSessionId) {
+      return;
+    }
+
+    const currentSessionId = targetSessionId;
+    const generation = isRemote ? session?.remoteGeneration ?? null : null;
+    const payloadBytes = preedit ? Math.max(1, new TextEncoder().encode(preedit).length) : 1;
+
+    void terminalInputQueue
+      .enqueuePreedit(
+        currentSessionId,
+        generation,
+        payloadBytes,
+        async () => {
+          return invoke("cmd_native_terminal_set_preedit", {
+            sessionId: currentSessionId,
+            preedit,
+          });
+        },
+      )
+      .catch((error: unknown) => {
+        if (error instanceof NativeTerminalStaleGenerationError) {
+          recordTerminalInputDrop("stale-generation");
+          return;
+        }
+        if (error instanceof NativeTerminalQueueOverflowError) {
+          recordTerminalInputDrop("overflow");
+          return;
+        }
+        reportNativeTerminalIpcFailure("cmd_native_terminal_set_preedit", error);
+      });
+  }, [remoteConnectionState, remoteGeneration, session?.remoteConnectionState, session?.remoteGeneration, session?.workspaceId, targetSessionId, visible]);
 
   const sendInput = useCallback((input: NativeTerminalInput) => {
     if (!visible || !isTauri() || !targetSessionId) {
+      recordTerminalInputDrop("dropped");
       switchDebug("terminal.surface.input.dropped", {
         backendSessionId: targetSessionId,
         visible,
@@ -943,6 +995,7 @@ export function NativeTerminalPane({
       session?.remoteConnectionState === "expired"
     );
     if (isOutage) {
+      recordTerminalInputDrop("outage");
       switchDebug("terminal.surface.input.dropped.outage", {
         backendSessionId: targetSessionId,
         state: session?.remoteConnectionState,
@@ -951,6 +1004,7 @@ export function NativeTerminalPane({
     }
 
     if (quarantinedBindingRef.current?.sessionId === targetSessionId) {
+      recordTerminalInputDrop("quarantined");
       switchDebug("terminal.surface.input.dropped.quarantined", {
         backendSessionId: targetSessionId,
       });
@@ -965,7 +1019,10 @@ export function NativeTerminalPane({
 
     const executeInput = async (isRetry = false): Promise<void> => {
       if (!isCurrentOwner()) return;
-      if (quarantinedBindingRef.current?.sessionId === currentSessionId) return;
+      if (quarantinedBindingRef.current?.sessionId === currentSessionId) {
+        recordTerminalInputDrop("quarantined");
+        return;
+      }
       try {
         const receipt = await terminalInputQueue.enqueue(
           currentSessionId,
@@ -994,6 +1051,15 @@ export function NativeTerminalPane({
       } catch (error: unknown) {
         if (!isCurrentOwner()) return;
         if (error instanceof NativeTerminalStaleGenerationError) {
+          recordTerminalInputDrop("stale-generation");
+          return;
+        }
+        if (error instanceof NativeTerminalQueueOverflowError) {
+          recordTerminalInputDrop("overflow");
+          switchDebug("terminal.surface.input.dropped.overflow", {
+            backendSessionId: currentSessionId,
+            error: String(error),
+          });
           return;
         }
         if (isStructuredIpcError(error) && error.details?.inputWritten === true) {
@@ -1021,7 +1087,10 @@ export function NativeTerminalPane({
           try {
             await recovery;
             if (!isCurrentOwner()) return;
-            if (quarantinedBindingRef.current?.sessionId === currentSessionId) return;
+            if (quarantinedBindingRef.current?.sessionId === currentSessionId) {
+              recordTerminalInputDrop("quarantined");
+              return;
+            }
             restoreFocusIfLost();
             await executeInput(true);
           } catch (recoveryError: unknown) {
@@ -1031,6 +1100,7 @@ export function NativeTerminalPane({
               if (bindingKey) {
                 quarantinedBindingRef.current = { sessionId: currentSessionId, bindingKey };
               }
+              recordTerminalInputDrop("quarantined");
               setError(null);
               onBackendSessionUnavailable?.(currentSessionId, classification.reason);
               return;

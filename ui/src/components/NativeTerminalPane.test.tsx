@@ -13,6 +13,11 @@ import {
   resetNativeTerminalPaneForTest,
   snapBoundsToDevicePixels,
 } from "./NativeTerminalPane";
+import {
+  getTerminalInputDropCount,
+  getTerminalInputDropTotals,
+  resetTerminalInputDropCountsForTest,
+} from "../lib/nativeTerminalInputQueue";
 import { registerBuiltInBrowserLinkOpener } from "../lib/linkRouting";
 import { saveBrowserSettings } from "../lib/browserSettings";
 import { NativeTerminalVisibilityProvider } from "../lib/nativeTerminalVisibility";
@@ -3335,7 +3340,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     expect(sends).toHaveLength(1);
   });
 
-  it("routes neutral BODY keyboard input only to the last-focused split terminal", () => {
+  it("routes neutral BODY keyboard input only to the last-focused split terminal", async () => {
     const leftSession = createSession("split-key-left", "daemon-key-left");
     const rightSession = createSession("split-key-right", "daemon-key-right");
     const { getAllByTestId } = render(
@@ -3364,13 +3369,15 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       );
     });
 
-    const sends = tauriCoreMocks.invoke.mock.calls.filter(
-      ([command]) => command === "cmd_native_terminal_send_input",
-    );
-    expect(sends).toHaveLength(1);
-    expect(sends[0]?.[1]).toMatchObject({
-      sessionId: "daemon-key-right",
-      input: { text: "x" },
+    await waitFor(() => {
+      const sends = tauriCoreMocks.invoke.mock.calls.filter(
+        ([command]) => command === "cmd_native_terminal_send_input",
+      );
+      expect(sends).toHaveLength(1);
+      expect(sends[0]?.[1]).toMatchObject({
+        sessionId: "daemon-key-right",
+        input: { text: "x" },
+      });
     });
   });
 
@@ -4597,7 +4604,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     );
   });
 
-  it("clears native preedit before committing composition text", () => {
+  it("clears native preedit before committing composition text", async () => {
     const session = createSession("term-session-1");
     const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
@@ -4609,18 +4616,20 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       textarea.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "한글" }));
     });
 
-    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_set_preedit", {
-      sessionId: "term-session-1",
-      preedit: null,
-    });
-    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
-      sessionId: "term-session-1",
-      input: { text: "한글" },
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_set_preedit", {
+        sessionId: "term-session-1",
+        preedit: null,
+      });
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        sessionId: "term-session-1",
+        input: { text: "한글" },
+      });
     });
     expect(textarea.value).toBe("");
   });
 
-  it("clears a cancelled composition when focus leaves the input sink", () => {
+  it("clears a cancelled composition when focus leaves the input sink", async () => {
     const session = createSession("term-session-1");
     const { getByTestId } = render(<NativeTerminalPane sessionId="term-session-1" session={session} />);
     const textarea = getByTestId("native-terminal-focus-sink") as HTMLTextAreaElement;
@@ -4633,9 +4642,11 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
 
     expect(textarea.value).toBe("");
-    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_set_preedit", {
-      sessionId: "term-session-1",
-      preedit: null,
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_set_preedit", {
+        sessionId: "term-session-1",
+        preedit: null,
+      });
     });
 
     act(() => {
@@ -4643,9 +4654,11 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       textarea.dispatchEvent(new Event("input", { bubbles: true }));
     });
 
-    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
-      sessionId: "term-session-1",
-      input: { text: "a" },
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        sessionId: "term-session-1",
+        input: { text: "a" },
+      });
     });
   });
 
@@ -4709,7 +4722,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         Boolean((args as { input?: { keyEvent?: unknown } })?.input?.keyEvent),
     );
 
-  it("leaves IME-owned keydowns on the focused sink to the IME and commits the composition text once", () => {
+  it("leaves IME-owned keydowns on the focused sink to the IME and commits the composition text once", async () => {
     const session = createSession("term-session-ime-keydown-sink");
     const { getByTestId } = render(
       <NativeTerminalPane sessionId="term-session-ime-keydown-sink" session={session} />,
@@ -4760,7 +4773,9 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       );
     });
 
-    expect(textSendsOf()).toEqual(["안"]);
+    await waitFor(() => {
+      expect(textSendsOf()).toEqual(["안"]);
+    });
   });
 
   it("leaves a legacy keyCode 229 keydown on the focused sink to the IME", () => {
@@ -4841,7 +4856,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     );
   });
 
-  it("focuses the owning sink on a composition-starting IME keydown in the document fallback", () => {
+  it("focuses the owning sink on a composition-starting IME keydown in the document fallback", async () => {
     const session = createSession("term-session-ime-fallback-focus");
     const { getByTestId } = render(
       <NativeTerminalPane sessionId="term-session-ime-fallback-focus" session={session} />,
@@ -4884,7 +4899,9 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       );
     });
 
-    expect(textSendsOf()).toEqual(["가"]);
+    await waitFor(() => {
+      expect(textSendsOf()).toEqual(["가"]);
+    });
   });
 
   it("treats an AltGr text key with only the AltGraph modifier set as text input", () => {
@@ -4958,7 +4975,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     expect(textSendsOf()).toEqual(["@"]);
   });
 
-  it("treats an AltGr chord in the document fallback as text input and focuses the sink", () => {
+  it("treats an AltGr chord in the document fallback as text input and focuses the sink", async () => {
     const session = createSession("term-session-altgraph-fallback");
     const { getByTestId } = render(
       <NativeTerminalPane sessionId="term-session-altgraph-fallback" session={session} />,
@@ -4992,7 +5009,9 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       textarea.dispatchEvent(new Event("input", { bubbles: true }));
     });
 
-    expect(textSendsOf()).toEqual(["@"]);
+    await waitFor(() => {
+      expect(textSendsOf()).toEqual(["@"]);
+    });
   });
 
   it("still forwards a genuine Ctrl+Alt chord when AltGraph is not active", () => {
@@ -5934,9 +5953,11 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       fireEvent.compositionEnd(sink, { data: "가" });
     });
 
-    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
-      sessionId: "daemon-native-ime-switch",
-      input: { text: "가" },
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        sessionId: "daemon-native-ime-switch",
+        input: { text: "가" },
+      });
     });
   });
 
@@ -6991,5 +7012,204 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       ([cmd]) => cmd === "cmd_native_terminal_attach",
     );
     expect(attachCalls).toHaveLength(0);
+  });
+
+  it("delivers preedit update enqueued while input send is in flight strictly after input in NativeTerminalPane", async () => {
+    resetNativeTerminalPaneForTest();
+    const session = createSession("term-session-order");
+    let resolveInput!: (value: unknown) => void;
+    const inputPromise = new Promise((resolve) => {
+      resolveInput = resolve;
+    });
+    const invocations: string[] = [];
+
+    tauriCoreMocks.invoke.mockImplementation(async (cmd, args) => {
+      if (cmd === "cmd_native_terminal_send_input") {
+        invocations.push("send_input");
+        return inputPromise;
+      }
+      if (cmd === "cmd_native_terminal_set_preedit") {
+        invocations.push(`preedit:${args?.preedit}`);
+        return undefined;
+      }
+      return undefined;
+    });
+
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-order" session={session} />,
+    );
+    const sink = getByTestId("native-terminal-focus-sink");
+
+    act(() => {
+      fireEvent.keyDown(sink, { key: "x" });
+    });
+
+    expect(invocations).toEqual(["send_input"]);
+
+    act(() => {
+      fireEvent.compositionUpdate(sink, { data: "한" });
+    });
+
+    expect(invocations).toEqual(["send_input"]);
+
+    await act(async () => {
+      resolveInput({
+        presented: true,
+        cursorCol: 0,
+        cursorRow: 0,
+        cellWidthPx: 8,
+        cellHeightPx: 16,
+      });
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(invocations).toEqual(["send_input", "preedit:한"]);
+    });
+  });
+
+  it("coalesces consecutive preedit updates into one delivered call while input is in flight in NativeTerminalPane", async () => {
+    resetNativeTerminalPaneForTest();
+    const session = createSession("term-session-coalesce");
+    let resolveInput!: (value: unknown) => void;
+    const inputPromise = new Promise((resolve) => {
+      resolveInput = resolve;
+    });
+    const preeditCalls: string[] = [];
+
+    tauriCoreMocks.invoke.mockImplementation(async (cmd, args) => {
+      if (cmd === "cmd_native_terminal_send_input") {
+        return inputPromise;
+      }
+      if (cmd === "cmd_native_terminal_set_preedit") {
+        preeditCalls.push(args?.preedit);
+        return undefined;
+      }
+      return undefined;
+    });
+
+    const { getByTestId } = render(
+      <NativeTerminalPane sessionId="term-session-coalesce" session={session} />,
+    );
+    const sink = getByTestId("native-terminal-focus-sink");
+
+    act(() => {
+      fireEvent.keyDown(sink, { key: "x" });
+    });
+
+    act(() => {
+      fireEvent.compositionUpdate(sink, { data: "ㅎ" });
+      fireEvent.compositionUpdate(sink, { data: "하" });
+      fireEvent.compositionUpdate(sink, { data: "한" });
+    });
+
+    expect(preeditCalls).toHaveLength(0);
+
+    await act(async () => {
+      resolveInput({
+        presented: true,
+        cursorCol: 0,
+        cursorRow: 0,
+        cellWidthPx: 8,
+        cellHeightPx: 16,
+      });
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(preeditCalls).toEqual(["한"]);
+    });
+  });
+
+  it("increments each drop reason counter exactly once for its scenario in NativeTerminalPane", async () => {
+    resetNativeTerminalPaneForTest();
+    resetTerminalInputDropCountsForTest();
+    expect(getTerminalInputDropCount()).toBe(0);
+
+    // Scenario 1: dropped (visible running pane whose session has no backend id yet)
+    const unboundSession = createSession("term-session-drop-unbound", null);
+    const view1 = render(
+      <NativeTerminalPane sessionId="term-session-drop-unbound" session={unboundSession} />,
+    );
+    act(() => {
+      fireEvent.keyDown(view1.getByTestId("native-terminal-focus-sink"), { key: "a" });
+    });
+    expect(getTerminalInputDropCount("dropped")).toBe(1);
+    view1.unmount();
+
+    // Scenario 2: outage (remote workspace in disconnected state)
+    const outageSession = {
+      ...createSession("term-session-drop-outage"),
+      workspaceId: "ssh:ws-outage",
+      remoteConnectionState: "disconnected" as const,
+    };
+    const view2 = render(
+      <NativeTerminalPane sessionId="term-session-drop-outage" session={outageSession} />,
+    );
+    act(() => {
+      fireEvent.keyDown(view2.getByTestId("native-terminal-focus-sink"), { key: "b" });
+    });
+    expect(getTerminalInputDropCount("outage")).toBe(1);
+    view2.unmount();
+
+    // Scenario 3: quarantined (attach failure marks session confirmed-missing)
+    const quarantineSession = createSession("term-session-drop-quarantine");
+    tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
+      if (cmd === "cmd_native_terminal_send_input") {
+        const err = new Error("input failed");
+        Object.assign(err, {
+          code: "INTERNAL_ERROR",
+          details: { inputWritten: false, kind: "error" },
+        });
+        throw err;
+      }
+      if (cmd === "cmd_native_terminal_attach") {
+        const err = new Error("session missing");
+        Object.assign(err, {
+          code: "SESSION_NOT_FOUND",
+          details: {
+            sessionId: "term-session-drop-quarantine",
+            source: "daemon_attach",
+            kind: "session_not_found",
+          },
+        });
+        throw err;
+      }
+      return undefined;
+    });
+    const onUnavailable = vi.fn();
+    const view3 = render(
+      <NativeTerminalPane
+        sessionId="term-session-drop-quarantine"
+        session={quarantineSession}
+        onBackendSessionUnavailable={onUnavailable}
+      />,
+    );
+    const qSink = view3.getByTestId("native-terminal-focus-sink");
+    await act(async () => {
+      fireEvent.keyDown(qSink, { key: "c" });
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(onUnavailable).toHaveBeenCalled();
+    });
+    // Classification records the blocked input once; a further blocked key would
+    // legitimately add another, so this scenario drives exactly one key.
+    await waitFor(() => {
+      expect(getTerminalInputDropCount("quarantined")).toBe(1);
+    });
+    view3.unmount();
+
+    // Overflow and stale-generation drops are decided inside
+    // ui/src/lib/nativeTerminalInputQueue.ts and are covered by that module's own
+    // counter test; this component-level test covers the reasons the pane itself decides.
+
+    // The pane itself decides dropped/outage/quarantined; the recovery retry path can
+    // additionally register queue-level reasons, so match the component-owned set.
+    expect(getTerminalInputDropTotals()).toMatchObject({
+      dropped: 1,
+      outage: 1,
+      quarantined: 1,
+    });
   });
 });

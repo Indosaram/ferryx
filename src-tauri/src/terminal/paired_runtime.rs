@@ -5,7 +5,10 @@ use parking_lot::Mutex;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 use tokio::sync::{mpsc, oneshot};
@@ -33,24 +36,17 @@ pub(crate) enum FsFault {
 }
 
 #[cfg(test)]
-static TEST_FS_FAULT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+thread_local! {
+    static TEST_FS_FAULT: std::cell::Cell<FsFault> = const { std::cell::Cell::new(FsFault::None) };
+}
 
 #[cfg(test)]
 impl FsFault {
     pub(crate) fn set(fault: Self) {
-        let val = match fault {
-            Self::None => 0,
-            Self::FailTempWrite => 1,
-            Self::FailRename => 2,
-        };
-        TEST_FS_FAULT.store(val, std::sync::atomic::Ordering::SeqCst);
+        TEST_FS_FAULT.with(|f| f.set(fault));
     }
     pub(crate) fn get() -> Self {
-        match TEST_FS_FAULT.load(std::sync::atomic::Ordering::SeqCst) {
-            1 => Self::FailTempWrite,
-            2 => Self::FailRename,
-            _ => Self::None,
-        }
+        TEST_FS_FAULT.with(|f| f.get())
     }
 }
 
@@ -93,11 +89,39 @@ fn load_descriptors(
 
 static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static PERSIST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+const PERSIST_MIN_INTERVAL: Duration = Duration::from_millis(100);
+
+#[cfg(test)]
+static TEST_PERSIST_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static TEST_PERSIST_MAP: parking_lot::Mutex<Option<HashMap<PathBuf, usize>>> =
+    parking_lot::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn test_persist_count() -> usize {
+    TEST_PERSIST_COUNT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(test)]
+pub(crate) fn test_persist_count_path(path: &Path) -> usize {
+    TEST_PERSIST_MAP
+        .lock()
+        .as_ref()
+        .and_then(|m| m.get(path).copied())
+        .unwrap_or(0)
+}
 
 fn save_descriptors_locked(
     path: &Path,
     descriptors: &HashMap<String, super::paired_daemon::Descriptor>,
 ) -> Result<(), String> {
+    #[cfg(test)]
+    {
+        TEST_PERSIST_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut map = TEST_PERSIST_MAP.lock();
+        let m = map.get_or_insert_with(HashMap::new);
+        *m.entry(path.to_path_buf()).or_insert(0) += 1;
+    }
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -144,6 +168,8 @@ enum Command {
     Resize(u64, u16, u16, Reply),
     Interrupt(u64, Reply),
     Detach(Reply),
+    #[cfg(test)]
+    Block(oneshot::Sender<()>, oneshot::Receiver<()>),
 }
 struct Owner {
     sender: mpsc::Sender<Command>,
@@ -151,6 +177,42 @@ struct Owner {
     identity: Arc<()>,
     #[cfg(test)]
     completed: tokio::sync::watch::Receiver<bool>,
+}
+
+struct ActorPersistGuard {
+    descriptors: Arc<Mutex<HashMap<String, super::paired_daemon::Descriptor>>>,
+    store_path: Arc<Mutex<Option<PathBuf>>>,
+    dirty: Arc<AtomicBool>,
+}
+
+impl Drop for ActorPersistGuard {
+    fn drop(&mut self) {
+        if !self.dirty.load(Ordering::Acquire) {
+            return;
+        }
+        let path = self.store_path.lock().clone();
+        let Some(ref path) = path else {
+            return;
+        };
+        // R3-N1: acquire PERSIST_MUTEX before taking the snapshot
+        // so disk writes strictly serialize with state updates.
+        let _persist_guard = match PERSIST_MUTEX.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        if !self.dirty.load(Ordering::Acquire) {
+            return;
+        }
+        let snapshot = {
+            let descs = self.descriptors.lock();
+            descs.clone()
+        };
+        if let Err(e) = save_descriptors_locked(path, &snapshot) {
+            eprintln!("[paired_runtime] descriptor save failed in actor drop guard: {e}");
+        } else {
+            self.dirty.store(false, Ordering::Release);
+        }
+    }
 }
 
 /// Weak ownership avoids keeping the runtime alive. Identity fencing prevents an
@@ -186,11 +248,6 @@ impl Drop for ReapOwner {
         let _ = self.completed.send(true);
     }
 }
-impl Drop for Owner {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
 
 pub struct Runtime {
     owners: Arc<Mutex<HashMap<String, Owner>>>,
@@ -207,6 +264,7 @@ impl Default for Runtime {
 impl Runtime {
     pub fn new(store_path: Option<PathBuf>) -> Self {
         let store_path = store_path.or_else(default_descriptors_path);
+        let _persist_guard = PERSIST_MUTEX.lock();
         let (descriptors, effective_store_path) = if let Some(ref path) = store_path {
             match load_descriptors(path) {
                 Ok(map) => (map, store_path),
@@ -218,6 +276,7 @@ impl Runtime {
         } else {
             (HashMap::new(), None)
         };
+        drop(_persist_guard);
         Self {
             owners: Arc::new(Mutex::new(HashMap::new())),
             descriptors: Arc::new(Mutex::new(descriptors)),
@@ -351,6 +410,12 @@ impl Runtime {
         let task_id = id.clone();
         let task = tokio::spawn(async move {
             let _reap = reap;
+            let dirty = Arc::new(AtomicBool::new(false));
+            let _persist_drop_guard = ActorPersistGuard {
+                descriptors: descriptors.clone(),
+                store_path: store_path.clone(),
+                dirty: dirty.clone(),
+            };
             // Drop the proxy and receiver before publishing completion/removing
             // the map entry. A cloned sender then fails closed on this channel.
             let mut proxy = proxy;
@@ -359,8 +424,15 @@ impl Runtime {
             let mut keepalive =
                 tokio::time::interval_at(tokio::time::Instant::now() + period, period);
             keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // Seed one interval in the past so the first change persists immediately:
+            // a change arriving inside the first debounce window could otherwise be
+            // lost when the actor is dropped before the window elapses.
+            let mut last_persisted = tokio::time::Instant::now()
+                .checked_sub(PERSIST_MIN_INTERVAL)
+                .unwrap_or_else(tokio::time::Instant::now);
             loop {
                 tokio::select! {
+                    biased;
                     command = receiver.recv() => match command {
                         Some(Command::Write(g, data, reply)) => {
                             let gen = if g == 0 { proxy.controller().unwrap_or(Epoch(0)) } else { Epoch(g) };
@@ -376,28 +448,138 @@ impl Runtime {
                             // R3-N1: acquire PERSIST_MUTEX before taking the snapshot
                             // so disk writes strictly serialize with state updates.
                             let path = store_path.lock().clone();
-                            let _persist_guard = PERSIST_MUTEX.lock();
+                            let _persist_guard = match PERSIST_MUTEX.lock() {
+                                Ok(g) => g,
+                                Err(_) => {
+                                    let _ = reply.send(result);
+                                    return;
+                                }
+                            };
                             let snapshot = {
                                 let mut descs = descriptors.lock();
                                 descs.insert(task_id.clone(), proxy.descriptor().clone());
                                 descs.clone()
                             };
                             drop(proxy);
-                            if let (Some(ref path), Ok(_)) = (path, _persist_guard) {
+                            if let Some(ref path) = path {
                                 if let Err(e) = save_descriptors_locked(path, &snapshot) {
                                     eprintln!("[paired_runtime] descriptor save failed after detach: {e}");
+                                } else {
+                                    dirty.store(false, Ordering::Release);
                                 }
+                            } else {
+                                dirty.store(false, Ordering::Release);
                             }
+                            drop(_persist_guard);
                             let _ = reply.send(result);
                             return;
                         }
-                        None => return,
+                        #[cfg(test)]
+                        Some(Command::Block(started, rx)) => {
+                            let _ = started.send(());
+                            let _ = rx.await;
+                        }
+                        None => {
+                            let path = store_path.lock().clone();
+                            let _persist_guard = match PERSIST_MUTEX.lock() {
+                                Ok(g) => g,
+                                Err(_) => return,
+                            };
+                            let snapshot = {
+                                let mut descs = descriptors.lock();
+                                descs.insert(task_id.clone(), proxy.descriptor().clone());
+                                descs.clone()
+                            };
+                            drop(proxy);
+                            if let Some(ref path) = path {
+                                if let Err(e) = save_descriptors_locked(path, &snapshot) {
+                                    eprintln!("[paired_runtime] descriptor save failed after channel closed: {e}");
+                                } else {
+                                    dirty.store(false, Ordering::Release);
+                                }
+                            } else {
+                                dirty.store(false, Ordering::Release);
+                            }
+                            drop(_persist_guard);
+                            return;
+                        }
                     },
+                    _ = tokio::time::sleep_until(last_persisted + PERSIST_MIN_INTERVAL), if dirty.load(Ordering::Acquire) => {
+                        let path = store_path.lock().clone();
+                        let _persist_guard = match PERSIST_MUTEX.lock() {
+                            Ok(g) => g,
+                            Err(_) => continue,
+                        };
+                        let snapshot = {
+                            let descs = descriptors.lock();
+                            descs.clone()
+                        };
+                        let mut saved = false;
+                        if let Some(ref path) = path {
+                            match save_descriptors_locked(path, &snapshot) {
+                                Ok(()) => saved = true,
+                                Err(e) => {
+                                    eprintln!("[paired_runtime] descriptor save failed after debounce: {e}");
+                                }
+                            }
+                        } else {
+                            saved = true;
+                        }
+                        drop(_persist_guard);
+                        last_persisted = tokio::time::Instant::now();
+                        if saved {
+                            dirty.store(false, Ordering::Release);
+                        }
+                    }
                     _ = keepalive.tick(), if proxy.controller().is_some() => {
-                        if let Some(g) = proxy.controller() { if proxy.ping(g).await.is_err() { return; } }
+                        if let Some(g) = proxy.controller() {
+                            if proxy.ping(g).await.is_err() {
+                                let path = store_path.lock().clone();
+                                let _persist_guard = match PERSIST_MUTEX.lock() {
+                                    Ok(g) => g,
+                                    Err(_) => return,
+                                };
+                                let snapshot = {
+                                    let mut descs = descriptors.lock();
+                                    descs.insert(task_id.clone(), proxy.descriptor().clone());
+                                    descs.clone()
+                                };
+                                drop(proxy);
+                                if let Some(ref path) = path {
+                                    if save_descriptors_locked(path, &snapshot).is_ok() {
+                                        dirty.store(false, Ordering::Release);
+                                    }
+                                } else {
+                                    dirty.store(false, Ordering::Release);
+                                }
+                                drop(_persist_guard);
+                                return;
+                            }
+                        }
                     }
                     result = proxy.receive(), if proxy.controller().is_some() => {
-                        if result.is_err() || proxy.controller().is_none() { return; }
+                        if result.is_err() || proxy.controller().is_none() {
+                            let path = store_path.lock().clone();
+                            let _persist_guard = match PERSIST_MUTEX.lock() {
+                                Ok(g) => g,
+                                Err(_) => return,
+                            };
+                            let snapshot = {
+                                let mut descs = descriptors.lock();
+                                descs.insert(task_id.clone(), proxy.descriptor().clone());
+                                descs.clone()
+                            };
+                            drop(proxy);
+                            if let Some(ref path) = path {
+                                if save_descriptors_locked(path, &snapshot).is_ok() {
+                                    dirty.store(false, Ordering::Release);
+                                }
+                            } else {
+                                dirty.store(false, Ordering::Release);
+                            }
+                            drop(_persist_guard);
+                            return;
+                        }
                         let seq = proxy.descriptor().after_sequence;
                         let changed = {
                             let mut descs = descriptors.lock();
@@ -414,17 +596,35 @@ impl Runtime {
                             }
                         };
                         if changed {
-                            // R3-N1: acquire PERSIST_MUTEX before taking the snapshot
-                            // so disk writes strictly serialize with state updates.
-                            let path = store_path.lock().clone();
-                            let _persist_guard = PERSIST_MUTEX.lock();
-                            let snapshot = {
-                                let descs = descriptors.lock();
-                                descs.clone()
-                            };
-                            if let (Some(ref path), Ok(_)) = (path, _persist_guard) {
-                                if let Err(e) = save_descriptors_locked(path, &snapshot) {
-                                    eprintln!("[paired_runtime] descriptor save failed after receive: {e}");
+                            dirty.store(true, Ordering::Release);
+                            let now = tokio::time::Instant::now();
+                            if now.duration_since(last_persisted) >= PERSIST_MIN_INTERVAL {
+                                // R3-N1: acquire PERSIST_MUTEX before taking the snapshot
+                                // so disk writes strictly serialize with state updates.
+                                let path = store_path.lock().clone();
+                                let _persist_guard = match PERSIST_MUTEX.lock() {
+                                    Ok(g) => g,
+                                    Err(_) => continue,
+                                };
+                                let snapshot = {
+                                    let descs = descriptors.lock();
+                                    descs.clone()
+                                };
+                                let mut saved = false;
+                                if let Some(ref path) = path {
+                                    match save_descriptors_locked(path, &snapshot) {
+                                        Ok(()) => saved = true,
+                                        Err(e) => {
+                                            eprintln!("[paired_runtime] descriptor save failed after receive: {e}");
+                                        }
+                                    }
+                                } else {
+                                    saved = true;
+                                }
+                                drop(_persist_guard);
+                                last_persisted = now;
+                                if saved {
+                                    dirty.store(false, Ordering::Release);
                                 }
                             }
                         }
@@ -475,7 +675,31 @@ impl Runtime {
             assert!(weak.upgrade().is_none());
         }
     }
-    fn sender(&self, id: &str) -> Result<mpsc::Sender<Command>, String> {
+    #[cfg(test)]
+    pub(crate) fn block_actor(
+        &self,
+        id: &str,
+        started: oneshot::Sender<()>,
+        rx: oneshot::Receiver<()>,
+    ) {
+        if let Ok(sender) = self.sender(id) {
+            let _ = sender.try_send(Command::Block(started, rx));
+        }
+    }
+    #[cfg(test)]
+    pub(crate) async fn abort_actor(&self, id: &str) {
+        let mut completed = {
+            let owners = self.owners.lock();
+            owners.get(id).map(|o| {
+                o.task.abort();
+                o.completed.clone()
+            })
+        };
+        if let Some(ref mut completed) = completed {
+            let _ = completed.wait_for(|done| *done).await;
+        }
+    }
+    pub(crate) fn sender(&self, id: &str) -> Result<mpsc::Sender<Command>, String> {
         self.owners
             .lock()
             .get(id)
@@ -518,7 +742,8 @@ impl Runtime {
             let result = tokio::time::timeout(Duration::from_secs(30), async {
                 let (tx, rx) = oneshot::channel();
                 sender
-                    .try_send(command(tx))
+                    .send(command(tx))
+                    .await
                     .map_err(|_| "PAIRED_PROXY_UNAVAILABLE".to_string())?;
                 rx.await
                     .map_err(|_| "PAIRED_PROXY_UNAVAILABLE".to_string())?
@@ -606,9 +831,17 @@ impl Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paired_host::{client::MachineClient, service::PairedHostService};
     use crate::remote::machine_protocol::RemoteTerminalTarget;
+    use crate::remote::terminal_wire::{encode_frame, Metadata};
     use crate::terminal::output_hub::TerminalOutputHub;
     use crate::terminal::paired_daemon::Descriptor;
+    use axum::{
+        extract::ws::{Message, WebSocketUpgrade},
+        routing::{get, post},
+        Json, Router,
+    };
+    use serde_json::json;
 
     static FAULT_SERIALIZER: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -956,5 +1189,335 @@ mod tests {
             res.is_ok(),
             "deadlock detected: opposite lock order hung tasks"
         );
+    }
+
+    async fn start_mock_relay(
+        temp_dir: &tempfile::TempDir,
+        send_output_frames: bool,
+    ) -> (
+        String,
+        PairedHostService,
+        Descriptor,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        let router = Router::new()
+            .route(
+                "/api/v1/pair/exchange",
+                post(|| async {
+                    Json(json!({
+                        "token": "fixture-secret",
+                        "machineId": "a",
+                        "device": {
+                            "id": "d",
+                            "name": "d",
+                            "permission": "control",
+                            "accessScope": "machine",
+                            "createdAt": 1,
+                            "lastSeenAt": 1
+                        }
+                    }))
+                }),
+            )
+            .route(
+                "/host/a/api/v1/capabilities",
+                get(|| async {
+                    Json(json!({
+                        "apiVersion": 1,
+                        "machineId": "a",
+                        "daemonEpoch": "1",
+                        "platform": "linux",
+                        "accessScope": "machine",
+                        "permission": "control",
+                        "capabilities": ["terminalCreateV1", "terminalStreamV1"],
+                        "limits": {"directoryEntries": 1000, "terminalSessions": 64}
+                    }))
+                }),
+            )
+            .route(
+                "/host/a/api/v1/sessions/s",
+                get(|| async {
+                    Json(json!({
+                        "status": "running",
+                        "session": {
+                            "target": {"machineId": "a", "daemonEpoch": "1", "sessionId": "s"},
+                            "workspaceId": "w",
+                            "worktree": null,
+                            "cwd": "/fixture",
+                            "cols": 80,
+                            "rows": 24,
+                            "running": true,
+                            "providerSession": null,
+                            "startSequence": "10",
+                            "endSequence": "10"
+                        }
+                    }))
+                }),
+            )
+            .route(
+                "/host/a/api/v1/socket-ticket",
+                post(|| async { Json(json!({"ticket": "fixture-ticket"})) }),
+            )
+            .route(
+                "/host/a/api/v1/terminal/s",
+                get(move |ws: WebSocketUpgrade| async move {
+                    ws.on_upgrade(move |mut socket| async move {
+                        socket
+                            .send(Message::Text(
+                                json!({
+                                    "type": "attached",
+                                    "target": {"machineId": "a", "daemonEpoch": "1", "sessionId": "s"},
+                                    "generation": "7",
+                                    "cols": 80,
+                                    "rows": 24,
+                                    "startSequence": "10",
+                                    "endSequence": "10",
+                                    "replayGap": null
+                                })
+                                .to_string()
+                                .into(),
+                            ))
+                            .await
+                            .unwrap();
+                        if send_output_frames {
+                            for seq in 11..=20 {
+                                let frame = encode_frame(
+                                    Metadata::Output {
+                                        sequence: seq,
+                                        gap: None,
+                                    },
+                                    b"x",
+                                    false,
+                                )
+                                .unwrap();
+                                let _ = socket.send(Message::Binary(frame.into())).await;
+                                tokio::time::sleep(Duration::from_millis(5)).await;
+                            }
+                        }
+                        while let Some(msg) = socket.recv().await {
+                            if matches!(msg, Ok(Message::Close(_)) | Err(_)) {
+                                break;
+                            }
+                        }
+                    })
+                }),
+            );
+
+        let (shutdown, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async {
+                    let _ = stopped.await;
+                })
+                .await
+                .unwrap();
+        });
+
+        let service = PairedHostService::open_test_loopback(temp_dir.path().join("service_data"));
+        let host = service
+            .pair(crate::paired_host::service::PairRequest {
+                relay_origin: format!("http://{address}"),
+                pin: crate::paired_host::service::Secret("fixture".into()),
+                display_label: "fixture".into(),
+            })
+            .await
+            .unwrap();
+
+        let descriptor = Descriptor {
+            host_id: host.host_id.clone(),
+            generation: host.generation,
+            target: RemoteTerminalTarget {
+                machine_id: "a".into(),
+                daemon_epoch: Epoch(1),
+                session_id: "s".into(),
+            },
+            after_sequence: None,
+        };
+
+        (
+            format!("http://{address}"),
+            service,
+            descriptor,
+            shutdown,
+            server,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_output_batch_debounce_and_detach_persists_latest_cursor() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store_path = temp_dir.path().join("paired_descriptors.json");
+        let (_relay_origin, service, descriptor, shutdown, server) =
+            start_mock_relay(&temp_dir, true).await;
+
+        let hub = Arc::new(TerminalOutputHub::new(32));
+        let mut proxy = Proxy::new(descriptor, hub.clone()).unwrap();
+        let mut output = hub
+            .subscribe_with_sequence(proxy.id(), None)
+            .unwrap()
+            .receiver;
+        proxy
+            .reattach(&MachineClient::new(), &service)
+            .await
+            .unwrap();
+
+        let runtime = Runtime::new(Some(store_path.clone()));
+        let baseline_persists = test_persist_count_path(&store_path);
+        let id = runtime.install(proxy).unwrap();
+        // install persists once initially
+        assert_eq!(test_persist_count_path(&store_path) - baseline_persists, 1);
+
+        // Wait until all 10 output chunks are delivered to the output hub
+        for _ in 0..10 {
+            tokio::time::timeout(Duration::from_secs(5), output.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        }
+
+        let batches_persists = test_persist_count_path(&store_path) - baseline_persists - 1;
+        assert!(
+            batches_persists <= 2,
+            "10 sequential output batches must cause at most 2 persists, got {batches_persists}"
+        );
+
+        // Final detach must synchronously persist the latest cursor (sequence 20)
+        runtime.detach(&id).await.unwrap();
+
+        let loaded = load_descriptors(&store_path).unwrap();
+        let persisted_desc = loaded.get(&id).expect("descriptor present after detach");
+        assert_eq!(
+            persisted_desc.after_sequence,
+            Some(Epoch(20)),
+            "detach must persist the latest cursor"
+        );
+
+        let _ = shutdown.send(());
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn test_backpressure_full_channel_write_succeeds_once_slots_free() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (_relay_origin, service, descriptor, shutdown, server) =
+            start_mock_relay(&temp_dir, false).await;
+
+        let hub = Arc::new(TerminalOutputHub::new(32));
+        let mut proxy = Proxy::new(descriptor, hub).unwrap();
+        proxy
+            .reattach(&MachineClient::new(), &service)
+            .await
+            .unwrap();
+
+        let runtime = Arc::new(Runtime::default());
+        let id = runtime.install(proxy).unwrap();
+
+        let (blocked_tx, blocked_rx) = oneshot::channel();
+        let (unblock_tx, unblock_rx) = oneshot::channel();
+        runtime.block_actor(&id, blocked_tx, unblock_rx);
+        blocked_rx.await.expect("actor confirmed blocked");
+
+        let sender = runtime.sender(&id).unwrap();
+        // Channel capacity is 32. Fill all 32 buffer slots
+        for _ in 0..32 {
+            let (tx, _rx) = oneshot::channel();
+            sender
+                .try_send(Command::Write(0, b"filler".to_vec(), tx))
+                .unwrap();
+        }
+        // Channel is now pre-filled to capacity
+        let (probe_tx, _probe_rx) = oneshot::channel();
+        assert!(
+            sender
+                .try_send(Command::Write(0, b"probe".to_vec(), probe_tx))
+                .is_err(),
+            "channel must be pre-filled to capacity"
+        );
+
+        // Initiate a write on full channel. Bounded backpressure waits for a slot.
+        let (write_entered_tx, write_entered_rx) = oneshot::channel();
+        let write_fut = {
+            let runtime = runtime.clone();
+            let id = id.clone();
+            tokio::spawn(async move {
+                let op = runtime.write(&id, 0, b"keystroke".to_vec()).unwrap();
+                let _ = write_entered_tx.send(());
+                op.await
+            })
+        };
+
+        // Ensure write_fut has entered and is waiting on backpressure
+        write_entered_rx.await.expect("write future entered");
+        tokio::task::yield_now().await;
+        assert!(
+            !write_fut.is_finished(),
+            "write must wait on backpressure instead of immediately dropping keystroke"
+        );
+
+        // Free slots by unblocking the actor
+        let _ = unblock_tx.send(());
+
+        let res = tokio::time::timeout(Duration::from_secs(5), write_fut)
+            .await
+            .expect("write must complete within timeout")
+            .unwrap();
+
+        assert!(
+            res.is_ok(),
+            "write must succeed with no PAIRED_PROXY_UNAVAILABLE once slots free: {res:?}"
+        );
+
+        let _ = runtime.detach(&id).await;
+        let _ = shutdown.send(());
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn test_actor_abort_inside_debounce_persists_latest_cursor() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store_path = temp_dir.path().join("paired_descriptors.json");
+        let (_relay_origin, service, descriptor, shutdown, server) =
+            start_mock_relay(&temp_dir, true).await;
+
+        let hub = Arc::new(TerminalOutputHub::new(32));
+        let mut proxy = Proxy::new(descriptor, hub.clone()).unwrap();
+        let mut output = hub
+            .subscribe_with_sequence(proxy.id(), None)
+            .unwrap()
+            .receiver;
+        proxy
+            .reattach(&MachineClient::new(), &service)
+            .await
+            .unwrap();
+
+        let runtime = Runtime::new(Some(store_path.clone()));
+        let id = runtime.install(proxy).unwrap();
+
+        // Wait until all 10 output chunks (sequences 11..=20) are delivered to output hub
+        for _ in 0..10 {
+            tokio::time::timeout(Duration::from_secs(5), output.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        }
+
+        // Chunks 11..=20 were received; chunks 12..=20 arrived inside the debounce window.
+        // Abort the actor task before the debounce timer elapses.
+        runtime.abort_actor(&id).await;
+
+        // On-disk snapshot must carry the latest cursor (sequence 20), saved by the drop guard.
+        let loaded = load_descriptors(&store_path).unwrap();
+        let persisted_desc = loaded.get(&id).expect("descriptor present after abort");
+        assert_eq!(
+            persisted_desc.after_sequence,
+            Some(Epoch(20)),
+            "abort inside debounce window must persist the latest cursor"
+        );
+
+        let _ = shutdown.send(());
+        let _ = server.await;
     }
 }

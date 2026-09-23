@@ -12,6 +12,62 @@ export class NativeTerminalStaleGenerationError extends Error {
   }
 }
 
+export type TerminalInputDropReason =
+  | "dropped"
+  | "outage"
+  | "quarantined"
+  | "overflow"
+  | "stale-generation";
+
+export type TerminalInputDropCallback = (
+  reason: TerminalInputDropReason,
+  total: number,
+) => void;
+
+const dropCounters = new Map<TerminalInputDropReason, number>();
+const dropListeners = new Set<TerminalInputDropCallback>();
+
+export function recordTerminalInputDrop(reason: TerminalInputDropReason): void {
+  const next = (dropCounters.get(reason) ?? 0) + 1;
+  dropCounters.set(reason, next);
+  for (const listener of dropListeners) {
+    try {
+      listener(reason, next);
+    } catch {
+      // Drop accounting callbacks must not throw across caller boundaries.
+    }
+  }
+}
+
+export function getTerminalInputDropCount(reason?: TerminalInputDropReason): number {
+  if (reason) return dropCounters.get(reason) ?? 0;
+  let total = 0;
+  for (const count of dropCounters.values()) total += count;
+  return total;
+}
+
+export function getTerminalInputDropTotals(): Readonly<Record<TerminalInputDropReason, number>> {
+  return {
+    dropped: dropCounters.get("dropped") ?? 0,
+    outage: dropCounters.get("outage") ?? 0,
+    quarantined: dropCounters.get("quarantined") ?? 0,
+    overflow: dropCounters.get("overflow") ?? 0,
+    "stale-generation": dropCounters.get("stale-generation") ?? 0,
+  };
+}
+
+export function subscribeTerminalInputDrop(callback: TerminalInputDropCallback): () => void {
+  dropListeners.add(callback);
+  return () => {
+    dropListeners.delete(callback);
+  };
+}
+
+export function resetTerminalInputDropCountsForTest(): void {
+  dropCounters.clear();
+  dropListeners.clear();
+}
+
 interface QueuedItem<T = unknown> {
   readonly id: number;
   readonly generation: number | null;
@@ -19,6 +75,8 @@ interface QueuedItem<T = unknown> {
   readonly execute: () => Promise<T>;
   readonly resolve: (value: T) => void;
   readonly reject: (error: unknown) => void;
+  readonly kind?: "input" | "preedit";
+  readonly supersededResolvers?: Array<(value: T) => void>;
 }
 
 interface SessionQueueState {
@@ -26,6 +84,7 @@ interface SessionQueueState {
   allocatedBytes: number;
   allocatedEntries: number;
   running: boolean;
+  preeditRunning: boolean;
   activeGeneration: number | null;
 }
 
@@ -39,6 +98,20 @@ const DEFAULT_MAX_QUEUE_BYTES = 256 * 1024;
 // which counts in-flight and queued ops together). Buffering far more entries
 // locally would only turn entries 18+ into explicit Busy rejections downstream.
 const DEFAULT_MAX_QUEUE_ENTRIES = 17;
+
+function notifySuperseded<T>(
+  resolvers: Array<(value: T) => void> | undefined,
+  value: T,
+): void {
+  if (!resolvers) return;
+  for (const resolve of resolvers) {
+    try {
+      resolve(value);
+    } catch {
+      // Superseded preedit resolution errors must not disrupt pump.
+    }
+  }
+}
 
 export class NativeTerminalInputQueueManager {
   private readonly maxQueueBytes: number;
@@ -64,7 +137,40 @@ export class NativeTerminalInputQueueManager {
   }
 
   public isRunning(sessionId: string): boolean {
-    return this.sessions.get(sessionId)?.running ?? false;
+    const s = this.sessions.get(sessionId);
+    return (s?.running ?? false) || (s?.preeditRunning ?? false);
+  }
+
+  public recordDrop(reason: TerminalInputDropReason): void {
+    recordTerminalInputDrop(reason);
+  }
+
+  public getDropCount(reason?: TerminalInputDropReason): number {
+    return getTerminalInputDropCount(reason);
+  }
+
+  public getDropTotals(): Readonly<Record<TerminalInputDropReason, number>> {
+    return getTerminalInputDropTotals();
+  }
+
+  public subscribeDrop(callback: TerminalInputDropCallback): () => void {
+    return subscribeTerminalInputDrop(callback);
+  }
+
+  private getOrCreateState(sessionId: string): SessionQueueState {
+    let state = this.sessions.get(sessionId);
+    if (!state) {
+      state = {
+        items: [],
+        allocatedBytes: 0,
+        allocatedEntries: 0,
+        running: false,
+        preeditRunning: false,
+        activeGeneration: null,
+      };
+      this.sessions.set(sessionId, state);
+    }
+    return state;
   }
 
   public invalidateOldGenerations(sessionId: string, currentGeneration: number): void {
@@ -75,6 +181,7 @@ export class NativeTerminalInputQueueManager {
         allocatedBytes: 0,
         allocatedEntries: 0,
         running: false,
+        preeditRunning: false,
         activeGeneration: currentGeneration,
       });
       return;
@@ -89,6 +196,7 @@ export class NativeTerminalInputQueueManager {
         state.allocatedBytes = Math.max(0, state.allocatedBytes - item.bytes);
         state.allocatedEntries = Math.max(0, state.allocatedEntries - 1);
         item.reject(new NativeTerminalStaleGenerationError());
+        notifySuperseded(item.supersededResolvers, undefined);
       } else {
         remaining.push(item);
       }
@@ -107,6 +215,7 @@ export class NativeTerminalInputQueueManager {
       state.allocatedBytes = Math.max(0, state.allocatedBytes - item.bytes);
       state.allocatedEntries = Math.max(0, state.allocatedEntries - 1);
       item.reject(new Error("Terminal input queue cleared"));
+      notifySuperseded(item.supersededResolvers, undefined);
     }
   }
 
@@ -115,6 +224,7 @@ export class NativeTerminalInputQueueManager {
       this.clear(sessionId);
     }
     this.sessions.clear();
+    resetTerminalInputDropCountsForTest();
   }
 
   public enqueue<T>(
@@ -123,17 +233,7 @@ export class NativeTerminalInputQueueManager {
     payloadBytes: number,
     operation: () => Promise<T>,
   ): Promise<T> {
-    let state = this.sessions.get(sessionId);
-    if (!state) {
-      state = {
-        items: [],
-        allocatedBytes: 0,
-        allocatedEntries: 0,
-        running: false,
-        activeGeneration: null,
-      };
-      this.sessions.set(sessionId, state);
-    }
+    const state = this.getOrCreateState(sessionId);
 
     if (
       generation !== null &&
@@ -162,6 +262,86 @@ export class NativeTerminalInputQueueManager {
         execute: operation,
         resolve,
         reject,
+        kind: "input",
+      };
+
+      state.items.push(item as QueuedItem);
+      this.pump(sessionId);
+    });
+  }
+
+  public enqueuePreedit<T>(
+    sessionId: string,
+    generation: number | null,
+    payloadBytes: number,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const state = this.getOrCreateState(sessionId);
+
+    if (
+      generation !== null &&
+      state.activeGeneration !== null &&
+      generation < state.activeGeneration
+    ) {
+      return Promise.reject(new NativeTerminalStaleGenerationError());
+    }
+
+    const boundedBytes = Math.max(1, payloadBytes);
+    const existingIndex = state.items.findIndex((item) => item.kind === "preedit");
+    const existingItem = existingIndex !== -1 ? state.items[existingIndex] : undefined;
+
+    const prospectiveEntries = existingItem
+      ? state.allocatedEntries
+      : state.allocatedEntries + 1;
+    const prospectiveBytes = existingItem
+      ? state.allocatedBytes - existingItem.bytes + boundedBytes
+      : state.allocatedBytes + boundedBytes;
+
+    if (
+      prospectiveEntries > this.maxQueueEntries ||
+      prospectiveBytes > this.maxQueueBytes
+    ) {
+      if (existingIndex !== -1) {
+        const displaced = state.items.splice(existingIndex, 1)[0];
+        if (displaced) {
+          state.allocatedBytes = Math.max(0, state.allocatedBytes - displaced.bytes);
+          state.allocatedEntries = Math.max(0, state.allocatedEntries - 1);
+          const overflowError = new NativeTerminalQueueOverflowError();
+          displaced.reject(overflowError);
+          notifySuperseded(displaced.supersededResolvers, undefined);
+        }
+      }
+      recordTerminalInputDrop("overflow");
+      return Promise.reject(new NativeTerminalQueueOverflowError());
+    }
+
+    const supersededResolvers: Array<(value: unknown) => void> = [];
+
+    if (existingIndex !== -1) {
+      const removed = state.items.splice(existingIndex, 1)[0];
+      if (removed) {
+        state.allocatedBytes = Math.max(0, state.allocatedBytes - removed.bytes);
+        state.allocatedEntries = Math.max(0, state.allocatedEntries - 1);
+        supersededResolvers.push(removed.resolve);
+        if (removed.supersededResolvers) {
+          supersededResolvers.push(...removed.supersededResolvers);
+        }
+      }
+    }
+
+    state.allocatedBytes += boundedBytes;
+    state.allocatedEntries += 1;
+
+    return new Promise<T>((resolve, reject) => {
+      const item: QueuedItem<T> = {
+        id: this.nextItemId++,
+        generation,
+        bytes: boundedBytes,
+        execute: operation,
+        resolve,
+        reject,
+        kind: "preedit",
+        supersededResolvers: supersededResolvers as Array<(value: T) => void>,
       };
 
       state.items.push(item as QueuedItem);
@@ -171,12 +351,19 @@ export class NativeTerminalInputQueueManager {
 
   private pump(sessionId: string): void {
     const state = this.sessions.get(sessionId);
-    if (!state || state.running) return;
+    if (!state || state.items.length === 0) return;
+
+    if (state.running || state.preeditRunning) return;
 
     const item = state.items.shift();
     if (!item) return;
 
-    state.running = true;
+    const isInput = item.kind !== "preedit";
+    if (isInput) {
+      state.running = true;
+    } else {
+      state.preeditRunning = true;
+    }
 
     void (async () => {
       try {
@@ -186,18 +373,25 @@ export class NativeTerminalInputQueueManager {
           item.generation < state.activeGeneration
         ) {
           item.reject(new NativeTerminalStaleGenerationError());
+          notifySuperseded(item.supersededResolvers, undefined);
         } else {
           try {
             const result = await item.execute();
             item.resolve(result);
+            notifySuperseded(item.supersededResolvers, result);
           } catch (error: unknown) {
             item.reject(error);
+            notifySuperseded(item.supersededResolvers, undefined);
           }
         }
       } finally {
         state.allocatedBytes = Math.max(0, state.allocatedBytes - item.bytes);
         state.allocatedEntries = Math.max(0, state.allocatedEntries - 1);
-        state.running = false;
+        if (isInput) {
+          state.running = false;
+        } else {
+          state.preeditRunning = false;
+        }
         this.pump(sessionId);
       }
     })();

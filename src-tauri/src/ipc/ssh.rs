@@ -252,7 +252,9 @@ fn save_store(path: &PathBuf, store: &SshHostStore) -> Result<(), IpcError> {
             IpcErrorCode::IoError,
             format!("Failed to write ssh store: {}", e),
         )
-    })
+    })?;
+    crate::ssh::projects::invalidate_store_memo(path);
+    Ok(())
 }
 
 fn now_millis() -> u64 {
@@ -1099,5 +1101,55 @@ Host dev-box
         assert_eq!(store.hosts[0].label, "omaki");
         assert_eq!(store.hosts[0].hostname, "100.91.254.71");
         assert_eq!(store.hosts[0].username.as_deref(), Some("indo"));
+    }
+
+    #[test]
+    fn save_store_invalidates_memoized_host_store() {
+        let dir = tempfile::tempdir().expect("temporary store");
+        let path = dir.path().join("ssh_hosts.json");
+        let host = SshHost {
+            id: "h1".into(),
+            label: "Host 1".into(),
+            hostname: "127.0.0.1".into(),
+            username: None,
+            port: None,
+            identity_file: None,
+            jump_host: None,
+            source: SshHostSource::Manual,
+            auth_method: SshAuthMethod::Agent,
+            disabled: None,
+        };
+        save_store(
+            &path,
+            &SshHostStore {
+                hosts: vec![host.clone()],
+                tombstones: vec![],
+            },
+        )
+        .expect("initial save");
+
+        let read1 = crate::ssh::projects::enabled_host(&path, "h1").expect("enabled host 1");
+        assert_eq!(read1.disabled, None);
+
+        let mut disabled_host = host.clone();
+        disabled_host.disabled = Some(true);
+        save_store(
+            &path,
+            &SshHostStore {
+                hosts: vec![disabled_host],
+                tombstones: vec![],
+            },
+        )
+        .expect("save disabled host");
+
+        let err = crate::ssh::projects::enabled_host(&path, "h1")
+            .expect_err("should reject disabled host");
+        assert_eq!(
+            err.details
+                .as_ref()
+                .and_then(|d| d.get("reason"))
+                .and_then(|r| r.as_str()),
+            Some("hostDisabled")
+        );
     }
 }

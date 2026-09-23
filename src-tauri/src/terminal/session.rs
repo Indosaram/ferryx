@@ -6,7 +6,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 #[cfg(windows)]
@@ -540,40 +540,109 @@ impl PtySession {
         self.worktree_path.clone()
     }
 
+    pub const DEFAULT_PTY_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
     pub fn write_input(&self, data: &[u8]) -> Result<(), PtyError> {
+        self.write_input_with_deadline(data, Self::DEFAULT_PTY_WRITE_TIMEOUT)
+    }
+
+    #[cfg(unix)]
+    fn poll_writable_deadline(
+        &self,
+        start: std::time::Instant,
+        deadline: Duration,
+    ) -> Result<(), PtyError> {
+        use std::os::fd::AsRawFd;
+        let elapsed = start.elapsed();
+        if elapsed >= deadline {
+            return Err(PtyError::IoError("PTY_INPUT_TIMEOUT".into()));
+        }
+        let remaining_duration = deadline - elapsed;
+        let timeout_ms = i32::try_from(remaining_duration.as_millis())
+            .unwrap_or(i32::MAX)
+            .max(1);
+
+        let mut poll = libc::pollfd {
+            fd: self.input.get_ref().as_raw_fd(),
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        let res = unsafe { libc::poll(&mut poll, 1, timeout_ms) };
+        if res == 0 {
+            return Err(PtyError::IoError("PTY_INPUT_TIMEOUT".into()));
+        }
+        if res < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                if start.elapsed() >= deadline {
+                    return Err(PtyError::IoError("PTY_INPUT_TIMEOUT".into()));
+                }
+                return Ok(());
+            }
+            return Err(PtyError::IoError(err.to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn write_input_with_deadline(
+        &self,
+        data: &[u8],
+        deadline: Duration,
+    ) -> Result<(), PtyError> {
+        let start = std::time::Instant::now();
+
         let mut writer = self.writer.lock();
         let writer = writer
             .as_mut()
             .ok_or_else(|| PtyError::IoError("PTY writer is closed".into()))?;
         let mut remaining = data;
         while !remaining.is_empty() {
+            if start.elapsed() >= deadline {
+                return Err(PtyError::IoError("PTY_INPUT_TIMEOUT".into()));
+            }
             match writer.write(remaining) {
                 Ok(0) => return Err(PtyError::IoError("PTY write returned zero".into())),
                 Ok(n) => remaining = &remaining[n..],
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                    if start.elapsed() >= deadline {
+                        return Err(PtyError::IoError("PTY_INPUT_TIMEOUT".into()));
+                    }
+                    continue;
+                }
                 #[cfg(unix)]
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    use std::os::fd::AsRawFd;
-                    let mut poll = libc::pollfd {
-                        fd: self.input.get_ref().as_raw_fd(),
-                        events: libc::POLLOUT,
-                        revents: 0,
-                    };
-                    if unsafe { libc::poll(&mut poll, 1, -1) } < 0
-                        && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
-                    {
-                        return Err(PtyError::IoError(
-                            std::io::Error::last_os_error().to_string(),
-                        ));
-                    }
+                    self.poll_writable_deadline(start, deadline)?;
                 }
                 Err(e) => return Err(PtyError::IoError(format!("Write failed: {e}"))),
             }
         }
-        writer
-            .flush()
-            .map_err(|e| PtyError::IoError(format!("Flush failed: {e}")))?;
+        loop {
+            if start.elapsed() >= deadline {
+                return Err(PtyError::IoError("PTY_INPUT_TIMEOUT".into()));
+            }
+            match writer.flush() {
+                Ok(()) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                    if start.elapsed() >= deadline {
+                        return Err(PtyError::IoError("PTY_INPUT_TIMEOUT".into()));
+                    }
+                    continue;
+                }
+                #[cfg(unix)]
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    self.poll_writable_deadline(start, deadline)?;
+                }
+                Err(e) => return Err(PtyError::IoError(format!("Flush failed: {e}"))),
+            }
+        }
         Ok(())
+    }
+
+    /// Test seam: replace the PTY writer so the WouldBlock stall path can be
+    /// reproduced without depending on kernel input-queue limits.
+    #[cfg(test)]
+    pub(crate) fn set_writer_for_test(&self, writer: Box<dyn Write + Send>) {
+        *self.writer.lock() = Some(writer);
     }
 
     /// Cancellation drops the pending readiness future: no worker owns bytes.
@@ -1177,5 +1246,127 @@ mod tests {
         let json = serde_json::to_string(&snapshot).expect("serialize snapshot");
         let decoded: PtySessionSnapshot = serde_json::from_str(&json).expect("deserialize snapshot");
         assert_eq!(decoded, snapshot);
+    }
+
+    #[test]
+    fn test_write_input_with_deadline_times_out_when_writer_stalls() {
+        use portable_pty::CommandBuilder;
+
+        struct WouldBlockWriter;
+        impl std::io::Write for WouldBlockWriter {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::WouldBlock))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
+        let _guard = rt.enter();
+
+        let manager = crate::terminal::PtyManager::new();
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.arg("-c");
+        cmd.arg("sleep 30");
+        let (session_id, _rx) = manager.spawn(cmd, 80, 24).expect("spawn pty session");
+        let session = manager.get_session(&session_id).expect("session exists");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let session_clone = Arc::clone(&session);
+        let handle = std::thread::spawn(move || {
+            // A real slave input queue does not stall the master writer on this
+            // platform, so install a writer that always reports WouldBlock to
+            // reproduce the stall the deadline exists for.
+            session_clone.set_writer_for_test(Box::new(WouldBlockWriter));
+            let chunk = vec![b'A'; 4096];
+            let deadline = Duration::from_millis(300);
+            let call_start = std::time::Instant::now();
+            let res = match session_clone.write_input_with_deadline(&chunk, deadline) {
+                Ok(()) => panic!("bounded write succeeded while the writer reported WouldBlock"),
+                Err(err) => (err, call_start.elapsed()),
+            };
+            let _ = tx.send(res);
+        });
+
+        let (err, call_elapsed) = rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("worker thread must complete within 3 seconds");
+        let join_result = handle.join();
+        assert!(join_result.is_ok(), "worker thread join succeeded");
+        let total_wall_time = call_elapsed;
+
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("PTY_INPUT_TIMEOUT"),
+            "expected error containing PTY_INPUT_TIMEOUT, got: {err_msg}"
+        );
+        assert!(
+            total_wall_time < Duration::from_secs(3),
+            "total wall time must stay under 3 seconds, got {total_wall_time:?}"
+        );
+        assert!(
+            call_elapsed < Duration::from_secs(3),
+            "call elapsed time must stay under 3 seconds, got {call_elapsed:?}"
+        );
+
+        let _ = session.kill();
+    }
+
+    #[test]
+    fn test_write_input_with_deadline_times_out_when_writer_returns_interrupted() {
+        use portable_pty::CommandBuilder;
+
+        struct InterruptedWriter;
+        impl std::io::Write for InterruptedWriter {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
+        let _guard = rt.enter();
+
+        let manager = crate::terminal::PtyManager::new();
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.arg("-c");
+        cmd.arg("sleep 30");
+        let (session_id, _rx) = manager.spawn(cmd, 80, 24).expect("spawn pty session");
+        let session = manager.get_session(&session_id).expect("session exists");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let session_clone = Arc::clone(&session);
+        let handle = std::thread::spawn(move || {
+            session_clone.set_writer_for_test(Box::new(InterruptedWriter));
+            let chunk = vec![b'A'; 4096];
+            let deadline = Duration::from_millis(300);
+            let call_start = std::time::Instant::now();
+            let res = match session_clone.write_input_with_deadline(&chunk, deadline) {
+                Ok(()) => panic!("bounded write succeeded while the writer reported Interrupted"),
+                Err(err) => (err, call_start.elapsed()),
+            };
+            let _ = tx.send(res);
+        });
+
+        let (err, call_elapsed) = rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("worker thread must complete within 3 seconds");
+        let join_result = handle.join();
+        assert!(join_result.is_ok(), "worker thread join succeeded");
+
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("PTY_INPUT_TIMEOUT"),
+            "expected error containing PTY_INPUT_TIMEOUT, got: {err_msg}"
+        );
+        assert!(
+            call_elapsed < Duration::from_secs(3),
+            "call elapsed time must stay under 3 seconds, got {call_elapsed:?}"
+        );
+
+        let _ = session.kill();
     }
 }

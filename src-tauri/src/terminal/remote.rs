@@ -1571,24 +1571,39 @@ async fn queue_worker(
     entry_weak: Weak<Entry>,
     hub: Arc<TerminalOutputHub>,
 ) {
-    while let Some(cmd) = rx.recv().await {
+    struct PermitGuard {
+        permits: Arc<parking_lot::Mutex<QueuePermits>>,
+        entries: usize,
+        bytes: usize,
+    }
+    impl Drop for PermitGuard {
+        fn drop(&mut self) {
+            if self.entries > 0 || self.bytes > 0 {
+                let mut p = self.permits.lock();
+                p.allocated_entries = p.allocated_entries.saturating_sub(self.entries);
+                p.allocated_bytes = p.allocated_bytes.saturating_sub(self.bytes);
+            }
+        }
+    }
+
+    let mut pending = std::collections::VecDeque::new();
+    loop {
+        let cmd = if let Some(cmd) = pending.pop_front() {
+            cmd
+        } else {
+            match rx.recv().await {
+                Some(cmd) => cmd,
+                None => break,
+            }
+        };
+
         let Some(e) = entry_weak.upgrade() else {
             break;
         };
 
-        struct PermitGuard {
-            permits: Arc<parking_lot::Mutex<QueuePermits>>,
-            bytes: usize,
-        }
-        impl Drop for PermitGuard {
-            fn drop(&mut self) {
-                let mut p = self.permits.lock();
-                p.allocated_entries = p.allocated_entries.saturating_sub(1);
-                p.allocated_bytes = p.allocated_bytes.saturating_sub(self.bytes);
-            }
-        }
         let _guard = PermitGuard {
             permits: e.queue_permits.clone(),
+            entries: 1,
             bytes: cmd.bytes,
         };
 
@@ -1642,8 +1657,72 @@ async fn queue_worker(
             )
         };
 
+        let mut batched_writes = Vec::new();
+        let mut total_bytes = 0;
+        if let RemoteCommandKind::Write(ref bytes) = cmd.kind {
+            total_bytes = bytes.len();
+            while batched_writes.len() < 8 {
+                let candidate = if let Some(c) = pending.pop_front() {
+                    Some(c)
+                } else {
+                    rx.try_recv().ok()
+                };
+                let Some(candidate) = candidate else {
+                    break;
+                };
+
+                if candidate.reply.is_closed() {
+                    drop(PermitGuard {
+                        permits: e.queue_permits.clone(),
+                        entries: 1,
+                        bytes: candidate.bytes,
+                    });
+                    continue;
+                }
+
+                let matches = match candidate.kind {
+                    RemoteCommandKind::Write(ref b) => {
+                        candidate.generation == cmd.generation
+                            && tokio::time::Instant::now() < candidate.dispatch_deadline
+                            && total_bytes.saturating_add(b.len()) <= MAX_PENDING_BYTES
+                    }
+                    _ => false,
+                };
+
+                if matches {
+                    if let RemoteCommandKind::Write(ref b) = candidate.kind {
+                        total_bytes += b.len();
+                    }
+                    batched_writes.push(candidate);
+                } else {
+                    pending.push_front(candidate);
+                    break;
+                }
+            }
+        }
+
+        let batch_bytes: usize = batched_writes.iter().map(|c| c.bytes).sum();
+        let _batch_guard = PermitGuard {
+            permits: e.queue_permits.clone(),
+            entries: batched_writes.len(),
+            bytes: batch_bytes,
+        };
+
         let result = match cmd.kind {
-            RemoteCommandKind::Write(ref bytes) => client.write(&target, bytes).await,
+            RemoteCommandKind::Write(ref bytes) => {
+                if batched_writes.is_empty() {
+                    client.write(&target, bytes).await
+                } else {
+                    let mut combined = Vec::with_capacity(total_bytes);
+                    combined.extend_from_slice(bytes);
+                    for drained in &batched_writes {
+                        if let RemoteCommandKind::Write(ref b) = drained.kind {
+                            combined.extend_from_slice(b);
+                        }
+                    }
+                    client.write(&target, &combined).await
+                }
+            }
             RemoteCommandKind::Resize(cols, rows) => client.resize(&target, cols, rows).await,
         };
 
@@ -1681,6 +1760,9 @@ async fn queue_worker(
             }
         };
 
-        let _ = cmd.reply.send(outcome);
+        let _ = cmd.reply.send(outcome.clone());
+        for drained in batched_writes {
+            let _ = drained.reply.send(outcome.clone());
+        }
     }
 }

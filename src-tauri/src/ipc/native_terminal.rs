@@ -4,7 +4,10 @@ use tauri::{AppHandle, Manager, Runtime, State};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::daemon::DaemonClient;
-use crate::ipc::IpcError;
+use crate::ipc::{IpcError, IpcErrorCode};
+
+pub const NATIVE_TERMINAL_RECEIPT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(250);
 use crate::native_terminal::composition::{CellMetrics, LogicalBounds, SurfaceCompositionLayout};
 use crate::native_terminal::snapshot_slot::{PresentedFrame, SnapshotSlot};
 use crate::native_terminal::surface_host::{
@@ -784,8 +787,8 @@ pub fn encode_attached_native_input(
     session_id: &str,
     input: &NativeTerminalInput,
 ) -> Result<Vec<u8>, IpcError> {
-    require_attached_surface(state, session_id)
-        .and_then(|()| state.encode_input(session_id, input))
+    state
+        .encode_attached_input(session_id, input)
         .map_err(|error| {
             IpcError::from(error).with_details(serde_json::json!({ "inputWritten": false }))
         })
@@ -845,8 +848,7 @@ pub fn scroll_attached_native_terminal(
     session_id: &str,
     behavior: ScrollViewport,
 ) -> Result<(), NativeTerminalError> {
-    require_attached_surface(state, session_id)?;
-    state.with_session_terminal(session_id, |term| term.scroll_viewport(behavior))
+    state.scroll_attached_terminal(session_id, behavior)
 }
 
 pub fn scrollbar_for_attached_native_terminal(
@@ -970,22 +972,69 @@ pub async fn dispatch_native_terminal_receipt<R: Runtime>(
     let surface_window = window.clone();
     let (sender, receiver) = oneshot::channel();
     let session_id_clone = session_id.to_string();
-    if let Err(error) = window.run_on_main_thread(move || {
-        let result = state_inner
-            .get_receipt(&surface_window, &session_id_clone)
-            .map(|receipt| into_ipc_receipt(session_id_clone.clone(), receipt))
-            .map_err(|error| IpcError::internal(error.to_string()));
-        let _ = sender.send(result);
-    }) {
+    if let Err(error) = crate::native_terminal::surface_host::dispatch_main_thread_receipt(
+        &window,
+        move || {
+            let result = state_inner
+                .get_receipt(&surface_window, &session_id_clone)
+                .map(|receipt| into_ipc_receipt(session_id_clone.clone(), receipt))
+                .map_err(|error| IpcError::internal(error.to_string()));
+            let _ = sender.send(result);
+        },
+    ) {
+        let degraded = state.degraded_receipt(session_id);
+        let degraded_receipt = into_ipc_receipt(session_id.to_string(), degraded);
+        let mut details_map = match serde_json::to_value(&degraded_receipt) {
+            Ok(serde_json::Value::Object(map)) => map,
+            _ => serde_json::Map::new(),
+        };
+        details_map.insert("inputWritten".to_string(), serde_json::Value::Bool(true));
+        details_map.insert(
+            "receipt".to_string(),
+            serde_json::to_value(&degraded_receipt).unwrap_or_default(),
+        );
         return Err(IpcError::internal(format!(
             "Could not dispatch native terminal input receipt: {error}"
-        )));
+        ))
+        .with_details(serde_json::Value::Object(details_map)));
     }
-    match receiver.await {
-        Ok(receipt_result) => receipt_result,
-        Err(_) => Err(IpcError::internal(
-            "Main thread stopped before native terminal input completed",
-        )),
+    match tokio::time::timeout(NATIVE_TERMINAL_RECEIPT_TIMEOUT, receiver).await {
+        Ok(Ok(receipt_result)) => receipt_result,
+        Ok(Err(_)) => {
+            let degraded = state.degraded_receipt(session_id);
+            let degraded_receipt = into_ipc_receipt(session_id.to_string(), degraded);
+            let mut details_map = match serde_json::to_value(&degraded_receipt) {
+                Ok(serde_json::Value::Object(map)) => map,
+                _ => serde_json::Map::new(),
+            };
+            details_map.insert("inputWritten".to_string(), serde_json::Value::Bool(true));
+            details_map.insert(
+                "receipt".to_string(),
+                serde_json::to_value(&degraded_receipt).unwrap_or_default(),
+            );
+            Err(IpcError::internal(
+                "Main thread stopped before native terminal input completed",
+            )
+            .with_details(serde_json::Value::Object(details_map)))
+        }
+        Err(_) => {
+            let degraded = state.degraded_receipt(session_id);
+            let degraded_receipt = into_ipc_receipt(session_id.to_string(), degraded);
+            let mut details_map = match serde_json::to_value(&degraded_receipt) {
+                Ok(serde_json::Value::Object(map)) => map,
+                _ => serde_json::Map::new(),
+            };
+            details_map.insert("inputWritten".to_string(), serde_json::Value::Bool(true));
+            details_map.insert(
+                "receipt".to_string(),
+                serde_json::to_value(&degraded_receipt).unwrap_or_default(),
+            );
+            Err(IpcError::new(
+                IpcErrorCode::Timeout,
+                "Main thread rendezvous timed out awaiting native terminal receipt",
+            )
+            .with_details(serde_json::Value::Object(details_map)))
+        }
     }
 }
 
@@ -1001,27 +1050,34 @@ where
     Fut: std::future::Future<Output = Result<(), IpcError>>,
 {
     let bytes = encode_attached_native_input(state, session_id, input)?;
-    state.emit_scrollbar_if_changed(Some(app), session_id);
     write_op(bytes).await?;
     // Keystroke parity with standard terminals (ghostty
     // scroll-to-bottom.keystroke=true): typing while the viewport is
     // scrolled up snaps back to the live edge so the echoed input is
     // visible. The write above already succeeded, so a snap failure is
     // cosmetic and must not fail the command.
-    if require_attached_surface(state, session_id).is_ok() {
-        if let Err(err) = scroll_attached_native_terminal(state, session_id, ScrollViewport::Bottom)
-        {
+    if let Err(err) = scroll_attached_native_terminal(state, session_id, ScrollViewport::Bottom) {
+        if !matches!(err, NativeTerminalError::SessionDetached(_)) {
             tracing::warn!(
                 session_id,
                 %err,
                 "Failed to snap native terminal viewport to bottom after input"
             );
         }
+    } else {
         state.emit_scrollbar_if_changed(Some(app), session_id);
     }
     dispatch_native_terminal_receipt(app, state, session_id)
         .await
-        .map_err(|error| error.with_details(serde_json::json!({ "inputWritten": true })))
+        .map_err(|mut error| {
+            if let Some(ref mut details) = error.details {
+                if let Some(obj) = details.as_object_mut() {
+                    obj.insert("inputWritten".to_string(), serde_json::Value::Bool(true));
+                    return error;
+                }
+            }
+            error.with_details(serde_json::json!({ "inputWritten": true }))
+        })
 }
 
 #[tauri::command]
@@ -1396,7 +1452,15 @@ pub async fn cmd_native_terminal_paste<R: Runtime>(
 
     dispatch_native_terminal_receipt(&app, state.inner(), &session_id)
         .await
-        .map_err(|error| error.with_details(serde_json::json!({ "inputWritten": true })))
+        .map_err(|mut error| {
+            if let Some(ref mut details) = error.details {
+                if let Some(obj) = details.as_object_mut() {
+                    obj.insert("inputWritten".to_string(), serde_json::Value::Bool(true));
+                    return error;
+                }
+            }
+            error.with_details(serde_json::json!({ "inputWritten": true }))
+        })
 }
 
 pub(crate) fn authoritative_mouse_event(

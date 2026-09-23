@@ -1593,9 +1593,12 @@ async fn machine_terminal_upgrade(
 #[cfg(all(test, unix))]
 #[path = "../../tests/support/machine_input_cancellation.rs"]
 pub(crate) mod machine_input_cancellation_tests;
+#[cfg(all(test, unix))]
+#[path = "../../tests/support/machine_input_fixture.rs"]
+pub(crate) mod machine_input_fixture;
 #[cfg(test)]
 #[path = "machine_input_probe.rs"]
-mod machine_input_probe;
+pub(crate) mod machine_input_probe;
 
 fn machine_control_message(value: serde_json::Value) -> Message {
     Message::Text(value.to_string().into())
@@ -1762,11 +1765,16 @@ async fn handle_machine_terminal_socket(
     };
     let (input_tx, mut input_rx) = mpsc::channel(if cfg!(test) { 1 } else { 64 });
     let read = async {
+        let mut pending_message: Option<Message> = None;
         loop {
-            let message = match tokio::time::timeout(Duration::from_secs(60), receiver.next()).await
-            {
-                Ok(Some(Ok(msg))) => msg,
-                _ => return,
+            let message = match pending_message.take() {
+                Some(msg) => msg,
+                None => {
+                    match tokio::time::timeout(Duration::from_secs(60), receiver.next()).await {
+                        Ok(Some(Ok(msg))) => msg,
+                        _ => return,
+                    }
+                }
             };
             if matches!(message, Message::Close(_)) {
                 return;
@@ -1777,22 +1785,32 @@ async fn handle_machine_terminal_socket(
             if input_tx.capacity() == 0 {
                 machine_input_probe::queue_full(&target.session_id);
             }
-            // Preserve ordinary bursts with bounded backpressure, but keep one
-            // lookahead read live so Close/EOF can cancel a saturated writer.
-            // Further data beyond this bounded window ends the socket; it is
-            // never buffered for delivery after reconnect.
+            // Throttle under saturation with backpressure while keeping
+            // lookahead alive for Close/EOF cancellation.
+            let send = input_tx.send(message);
+            tokio::pin!(send);
+            let mut next_message = None;
             tokio::select! {
                 biased;
-                result = input_tx.send(message) => { if result.is_err() { return; } }
+                result = send.as_mut() => {
+                    if result.is_err() {
+                        return;
+                    }
+                }
                 next_frame = receiver.next() => {
                     match next_frame {
                         Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return,
-                        Some(Ok(_)) => {
-                            // Saturated writer received further data beyond bounded queue
-                            return;
+                        Some(Ok(next)) => {
+                            next_message = Some(next);
                         }
                     }
                 }
+            }
+            if let Some(next) = next_message {
+                if send.await.is_err() {
+                    return;
+                }
+                pending_message = Some(next);
             }
         }
     };
@@ -6477,5 +6495,131 @@ mod tests {
 
         let _ = stop_tx.send(());
         let _ = task.await;
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_machine_terminal_input_throttled_under_saturation_preserves_order() {
+        use futures_util::SinkExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let fixture = machine_input_fixture::Fixture::new().await;
+        let session = fixture.create().await;
+        let id = session["target"]["sessionId"].as_str().unwrap();
+        let mut socket = fixture.attach(&session).await;
+
+        let path = fixture.root.path().join("throttle.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let script = r#"use IO::Socket::UNIX; my $s=IO::Socket::UNIX->new(Peer=>$ARGV[0]) or die $!; $s->autoflush(1); print $s pack('L<',$$); read($s,my $go,1)==1 or die; while (1) { my $n=sysread(STDIN,my $b,4096); $n or die; print $s $b; last if index($b,'!')>=0; }"#;
+        let command = format!(
+            "stty raw -echo; exec /usr/bin/perl -e '{}' '{}'\r",
+            script.replace('\'', "'\\''"),
+            path.display()
+        );
+        socket
+            .send(Message::Binary(command.into_bytes().into()))
+            .await
+            .unwrap();
+
+        let (mut control, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let pid = control.read_u32_le().await.unwrap();
+        drop(listener);
+        let _ = std::fs::remove_file(&path);
+
+        let pty = fixture
+            .owner
+            .terminal_service()
+            .get_session(id)
+            .unwrap();
+        assert_eq!(pty.pid(), Some(pid));
+
+        let fd = pty.raw_master_fd().unwrap();
+        let fill = [b'x'; 65536];
+        loop {
+            // SAFETY: fill is a valid local slice, fd is owned by active pty.
+            let n = unsafe { libc::write(fd, fill.as_ptr().cast(), fill.len()) };
+            if n < 0 {
+                assert_eq!(
+                    std::io::Error::last_os_error().kind(),
+                    std::io::ErrorKind::WouldBlock
+                );
+                break;
+            }
+        }
+
+        let mut observation = machine_input_probe::Observation::register(id);
+
+        // F1 is popped by receiver and enters pending PTY write (kernel WouldBlock).
+        socket
+            .send(Message::Binary(b"F1:FIRST\n".to_vec().into()))
+            .await
+            .unwrap();
+        // F2 fills the 1-slot channel queue.
+        socket
+            .send(Message::Binary(b"F2:SECOND\n".to_vec().into()))
+            .await
+            .unwrap();
+        // F3 begins in-flight send, saturating the writer and triggering queue_full.
+        socket
+            .send(Message::Binary(b"F3:THIRD\n".to_vec().into()))
+            .await
+            .unwrap();
+
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            observation.0.wait_for(|p| p.queue_full),
+        )
+        .await
+        .expect("queue must become full")
+        .unwrap();
+
+        // One further frame sent under saturation: backpressure must keep socket open.
+        socket
+            .send(Message::Binary(b"F4:FOURTH\n".to_vec().into()))
+            .await
+            .unwrap();
+
+        // Unblock the slow consumer.
+        control.write_all(&[1]).await.unwrap();
+        socket
+            .send(Message::Binary(b"!\n".to_vec().into()))
+            .await
+            .unwrap();
+
+        let mut delivered = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = tokio::time::timeout(Duration::from_secs(10), control.read(&mut chunk))
+                .await
+                .expect("drain must not time out")
+                .expect("read chunk");
+            assert!(n > 0, "control closed before delivering terminator");
+            delivered.extend_from_slice(&chunk[..n]);
+            if delivered.contains(&b'!') {
+                break;
+            }
+        }
+
+        let text = String::from_utf8_lossy(&delivered);
+        let pos1 = text.find("F1:FIRST").expect("F1 must be delivered");
+        let pos2 = text.find("F2:SECOND").expect("F2 must be delivered");
+        let pos3 = text.find("F3:THIRD").expect("F3 must be delivered");
+        let pos4 = text.find("F4:FOURTH").expect("F4 must be delivered");
+        assert!(pos1 < pos2, "F1 must arrive before F2");
+        assert!(pos2 < pos3, "F2 must arrive before F3");
+        assert!(pos3 < pos4, "F3 must arrive before F4");
+
+        // Assert the connection stayed open and healthy after saturation.
+        socket
+            .send(Message::Ping(vec![1, 2, 3].into()))
+            .await
+            .expect("socket must stay open after saturation");
+        let _ = socket.close(None).await;
+
+        fixture.cleanup().await;
     }
 }

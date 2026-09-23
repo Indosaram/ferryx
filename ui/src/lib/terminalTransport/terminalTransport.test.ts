@@ -1,8 +1,60 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { terminalEventBus, type TerminalOutputChunk } from "../terminalEvents";
 import * as tauri from "../tauri";
-import { WebSocketTerminalTransport } from "./remoteTransport";
+import { MAX_OUTBOUND_BUFFER_BYTES, WebSocketTerminalTransport } from "./remoteTransport";
 import { TauriTerminalTransport } from "./tauriTransport";
+
+class MockWebSocket {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSING = 2;
+  static readonly CLOSED = 3;
+
+  readonly CONNECTING = 0;
+  readonly OPEN = 1;
+  readonly CLOSING = 2;
+  readonly CLOSED = 3;
+
+  readyState = MockWebSocket.CONNECTING;
+  binaryType = "blob";
+  readonly sent: Array<string | Uint8Array> = [];
+  private readonly openListeners: Set<() => void> = new Set();
+  onopen: ((event: Event) => void) | null = null;
+  onclose: ((event: Event) => void) | null = null;
+  onerror: ((event: Event) => void) | null = null;
+  onmessage: ((event: { data: string | ArrayBuffer }) => void) | null = null;
+
+  constructor(public readonly url: string) {}
+
+  send(data: string | Uint8Array) {
+    this.sent.push(data);
+  }
+
+  close() {
+    this.readyState = MockWebSocket.CLOSED;
+  }
+
+  addEventListener(event: string, listener: () => void) {
+    if (event === "open") {
+      this.openListeners.add(listener);
+    }
+  }
+
+  removeEventListener(event: string, listener: () => void) {
+    if (event === "open") {
+      this.openListeners.delete(listener);
+    }
+  }
+
+  open() {
+    this.readyState = MockWebSocket.OPEN;
+    for (const listener of this.openListeners) {
+      listener();
+    }
+    const openEvent = typeof Event !== "undefined" ? new Event("open") : ({ type: "open" } as unknown as Event);
+    this.onopen?.(openEvent);
+  }
+}
 
 describe("TerminalTransport abstractions", () => {
   it("TauriTerminalTransport instantiates and conforms to contract", async () => {
@@ -179,5 +231,88 @@ describe("TerminalTransport abstractions", () => {
     expect(typeof transport.attach).toBe("function");
     expect(typeof transport.write).toBe("function");
     expect(typeof transport.resize).toBe("function");
+  });
+
+  describe("WebSocketTerminalTransport outbound buffering", () => {
+    let lastMockWs: MockWebSocket | null = null;
+
+    class TestWebSocket extends MockWebSocket {
+      constructor(url: string) {
+        super(url);
+        lastMockWs = this;
+      }
+    }
+
+    beforeEach(() => {
+      lastMockWs = null;
+      vi.spyOn(globalThis, "fetch").mockResolvedValue({
+        ok: true,
+        json: async () => ({ ticket: "mock-ticket" }),
+      } as Response);
+      vi.stubGlobal("WebSocket", TestWebSocket);
+    });
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    });
+
+    it("WebSocketTerminalTransport delivers writes issued while CONNECTING in exact order on open", async () => {
+      const transport = new WebSocketTerminalTransport("http://127.0.0.1:43821", "dummy_token");
+      await transport.attach("sess-a");
+
+      expect(lastMockWs?.readyState).toBe(MockWebSocket.CONNECTING);
+
+      // Writes issued while socket is connecting are buffered in FIFO order.
+      transport.write("sess-a", "first-chunk\n");
+      transport.resize("sess-a", 120, 40);
+      transport.signal("sess-a", "interrupt");
+      transport.write("sess-a", new TextEncoder().encode("second-chunk\n"));
+
+      expect(lastMockWs?.sent).toHaveLength(0);
+
+      lastMockWs?.open();
+
+      expect(lastMockWs?.sent).toHaveLength(4);
+      const decoder = new TextDecoder();
+      expect(decoder.decode(lastMockWs?.sent[0] as Uint8Array)).toBe("first-chunk\n");
+      expect(lastMockWs?.sent[1]).toBe(JSON.stringify({ type: "resize", cols: 120, rows: 40 }));
+      expect(lastMockWs?.sent[2]).toBe(JSON.stringify({ type: "signal", signal: "interrupt" }));
+      expect(decoder.decode(lastMockWs?.sent[3] as Uint8Array)).toBe("second-chunk\n");
+    });
+
+    it("WebSocketTerminalTransport increments drop counter when byte bound is exceeded without unbounded buffer growth", async () => {
+      const transport = new WebSocketTerminalTransport("http://127.0.0.1:43821", "dummy_token");
+      expect(MAX_OUTBOUND_BUFFER_BYTES).toBe(4096);
+
+      // 4000 bytes fit within the 4096-byte bound.
+      transport.write("sess-b", new Uint8Array(4000));
+      expect(transport.getOutboundDropCount("sess-b")).toBe(0);
+      expect(transport.getOutboundBufferSize("sess-b")).toBe(4000);
+
+      // Exceeding 4096 bytes drops the payload and increments the drop counter.
+      transport.write("sess-b", new Uint8Array(100));
+      expect(transport.getOutboundDropCount("sess-b")).toBe(1);
+      expect(transport.getOutboundBufferSize("sess-b")).toBe(4000);
+
+      transport.write("sess-b", new Uint8Array(200));
+      expect(transport.getOutboundDropCount("sess-b")).toBe(2);
+      expect(transport.getOutboundBufferSize("sess-b")).toBe(4000);
+    });
+
+    it("WebSocketTerminalTransport close clears the pending buffer for that session", async () => {
+      const transport = new WebSocketTerminalTransport("http://127.0.0.1:43821", "dummy_token");
+
+      transport.write("sess-c", "pending payload before close");
+      expect(transport.getOutboundBufferSize("sess-c")).toBeGreaterThan(0);
+
+      await transport.close("sess-c");
+      expect(transport.getOutboundBufferSize("sess-c")).toBe(0);
+
+      // Subsequent socket open flushes nothing because the buffer was cleared.
+      await transport.attach("sess-c");
+      lastMockWs?.open();
+      expect(lastMockWs?.sent).toHaveLength(0);
+    });
   });
 });

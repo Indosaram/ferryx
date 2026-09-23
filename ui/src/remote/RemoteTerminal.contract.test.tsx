@@ -1068,4 +1068,46 @@ describe("remote terminal grid contract", () => {
     expect(socket().send).toHaveBeenCalledTimes(1);
     expect(socket().send).toHaveBeenCalledWith(new Uint8Array([27]));
   });
+
+  it("observably rejects input and displays overflow status when outbound buffer limit is exceeded while connecting", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    const onInputOverflow = vi.fn();
+    render(
+      <RemoteTerminal
+        sessionId="session-123"
+        token="token-abc"
+        onInputOverflow={onInputOverflow}
+      />,
+    );
+
+    // Socket is in CONNECTING state (readyState = 0, before onopen)
+    socket().readyState = 0;
+
+    // Fill buffer up to MAX_OUTBOUND_BUFFER_BYTES (4096 bytes)
+    const chunk4096 = "x".repeat(4096);
+    fireEvent.paste(surface(), { clipboardData: { getData: () => chunk4096 } });
+
+    // Verify buffered indicator is displayed and overflow indicator is not displayed yet
+    expect(screen.getByTestId("remote-terminal-buffered-indicator")).toBeInTheDocument();
+    expect(screen.queryByTestId("remote-terminal-overflow-indicator")).not.toBeInTheDocument();
+    expect(onInputOverflow).not.toHaveBeenCalled();
+
+    // Drive RemoteTerminal's own queue past the bound with an extra keystroke
+    fireEvent.keyDown(surface(), { key: "a" });
+
+    // Assert that overflow is now observable via both UI indicator and callback
+    expect(screen.getByTestId("remote-terminal-overflow-indicator")).toBeInTheDocument();
+    expect(screen.getByTestId("remote-terminal-overflow-indicator")).toHaveTextContent("Input overflow");
+    expect(onInputOverflow).toHaveBeenCalledWith(1);
+
+    // Assert that socket send was not called while connecting
+    expect(socket().send).not.toHaveBeenCalled();
+
+    // When the socket transitions to OPEN, only the buffered 4096 bytes are flushed; the overflowed byte was dropped
+    socket().readyState = MockWebSocket.OPEN;
+    act(() => socket().onopen?.());
+    expect(socket().send).toHaveBeenCalledTimes(1);
+    expect(socket().send).toHaveBeenCalledWith(new TextEncoder().encode(chunk4096));
+    expect(screen.queryByTestId("remote-terminal-overflow-indicator")).not.toBeInTheDocument();
+  });
 });

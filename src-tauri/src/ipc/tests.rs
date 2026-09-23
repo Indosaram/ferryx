@@ -1522,6 +1522,8 @@ async fn test_p10_background_reconciler_adopts_delayed_completed_session() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+    let _serial = serialize_registry_test();
+
     clear_pending_creates_for_test();
 
     let dir = tempfile::tempdir().unwrap();
@@ -1692,6 +1694,8 @@ async fn test_p10_background_reconciler_closes_cancelled_delayed_completed_sessi
     use crate::scoped_contracts::Epoch;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let _serial = serialize_registry_test();
 
     clear_pending_creates_for_test();
 
@@ -1866,6 +1870,8 @@ async fn test_p11_reattach_failure_cleanup_reconciles_and_reaps_unknown() {
     use crate::scoped_contracts::Epoch;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let _serial = serialize_registry_test();
 
     clear_pending_cleanups_for_test();
 
@@ -2211,6 +2217,8 @@ async fn test_p11_reaper_retains_exhausted_records_in_dead_letter_list() {
     use crate::scoped_contracts::Epoch;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+    let _serial = serialize_registry_test();
+
     clear_pending_cleanups_for_test();
 
     let dir = tempfile::tempdir().unwrap();
@@ -2360,6 +2368,8 @@ async fn test_p10_pending_create_reaper_resolves_still_pending_records() {
     use crate::remote::machine_protocol as m;
     use crate::scoped_contracts::Epoch;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let _serial = serialize_registry_test();
 
     clear_pending_creates_for_test();
 
@@ -2518,6 +2528,8 @@ async fn test_p11_start_cleanup_reaper_schedules_background_resolution() {
     use crate::remote::machine_protocol as m;
     use crate::scoped_contracts::Epoch;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let _serial = serialize_registry_test();
 
     clear_pending_cleanups_for_test();
 
@@ -3760,4 +3772,14 @@ fn paired_create_reconcile_policy_covers_lost_responses() {
             "{code} is terminal and must surface to the user"
         );
     }
+}
+
+/// The pending-create and pending-cleanup registries are process-global, so the tests that drive
+/// them must not interleave with one another.
+static IPC_REGISTRY_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serialize_registry_test() -> std::sync::MutexGuard<'static, ()> {
+    IPC_REGISTRY_TESTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
