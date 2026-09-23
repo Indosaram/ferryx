@@ -4057,22 +4057,9 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         )))
         .with_state(Arc::clone(&state));
 
-    if let Ok(attach) =
-        crate::remote::attach_identity::load_or_generate_canonical_attach_identity()
-    {
-        let machine_id = crate::remote::auth::canonical_identity_dir()
-            .ok()
-            .and_then(|dir| crate::remote::auth::load_or_generate_machine_identity(&dir).ok())
-            .map(|identity| identity.machine_id)
-            .unwrap_or_default();
-        let enrollment_epoch = crate::account::enroll_client::load_enrollment_record()
-            .map(|record| record.enrollment_epoch)
-            .unwrap_or_default();
+    if cfg!(not(test)) {
         let auth = Arc::clone(&state.auth_manager);
         let deps = Arc::new(crate::remote::attach_router::AttachRouterDeps {
-            attach,
-            machine_id,
-            enrollment_epoch,
             gateway_addr: format!(
                 "127.0.0.1:{}",
                 crate::remote::state::REMOTE_GATEWAY_PORT

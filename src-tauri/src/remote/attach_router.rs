@@ -20,9 +20,6 @@ use crate::remote::session_transport::{
 pub type AttachAuthorizer = Arc<dyn Fn(&[u8]) -> bool + Send + Sync>;
 
 pub struct AttachRouterDeps {
-    pub attach: crate::remote::attach_identity::AttachIdentity,
-    pub machine_id: String,
-    pub enrollment_epoch: String,
     pub gateway_addr: String,
     pub authorize: AttachAuthorizer,
 }
@@ -41,6 +38,19 @@ async fn serve_direct_attach(
     socket: axum::extract::ws::WebSocket,
     deps: Arc<AttachRouterDeps>,
 ) {
+    let Ok(attach) =
+        crate::remote::attach_identity::load_or_generate_canonical_attach_identity()
+    else {
+        return;
+    };
+    let machine_id = crate::remote::auth::canonical_identity_dir()
+        .ok()
+        .and_then(|dir| crate::remote::auth::load_or_generate_machine_identity(&dir).ok())
+        .map(|identity| identity.machine_id)
+        .unwrap_or_default();
+    let enrollment_epoch = crate::account::enroll_client::load_enrollment_record()
+        .map(|record| record.enrollment_epoch)
+        .unwrap_or_default();
     let Ok(gateway) = tokio::net::TcpStream::connect(&deps.gateway_addr).await else {
         return;
     };
@@ -48,10 +58,10 @@ async fn serve_direct_attach(
     let opened = establish_session(
         stream,
         true,
-        Some(&deps.attach),
-        &deps.machine_id,
+        Some(&attach),
+        &machine_id,
         "direct",
-        &deps.enrollment_epoch,
+        &enrollment_epoch,
         {
             let authorize = Arc::clone(&deps.authorize);
             move |key| authorize(key)
@@ -184,6 +194,14 @@ mod tests {
         let attach = crate::remote::attach_identity::load_or_generate_canonical_attach_identity()
             .expect("machine attach identity");
         let machine_public = attach.public_key.clone();
+        let machine_id = crate::remote::auth::canonical_identity_dir()
+            .ok()
+            .and_then(|dir| crate::remote::auth::load_or_generate_machine_identity(&dir).ok())
+            .map(|identity| identity.machine_id)
+            .expect("machine identity");
+        let enrollment_epoch = crate::account::enroll_client::load_enrollment_record()
+            .map(|record| record.enrollment_epoch)
+            .unwrap_or_default();
 
         let gateway_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let gateway_addr = gateway_listener.local_addr().unwrap().to_string();
@@ -196,9 +214,6 @@ mod tests {
         });
 
         let deps = Arc::new(AttachRouterDeps {
-            attach,
-            machine_id: "direct-machine".into(),
-            enrollment_epoch: "3".into(),
             gateway_addr: gateway_addr.clone(),
             authorize: Arc::new(move |key| key == &client_public),
         });
@@ -215,9 +230,9 @@ mod tests {
             ws,
             &client_identity,
             &machine_public,
-            "direct-machine",
+            &machine_id,
             "direct",
-            "3",
+            &enrollment_epoch,
         )
         .await
         .expect("direct attach handshake");
