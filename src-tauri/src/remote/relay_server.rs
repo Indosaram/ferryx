@@ -3814,12 +3814,12 @@ mod tests {
                 private_key: STANDARD.encode(secret.to_bytes()),
             }
         };
-        let device_secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
-        let device_public = STANDARD.encode(x25519_dalek::PublicKey::from(&device_secret).as_bytes());
-        let client_identity = crate::remote::attach_identity::AttachIdentity {
-            public_key: device_public.clone(),
-            private_key: STANDARD.encode(device_secret.to_bytes()),
-        };
+        let client_dir = tempfile::tempdir().unwrap();
+        let device_public = crate::remote::attach_client::load_or_generate_client_attach_identity(
+            client_dir.path(),
+        )
+        .expect("client identity")
+        .public_key;
 
         // The daemon half: the same responder `relay_client::handle_session` runs, reached
         // through the relay's data route.
@@ -3850,16 +3850,13 @@ mod tests {
         });
 
         // The account client half: encrypts before anything leaves the process.
-        let (ws, _) = tokio_tungstenite::connect_async(format!("{base}/tunnel/opaque/{session}"))
-            .await
-            .unwrap();
-        let mut secure = crate::remote::attach_client::attach_opaque_session(
-            ws,
-            &client_identity,
-            &machine.public_key,
-            "opaque-load",
+        let mut secure = crate::paired_host::attach::attach_relay_session(
+            &base,
             session,
+            "opaque-load",
+            &machine.public_key,
             "3",
+            client_dir.path(),
         )
         .await
         .expect("account attach handshake");
