@@ -28,8 +28,9 @@
 
 use crate::remote::auth::{verify_control_challenge, write_private_json};
 use crate::remote::protocol::{
-    ControlAuth, ControlAuthResponse, ControlChallenge, PairingState, RegisterPairingPin,
-    RegisterPairingPinAck, SocketTicketRequest, SocketTicketResponse,
+    AccountGrantOfferDelivered, AccountGrantOfferDelivery, ControlAuth, ControlAuthResponse,
+    ControlChallenge, PairingState, RegisterPairingPin, RegisterPairingPinAck, SocketTicketRequest,
+    SocketTicketResponse,
 };
 pub use crate::remote::state::DEFAULT_RELAY_URL;
 use axum::{
@@ -103,6 +104,17 @@ struct ControlChannel {
     generation: u64,
     tx: mpsc::Sender<IncomingSessionNotice>,
 }
+
+/// A sealed account grant on its way to a daemon, with the slot its acknowledgement must
+/// fill. The relay only ever carries the sealed blob, never the plaintext pairing token.
+struct GrantDeliveryRequest {
+    delivery: AccountGrantOfferDelivery,
+    ack: oneshot::Sender<AccountGrantOfferDelivered>,
+}
+
+/// How long a grant delivery waits for the daemon's acknowledgement before the caller is
+/// told the machine did not answer.
+const GRANT_DELIVERY_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Deserialize)]
 #[serde(tag = "type")]
@@ -255,6 +267,11 @@ struct RelayInner {
     /// captured by one relay from being replayed against another.
     control_audience: String,
     control_channels: Mutex<HashMap<String, ControlChannel>>,
+    /// Daemon-ward grant deliveries, keyed by machine. Kept beside `control_channels`
+    /// rather than inside it so a control socket's session notices and its grant
+    /// deliveries never share a queue, and so tests that build a `ControlChannel`
+    /// directly keep working with notices alone.
+    grant_channels: Mutex<HashMap<String, mpsc::Sender<GrantDeliveryRequest>>>,
     machine_public_keys: Mutex<HashMap<String, String>>,
     key_store_path: Option<std::path::PathBuf>,
     admission: Mutex<HashMap<IpAddr, AttemptTracker>>,
@@ -343,6 +360,7 @@ impl RelayState {
                 control_audience: audience.into(),
                 machine_tokens: state.inner.machine_tokens.clone(),
                 control_channels: Mutex::new(HashMap::new()),
+                grant_channels: Mutex::new(HashMap::new()),
                 machine_public_keys: Mutex::new(keys),
                 key_store_path: state.inner.key_store_path.clone(),
                 admission: Mutex::new(HashMap::new()),
@@ -389,6 +407,7 @@ impl RelayState {
                     .unwrap_or_else(|| LEGACY_CONTROL_AUDIENCE.to_string()),
                 next_generation: AtomicU64::new(1),
                 control_channels: Mutex::new(HashMap::new()),
+                grant_channels: Mutex::new(HashMap::new()),
                 machine_public_keys: Mutex::new(keys),
                 key_store_path,
                 admission: Mutex::new(HashMap::new()),
@@ -616,19 +635,67 @@ impl RelayState {
     fn register_control_channel(
         &self,
         machine_id: String,
-    ) -> (u64, mpsc::Receiver<IncomingSessionNotice>) {
+    ) -> (
+        u64,
+        mpsc::Receiver<IncomingSessionNotice>,
+        mpsc::Receiver<GrantDeliveryRequest>,
+    ) {
         let (tx, rx) = mpsc::channel(MAX_PENDING_SESSIONS);
+        let (grant_tx, grant_rx) = mpsc::channel(1);
         let generation = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
+        // One lock order everywhere: `control_channels` before `grant_channels`.
         self.inner
             .control_channels
             .lock()
-            .insert(machine_id, ControlChannel { generation, tx });
-        (generation, rx)
+            .insert(machine_id.clone(), ControlChannel { generation, tx });
+        self.inner.grant_channels.lock().insert(machine_id, grant_tx);
+        (generation, rx, grant_rx)
     }
 
     fn unregister_control_channel(&self, _machine_token: &str, generation: u64) {
         let mut channels = self.inner.control_channels.lock();
+        let retired: Vec<String> = channels
+            .iter()
+            .filter(|(_, channel)| channel.generation == generation)
+            .map(|(machine, _)| machine.clone())
+            .collect();
         channels.retain(|_, channel| channel.generation != generation);
+        drop(channels);
+        let mut grants = self.inner.grant_channels.lock();
+        for machine in retired {
+            grants.remove(&machine);
+        }
+    }
+
+    /// Hands one sealed grant to a machine's live control socket and waits for the
+    /// daemon's acknowledgement. The envelope is already sealed to the daemon's attach
+    /// key, so the relay carries ciphertext and never a plaintext pairing token.
+    pub async fn deliver_grant_offer(
+        &self,
+        machine_id: &str,
+        envelope: crate::remote::account_protocol::AccountGrantOfferEnvelope,
+    ) -> Result<AccountGrantOfferDelivered, StatusCode> {
+        let sender = {
+            let channels = self.inner.grant_channels.lock();
+            channels.get(machine_id).cloned()
+        }
+        .ok_or(StatusCode::NOT_FOUND)?;
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let delivery = AccountGrantOfferDelivery {
+            machine_id: machine_id.to_owned(),
+            envelope,
+        };
+        sender
+            .try_send(GrantDeliveryRequest {
+                delivery,
+                ack: ack_tx,
+            })
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        match timeout(GRANT_DELIVERY_TIMEOUT, ack_rx).await {
+            Ok(Ok(delivered)) => Ok(delivered),
+            Ok(Err(_)) => Err(StatusCode::SERVICE_UNAVAILABLE),
+            Err(_) => Err(StatusCode::GATEWAY_TIMEOUT),
+        }
     }
 
     pub fn bind_control_alias(&self, machine_token: &str, alias: String) {
@@ -2123,7 +2190,8 @@ async fn handle_control_socket(
     machine_token: String,
     machine_id: Option<String>,
 ) {
-    let (generation, mut notices) = state.register_control_channel(machine_token.clone());
+    let (generation, mut notices, mut grants) = state.register_control_channel(machine_token.clone());
+    let mut pending_grant: Option<oneshot::Sender<AccountGrantOfferDelivered>> = None;
     if let Some(ref id) = machine_id {
         if id != &machine_token {
             state.bind_control_alias(&machine_token, id.clone());
@@ -2131,6 +2199,15 @@ async fn handle_control_socket(
     }
     loop {
         tokio::select! {
+            grant = grants.recv() => {
+                let Some(GrantDeliveryRequest { delivery, ack }) = grant else { break };
+                let Ok(payload) = serde_json::to_string(&delivery) else { continue };
+                if !matches!(timeout(TRANSFER_TIMEOUT, socket.send(Message::Text(payload.into()))).await, Ok(Ok(()))) {
+                    tracing::warn!("relay grant delivery failed or timed out");
+                    break;
+                }
+                pending_grant = Some(ack);
+            }
             notice = notices.recv() => {
                 let Some(notice) = notice else { break };
                 let Ok(payload) = serde_json::to_string(&notice) else { continue };
@@ -2143,6 +2220,18 @@ async fn handle_control_socket(
                 match incoming {
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(Message::Text(text))) => {
+                        // The daemon answers a grant delivery with `AccountGrantOfferDelivered`;
+                        // that frame fills the slot the caller of `deliver_grant_offer` waits on.
+                        if pending_grant.is_some() {
+                            if let Ok(delivered) =
+                                serde_json::from_str::<AccountGrantOfferDelivered>(&text)
+                            {
+                                if let Some(ack) = pending_grant.take() {
+                                    let _ = ack.send(delivered);
+                                }
+                                continue;
+                            }
+                        }
                         match serde_json::from_str::<ControlRequest>(&text).or_else(|_| {
                             serde_json::from_str::<RegisterPairingPin>(&text).map(ControlRequest::RegisterPairingPin)
                         }) {
@@ -2544,7 +2633,7 @@ mod tests {
             runtime.block_on(async {
             let state = test_state(vec![]);
             let (base, server) = spawn_test_relay_with_state(state.clone()).await;
-            let (generation, mut notices) = state.register_control_channel("load".into());
+            let (generation, mut notices, _grants) = state.register_control_channel("load".into());
             for window in 0..2 {
                 for request in 0..30 {
                     let http = proxy_http(&state, "load", Some(generation), Method::GET,
@@ -2822,7 +2911,7 @@ mod tests {
     #[tokio::test]
     async fn test_security_fleet_pin_brute_force_lockout() {
         let state = test_state(vec![]);
-        let (generation, mut notices) = state.register_control_channel("machine_alpha".into());
+        let (generation, mut notices, _grants) = state.register_control_channel("machine_alpha".into());
         assert!(state
             .register_pairing(
                 "machine_alpha",
@@ -2856,7 +2945,7 @@ mod tests {
     #[tokio::test]
     async fn test_security_expired_pin_claim_rejected() {
         let state = test_state(vec![]);
-        let (generation, mut notices) = state.register_control_channel("machine_alpha".into());
+        let (generation, mut notices, _grants) = state.register_control_channel("machine_alpha".into());
         let mut expired = security_registration("machine_alpha");
         expired.expires_at = current_time_secs() - 10;
         assert!(state
@@ -3151,7 +3240,7 @@ mod tests {
     #[tokio::test]
     async fn test_relay_socket_ticket_issuance_and_single_use() {
         let state = test_state(vec![]);
-        let (_generation, _control) = state.register_control_channel("browser-machine".into());
+        let (_generation, _control, _grants) = state.register_control_channel("browser-machine".into());
         let ticket = issue_test_ticket(&state, "/api/v1/events").await;
         assert_eq!(
             uuid::Uuid::parse_str(&ticket.ticket)
@@ -3199,7 +3288,7 @@ mod tests {
     #[tokio::test]
     async fn test_relay_socket_ticket_expired_rejected() {
         let state = test_state(vec![]);
-        let (_generation, _control) = state.register_control_channel("browser-machine".into());
+        let (_generation, _control, _grants) = state.register_control_channel("browser-machine".into());
         let ticket = issue_test_ticket(&state, "/api/v1/events").await;
         state
             .inner
@@ -3222,7 +3311,7 @@ mod tests {
     #[tokio::test]
     async fn a11_expired_ticket_wire_boundary() {
         let state = test_state(vec![]);
-        let (_generation, _control) = state.register_control_channel("browser-machine".into());
+        let (_generation, _control, _grants) = state.register_control_channel("browser-machine".into());
         let ticket = issue_test_ticket(&state, "/api/v1/events").await;
         // Inject time's exact boundary, never wait for wall-clock expiry.
         state
@@ -3670,6 +3759,60 @@ mod tests {
                 registration(current_time_secs() + MAX_PAIRING_LEASE - 5)
             )
             .is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_sealed_grant_reaches_the_daemon_control_socket() {
+        let state = test_state(vec![]);
+        let probe = state.clone();
+        let (base, server) = spawn_test_relay_with_state(state).await;
+        let owner = identity(1, "grant-machine");
+        let (mut socket, response) =
+            authenticate_with_token(&base, &owner, false, false, None).await;
+        assert!(response.success);
+
+        let envelope = crate::remote::account_protocol::AccountGrantOfferEnvelope {
+            machine_id: owner.machine_id.clone(),
+            enrollment_epoch: "7".into(),
+            sealed: "c2VhbGVkLWdyYW50".into(),
+        };
+        let machine = owner.machine_id.clone();
+        let deliver = tokio::spawn(async move { probe.deliver_grant_offer(&machine, envelope).await });
+
+        // The daemon receives the sealed blob exactly as the account sealed it.
+        let delivered: AccountGrantOfferDelivery = receive_json(&mut socket).await;
+        assert_eq!(delivered.machine_id, owner.machine_id);
+        assert_eq!(delivered.envelope.sealed, "c2VhbGVkLWdyYW50");
+        socket
+            .send(TMessage::Text(
+                serde_json::to_string(&AccountGrantOfferDelivered {
+                    grant_id: Some("grant-1".into()),
+                    status: "ready".into(),
+                })
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+
+        let ack = deliver.await.unwrap().unwrap();
+        assert_eq!(ack.status, "ready");
+        assert_eq!(ack.grant_id.as_deref(), Some("grant-1"));
+
+        // A machine with no live control socket cannot be handed a grant.
+        let orphan = test_state(vec![]);
+        assert!(orphan
+            .deliver_grant_offer(
+                "no-such-machine",
+                crate::remote::account_protocol::AccountGrantOfferEnvelope {
+                    machine_id: "no-such-machine".into(),
+                    enrollment_epoch: "7".into(),
+                    sealed: "c2VhbGVk".into(),
+                },
+            )
+            .await
+            .is_err());
+        server.abort();
     }
 
     #[tokio::test]
@@ -4313,7 +4456,7 @@ mod tests {
             &"a".repeat(65),
         ] {
             let state = test_state(vec![]);
-            let (generation, _notices) = state.register_control_channel("machine".into());
+            let (generation, _notices, _grants) = state.register_control_channel("machine".into());
             let mut registration = security_registration("machine");
             registration.pairing_token = token.into();
             // When registering the pairing capability.
@@ -4943,8 +5086,8 @@ mod tests {
     fn test_relay_generation_safe_cleanup_and_limits() {
         let state = test_state(vec!["tok".into()]);
         assert!(!state.notify_incoming_session("tok", "missing-control"));
-        let (old, _old_rx) = state.register_control_channel("tok".into());
-        let (new, mut rx) = state.register_control_channel("tok".into());
+        let (old, _old_rx, _grants) = state.register_control_channel("tok".into());
+        let (new, mut rx, _grants) = state.register_control_channel("tok".into());
         state.unregister_control_channel("tok", old);
         assert!(!state.issue_session("tok", "stale", Some(old), false));
         assert!(state.notify_incoming_session("tok", "session"));
@@ -5280,7 +5423,7 @@ mod tests {
     #[tokio::test]
     async fn test_p01_edge_concurrent_double_claim_exactly_one_wins() {
         let state = test_state(vec![]);
-        let (generation, _notices) = state.register_control_channel("machine_alpha".into());
+        let (generation, _notices, _grants) = state.register_control_channel("machine_alpha".into());
         assert!(state
             .register_pairing(
                 "machine_alpha",
@@ -5334,7 +5477,7 @@ mod tests {
     #[tokio::test]
     async fn test_p01_edge_rollback_must_not_resurrect_consumed() {
         let state = test_state(vec![]);
-        let (generation, _notices) = state.register_control_channel("machine_alpha".into());
+        let (generation, _notices, _grants) = state.register_control_channel("machine_alpha".into());
         let reg = security_registration("machine_alpha");
         assert!(state
             .register_pairing("machine_alpha", generation, reg.clone())
@@ -5387,7 +5530,7 @@ mod tests {
     #[tokio::test]
     async fn test_p01_edge_lease_expiry_enforced_after_rollback() {
         let state = test_state(vec![]);
-        let (generation, _notices) = state.register_control_channel("machine_alpha".into());
+        let (generation, _notices, _grants) = state.register_control_channel("machine_alpha".into());
         let reg = security_registration("machine_alpha");
         assert!(state
             .register_pairing("machine_alpha", generation, reg.clone())
@@ -5438,7 +5581,7 @@ mod tests {
     #[tokio::test]
     async fn test_p01_edge_claim_rollback_when_already_expired_marks_expired() {
         let state = test_state(vec![]);
-        let (generation, _notices) = state.register_control_channel("machine_alpha".into());
+        let (generation, _notices, _grants) = state.register_control_channel("machine_alpha".into());
         let reg = security_registration("machine_alpha");
         assert!(state
             .register_pairing("machine_alpha", generation, reg.clone())
@@ -5491,7 +5634,7 @@ mod tests {
     #[tokio::test]
     async fn test_p01_edge_claim_lease_timeout_allows_reclaim() {
         let state = test_state(vec![]);
-        let (generation, _notices) = state.register_control_channel("machine_alpha".into());
+        let (generation, _notices, _grants) = state.register_control_channel("machine_alpha".into());
         let reg = security_registration("machine_alpha");
         assert!(state
             .register_pairing("machine_alpha", generation, reg.clone())
@@ -5554,7 +5697,7 @@ mod tests {
     #[tokio::test]
     async fn test_p01_edge_stale_claim_fence_cannot_rollback_or_consume_newer_claim() {
         let state = test_state(vec![]);
-        let (generation, _notices) = state.register_control_channel("machine_alpha".into());
+        let (generation, _notices, _grants) = state.register_control_channel("machine_alpha".into());
         let reg = security_registration("machine_alpha");
         assert!(state
             .register_pairing("machine_alpha", generation, reg.clone())
