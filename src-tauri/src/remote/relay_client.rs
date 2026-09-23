@@ -295,6 +295,8 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct SessionRequest {
     session_id: String,
+    #[serde(default)]
+    opaque: bool,
 }
 
 /// Reverse tunnel client run by the desktop daemon.
@@ -579,10 +581,10 @@ impl RelayClient {
                         continue;
                     }
                     match serde_json::from_str::<SessionRequest>(&text) {
-                        Ok(SessionRequest { session_id }) => {
+                        Ok(SessionRequest { session_id, opaque }) => {
                             let client = self.clone();
                             sessions.spawn(async move {
-                                if let Err(err) = client.handle_session(&session_id).await {
+                                if let Err(err) = client.handle_session(&session_id, opaque).await {
                                     tracing::warn!(
                                         "relay data channel for session {session_id} failed: {err}"
                                     );
@@ -614,10 +616,48 @@ impl RelayClient {
     /// Opens a data channel for `session_id` against the relay and proxies
     /// frames bidirectionally between it and the local loopback gateway
     /// until either side disconnects.
-    async fn handle_session(&self, session_id: &str) -> anyhow::Result<()> {
+    async fn handle_session(&self, session_id: &str, opaque: bool) -> anyhow::Result<()> {
         let (ws, _response) = tokio_tungstenite::connect_async(self.data_url(session_id)).await?;
         let gateway = TcpStream::connect(&self.gateway_addr).await?;
-        proxy_ws_to_tcp(ws, gateway).await
+        if !opaque {
+            return proxy_ws_to_tcp(ws, gateway).await;
+        }
+
+        let attach = crate::remote::attach_identity::load_or_generate_canonical_attach_identity()
+            .map_err(|error| anyhow::anyhow!(error))?;
+        let machine_id = self
+            .identity
+            .as_ref()
+            .map(|identity| identity.machine_id.clone())
+            .unwrap_or_default();
+        let enrollment_epoch = crate::account::enroll_client::load_enrollment_record()
+            .map(|record| record.enrollment_epoch)
+            .unwrap_or_default();
+        let auth = self.pairing.auth.clone();
+
+        let stream = crate::remote::attach_crypto::WebSocketByteStream::new(ws);
+        let transport = crate::remote::session_transport::establish_session(
+            stream,
+            true,
+            Some(&attach),
+            &machine_id,
+            session_id,
+            &enrollment_epoch,
+            move |key: &[u8; 32]| auth.device_for_attach_key_bytes(key).is_some(),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+
+        match transport {
+            crate::remote::session_transport::SessionTransport::Attached(secure) => {
+                crate::remote::session_transport::proxy_secure_to_gateway(secure, gateway)
+                    .await
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))
+            }
+            crate::remote::session_transport::SessionTransport::Plain(stream) => {
+                proxy_ws_to_tcp(stream.into_inner(), gateway).await
+            }
+        }
     }
 }
 

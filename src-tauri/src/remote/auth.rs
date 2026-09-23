@@ -874,8 +874,7 @@ impl AuthManager {
         Ok(result)
     }
 
-    pub fn device_for_attach_key(&self, attach_public_key: &str) -> Option<DeviceInfo> {
-        let key = attach_public_key.trim();
+    pub fn device_for_attach_key(&self, attach_public_key: &str) -> Option<DeviceInfo> {        let key = attach_public_key.trim();
         if key.is_empty() {
             return None;
         }
@@ -889,6 +888,10 @@ impl AuthManager {
                     && device.attach_public_key.as_deref() == Some(key)
             })
             .cloned()
+    }
+
+    pub fn device_for_attach_key_bytes(&self, attach_public_key: &[u8]) -> Option<DeviceInfo> {
+        self.device_for_attach_key(&STANDARD.encode(attach_public_key))
     }
 
     pub fn list_devices(&self) -> Vec<DeviceInfo> {

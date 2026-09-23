@@ -72,6 +72,8 @@ const SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(10);
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IncomingSessionNotice {
     pub session_id: String,
+    #[serde(default)]
+    pub opaque: bool,
 }
 
 /// Which of the two tunnel halves a pending registry entry holds.
@@ -661,6 +663,7 @@ impl RelayState {
             .tx
             .try_send(IncomingSessionNotice {
                 session_id: session_id.into(),
+                opaque: false,
             })
             .is_err()
         {
@@ -996,7 +999,10 @@ impl RelayState {
             );
             channel
                 .tx
-                .try_send(IncomingSessionNotice { session_id })
+                .try_send(IncomingSessionNotice {
+                    session_id,
+                    opaque: false,
+                })
                 .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
         }
         let socket = timeout(SESSION_PAIRING_TIMEOUT, rx)
