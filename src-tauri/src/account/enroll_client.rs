@@ -251,7 +251,55 @@ pub async fn request_machine_grant(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::remote::auth::{enrollment_code_hash, verify_account_enrollment};
+    use crate::remote::auth::{
+        enrollment_code_hash, verify_account_enrollment, AuthManager, DevicePermission,
+    };
+
+    #[test]
+    fn enrollment_leaves_existing_device_tokens_alone() {
+        let dir = tempfile::tempdir().expect("temp");
+        let remote = dir.path().join("remote");
+        std::fs::create_dir_all(&remote).expect("remote dir");
+        let identity_path = remote.join("identity.json");
+        let identity = load_or_generate_machine_identity(&remote).expect("identity");
+        let identity_bytes = std::fs::read(&identity_path).expect("identity bytes");
+
+        let auth_path = remote.join("remote-auth.json");
+        let manager = AuthManager::with_persistence(Some(auth_path.clone()));
+        let code = manager.create_pairing_code(DevicePermission::Control);
+        let (legacy_bearer, _device) = manager
+            .exchange_pairing_code(&code, "Old Phone")
+            .expect("legacy pairing");
+        let auth_before = std::fs::read(&auth_path).expect("auth file");
+
+        let record = AccountEnrollmentRecord {
+            account_id: "acct-1".into(),
+            machine_record_id: "record-1".into(),
+            account_origin: "https://account.example".into(),
+            relay_origin: "https://relay.checka.cc".into(),
+            enrollment_epoch: "1".into(),
+            enrolled_at: 1,
+        };
+        write_private_json(&remote.join(ACCOUNT_ENROLLMENT_FILE), &record).expect("write record");
+
+        assert_eq!(
+            std::fs::read(&identity_path).expect("identity bytes"),
+            identity_bytes,
+            "enrollment must not rewrite the machine identity"
+        );
+        assert_eq!(
+            std::fs::read(&auth_path).expect("auth file"),
+            auth_before,
+            "enrollment must not touch the device grant store"
+        );
+        let reloaded = AuthManager::with_persistence(Some(auth_path));
+        assert!(
+            reloaded.validate_token(&legacy_bearer).is_ok(),
+            "a device paired before enrollment must still authenticate after it"
+        );
+        assert_eq!(reloaded.list_devices().len(), 1);
+        assert!(!identity.machine_id.is_empty());
+    }
 
     #[test]
     fn stored_machine_identity_signs_and_verifies() {
