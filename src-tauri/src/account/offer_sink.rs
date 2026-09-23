@@ -118,13 +118,20 @@ pub fn apply_envelope_for_this_machine(
         .ok_or(OfferError::NotEnrolled)?;
     let attach = crate::remote::attach_identity::load_or_generate_canonical_attach_identity()
         .map_err(OfferError::Sealed)?;
+    let dir = crate::remote::auth::canonical_remote_dir()
+        .ok_or_else(|| OfferError::Sealed("cannot resolve identity dir".into()))?;
+    let identity = crate::remote::auth::load_or_generate_machine_identity(&dir)
+        .map_err(|e| OfferError::Sealed(e.to_string()))?;
+    if envelope.machine_id != identity.machine_id {
+        return Err(OfferError::WrongMachine);
+    }
     if record.machine_record_id.is_empty() || envelope.enrollment_epoch != record.enrollment_epoch {
         return Err(OfferError::WrongEpoch);
     }
     apply_grant_offer(
         auth,
         &attach,
-        &envelope.machine_id,
+        &identity.machine_id,
         &record.enrollment_epoch,
         envelope,
         now,

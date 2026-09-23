@@ -9,7 +9,7 @@ use tokio_tungstenite::WebSocketStream;
 
 use super::attach_identity::AttachIdentity;
 
-pub const MAX_ATTACH_FRAME: usize = 1024 * 1024;
+pub const MAX_ATTACH_FRAME: usize = 65519;
 pub const MAX_HANDSHAKE_MESSAGE: usize = 65_535;
 pub const ATTACH_PROLOGUE_PREFIX: &str = "ferryx-attach-v1";
 
@@ -172,8 +172,8 @@ impl AttachInitiator {
 }
 
 pub struct SecureStream<S> {
-    inner: S,
-    transport: snow::TransportState,
+    pub(crate) inner: S,
+    pub(crate) transport: snow::TransportState,
 }
 
 impl<S> SecureStream<S> {
@@ -323,7 +323,7 @@ where
     }
 }
 
-async fn write_frame<S: AsyncWrite + Unpin>(stream: &mut S, bytes: &[u8]) -> Result<(), AttachError> {
+pub(crate) async fn write_frame<S: AsyncWrite + Unpin>(stream: &mut S, bytes: &[u8]) -> Result<(), AttachError> {
     if bytes.len() > MAX_ATTACH_FRAME {
         return Err(AttachError::FrameTooLarge(bytes.len()));
     }
@@ -339,7 +339,7 @@ async fn write_frame<S: AsyncWrite + Unpin>(stream: &mut S, bytes: &[u8]) -> Res
     Ok(())
 }
 
-async fn read_frame<S: AsyncRead + Unpin>(
+pub(crate) async fn read_frame<S: AsyncRead + Unpin>(
     stream: &mut S,
     max: usize,
 ) -> Result<Vec<u8>, AttachError> {

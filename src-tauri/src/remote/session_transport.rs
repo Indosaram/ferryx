@@ -48,47 +48,68 @@ where
 /// peer are written to `gateway`, and bytes read from `gateway` are sent back as frames.
 /// Nothing is interpreted on the way through, so the gateway only ever sees plaintext.
 pub async fn proxy_secure_to_gateway<S, T>(
-    mut secure: SecureStream<S>,
+    secure: SecureStream<S>,
     gateway: T,
 ) -> Result<(), AttachError>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    let (mut stream_rx, mut stream_tx) = tokio::io::split(secure.inner);
     let (mut gateway_rx, mut gateway_tx) = tokio::io::split(gateway);
-    let (sender, mut receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
-    let reader = tokio::spawn(async move {
+    let transport = std::sync::Arc::new(std::sync::Mutex::new(secure.transport));
+
+    let t_rx = transport.clone();
+    let to_gateway = async move {
+        loop {
+            let frame = crate::remote::attach_crypto::read_frame(
+                &mut stream_rx,
+                crate::remote::attach_crypto::MAX_ATTACH_FRAME + 16,
+            )
+            .await?;
+            let mut plaintext = vec![0u8; frame.len().max(1)];
+            let read = {
+                let mut t = t_rx.lock().unwrap();
+                t.read_message(&frame, &mut plaintext)
+                    .map_err(|e| AttachError::DecryptFailed(e.to_string()))?
+            };
+            plaintext.truncate(read);
+            gateway_tx
+                .write_all(&plaintext)
+                .await
+                .map_err(|_| AttachError::StreamClosed)?;
+        }
+        #[allow(unreachable_code)]
+        Ok::<(), AttachError>(())
+    };
+
+    let t_tx = transport;
+    let from_gateway = async move {
         let mut buffer = vec![0u8; 16 * 1024];
         loop {
-            match gateway_rx.read(&mut buffer).await {
-                Ok(0) | Err(_) => break,
-                Ok(read) => {
-                    if sender.send(buffer[..read].to_vec()).await.is_err() {
-                        break;
-                    }
-                }
+            let n = gateway_rx
+                .read(&mut buffer)
+                .await
+                .map_err(|_| AttachError::StreamClosed)?;
+            if n == 0 {
+                break;
             }
+            let plaintext = &buffer[..n];
+            let mut cipher = vec![0u8; plaintext.len() + 16];
+            let written = {
+                let mut t = t_tx.lock().unwrap();
+                t.write_message(plaintext, &mut cipher)
+                    .map_err(|e| AttachError::DecryptFailed(e.to_string()))?
+            };
+            crate::remote::attach_crypto::write_frame(&mut stream_tx, &cipher[..written]).await?;
         }
-    });
+        Ok::<(), AttachError>(())
+    };
 
-    loop {
-        tokio::select! {
-            chunk = receiver.recv() => match chunk {
-                Some(bytes) => secure.send_frame(&bytes).await?,
-                None => break,
-            },
-            frame = secure.recv_frame() => match frame {
-                Ok(bytes) => {
-                    if gateway_tx.write_all(&bytes).await.is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            },
-        }
+    tokio::select! {
+        res1 = to_gateway => res1,
+        res2 = from_gateway => res2,
     }
-    reader.abort();
-    Ok(())
 }
 
 #[cfg(test)]

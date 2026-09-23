@@ -52,25 +52,25 @@ export async function storeAttachKey(keyPair: AttachKeyPair): Promise<void> {
   });
 }
 
-function generateRandomHex(bytesCount: number): string {
-  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
-    const bytes = new Uint8Array(bytesCount);
-    crypto.getRandomValues(bytes);
-    return Array.from(bytes)
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
+function generateRandomBase64(bytesCount: number): string {
+  if (typeof crypto === "undefined" || typeof crypto.getRandomValues !== "function") {
+    throw new Error("SECURE_CRYPTO_UNAVAILABLE: crypto.getRandomValues is required");
   }
-  return Array.from({ length: bytesCount * 2 }, () =>
-    Math.floor(Math.random() * 16).toString(16),
-  ).join("");
+  const bytes = new Uint8Array(bytesCount);
+  crypto.getRandomValues(bytes);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
 }
 
 export async function getOrCreateAttachKey(): Promise<AttachKeyPair> {
   const existing = await getStoredAttachKey();
   if (existing) return existing;
 
-  const privateKey = generateRandomHex(32);
-  const publicKey = generateRandomHex(32);
+  const privateKey = generateRandomBase64(32);
+  const publicKey = generateRandomBase64(32);
   const keyPair: AttachKeyPair = { publicKey, privateKey };
   try {
     await storeAttachKey(keyPair);

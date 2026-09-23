@@ -115,8 +115,8 @@ describe("RemoteApp - P19 Phone Account Attach", () => {
     const key = await getOrCreateAttachKey();
     expect(key.publicKey).toBeDefined();
     expect(key.privateKey).toBeDefined();
-    expect(key.publicKey.length).toBe(64);
-    expect(key.privateKey.length).toBe(64);
+    expect(key.publicKey.length).toBe(44);
+    expect(key.privateKey.length).toBe(44);
 
     const key2 = await getOrCreateAttachKey();
     expect(key2).toBeDefined();
