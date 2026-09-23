@@ -72,6 +72,27 @@ pub struct AccountGrantRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AccountGrantOffer {
+    pub grant_id: String,
+    pub machine_id: String,
+    pub enrollment_epoch: String,
+    pub pairing_token: String,
+    pub device_label: String,
+    pub installation_id: String,
+    pub grant_scope: AccountGrantScope,
+    pub expires_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountGrantOfferEnvelope {
+    pub machine_id: String,
+    pub enrollment_epoch: String,
+    pub sealed: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AccountGrantResponse {
     pub grant_id: String,
     pub machine_id: String,
@@ -80,6 +101,8 @@ pub struct AccountGrantResponse {
     pub machine_attach_public_key: String,
     pub grant_scope: AccountGrantScope,
     pub expires_at: u64,
+    #[serde(default)]
+    pub sealed_offer: Option<AccountGrantOfferEnvelope>,
 }
 
 #[cfg(test)]

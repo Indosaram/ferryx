@@ -1,31 +1,12 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 
-use crate::remote::account_protocol::AccountGrantScope;
+use crate::remote::account_protocol::{
+    AccountGrantOffer, AccountGrantOfferEnvelope, AccountGrantScope,
+};
 use crate::remote::attach_identity::AttachIdentity;
 use crate::remote::auth::{AuthManager, DeviceAccessScope, DevicePermission};
-use crate::remote::sealed_offer::open_offer;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AccountGrantOfferEnvelope {
-    pub machine_id: String,
-    pub enrollment_epoch: String,
-    pub sealed: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AccountGrantOffer {
-    pub grant_id: String,
-    pub machine_id: String,
-    pub enrollment_epoch: String,
-    pub pairing_token: String,
-    pub device_label: String,
-    pub installation_id: String,
-    pub grant_scope: AccountGrantScope,
-    pub expires_at: u64,
-}
+use crate::remote::sealed_offer::{open_offer, seal_offer};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -73,8 +54,7 @@ fn scope_pairing(scope: AccountGrantScope) -> (DevicePermission, DeviceAccessSco
     }
 }
 
-pub fn open_grant_offer(
-    attach: &AttachIdentity,
+pub fn open_grant_offer(    attach: &AttachIdentity,
     envelope: &AccountGrantOfferEnvelope,
     machine_id: &str,
     enrollment_epoch: &str,

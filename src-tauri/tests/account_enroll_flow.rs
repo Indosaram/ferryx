@@ -142,6 +142,16 @@ async fn enroll(
     code: &str,
     origin: &str,
 ) -> (u16, Value) {
+    enroll_with_attach(server, identity, code, origin, &attach_public_key()).await
+}
+
+async fn enroll_with_attach(
+    server: &Server,
+    identity: &MachineIdentity,
+    code: &str,
+    origin: &str,
+    attach_public_key: &str,
+) -> (u16, Value) {
     let (nonce, timestamp) = challenge_for(server, &identity.machine_id).await;
     let signature = sign_account_enrollment(
         identity,
@@ -160,7 +170,7 @@ async fn enroll(
             "machineId": identity.machine_id,
             "displayName": identity.display_name,
             "publicKey": identity.public_key,
-            "attachPublicKey": attach_public_key(),
+            "attachPublicKey": attach_public_key,
             "platform": "linux",
             "appVersion": "test",
             "nonce": nonce,
@@ -368,4 +378,75 @@ async fn account_enroll_replay_and_bad_signature_are_rejected() {
         store.machines.values().next().expect("machine").platform,
         "windows"
     );
+}
+
+#[tokio::test]
+async fn account_grant_seals_an_offer_the_daemon_can_open() {
+    use ferryx_lib::account::offer_sink::{apply_grant_offer, open_grant_offer};
+    use ferryx_lib::remote::account_protocol::AccountGrantOfferEnvelope;
+    use ferryx_lib::remote::attach_identity::AttachIdentity;
+    use ferryx_lib::remote::auth::{AuthManager, DeviceAccessScope};
+
+    let data_dir = tempfile::tempdir().expect("data");
+    let mail_dir = tempfile::tempdir().expect("mail");
+    let manager_dir = tempfile::tempdir().expect("manager");
+    let state = AccountState::new(
+        data_dir.path(),
+        ORIGIN,
+        Arc::new(FileMailer::with_dir(mail_dir.path())),
+    );
+    let server = spawn(state).await;
+    let token = sign_in(&server, mail_dir.path(), "owner@b.co").await;
+
+    let secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+    let attach_public = STANDARD.encode(x25519_dalek::PublicKey::from(&secret).as_bytes());
+    let attach = AttachIdentity {
+        public_key: attach_public.clone(),
+        private_key: STANDARD.encode(secret.to_bytes()),
+    };
+
+    let identity = machine_identity("machine-sealed");
+    let code = issue_enrollment_code(&server, &token).await;
+    let (status, body) = enroll_with_attach(&server, &identity, &code, ORIGIN, &attach_public).await;
+    assert_eq!(status, 200, "{body}");
+    let machine_record_id = body["machineRecordId"].as_str().expect("record").to_string();
+    let epoch = body["enrollmentEpoch"].as_str().expect("epoch").to_string();
+
+    let grants_path = format!("/api/account/v1/machines/{machine_record_id}/grants");
+    let (status, body) = post(
+        &server.base,
+        &grants_path,
+        json!({
+            "machineRecordId": machine_record_id,
+            "enrollmentEpoch": epoch,
+            "deviceLabel": "MacBook",
+            "installationId": "install-1",
+            "grantScope": "machine",
+            "attachPublicKey": attach_public,
+        }),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let envelope: AccountGrantOfferEnvelope =
+        serde_json::from_value(body["sealedOffer"].clone()).expect("sealed offer carried");
+
+    let now = now_secs();
+    let offer = open_grant_offer(&attach, &envelope, &identity.machine_id, &epoch, now)
+        .expect("the machine opens the offer the account sealed");
+    assert_eq!(offer.device_label, "MacBook");
+    assert!(
+        !envelope.sealed.contains(&offer.pairing_token),
+        "the relay payload never carries the token in the clear"
+    );
+
+    let auth = AuthManager::with_persistence(Some(manager_dir.path().join("remote-auth.json")));
+    let ack = apply_grant_offer(&auth, &attach, &identity.machine_id, &epoch, &envelope, now)
+        .expect("the machine registers the capability");
+    assert_eq!(ack.status, "ready");
+
+    let (_bearer, device) = auth
+        .exchange_pairing_code_with_installation(&offer.pairing_token, "MacBook", Some("install-1"))
+        .expect("the sealed grant redeems into a device");
+    assert_eq!(device.access_scope, DeviceAccessScope::Machine);
 }

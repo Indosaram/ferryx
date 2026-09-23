@@ -19,9 +19,10 @@ use super::store::{
     DEFAULT_LOGIN_REQUESTS_PER_HOUR, DEFAULT_MAX_BODY_BYTES, ENROLLMENT_CODE_TTL, LOGIN_CODE_TTL,
     SESSION_TTL,
 };
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use crate::remote::account_protocol::{
-    AccountEnrollChallenge, AccountEnrollRequest, AccountEnrollResponse, AccountGrantRequest,
-    AccountGrantResponse, AccountGrantScope,
+    AccountEnrollChallenge, AccountEnrollRequest, AccountEnrollResponse, AccountGrantOffer,
+    AccountGrantOfferEnvelope, AccountGrantRequest, AccountGrantResponse, AccountGrantScope,
 };
 
 pub const GRANT_TTL: Duration = Duration::from_secs(600);
@@ -592,7 +593,7 @@ pub async fn issue_grant(
     let request: AccountGrantRequest = parse_json(body).await?;
     let now = now_secs();
 
-    let (grant, pairing_token, machine) = state.mutate(|store| {
+    let (grant, pairing_token, machine, offer) = state.mutate(|store| {
         let machine = store
             .machines
             .get(&machine_record_id)
@@ -625,8 +626,35 @@ pub async fn issue_grant(
             expires_at: now + GRANT_TTL.as_secs(),
         };
         store.grants.insert(grant.grant_id.clone(), grant.clone());
-        Ok((grant, pairing_token, machine))
+        let offer = AccountGrantOffer {
+            grant_id: grant.grant_id.clone(),
+            machine_id: machine.machine_id.clone(),
+            enrollment_epoch: machine.enrollment_epoch.to_string(),
+            pairing_token: pairing_token.clone(),
+            device_label: request.device_label.clone(),
+            installation_id: request.installation_id.clone(),
+            grant_scope: request.grant_scope,
+            expires_at: grant.expires_at,
+        };
+        Ok((grant, pairing_token, machine, offer))
     })?;
+
+    let sealed_offer = serde_json::to_vec(&offer)
+        .map_err(|error| ApiError::internal(error.to_string()))
+        .and_then(|plaintext| {
+            crate::remote::sealed_offer::seal_offer(
+                &machine.attach_public_key,
+                &machine.machine_id,
+                &offer.enrollment_epoch,
+                &plaintext,
+            )
+            .map_err(|error| ApiError::internal(error.to_string()))
+        })
+        .map(|sealed| AccountGrantOfferEnvelope {
+            machine_id: machine.machine_id.clone(),
+            enrollment_epoch: offer.enrollment_epoch.clone(),
+            sealed: STANDARD.encode(sealed),
+        })?;
 
     Ok(Json(AccountGrantResponse {
         grant_id: grant.grant_id,
@@ -636,6 +664,7 @@ pub async fn issue_grant(
         machine_attach_public_key: machine.attach_public_key,
         grant_scope: request.grant_scope,
         expires_at: grant.expires_at,
+        sealed_offer: Some(sealed_offer),
     }))
 }
 
