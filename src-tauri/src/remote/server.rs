@@ -3965,7 +3965,7 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .allow_methods(Any)
         .allow_headers(Any);
 
-    Router::new()
+    let mut router = Router::new()
         .route("/api/v1/health", get(health_check))
         .route("/api/v1/capabilities", get(get_capabilities))
         .route(
@@ -4055,7 +4055,34 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .layer(axum::Extension(Arc::new(
             super::filesystem::BrowseLimits::default(),
         )))
-        .with_state(state)
+        .with_state(Arc::clone(&state));
+
+    if let Ok(attach) =
+        crate::remote::attach_identity::load_or_generate_canonical_attach_identity()
+    {
+        let machine_id = crate::remote::auth::canonical_identity_dir()
+            .ok()
+            .and_then(|dir| crate::remote::auth::load_or_generate_machine_identity(&dir).ok())
+            .map(|identity| identity.machine_id)
+            .unwrap_or_default();
+        let enrollment_epoch = crate::account::enroll_client::load_enrollment_record()
+            .map(|record| record.enrollment_epoch)
+            .unwrap_or_default();
+        let auth = Arc::clone(&state.auth_manager);
+        let deps = Arc::new(crate::remote::attach_router::AttachRouterDeps {
+            attach,
+            machine_id,
+            enrollment_epoch,
+            gateway_addr: format!(
+                "127.0.0.1:{}",
+                crate::remote::state::REMOTE_GATEWAY_PORT
+            ),
+            authorize: Arc::new(move |key| auth.device_for_attach_key_bytes(key).is_some()),
+        });
+        router = router.merge(crate::remote::attach_router::attach_router(deps));
+    }
+
+    router
 }
 
 pub static ALLOW_INSECURE_DIRECT: std::sync::atomic::AtomicBool =
