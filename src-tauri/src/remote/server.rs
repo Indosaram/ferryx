@@ -4366,6 +4366,7 @@ pub async fn start_remote_server_with_resolver_and_insecure_opt_in(
                 epoch,
             });
             published_pairing = Some((Arc::clone(&state), epoch));
+            *state.relay_client.write() = Some(client.clone());
             // run invokes connect_control and keeps servicing reverse tunnels/reconnects.
             tokio::spawn(async move { client.run().await })
         });

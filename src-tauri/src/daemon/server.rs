@@ -2547,6 +2547,63 @@ impl DaemonServer {
                     capabilities.push("sessionOwnershipTransferV1".into());
                     DaemonResponse::CapabilitiesOk { capabilities }
                 },
+                Ok(DaemonRequest::RemoteAllocateAttachSession) => {
+                    let client = self.remote_state.relay_client.read().clone();
+                    let relay_origin = self
+                        .remote_state
+                        .config
+                        .read()
+                        .relay_url
+                        .clone()
+                        .unwrap_or_default();
+                    match client {
+                        None => DaemonResponse::Error {
+                            message: "relay mode is not running".into(),
+                            code: Some("RELAY_OFF".into()),
+                            details: None,
+                        },
+                        Some(client) => match client.allocate_opaque_session().await {
+                        Ok(session_id) => {
+                            let identity = crate::remote::auth::canonical_identity_dir()
+                                .ok()
+                                .and_then(|dir| {
+                                    crate::remote::auth::load_or_generate_machine_identity(&dir).ok()
+                                });
+                            let attach = crate::remote::attach_identity::
+                                load_or_generate_canonical_attach_identity();
+                            match (identity, attach) {
+                                (Some(identity), Ok(attach)) => {
+                                    DaemonResponse::RemoteAttachSessionOk {
+                                        session_id,
+                                        machine_id: identity.machine_id,
+                                        machine_attach_public_key: attach.public_key,
+                                        enrollment_epoch: crate::account::enroll_client::
+                                            load_enrollment_record()
+                                            .map(|record| record.enrollment_epoch)
+                                            .unwrap_or_default(),
+                                        relay_origin,
+                                    }
+                                }
+                                (None, _) => DaemonResponse::Error {
+                                    message: "machine identity unavailable".into(),
+                                    code: Some("IDENTITY_UNAVAILABLE".into()),
+                                    details: None,
+                                },
+                                (_, Err(error)) => DaemonResponse::Error {
+                                    message: error,
+                                    code: Some("ATTACH_IDENTITY_UNAVAILABLE".into()),
+                                    details: None,
+                                },
+                            }
+                        }
+                            Err(error) => DaemonResponse::Error {
+                                message: error.to_string(),
+                                code: Some("RELAY_ALLOCATE_FAILED".into()),
+                                details: None,
+                            },
+                        },
+                    }
+                }
                 Ok(request @ (DaemonRequest::RemoteCreatePairingCode { .. }
                     | DaemonRequest::RemoteCreateMachinePairingCode)) => {
                     let (permission, scope) = match request {

@@ -315,6 +315,7 @@ pub enum DaemonRequest {
     /// Separate variant: an old daemon rejects machine issuance instead of
     /// ignoring an unknown scope field and accidentally issuing a mirror PIN.
     RemoteCreateMachinePairingCode,
+    RemoteAllocateAttachSession,
     #[serde(rename_all = "camelCase")]
     RemoteConfigure {
         config: RemoteGatewayConfig,
@@ -418,6 +419,14 @@ pub enum DaemonResponse {
         receipt: crate::paired_host::inventory::MigrationReceipt,
     },
     PairedHostForgetOk,
+    #[serde(rename_all = "camelCase")]
+    RemoteAttachSessionOk {
+        session_id: String,
+        machine_id: String,
+        machine_attach_public_key: String,
+        enrollment_epoch: String,
+        relay_origin: String,
+    },
     PairedHostError {
         error: crate::paired_host::service::ServiceError,
     },

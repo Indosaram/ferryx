@@ -780,6 +780,9 @@ pub struct RemoteGatewayState {
     /// go through this one coordinator instead of each minting a local-only code or
     /// standing up a competing RelayClient for the same machine identity.
     pub relay_pairing: RwLock<Option<PublishedPairing>>,
+    /// The relay client owned by the running gateway. The daemon asks it to mint an attach
+    /// session, so a client can reach this machine without holding any relay credential.
+    pub relay_client: RwLock<Option<crate::remote::relay_client::RelayClient>>,
     /// Single-use socket tickets minted for direct-gateway WebSocket upgrades.
     ///
     /// The browser `WebSocket` constructor cannot set an `Authorization` header, so a
@@ -963,6 +966,7 @@ impl RemoteGatewayState {
             config_path,
             desktop_event_sink: RwLock::new(None),
             relay_pairing: RwLock::new(None),
+            relay_client: RwLock::new(None),
             socket_tickets: parking_lot::Mutex::new(std::collections::HashMap::new()),
             browser_backend: parking_lot::RwLock::new(Arc::new(
                 crate::remote::browser_backend::LocalIpcBrowserBackend::new(

@@ -191,6 +191,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::Ping => "ping",
         DaemonRequest::MachineSessionDetail { .. } => "machineSessionDetail",
         DaemonRequest::MachineSessionMetadata { .. } => "machineSessionMetadata",
+        DaemonRequest::RemoteAllocateAttachSession => "remoteAllocateAttachSession",
         DaemonRequest::MachineGateway => "machineGateway",
         DaemonRequest::MachineMetadataSubscribe { .. } => "machineMetadataSubscribe",
         DaemonRequest::RetryRemoteSession { .. } => "retryRemoteSession",
