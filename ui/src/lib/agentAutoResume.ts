@@ -1,7 +1,7 @@
 import { getAgentReconnectAffordance } from "./agentResumeAffordance";
 import { loadGeneralSettings } from "./generalSettings";
 import { isStandbyBackendSessionId } from "./sessionLifecycle";
-import type { TerminalSession, TerminalTab } from "./types";
+import { isTerminalTab, type TerminalSession } from "./types";
 import type { WorkspaceState } from "../state/workspaceStore";
 
 export const MAX_AUTO_RESUME_CANDIDATES = 8;
@@ -49,7 +49,7 @@ function activeTabSessionIds(state: WorkspaceState): Set<string> {
     : state.layout.activeTabId;
   if (!activeTabId) return result;
   const tab = state.layout.tabs.find((candidate) => candidate.id === activeTabId);
-  if (!tab || tab.kind === "browser") return result;
+  if (!tab || !isTerminalTab(tab)) return result;
   result.add(tab.sessionId);
   const tabLayout = state.layout.layoutsByTabId?.[activeTabId];
   for (const sessionId of Object.values(tabLayout?.sessionIdsByLeafId ?? {})) {
@@ -85,9 +85,10 @@ export function collectAutoResumeCandidates(
   const activeTabId = state.layout.focusedGroupId
     ? state.layout.tabGroups?.[state.layout.focusedGroupId]?.activeTabId ?? state.layout.activeTabId
     : state.layout.activeTabId ?? state.layout.tabs[0]?.id;
-  const activeTab = activeTabId
-    ? (state.layout.tabs.find((t) => t.id === activeTabId && t.kind !== "browser") as TerminalTab | undefined)
+  const activeCandidate = activeTabId
+    ? state.layout.tabs.find((t) => t.id === activeTabId)
     : null;
+  const activeTab = activeCandidate && isTerminalTab(activeCandidate) ? activeCandidate : null;
 
   if (activeTab) {
     const tabLayout = state.layout.layoutsByTabId?.[activeTab.id];
@@ -114,8 +115,8 @@ export function collectAutoResumeCandidates(
   }
 
   for (const tab of state.layout.tabs) {
-    if (tab.kind === "browser") continue;
-    const terminalTab = tab as TerminalTab;
+    if (!isTerminalTab(tab)) continue;
+    const terminalTab = tab;
     const tabLayout = state.layout.layoutsByTabId?.[terminalTab.id];
     if (tabLayout?.sessionIdsByLeafId) {
       for (const sessionId of Object.values(tabLayout.sessionIdsByLeafId)) {

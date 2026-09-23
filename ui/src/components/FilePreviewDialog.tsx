@@ -12,9 +12,11 @@ import { ExternalLink, RotateCcw, X } from "lucide-react";
 
 import { filePreviewController, type FilePreviewController, type FilePreviewNotice, type FilePreviewState } from "../lib/filePreview";
 import type {
+  FilePreviewAudioProps,
   FilePreviewErrorReason,
   FilePreviewImageProps,
   FilePreviewPayload,
+  FilePreviewPdfProps,
   FilePreviewSource,
   FilePreviewTextProps,
   FilePreviewVideoProps,
@@ -27,6 +29,8 @@ export type FilePreviewRenderSlots = {
   readonly markdown?: ComponentType<FilePreviewTextProps>;
   readonly image?: ComponentType<FilePreviewImageProps>;
   readonly video?: ComponentType<FilePreviewVideoProps>;
+  readonly audio?: ComponentType<FilePreviewAudioProps>;
+  readonly pdf?: ComponentType<FilePreviewPdfProps>;
 };
 
 export type FilePreviewDialogProps = {
@@ -319,6 +323,16 @@ export function FilePreviewDialog({
           const ImageRenderer = renderers?.image;
           if (!ImageRenderer) return renderMissingRenderer(open.payload);
           return <ImageRenderer {...rendererProps} payload={open.payload} />;
+        }
+        if (kind === "audio") {
+          const AudioRenderer = renderers?.audio;
+          if (!AudioRenderer) return renderMissingRenderer(open.payload);
+          return <AudioRenderer {...rendererProps} payload={open.payload} />;
+        }
+        if (kind === "pdf") {
+          const PdfRenderer = renderers?.pdf;
+          if (!PdfRenderer) return renderMissingRenderer(open.payload);
+          return <PdfRenderer {...rendererProps} payload={open.payload} />;
         }
         const VideoRenderer = renderers?.video;
         if (!VideoRenderer) return renderMissingRenderer(open.payload);

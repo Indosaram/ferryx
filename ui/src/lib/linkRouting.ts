@@ -1,4 +1,3 @@
-import { filePreviewController } from "./filePreview";
 import type { FilePreviewSource } from "./filePreviewTypes";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { isHttpUrl, loadBrowserSettings } from "./browserSettings";
@@ -290,12 +289,17 @@ export async function openTerminalToken(
         backendSessionId: options.sessionId ?? "default-session",
         workspaceId: null,
       };
-      await filePreviewController.open(source, {
-        path: token.path,
-        backendSessionId: source.backendSessionId,
-        line: token.line ?? null,
-        col: token.col ?? null,
-      });
+      window.dispatchEvent(new CustomEvent("ferryx:open-file-preview", {
+        detail: {
+          source,
+          request: {
+            path: token.path,
+            backendSessionId: source.backendSessionId,
+            line: token.line ?? null,
+            col: token.col ?? null,
+          },
+        },
+      }));
       return true;
     }
 

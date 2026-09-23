@@ -25,8 +25,17 @@ import type { FilePreviewImageProps } from "../lib/filePreviewTypes";
  * reach this component and corrupt the current view.
  */
 
-/** Raster types the backend may hand to this renderer. SVG is deliberately absent. */
-const IMAGE_MEDIA_TYPES: readonly string[] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+/** Types this renderer draws with <img>. SVG stays an image, never a document. */
+const IMAGE_MEDIA_TYPES: readonly string[] = [
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+  "image/bmp",
+  "image/x-icon",
+  "image/vnd.microsoft.icon",
+  "image/svg+xml",
+];
 
 const ZOOM_MIN_PCT = Math.round(FILE_PREVIEW_ZOOM.min * 100);
 const ZOOM_MAX_PCT = Math.round(FILE_PREVIEW_ZOOM.max * 100);

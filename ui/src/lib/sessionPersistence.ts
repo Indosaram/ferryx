@@ -92,6 +92,24 @@ export function serializeWorkspaceState(
         continue;
       }
 
+      if (tab.kind === "file") {
+        persistedTabs.push({
+          id: tab.id,
+          kind: "file",
+          label: tab.label,
+          pinned: Boolean(tab.pinned),
+          file: {
+            path: tab.path,
+            backendSessionId: tab.backendSessionId,
+            line: tab.line,
+            col: tab.col,
+            workspaceId: tab.workspaceId,
+            previewId: tab.previewId,
+          },
+        });
+        continue;
+      }
+
       const tabLayout = normalizedLayout.layoutsByTabId[tab.id];
       let effectiveRoot: PaneNode | null = tabLayout?.root ?? createLeafNode(`leaf-persisted:${tab.id}`);
       let effectiveContents = tabLayout?.contentsByLeafId;
@@ -137,6 +155,9 @@ export function serializeWorkspaceState(
             contentsByLeafId[leafId] = createDagPaneContent({
               runId: rawDag.runId ?? null,
             });
+            sessionIdsByLeafId[leafId] = "";
+          } else if (content.kind === "file") {
+            contentsByLeafId[leafId] = content;
             sessionIdsByLeafId[leafId] = "";
           } else {
             contentsByLeafId[leafId] = createTerminalPaneContent(content.sessionId);
@@ -532,6 +553,24 @@ export function deserializeWorkspaceState(
         continue;
       }
 
+      if (persistedTab.kind === "file" || persistedTab.file) {
+        const file = persistedTab.file;
+        if (!file?.path) continue;
+        tabs.push({
+          id: persistedTab.id,
+          kind: "file",
+          label: persistedTab.label,
+          path: file.path,
+          backendSessionId: file.backendSessionId,
+          line: file.line,
+          col: file.col,
+          workspaceId: file.workspaceId,
+          previewId: file.previewId || persistedTab.id,
+          pinned: Boolean(persistedTab.pinned),
+        });
+        continue;
+      }
+
       const primarySessionId = persistedTab.terminal?.primarySessionId ?? persistedTab.sessionId ?? "";
       const tab: TerminalTab = {
         id: persistedTab.id,
@@ -569,6 +608,30 @@ export function deserializeWorkspaceState(
           expandedLeafId: null,
           sessionIdsByLeafId: { [leafId]: "" },
           contentsByLeafId: { [leafId]: createBrowserPaneContent(browserState) },
+        };
+        continue;
+      }
+
+      if (persistedTab.kind === "file" || persistedTab.file) {
+        const file = persistedTab.file;
+        if (!file?.path) continue;
+        const leafId = `leaf-file:${persistedTab.id}`;
+        layoutsByTabId[persistedTab.id] = {
+          root: createLeafNode(leafId),
+          activeLeafId: leafId,
+          expandedLeafId: null,
+          sessionIdsByLeafId: { [leafId]: "" },
+          contentsByLeafId: {
+            [leafId]: {
+              kind: "file",
+              path: file.path,
+              backendSessionId: file.backendSessionId,
+              line: file.line,
+              col: file.col,
+              workspaceId: file.workspaceId,
+              previewId: file.previewId || persistedTab.id,
+            },
+          },
         };
         continue;
       }
@@ -625,6 +688,9 @@ export function deserializeWorkspaceState(
             contentsByLeafId[leafId] = createDagPaneContent({
               runId: rawDag.runId ?? null,
             });
+            sessionIdsByLeafId[leafId] = "";
+          } else if (rawContent.kind === "file") {
+            contentsByLeafId[leafId] = rawContent;
             sessionIdsByLeafId[leafId] = "";
           } else {
             const sessId = rawContent.sessionId || persistedMapping?.[leafId] || primarySessionId;
@@ -689,7 +755,7 @@ export function deserializeWorkspaceState(
   const referencedSessionIds = new Set<string>();
   for (const layout of allLayouts) {
     for (const tab of layout.tabs) {
-      if (tab.kind === "browser") continue;
+      if (tab.kind === "browser" || tab.kind === "file") continue;
       const tabLayout = layout.layoutsByTabId[tab.id];
       if (tabLayout?.contentsByLeafId) {
         for (const content of Object.values(tabLayout.contentsByLeafId)) {

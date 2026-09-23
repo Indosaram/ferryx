@@ -75,7 +75,7 @@ describe("terminal lifecycle reaches a parked workspace", () => {
     await act(async () => { openedTabId = await result.current.openTab(alpha); });
     const tabId: string = openedTabId ?? ((): never => { throw new Error("expected a tab"); })();
     const openedTab = result.current.state.layout.tabs[0];
-    if (openedTab.kind === "browser") throw new Error("expected a terminal tab");
+    if (openedTab.kind === "browser" || openedTab.kind === "file") throw new Error("expected a terminal tab");
     const sessionId = openedTab.sessionId;
 
     act(() => result.current.dispatchWorkspaceAction({

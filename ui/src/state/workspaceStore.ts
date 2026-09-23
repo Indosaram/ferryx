@@ -25,7 +25,9 @@ import { canCaptureAuthoritativeProviderSession } from "../lib/agentResume";
 import { getAgentReconnectAffordance } from "../lib/agentResumeAffordance";
 import { getNativeWindowFocused } from "../lib/nativeWindowFocus";
 import { isWindowForegroundFocused } from "../lib/notificationCoordinator";
-import { createBrowserPaneContent, worktreeIdentity } from "../lib/types";
+import { listFilePreviewIds, releaseFilePreview, retainFilePreview } from "../lib/filePreviewTabRegistry";
+import type { FilePreviewOpenRequest, FilePreviewSource } from "../lib/filePreviewTypes";
+import { createBrowserPaneContent, isTerminalTab, worktreeIdentity } from "../lib/types";
 import type {
   AgentProviderSession,
   ActiveAgent,
@@ -38,6 +40,7 @@ import type {
   StructuredIpcError,
   TerminalLifecycle,
   TerminalLifecyclePayload,
+  FileTab,
   TerminalSession,
   TerminalTab,
   WorkspaceTab,
@@ -155,6 +158,7 @@ export type WorkspaceAction =
     }
   | { type: "UPDATE_BROWSER_TAB"; tabId: string; browserId?: string; updates: Partial<BrowserTab> }
   | { type: "ACTIVATE_TAB"; tabId: string }
+  | { type: "UPDATE_FILE_TAB"; tabId: string; line: number | null; col: number | null }
   | { type: "REORDER_TAB"; tabId: string; targetIndex: number }
   | { type: "RENAME_TAB"; tabId: string; label: string }
   | { type: "SET_TAB_PINNED"; tabId: string; pinned: boolean }
@@ -797,10 +801,10 @@ export function useWorkspaceStore({
             snapshot.layout.tabs.some((tab) => tab.id === snapshot.layout.activeTabId),
         );
         const activeTab = snapshot.layout.tabs.find(
-          (tab) => tab.kind !== "browser" && sessionWorktreePath(snapshot.sessions[tab.sessionId]) === worktree.path,
+          (tab) => isTerminalTab(tab) && sessionWorktreePath(snapshot.sessions[tab.sessionId]) === worktree.path,
         ) ?? snapshot.layout.tabs[0];
         if (activeTab) {
-          if (activeTab.kind !== "browser") {
+          if (isTerminalTab(activeTab)) {
             const activeSession = snapshot.sessions[activeTab.sessionId];
             if (activeSession && activeSession.backendSessionId === null && isPairedWorkspaceId(activeSession.workspaceId)) {
               void ensureSessionBackends([activeSession.id], { fallbackToShell: true });
@@ -856,7 +860,7 @@ export function useWorkspaceStore({
         if (activeTabId) {
           dispatch({ type: "ACTIVATE_TAB", tabId: activeTabId });
           const activeTab = parkedLayout.tabs.find((t) => t.id === activeTabId);
-          if (activeTab && activeTab.kind !== "browser") {
+          if (activeTab && isTerminalTab(activeTab)) {
             const activeSession = snapshot.sessions[activeTab.sessionId];
             if (activeSession && activeSession.backendSessionId === null && isPairedWorkspaceId(activeSession.workspaceId)) {
               void ensureSessionBackends([activeSession.id], { fallbackToShell: true });
@@ -868,7 +872,7 @@ export function useWorkspaceStore({
       }
 
       const existingInCurrent = snapshot.layout.tabs.find(
-        (tab) => tab.kind !== "browser" && sessionWorktreePath(snapshot.sessions[tab.sessionId]) === worktree.path,
+        (tab) => isTerminalTab(tab) && sessionWorktreePath(snapshot.sessions[tab.sessionId]) === worktree.path,
       );
       if (existingInCurrent) {
         switchDebug("worktree.ensure.existing-current", {
@@ -878,7 +882,7 @@ export function useWorkspaceStore({
         });
         selectWorktreeImmediately();
         dispatch({ type: "ACTIVATE_TAB", tabId: existingInCurrent.id });
-        if (existingInCurrent.kind !== "browser") {
+        if (isTerminalTab(existingInCurrent)) {
           const existingSession = snapshot.sessions[existingInCurrent.sessionId];
           if (existingSession && existingSession.backendSessionId === null && isPairedWorkspaceId(existingSession.workspaceId)) {
             void ensureSessionBackends([existingSession.id], { fallbackToShell: true });
@@ -917,7 +921,7 @@ export function useWorkspaceStore({
     ) => {
       const snapshot = stateRef.current;
       const targetTab = snapshot.layout.tabs.find((candidate) => candidate.id === tabId);
-      if (!targetTab || targetTab.kind === "browser") return;
+      if (!targetTab || !isTerminalTab(targetTab)) return;
       const targetLayout = snapshot.layout.layoutsByTabId?.[targetTab.id];
       if (!targetLayout || !collectLeafIds(targetLayout.root).includes(targetLeafId)) return;
 
@@ -1081,6 +1085,12 @@ export function useWorkspaceStore({
         return;
       }
 
+      if (closingTab.kind === "file") {
+        dispatch({ type: "CLOSE_TAB", tabId });
+        releaseOrphanPreviews(stateRef.current);
+        return;
+      }
+
       // A browser can live as pane content inside a terminal-kind tab (e.g. after a
       // browser tab was dragged into this tab's split); collect its ids so the native
       // child webviews are torn down with the tab instead of leaking.
@@ -1109,6 +1119,7 @@ export function useWorkspaceStore({
           .filter((browserId) => !isBrowserIdReferenced(stateRef.current, browserId))
           .map((browserId) => closeBrowser(browserId)),
       );
+      releaseOrphanPreviews(stateRef.current);
     },
     [dispatch, services],
   );
@@ -1130,6 +1141,7 @@ export function useWorkspaceStore({
         ? (closingContent.browser?.browserId ?? closingContent.browserId ?? "")
         : "";
       dispatch({ type: "CLOSE_PANE", tabId, leafId });
+      releaseOrphanPreviews(stateRef.current);
       if (closingSessionId && !isSessionReferenced(stateRef.current, closingSessionId)) {
         await closeBackendSession(closingSession, services);
       }
@@ -1243,8 +1255,8 @@ export function useWorkspaceStore({
     (tabId: string, title: string, explicitSessionId?: string) => {
       const snapshot = stateRef.current;
       const tab = getAllTabs(snapshot).find((candidate) => candidate.id === tabId);
-      if (!tab || tab.kind === "browser") return;
-      const sessionId = explicitSessionId ?? (tab as TerminalTab).sessionId;
+      if (!tab || !isTerminalTab(tab)) return;
+      const sessionId = explicitSessionId ?? tab.sessionId;
       if (!snapshot.sessions[sessionId]) return;
       dispatch({ type: "SESSION_TITLE_ACTIVITY", tabId, sessionId, title });
     },
@@ -1321,6 +1333,42 @@ export function useWorkspaceStore({
       return tabId;
     },
     [dispatch, workspaceId],
+  );
+
+  const openFilePreviewTab = useCallback(
+    (source: FilePreviewSource, request: FilePreviewOpenRequest): string => {
+      const snapshot = stateRef.current;
+      const existing = snapshot.layout.tabs.find(
+        (tab) => tab.kind === "file" && tab.path === request.path,
+      );
+      if (existing && existing.kind === "file") {
+        retainFilePreview(existing.previewId, source, request);
+        dispatch({
+          type: "UPDATE_FILE_TAB",
+          tabId: existing.id,
+          line: request.line,
+          col: request.col,
+        });
+        return existing.id;
+      }
+      const tabId = createId("tab");
+      const label = request.path.split(/[/\\]/).pop() || request.path;
+      const tab: FileTab = {
+        kind: "file",
+        id: tabId,
+        label,
+        path: request.path,
+        backendSessionId: request.backendSessionId,
+        line: request.line,
+        col: request.col,
+        workspaceId: source.workspaceId,
+        previewId: tabId,
+      };
+      retainFilePreview(tabId, source, request);
+      dispatch({ type: "ADD_TAB_WITH_SESSION", tab });
+      return tabId;
+    },
+    [dispatch],
   );
 
   const adoptBrowserSession = useCallback(
@@ -1468,6 +1516,7 @@ export function useWorkspaceStore({
     activityNotificationTargets,
     openTab,
     createBrowserTab,
+    openFilePreviewTab,
     adoptBrowserSession,
     duplicateBrowserTab,
     navigateBrowserTab: navigateBrowserTabAction,
@@ -1545,7 +1594,7 @@ export function useWorkspaceStore({
 export function selectAgents(state: WorkspaceState): ActiveAgent[] {
   const allTabs = getAllTabs(state);
   return allTabs.flatMap((tab) => {
-    if (tab.kind === "browser") return [];
+    if (!isTerminalTab(tab)) return [];
     const session = state.sessions[tab.sessionId];
     if (!session) return [];
     const worktreePath = sessionWorktreePath(session);
@@ -1854,7 +1903,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       let layout = state.layout;
       for (const tab of state.layout.tabs) {
         const hasRetainedSession = [...getTabSessionIdsForLayout(state.layout, tab.id)].some((sessionId) => Boolean(sessions[sessionId]));
-        if (tab.kind !== "browser" && !hasRetainedSession) {
+        if (isTerminalTab(tab) && !hasRetainedSession) {
           layout = layoutReducer(layout, { type: "CLOSE_TAB", tabId: tab.id });
         }
       }
@@ -1864,7 +1913,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         let cleanedLayout = parkedLayout;
         for (const tab of parkedLayout.tabs) {
           const hasRetainedSession = [...getTabSessionIdsForLayout(parkedLayout, tab.id)].some((sessionId) => Boolean(sessions[sessionId]));
-          if (tab.kind !== "browser" && !hasRetainedSession) {
+          if (isTerminalTab(tab) && !hasRetainedSession) {
             cleanedLayout = layoutReducer(cleanedLayout, { type: "CLOSE_TAB", tabId: tab.id });
           }
         }
@@ -2079,7 +2128,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
     case "CLOSE_PANE": {
       const tab = state.layout.tabs.find((candidate) => candidate.id === action.tabId);
       const tabLayout = state.layout.layoutsByTabId?.[action.tabId];
-      if (!tab || tab.kind === "browser" || !tabLayout) return state;
+      if (!tab || !isTerminalTab(tab) || !tabLayout) return state;
       if (tabLayout.root.type === "leaf" && tabLayout.root.leafId === action.leafId) {
         return workspaceReducer(state, { type: "CLOSE_TAB", tabId: action.tabId });
       }
@@ -2098,7 +2147,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
           layout = {
             ...layout,
             tabs: layout.tabs.map((candidate) =>
-              candidate.id === action.tabId && candidate.kind !== "browser"
+              candidate.id === action.tabId && isTerminalTab(candidate)
                 ? { ...candidate, sessionId: replacementSessionId }
                 : candidate,
             ),
@@ -2161,6 +2210,11 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       };
       return clearWorktreeUnreadWhenRead(nextState, action.tabId, state);
     }
+    case "UPDATE_FILE_TAB":
+      return {
+        ...state,
+        layout: layoutReducer(state.layout, action),
+      };
     case "ACTIVATE_TAB": {
       if (state.layout.tabs.some((tab) => tab.id === action.tabId)) {
         const unreadTabIds = { ...state.unreadTabIds };
@@ -2873,7 +2927,7 @@ function getAllTabs(state: WorkspaceState): WorkspaceTab[] {
 
 function getTabSessionIdsForLayout(layout: LayoutState, tabId: string): Set<string> {
   const tab = layout.tabs.find((candidate) => candidate.id === tabId);
-  if (!tab || tab.kind === "browser") return new Set<string>();
+  if (!tab || !isTerminalTab(tab)) return new Set<string>();
   const tabLayout = layout.layoutsByTabId?.[tabId];
   const sessionIds = new Set<string>(Object.values(tabLayout?.sessionIdsByLeafId ?? {}));
   sessionIds.add(tab.sessionId);
@@ -2977,7 +3031,7 @@ function locateSessionLeaf(
   sessionId: string,
 ): { tabId: string; leafId: string | null } | null {
   for (const tab of layout.tabs) {
-    if (tab.kind === "browser") continue;
+    if (!isTerminalTab(tab)) continue;
     const tabLayout = layout.layoutsByTabId?.[tab.id];
     if (tabLayout) {
       for (const leafId of collectLeafIds(tabLayout.root)) {
@@ -3106,7 +3160,7 @@ function nextTabLabel(worktree: Worktree, allTabs: WorkspaceTab[], sessions: Rec
         ? branch
         : "main";
   const count = allTabs.filter(
-    (tab) => tab.kind !== "browser" && sessionWorktreePath(sessions[tab.sessionId]) === worktree.path,
+    (tab) => isTerminalTab(tab) && sessionWorktreePath(sessions[tab.sessionId]) === worktree.path,
   ).length + 1;
   return count === 1 ? base : `${base} (${count})`;
 }
@@ -3119,6 +3173,29 @@ function mapBackendLifecycle(payload: TerminalLifecyclePayload): TerminalLifecyc
 
 function createClientRequestId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function collectPreviewIds(state: { layout: LayoutState; worktreeLayouts?: Record<string, LayoutState> }): Set<string> {
+  const ids = new Set<string>();
+  const layouts = [state.layout, ...Object.values(state.worktreeLayouts ?? {})];
+  for (const layout of layouts) {
+    for (const tab of layout.tabs) {
+      if (tab.kind === "file") ids.add(tab.previewId);
+    }
+    for (const pane of Object.values(layout.layoutsByTabId ?? {})) {
+      for (const content of Object.values(pane.contentsByLeafId ?? {})) {
+        if (content.kind === "file") ids.add(content.previewId);
+      }
+    }
+  }
+  return ids;
+}
+
+function releaseOrphanPreviews(state: { layout: LayoutState; worktreeLayouts?: Record<string, LayoutState> }) {
+  const live = collectPreviewIds(state);
+  for (const id of listFilePreviewIds()) {
+    if (!live.has(id)) void releaseFilePreview(id);
+  }
 }
 
 function createId(prefix: string) {

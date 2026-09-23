@@ -3747,8 +3747,11 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
   });
 
-  it("handles Cmd+click without Shift to open file preview modal", async () => {
+  it("handles Cmd+click without Shift by opening a file tab instead of the preview modal", async () => {
     const openSpy = vi.spyOn(filePreviewController, "open").mockResolvedValue(undefined);
+    const events: Array<CustomEvent> = [];
+    const onOpen = (event: Event) => events.push(event as CustomEvent);
+    window.addEventListener("ferryx:open-file-preview", onOpen);
     const session = {
       ...createSession("term-session-preview-click", "daemon-preview-click"),
       cwd: "/Users/indo/code/project",
@@ -3811,19 +3814,22 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
 
     await waitFor(() => {
-      expect(openSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          sessionId: "term-session-preview-click",
-          backendSessionId: "daemon-preview-click",
-        }),
-        expect.objectContaining({
-          path: "src/components/App.tsx",
-          backendSessionId: "daemon-preview-click",
-          line: 42,
-          col: 10,
-        }),
-      );
+      expect(events).toHaveLength(1);
     });
+    expect(openSpy).not.toHaveBeenCalled();
+    expect(events[0]?.detail).toEqual({
+      source: expect.objectContaining({
+        sessionId: "term-session-preview-click",
+        backendSessionId: "daemon-preview-click",
+      }),
+      request: expect.objectContaining({
+        path: "src/components/App.tsx",
+        backendSessionId: "daemon-preview-click",
+        line: 42,
+        col: 10,
+      }),
+    });
+    window.removeEventListener("ferryx:open-file-preview", onOpen);
     openSpy.mockRestore();
   });
   it("shows a link underline only while hovering a token with the modifier", async () => {

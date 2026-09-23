@@ -43,6 +43,7 @@ import {
   type ResolvedSeam,
 } from "../state/paneTree";
 import { BrowserPane } from "./BrowserPane";
+import { FilePreviewPane } from "./FilePreviewPane";
 import { DagGraphView } from "./dag/DagGraphView";
 import { TabBar } from "./TabBar";
 import { NativeTerminalVisibilityProvider } from "../lib/nativeTerminalVisibility";
@@ -899,7 +900,7 @@ const PaneRenderer = React.memo(function PaneRenderer(props: PaneRendererProps) 
   const { node, tab, tabLayout, sessions, path, browserPanesVisible, dropFeedbackLeafId, onNavigateBrowserTab, onReloadBrowserTab } = props;
   if (node.type === "leaf") {
     const rawContent = tabLayout.contentsByLeafId?.[node.leafId];
-    const defaultSessionId = tab.kind === "browser" ? "" : tab.sessionId;
+    const defaultSessionId = tab.kind === "browser" || tab.kind === "file" ? "" : tab.sessionId;
     const sessionId = tabLayout.sessionIdsByLeafId[node.leafId] ?? defaultSessionId;
     const content = rawContent
       ? toPaneContent(rawContent, sessionId)
@@ -1184,7 +1185,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
           ) : null}
           <IconButton
             label="Split pane right"
-            data-shortcut={tab.kind !== "browser" ? "terminal.splitRight" : undefined}
+            data-shortcut={tab.kind === "terminal" || tab.kind === undefined ? "terminal.splitRight" : undefined}
             size="sm"
             className="size-5 rounded p-0 text-muted-foreground/70 hover:bg-accent/60 hover:text-foreground"
             onPointerDown={(event) => event.stopPropagation()}
@@ -1197,7 +1198,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
           </IconButton>
           <IconButton
             label="Split pane down"
-            data-shortcut={tab.kind !== "browser" ? "terminal.splitDown" : undefined}
+            data-shortcut={tab.kind === "terminal" || tab.kind === undefined ? "terminal.splitDown" : undefined}
             size="sm"
             className="size-5 rounded p-0 text-muted-foreground/70 hover:bg-accent/60 hover:text-foreground"
             onPointerDown={(event) => event.stopPropagation()}
@@ -1211,7 +1212,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
           {!isOnlyLeaf ? (
             <IconButton
               label="Close split view"
-              data-shortcut={tab.kind !== "browser" ? "terminal.unsplit tab.close" : "tab.close"}
+              data-shortcut={tab.kind === "terminal" || tab.kind === undefined ? "terminal.unsplit tab.close" : "tab.close"}
               size="sm"
               className="size-5 rounded p-0 text-muted-foreground/70 hover:bg-accent/60 hover:text-foreground"
               onPointerDown={(event) => event.stopPropagation()}
@@ -1288,6 +1289,17 @@ const PaneLeafView = React.memo(function PaneLeafView({
                 />
               );
             }
+            case "file":
+              return (
+                <FilePreviewPane
+                  previewId={content.previewId}
+                  path={content.path}
+                  backendSessionId={content.backendSessionId}
+                  line={content.line}
+                  col={content.col}
+                  workspaceId={content.workspaceId}
+                />
+              );
             case "dag": {
               return <DagGraphView runId={content.runId ?? undefined} />;
             }

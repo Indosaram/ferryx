@@ -231,7 +231,7 @@ describe("useWorkspaceStore Orca-style tab ownership moves", () => {
     expect(detachedLayout.sessionIdsByLeafId).toEqual({ "leaf-source-active": "session-source-active" });
     const detachedTab = result.current.state.layout.tabs.find((tab) => tab.id === detachedTabId);
     expect(detachedTab?.kind).not.toBe("browser");
-    if (detachedTab?.kind !== "browser") expect(detachedTab?.sessionId).toBe("session-source-active");
+    if (detachedTab && detachedTab.kind !== "browser" && detachedTab.kind !== "file") expect(detachedTab.sessionId).toBe("session-source-active");
 
     expect(result.current.state.sessions["session-source-active"].backendSessionId).toBe("backend-session-source-active");
     expect(Object.keys(result.current.state.sessions)).toHaveLength(3);

@@ -93,6 +93,8 @@ fn every_kind_has_a_lowercase_wire_value() {
         FilePreviewKind::Markdown,
         FilePreviewKind::Image,
         FilePreviewKind::Video,
+        FilePreviewKind::Audio,
+        FilePreviewKind::Pdf,
     ]
     .into_iter()
     .map(|kind| serde_json::to_value(kind).expect("kind serializes"))
@@ -103,7 +105,9 @@ fn every_kind_has_a_lowercase_wire_value() {
             json!("text"),
             json!("markdown"),
             json!("image"),
-            json!("video")
+            json!("video"),
+            json!("audio"),
+            json!("pdf"),
         ]
     );
 }

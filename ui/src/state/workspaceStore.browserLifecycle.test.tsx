@@ -243,7 +243,7 @@ describe("useWorkspaceStore browser lifecycle", () => {
     expect(result.current.state.layout.tabs).toHaveLength(1);
     const tab = result.current.state.layout.tabs[0];
     expect(tab.kind).not.toBe("browser");
-    if (tab.kind !== "browser") {
+    if (tab.kind !== "browser" && tab.kind !== "file") {
       expect(result.current.state.sessions[tab.sessionId].backendSessionId).toBe("backend-retried");
     }
   });

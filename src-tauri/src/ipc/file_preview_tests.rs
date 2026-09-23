@@ -26,8 +26,13 @@ fn write_file(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
 }
 
 fn request(dir: &Path, path: &str) -> FilePreviewOpenRequest {
+    request_owned(dir, path, "")
+}
+
+fn request_owned(dir: &Path, path: &str, owner_id: &str) -> FilePreviewOpenRequest {
     FilePreviewOpenRequest {
         window_label: WINDOW.to_string(),
+        owner_id: owner_id.to_string(),
         path: path.to_string(),
         cwd: Some(dir.to_path_buf()),
         line: None,
@@ -185,13 +190,20 @@ fn preview_kind_and_media_type_follow_the_frozen_extension_allowlist() {
     assert_eq!(classify_extension("a.webp"), Some(FilePreviewKind::Image));
     assert_eq!(classify_extension("a.mp4"), Some(FilePreviewKind::Video));
     assert_eq!(classify_extension("a.mov"), Some(FilePreviewKind::Video));
-    // SVG is shown as text, never as an active document
-    assert_eq!(classify_extension("a.svg"), Some(FilePreviewKind::Text));
+    assert_eq!(classify_extension("a.mp3"), Some(FilePreviewKind::Audio));
+    assert_eq!(classify_extension("a.wav"), Some(FilePreviewKind::Audio));
+    assert_eq!(classify_extension("a.pdf"), Some(FilePreviewKind::Pdf));
+    assert_eq!(classify_extension("a.bmp"), Some(FilePreviewKind::Image));
+    assert_eq!(classify_extension("a.ico"), Some(FilePreviewKind::Image));
+    // SVG is an image element, not an active document.
+    assert_eq!(classify_extension("a.svg"), Some(FilePreviewKind::Image));
     assert_eq!(classify_extension("a.rs"), Some(FilePreviewKind::Text));
-    // unsupported media containers are refused, not guessed
+    // containers the webview cannot decode stay refused
     assert_eq!(classify_extension("a.heic"), None);
     assert_eq!(classify_extension("a.avif"), None);
+    assert_eq!(classify_extension("a.zip"), None);
     assert_eq!(video_media_type("a.mov"), Some("video/quicktime"));
+    assert_eq!(audio_media_type("a.mp3"), Some("audio/mpeg"));
     assert_eq!(video_media_type("a.webm"), Some("video/webm"));
     assert_eq!(video_media_type("a.mkv"), None);
 }
@@ -596,6 +608,52 @@ async fn video_open_exposes_a_streaming_capability_not_a_body() {
         .await
         .expect_err("unknown container");
     assert_eq!(reason_of(&unknown), "UnsupportedFormat");
+}
+
+#[tokio::test]
+async fn distinct_owners_keep_capabilities_until_their_own_close() {
+    let dir = TempDir::new().expect("tempdir");
+    write_file(dir.path(), "a.png", &png_bytes(2, 2));
+    write_file(dir.path(), "b.png", &png_bytes(2, 2));
+    let service = service().await;
+    let client = http();
+
+    let first = service
+        .open(request_owned(dir.path(), "a.png", "tab-a"))
+        .await
+        .expect("a");
+    let second = service
+        .open(request_owned(dir.path(), "b.png", "tab-b"))
+        .await
+        .expect("b");
+    assert_ne!(first.handle, second.handle);
+
+    let first_live = client
+        .get(first.media_url.clone().unwrap())
+        .send()
+        .await
+        .expect("request a");
+    assert_eq!(first_live.status(), reqwest::StatusCode::OK);
+    let second_live = client
+        .get(second.media_url.clone().unwrap())
+        .send()
+        .await
+        .expect("request b");
+    assert_eq!(second_live.status(), reqwest::StatusCode::OK);
+
+    service.close(WINDOW, &first.handle);
+    let closed = client
+        .get(first.media_url.clone().unwrap())
+        .send()
+        .await
+        .expect("request closed a");
+    assert_eq!(closed.status(), reqwest::StatusCode::NOT_FOUND);
+    let still_live = client
+        .get(second.media_url.clone().unwrap())
+        .send()
+        .await
+        .expect("request live b");
+    assert_eq!(still_live.status(), reqwest::StatusCode::OK);
 }
 
 #[tokio::test]

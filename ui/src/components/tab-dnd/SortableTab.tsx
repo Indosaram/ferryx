@@ -1,6 +1,6 @@
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { Globe, Pin, TerminalSquare, X } from "lucide-react";
+import { FileText, Globe, Pin, TerminalSquare, X } from "lucide-react";
 import { memo, useMemo, type KeyboardEvent, type MouseEvent, type PointerEvent } from "react";
 
 import { resolveActivityIndicator, type ActivitySummary } from "../../lib/activity";
@@ -53,7 +53,7 @@ export const SortableTab = memo(function SortableTab({
     disabled: isRenaming,
     data: sortableData,
   });
-  const resolvedActivity = tab.kind === "browser" ? null : resolveActivityIndicator(activity);
+  const resolvedActivity = tab.kind === "browser" || tab.kind === "file" ? null : resolveActivityIndicator(activity);
   const activityIndicator = unread && (resolvedActivity === null || resolvedActivity === "done") ? "unread" : resolvedActivity;
   const isPinned = Boolean(tab.pinned);
   const agentType = activity?.agentType;
@@ -97,6 +97,8 @@ export const SortableTab = memo(function SortableTab({
     >
       {tab.kind === "browser" ? (
         <Globe className="size-3 shrink-0 text-primary" />
+      ) : tab.kind === "file" ? (
+        <FileText data-testid="tab-file-icon" className="size-3 shrink-0 text-primary" />
       ) : (
         <>
           {agentLogo ? (

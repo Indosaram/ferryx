@@ -188,7 +188,7 @@ describe("workspace activity tracking", () => {
       tabId = openedTab(await result.current.openTab(worktree));
     });
     const tab = result.current.state.layout.tabs.find((t) => t.id === tabId);
-    if (!tab || tab.kind === "browser") throw new Error("expected terminal tab");
+    if (!tab || tab.kind === "browser" || tab.kind === "file") throw new Error("expected terminal tab");
     const sessionId = tab.sessionId;
 
     act(() => {

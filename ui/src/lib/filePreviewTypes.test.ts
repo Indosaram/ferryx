@@ -18,8 +18,8 @@ const rustContract = readFileSync(
 );
 
 describe("file preview shared discriminants", () => {
-  it("freezes the four previewable kinds", () => {
-    expect([...FILE_PREVIEW_KINDS]).toEqual(["text", "markdown", "image", "video"]);
+  it("freezes the previewable kinds", () => {
+    expect([...FILE_PREVIEW_KINDS]).toEqual(["text", "markdown", "image", "video", "audio", "pdf"]);
   });
 
   it("freezes the nine machine error reasons", () => {

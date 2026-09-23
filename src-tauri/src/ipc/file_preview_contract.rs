@@ -16,7 +16,7 @@ use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Content classes the modal can render. Nothing else is previewable.
+/// Content classes the preview can render. Editing is not one of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum FilePreviewKind {
@@ -24,6 +24,8 @@ pub enum FilePreviewKind {
     Markdown,
     Image,
     Video,
+    Audio,
+    Pdf,
 }
 
 /// Text encodings that decode successfully; anything else is

@@ -43,6 +43,7 @@ export type FilePreviewDeps = {
   readonly invoke: <T>(command: string, args: Record<string, unknown>) => Promise<T>;
   readonly openExternalFile: (request: FilePreviewExternalRequest) => Promise<void>;
   readonly openExternalUrl: (url: string) => Promise<void>;
+  readonly ownerId?: string;
 };
 
 /**
@@ -229,6 +230,7 @@ export function createFilePreviewController(deps: Partial<FilePreviewDeps> = {})
     setState({ status: "loading", generation: current, source, request });
     try {
       const payload = await invoke<FilePreviewPayload>(FILE_PREVIEW_COMMANDS.open, {
+        ownerId: deps.ownerId,
         path: request.path,
         backendSessionId: request.backendSessionId,
         line: request.line,

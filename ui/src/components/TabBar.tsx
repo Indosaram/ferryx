@@ -246,7 +246,7 @@ export function TabBar({
     const hasTabsToRight = index >= 0 && index < tabs.length - 1;
     const hasTabsToLeft = index > 0;
     const hasOtherTabs = tabs.length > 1;
-    const canSplitTerminal = tab.kind !== "browser";
+    const canSplitTerminal = tab.kind !== "browser" && tab.kind !== "file";
     const items: NativeMenuEntry[] = [];
     const actions: Record<string, () => void> = {};
     if (tab.kind === "browser" && onDuplicateBrowser) {
@@ -309,7 +309,7 @@ export function TabBar({
       items.push({ kind: "item", id: "reset-agent-state", label: "Reset Agent State", icon: "refresh" });
       actions["reset-agent-state"] = () => onResetAgentState(tab.id);
     }
-    if (tab.kind !== "browser") {
+    if (tab.kind !== "browser" && tab.kind !== "file") {
       items.push({ kind: "separator" });
       items.push({ kind: "item", id: "suspend-session", label: "Suspend Session" });
       items.push({ kind: "item", id: "restart-session", label: "Restart Session" });
@@ -394,7 +394,7 @@ export function TabBar({
         <div className="flex min-w-0 items-stretch overflow-x-auto scrollbar-none" role="tablist">
           {tabs.map((tab, index) => {
             const active = tab.id === activeTabId;
-            const sleeping = tab.kind !== "browser" && sleepingSessionIds.has(tab.sessionId);
+            const sleeping = tab.kind !== "browser" && tab.kind !== "file" && sleepingSessionIds.has(tab.sessionId);
             return (
               <SortableTab
                 key={tab.id}

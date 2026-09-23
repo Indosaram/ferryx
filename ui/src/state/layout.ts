@@ -1,6 +1,7 @@
 import {
   createBrowserPaneContent,
   createDagPaneContent,
+  createFilePaneContent,
   createTerminalPaneContent,
   type BrowserPaneState,
   type DagPaneState,
@@ -33,6 +34,7 @@ export type LayoutAction =
   | { type: "ADD_TAB"; tab: WorkspaceTab; sessionId?: string; activate?: boolean }
   | { type: "CLOSE_TAB"; tabId: string; replacementTab?: WorkspaceTab }
   | { type: "ACTIVATE_TAB"; tabId: string }
+  | { type: "UPDATE_FILE_TAB"; tabId: string; line: number | null; col: number | null }
   | { type: "REORDER_TAB"; tabId: string; targetIndex: number }
   | { type: "RENAME_TAB"; tabId: string; label: string }
   | { type: "SET_TAB_PINNED"; tabId: string; pinned: boolean }
@@ -203,6 +205,48 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
           tabGroups: {
             ...state.tabGroups,
             [group.id]: { ...group, activeTabId: action.tabId },
+          },
+        },
+        true,
+      );
+    }
+    case "UPDATE_FILE_TAB": {
+      const tab = state.tabs.find((item) => item.id === action.tabId);
+      if (!tab || tab.kind !== "file") return state;
+      const tabs = state.tabs.map((item) =>
+        item.id === action.tabId && item.kind === "file"
+          ? { ...item, line: action.line, col: action.col }
+          : item,
+      );
+      const group = findGroupContainingTab(state.tabGroups ?? {}, action.tabId);
+      const focused = group
+        ? {
+            focusedGroupId: group.id,
+            tabGroups: {
+              ...state.tabGroups,
+              [group.id]: { ...group, activeTabId: action.tabId },
+            },
+          }
+        : {};
+      const existing = state.layoutsByTabId[action.tabId];
+      if (!existing) {
+        return normalizeLayoutInternal({ ...state, ...focused, tabs, activeTabId: action.tabId }, true);
+      }
+      const contentsByLeafId = { ...existing.contentsByLeafId };
+      for (const [leafId, content] of Object.entries(contentsByLeafId)) {
+        if (content.kind === "file") {
+          contentsByLeafId[leafId] = { ...content, line: action.line, col: action.col };
+        }
+      }
+      return normalizeLayoutInternal(
+        {
+          ...state,
+          ...focused,
+          tabs,
+          activeTabId: action.tabId,
+          layoutsByTabId: {
+            ...state.layoutsByTabId,
+            [action.tabId]: { ...existing, contentsByLeafId },
           },
         },
         true,
@@ -404,6 +448,7 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
       if (
         !sourceTab ||
         sourceTab.kind === "browser" ||
+        sourceTab.kind === "file" ||
         !sourceLayout ||
         !sourceGroup ||
         state.tabs.some((tab) => tab.id === action.newTab.id)
@@ -413,7 +458,7 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
       const leafIds = collectLeafIds(sourceLayout.root);
       if (leafIds.length <= 1 || !leafIds.includes(action.leafId)) return state;
       const movedSessionId = sourceLayout.sessionIdsByLeafId[action.leafId];
-      if (!movedSessionId || action.newTab.kind === "browser") return state;
+      if (!movedSessionId || action.newTab.kind === "browser" || action.newTab.kind === "file") return state;
       const movedContent = sourceLayout.contentsByLeafId?.[action.leafId] ?? createTerminalPaneContent(movedSessionId);
 
       const nextRoot = removeLeaf(sourceLayout.root, action.leafId);
@@ -655,6 +700,24 @@ export function toPaneContent(raw: unknown, fallbackSessionId = ""): PaneContent
           };
       return createBrowserPaneContent(browserState);
     }
+    if (item.kind === "file") {
+      const file = item as {
+        path?: string;
+        backendSessionId?: string;
+        line?: number | null;
+        col?: number | null;
+        workspaceId?: string | null;
+        previewId?: string;
+      };
+      return createFilePaneContent({
+        path: file.path ?? "",
+        backendSessionId: file.backendSessionId ?? "",
+        line: file.line ?? null,
+        col: file.col ?? null,
+        workspaceId: file.workspaceId ?? null,
+        previewId: file.previewId ?? "",
+      });
+    }
     if (item.kind === "dag") {
       const dagState: DagPaneState = (item as { dag?: DagPaneState }).dag
         ? { runId: (item as { dag?: DagPaneState }).dag?.runId ?? (item as { runId?: string | null }).runId ?? null }
@@ -679,18 +742,28 @@ export function defaultContentForTab(tab: WorkspaceTab, sessionIdOverride?: stri
       worktreeLabel: tab.worktreeLabel,
     });
   }
+  if (tab.kind === "file") {
+    return createFilePaneContent({
+      path: tab.path,
+      backendSessionId: tab.backendSessionId,
+      line: tab.line,
+      col: tab.col,
+      workspaceId: tab.workspaceId,
+      previewId: tab.previewId,
+    });
+  }
   return createTerminalPaneContent(sessionIdOverride ?? tab.sessionId);
 }
 
 export function getTabPaneLayout(layout: LayoutState, tab: WorkspaceTab): TabPaneLayout {
-  const isBrowserTab = tab.kind === "browser";
+  const isNonTerminalTab = tab.kind === "browser" || tab.kind === "file";
   const fallbackLeafId = `leaf-default-${tab.id}`;
   const defaultContent = defaultContentForTab(tab);
   return layout.layoutsByTabId?.[tab.id] ?? {
     root: { type: "leaf", leafId: fallbackLeafId },
     activeLeafId: fallbackLeafId,
     expandedLeafId: null,
-    sessionIdsByLeafId: { [fallbackLeafId]: isBrowserTab ? "" : tab.sessionId },
+    sessionIdsByLeafId: { [fallbackLeafId]: isNonTerminalTab ? "" : tab.sessionId },
     contentsByLeafId: { [fallbackLeafId]: defaultContent },
   };
 }
@@ -739,12 +812,12 @@ function normalizeLayoutInternal(state: LayoutState, force: boolean): LayoutStat
         if (existing.contentsByLeafId && Object.prototype.hasOwnProperty.call(existing.contentsByLeafId, leafId)) {
           const content = toPaneContent(
             existing.contentsByLeafId[leafId],
-            existing.sessionIdsByLeafId?.[leafId] ?? (tab.kind === "browser" ? "" : tab.sessionId),
+            existing.sessionIdsByLeafId?.[leafId] ?? (tab.kind === "browser" || tab.kind === "file" ? "" : tab.sessionId),
           );
           contentsByLeafId[leafId] = content;
           sessionIdsByLeafId[leafId] = content.kind === "terminal" ? content.sessionId : "";
         } else if (existing.sessionIdsByLeafId && Object.prototype.hasOwnProperty.call(existing.sessionIdsByLeafId, leafId)) {
-          if (tab.kind === "browser") {
+          if (tab.kind === "browser" || tab.kind === "file") {
             contentsByLeafId[leafId] = defaultContent;
             sessionIdsByLeafId[leafId] = "";
           } else {

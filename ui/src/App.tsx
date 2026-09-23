@@ -19,17 +19,6 @@ import { WorktreeDeleteDialog } from "./components/WorktreeDeleteDialog";
 import { WorktreeDiskDialog } from "./components/WorktreeDiskDialog";
 import { ConfirmCloseTabDialog } from "./components/ConfirmCloseTabDialog";
 import { TerminalLinkActions } from "./components/TerminalLinkActions";
-import { FilePreviewDialog } from "./components/FilePreviewDialog";
-import { FilePreviewText } from "./components/FilePreviewText";
-import { FilePreviewImage } from "./components/FilePreviewImage";
-import { FilePreviewVideo } from "./components/FilePreviewVideo";
-
-const filePreviewRenderers = {
-  text: FilePreviewText,
-  markdown: FilePreviewText,
-  image: FilePreviewImage,
-  video: FilePreviewVideo,
-};
 import { Toaster, toast } from "./components/ui/sonner";
 import { IconButton } from "./components/ui/IconButton";
 import { copyTextToClipboard } from "./lib/clipboard";
@@ -132,6 +121,7 @@ import { resolveWorktreeOwnerId } from "./lib/worktreeOwnership";
 import { switchDebug } from "./lib/switchDebug";
 import { useInactiveProjectWorktrees } from "./state/inactiveProjectWorktrees";
 import {
+  isTerminalTab,
   worktreeIdentity,
   type DirtyState,
   type TerminalSession,
@@ -468,7 +458,7 @@ export function deriveFocusedTerminal(
     ? state.layout.tabs.find((tab) => tab.id === activeTabId)
     : undefined;
   const focusedTab =
-    focusedCandidate && focusedCandidate.kind !== "browser" ? focusedCandidate : null;
+    focusedCandidate && isTerminalTab(focusedCandidate) ? focusedCandidate : null;
 
   const tabLayout = focusedTab ? state.layout.layoutsByTabId?.[focusedTab.id] : undefined;
   const activeLeafId =
@@ -490,7 +480,7 @@ export function deriveFocusedTerminal(
     : (focusedTab?.label ?? null);
 
   const terminalTabs = [state.layout, ...Object.values(state.worktreeLayouts ?? {})].flatMap((ownerLayout) => ownerLayout.tabs.flatMap((tab) => {
-    if (tab.kind === "browser") return [];
+    if (!isTerminalTab(tab)) return [];
     const layout = ownerLayout.layoutsByTabId?.[tab.id];
     const leafIds = layout?.root ? collectLeafIds(layout.root) : [];
     const paneSessionIds = leafIds.length > 0
@@ -574,7 +564,7 @@ function isTerminalTabInWorktree(
   if (!entryId) return true;
   const { tabId, leafId } = parseRemotePaneId(entryId);
   const tab = state.layout.tabs.find((candidate) => candidate.id === tabId);
-  if (!tab || tab.kind === "browser") return false;
+  if (!tab || !isTerminalTab(tab)) return false;
   // A leaf-addressed entry names one pane of a split tab, so the worktree check must
   // follow that pane's own PTY instead of the tab's primary session.
   const sessionId = leafId
@@ -699,6 +689,7 @@ function WorkspaceApp({
     parkedActivityVersion,
     openTab,
     createBrowserTab,
+    openFilePreviewTab,
     adoptBrowserSession,
     duplicateBrowserTab,
     navigateBrowserTab,
@@ -1782,7 +1773,7 @@ function WorkspaceApp({
       const currentState = stateRef.current;
       const tab = currentState.layout.tabs.find((candidate) => candidate.id === tabId);
       if (!tab) return;
-      if (tab.kind === "browser") {
+      if (tab.kind === "browser" || tab.kind === "file") {
         activateTab(tabId);
         return;
       }
@@ -2467,6 +2458,19 @@ function WorkspaceApp({
       unlisten?.();
     };
   }, [createBrowserTab, reportRuntimeError]);
+
+  useEffect(() => {
+    const onOpenFilePreview = (event: Event) => {
+      const detail = (event as CustomEvent<{
+        source: Parameters<typeof openFilePreviewTab>[0];
+        request: Parameters<typeof openFilePreviewTab>[1];
+      }>).detail;
+      if (!detail?.source || !detail.request) return;
+      openFilePreviewTab(detail.source, detail.request);
+    };
+    window.addEventListener("ferryx:open-file-preview", onOpenFilePreview);
+    return () => window.removeEventListener("ferryx:open-file-preview", onOpenFilePreview);
+  }, [openFilePreviewTab]);
 
   useEffect(() => {
     let disposed = false;
@@ -3164,7 +3168,6 @@ function WorkspaceApp({
           onClose={() => setDiskManageProject(null)}
         />
       ) : null}
-      <FilePreviewDialog renderers={filePreviewRenderers} />
     </div>
   );
 }

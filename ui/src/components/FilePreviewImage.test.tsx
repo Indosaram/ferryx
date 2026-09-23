@@ -74,7 +74,7 @@ function drag(target: HTMLElement, from: { x: number; y: number }, to: { x: numb
 
 describe("FilePreviewImage source admission", () => {
   it("renders the capability URL for every allowlisted raster type", () => {
-    for (const mediaType of ["image/png", "image/jpeg", "image/gif", "image/webp"]) {
+    for (const mediaType of ["image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp", "image/x-icon", "image/svg+xml"]) {
       const payload = imagePayload({ mediaType, mediaUrl: `http://127.0.0.1:52341/preview/${mediaType}` });
       const { unmount } = renderImage(payload);
       const img = screen.getByRole("img") as HTMLImageElement;
@@ -84,22 +84,18 @@ describe("FilePreviewImage source admission", () => {
     }
   });
 
-  it("never creates an img source for an SVG payload", () => {
+  it("renders an SVG payload as an img and not a document", () => {
     const spies = handlers();
     renderImage(
-      imagePayload({ displayName: "diagram.svg", mediaType: "image/svg+xml" }),
+      imagePayload({ displayName: "diagram.svg", mediaType: "image/svg+xml", mediaUrl: "http://127.0.0.1:52341/preview/svg" }),
       1,
       spies,
     );
 
-    expect(screen.queryByRole("img")).toBeNull();
-    expect(document.querySelector("img")).toBeNull();
-    expect(screen.getByTestId("file-preview-image-unsupported")).toBeInTheDocument();
-    expect(spies.onFailure).toHaveBeenCalledTimes(1);
-    expect(spies.onFailure.mock.calls[0][0]).toMatchObject({
-      reason: "UnsupportedFormat",
-      details: { reason: "UnsupportedFormat", displayName: "diagram.svg" },
-    });
+    const img = screen.getByRole("img") as HTMLImageElement;
+    expect(img.getAttribute("src")).toBe("http://127.0.0.1:52341/preview/svg");
+    expect(document.querySelector("iframe, object, embed")).toBeNull();
+    expect(spies.onFailure).not.toHaveBeenCalled();
   });
 
   it("never creates an img source when metadata is missing", () => {

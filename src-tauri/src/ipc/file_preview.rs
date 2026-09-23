@@ -62,8 +62,8 @@ const ALLOWED_ORIGINS: &[&str] = &[
 /// not support. They are refused as `UnsupportedFormat` instead of being
 /// mis-decoded as text.
 const UNSUPPORTED_EXTENSIONS: &[&str] = &[
-    "heic", "heif", "avif", "bmp", "tiff", "tif", "ico", "icns", "psd", "mkv", "avi", "wmv", "flv",
-    "mpg", "mpeg", "3gp", "mp3", "m4a", "wav", "flac", "aac", "ogg", "opus", "pdf", "zip", "gz",
+    "heic", "heif", "avif", "tiff", "tif", "icns", "psd", "mkv", "avi", "wmv", "flv",
+    "mpg", "mpeg", "3gp", "zip", "gz",
     "bz2", "xz", "tar", "7z", "rar", "exe", "dll", "so", "dylib", "wasm", "bin", "class", "jar",
     "o", "a", "pyc", "woff", "woff2", "ttf", "otf",
 ];
@@ -152,14 +152,20 @@ fn extension_of(name: &str) -> String {
 }
 
 /// Content class for a file name, or `None` when the format is explicitly not
-/// previewable. Unknown extensions are treated as text; SVG is text on purpose
-/// (it is never rendered as an active document).
+/// previewable. Unknown extensions are treated as text. SVG is an image via
+/// `<img>`, never an active document, so scripts in the file do not run.
 pub fn classify_extension(name: &str) -> Option<FilePreviewKind> {
     let ext = extension_of(name);
     match ext.as_str() {
         "md" | "markdown" => Some(FilePreviewKind::Markdown),
-        "png" | "jpg" | "jpeg" | "gif" | "webp" => Some(FilePreviewKind::Image),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "svg" => {
+            Some(FilePreviewKind::Image)
+        }
         "mp4" | "m4v" | "mov" | "webm" | "ogv" => Some(FilePreviewKind::Video),
+        "mp3" | "m4a" | "wav" | "flac" | "aac" | "ogg" | "opus" | "oga" => {
+            Some(FilePreviewKind::Audio)
+        }
+        "pdf" => Some(FilePreviewKind::Pdf),
         other if UNSUPPORTED_EXTENSIONS.contains(&other) => None,
         _ => Some(FilePreviewKind::Text),
     }
@@ -173,6 +179,17 @@ pub fn video_media_type(name: &str) -> Option<&'static str> {
         "mov" => Some("video/quicktime"),
         "webm" => Some("video/webm"),
         "ogv" => Some("video/ogg"),
+        _ => None,
+    }
+}
+
+pub fn audio_media_type(name: &str) -> Option<&'static str> {
+    match extension_of(name).as_str() {
+        "mp3" => Some("audio/mpeg"),
+        "m4a" | "aac" => Some("audio/mp4"),
+        "wav" => Some("audio/wav"),
+        "flac" => Some("audio/flac"),
+        "ogg" | "opus" | "oga" => Some("audio/ogg"),
         _ => None,
     }
 }
@@ -234,7 +251,46 @@ pub fn image_signature(bytes: &[u8]) -> Option<ImageSignature> {
     if bytes.starts_with(b"\xFF\xD8") {
         return jpeg_signature(bytes);
     }
+    if bytes.starts_with(b"BM") && bytes.len() >= 26 {
+        let width = i32::from_le_bytes(bytes[18..22].try_into().ok()?);
+        let height = i32::from_le_bytes(bytes[22..26].try_into().ok()?);
+        if width > 0 && height != 0 {
+            return Some(ImageSignature {
+                media_type: "image/bmp",
+                width: width as u64,
+                height: height.unsigned_abs() as u64,
+            });
+        }
+    }
+    if bytes.len() >= 8 && bytes.starts_with(b"\x00\x00\x01\x00") {
+        let width = match bytes[6] {
+            0 => 256,
+            n => u64::from(n),
+        };
+        let height = match bytes[7] {
+            0 => 256,
+            n => u64::from(n),
+        };
+        return Some(ImageSignature {
+            media_type: "image/x-icon",
+            width,
+            height,
+        });
+    }
+    if svg_probe(bytes) {
+        return Some(ImageSignature {
+            media_type: "image/svg+xml",
+            width: 1,
+            height: 1,
+        });
+    }
     None
+}
+
+fn svg_probe(bytes: &[u8]) -> bool {
+    let end = bytes.len().min(512);
+    let text = String::from_utf8_lossy(&bytes[..end]).to_ascii_lowercase();
+    text.contains("<svg")
 }
 
 fn webp_signature(bytes: &[u8]) -> Option<ImageSignature> {
@@ -506,10 +562,27 @@ struct OpenedFile {
 #[derive(Debug, Clone)]
 pub struct FilePreviewOpenRequest {
     pub window_label: String,
+    /// Tab-scoped owner. Empty keeps the legacy one-slot-per-window behavior.
+    pub owner_id: String,
     pub path: String,
     pub cwd: Option<PathBuf>,
     pub line: Option<u32>,
     pub col: Option<u32>,
+}
+
+fn slot_key(window_label: &str, owner_id: &str) -> String {
+    if owner_id.is_empty() {
+        window_label.to_string()
+    } else {
+        format!("{window_label}\0{owner_id}")
+    }
+}
+
+fn window_owns_key(window_label: &str, key: &str) -> bool {
+    key == window_label
+        || key
+            .strip_prefix(window_label)
+            .is_some_and(|rest| rest.starts_with('\0'))
 }
 
 /// Handle registry plus the loopback capability server.
@@ -592,19 +665,21 @@ impl FilePreviewService {
         ensure_trusted_window(&request.window_label)?;
         let FilePreviewOpenRequest {
             window_label,
+            owner_id,
             path,
             cwd,
             line,
             col,
         } = request;
+        let slot = slot_key(&window_label, &owner_id);
         // R3: take the open epoch BEFORE awaited I/O. If a newer open for the
-        // same window completes first, this registration is stale and must be
+        // same owner completes first, this registration is stale and must be
         // discarded instead of revoking the newer preview.
-        let epoch = self.begin_main_open(&window_label);
+        let epoch = self.begin_main_open(&slot);
         let opened =
             crate::ipc::run_blocking(move || open_blocking(&path, cwd.as_deref(), line, col))
                 .await?;
-        self.register_main(&window_label, opened, epoch)
+        self.register_main(&slot, opened, epoch)
     }
 
     /// Markdown child image: a bounded, contained sibling asset of the open
@@ -616,10 +691,11 @@ impl FilePreviewService {
         relative_path: &str,
     ) -> Result<FilePreviewChildAsset, IpcError> {
         ensure_trusted_window(window_label)?;
+        let slot = self.parent_slot_key(window_label, parent_handle)?;
         let boundary = self.markdown_parent_dir(window_label, parent_handle)?;
         // R4: reserve a child slot atomically with the budget check so
         // concurrent child opens cannot oversubscribe the bound.
-        let reservation = self.reserve_child_slot(window_label)?;
+        let reservation = self.reserve_child_slot(&slot)?;
         let relative = relative_path.to_string();
         let boundary_for_io = boundary.clone();
         let opened = crate::ipc::run_blocking(move || {
@@ -638,21 +714,21 @@ impl FilePreviewService {
         let opened = match opened {
             Ok(opened) => opened,
             Err(error) => {
-                self.refund_child_slot(window_label, reservation);
+                self.refund_child_slot(&slot, reservation);
                 return Err(error);
             }
         };
         // R5: the boundary directory must still be the same object it was at
         // open time; a rename+symlink swap during the awaited I/O is refused.
         if !boundary_identity_holds_after_io(&boundary) {
-            self.refund_child_slot(window_label, reservation);
+            self.refund_child_slot(&slot, reservation);
             return Err(outside_boundary(relative_path));
         }
 
         let media_type = opened.media_type.unwrap_or("application/octet-stream");
         let byte_length = opened.byte_length;
         let display_name = opened.display_name.clone();
-        let handle = self.register_child(window_label, parent_handle, opened, reservation)?;
+        let handle = self.register_child(&slot, parent_handle, opened, reservation)?;
         Ok(FilePreviewChildAsset {
             handle: handle.clone(),
             display_name,
@@ -673,8 +749,9 @@ impl FilePreviewService {
         relative_path: &str,
     ) -> Result<FilePreviewPayload, IpcError> {
         ensure_trusted_window(window_label)?;
+        let slot = self.parent_slot_key(window_label, parent_handle)?;
         let boundary = self.markdown_parent_dir(window_label, parent_handle)?;
-        let epoch = self.begin_main_open(window_label);
+        let epoch = self.begin_main_open(&slot);
         let relative = relative_path.to_string();
         let boundary_for_io = boundary.clone();
         let opened = crate::ipc::run_blocking(move || {
@@ -696,14 +773,26 @@ impl FilePreviewService {
         if !boundary_identity_holds_after_io(&boundary) {
             return Err(outside_boundary(relative_path));
         }
-        self.register_main(window_label, opened, epoch)
+        self.register_main(&slot, opened, epoch)
     }
 
     /// Revokes one handle owned by `window_label`. Idempotent, and a window can
     /// never revoke another window's capability.
     pub fn close(&self, window_label: &str, handle: &str) {
         let mut registry = self.registry.lock();
-        let Some(slot) = registry.windows.get_mut(window_label) else {
+        let Some(key) = registry.windows.iter().find_map(|(key, slot)| {
+            if !window_owns_key(window_label, key) {
+                return None;
+            }
+            if slot.main.as_deref() == Some(handle) || slot.children.iter().any(|child| child == handle) {
+                Some(key.clone())
+            } else {
+                None
+            }
+        }) else {
+            return;
+        };
+        let Some(slot) = registry.windows.get_mut(&key) else {
             return;
         };
         if slot.main.as_deref() == Some(handle) {
@@ -725,12 +814,41 @@ impl FilePreviewService {
     /// Never terminates a daemon session.
     pub fn close_window(&self, window_label: &str) {
         let mut registry = self.registry.lock();
-        let Some(slot) = registry.windows.remove(window_label) else {
-            return;
-        };
-        for handle in slot.children.into_iter().chain(slot.main) {
-            registry.revoke(&handle);
+        let keys: Vec<String> = registry
+            .windows
+            .keys()
+            .filter(|key| window_owns_key(window_label, key))
+            .cloned()
+            .collect();
+        for key in keys {
+            let Some(slot) = registry.windows.remove(&key) else {
+                continue;
+            };
+            for handle in slot.children.into_iter().chain(slot.main) {
+                registry.revoke(&handle);
+            }
         }
+    }
+
+    fn parent_slot_key(&self, window_label: &str, parent_handle: &str) -> Result<String, IpcError> {
+        let registry = self.registry.lock();
+        registry
+            .windows
+            .iter()
+            .find_map(|(key, slot)| {
+                if window_owns_key(window_label, key) && slot.main.as_deref() == Some(parent_handle) {
+                    Some(key.clone())
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| {
+                preview_error(
+                    FilePreviewErrorReason::ExpiredHandle,
+                    "preview handle is unknown or has been revoked",
+                    None,
+                )
+            })
     }
 
     fn markdown_parent_dir(
@@ -739,11 +857,9 @@ impl FilePreviewService {
         parent_handle: &str,
     ) -> Result<ChildBoundary, IpcError> {
         let registry = self.registry.lock();
-        let is_current_main = registry
-            .windows
-            .get(window_label)
-            .and_then(|slot| slot.main.as_deref())
-            == Some(parent_handle);
+        let is_current_main = registry.windows.iter().any(|(key, slot)| {
+            window_owns_key(window_label, key) && slot.main.as_deref() == Some(parent_handle)
+        });
         let record = registry.handles.get(parent_handle);
         match (is_current_main, record) {
             (true, Some(record)) => {
@@ -1206,11 +1322,17 @@ fn open_blocking_path(
                 target: None,
             })
         }
-        FilePreviewKind::Video => {
-            let media_type = video_media_type(&display_name).ok_or_else(|| {
+        FilePreviewKind::Video | FilePreviewKind::Audio | FilePreviewKind::Pdf => {
+            let media_type = match kind {
+                FilePreviewKind::Video => video_media_type(&display_name),
+                FilePreviewKind::Audio => audio_media_type(&display_name),
+                FilePreviewKind::Pdf => Some("application/pdf"),
+                _ => None,
+            }
+            .ok_or_else(|| {
                 preview_error(
                     FilePreviewErrorReason::UnsupportedFormat,
-                    "this video container is not supported",
+                    "this media container is not supported",
                     Some(json!({ "displayName": display_name })),
                 )
             })?;
@@ -1559,6 +1681,7 @@ pub async fn cmd_file_preview_open<R: tauri::Runtime>(
     webview: tauri::Webview<R>,
     service: tauri::State<'_, Arc<FilePreviewService>>,
     daemon_client: tauri::State<'_, Arc<crate::daemon::DaemonClient>>,
+    owner_id: Option<String>,
     path: String,
     backend_session_id: String,
     line: Option<u32>,
@@ -1582,6 +1705,7 @@ pub async fn cmd_file_preview_open<R: tauri::Runtime>(
     service
         .open(FilePreviewOpenRequest {
             window_label,
+            owner_id: owner_id.unwrap_or_default(),
             path,
             cwd,
             line,

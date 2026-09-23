@@ -12,7 +12,10 @@ import {
   type FilePreviewSource,
   type FilePreviewTextProps,
 } from "../lib/filePreviewTypes";
+import { FilePreviewAudio } from "./FilePreviewAudio";
 import { FilePreviewDialog } from "./FilePreviewDialog";
+import { FilePreviewPdf } from "./FilePreviewPdf";
+import { FilePreviewVideo } from "./FilePreviewVideo";
 
 type Deferred<T> = {
   readonly promise: Promise<T>;
@@ -122,6 +125,25 @@ function StubTextRenderer(props: FilePreviewTextProps) {
       </button>
     </div>
   );
+}
+
+const MEDIA_RENDERERS = {
+  audio: FilePreviewAudio,
+  pdf: FilePreviewPdf,
+  video: FilePreviewVideo,
+} as const;
+
+function expectReadOnlyPreview(testId: "file-preview-audio-element" | "file-preview-pdf-frame"): HTMLElement {
+  const dialog = screen.getByRole("dialog");
+  const element = screen.getByTestId(testId);
+  expect(dialog.contains(element)).toBe(true);
+  expect(element.getAttribute("contenteditable")).toBeNull();
+  expect(dialog.querySelector("[contenteditable]")).toBeNull();
+  expect(dialog.querySelector("input, textarea, select")).toBeNull();
+  expect(screen.queryByRole("button", { name: /^save$/i })).toBeNull();
+  expect(screen.queryByTestId("file-preview-video-element")).toBeNull();
+  expect(screen.queryByTestId("file-preview-video")).toBeNull();
+  return element;
 }
 
 describe("FilePreviewDialog", () => {
@@ -319,5 +341,50 @@ describe("FilePreviewDialog", () => {
 
     await vi.waitFor(() => expect(screen.getByTestId("file-preview-notice")).toBeInTheDocument());
     expect(screen.getByTestId("file-preview-notice")).toHaveAttribute("data-notice", "child-document-unsupported");
+  });
+
+  it("renders an audio payload with a read-only audio element, not the video renderer", async () => {
+    const mediaUrl = "http://127.0.0.1:9/clip.mp3";
+    const controller = makeController({
+      open: async () =>
+        payload({
+          kind: "audio",
+          displayName: "clip.mp3",
+          text: null,
+          lineCount: null,
+          encoding: null,
+          mediaType: "audio/mpeg",
+          mediaUrl,
+        }),
+    });
+    render(<FilePreviewDialog controller={controller} renderers={MEDIA_RENDERERS} />);
+    await openPreview(controller, SOURCE, { ...REQUEST, path: "/tmp/clip.mp3" });
+
+    const audio = expectReadOnlyPreview("file-preview-audio-element");
+    expect(audio.tagName).toBe("AUDIO");
+    expect(audio).toHaveAttribute("src", mediaUrl);
+    expect(audio).toHaveAttribute("controls");
+  });
+
+  it("renders a pdf payload with a read-only frame, not the video renderer", async () => {
+    const mediaUrl = "http://127.0.0.1:9/spec.pdf";
+    const controller = makeController({
+      open: async () =>
+        payload({
+          kind: "pdf",
+          displayName: "spec.pdf",
+          text: null,
+          lineCount: null,
+          encoding: null,
+          mediaType: "application/pdf",
+          mediaUrl,
+        }),
+    });
+    render(<FilePreviewDialog controller={controller} renderers={MEDIA_RENDERERS} />);
+    await openPreview(controller, SOURCE, { ...REQUEST, path: "/tmp/spec.pdf" });
+
+    const frame = expectReadOnlyPreview("file-preview-pdf-frame");
+    expect(frame.tagName).toBe("IFRAME");
+    expect(frame).toHaveAttribute("src", mediaUrl);
   });
 });

@@ -14,7 +14,7 @@
  */
 
 /** Content classes the modal can render. Nothing else is previewable. */
-export const FILE_PREVIEW_KINDS = ["text", "markdown", "image", "video"] as const;
+export const FILE_PREVIEW_KINDS = ["text", "markdown", "image", "video", "audio", "pdf"] as const;
 export type FilePreviewKind = (typeof FILE_PREVIEW_KINDS)[number];
 
 /**
@@ -240,3 +240,9 @@ export type FilePreviewImageProps = FilePreviewRendererProps;
 
 /** Task 5 props: native video element lifecycle. */
 export type FilePreviewVideoProps = FilePreviewRendererProps;
+
+/** Native audio element. Same capability stream as video, no editor. */
+export type FilePreviewAudioProps = FilePreviewRendererProps;
+
+/** Webview-native PDF frame. Read-only; no annotation or save. */
+export type FilePreviewPdfProps = FilePreviewRendererProps;

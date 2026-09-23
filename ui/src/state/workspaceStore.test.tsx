@@ -225,7 +225,7 @@ describe("useWorkspaceStore terminal ownership", () => {
     );
     const state = restoredSplitState();
     const tab = state.layout.tabs[0];
-    if (tab.kind === "browser") throw new Error("Expected terminal fixture");
+    if (tab.kind === "browser" || tab.kind === "file") throw new Error("Expected terminal fixture");
     if (tagged) tab.kind = "terminal";
     tab.pinned = pinned;
     const sibling = closing === "1" ? "2" : "1";
@@ -561,7 +561,7 @@ describe("useWorkspaceStore terminal ownership", () => {
 
     const tab = result.current.state.layout.tabs[0];
     expect(tab.kind).not.toBe("browser");
-    if (tab.kind !== "browser") expect(tab.sessionId).toBe("session-2");
+    if (tab.kind !== "browser" && tab.kind !== "file") expect(tab.sessionId).toBe("session-2");
     expect(result.current.state.sessions["session-1"]).toBeUndefined();
     expect(services.closeTerminal).toHaveBeenCalledWith("restored-backend-1");
   });
@@ -666,7 +666,7 @@ describe("useWorkspaceStore terminal ownership", () => {
     });
     const closingTabId = result.current.state.layout.activeTabId!;
     const closingTab = result.current.state.layout.tabs[0];
-    const closingSessionId = closingTab.kind === "browser" ? "" : closingTab.sessionId;
+    const closingSessionId = closingTab.kind === "browser" || closingTab.kind === "file" ? "" : closingTab.sessionId;
     const closingBackendId = result.current.state.sessions[closingSessionId].backendSessionId!;
 
     const closePromise = result.current.closeTab(closingTabId);
@@ -711,7 +711,7 @@ describe("useWorkspaceStore terminal ownership", () => {
     ]);
 
     const [tab] = result.current.state.layout.tabs;
-    if (tab.kind === "browser") throw new Error("expected a terminal tab");
+    if (tab.kind === "browser" || tab.kind === "file") throw new Error("expected a terminal tab");
     act(() => result.current.dispatchWorkspaceAction({
       type: "SESSION_SCREEN_ACTIVITY",
       tabId: tab.id,
@@ -884,7 +884,7 @@ describe("session title activity", () => {
       tabId = openedTab(await result.current.openTab(worktree));
     });
     const workingTab = result.current.state.layout.tabs.find((tab) => tab.id === tabId);
-    if (!workingTab || workingTab.kind === "browser") throw new Error("terminal tab expected");
+    if (!workingTab || workingTab.kind === "browser" || workingTab.kind === "file") throw new Error("terminal tab expected");
     const sessionId = workingTab.sessionId;
 
     act(() => {
@@ -907,7 +907,7 @@ describe("session title activity", () => {
       tabId = openedTab(await result.current.openTab(worktree));
     });
     const idleTab = result.current.state.layout.tabs.find((tab) => tab.id === tabId);
-    if (!idleTab || idleTab.kind === "browser") throw new Error("terminal tab expected");
+    if (!idleTab || idleTab.kind === "browser" || idleTab.kind === "file") throw new Error("terminal tab expected");
     const sessionId = idleTab.sessionId;
 
     act(() => {
@@ -929,7 +929,7 @@ describe("session title activity", () => {
     });
 
     const tab1 = result.current.state.layout.tabs.find((t) => t.id === tab1Id);
-    if (!tab1 || tab1.kind === "browser") throw new Error("terminal tab expected");
+    if (!tab1 || tab1.kind === "browser" || tab1.kind === "file") throw new Error("terminal tab expected");
     const backendId = result.current.state.sessions[tab1.sessionId]?.backendSessionId;
 
     await act(async () => {
@@ -964,7 +964,7 @@ describe("session title activity", () => {
     });
 
     const tab = result.current.state.layout.tabs.find((t) => t.id === tabId);
-    if (!tab || tab.kind === "browser") throw new Error("terminal tab expected");
+    if (!tab || tab.kind === "browser" || tab.kind === "file") throw new Error("terminal tab expected");
     const backendId = result.current.state.sessions[tab.sessionId]?.backendSessionId;
 
     await act(async () => {

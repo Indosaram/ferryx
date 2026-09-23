@@ -292,8 +292,11 @@ describe("openTerminalToken", () => {
       col: 5,
     });
   });
-  it("routes file token to preview modal when source is provided and shiftKey is false", async () => {
+  it("routes file token to a file tab event when source is provided and shiftKey is false", async () => {
     const openSpy = vi.spyOn(filePreviewController, "open").mockResolvedValue(undefined);
+    const events: Array<CustomEvent> = [];
+    const onOpen = (event: Event) => events.push(event as CustomEvent);
+    window.addEventListener("ferryx:open-file-preview", onOpen);
     const source: FilePreviewSource = {
       leafId: "leaf-1",
       sessionId: "front-1",
@@ -314,13 +317,19 @@ describe("openTerminalToken", () => {
       },
     );
     expect(res).toBe(true);
-    expect(openSpy).toHaveBeenCalledWith(source, {
-      path: "src/main.rs",
-      backendSessionId: "back-1",
-      line: 42,
-      col: 5,
+    expect(openSpy).not.toHaveBeenCalled();
+    expect(events).toHaveLength(1);
+    expect(events[0]?.detail).toEqual({
+      source,
+      request: {
+        path: "src/main.rs",
+        backendSessionId: "back-1",
+        line: 42,
+        col: 5,
+      },
     });
     expect(invoke).not.toHaveBeenCalledWith("cmd_open_file_path", expect.anything());
+    window.removeEventListener("ferryx:open-file-preview", onOpen);
     openSpy.mockRestore();
   });
 

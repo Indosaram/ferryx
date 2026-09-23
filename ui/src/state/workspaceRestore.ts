@@ -105,7 +105,7 @@ function activeRestoreSessionIds(state: WorkspaceState): Set<string> {
     : state.layout.activeTabId;
   if (!activeTabId) return sessionIds;
   const tab = state.layout.tabs.find((candidate) => candidate.id === activeTabId);
-  if (!tab || tab.kind === "browser") return sessionIds;
+  if (!tab || tab.kind === "browser" || tab.kind === "file") return sessionIds;
   sessionIds.add(tab.sessionId);
   const tabLayout = state.layout.layoutsByTabId?.[activeTabId];
   for (const sessionId of Object.values(tabLayout?.sessionIdsByLeafId ?? {})) {

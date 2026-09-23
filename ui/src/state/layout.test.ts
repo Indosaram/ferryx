@@ -1,12 +1,66 @@
 import { describe, expect, it } from "vitest";
 
-import type { TerminalTab } from "../lib/types";
-import { createLayoutState, layoutReducer } from "./layout";
+import type { FileTab, TerminalTab } from "../lib/types";
+import { createLayoutState, defaultContentForTab, layoutReducer } from "./layout";
 import { resolveSeam } from "./paneTree";
 
 function tab(id: string, sessionId: string): TerminalTab {
   return { id, label: id, sessionId };
 }
+
+describe("file preview tabs", () => {
+  it("uses a file pane, not a terminal session, as the default content", () => {
+    const fileTab: FileTab = {
+      kind: "file",
+      id: "tab-file",
+      label: "readme.md",
+      path: "/repo/readme.md",
+      backendSessionId: "backend-1",
+      line: 4,
+      col: 2,
+      workspaceId: "ws-1",
+      previewId: "preview-readme",
+    };
+    const content = defaultContentForTab(fileTab);
+    expect(content.kind).toBe("file");
+    if (content.kind !== "file") return;
+    expect(content.path).toBe("/repo/readme.md");
+    expect("sessionId" in content).toBe(false);
+
+    const state = layoutReducer(createLayoutState(), { type: "ADD_TAB", tab: fileTab });
+    const leafId = Object.keys(state.layoutsByTabId["tab-file"].contentsByLeafId ?? {})[0];
+    expect(state.layoutsByTabId["tab-file"].contentsByLeafId?.[leafId!]?.kind).toBe("file");
+    expect(state.layoutsByTabId["tab-file"].sessionIdsByLeafId[leafId!]).toBe("");
+  });
+
+  it("focuses the group that owns a reused file tab", () => {
+    const fileTab: FileTab = {
+      kind: "file",
+      id: "tab-file",
+      label: "readme.md",
+      path: "/repo/readme.md",
+      backendSessionId: "backend-1",
+      line: 4,
+      col: 2,
+      workspaceId: "ws-1",
+      previewId: "preview-readme",
+    };
+    const terminal: TerminalTab = { id: "tab-term", label: "shell", sessionId: "session-1" };
+    let state = layoutReducer(createLayoutState(), { type: "ADD_TAB", tab: terminal });
+    state = layoutReducer(state, { type: "ADD_TAB", tab: fileTab });
+    state = layoutReducer(state, { type: "ACTIVATE_TAB", tabId: "tab-term" });
+    state = layoutReducer(state, {
+      type: "UPDATE_FILE_TAB",
+      tabId: "tab-file",
+      line: 9,
+      col: 1,
+    });
+    expect(state.activeTabId).toBe("tab-file");
+    expect(state.focusedGroupId).toBeTruthy();
+    const group = state.tabGroups?.[state.focusedGroupId!];
+    expect(group?.activeTabId).toBe("tab-file");
+  });
+});
 
 describe("layoutReducer with per-tab split trees", () => {
   it("initializes each tab with its own independent single-pane root layout", () => {

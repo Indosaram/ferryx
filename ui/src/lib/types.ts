@@ -228,7 +228,25 @@ export type BrowserTab = {
   pinned?: boolean;
 };
 
-export type WorkspaceTab = TerminalTab | BrowserTab;
+export type FileTab = {
+  kind: "file";
+  id: string;
+  label: string;
+  path: string;
+  backendSessionId: string;
+  line: number | null;
+  col: number | null;
+  workspaceId: string | null;
+  /** Stable preview owner. Survives moving the pane into another tab. */
+  previewId: string;
+  pinned?: boolean;
+};
+
+export type WorkspaceTab = TerminalTab | BrowserTab | FileTab;
+
+export function isTerminalTab(tab: WorkspaceTab): tab is TerminalTab {
+  return tab.kind !== "browser" && tab.kind !== "file";
+}
 
 export type CreateBrowserRequest = {
   browserId?: string | null;
@@ -350,7 +368,21 @@ export type DagPaneContent = {
   readonly runId?: string | null;
 };
 
-export type PaneContent = TerminalPaneContent | BrowserPaneContent | DagPaneContent;
+export type FilePaneContent = {
+  readonly kind: "file";
+  readonly path: string;
+  readonly backendSessionId: string;
+  readonly line: number | null;
+  readonly col: number | null;
+  readonly workspaceId: string | null;
+  readonly previewId: string;
+};
+
+export type PaneContent = TerminalPaneContent | BrowserPaneContent | DagPaneContent | FilePaneContent;
+
+export function createFilePaneContent(file: Omit<FilePaneContent, "kind">): FilePaneContent {
+  return { kind: "file", ...file };
+}
 
 export function createDagPaneContent(dag?: DagPaneState | { runId?: string | null }): DagPaneContent {
   const content: DagPaneContent = {
@@ -665,7 +697,15 @@ export interface PersistedBrowserTabState {
 export interface PersistedTab {
   id: string;
   label: string;
-  kind?: "terminal" | "browser";
+  kind?: "terminal" | "browser" | "file";
+  file?: {
+    path: string;
+    backendSessionId: string;
+    line: number | null;
+    col: number | null;
+    workspaceId: string | null;
+    previewId: string;
+  };
   pinned?: boolean;
   terminal?: PersistedTerminalTabState;
   browser?: PersistedBrowserTabState;
