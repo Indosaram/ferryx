@@ -1194,4 +1194,63 @@ describe("remote terminal grid contract", () => {
       }),
     );
   });
+
+  it("routes typed input and ctrl-c dock key through generation-fenced remoteWrite on SSH sessions while preserving raw binary input on local sessions", async () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+
+    const sshView = render(<RemoteTerminal sessionId="session-ssh" token="token-abc" />);
+    const sshWs = socket();
+    act(() => sshWs.onopen?.());
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("Live"));
+
+    // Server sends remoteStatus with generation "202"
+    act(() => {
+      sshWs.onmessage?.({
+        data: JSON.stringify({
+          type: "remoteStatus",
+          state: "connected",
+          generation: "202",
+        }),
+      } as MessageEvent);
+    });
+
+    sshWs.send.mockClear();
+
+    // Simulate typed character "a" on SSH session
+    fireEvent.keyDown(surface(), { key: "a" });
+    expect(sshWs.send).toHaveBeenCalledTimes(1);
+    expect(sshWs.send).toHaveBeenCalledWith(
+      JSON.stringify({
+        type: "remoteWrite",
+        generation: "202",
+        data: "a",
+      }),
+    );
+
+    sshWs.send.mockClear();
+
+    // Assert the ctrl-c dock key sends data: "\u0003" as remoteWrite in the same generation state
+    fireEvent.click(screen.getByRole("button", { name: "Ctrl-C" }));
+    expect(sshWs.send).toHaveBeenCalledTimes(1);
+    expect(sshWs.send).toHaveBeenCalledWith(
+      JSON.stringify({
+        type: "remoteWrite",
+        generation: "202",
+        data: "\u0003",
+      }),
+    );
+
+    sshView.unmount();
+
+    // Without any remoteStatus (local session), typed character is still sent as raw bytes
+    render(<RemoteTerminal sessionId="session-local" token="token-abc" />);
+    const localWs = socket();
+    act(() => localWs.onopen?.());
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("Live"));
+
+    localWs.send.mockClear();
+    fireEvent.keyDown(surface(), { key: "a" });
+    expect(localWs.send).toHaveBeenCalledTimes(1);
+    expect(localWs.send).toHaveBeenCalledWith(new TextEncoder().encode("a"));
+  });
 });

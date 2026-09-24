@@ -367,6 +367,70 @@ async fn exercise(config: &QaConfig) {
 
         // 9. Print distinct sentinel line on success and cleanup.
         println!("FERRYX_SSH_QA_GRID_RESIZE_OK {session}");
+
+        // 10. Binary input dropped: SSH sessions must ignore WebSocket binary messages.
+        let binary_payload = b"printf '\\115\\101\\122\\113\\105\\122\\055\\102\\012'\n".to_vec();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            ws_stream.send(tokio_tungstenite::tungstenite::Message::Binary(
+                binary_payload.into(),
+            )),
+        )
+        .await
+        .expect("timeout sending binary message")
+        .expect("send binary websocket message");
+
+        let mut frames_seen_binary: Vec<serde_json::Value> = Vec::new();
+        let mut concatenated_runs_binary = String::new();
+        let _ = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let val = read_next_ws_json(&mut ws_stream).await;
+                concatenated_runs_binary.push_str(&extract_grid_text(&val));
+                frames_seen_binary.push(val);
+            }
+        })
+        .await;
+        assert!(
+            !concatenated_runs_binary.contains("MARKER-B"),
+            "binary input must be dropped on SSH session, but MARKER-B appeared in grid text; frames seen: {:?}",
+            frames_seen_binary
+        );
+
+        // 11. Remote write delivered: remoteWrite text frames must reach the SSH PTY.
+        let write_payload = serde_json::json!({
+            "type": "remoteWrite",
+            "generation": generation,
+            "data": "printf '\\115\\101\\122\\113\\105\\122\\055\\101\\012'\n",
+        });
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            ws_stream.send(tokio_tungstenite::tungstenite::Message::Text(
+                write_payload.to_string().into(),
+            )),
+        )
+        .await
+        .expect("timeout sending remoteWrite")
+        .expect("send remoteWrite websocket message");
+
+        let mut frames_seen_write: Vec<serde_json::Value> = Vec::new();
+        let mut concatenated_runs_write = String::new();
+
+        let read_write_marker = tokio::time::timeout(Duration::from_secs(10), async {
+            while !concatenated_runs_write.contains("MARKER-A") {
+                let val = read_next_ws_json(&mut ws_stream).await;
+                concatenated_runs_write.push_str(&extract_grid_text(&val));
+                frames_seen_write.push(val);
+            }
+        })
+        .await;
+        assert!(
+            read_write_marker.is_ok(),
+            "timed out waiting for 'MARKER-A' grid output from remoteWrite; frames seen: {:?}",
+            frames_seen_write
+        );
+
+        // 12. Print distinct sentinel line on success.
+        println!("FERRYX_SSH_QA_INPUT_PATH_OK {session}");
         let _ = tokio::time::timeout(Duration::from_secs(2), ws_stream.close(None)).await;
         server_handle.abort();
         remote_state.clear_active_selection();

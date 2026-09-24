@@ -417,6 +417,15 @@ export function RemoteTerminal({
     setPendingInputBytes(outboundBytesRef.current);
   }, [onInputDrop, onInputOverflow]);
 
+  const sendInput = useCallback((payload: string | Uint8Array) => {
+    if (generationRef.current !== null) {
+      const data = typeof payload === "string" ? payload : new TextDecoder().decode(payload);
+      sendPayload(JSON.stringify({ type: "remoteWrite", generation: generationRef.current, data }));
+      return;
+    }
+    sendPayload(payload);
+  }, [sendPayload]);
+
   const [userFontSize, setUserFontSize] = useState<number | null>(null);
   const activeFontSize = clampTerminalFontSize(userFontSize ?? settings.fontSize);
 
@@ -788,7 +797,7 @@ export function RemoteTerminal({
 
   const sendText = (text: string) => {
     if (text.length === 0) return;
-    sendPayload(new TextEncoder().encode(text));
+    sendInput(new TextEncoder().encode(text));
   };
 
   /// WebKit inserts U+00A0 for typed spaces; a PTY line must never receive one. Jamo the IME never
@@ -943,26 +952,31 @@ export function RemoteTerminal({
     flushSinkText();
 
     if (key === "ctrl-c") {
+      if (generationRef.current !== null) {
+        // A terminal interrupt is ETX; the gateway does not forward `signal` for SSH.
+        sendInput("\u0003");
+        return;
+      }
       sendPayload(JSON.stringify({ type: "signal", signal: "interrupt" }));
       return;
     }
     const modifiedDockSequence = modifiedDockNavigationSequence(key);
     if (modifiedDockSequence) {
-      sendPayload(new TextEncoder().encode(modifiedDockSequence));
+      sendInput(new TextEncoder().encode(modifiedDockSequence));
       return;
     }
     if (key.startsWith("alt-")) {
-      sendPayload(new TextEncoder().encode(`\u001b${key.slice(4)}`));
+      sendInput(new TextEncoder().encode(`\u001b${key.slice(4)}`));
       return;
     }
     if (key.startsWith("ctrl-")) {
       const byte = controlByteForChar(key.slice(5));
-      if (byte !== null) sendPayload(new Uint8Array([byte]));
+      if (byte !== null) sendInput(new Uint8Array([byte]));
       return;
     }
     const sequenceKey = BROWSER_KEY_NAMES[key] ?? key;
     const sequence = KEY_SEQUENCES[sequenceKey as keyof typeof KEY_SEQUENCES] ?? sequenceKey;
-    sendPayload(new TextEncoder().encode(sequence));
+    sendInput(new TextEncoder().encode(sequence));
   };
 
   return (
