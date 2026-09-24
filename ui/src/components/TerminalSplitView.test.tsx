@@ -419,6 +419,226 @@ describe("TerminalSplitView group and pane rendering", () => {
     expect(options.seam.members).toEqual([{ origin: 0, path: "", span: 1 }]);
   });
 
+  describe("divider double-click equalize", () => {
+    it("splits the panes evenly on a divider double-click and forwards the resolved seam", () => {
+      const onSetRatio = vi.fn();
+      const layout = splitLayout();
+      layout.layoutsByTabId["tab-1"].root = {
+        type: "split",
+        direction: "horizontal",
+        first: { type: "leaf", leafId: "leaf-1" },
+        second: { type: "leaf", leafId: "leaf-2" },
+        ratio: 0.8,
+      };
+
+      render(<TerminalSplitView layout={layout} sessions={splitSessions()} onSetRatio={onSetRatio} />);
+      const divider = screen.getByRole("separator", { name: "Resize terminal panes" });
+      const now = vi.spyOn(Date, "now");
+
+      now.mockReturnValue(1_000);
+      fireEvent.pointerDown(divider, { clientX: 250, clientY: 100 });
+      fireEvent.pointerUp(window);
+      now.mockReturnValue(1_200);
+      fireEvent.pointerDown(divider, { clientX: 252, clientY: 101 });
+      fireEvent.pointerUp(window);
+
+      expect(onSetRatio).toHaveBeenCalledTimes(1);
+      expect(onSetRatio).toHaveBeenCalledWith(
+        "tab-1",
+        "",
+        0.5,
+        expect.objectContaining({
+          isolated: false,
+          seam: expect.objectContaining({ direction: "horizontal", targetPath: "" }),
+        }),
+      );
+      now.mockRestore();
+    });
+
+    it("ignores two clicks separated by more than the double-click window", () => {
+      const onSetRatio = vi.fn();
+      render(<TerminalSplitView layout={splitLayout()} sessions={splitSessions()} onSetRatio={onSetRatio} />);
+      const divider = screen.getByRole("separator", { name: "Resize terminal panes" });
+      const now = vi.spyOn(Date, "now");
+
+      now.mockReturnValue(1_000);
+      fireEvent.pointerDown(divider, { clientX: 250, clientY: 100 });
+      fireEvent.pointerUp(window);
+      now.mockReturnValue(1_900);
+      fireEvent.pointerDown(divider, { clientX: 250, clientY: 100 });
+      fireEvent.pointerUp(window);
+
+      expect(onSetRatio).not.toHaveBeenCalled();
+      now.mockRestore();
+    });
+
+    it("resizes instead of equalizing when a drag starts on the second press", () => {
+      const onSetRatio = vi.fn();
+      render(<TerminalSplitView layout={splitLayout()} sessions={splitSessions()} onSetRatio={onSetRatio} />);
+      const divider = screen.getByRole("separator", { name: "Resize terminal panes" });
+      const parent = divider.parentElement as HTMLElement;
+      vi.spyOn(parent, "getBoundingClientRect").mockReturnValue({
+        left: 0,
+        right: 500,
+        width: 500,
+        top: 0,
+        bottom: 500,
+        height: 500,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      });
+      const now = vi.spyOn(Date, "now");
+
+      now.mockReturnValue(1_000);
+      fireEvent.pointerDown(divider, { clientX: 250, clientY: 100 });
+      fireEvent.pointerUp(window);
+      now.mockReturnValue(1_100);
+      fireEvent.pointerDown(divider, { clientX: 250, clientY: 100 });
+      fireEvent.pointerMove(window, { clientX: 400, clientY: 100 });
+      fireEvent.pointerUp(window);
+
+      expect(onSetRatio).not.toHaveBeenCalledWith("tab-1", "", 0.5, expect.anything());
+      expect(onSetRatio).toHaveBeenCalledWith(
+        "tab-1",
+        "",
+        0.8,
+        expect.objectContaining({ isolated: false }),
+      );
+      now.mockRestore();
+    });
+
+    it("ignores a right-button double-click", () => {
+      const onSetRatio = vi.fn();
+      render(<TerminalSplitView layout={splitLayout()} sessions={splitSessions()} onSetRatio={onSetRatio} />);
+      const divider = screen.getByRole("separator", { name: "Resize terminal panes" });
+      const now = vi.spyOn(Date, "now");
+
+      now.mockReturnValue(1_000);
+      fireEvent.pointerDown(divider, { clientX: 250, clientY: 100, button: 2 });
+      fireEvent.pointerUp(window, { button: 2 });
+      now.mockReturnValue(1_200);
+      fireEvent.pointerDown(divider, { clientX: 250, clientY: 100, button: 2 });
+      fireEvent.pointerUp(window, { button: 2 });
+
+      expect(onSetRatio).not.toHaveBeenCalledWith("tab-1", "", 0.5, expect.anything());
+      now.mockRestore();
+    });
+
+    it("keeps the even division when the second press jitters within the slop", () => {
+      const onSetRatio = vi.fn();
+      render(<TerminalSplitView layout={splitLayout()} sessions={splitSessions()} onSetRatio={onSetRatio} />);
+      const divider = screen.getByRole("separator", { name: "Resize terminal panes" });
+      const parent = divider.parentElement as HTMLElement;
+      vi.spyOn(parent, "getBoundingClientRect").mockReturnValue({
+        left: 0,
+        right: 500,
+        width: 500,
+        top: 0,
+        bottom: 500,
+        height: 500,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      });
+      const now = vi.spyOn(Date, "now");
+
+      now.mockReturnValue(1_000);
+      fireEvent.pointerDown(divider, { clientX: 250, clientY: 100 });
+      fireEvent.pointerUp(window);
+      now.mockReturnValue(1_100);
+      fireEvent.pointerDown(divider, { clientX: 250, clientY: 100 });
+      fireEvent.pointerMove(window, { clientX: 252, clientY: 100 });
+      fireEvent.pointerUp(window);
+
+      const ratios = onSetRatio.mock.calls.map((call) => call[2]);
+      expect(ratios.at(-1)).toBe(0.5);
+      now.mockRestore();
+    });
+
+    it("does not equalize when the second click follows a real resize drag", () => {
+      const onSetRatio = vi.fn();
+      render(<TerminalSplitView layout={splitLayout()} sessions={splitSessions()} onSetRatio={onSetRatio} />);
+      const divider = screen.getByRole("separator", { name: "Resize terminal panes" });
+      const parent = divider.parentElement as HTMLElement;
+      vi.spyOn(parent, "getBoundingClientRect").mockReturnValue({
+        left: 0,
+        right: 500,
+        width: 500,
+        top: 0,
+        bottom: 500,
+        height: 500,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      });
+      const now = vi.spyOn(Date, "now");
+
+      now.mockReturnValue(1_000);
+      fireEvent.pointerDown(divider, { clientX: 250, clientY: 100 });
+      now.mockReturnValue(1_100);
+      fireEvent.pointerMove(window, { clientX: 300, clientY: 100 });
+      fireEvent.pointerUp(window);
+      now.mockReturnValue(1_200);
+      fireEvent.pointerDown(divider, { clientX: 251, clientY: 100 });
+      fireEvent.pointerUp(window);
+
+      expect(onSetRatio).not.toHaveBeenCalledWith("tab-1", "", 0.5, expect.anything());
+      now.mockRestore();
+    });
+
+    it("equalizes split tab groups from the group divider", () => {
+      const onSetGroupRatio = vi.fn();
+      const layout: LayoutState = {
+        tabs: [tab("tab-a", "session-1"), tab("tab-b", "session-2")],
+        activeTabId: "tab-a",
+        tabGroups: {
+          "group-a": { id: "group-a", tabIds: ["tab-a"], activeTabId: "tab-a" },
+          "group-b": { id: "group-b", tabIds: ["tab-b"], activeTabId: "tab-b" },
+        },
+        tabGroupLayout: {
+          type: "split",
+          direction: "horizontal",
+          first: { type: "group", groupId: "group-a" },
+          second: { type: "group", groupId: "group-b" },
+          ratio: 0.75,
+        },
+        focusedGroupId: "group-a",
+        layoutsByTabId: {
+          "tab-a": {
+            root: { type: "leaf", leafId: "leaf-a" },
+            activeLeafId: "leaf-a",
+            expandedLeafId: null,
+            sessionIdsByLeafId: { "leaf-a": "session-1" },
+          },
+          "tab-b": {
+            root: { type: "leaf", leafId: "leaf-b" },
+            activeLeafId: "leaf-b",
+            expandedLeafId: null,
+            sessionIdsByLeafId: { "leaf-b": "session-2" },
+          },
+        },
+      };
+
+      render(
+        <TerminalSplitView layout={layout} sessions={splitSessions()} onSetGroupRatio={onSetGroupRatio} />,
+      );
+      const divider = screen.getByRole("separator", { name: "Resize tab groups" });
+      const now = vi.spyOn(Date, "now");
+
+      now.mockReturnValue(1_000);
+      fireEvent.pointerDown(divider, { clientX: 250, clientY: 100 });
+      fireEvent.pointerUp(window);
+      now.mockReturnValue(1_200);
+      fireEvent.pointerDown(divider, { clientX: 251, clientY: 100 });
+      fireEvent.pointerUp(window);
+
+      expect(onSetGroupRatio).toHaveBeenCalledTimes(1);
+      expect(onSetGroupRatio).toHaveBeenCalledWith("", 0.5);
+      now.mockRestore();
+    });
+  });
+
   it("passes searchOpen true only to the pane matching searchLeafId", () => {
     const layout = singleTabLayout("tab-1", "session-1", "leaf-1");
     const sessions = { "session-1": session("session-1", "backend-1") };

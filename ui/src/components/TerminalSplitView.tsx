@@ -67,6 +67,10 @@ import { IconButton } from "./ui/IconButton";
 
 const MIN_PANE_SIZE_PX = 80;
 
+/** Two clicks within this window and this slop on a divider count as one double-click. */
+const DIVIDER_DOUBLE_CLICK_MS = 500;
+const DIVIDER_DOUBLE_CLICK_SLOP_PX = 4;
+
 function isInteractiveTarget(target: HTMLElement | null): boolean {
   return Boolean(
     target?.closest(
@@ -1328,6 +1332,7 @@ function PaneResizeDivider({
 }: PaneResizeDividerProps) {
   const dividerRef = useRef<HTMLDivElement>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
+  const lastClickRef = useRef<{ time: number; x: number; y: number } | null>(null);
   const isHorizontal = direction === "horizontal";
 
   useEffect(() => {
@@ -1343,13 +1348,21 @@ function PaneResizeDivider({
     event.preventDefault();
     const parent = dividerRef.current?.parentElement;
     if (!parent) return;
+
     if (cleanupRef.current) {
       cleanupRef.current();
       cleanupRef.current = null;
     }
+
     document.body.style.cursor = isHorizontal ? "col-resize" : "row-resize";
 
     const seam = onDragStart?.() ?? null;
+    const originX = event.clientX;
+    const originY = event.clientY;
+    // Only a primary left-button press can form a click pair; a secondary mouse button or an
+    // additional touch contact must never trigger the equalize.
+    const clickEligible = event.button === 0 && event.isPrimary !== false;
+    const movedRef = { current: false };
     const isolatedRef = { current: Boolean(event.altKey) };
     const seamRef = { current: seam };
     const pendingRatioRef = { current: null as number | null };
@@ -1377,6 +1390,14 @@ function PaneResizeDivider({
     };
 
     const handlePointerMove = (pointerEvent: PointerEvent) => {
+      if (
+        Math.abs(pointerEvent.clientX - originX) > DIVIDER_DOUBLE_CLICK_SLOP_PX ||
+        Math.abs(pointerEvent.clientY - originY) > DIVIDER_DOUBLE_CLICK_SLOP_PX
+      ) {
+        // A real resize: this press is not a click, and it breaks any pending click pair.
+        movedRef.current = true;
+        lastClickRef.current = null;
+      }
       isolatedRef.current = pointerEvent.altKey;
       const parentNow = dividerRef.current?.parentElement;
       if (!parentNow) return;
@@ -1396,7 +1417,7 @@ function PaneResizeDivider({
     const cleanup = () => {
       document.body.style.cursor = "";
       window.removeEventListener("pointermove", handlePointerMove);
-      window.removeEventListener("pointerup", cleanup);
+      window.removeEventListener("pointerup", handlePointerUp);
       window.removeEventListener("pointercancel", cleanup);
       cleanupRef.current = null;
       if (frameId !== null) {
@@ -1409,9 +1430,38 @@ function PaneResizeDivider({
       }
     };
 
+    const handlePointerUp = () => {
+      // Decide on the click pair before cleanup, which flushes any pending jitter ratio; the
+      // equalize must be the last ratio written for this press.
+      let equalize = false;
+      if (clickEligible && !movedRef.current) {
+        const now = Date.now();
+        const previousClick = lastClickRef.current;
+        lastClickRef.current = { time: now, x: originX, y: originY };
+        if (
+          previousClick &&
+          now - previousClick.time <= DIVIDER_DOUBLE_CLICK_MS &&
+          Math.abs(originX - previousClick.x) <= DIVIDER_DOUBLE_CLICK_SLOP_PX &&
+          Math.abs(originY - previousClick.y) <= DIVIDER_DOUBLE_CLICK_SLOP_PX
+        ) {
+          lastClickRef.current = null;
+          equalize = true;
+        }
+      }
+
+      cleanup();
+
+      if (equalize) {
+        // Two clicks in the same spot snap the panes back to an even division of the current
+        // container, keeping collinear splits on the same line. Recognizing the pair on release
+        // (not on the second press) lets a drag that starts on the second press resize normally.
+        onRatioChange(0.5, { isolated: false, seam: seamRef.current });
+      }
+    };
+
     cleanupRef.current = cleanup;
     window.addEventListener("pointermove", handlePointerMove);
-    window.addEventListener("pointerup", cleanup);
+    window.addEventListener("pointerup", handlePointerUp);
     window.addEventListener("pointercancel", cleanup);
   };
 
