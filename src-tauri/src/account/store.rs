@@ -98,6 +98,16 @@ pub struct GrantRecord {
     pub expires_at: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceAuthRecord {
+    pub device_code_hash: String,
+    pub user_code: String,
+    pub email: Option<String>,
+    pub enrollment_code: Option<String>,
+    pub expires_at: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountStore {
@@ -113,6 +123,8 @@ pub struct AccountStore {
     pub machines: BTreeMap<String, MachineRecord>,
     #[serde(default)]
     pub grants: BTreeMap<String, GrantRecord>,
+    #[serde(default)]
+    pub device_auths: BTreeMap<String, DeviceAuthRecord>,
 }
 
 impl AccountStore {
@@ -137,6 +149,7 @@ impl AccountStore {
             .retain(|_, code| code.expires_at > now);
         self.sessions.retain(|_, session| session.expires_at > now);
         self.grants.retain(|_, grant| grant.expires_at > now);
+        self.device_auths.retain(|_, auth| auth.expires_at > now);
     }
 
     pub fn user_by_email(&self, email: &str) -> Option<&UserRecord> {

@@ -700,9 +700,10 @@ where
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccountCliCommand {
     Enroll { code: String, origin: Option<String> },
+    Login { email: Option<String>, origin: Option<String> },
 }
 
-const ACCOUNT_USAGE: &str = "expected `ferryx account enroll --code <code> [--origin <url>]`";
+const ACCOUNT_USAGE: &str = "expected `ferryx account <enroll|login>`\n  enroll: `ferryx account enroll --code <code> [--origin <url>]`\n  login:  `ferryx account login [--email <email>] [--origin <url>]`";
 
 pub fn parse_account_cli<I, T>(args: I) -> Result<AccountCliCommand, String>
 where
@@ -716,32 +717,55 @@ where
     if args.get(1).is_none_or(|arg| arg != "account") {
         return Err(ACCOUNT_USAGE.into());
     }
-    if args.get(2).is_none_or(|arg| arg != "enroll") {
-        return Err(ACCOUNT_USAGE.into());
-    }
-    let mut code = None;
-    let mut origin = None;
-    let mut index = 3;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--code" if code.is_none() => {
-                let value = args.get(index + 1).ok_or("missing value for --code")?;
-                code = Some(value.clone());
-                index += 2;
+    match args.get(2).map(String::as_str) {
+        Some("enroll") => {
+            let mut code = None;
+            let mut origin = None;
+            let mut index = 3;
+            while index < args.len() {
+                match args[index].as_str() {
+                    "--code" if code.is_none() => {
+                        let value = args.get(index + 1).ok_or("missing value for --code")?;
+                        code = Some(value.clone());
+                        index += 2;
+                    }
+                    "--origin" if origin.is_none() => {
+                        let value = args.get(index + 1).ok_or("missing value for --origin")?;
+                        origin = Some(value.clone());
+                        index += 2;
+                    }
+                    other => return Err(format!("unknown account option `{other}`")),
+                }
             }
-            "--origin" if origin.is_none() => {
-                let value = args.get(index + 1).ok_or("missing value for --origin")?;
-                origin = Some(value.clone());
-                index += 2;
+            let code = code.ok_or_else(|| ACCOUNT_USAGE.to_string())?;
+            if code.trim().is_empty() {
+                return Err("missing value for --code".into());
             }
-            other => return Err(format!("unknown account option `{other}`")),
+            Ok(AccountCliCommand::Enroll { code, origin })
         }
+        Some("login") => {
+            let mut email = None;
+            let mut origin = None;
+            let mut index = 3;
+            while index < args.len() {
+                match args[index].as_str() {
+                    "--email" if email.is_none() => {
+                        let value = args.get(index + 1).ok_or("missing value for --email")?;
+                        email = Some(value.clone());
+                        index += 2;
+                    }
+                    "--origin" if origin.is_none() => {
+                        let value = args.get(index + 1).ok_or("missing value for --origin")?;
+                        origin = Some(value.clone());
+                        index += 2;
+                    }
+                    other => return Err(format!("unknown account option `{other}`")),
+                }
+            }
+            Ok(AccountCliCommand::Login { email, origin })
+        }
+        _ => Err(ACCOUNT_USAGE.into()),
     }
-    let code = code.ok_or_else(|| ACCOUNT_USAGE.to_string())?;
-    if code.trim().is_empty() {
-        return Err("missing value for --code".into());
-    }
-    Ok(AccountCliCommand::Enroll { code, origin })
 }
 
 pub fn run_account_cli(command: AccountCliCommand) -> Result<(), String> {
@@ -768,6 +792,62 @@ pub fn run_account_cli(command: AccountCliCommand) -> Result<(), String> {
                  Existing paired devices and live terminals are unaffected."
             );
             Ok(())
+        }
+        AccountCliCommand::Login { email, origin } => {
+            let origin = match origin {
+                Some(value) => value,
+                None => crate::account::origin::account_origin()
+                    .map_err(|error| error.to_string())?,
+            };
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| error.to_string())?;
+            runtime.block_on(async {
+                let auth_resp = crate::account::enroll_client::request_device_auth(&origin, email.as_deref())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                eprintln!("\n=== Ferryx Headless Machine Login ===");
+                eprintln!("To authenticate this machine, please open the following link on your phone or computer:\n");
+                eprintln!("  {}\n", auth_resp.verification_uri_complete);
+                if let Some(ref em) = email {
+                    eprintln!("(An approval email has also been sent to {em})");
+                }
+                eprintln!("Waiting for authorization...");
+                let start = std::time::Instant::now();
+                let timeout = std::time::Duration::from_secs(auth_resp.expires_in.max(300));
+                let poll_interval = std::time::Duration::from_secs(auth_resp.interval.max(2));
+
+                let enrollment_code = loop {
+                    tokio::time::sleep(poll_interval).await;
+                    if start.elapsed() > timeout {
+                        return Err("Authentication timed out waiting for approval.".to_string());
+                    }
+                    eprint!(".");
+                    match crate::account::enroll_client::poll_device_auth(&origin, &auth_resp.device_code).await {
+                        Ok(Some(code)) => {
+                            eprintln!("\nAuthorization approved!");
+                            break code;
+                        }
+                        Ok(None) => continue,
+                        Err(err) => return Err(format!("\nPolling error: {err}")),
+                    }
+                };
+
+                eprintln!("Enrolling machine with account...");
+                let record = crate::account::enroll_client::enroll_machine(&origin, &enrollment_code)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                println!("{}", record.account_id);
+                println!("{}", record.machine_record_id);
+                println!("{}", record.relay_origin);
+                println!("{}", record.enrollment_epoch);
+                eprintln!(
+                    "Enrolled successfully! The daemon keeps owning its identity and device tokens. \
+                     Existing paired devices and live terminals are unaffected."
+                );
+                Ok(())
+            })
         }
     }
 }
@@ -2186,5 +2266,40 @@ mod tests {
         assert!(parse_account_cli(["ferryx", "account", "enroll", "--code"]).is_err());
         assert!(parse_account_cli(["ferryx", "account", "enroll", "--code", "x", "--bogus"]).is_err());
         assert!(parse_account_cli(["ferryx", "pair", "list"]).is_err());
+    }
+
+    #[test]
+    fn account_login_cli_parses_email_and_optional_origin() {
+        assert_eq!(
+            parse_account_cli(["ferryx", "account", "login"]).expect("parse"),
+            AccountCliCommand::Login {
+                email: None,
+                origin: None,
+            }
+        );
+        assert_eq!(
+            parse_account_cli(["ferryx", "account", "login", "--email", "user@example.com"]).expect("parse"),
+            AccountCliCommand::Login {
+                email: Some("user@example.com".into()),
+                origin: None,
+            }
+        );
+        assert_eq!(
+            parse_account_cli([
+                "ferryx",
+                "account",
+                "login",
+                "--origin",
+                "https://account.example",
+                "--email",
+                "user@example.com",
+            ])
+            .expect("parse"),
+            AccountCliCommand::Login {
+                email: Some("user@example.com".into()),
+                origin: Some("https://account.example".into()),
+            }
+        );
+        assert!(parse_account_cli(["ferryx", "account", "login", "--bogus"]).is_err());
     }
 }

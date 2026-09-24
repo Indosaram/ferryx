@@ -25,7 +25,7 @@ if (!worktree || !existsSync(path.join(worktree, "src-tauri/tauri.conf.json"))) 
 const mainRepo = "/Volumes/T9-Mac/project/ferryx";
 const signingIdentity = "Developer ID Application: Indo Yoon (5DUM8WPB4C)";
 const notaryProfile = "FerryxNotary";
-const targetDir = "/tmp/ferryx-notary-target";
+const targetDir = process.env.CARGO_TARGET_DIR || "/tmp/ferryx-notary-target";
 const runDir = path.join(worktree, ".notary-run");
 
 function run(cmd, args, extraEnv = {}, opts = {}) {

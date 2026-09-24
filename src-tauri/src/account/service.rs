@@ -251,6 +251,183 @@ async fn parse_json<T: for<'de> Deserialize<'de>>(body: Bytes) -> Result<T, ApiE
         .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceAuthRequestBody {
+    pub email: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceAuthResponse {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    pub verification_uri_complete: String,
+    pub expires_in: u64,
+    pub interval: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DevicePollRequestBody {
+    pub device_code: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DevicePollResponse {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enrollment_code: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeviceApproveQuery {
+    pub code: String,
+}
+
+pub async fn device_request(
+    State(state): State<Arc<AccountState>>,
+    body: Bytes,
+) -> Result<Json<DeviceAuthResponse>, ApiError> {
+    let request: DeviceAuthRequestBody = parse_json(body).await?;
+    let email = request.email.as_deref().map(normalize_email);
+    let device_code = random_token();
+    let mut rng = rand::rngs::OsRng;
+    let chars: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let mut part1 = String::new();
+    let mut part2 = String::new();
+    for _ in 0..4 {
+        part1.push(chars[rand::Rng::gen_range(&mut rng, 0..chars.len())] as char);
+        part2.push(chars[rand::Rng::gen_range(&mut rng, 0..chars.len())] as char);
+    }
+    let user_code = format!("{part1}-{part2}");
+    let origin = state.origin.trim_end_matches('/');
+    let verification_uri = format!("{origin}/device");
+    let verification_uri_complete = format!("{origin}/api/account/v1/device/approve?code={user_code}");
+
+    if let Some(ref to_email) = email {
+        let _ = state.mailer.send_magic_link(
+            to_email,
+            &verification_uri_complete,
+        );
+    }
+
+    let expires_at = now_secs() + 900;
+    state.mutate(|store| {
+        store.device_auths.retain(|_, d| d.expires_at > now_secs());
+        store.device_auths.insert(
+            token_hash(&device_code),
+            crate::account::store::DeviceAuthRecord {
+                device_code_hash: token_hash(&device_code),
+                user_code: user_code.clone(),
+                email: email.clone(),
+                enrollment_code: None,
+                expires_at,
+            },
+        );
+        Ok(())
+    })?;
+
+    Ok(Json(DeviceAuthResponse {
+        device_code,
+        user_code,
+        verification_uri,
+        verification_uri_complete,
+        expires_in: 900,
+        interval: 2,
+    }))
+}
+
+pub async fn device_poll(
+    State(state): State<Arc<AccountState>>,
+    body: Bytes,
+) -> Result<Json<DevicePollResponse>, ApiError> {
+    let request: DevicePollRequestBody = parse_json(body).await?;
+    let now = now_secs();
+    let code_hash = token_hash(&request.device_code);
+    state.mutate(|store| {
+        let record = store.device_auths.get(&code_hash).ok_or_else(|| {
+            ApiError::new(StatusCode::BAD_REQUEST, "DEVICE_CODE_INVALID", "invalid code")
+        })?;
+        if record.expires_at <= now {
+            store.device_auths.remove(&code_hash);
+            return Err(ApiError::new(StatusCode::BAD_REQUEST, "DEVICE_CODE_EXPIRED", "expired"));
+        }
+        if let Some(ref enrollment_code) = record.enrollment_code {
+            let code = enrollment_code.clone();
+            store.device_auths.remove(&code_hash);
+            Ok(Json(DevicePollResponse {
+                status: "approved".into(),
+                enrollment_code: Some(code),
+            }))
+        } else {
+            Ok(Json(DevicePollResponse {
+                status: "authorization_pending".into(),
+                enrollment_code: None,
+            }))
+        }
+    })
+}
+
+pub async fn device_approve_get(
+    State(state): State<Arc<AccountState>>,
+    axum::extract::Query(query): axum::extract::Query<DeviceApproveQuery>,
+) -> Result<axum::response::Html<&'static str>, ApiError> {
+    let now = now_secs();
+    let code_clean = query.code.trim().to_uppercase();
+    state.mutate(|store| {
+        let (found_key, user_id, origin) = {
+            let mut found = None;
+            for (key, record) in store.device_auths.iter() {
+                if record.user_code == code_clean && record.expires_at > now {
+                    let email = record.email.clone().unwrap_or_else(|| "cli-user@local".into());
+                    let user_id = store.users.values()
+                        .find(|u| u.email == email)
+                        .map(|u| u.user_id.clone())
+                        .unwrap_or_else(|| {
+                            let uid = format!("usr_{}", &random_token()[..16]);
+                            store.users.insert(uid.clone(), crate::account::store::UserRecord {
+                                user_id: uid.clone(),
+                                email,
+                                created_at: now,
+                            });
+                            uid
+                        });
+                    found = Some((key.clone(), user_id, state.origin.clone()));
+                    break;
+                }
+            }
+            found.ok_or_else(|| {
+                ApiError::new(StatusCode::NOT_FOUND, "DEVICE_CODE_NOT_FOUND", "code not found or expired")
+            })?
+        };
+
+        let enrollment_code = random_token();
+        store.enrollment_codes.insert(
+            token_hash(&enrollment_code),
+            crate::account::store::EnrollmentCodeRecord {
+                user_id,
+                account_origin: origin,
+                expires_at: now + 600,
+            },
+        );
+
+        if let Some(record) = store.device_auths.get_mut(&found_key) {
+            record.enrollment_code = Some(enrollment_code);
+        }
+        Ok(())
+    })?;
+
+    Ok(axum::response::Html(
+        "<!DOCTYPE html><html><body style=\"font-family: sans-serif; text-align: center; padding: 40px;\">\
+        <h2 style=\"color: #10b981;\">&#10003; Ferryx Machine Approved!</h2>\
+        <p>You can return to your terminal. This browser window can now be closed.</p>\
+        </body></html>",
+    ))
+}
+
 pub async fn login_request(
     State(state): State<Arc<AccountState>>,
     body: Bytes,
@@ -674,6 +851,9 @@ pub fn router(state: Arc<AccountState>) -> Router {
     Router::new()
         .route("/api/account/v1/login/request", post(login_request))
         .route("/api/account/v1/login/consume", post(login_consume))
+        .route("/api/account/v1/device/request", post(device_request))
+        .route("/api/account/v1/device/poll", post(device_poll))
+        .route("/api/account/v1/device/approve", get(device_approve_get))
         .route("/api/account/v1/logout", post(logout))
         .route(
             "/api/account/v1/enrollment-codes",
@@ -697,4 +877,40 @@ pub async fn serve(listener: tokio::net::TcpListener, state: Arc<AccountState>) 
     axum::serve(listener, router(state))
         .await
         .map_err(|error| format!("account server failed: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn device_flow_lifecycle_request_poll_approve() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(tmp.path().join("mail")));
+        let state = Arc::new(AccountState::new(tmp.path(), "https://relay.test", mailer));
+
+        let req_body = serde_json::to_vec(&serde_json::json!({
+            "email": "headless@test.local"
+        })).unwrap();
+        let resp = device_request(State(state.clone()), Bytes::from(req_body)).await.unwrap().0;
+        assert_eq!(resp.interval, 2);
+        assert!(!resp.user_code.is_empty());
+
+        let poll_body = serde_json::to_vec(&serde_json::json!({
+            "deviceCode": resp.device_code
+        })).unwrap();
+        let pending = device_poll(State(state.clone()), Bytes::from(poll_body.clone())).await.unwrap().0;
+        assert_eq!(pending.status, "authorization_pending");
+        assert!(pending.enrollment_code.is_none());
+
+        let approve_res = device_approve_get(
+            State(state.clone()),
+            axum::extract::Query(DeviceApproveQuery { code: resp.user_code.clone() }),
+        ).await;
+        assert!(approve_res.is_ok());
+
+        let approved = device_poll(State(state.clone()), Bytes::from(poll_body)).await.unwrap().0;
+        assert_eq!(approved.status, "approved");
+        assert!(approved.enrollment_code.is_some());
+    }
 }

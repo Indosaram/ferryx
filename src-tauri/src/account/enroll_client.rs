@@ -248,6 +248,81 @@ pub async fn request_machine_grant(
         .map_err(|error| EnrollError::local("ACCOUNT_BAD_RESPONSE", error.to_string()))
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceAuthClientResponse {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    pub verification_uri_complete: String,
+    pub expires_in: u64,
+    pub interval: u64,
+}
+
+pub async fn request_device_auth(
+    account_origin: &str,
+    email: Option<&str>,
+) -> Result<DeviceAuthClientResponse, EnrollError> {
+    let origin = account_origin.trim_end_matches('/');
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| EnrollError::local("ACCOUNT_CLIENT_FAILED", e.to_string()))?;
+    let url = format!("{origin}/api/account/v1/device/request");
+    let resp = client
+        .post(&url)
+        .json(&serde_json::json!({ "email": email }))
+        .send()
+        .await
+        .map_err(|e| EnrollError::local("ACCOUNT_UNREACHABLE", e.to_string()))?;
+    let status = resp.status().as_u16();
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| EnrollError::local("ACCOUNT_UNREACHABLE", e.to_string()))?;
+    if status != 200 {
+        return Err(EnrollError::remote(status, &body));
+    }
+    serde_json::from_str(&body)
+        .map_err(|e| EnrollError::local("ACCOUNT_BAD_RESPONSE", e.to_string()))
+}
+
+pub async fn poll_device_auth(
+    account_origin: &str,
+    device_code: &str,
+) -> Result<Option<String>, EnrollError> {
+    let origin = account_origin.trim_end_matches('/');
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| EnrollError::local("ACCOUNT_CLIENT_FAILED", e.to_string()))?;
+    let url = format!("{origin}/api/account/v1/device/poll");
+    let resp = client
+        .post(&url)
+        .json(&serde_json::json!({ "deviceCode": device_code }))
+        .send()
+        .await
+        .map_err(|e| EnrollError::local("ACCOUNT_UNREACHABLE", e.to_string()))?;
+    let status = resp.status().as_u16();
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| EnrollError::local("ACCOUNT_UNREACHABLE", e.to_string()))?;
+    if status != 200 {
+        return Err(EnrollError::remote(status, &body));
+    }
+    let val: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| EnrollError::local("ACCOUNT_BAD_RESPONSE", e.to_string()))?;
+    if val["status"].as_str() == Some("approved") {
+        let code = val["enrollmentCode"]
+            .as_str()
+            .ok_or_else(|| EnrollError::local("ACCOUNT_BAD_RESPONSE", "missing enrollmentCode"))?;
+        Ok(Some(code.to_string()))
+    } else {
+        Ok(None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
