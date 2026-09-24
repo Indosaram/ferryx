@@ -68,6 +68,24 @@ const MAX_MESSAGE_SIZE: usize = 64 * 1024;
 /// entries that have exceeded [`SESSION_PAIRING_TIMEOUT`] without pairing.
 const SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(10);
 
+pub const RELAY_STAGE_HEADER: &str = "x-ferryx-relay-stage";
+pub const RELAY_STAGE_DATA_PAIRING_TIMEOUT: &str = "data_pairing_timeout";
+pub const RELAY_STAGE_UPSTREAM_TRANSFER_TIMEOUT: &str = "upstream_transfer_timeout";
+
+fn relay_timeout_response(stage: &'static str) -> Response {
+    let mut response = StatusCode::GATEWAY_TIMEOUT.into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        RELAY_STAGE_HEADER,
+        HeaderValue::from_static(stage),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_EXPOSE_HEADERS,
+        HeaderValue::from_static(RELAY_STAGE_HEADER),
+    );
+    response
+}
+
 /// Notification pushed down the control channel when a client asks to open
 /// a new session against this daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1835,9 +1853,16 @@ async fn proxy_http(
     };
     // Machine Git mutations have a 30-second child deadline. Leave time for
     // admission and the final response without relaxing socket write deadlines.
-    timeout(Duration::from_secs(40), transfer)
-        .await
-        .map_err(|_| StatusCode::GATEWAY_TIMEOUT)?
+    match timeout(Duration::from_secs(40), transfer).await {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(StatusCode::GATEWAY_TIMEOUT)) => {
+            Ok(relay_timeout_response(RELAY_STAGE_DATA_PAIRING_TIMEOUT))
+        }
+        Ok(Err(status)) => Err(status),
+        Err(_) => {
+            Ok(relay_timeout_response(RELAY_STAGE_UPSTREAM_TRANSFER_TIMEOUT))
+        }
+    }
 }
 
 /// Decode HTTP framing independently of WebSocket message boundaries.
@@ -1974,6 +1999,10 @@ fn apply_cors_headers(headers: &mut HeaderMap) {
         header::ACCESS_CONTROL_MAX_AGE,
         HeaderValue::from_static("86400"),
     );
+    headers.insert(
+        header::ACCESS_CONTROL_EXPOSE_HEADERS,
+        HeaderValue::from_static(RELAY_STAGE_HEADER),
+    );
 }
 
 async fn relay_cors_middleware(request: Request<Body>, next: axum::middleware::Next) -> Response {
@@ -1994,13 +2023,18 @@ pub fn relay_router(state: RelayState) -> Router {
 }
 
 /// The relay operator pins the account service's Ed25519 public key here; `None` keeps the grant
-/// route closed even if the route itself is reachable.
-pub fn relay_router_with_grant_key(state: RelayState, account_public_key: Option<String>) -> Router {
+/// route closed even if the route itself is reachable. When `account_state` is present, the
+/// account HTTP service is embedded into the same relay router.
+pub fn relay_router_with_account(
+    state: RelayState,
+    account_public_key: Option<String>,
+    account_state: Option<Arc<crate::account::service::AccountState>>,
+) -> Router {
     let grant_gate = crate::remote::account_grants::GrantGate {
         account_public_key,
         delivery: state.clone(),
     };
-    Router::new()
+    let mut router = Router::new()
         .route("/api/v1/pair/exchange", post(pair_exchange_handler))
         .route(
             "/host/{machine_id}/api/v1/socket-ticket",
@@ -2039,12 +2073,23 @@ pub fn relay_router_with_grant_key(state: RelayState, account_public_key: Option
         .route("/tunnel/data/{session_id}", get(data_handler))
         .route("/tunnel/client/{session_id}", get(client_handler))
         .route("/tunnel/opaque/{session_id}", get(opaque_handler))
-        .merge(crate::remote::account_grants::grant_gate_router(grant_gate).with_state(()))
         .fallback(axum::routing::get(
             crate::remote::server::serve_static_or_index,
         ))
         .layer(axum::middleware::from_fn(relay_cors_middleware))
         .with_state(state)
+        .merge(crate::remote::account_grants::grant_gate_router(grant_gate));
+
+    if let Some(account) = account_state {
+        router = router.merge(crate::account::service::router(account));
+    }
+
+    router
+}
+
+/// Back-compat wrapper: relay-only router with no embedded account service.
+pub fn relay_router_with_grant_key(state: RelayState, account_public_key: Option<String>) -> Router {
+    relay_router_with_account(state, account_public_key, None)
 }
 
 /// Spawns the background task that periodically evicts sessions which
@@ -5921,5 +5966,99 @@ mod tests {
             state.inner.pairings.lock()["123456"].state,
             PairingState::Consumed
         );
+    }
+
+    #[tokio::test]
+    async fn test_relay_504_stage_discriminator_data_pairing_timeout() {
+        tokio::time::pause();
+        let state = test_state(vec![]);
+        let (generation, mut notices, _grants) =
+            state.register_control_channel("machine_stage_1".into());
+
+        let http_fut = proxy_http(
+            &state,
+            "machine_stage_1",
+            Some(generation),
+            Method::GET,
+            "/api/v1/capabilities",
+            HeaderMap::new(),
+            Vec::new(),
+        );
+        tokio::pin!(http_fut);
+
+        let notice = tokio::select! {
+            res = &mut http_fut => panic!("http_fut completed prematurely: {:?}", res.map(|r| r.status())),
+            n = notices.recv() => n.expect("session notice must be pushed"),
+        };
+        assert!(!notice.session_id.is_empty());
+
+        tokio::time::advance(SESSION_PAIRING_TIMEOUT + Duration::from_secs(1)).await;
+
+        let res = http_fut
+            .await
+            .expect("proxy_http returns Ok(Response) for stage timeout");
+        assert_eq!(res.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(
+            res.headers()
+                .get(RELAY_STAGE_HEADER)
+                .and_then(|v| v.to_str().ok()),
+            Some(RELAY_STAGE_DATA_PAIRING_TIMEOUT)
+        );
+        state.unregister_control_channel("machine_stage_1", generation);
+    }
+
+    #[tokio::test]
+    async fn test_relay_504_stage_discriminator_upstream_transfer_timeout() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (generation, mut notices, _grants) =
+            state.register_control_channel("machine_stage_2".into());
+
+        let http_fut = proxy_http(
+            &state,
+            "machine_stage_2",
+            Some(generation),
+            Method::GET,
+            "/api/v1/workspace/projects",
+            HeaderMap::new(),
+            Vec::new(),
+        );
+        tokio::pin!(http_fut);
+
+        let notice = tokio::select! {
+            res = &mut http_fut => panic!("http_fut completed prematurely: {:?}", res.map(|r| r.status())),
+            n = notices.recv() => n.expect("session notice must be pushed"),
+        };
+        let (mut data_socket, _) = tokio_tungstenite::connect_async(format!(
+            "{base}/tunnel/data/{}",
+            notice.session_id
+        ))
+        .await
+        .expect("data socket connection must succeed");
+
+        let msg = tokio::select! {
+            res = &mut http_fut => panic!("http_fut completed prematurely: {:?}", res.map(|r| r.status())),
+            frame = data_socket.next() => frame.expect("data socket stream active").expect("frame ok"),
+        };
+        assert!(msg
+            .into_data()
+            .starts_with(b"GET /api/v1/workspace/projects HTTP/1.1\r\n"));
+
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(41)).await;
+
+        let res = http_fut
+            .await
+            .expect("proxy_http returns Ok(Response) for stage timeout");
+        assert_eq!(res.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(
+            res.headers()
+                .get(RELAY_STAGE_HEADER)
+                .and_then(|v| v.to_str().ok()),
+            Some(RELAY_STAGE_UPSTREAM_TRANSFER_TIMEOUT)
+        );
+
+        state.unregister_control_channel("machine_stage_2", generation);
+        server.abort();
     }
 }

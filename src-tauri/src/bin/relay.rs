@@ -13,8 +13,10 @@
 //! environment and `--machine-token` flags are accepted.
 
 use ferryx_lib::remote::relay_server::{
-    relay_router_with_grant_key, spawn_session_reaper, RelayState,
+    relay_router_with_account, spawn_session_reaper, RelayState,
 };
+use std::path::PathBuf;
+use std::sync::Arc;
 
 struct RelayConfig {
     port: u16,
@@ -103,7 +105,22 @@ async fn main() {
 
     let state = RelayState::new(config.machine_tokens);
     spawn_session_reaper(state.clone());
-    let router = relay_router_with_grant_key(state, config.account_public_key);
+
+    let origin = std::env::var("FERRYX_ACCOUNT_ORIGIN")
+        .unwrap_or_else(|_| "https://relay.checka.cc".into());
+    let data_dir = std::env::var("FERRYX_ACCOUNT_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".ferryx")
+                .join("account-data")
+        });
+    let mailer = Arc::new(ferryx_lib::account::mailer::FileMailer::with_dir(data_dir.join("mail")));
+    let account_state = Arc::new(ferryx_lib::account::service::AccountState::new(&data_dir, &origin, mailer));
+
+    let router = relay_router_with_account(state, config.account_public_key, Some(account_state));
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], config.port));
     let listener = match tokio::net::TcpListener::bind(addr).await {
