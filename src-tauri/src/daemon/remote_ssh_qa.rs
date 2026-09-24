@@ -1,6 +1,47 @@
 //! Test-only external-machine entry point. No production trust override exists.
 use super::*;
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+type TestWsStream = tokio_tungstenite::WebSocketStream<
+    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+>;
+
+async fn read_next_ws_json(ws: &mut TestWsStream) -> serde_json::Value {
+    loop {
+        let raw = tokio::time::timeout(Duration::from_secs(10), ws.next())
+            .await
+            .expect("timeout waiting for websocket frame")
+            .expect("stream ended unexpectedly")
+            .expect("websocket frame error");
+        match raw {
+            tokio_tungstenite::tungstenite::Message::Text(text) => {
+                return serde_json::from_str(&text).expect("valid json text frame");
+            }
+            tokio_tungstenite::tungstenite::Message::Ping(_)
+            | tokio_tungstenite::tungstenite::Message::Pong(_) => continue,
+            other => panic!("expected text websocket frame, got: {other:?}"),
+        }
+    }
+}
+
+fn extract_grid_text(frame: &serde_json::Value) -> String {
+    let mut text = String::new();
+    if let Some(lines) = frame.get("lines").and_then(|l| l.as_array()) {
+        for line in lines {
+            if let Some(runs) = line.get("runs").and_then(|r| r.as_array()) {
+                for run in runs {
+                    if let Some(t) = run.get("text").and_then(|t| t.as_str()) {
+                        text.push_str(t);
+                    }
+                }
+            }
+            text.push('\n');
+        }
+    }
+    text
+}
 
 pub(super) const CONFIG_ENV: &str = "FERRYX_SSH_QA_CONFIG";
 const CHILD_ENV: &str = "FERRYX_SSH_QA_CHILD";
@@ -153,6 +194,182 @@ async fn exercise(config: &QaConfig) {
             }
         })
         .await;
+
+        // Grid resize verification (Step 1-9): verifies the browser SSH grid resize fix
+        // reaches the remote PTY and mirror.
+        assert!(result.is_ok(), "exact remote CWD through SSH PTY must succeed before grid test");
+
+        // 1. Start gateway router on an ephemeral port and admit SSH session.
+        let remote_state = Arc::clone(daemon.remote_state());
+        remote_state.set_active_selection(crate::remote::RemoteActiveDesktopSelection {
+            session_id: Some(session.clone()),
+            ..Default::default()
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port for remote router");
+        let addr = listener.local_addr().expect("resolve ephemeral port");
+        let router_state = Arc::clone(&remote_state);
+        let server_handle = tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                crate::remote::create_remote_router(router_state),
+            )
+            .await;
+        });
+
+        // 2. Mint Control-permission pairing code and exchange for device token.
+        let code = remote_state
+            .auth_manager
+            .create_pairing_code(crate::remote::DevicePermission::Control);
+        let (token, _) = remote_state
+            .auth_manager
+            .exchange_pairing_code(&code, "QA grid resize")
+            .expect("exchange pairing code for device token");
+
+        // 3. Open WebSocket to /api/v1/terminal/{session}?render=grid&cols=100&rows=30.
+        let ws_url = format!(
+            "ws://127.0.0.1:{}/api/v1/terminal/{}?render=grid&cols=100&rows=30",
+            addr.port(),
+            session
+        );
+        let mut ws_request = ws_url
+            .into_client_request()
+            .expect("valid websocket request");
+        ws_request.headers_mut().insert(
+            "authorization",
+            format!("Bearer {token}")
+                .parse()
+                .expect("valid authorization header"),
+        );
+        let (mut ws_stream, _) = tokio::time::timeout(
+            Duration::from_secs(10),
+            tokio_tungstenite::connect_async(ws_request),
+        )
+        .await
+        .expect("connect_async within timeout")
+        .expect("open grid websocket");
+
+        // 4. Read first Text frame (remoteStatus) and parse generation, then read initial grid frame.
+        let status_val = read_next_ws_json(&mut ws_stream).await;
+        assert_eq!(
+            status_val.get("type").and_then(|v| v.as_str()),
+            Some("remoteStatus"),
+            "first frame must be remoteStatus, got: {status_val}"
+        );
+        let generation = status_val
+            .get("generation")
+            .and_then(|v| v.as_str())
+            .expect("remoteStatus must contain generation")
+            .to_string();
+
+        let init_grid_val = read_next_ws_json(&mut ws_stream).await;
+
+        // 5. ASSERTION 1 (initial-geometry fix): initial grid frame has cols == 100 && rows == 30.
+        assert_eq!(
+            init_grid_val.get("type").and_then(|v| v.as_str()),
+            Some("grid"),
+            "second frame must be grid, got: {init_grid_val}"
+        );
+        assert_eq!(
+            init_grid_val.get("cols").and_then(|v| v.as_u64()),
+            Some(100),
+            "initial grid cols must be 100"
+        );
+        assert_eq!(
+            init_grid_val.get("rows").and_then(|v| v.as_u64()),
+            Some(30),
+            "initial grid rows must be 30"
+        );
+
+        // 6. Write b"stty size\n" and read grid frames until concatenated run texts contain "30 100".
+        daemon
+            .write_session_input(&session, b"stty size\n".to_vec())
+            .await
+            .unwrap();
+
+        let mut frames_seen_initial: Vec<serde_json::Value> = Vec::new();
+        let mut concatenated_runs_initial = String::new();
+
+        let read_initial_stty = tokio::time::timeout(Duration::from_secs(10), async {
+            while !concatenated_runs_initial.contains("30 100") {
+                let val = read_next_ws_json(&mut ws_stream).await;
+                concatenated_runs_initial.push_str(&extract_grid_text(&val));
+                frames_seen_initial.push(val);
+            }
+        })
+        .await;
+        assert!(
+            read_initial_stty.is_ok(),
+            "timed out waiting for initial '30 100' grid output; frames seen: {:?}",
+            frames_seen_initial
+        );
+
+        // 7. Send generation-fenced resize as a Text frame.
+        let resize_payload = serde_json::json!({
+            "type": "remoteResize",
+            "generation": generation,
+            "cols": 132,
+            "rows": 43,
+        });
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            ws_stream.send(tokio_tungstenite::tungstenite::Message::Text(
+                resize_payload.to_string().into(),
+            )),
+        )
+        .await
+        .expect("timeout sending remoteResize")
+        .expect("send remoteResize websocket message");
+
+        // 8. ASSERTION 2 (mirror-resize fix): read grid frames until cols == 132 && rows == 43,
+        // then write b"stty size\n" and read grid frames until run texts contain "43 132".
+        let mut frames_seen_resize: Vec<serde_json::Value> = Vec::new();
+        let read_resize_frame = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let val = read_next_ws_json(&mut ws_stream).await;
+                let cols = val.get("cols").and_then(|c| c.as_u64());
+                let rows = val.get("rows").and_then(|r| r.as_u64());
+                frames_seen_resize.push(val);
+                if cols == Some(132) && rows == Some(43) {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(
+            read_resize_frame.is_ok(),
+            "timed out waiting for grid frame with cols=132, rows=43; frames seen: {:?}",
+            frames_seen_resize
+        );
+
+        daemon
+            .write_session_input(&session, b"stty size\n".to_vec())
+            .await
+            .unwrap();
+
+        let mut frames_seen_resized_stty: Vec<serde_json::Value> = Vec::new();
+        let mut concatenated_runs_resized = String::new();
+
+        let read_resized_stty = tokio::time::timeout(Duration::from_secs(10), async {
+            while !concatenated_runs_resized.contains("43 132") {
+                let val = read_next_ws_json(&mut ws_stream).await;
+                concatenated_runs_resized.push_str(&extract_grid_text(&val));
+                frames_seen_resized_stty.push(val);
+            }
+        })
+        .await;
+        assert!(
+            read_resized_stty.is_ok(),
+            "timed out waiting for resized '43 132' grid output; frames seen: {:?}",
+            frames_seen_resized_stty
+        );
+
+        // 9. Print distinct sentinel line on success and cleanup.
+        println!("FERRYX_SSH_QA_GRID_RESIZE_OK {session}");
+        let _ = tokio::time::timeout(Duration::from_secs(2), ws_stream.close(None)).await;
+        server_handle.abort();
+        remote_state.clear_active_selection();
         daemon
             .handle_close(&session)
             .await
