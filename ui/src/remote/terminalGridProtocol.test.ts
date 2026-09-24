@@ -113,4 +113,9 @@ describe("terminal grid protocol", () => {
     expect(estimateCellWidth("hi!")).toBe(3);
     expect(estimateCellWidth("")).toBe(0);
   });
+
+  it("ignores server control messages such as remoteStatus and pong", () => {
+    expect(parseGridFrame('{"type":"remoteStatus","state":"connected","generation":"42"}')).toBeNull();
+    expect(parseGridFrame('{"type":"pong"}')).toBeNull();
+  });
 });

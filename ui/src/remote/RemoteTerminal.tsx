@@ -356,6 +356,8 @@ export function RemoteTerminal({
   const lastSentGeometryRef = useRef<GridGeometry | null>(null);
   const scheduledSocketRequestRef = useRef<SocketRequest | null>(null);
   const activeSocketRequestRef = useRef<SocketRequest | null>(null);
+  const generationRef = useRef<string | null>(null);
+  const lastSentGenerationRef = useRef<string | null>(null);
   const [socketRequest, setSocketRequest] = useState<SocketRequest | null>(null);
   const [connected, setConnected] = useState(false);
   const [grid, setGrid] = useState<TerminalGridState | null>(null);
@@ -489,18 +491,32 @@ export function RemoteTerminal({
         setGrid(null);
         setConnected(false);
         lastSentGeometryRef.current = null;
+        lastSentGenerationRef.current = null;
+        generationRef.current = null;
         setSocketRequest(nextRequest);
         return;
       }
 
       const socket = socketRef.current;
+      const generationChanged = generationRef.current !== lastSentGenerationRef.current;
       if (
         !socket ||
         socket.readyState !== WebSocket.OPEN ||
         !socketRequestMatches(activeSocketRequestRef.current, sessionId, token) ||
-        geometriesEqual(lastSentGeometryRef.current, geometry)
+        (!generationChanged && geometriesEqual(lastSentGeometryRef.current, geometry))
       ) return;
-      socket.send(JSON.stringify({ type: "resize", cols: geometry.cols, rows: geometry.rows }));
+      if (generationRef.current !== null) {
+        socket.send(JSON.stringify({
+          type: "remoteResize",
+          generation: generationRef.current,
+          cols: geometry.cols,
+          rows: geometry.rows,
+        }));
+        lastSentGenerationRef.current = generationRef.current;
+      } else {
+        socket.send(JSON.stringify({ type: "resize", cols: geometry.cols, rows: geometry.rows }));
+        lastSentGenerationRef.current = null;
+      }
       lastSentGeometryRef.current = geometry;
     };
 
@@ -526,6 +542,8 @@ export function RemoteTerminal({
     setGrid(null);
     setConnected(false);
     lastSentGeometryRef.current = socketRequest.geometry;
+    lastSentGenerationRef.current = null;
+    generationRef.current = null;
 
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let backoffAttempt = 0;
@@ -573,6 +591,8 @@ export function RemoteTerminal({
         if (disposed || socketRef.current !== socket || reconnectTimer !== null) return;
         wheelRemainderRowsRef.current = 0;
         setConnected(false);
+        lastSentGenerationRef.current = null;
+        generationRef.current = null;
         if (onTransportFailure) {
           onTransportFailure();
           return;
@@ -590,6 +610,18 @@ export function RemoteTerminal({
       socket.onmessage = (event) => {
         if (disposed || socketRef.current !== socket) return;
         if (typeof event.data !== "string") return;
+        if (!event.data.startsWith('{"type":"grid')) {
+          try {
+            const parsed = JSON.parse(event.data);
+            if (parsed?.type === "remoteStatus" && typeof parsed.generation === "string") {
+              generationRef.current = parsed.generation;
+              requestResizeRef.current();
+              return;
+            }
+          } catch {
+            // Non-JSON or grid frame payload
+          }
+        }
         const frame = parseGridFrame(event.data);
         if (!frame) return;
         setGrid((current) => applyGridFrame(current, frame));
@@ -601,6 +633,8 @@ export function RemoteTerminal({
     return () => {
       disposed = true;
       wheelRemainderRowsRef.current = 0;
+      lastSentGenerationRef.current = null;
+      generationRef.current = null;
       abort.abort();
       clearReconnectTimer();
       const currentSocket = socketRef.current;

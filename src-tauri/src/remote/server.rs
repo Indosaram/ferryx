@@ -1489,7 +1489,15 @@ async fn ws_terminal_handler(
     Ok(ws.on_upgrade(move |socket| async move {
         let _ = while_device_authorized(
             &mut revocation,
-            handle_terminal_socket(socket, session_id, attachment, device, state, render_grid),
+            handle_terminal_socket(
+                socket,
+                session_id,
+                attachment,
+                device,
+                state,
+                render_grid,
+                requested_geometry,
+            ),
         )
         .await;
     }))
@@ -1933,6 +1941,7 @@ async fn handle_terminal_socket(
     device: DeviceInfo,
     state: Arc<RemoteGatewayState>,
     render_grid: bool,
+    requested_geometry: Option<(u16, u16)>,
 ) {
     let recovery_state = Arc::new(parking_lot::RwLock::new(None));
     let mut recovery = match state.session_backend.recovery(&session_id).await {
@@ -1944,6 +1953,14 @@ async fn handle_terminal_socket(
         let Some(status) = stream.next().await else {
             return;
         };
+        if device.permission == DevicePermission::Control {
+            if let Some((cols, rows)) = requested_geometry {
+                let _ = state
+                    .session_backend
+                    .resize_generation(&session_id, status.generation, cols, rows)
+                    .await;
+            }
+        }
         *recovery_state.write() = Some(status.clone());
         if socket.send(recovery_message(status)).await.is_err() {
             return;
@@ -2055,8 +2072,13 @@ async fn handle_terminal_socket(
                 Message::Text(text) => {
                     if let Ok(ctrl) = serde_json::from_str::<ClientControlMessage>(&text) {
                         if is_ssh {
-                            ssh_control(&session_backend, &session_id_clone, &ctrl, can_control)
-                                .await;
+                            let _ = ssh_control(
+                                &session_backend,
+                                &session_id_clone,
+                                &ctrl,
+                                can_control,
+                            )
+                            .await;
                             if !matches!(
                                 ctrl,
                                 ClientControlMessage::Scroll { .. } | ClientControlMessage::Ping
@@ -2134,22 +2156,24 @@ async fn next_recovery(stream: &mut Option<RecoveryStream>) -> Option<RemoteReco
 
 /// SSH input always carries the generation chosen by the client, never one sampled
 /// by the gateway after buffering or recovery. The runtime performs atomic admission.
-async fn ssh_control(
+pub(super) async fn ssh_control(
     backend: &Arc<dyn RemoteSessionBackend>,
     id: &str,
     control: &ClientControlMessage,
     can_control: bool,
-) {
+) -> bool {
     if !can_control {
-        return;
+        return false;
     }
     match control {
         ClientControlMessage::RemoteWrite { generation, data } => {
             if let Ok(generation) = generation.parse::<u64>() {
-                let _ = backend
+                return backend
                     .write_generation(id, generation, data.as_bytes())
-                    .await;
+                    .await
+                    .is_ok();
             }
+            false
         }
         ClientControlMessage::RemoteResize {
             generation,
@@ -2160,10 +2184,14 @@ async fn ssh_control(
                 generation.parse::<u64>(),
                 validated_grid_geometry(*cols, *rows),
             ) {
-                let _ = backend.resize_generation(id, generation, cols, rows).await;
+                return backend
+                    .resize_generation(id, generation, cols, rows)
+                    .await
+                    .is_ok();
             }
+            false
         }
-        _ => {}
+        _ => false,
     }
 }
 
@@ -2423,8 +2451,27 @@ async fn handle_terminal_grid_socket(
                 Message::Text(text) => {
                     if let Ok(ctrl) = serde_json::from_str::<ClientControlMessage>(&text) {
                         if is_ssh {
-                            ssh_control(&session_backend, &session_id_clone, &ctrl, can_control)
-                                .await;
+                            let ok = ssh_control(
+                                &session_backend,
+                                &session_id_clone,
+                                &ctrl,
+                                can_control,
+                            )
+                            .await;
+                            if let ClientControlMessage::RemoteResize { cols, rows, .. } = ctrl {
+                                if ok {
+                                    if let Some((cols, rows)) = validated_grid_geometry(cols, rows)
+                                    {
+                                        if !enqueue_grid_operation(
+                                            &recv_mirror,
+                                            &recv_tx,
+                                            |mirror| mirror.resize(cols, rows),
+                                        ) {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
                             if !matches!(
                                 ctrl,
                                 ClientControlMessage::Scroll { .. } | ClientControlMessage::Ping

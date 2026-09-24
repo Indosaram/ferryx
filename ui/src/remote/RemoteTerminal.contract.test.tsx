@@ -1110,4 +1110,88 @@ describe("remote terminal grid contract", () => {
     expect(socket().send).toHaveBeenCalledWith(new TextEncoder().encode(chunk4096));
     expect(screen.queryByTestId("remote-terminal-overflow-indicator")).not.toBeInTheDocument();
   });
+
+  it("tracks generation from remoteStatus, emits generation-fenced remoteResize on status and resize, and resets on reconnect", async () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    let resizeObserverCallback: (() => void) | null = null;
+    class MockResizeObserver {
+      constructor(cb: () => void) {
+        resizeObserverCallback = cb;
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    vi.stubGlobal("ResizeObserver", MockResizeObserver);
+
+    render(<RemoteTerminal sessionId="session-ssh" token="token-abc" />);
+
+    // Initial WebSocket request contains initial geometry 80x20
+    const ws1 = socket();
+    act(() => ws1.onopen?.());
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("Live"));
+
+    // Server sends remoteStatus with generation "101"
+    act(() => {
+      ws1.onmessage?.({
+        data: JSON.stringify({
+          type: "remoteStatus",
+          state: "connected",
+          generation: "101",
+        }),
+      } as MessageEvent);
+    });
+
+    // RemoteTerminal should immediately send generation-fenced remoteResize with the measured geometry (80x20)
+    expect(ws1.send).toHaveBeenCalledWith(
+      JSON.stringify({
+        type: "remoteResize",
+        generation: "101",
+        cols: 80,
+        rows: 20,
+      }),
+    );
+
+    // Viewport resizes to 1000x500 (100 cols, 25 rows)
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.hasAttribute("data-terminal-cell-measure")) return rect(10, 20);
+      if (this.getAttribute("data-testid") === "remote-terminal-grid") return rect(1000, 500);
+      return rect(0, 0);
+    });
+
+    act(() => {
+      resizeObserverCallback?.();
+    });
+
+    // Verify remoteResize is sent with the new geometry and generation 101
+    expect(ws1.send).toHaveBeenCalledWith(
+      JSON.stringify({
+        type: "remoteResize",
+        generation: "101",
+        cols: 100,
+        rows: 25,
+      }),
+    );
+
+    // Generation updates to "102"
+    act(() => {
+      ws1.onmessage?.({
+        data: JSON.stringify({
+          type: "remoteStatus",
+          state: "connected",
+          generation: "102",
+        }),
+      } as MessageEvent);
+    });
+
+    // Should immediately send remoteResize with generation "102" and latest measured geometry (100x25)
+    expect(ws1.send).toHaveBeenCalledWith(
+      JSON.stringify({
+        type: "remoteResize",
+        generation: "102",
+        cols: 100,
+        rows: 25,
+      }),
+    );
+  });
 });
