@@ -117,7 +117,7 @@ async fn main() {
                 .join(".ferryx")
                 .join("account-data")
         });
-    let mailer = Arc::new(ferryx_lib::account::mailer::FileMailer::with_dir(data_dir.join("mail")));
+    let mailer = ferryx_lib::account::mailer::create_production_mailer(Some(data_dir.join("mail")));
     let account_state = Arc::new(ferryx_lib::account::service::AccountState::new(&data_dir, &origin, mailer));
 
     let router = relay_router_with_account(state, config.account_public_key, Some(account_state));

@@ -794,6 +794,15 @@ pub fn run_account_cli(command: AccountCliCommand) -> Result<(), String> {
             Ok(())
         }
         AccountCliCommand::Login { email, origin } => {
+            let email = match email {
+                Some(ref em) if !em.trim().is_empty() => em.trim(),
+                _ => {
+                    return Err(
+                        "error: --email <address> is required for headless machine login.\nUsage: ferryx account login --email user@example.com"
+                            .to_string(),
+                    );
+                }
+            };
             let origin = match origin {
                 Some(value) => value,
                 None => crate::account::origin::account_origin()
@@ -804,15 +813,13 @@ pub fn run_account_cli(command: AccountCliCommand) -> Result<(), String> {
                 .build()
                 .map_err(|error| error.to_string())?;
             runtime.block_on(async {
-                let auth_resp = crate::account::enroll_client::request_device_auth(&origin, email.as_deref())
+                let auth_resp = crate::account::enroll_client::request_device_auth(&origin, email)
                     .await
                     .map_err(|e| e.to_string())?;
-                eprintln!("\n=== Ferryx Headless Machine Login ===");
-                eprintln!("To authenticate this machine, please open the following link on your phone or computer:\n");
-                eprintln!("  {}\n", auth_resp.verification_uri_complete);
-                if let Some(ref em) = email {
-                    eprintln!("(An approval email has also been sent to {em})");
-                }
+                eprintln!("\n=== Ferryx Machine Login ===");
+                eprintln!("A magic authorization link has been sent to {email}.");
+                eprintln!("Please open the link in your email to approve this machine.\n");
+                eprintln!("Confirmation Code: {}\n", auth_resp.user_code);
                 eprintln!("Waiting for authorization...");
                 let start = std::time::Instant::now();
                 let timeout = std::time::Duration::from_secs(auth_resp.expires_in.max(300));

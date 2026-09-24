@@ -103,7 +103,8 @@ pub struct GrantRecord {
 pub struct DeviceAuthRecord {
     pub device_code_hash: String,
     pub user_code: String,
-    pub email: Option<String>,
+    pub email: String,
+    pub email_token_hash: String,
     pub enrollment_code: Option<String>,
     pub expires_at: u64,
 }

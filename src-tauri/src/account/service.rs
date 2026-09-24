@@ -254,7 +254,7 @@ async fn parse_json<T: for<'de> Deserialize<'de>>(body: Bytes) -> Result<T, ApiE
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceAuthRequestBody {
-    pub email: Option<String>,
+    pub email: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -263,7 +263,6 @@ pub struct DeviceAuthResponse {
     pub device_code: String,
     pub user_code: String,
     pub verification_uri: String,
-    pub verification_uri_complete: String,
     pub expires_in: u64,
     pub interval: u64,
 }
@@ -285,6 +284,7 @@ pub struct DevicePollResponse {
 #[derive(Debug, Deserialize)]
 pub struct DeviceApproveQuery {
     pub code: String,
+    pub token: String,
 }
 
 pub async fn device_request(
@@ -292,7 +292,14 @@ pub async fn device_request(
     body: Bytes,
 ) -> Result<Json<DeviceAuthResponse>, ApiError> {
     let request: DeviceAuthRequestBody = parse_json(body).await?;
-    let email = request.email.as_deref().map(normalize_email);
+    let email = normalize_email(&request.email);
+    if email.is_empty() || !email.contains('@') {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "valid email is required",
+        ));
+    }
     let device_code = random_token();
     let mut rng = rand::rngs::OsRng;
     let chars: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -305,14 +312,15 @@ pub async fn device_request(
     let user_code = format!("{part1}-{part2}");
     let origin = state.origin.trim_end_matches('/');
     let verification_uri = format!("{origin}/device");
-    let verification_uri_complete = format!("{origin}/api/account/v1/device/approve?code={user_code}");
-
-    if let Some(ref to_email) = email {
-        let _ = state.mailer.send_magic_link(
-            to_email,
-            &verification_uri_complete,
-        );
-    }
+    let email_token = random_token();
+    let email_token_hash = token_hash(&email_token);
+    let email_approve_url = format!(
+        "{origin}/api/account/v1/device/approve?code={user_code}&token={email_token}"
+    );
+    state
+        .mailer
+        .send_magic_link(&email, &email_approve_url)
+        .map_err(|e| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "MAIL_FAILED", e.to_string()))?;
 
     let expires_at = now_secs() + 900;
     state.mutate(|store| {
@@ -323,6 +331,7 @@ pub async fn device_request(
                 device_code_hash: token_hash(&device_code),
                 user_code: user_code.clone(),
                 email: email.clone(),
+                email_token_hash,
                 enrollment_code: None,
                 expires_at,
             },
@@ -334,7 +343,6 @@ pub async fn device_request(
         device_code,
         user_code,
         verification_uri,
-        verification_uri_complete,
         expires_in: 900,
         interval: 2,
     }))
@@ -377,39 +385,56 @@ pub async fn device_approve_get(
 ) -> Result<axum::response::Html<&'static str>, ApiError> {
     let now = now_secs();
     let code_clean = query.code.trim().to_uppercase();
+    let token_clean = query.token.trim();
+    if token_clean.is_empty() {
+        return Err(ApiError::unauthorized(
+            "EMAIL_TOKEN_REQUIRED",
+            "email verification token is required",
+        ));
+    }
+    let token_hash_expected = token_hash(token_clean);
     state.mutate(|store| {
-        let (found_key, user_id, origin) = {
-            let mut found = None;
-            for (key, record) in store.device_auths.iter() {
-                if record.user_code == code_clean && record.expires_at > now {
-                    let email = record.email.clone().unwrap_or_else(|| "cli-user@local".into());
-                    let user_id = store.users.values()
-                        .find(|u| u.email == email)
-                        .map(|u| u.user_id.clone())
-                        .unwrap_or_else(|| {
-                            let uid = format!("usr_{}", &random_token()[..16]);
-                            store.users.insert(uid.clone(), crate::account::store::UserRecord {
+        let mut found: Option<(String, String, String)> = None;
+        for (key, record) in store.device_auths.iter() {
+            if record.user_code == code_clean && record.expires_at > now {
+                if record.email_token_hash != token_hash_expected {
+                    return Err(ApiError::unauthorized(
+                        "EMAIL_TOKEN_INVALID",
+                        "invalid email token",
+                    ));
+                }
+                let email = record.email.clone();
+                let user_id = store
+                    .users
+                    .values()
+                    .find(|u| u.email == email)
+                    .map(|u| u.user_id.clone())
+                    .unwrap_or_else(|| {
+                        let uid = format!("usr_{}", &random_token()[..16]);
+                        store.users.insert(
+                            uid.clone(),
+                            crate::account::store::UserRecord {
                                 user_id: uid.clone(),
                                 email,
                                 created_at: now,
-                            });
-                            uid
-                        });
-                    found = Some((key.clone(), user_id, state.origin.clone()));
-                    break;
-                }
+                            },
+                        );
+                        uid
+                    });
+                found = Some((key.clone(), user_id, state.origin.clone()));
+                break;
             }
-            found.ok_or_else(|| {
-                ApiError::new(StatusCode::NOT_FOUND, "DEVICE_CODE_NOT_FOUND", "code not found or expired")
-            })?
-        };
+        }
+        let (found_key, user_id, account_origin) = found.ok_or_else(|| {
+            ApiError::unauthorized("EMAIL_TOKEN_INVALID", "email token is invalid or expired")
+        })?;
 
         let enrollment_code = random_token();
         store.enrollment_codes.insert(
             token_hash(&enrollment_code),
             crate::account::store::EnrollmentCodeRecord {
                 user_id,
-                account_origin: origin,
+                account_origin,
                 expires_at: now + 600,
             },
         );
@@ -883,10 +908,34 @@ pub async fn serve(listener: tokio::net::TcpListener, state: Arc<AccountState>) 
 mod tests {
     use super::*;
 
+    fn read_magic_link(mail_dir: &std::path::Path) -> String {
+        let entries: Vec<_> = std::fs::read_dir(mail_dir)
+            .expect("mail dir")
+            .filter_map(|entry| entry.ok())
+            .collect();
+        assert_eq!(entries.len(), 1, "device request sends exactly one magic link");
+        std::fs::read_to_string(entries[0].path()).expect("magic link content")
+    }
+
+    fn extract_token(approve_url: &str) -> String {
+        assert!(
+            approve_url.contains("/api/account/v1/device/approve?code="),
+            "magic link must target the device approve endpoint: {approve_url}"
+        );
+        let token = approve_url
+            .split("token=")
+            .nth(1)
+            .expect("magic link carries the email token")
+            .to_string();
+        assert!(!token.is_empty(), "email token must not be empty");
+        token
+    }
+
     #[tokio::test]
     async fn device_flow_lifecycle_request_poll_approve() {
         let tmp = tempfile::tempdir().unwrap();
-        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(tmp.path().join("mail")));
+        let mail_dir = tmp.path().join("mail");
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(mail_dir.clone()));
         let state = Arc::new(AccountState::new(tmp.path(), "https://relay.test", mailer));
 
         let req_body = serde_json::to_vec(&serde_json::json!({
@@ -895,6 +944,20 @@ mod tests {
         let resp = device_request(State(state.clone()), Bytes::from(req_body)).await.unwrap().0;
         assert_eq!(resp.interval, 2);
         assert!(!resp.user_code.is_empty());
+        assert_eq!(resp.verification_uri, "https://relay.test/device");
+
+        let wire = serde_json::to_value(&resp).expect("serialize response");
+        assert!(
+            wire.get("verificationUriComplete").is_none(),
+            "the approval URL must never be returned to the client"
+        );
+
+        let approve_url = read_magic_link(&mail_dir);
+        assert!(
+            approve_url.contains(&format!("code={}", resp.user_code)),
+            "magic link must carry the displayed user code"
+        );
+        let valid_token = extract_token(&approve_url);
 
         let poll_body = serde_json::to_vec(&serde_json::json!({
             "deviceCode": resp.device_code
@@ -903,14 +966,52 @@ mod tests {
         assert_eq!(pending.status, "authorization_pending");
         assert!(pending.enrollment_code.is_none());
 
+        let rejected = device_approve_get(
+            State(state.clone()),
+            axum::extract::Query(DeviceApproveQuery {
+                code: resp.user_code.clone(),
+                token: "wrong_token".into(),
+            }),
+        ).await;
+        let error = match rejected {
+            Err(error) => error,
+            Ok(_) => panic!("approval without the emailed token must fail"),
+        };
+        assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(error.code, "EMAIL_TOKEN_INVALID");
+
+        let still_pending = device_poll(State(state.clone()), Bytes::from(poll_body.clone())).await.unwrap().0;
+        assert_eq!(still_pending.status, "authorization_pending");
+        assert!(still_pending.enrollment_code.is_none());
+
         let approve_res = device_approve_get(
             State(state.clone()),
-            axum::extract::Query(DeviceApproveQuery { code: resp.user_code.clone() }),
+            axum::extract::Query(DeviceApproveQuery {
+                code: resp.user_code.clone(),
+                token: valid_token,
+            }),
         ).await;
         assert!(approve_res.is_ok());
 
         let approved = device_poll(State(state.clone()), Bytes::from(poll_body)).await.unwrap().0;
         assert_eq!(approved.status, "approved");
         assert!(approved.enrollment_code.is_some());
+    }
+
+    #[tokio::test]
+    async fn device_request_rejects_invalid_email() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(tmp.path().join("mail")));
+        let state = Arc::new(AccountState::new(tmp.path(), "https://relay.test", mailer));
+
+        for email in ["", "not-an-email"] {
+            let req_body = serde_json::to_vec(&serde_json::json!({ "email": email })).unwrap();
+            let error = device_request(State(state.clone()), Bytes::from(req_body))
+                .await
+                .expect_err("invalid email must be rejected");
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert_eq!(error.code, "BAD_REQUEST");
+            assert_eq!(error.message, "valid email is required");
+        }
     }
 }

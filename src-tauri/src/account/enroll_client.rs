@@ -254,14 +254,13 @@ pub struct DeviceAuthClientResponse {
     pub device_code: String,
     pub user_code: String,
     pub verification_uri: String,
-    pub verification_uri_complete: String,
     pub expires_in: u64,
     pub interval: u64,
 }
 
 pub async fn request_device_auth(
     account_origin: &str,
-    email: Option<&str>,
+    email: &str,
 ) -> Result<DeviceAuthClientResponse, EnrollError> {
     let origin = account_origin.trim_end_matches('/');
     let client = reqwest::Client::builder()
