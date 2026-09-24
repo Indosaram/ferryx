@@ -1,0 +1,243 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <defs>
+    <!-- Background Gradients -->
+    <radialGradient id="bgGlow" cx="50%" cy="45%" r="65%">
+      <stop offset="0%" stop-color="#0e2338" stop-opacity="0.85"/>
+      <stop offset="60%" stop-color="#0a121e" stop-opacity="0.95"/>
+      <stop offset="100%" stop-color="#05080f" stop-opacity="1"/>
+    </radialGradient>
+
+    <radialGradient id="shieldCenterGlow" cx="50%" cy="40%" r="45%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.25"/>
+      <stop offset="50%" stop-color="#0077ff" stop-opacity="0.1"/>
+      <stop offset="100%" stop-color="#000" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Linear Gradients for Shield & Accents -->
+    <linearGradient id="shieldBorder" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38ef7d"/>
+      <stop offset="30%" stop-color="#00f2fe"/>
+      <stop offset="70%" stop-color="#4facfe"/>
+      <stop offset="100%" stop-color="#0051ff"/>
+    </linearGradient>
+
+    <linearGradient id="shieldInnerGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0f2b46" stop-opacity="0.7"/>
+      <stop offset="100%" stop-color="#071322" stop-opacity="0.9"/>
+    </linearGradient>
+
+    <linearGradient id="accentTeal" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00f2fe"/>
+      <stop offset="100%" stop-color="#4facfe"/>
+    </linearGradient>
+
+    <linearGradient id="laserBeam" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0"/>
+      <stop offset="50%" stop-color="#00f2fe" stop-opacity="0.8"/>
+      <stop offset="100%" stop-color="#00f2fe" stop-opacity="0"/>
+    </linearGradient>
+
+    <linearGradient id="atomicPulse" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00f2fe"/>
+      <stop offset="100%" stop-color="#38ef7d"/>
+    </linearGradient>
+
+    <!-- Filters -->
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+
+    <filter id="intenseGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="18" result="blur1" />
+      <feGaussianBlur stdDeviation="6" result="blur2" />
+      <feMerge>
+        <feMergeNode in="blur1" />
+        <feMergeNode in="blur2" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+
+    <!-- Grid Pattern -->
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#16263b" stroke-width="1" stroke-opacity="0.6"/>
+      <circle cx="40" cy="40" r="1" fill="#204060" fill-opacity="0.8"/>
+    </pattern>
+    <pattern id="denseDots" width="20" height="20" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1" fill="#00f2fe" fill-opacity="0.15"/>
+    </pattern>
+  </defs>
+
+  <!-- Deep Terminal Background -->
+  <rect width="1200" height="630" fill="#070c14"/>
+  <rect width="1200" height="630" fill="url(#bgGlow)"/>
+  
+  <!-- Subtle Technical Grid Overlay -->
+  <rect width="1200" height="630" fill="url(#grid)"/>
+
+  <!-- Ambient Light Cone / Backlight -->
+  <circle cx="600" cy="270" r="320" fill="url(#shieldCenterGlow)" />
+
+  <!-- Abstract Circuit / Wiring / Storage Blocks -->
+  <g opacity="0.35" stroke="#00f2fe" stroke-width="1.2" fill="none">
+    <!-- Left technical lines -->
+    <path d="M 120 180 L 260 180 L 320 240 L 440 240" />
+    <circle cx="120" cy="180" r="3" fill="#00f2fe" />
+    <circle cx="440" cy="240" r="3" fill="#00f2fe" />
+    
+    <path d="M 80 340 L 240 340 L 300 280 L 420 280" />
+    <circle cx="80" cy="340" r="3" fill="#00f2fe" />
+    <circle cx="420" cy="280" r="3" fill="#00f2fe" />
+
+    <path d="M 160 460 L 320 460 L 380 400 L 460 400" />
+    <circle cx="160" cy="460" r="3" fill="#00f2fe" />
+
+    <!-- Right technical lines -->
+    <path d="M 1080 180 L 940 180 L 880 240 L 760 240" />
+    <circle cx="1080" cy="180" r="3" fill="#00f2fe" />
+    <circle cx="760" cy="240" r="3" fill="#00f2fe" />
+
+    <path d="M 1120 340 L 960 340 L 900 280 L 780 280" />
+    <circle cx="1120" cy="340" r="3" fill="#00f2fe" />
+    <circle cx="780" cy="280" r="3" fill="#00f2fe" />
+
+    <path d="M 1040 460 L 880 460 L 820 400 L 740 400" />
+    <circle cx="1040" cy="460" r="3" fill="#00f2fe" />
+  </g>
+
+  <!-- Left Abstract Snapshot Node Stack -->
+  <g transform="translate(180, 220)" opacity="0.6">
+    <rect x="0" y="0" width="130" height="28" rx="4" fill="#0b1e32" stroke="#1d4368" stroke-width="1.5"/>
+    <rect x="8" y="8" width="12" height="12" rx="2" fill="#00f2fe" opacity="0.8"/>
+    <line x1="28" y1="14" x2="80" y2="14" stroke="#4facfe" stroke-width="2" stroke-linecap="round"/>
+    <line x1="90" y1="14" x2="115" y2="14" stroke="#1e5482" stroke-width="2" stroke-linecap="round"/>
+
+    <rect x="15" y="38" width="130" height="28" rx="4" fill="#0b1e32" stroke="#1d4368" stroke-width="1.5"/>
+    <rect x="23" y="46" width="12" height="12" rx="2" fill="#38ef7d" opacity="0.8"/>
+    <line x1="43" y1="52" x2="95" y2="52" stroke="#38ef7d" stroke-width="2" stroke-linecap="round"/>
+    <line x1="105" y1="52" x2="130" y2="52" stroke="#1e5482" stroke-width="2" stroke-linecap="round"/>
+
+    <rect x="30" y="76" width="130" height="28" rx="4" fill="#0e2844" stroke="#00f2fe" stroke-width="1.5" filter="url(#glow)"/>
+    <rect x="38" y="84" width="12" height="12" rx="2" fill="#00f2fe"/>
+    <line x1="58" y1="90" x2="120" y2="90" stroke="#00f2fe" stroke-width="2" stroke-linecap="round"/>
+  </g>
+
+  <!-- Right Abstract Commit/Integrity Indicators -->
+  <g transform="translate(870, 220)" opacity="0.6">
+    <rect x="0" y="0" width="140" height="32" rx="4" fill="#0b1e32" stroke="#1d4368" stroke-width="1.5"/>
+    <circle cx="18" cy="16" r="5" fill="#38ef7d"/>
+    <line x1="34" y1="16" x2="90" y2="16" stroke="#4facfe" stroke-width="2" stroke-linecap="round"/>
+    <line x1="100" y1="16" x2="125" y2="16" stroke="#1e5482" stroke-width="2" stroke-linecap="round"/>
+
+    <rect x="-15" y="42" width="140" height="32" rx="4" fill="#0b1e32" stroke="#1d4368" stroke-width="1.5"/>
+    <circle cx="3" cy="58" r="5" fill="#00f2fe"/>
+    <line x1="19" y1="58" x2="75" y2="58" stroke="#00f2fe" stroke-width="2" stroke-linecap="round"/>
+    <line x1="85" y1="58" x2="110" y2="58" stroke="#1e5482" stroke-width="2" stroke-linecap="round"/>
+
+    <rect x="-30" y="84" width="140" height="32" rx="4" fill="#0e2844" stroke="#38ef7d" stroke-width="1.5" filter="url(#glow)"/>
+    <circle cx="-12" cy="100" r="5" fill="#38ef7d"/>
+    <line x1="4" y1="100" x2="80" y2="100" stroke="#38ef7d" stroke-width="2" stroke-linecap="round"/>
+  </g>
+
+  <!-- Top / Bottom decorative brackets -->
+  <g stroke="#234263" stroke-width="1.5" fill="none">
+    <path d="M 40 40 L 40 70 M 40 40 L 70 40" />
+    <path d="M 1160 40 L 1160 70 M 1160 40 L 1130 40" />
+    <path d="M 40 590 L 40 560 M 40 590 L 70 590" />
+    <path d="M 1160 590 L 1160 560 M 1160 590 L 1130 590" />
+  </g>
+
+  <!-- Laser / Scan Line across center -->
+  <line x1="100" y1="270" x2="1100" y2="270" stroke="url(#laserBeam)" stroke-width="1.5"/>
+
+  <!-- ==================== CENTRAL SHIELD: ATOMIC WRITE SHIELD ==================== -->
+  <g transform="translate(600, 270)">
+    <!-- Outer Holographic Rings / Orbitals (Atomic Theme) -->
+    <ellipse cx="0" cy="0" rx="210" ry="110" fill="none" stroke="#00f2fe" stroke-width="1" stroke-dasharray="8 12" opacity="0.3" transform="rotate(-25)"/>
+    <ellipse cx="0" cy="0" rx="210" ry="110" fill="none" stroke="#38ef7d" stroke-width="1" stroke-dasharray="6 14" opacity="0.3" transform="rotate(25)"/>
+    <ellipse cx="0" cy="0" rx="220" ry="85" fill="none" stroke="#0088ff" stroke-width="1.2" stroke-dasharray="4 8" opacity="0.25" transform="rotate(75)"/>
+
+    <!-- Concentric radar circles -->
+    <circle cx="0" cy="0" r="160" fill="none" stroke="#133659" stroke-width="1" stroke-dasharray="4 8" opacity="0.5"/>
+    <circle cx="0" cy="0" r="185" fill="none" stroke="#00f2fe" stroke-width="1" opacity="0.15"/>
+
+    <!-- Shield Glow Halo -->
+    <path d="M 0 -150 
+             L 115 -85 
+             L 115 45 
+             C 115 110, 0 160, 0 160 
+             C 0 160, -115 110, -115 45 
+             L -115 -85 Z"
+          fill="none" stroke="#00f2fe" stroke-width="10" opacity="0.25" filter="url(#intenseGlow)"/>
+
+    <!-- Outer Shield Boundary -->
+    <path d="M 0 -145 
+             L 110 -82 
+             L 110 42 
+             C 110 105, 0 152, 0 152 
+             C 0 152, -110 105, -110 42 
+             L -110 -82 Z"
+          fill="url(#shieldInnerGrad)" stroke="url(#shieldBorder)" stroke-width="3.5" filter="url(#glow)"/>
+
+    <!-- Inner Shield Technical Border -->
+    <path d="M 0 -130 
+             L 94 -77 
+             L 94 35 
+             C 94 90, 0 132, 0 132 
+             C 0 132, -94 90, -94 35 
+             L -94 -77 Z"
+          fill="none" stroke="#00f2fe" stroke-width="1.5" stroke-dasharray="14 6" opacity="0.6"/>
+
+    <!-- Snapshot Tier Layers inside Shield (Stacking blocks representing crash-safe write) -->
+    <!-- Layer 1: Base State (Committed) -->
+    <path d="M -60 55 L 60 55 L 45 78 L -45 78 Z" fill="#003554" stroke="#00a8ff" stroke-width="1.5" opacity="0.8"/>
+    <!-- Layer 2: WAL / Journal Log -->
+    <path d="M -70 20 L 70 20 L 60 45 L -60 45 Z" fill="#004b6e" stroke="#00e5ff" stroke-width="1.5" opacity="0.9"/>
+    <!-- Layer 3: Atomic Staging / Active Snapshot -->
+    <path d="M -78 -18 L 78 -18 L 70 10 L -70 10 Z" fill="#072b42" stroke="#38ef7d" stroke-width="1.8" opacity="0.95"/>
+
+    <!-- Central Atomic Nucleus / Checkpoint Core -->
+    <g transform="translate(0, -60)">
+      <circle cx="0" cy="0" r="28" fill="#031628" stroke="url(#atomicPulse)" stroke-width="2.5" filter="url(#glow)"/>
+      <circle cx="0" cy="0" r="14" fill="#00f2fe" opacity="0.9"/>
+      <circle cx="0" cy="0" r="6" fill="#ffffff"/>
+      <!-- Glowing spark lines -->
+      <line x1="0" y1="-38" x2="0" y2="-28" stroke="#00f2fe" stroke-width="2.5" stroke-linecap="round"/>
+      <line x1="0" y1="28" x2="0" y2="38" stroke="#00f2fe" stroke-width="2.5" stroke-linecap="round"/>
+      <line x1="-38" y1="0" x2="-28" y2="0" stroke="#00f2fe" stroke-width="2.5" stroke-linecap="round"/>
+      <line x1="28" y1="0" x2="38" y2="0" stroke="#00f2fe" stroke-width="2.5" stroke-linecap="round"/>
+    </g>
+
+    <!-- Success / Safe Verification Glyphs on the layers -->
+    <!-- Checkmark in center layer -->
+    <path d="M -10 -3 L -3 4 L 11 -8" fill="none" stroke="#38ef7d" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)"/>
+
+    <!-- Small status indicator dots -->
+    <circle cx="-42" cy="32" r="3" fill="#00f2fe"/>
+    <circle cx="-26" cy="32" r="3" fill="#00f2fe"/>
+    <circle cx="-10" cy="32" r="3" fill="#00f2fe"/>
+    <circle cx="10" cy="32" r="3" fill="#00f2fe"/>
+    <circle cx="26" cy="32" r="3" fill="#00f2fe"/>
+    <circle cx="42" cy="32" r="3" fill="#00f2fe"/>
+
+    <circle cx="-30" cy="66" r="2.5" fill="#4facfe"/>
+    <circle cx="0" cy="66" r="2.5" fill="#4facfe"/>
+    <circle cx="30" cy="66" r="2.5" fill="#4facfe"/>
+  </g>
+
+  <!-- ==================== MINIMAL TEXT (MAX 3 WORDS) ==================== -->
+  <g transform="translate(600, 520)" text-anchor="middle">
+    <!-- Subtitle pill badge -->
+    <rect x="-130" y="-36" width="260" height="28" rx="14" fill="#091b2c" stroke="#00f2fe" stroke-width="1.2" opacity="0.9"/>
+    <circle cx="-105" cy="-22" r="4" fill="#38ef7d" filter="url(#glow)"/>
+    <text x="-90" y="-17" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'SF Pro Display', monospace" font-size="11" font-weight="700" fill="#00f2fe" letter-spacing="3" text-anchor="start">ATOMIC WRITE ENGINE</text>
+
+    <!-- Main Title: Exactly 2 words (<= 3 words) -->
+    <text x="0" y="32" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'Inter', sans-serif" font-size="44" font-weight="800" fill="#ffffff" letter-spacing="1.5">
+      CRASH <tspan fill="#00f2fe">SAFETY</tspan>
+    </text>
+  </g>
+</svg>

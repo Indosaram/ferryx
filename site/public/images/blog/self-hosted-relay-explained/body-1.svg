@@ -1,0 +1,400 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900" style="background:#070a13; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'JetBrains Mono', monospace;">
+  <defs>
+    <!-- Background Gradients -->
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0a0f1d" />
+      <stop offset="50%" stop-color="#060912" />
+      <stop offset="100%" stop-color="#030509" />
+    </linearGradient>
+
+    <!-- Column Gradients -->
+    <linearGradient id="zone-client-bg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0c1728" stop-opacity="0.75" />
+      <stop offset="100%" stop-color="#070e1a" stop-opacity="0.85" />
+    </linearGradient>
+
+    <linearGradient id="zone-relay-bg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#08232e" stop-opacity="0.8" />
+      <stop offset="100%" stop-color="#05141c" stop-opacity="0.9" />
+    </linearGradient>
+
+    <linearGradient id="zone-host-bg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#091a2a" stop-opacity="0.75" />
+      <stop offset="100%" stop-color="#06101c" stop-opacity="0.85" />
+    </linearGradient>
+
+    <!-- Card Gradients -->
+    <linearGradient id="card-blue" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#112238" />
+      <stop offset="100%" stop-color="#0a1524" />
+    </linearGradient>
+
+    <linearGradient id="card-teal" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0b2834" />
+      <stop offset="100%" stop-color="#061820" />
+    </linearGradient>
+
+    <linearGradient id="card-dark" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0d1522" />
+      <stop offset="100%" stop-color="#080c14" />
+    </linearGradient>
+
+    <!-- Stream Beam Gradients -->
+    <linearGradient id="beam-client-to-relay" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#00f2fe" />
+    </linearGradient>
+
+    <linearGradient id="beam-host-to-relay" x1="100%" y1="0%" x2="0%" y2="0%">
+      <stop offset="0%" stop-color="#2dd4bf" />
+      <stop offset="100%" stop-color="#00f2fe" />
+    </linearGradient>
+
+    <linearGradient id="pipe-glow" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#0284c7" stop-opacity="0.3" />
+      <stop offset="50%" stop-color="#00f2fe" stop-opacity="0.6" />
+      <stop offset="100%" stop-color="#2dd4bf" stop-opacity="0.3" />
+    </linearGradient>
+
+    <!-- Glow Filters -->
+    <filter id="glow-teal" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <filter id="glow-strong" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="10" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <!-- Arrow Markers -->
+    <marker id="arrow-teal" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#00f2fe" />
+    </marker>
+    <marker id="arrow-cyan" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#38bdf8" />
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#2dd4bf" />
+    </marker>
+  </defs>
+
+  <!-- Background Base -->
+  <rect width="1600" height="900" fill="url(#bg-grad)" />
+
+  <!-- Subtle Dot Grid -->
+  <g opacity="0.04" fill="#38bdf8">
+    <pattern id="grid-dots" x="0" y="0" width="32" height="32" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.5" />
+    </pattern>
+    <rect width="1600" height="900" fill="url(#grid-dots)" />
+  </g>
+
+  <!-- Background Ambient Glows -->
+  <circle cx="280" cy="480" r="260" fill="#0284c7" opacity="0.06" filter="blur(90px)" />
+  <circle cx="800" cy="460" r="300" fill="#00f2fe" opacity="0.08" filter="blur(110px)" />
+  <circle cx="1320" cy="480" r="260" fill="#0d9488" opacity="0.06" filter="blur(90px)" />
+
+  <!-- ==================== HEADER ==================== -->
+  <g transform="translate(80, 48)">
+    <!-- Category Pill -->
+    <rect x="0" y="0" width="160" height="26" rx="13" fill="#0f1d30" stroke="#1d3557" stroke-width="1" />
+    <circle cx="14" cy="13" r="4" fill="#00f2fe" />
+    <text x="26" y="17" fill="#38bdf8" font-size="11" font-weight="700" letter-spacing="1.2">RELAY TOPOLOGY</text>
+
+    <!-- Main Title & Subtitle -->
+    <text x="0" y="60" fill="#f8fafc" font-size="30" font-weight="700" letter-spacing="-0.5">Self-Hosted Relay for Remote Terminals</text>
+    <text x="0" y="84" fill="#64748b" font-size="14.5" font-weight="400">Bi-directional outbound dial-out architecture: bypass NAT without open ports or vendor lock</text>
+  </g>
+
+  <!-- ==================== HORIZONTAL PIPELINE / BEAMS (BEHIND CARDS) ==================== -->
+  <g transform="translate(0, 0)">
+    <!-- Tunnel Pipeline Track -->
+    <path d="M 430 380 L 610 380" stroke="#142844" stroke-width="8" stroke-linecap="round" />
+    <path d="M 430 380 L 610 380" stroke="url(#beam-client-to-relay)" stroke-width="2" stroke-dasharray="6,4" />
+    
+    <path d="M 990 380 L 1170 380" stroke="#142844" stroke-width="8" stroke-linecap="round" />
+    <path d="M 1170 380 L 990 380" stroke="url(#beam-host-to-relay)" stroke-width="2" stroke-dasharray="6,4" />
+
+    <!-- Direction Badges over Connectors -->
+    <!-- Left Connector Badge -->
+    <g transform="translate(455, 335)">
+      <rect x="0" y="0" width="130" height="28" rx="6" fill="#091524" stroke="#0284c7" stroke-width="1.2" />
+      <text x="65" y="18" fill="#38bdf8" font-size="11" font-weight="600" text-anchor="middle">Outbound TLS :443</text>
+      <!-- Arrow Right -->
+      <path d="M 55 46 L 75 46 M 70 41 L 76 46 L 70 51" stroke="#00f2fe" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none" />
+    </g>
+
+    <!-- Right Connector Badge -->
+    <g transform="translate(1015, 335)">
+      <rect x="0" y="0" width="130" height="28" rx="6" fill="#081c24" stroke="#0d9488" stroke-width="1.2" />
+      <text x="65" y="18" fill="#2dd4bf" font-size="11" font-weight="600" text-anchor="middle">Outbound Dial :443</text>
+      <!-- Arrow Left -->
+      <path d="M 75 46 L 55 46 M 60 41 L 54 46 L 60 51" stroke="#2dd4bf" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none" />
+    </g>
+  </g>
+
+  <!-- ==================== COLUMN 1: REMOTE CLIENT (LEFT) ==================== -->
+  <g transform="translate(80, 165)">
+    <!-- Container Outline -->
+    <rect x="0" y="0" width="350" height="685" rx="16" fill="url(#zone-client-bg)" stroke="#1d2d45" stroke-width="1.5" />
+    
+    <!-- Zone Top Bar -->
+    <path d="M 0 16 Q 0 0 16 0 L 334 0 Q 350 0 350 16 L 350 44 L 0 44 Z" fill="#0d192c" />
+    <circle cx="22" cy="22" r="5" fill="#38bdf8" />
+    <text x="36" y="26" fill="#94a3b8" font-size="12" font-weight="700" letter-spacing="1">REMOTE CLIENT</text>
+    <text x="330" y="26" fill="#475569" font-size="11" text-anchor="end">MOBILE / WEB</text>
+
+    <!-- Card 1: Client Application -->
+    <g transform="translate(18, 65)">
+      <rect x="0" y="0" width="314" height="210" rx="10" fill="url(#card-blue)" stroke="#1e3a5f" stroke-width="1.2" />
+      
+      <!-- Device Header -->
+      <g transform="translate(16, 18)">
+        <rect x="0" y="0" width="32" height="32" rx="7" fill="#0f2b48" stroke="#0284c7" stroke-width="1" />
+        <!-- Phone / Laptop Icon -->
+        <rect x="9" y="7" width="14" height="18" rx="2" fill="none" stroke="#38bdf8" stroke-width="1.6" />
+        <circle cx="16" cy="21" r="1" fill="#38bdf8" />
+
+        <text x="44" y="14" fill="#f1f5f9" font-size="13.5" font-weight="700">Ferryx Remote Client</text>
+        <text x="44" y="30" fill="#38bdf8" font-size="11" font-family="'JetBrains Mono', monospace">Phone, Tablet, Browser</text>
+
+        <!-- Mini Terminal Viewport Display -->
+        <g transform="translate(0, 42)">
+          <rect x="0" y="0" width="282" height="66" rx="6" fill="#060c16" stroke="#16273f" stroke-width="1" />
+          <circle cx="10" cy="10" r="3" fill="#ef4444" opacity="0.8" />
+          <circle cx="18" cy="10" r="3" fill="#eab308" opacity="0.8" />
+          <circle cx="26" cy="10" r="3" fill="#22c55e" opacity="0.8" />
+          <text x="8" y="28" fill="#38bdf8" font-size="9.5" font-family="'JetBrains Mono', monospace">DOM Grid Renderer</text>
+          <text x="8" y="42" fill="#64748b" font-size="9" font-family="'JetBrains Mono', monospace">seq: #10492 • pane 1/3 (idle)</text>
+          <text x="8" y="56" fill="#2dd4bf" font-size="9" font-family="'JetBrains Mono', monospace">&gt; cargo test --workspace (ok)</text>
+        </g>
+
+        <text x="0" y="132" fill="#94a3b8" font-size="11">Custom DOM grid, lightweight rendering</text>
+        <text x="0" y="148" fill="#64748b" font-size="11">No heavy xterm.js memory footprint</text>
+      </g>
+    </g>
+
+    <!-- Card 2: Pairing & Key Exchange -->
+    <g transform="translate(18, 295)">
+      <rect x="0" y="0" width="314" height="175" rx="10" fill="url(#card-blue)" stroke="#1e3a5f" stroke-width="1.2" />
+      <g transform="translate(16, 18)">
+        <rect x="0" y="0" width="32" height="32" rx="7" fill="#0d283c" stroke="#00f2fe" stroke-width="1" />
+        <!-- Key / QR Icon -->
+        <path d="M 8 16 L 16 8 L 24 16 L 16 24 Z" fill="none" stroke="#00f2fe" stroke-width="1.6" />
+        <circle cx="16" cy="16" r="2" fill="#00f2fe" />
+
+        <text x="44" y="14" fill="#f1f5f9" font-size="13.5" font-weight="700">Pairing Handshake</text>
+        <text x="44" y="30" fill="#00f2fe" font-size="11" font-family="'JetBrains Mono', monospace">6-Digit PIN or QR Code</text>
+
+        <rect x="0" y="44" width="282" height="26" rx="4" fill="#071322" stroke="#162e4a" stroke-width="1" />
+        <text x="8" y="61" fill="#38bdf8" font-size="10.5" font-family="'JetBrains Mono', monospace">Grant: dev-macbook-host</text>
+
+        <text x="0" y="94" fill="#94a3b8" font-size="11.5">Binds host identity cryptographically</text>
+        <text x="0" y="112" fill="#64748b" font-size="11">Instant device revocation from host</text>
+      </g>
+    </g>
+
+    <!-- Card 3: Network Guarantee -->
+    <g transform="translate(18, 490)">
+      <rect x="0" y="0" width="314" height="165" rx="10" fill="url(#card-dark)" stroke="#1a273c" stroke-width="1" />
+      <g transform="translate(16, 18)">
+        <text x="0" y="14" fill="#cbd5e1" font-size="12.5" font-weight="700">Connection Spec</text>
+        
+        <g transform="translate(0, 28)">
+          <circle cx="4" cy="6" r="3" fill="#38bdf8" />
+          <text x="14" y="10" fill="#94a3b8" font-size="11">Transport: WebSocket over TLS</text>
+          
+          <circle cx="4" cy="28" r="3" fill="#38bdf8" />
+          <text x="14" y="32" fill="#94a3b8" font-size="11">Framing: Compact binary stream</text>
+
+          <circle cx="4" cy="50" r="3" fill="#38bdf8" />
+          <text x="14" y="54" fill="#94a3b8" font-size="11">Reconnect: Automatic seq-catchup</text>
+
+          <circle cx="4" cy="72" r="3" fill="#38bdf8" />
+          <text x="14" y="76" fill="#94a3b8" font-size="11">Security: Ephemeral session tokens</text>
+        </g>
+      </g>
+    </g>
+  </g>
+
+  <!-- ==================== COLUMN 2: SELF-HOSTED RELAY (CENTER) ==================== -->
+  <g transform="translate(610, 165)">
+    <!-- Container Outline (Highlighted with subtle cyan border) -->
+    <rect x="0" y="0" width="380" height="685" rx="16" fill="url(#zone-relay-bg)" stroke="#00f2fe" stroke-width="1.8" filter="url(#glow-teal)" stroke-opacity="0.8" />
+    <rect x="0" y="0" width="380" height="685" rx="16" fill="url(#zone-relay-bg)" stroke="#00f2fe" stroke-width="1.8" />
+    
+    <!-- Zone Top Bar -->
+    <path d="M 0 16 Q 0 0 16 0 L 364 0 Q 380 0 380 16 L 380 44 L 0 44 Z" fill="#082330" />
+    <circle cx="22" cy="22" r="5" fill="#00f2fe" />
+    <text x="36" y="26" fill="#2dd4bf" font-size="12" font-weight="700" letter-spacing="1">SELF-HOSTED RELAY</text>
+    <text x="360" y="26" fill="#38bdf8" font-size="11" text-anchor="end">PUBLIC VPS / CLOUD</text>
+
+    <!-- Main Server Badge -->
+    <g transform="translate(20, 65)">
+      <rect x="0" y="0" width="340" height="210" rx="10" fill="url(#card-teal)" stroke="#00f2fe" stroke-width="1.4" />
+      
+      <g transform="translate(18, 18)">
+        <rect x="0" y="0" width="36" height="36" rx="8" fill="#06323d" stroke="#00f2fe" stroke-width="1.2" />
+        <!-- Server Stack Icon -->
+        <rect x="8" y="9" width="20" height="5" rx="1.5" fill="none" stroke="#00f2fe" stroke-width="1.5" />
+        <rect x="8" y="16" width="20" height="5" rx="1.5" fill="none" stroke="#00f2fe" stroke-width="1.5" />
+        <rect x="8" y="23" width="20" height="5" rx="1.5" fill="none" stroke="#00f2fe" stroke-width="1.5" />
+        <circle cx="12" cy="11.5" r="0.8" fill="#00f2fe" />
+        <circle cx="12" cy="18.5" r="0.8" fill="#00f2fe" />
+        <circle cx="12" cy="25.5" r="0.8" fill="#00f2fe" />
+
+        <text x="48" y="16" fill="#f8fafc" font-size="14.5" font-weight="700">Relay Rendezvous Core</text>
+        <text x="48" y="32" fill="#2dd4bf" font-size="11" font-family="'JetBrains Mono', monospace">ferryx-relay daemon</text>
+
+        <!-- Visual Channel Diagram inside Relay -->
+        <g transform="translate(0, 48)">
+          <rect x="0" y="0" width="304" height="66" rx="6" fill="#03151c" stroke="#0d3f4a" stroke-width="1" />
+          
+          <rect x="12" y="14" width="70" height="38" rx="4" fill="#092834" stroke="#0284c7" stroke-width="1" />
+          <text x="47" y="31" fill="#38bdf8" font-size="9.5" text-anchor="middle" font-weight="600">Client</text>
+          <text x="47" y="44" fill="#64748b" font-size="8.5" text-anchor="middle">Port 443</text>
+
+          <!-- Middle Pipe Bridge -->
+          <line x1="82" y1="33" x2="222" y2="33" stroke="#00f2fe" stroke-width="3" stroke-dasharray="4,2" />
+          <circle cx="152" cy="33" r="10" fill="#062e38" stroke="#00f2fe" stroke-width="1.5" />
+          <path d="M 148 33 L 156 33" stroke="#2dd4bf" stroke-width="2" stroke-linecap="round" />
+
+          <rect x="222" y="14" width="70" height="38" rx="4" fill="#092834" stroke="#0d9488" stroke-width="1" />
+          <text x="257" y="31" fill="#2dd4bf" font-size="9.5" text-anchor="middle" font-weight="600">Host</text>
+          <text x="257" y="44" fill="#64748b" font-size="8.5" text-anchor="middle">Port 443</text>
+        </g>
+
+        <text x="0" y="136" fill="#94a3b8" font-size="11.5">Stream pass-through • Zero payload decryption</text>
+        <text x="0" y="152" fill="#2dd4bf" font-size="11" font-weight="600">No cloud vendor access to terminal bytes</text>
+      </g>
+    </g>
+
+    <!-- Card: Self-Hosted Advantages -->
+    <g transform="translate(20, 295)">
+      <rect x="0" y="0" width="340" height="175" rx="10" fill="url(#card-teal)" stroke="#0e4955" stroke-width="1.2" />
+      <g transform="translate(18, 18)">
+        <rect x="0" y="0" width="32" height="32" rx="7" fill="#083842" stroke="#2dd4bf" stroke-width="1" />
+        <!-- Shield Lock Icon -->
+        <path d="M 16 7 L 24 10 L 24 17 C 24 22 16 26 16 26 C 16 26 8 22 8 17 L 8 10 Z" fill="none" stroke="#2dd4bf" stroke-width="1.6" />
+        <circle cx="16" cy="16" r="2" fill="#2dd4bf" />
+
+        <text x="44" y="14" fill="#f1f5f9" font-size="13.5" font-weight="700">Sovereignty &amp; Privacy</text>
+        <text x="44" y="30" fill="#2dd4bf" font-size="11" font-family="'JetBrains Mono', monospace">Zero Third-Party SaaS</text>
+
+        <rect x="0" y="44" width="304" height="26" rx="4" fill="#041820" stroke="#0e3f4a" stroke-width="1" />
+        <text x="8" y="61" fill="#2dd4bf" font-size="10.5" font-family="'JetBrains Mono', monospace">Single binary: VPS / Hetzner / AWS</text>
+
+        <text x="0" y="94" fill="#94a3b8" font-size="11.5">Direct binary packaging (Linux / Docker)</text>
+        <text x="0" y="112" fill="#64748b" font-size="11">Auditable open architecture</text>
+      </g>
+    </g>
+
+    <!-- Card: Relay Responsibilities -->
+    <g transform="translate(20, 490)">
+      <rect x="0" y="0" width="340" height="165" rx="10" fill="url(#card-dark)" stroke="#0f2e38" stroke-width="1" />
+      <g transform="translate(18, 18)">
+        <text x="0" y="14" fill="#cbd5e1" font-size="12.5" font-weight="700">Relay Node Contract</text>
+        
+        <g transform="translate(0, 28)">
+          <circle cx="4" cy="6" r="3" fill="#00f2fe" />
+          <text x="14" y="10" fill="#94a3b8" font-size="11">Rendezvous ID table matches pairing tokens</text>
+          
+          <circle cx="4" cy="28" r="3" fill="#00f2fe" />
+          <text x="14" y="32" fill="#94a3b8" font-size="11">Low-latency epoll / async socket pipes</text>
+
+          <circle cx="4" cy="50" r="3" fill="#00f2fe" />
+          <text x="14" y="54" fill="#94a3b8" font-size="11">Drop dead sessions immediately on ping timeout</text>
+
+          <circle cx="4" cy="72" r="3" fill="#00f2fe" />
+          <text x="14" y="76" fill="#94a3b8" font-size="11">No persistent disk storage of terminal output</text>
+        </g>
+      </g>
+    </g>
+  </g>
+
+  <!-- ==================== COLUMN 3: LOCAL HOST / BEHIND NAT (RIGHT) ==================== -->
+  <g transform="translate(1170, 165)">
+    <!-- Container Outline -->
+    <rect x="0" y="0" width="350" height="685" rx="16" fill="url(#zone-host-bg)" stroke="#1a3248" stroke-width="1.5" />
+    
+    <!-- Zone Top Bar -->
+    <path d="M 0 16 Q 0 0 16 0 L 334 0 Q 350 0 350 16 L 350 44 L 0 44 Z" fill="#0c1f30" />
+    <circle cx="22" cy="22" r="5" fill="#2dd4bf" />
+    <text x="36" y="26" fill="#94a3b8" font-size="12" font-weight="700" letter-spacing="1">HOST MACHINE</text>
+    <text x="330" y="26" fill="#f43f5e" font-size="11" text-anchor="end">BEHIND NAT / FIREWALL</text>
+
+    <!-- Card 1: Outbound Tunnel Dial-out -->
+    <g transform="translate(18, 65)">
+      <rect x="0" y="0" width="314" height="210" rx="10" fill="url(#card-blue)" stroke="#0e5466" stroke-width="1.2" />
+      <g transform="translate(16, 18)">
+        <rect x="0" y="0" width="32" height="32" rx="7" fill="#08313a" stroke="#2dd4bf" stroke-width="1" />
+        <!-- NAT Traversal Icon -->
+        <circle cx="16" cy="16" r="9" fill="none" stroke="#2dd4bf" stroke-width="1.5" stroke-dasharray="3,2" />
+        <path d="M 12 16 L 20 16 M 17 12 L 21 16 L 17 20" stroke="#2dd4bf" stroke-width="1.5" stroke-linecap="round" fill="none" />
+
+        <text x="44" y="14" fill="#f1f5f9" font-size="13.5" font-weight="700">Outbound Relay Dial-out</text>
+        <text x="44" y="30" fill="#2dd4bf" font-size="11" font-family="'JetBrains Mono', monospace">Strict Egress Only</text>
+
+        <!-- Firewall Box -->
+        <g transform="translate(0, 42)">
+          <rect x="0" y="0" width="282" height="66" rx="6" fill="#091420" stroke="#18314a" stroke-width="1" />
+          <text x="10" y="22" fill="#ef4444" font-size="10" font-weight="600">INBOUND PORTS: ALL BLOCKED (0)</text>
+          <text x="10" y="38" fill="#64748b" font-size="9.5">No router port forwarding or UPnP</text>
+          <text x="10" y="54" fill="#2dd4bf" font-size="10" font-weight="600">OUTBOUND: TCP :443 ESTABLISHED</text>
+        </g>
+
+        <text x="0" y="132" fill="#94a3b8" font-size="11">Initiates persistent tunnel from inside</text>
+        <text x="0" y="148" fill="#64748b" font-size="11">Survives IP changes and laptop sleep</text>
+      </g>
+    </g>
+
+    <!-- Card 2: Ferryx Daemon Engine -->
+    <g transform="translate(18, 295)">
+      <rect x="0" y="0" width="314" height="175" rx="10" fill="url(#card-blue)" stroke="#1a4263" stroke-width="1.2" />
+      <g transform="translate(16, 18)">
+        <rect x="0" y="0" width="32" height="32" rx="7" fill="#0f2e46" stroke="#38bdf8" stroke-width="1" />
+        <!-- PTY Engine Icon -->
+        <path d="M 9 12 L 14 16 L 9 20" stroke="#38bdf8" stroke-width="1.6" stroke-linecap="round" fill="none" />
+        <line x1="16" y1="20" x2="23" y2="20" stroke="#38bdf8" stroke-width="1.6" />
+
+        <text x="44" y="14" fill="#f1f5f9" font-size="13.5" font-weight="700">Ferryx Host Daemon</text>
+        <text x="44" y="30" fill="#38bdf8" font-size="11" font-family="'JetBrains Mono', monospace">UDS 0600 • PTY Lifetime</text>
+
+        <rect x="0" y="44" width="282" height="26" rx="4" fill="#081626" stroke="#16314f" stroke-width="1" />
+        <text x="8" y="61" fill="#38bdf8" font-size="10.5" font-family="'JetBrains Mono', monospace">Daemon owns sessions (tmux-free)</text>
+
+        <text x="0" y="94" fill="#94a3b8" font-size="11.5">Closing GUI never kills terminal jobs</text>
+        <text x="0" y="112" fill="#64748b" font-size="11">Ring buffer replays missed terminal bytes</text>
+      </g>
+    </g>
+
+    <!-- Card 3: Jailed Worktrees -->
+    <g transform="translate(18, 490)">
+      <rect x="0" y="0" width="314" height="165" rx="10" fill="url(#card-dark)" stroke="#182c40" stroke-width="1" />
+      <g transform="translate(16, 18)">
+        <text x="0" y="14" fill="#cbd5e1" font-size="12.5" font-weight="700">Host Safety Boundaries</text>
+        
+        <g transform="translate(0, 28)">
+          <circle cx="4" cy="6" r="3" fill="#2dd4bf" />
+          <text x="14" y="10" fill="#94a3b8" font-size="11">Agent workspaces in isolated git worktrees</text>
+          
+          <circle cx="4" cy="28" r="3" fill="#2dd4bf" />
+          <text x="14" y="32" fill="#94a3b8" font-size="11">Per-user unix domain socket permissions</text>
+
+          <circle cx="4" cy="50" r="3" fill="#2dd4bf" />
+          <text x="14" y="54" fill="#94a3b8" font-size="11">Device pairing grant revocation table</text>
+
+          <circle cx="4" cy="72" r="3" fill="#2dd4bf" />
+          <text x="14" y="76" fill="#94a3b8" font-size="11">Full shell isolation from public internet</text>
+        </g>
+      </g>
+    </g>
+  </g>
+
+  <!-- ==================== BOTTOM STATUS BAR ==================== -->
+  <g transform="translate(80, 865)">
+    <circle cx="6" cy="6" r="3" fill="#00f2fe" />
+    <text x="16" y="10" fill="#64748b" font-size="11" font-family="'JetBrains Mono', monospace">ARCHITECTURE: OUTBOUND RENDEZVOUS • NO INBOUND PORTS • FULL DATA SOVEREIGNTY</text>
+  </g>
+</svg>

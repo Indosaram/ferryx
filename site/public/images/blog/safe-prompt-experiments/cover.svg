@@ -1,0 +1,409 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <defs>
+    <!-- Background Radial Gradients -->
+    <radialGradient id="bgBase" cx="50%" cy="40%" r="78%">
+      <stop offset="0%" stop-color="#0a192f" stop-opacity="1"/>
+      <stop offset="48%" stop-color="#06101e" stop-opacity="1"/>
+      <stop offset="100%" stop-color="#02050b" stop-opacity="1"/>
+    </radialGradient>
+
+    <!-- Lane Ambient Glows -->
+    <radialGradient id="lane1Glow" cx="230" cy="270" r="220" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0284c7" stop-opacity="0.22"/>
+      <stop offset="65%" stop-color="#0369a1" stop-opacity="0.05"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="lane2Glow" cx="600" cy="270" r="240" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.28"/>
+      <stop offset="40%" stop-color="#0d9488" stop-opacity="0.15"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="lane3Glow" cx="970" cy="270" r="220" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0d9488" stop-opacity="0.20"/>
+      <stop offset="65%" stop-color="#065f46" stop-opacity="0.05"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Linear Gradients -->
+    <linearGradient id="cyanTealLine" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00f2fe"/>
+      <stop offset="50%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#38ef7d"/>
+    </linearGradient>
+
+    <linearGradient id="cardGradNormal" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0d2238" stop-opacity="0.88"/>
+      <stop offset="100%" stop-color="#061322" stop-opacity="0.95"/>
+    </linearGradient>
+
+    <linearGradient id="cardGradWinner" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0e2a3a" stop-opacity="0.92"/>
+      <stop offset="60%" stop-color="#08202f" stop-opacity="0.95"/>
+      <stop offset="100%" stop-color="#061822" stop-opacity="0.98"/>
+    </linearGradient>
+
+    <linearGradient id="headerGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#112a45"/>
+      <stop offset="100%" stop-color="#091b2e"/>
+    </linearGradient>
+
+    <!-- Filters for Glow -->
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <filter id="intenseGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="8" result="blur1"/>
+      <feGaussianBlur stdDeviation="18" result="blur2"/>
+      <feMerge>
+        <feMergeNode in="blur2"/>
+        <feMergeNode in="blur1"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <filter id="textGlow" x="-20%" y="-50%" width="140%" height="200%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Terminal Dot/Grid Matrix -->
+    <pattern id="terminalGrid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#162a3f" stroke-width="0.6" stroke-opacity="0.35"/>
+      <circle cx="40" cy="0" r="1" fill="#1e3f60" fill-opacity="0.4"/>
+    </pattern>
+  </defs>
+
+  <!-- ==================== BACKGROUND ==================== -->
+  <rect width="1200" height="630" fill="url(#bgBase)"/>
+  <rect width="1200" height="630" fill="url(#terminalGrid)"/>
+  <rect width="1200" height="630" fill="url(#lane1Glow)"/>
+  <rect width="1200" height="630" fill="url(#lane2Glow)"/>
+  <rect width="1200" height="630" fill="url(#lane3Glow)"/>
+
+  <!-- ==================== CORNER RETICLES / VIEWPORT HUD ==================== -->
+  <path d="M 36 50 L 36 32 L 54 32" fill="none" stroke="#1e40af" stroke-width="2" opacity="0.8"/>
+  <path d="M 1164 50 L 1164 32 L 1146 32" fill="none" stroke="#065f46" stroke-width="2" opacity="0.8"/>
+  <path d="M 36 580 L 36 598 L 54 598" fill="none" stroke="#1e40af" stroke-width="2" opacity="0.8"/>
+  <path d="M 1164 580 L 1164 598 L 1146 598" fill="none" stroke="#065f46" stroke-width="2" opacity="0.8"/>
+
+  <!-- ==================== TOP GIT WORKTREE FORK PIPELINES ==================== -->
+  <!-- Central Origin Worktree Hub -->
+  <g transform="translate(600, 30)">
+    <rect x="-75" y="-14" width="150" height="28" rx="14" fill="#071626" stroke="#1e4267" stroke-width="1.2"/>
+    <!-- Git Branch Glyph / Safe Lock Glyph -->
+    <circle cx="-52" cy="0" r="4" fill="#00f2fe" filter="url(#glow)"/>
+    <line x1="-52" y1="0" x2="-30" y2="0" stroke="#00f2fe" stroke-width="2"/>
+    <circle cx="-30" cy="0" r="3" fill="#ffffff"/>
+    <!-- Abstract Tag Bars -->
+    <rect x="-16" y="-3" width="40" height="6" rx="3" fill="#38bdf8"/>
+    <rect x="30" y="-3" width="28" height="6" rx="3" fill="#38ef7d"/>
+  </g>
+
+  <!-- Branch Conduits Leading to 3 Lanes -->
+  <!-- To Lane 1 (Left) -->
+  <path d="M 535 34 C 400 36, 230 44, 230 72" fill="none" stroke="#173b5c" stroke-width="2.5" stroke-dasharray="5 4"/>
+  <path d="M 535 34 C 400 36, 230 44, 230 72" fill="none" stroke="#0284c7" stroke-width="1.5" opacity="0.8" filter="url(#glow)"/>
+  <circle cx="370" cy="39" r="3" fill="#0284c7"/>
+
+  <!-- To Lane 2 (Center) -->
+  <path d="M 600 44 L 600 72" fill="none" stroke="url(#cyanTealLine)" stroke-width="2.5" filter="url(#glow)"/>
+  <circle cx="600" cy="58" r="3.5" fill="#00f2fe" filter="url(#glow)"/>
+
+  <!-- To Lane 3 (Right) -->
+  <path d="M 665 34 C 800 36, 970 44, 970 72" fill="none" stroke="#134e48" stroke-width="2.5" stroke-dasharray="5 4"/>
+  <path d="M 665 34 C 800 36, 970 44, 970 72" fill="none" stroke="#0d9488" stroke-width="1.5" opacity="0.8" filter="url(#glow)"/>
+  <circle cx="830" cy="39" r="3" fill="#0d9488"/>
+
+  <!-- ==================== LANE 1: PROMPT VARIANT A (LEFT) ==================== -->
+  <g transform="translate(75, 72)">
+    <!-- Card Frame -->
+    <rect x="0" y="0" width="310" height="390" rx="14" fill="url(#cardGradNormal)" stroke="#183a5c" stroke-width="1.6"/>
+    
+    <!-- Window Header -->
+    <rect x="0" y="0" width="310" height="38" rx="14" fill="url(#headerGrad)"/>
+    <rect x="0" y="24" width="310" height="14" fill="url(#headerGrad)"/>
+    <line x1="0" y1="38" x2="310" y2="38" stroke="#183a5c" stroke-width="1"/>
+    
+    <!-- Terminal Dots -->
+    <circle cx="20" cy="19" r="4.5" fill="#ef4444" opacity="0.85"/>
+    <circle cx="35" cy="19" r="4.5" fill="#f59e0b" opacity="0.85"/>
+    <circle cx="50" cy="19" r="4.5" fill="#10b981" opacity="0.85"/>
+
+    <!-- Worktree Badge -->
+    <rect x="72" y="10" width="120" height="18" rx="9" fill="#0a1f33" stroke="#0284c7" stroke-width="1"/>
+    <!-- Branch Icon -->
+    <circle cx="84" cy="19" r="3" fill="#38bdf8"/>
+    <line x1="84" y1="19" x2="94" y2="19" stroke="#38bdf8" stroke-width="1.5"/>
+    <circle cx="94" cy="19" r="2.5" fill="#38bdf8"/>
+    <rect x="104" y="16" width="74" height="6" rx="3" fill="#94a3b8"/>
+
+    <!-- Status Pill -->
+    <rect x="235" y="10" width="58" height="18" rx="9" fill="#071d30" stroke="#0284c7" stroke-width="0.8"/>
+    <circle cx="246" cy="19" r="2.5" fill="#0284c7"/>
+    <rect x="254" y="16" width="28" height="6" rx="3" fill="#38bdf8"/>
+
+    <!-- Lane Content -->
+    <!-- Prompt Spec Section -->
+    <g transform="translate(20, 56)">
+      <rect x="0" y="0" width="270" height="76" rx="8" fill="#071728" stroke="#132e47" stroke-width="1"/>
+      <!-- Section Title Bar -->
+      <rect x="14" y="12" width="70" height="7" rx="3.5" fill="#38bdf8"/>
+      <rect x="92" y="12" width="35" height="7" rx="3.5" fill="#1e40af"/>
+      <!-- Prompt Lines -->
+      <rect x="14" y="28" width="240" height="6" rx="3" fill="#64748b" opacity="0.9"/>
+      <rect x="14" y="40" width="200" height="6" rx="3" fill="#475569" opacity="0.8"/>
+      <rect x="14" y="52" width="160" height="6" rx="3" fill="#334155" opacity="0.8"/>
+    </g>
+
+    <!-- Worktree Isolation Box (Sandbox) -->
+    <g transform="translate(20, 146)">
+      <rect x="0" y="0" width="270" height="106" rx="8" fill="#061322" stroke="#16324d" stroke-width="1"/>
+      <!-- Isolation Tag -->
+      <rect x="14" y="12" width="90" height="16" rx="8" fill="#0c253d" stroke="#0284c7" stroke-width="0.8"/>
+      <circle cx="24" cy="20" r="3" fill="#0284c7"/>
+      <rect x="33" y="17" width="58" height="5" rx="2.5" fill="#7dd3fc"/>
+      <!-- Agent Execution Stream -->
+      <rect x="14" y="38" width="180" height="6" rx="3" fill="#475569"/>
+      <rect x="14" y="50" width="220" height="6" rx="3" fill="#334155"/>
+      <!-- Diff Highlights -->
+      <rect x="14" y="64" width="12" height="6" rx="3" fill="#10b981"/>
+      <rect x="32" y="64" width="130" height="6" rx="3" fill="#059669" opacity="0.8"/>
+      <rect x="14" y="76" width="12" height="6" rx="3" fill="#ef4444"/>
+      <rect x="32" y="76" width="90" height="6" rx="3" fill="#b91c1c" opacity="0.8"/>
+      <rect x="14" y="88" width="170" height="6" rx="3" fill="#334155"/>
+    </g>
+
+    <!-- Evaluation Metrics / Diff Score -->
+    <g transform="translate(20, 266)">
+      <rect x="0" y="0" width="270" height="64" rx="8" fill="#081726" stroke="#163350" stroke-width="1"/>
+      <rect x="14" y="14" width="110" height="6" rx="3" fill="#94a3b8"/>
+      <!-- Metric Bar -->
+      <rect x="14" y="28" width="240" height="8" rx="4" fill="#0d2338"/>
+      <rect x="14" y="28" width="170" height="8" rx="4" fill="#0284c7"/>
+      <!-- Stats Badges -->
+      <rect x="14" y="44" width="45" height="12" rx="6" fill="#092b45"/>
+      <rect x="65" y="44" width="45" height="12" rx="6" fill="#092b45"/>
+    </g>
+
+    <!-- Bottom Status / Keep/Drop Indicator -->
+    <g transform="translate(20, 344)">
+      <rect x="0" y="0" width="270" height="32" rx="6" fill="#05111d" stroke="#11263c" stroke-width="1"/>
+      <circle cx="20" cy="16" r="4" fill="#64748b"/>
+      <rect x="32" y="13" width="80" height="6" rx="3" fill="#475569"/>
+      <rect x="210" y="9" width="46" height="14" rx="7" fill="#112538"/>
+      <rect x="218" y="13" width="30" height="6" rx="3" fill="#64748b"/>
+    </g>
+  </g>
+
+  <!-- ==================== LANE 2: PROMPT VARIANT B (HERO / WINNER) ==================== -->
+  <g transform="translate(445, 68)">
+    <!-- Radiant Hero Border & Shadow -->
+    <rect x="-4" y="-4" width="318" height="406" rx="18" fill="none" stroke="url(#cyanTealLine)" stroke-width="2.4" filter="url(#intenseGlow)" opacity="0.85"/>
+    <rect x="0" y="0" width="310" height="398" rx="15" fill="url(#cardGradWinner)" stroke="#00f2fe" stroke-width="1.8"/>
+
+    <!-- Window Header -->
+    <rect x="0" y="0" width="310" height="42" rx="15" fill="#092233"/>
+    <rect x="0" y="26" width="310" height="16" fill="#092233"/>
+    <line x1="0" y1="42" x2="310" y2="42" stroke="url(#cyanTealLine)" stroke-width="1.2"/>
+
+    <!-- Terminal Dots with Cyan/Teal Flare -->
+    <circle cx="22" cy="21" r="5" fill="#00f2fe" filter="url(#glow)"/>
+    <circle cx="38" cy="21" r="5" fill="#38bdf8"/>
+    <circle cx="54" cy="21" r="5" fill="#38ef7d" filter="url(#glow)"/>
+
+    <!-- Worktree Badge (Active Winner) -->
+    <rect x="76" y="11" width="126" height="20" rx="10" fill="#07283c" stroke="#00f2fe" stroke-width="1.2"/>
+    <circle cx="89" cy="21" r="3.5" fill="#00f2fe" filter="url(#glow)"/>
+    <line x1="89" y1="21" x2="100" y2="21" stroke="#00f2fe" stroke-width="1.8"/>
+    <circle cx="100" cy="21" r="3" fill="#38ef7d" filter="url(#glow)"/>
+    <rect x="110" y="18" width="78" height="6" rx="3" fill="#e0f2fe"/>
+
+    <!-- Winner Status Badge (Verified / Kept) -->
+    <rect x="225" y="11" width="72" height="20" rx="10" fill="#063d30" stroke="#38ef7d" stroke-width="1.2" filter="url(#glow)"/>
+    <!-- Checkmark Glyph -->
+    <path d="M 237 21 L 241 25 L 248 17" fill="none" stroke="#38ef7d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="254" y="18" width="34" height="6" rx="3" fill="#86efac"/>
+
+    <!-- Lane Content -->
+    <!-- Structured Prompt Spec -->
+    <g transform="translate(20, 60)">
+      <rect x="0" y="0" width="270" height="78" rx="8" fill="#071d2e" stroke="#0d425c" stroke-width="1.2"/>
+      <rect x="14" y="12" width="95" height="8" rx="4" fill="#00f2fe" filter="url(#glow)"/>
+      <rect x="116" y="12" width="40" height="8" rx="4" fill="#0284c7"/>
+      <!-- High Quality Prompt Tokens -->
+      <rect x="14" y="28" width="240" height="6.5" rx="3.2" fill="#7dd3fc" opacity="0.95"/>
+      <rect x="14" y="41" width="215" height="6.5" rx="3.2" fill="#38bdf8" opacity="0.85"/>
+      <rect x="14" y="54" width="180" height="6.5" rx="3.2" fill="#0284c7" opacity="0.8"/>
+    </g>
+
+    <!-- Worktree Isolation Container -->
+    <g transform="translate(20, 150)">
+      <rect x="0" y="0" width="270" height="112" rx="8" fill="#041926" stroke="#0e4b66" stroke-width="1.2"/>
+      <!-- Active Sandbox Banner -->
+      <rect x="14" y="12" width="115" height="18" rx="9" fill="#053644" stroke="#00f2fe" stroke-width="1"/>
+      <circle cx="25" cy="21" r="3.5" fill="#00f2fe" filter="url(#glow)"/>
+      <rect x="36" y="18" width="80" height="6" rx="3" fill="#a5f3fc"/>
+
+      <!-- Parallel Execution Logs & Diff Green Output -->
+      <rect x="14" y="39" width="200" height="6" rx="3" fill="#64748b"/>
+      <!-- Clean Green Diff Lines -->
+      <rect x="14" y="52" width="14" height="7" rx="3.5" fill="#38ef7d" filter="url(#glow)"/>
+      <rect x="34" y="52" width="190" height="7" rx="3.5" fill="#34d399" opacity="0.9"/>
+      <rect x="14" y="65" width="14" height="7" rx="3.5" fill="#38ef7d" filter="url(#glow)"/>
+      <rect x="34" y="65" width="150" height="7" rx="3.5" fill="#34d399" opacity="0.9"/>
+      <rect x="14" y="78" width="14" height="7" rx="3.5" fill="#38ef7d" filter="url(#glow)"/>
+      <rect x="34" y="78" width="120" height="7" rx="3.5" fill="#34d399" opacity="0.9"/>
+      <rect x="14" y="92" width="220" height="6" rx="3" fill="#38bdf8" opacity="0.7"/>
+    </g>
+
+    <!-- Evaluation Metrics / Winning Diff Bar -->
+    <g transform="translate(20, 274)">
+      <rect x="0" y="0" width="270" height="68" rx="8" fill="#06232e" stroke="#0d5568" stroke-width="1.2"/>
+      <rect x="14" y="14" width="130" height="7" rx="3.5" fill="#6ee7b7"/>
+      <!-- Metric Bar (Near 100%) -->
+      <rect x="14" y="28" width="240" height="9" rx="4.5" fill="#082a38"/>
+      <rect x="14" y="28" width="232" height="9" rx="4.5" fill="url(#cyanTealLine)" filter="url(#glow)"/>
+      <!-- Badges -->
+      <rect x="14" y="46" width="55" height="14" rx="7" fill="#084242" stroke="#38ef7d" stroke-width="0.8"/>
+      <rect x="75" y="46" width="55" height="14" rx="7" fill="#08384d" stroke="#00f2fe" stroke-width="0.8"/>
+    </g>
+
+    <!-- Merge Winner Bar (Keep Diff) -->
+    <g transform="translate(20, 352)">
+      <rect x="0" y="0" width="270" height="34" rx="7" fill="#063328" stroke="#38ef7d" stroke-width="1.4" filter="url(#glow)"/>
+      <circle cx="22" cy="17" r="5" fill="#38ef7d" filter="url(#glow)"/>
+      <rect x="36" y="14" width="110" height="6" rx="3" fill="#d1fae5"/>
+      <rect x="198" y="8" width="60" height="18" rx="9" fill="#10b981"/>
+      <rect x="208" y="14" width="40" height="6" rx="3" fill="#022c22"/>
+    </g>
+  </g>
+
+  <!-- ==================== LANE 3: PROMPT VARIANT C (RIGHT) ==================== -->
+  <g transform="translate(815, 72)">
+    <!-- Card Frame -->
+    <rect x="0" y="0" width="310" height="390" rx="14" fill="url(#cardGradNormal)" stroke="#153d3c" stroke-width="1.6"/>
+    
+    <!-- Window Header -->
+    <rect x="0" y="0" width="310" height="38" rx="14" fill="url(#headerGrad)"/>
+    <rect x="0" y="24" width="310" height="14" fill="url(#headerGrad)"/>
+    <line x1="0" y1="38" x2="310" y2="38" stroke="#153d3c" stroke-width="1"/>
+    
+    <!-- Terminal Dots -->
+    <circle cx="20" cy="19" r="4.5" fill="#ef4444" opacity="0.85"/>
+    <circle cx="35" cy="19" r="4.5" fill="#f59e0b" opacity="0.85"/>
+    <circle cx="50" cy="19" r="4.5" fill="#10b981" opacity="0.85"/>
+
+    <!-- Worktree Badge -->
+    <rect x="72" y="10" width="120" height="18" rx="9" fill="#082424" stroke="#0d9488" stroke-width="1"/>
+    <circle cx="84" cy="19" r="3" fill="#2dd4bf"/>
+    <line x1="84" y1="19" x2="94" y2="19" stroke="#2dd4bf" stroke-width="1.5"/>
+    <circle cx="94" cy="19" r="2.5" fill="#2dd4bf"/>
+    <rect x="104" y="16" width="74" height="6" rx="3" fill="#94a3b8"/>
+
+    <!-- Status Pill -->
+    <rect x="235" y="10" width="58" height="18" rx="9" fill="#062420" stroke="#0d9488" stroke-width="0.8"/>
+    <circle cx="246" cy="19" r="2.5" fill="#0d9488"/>
+    <rect x="254" y="16" width="28" height="6" rx="3" fill="#5eead4"/>
+
+    <!-- Lane Content -->
+    <!-- Prompt Spec Section -->
+    <g transform="translate(20, 56)">
+      <rect x="0" y="0" width="270" height="76" rx="8" fill="#061a1a" stroke="#113838" stroke-width="1"/>
+      <!-- Section Title Bar -->
+      <rect x="14" y="12" width="75" height="7" rx="3.5" fill="#2dd4bf"/>
+      <rect x="96" y="12" width="40" height="7" rx="3.5" fill="#0f766e"/>
+      <!-- Prompt Lines -->
+      <rect x="14" y="28" width="235" height="6" rx="3" fill="#64748b" opacity="0.9"/>
+      <rect x="14" y="40" width="190" height="6" rx="3" fill="#475569" opacity="0.8"/>
+      <rect x="14" y="52" width="150" height="6" rx="3" fill="#334155" opacity="0.8"/>
+    </g>
+
+    <!-- Worktree Isolation Box (Sandbox) -->
+    <g transform="translate(20, 146)">
+      <rect x="0" y="0" width="270" height="106" rx="8" fill="#051515" stroke="#123b3b" stroke-width="1"/>
+      <!-- Isolation Tag -->
+      <rect x="14" y="12" width="90" height="16" rx="8" fill="#082a2a" stroke="#0d9488" stroke-width="0.8"/>
+      <circle cx="24" cy="20" r="3" fill="#0d9488"/>
+      <rect x="33" y="17" width="58" height="5" rx="2.5" fill="#5eead4"/>
+      <!-- Execution Stream -->
+      <rect x="14" y="38" width="195" height="6" rx="3" fill="#475569"/>
+      <rect x="14" y="50" width="170" height="6" rx="3" fill="#334155"/>
+      <!-- Diff Highlights -->
+      <rect x="14" y="64" width="12" height="6" rx="3" fill="#10b981"/>
+      <rect x="32" y="64" width="100" height="6" rx="3" fill="#059669" opacity="0.8"/>
+      <rect x="14" y="76" width="12" height="6" rx="3" fill="#ef4444"/>
+      <rect x="32" y="76" width="140" height="6" rx="3" fill="#b91c1c" opacity="0.8"/>
+      <rect x="14" y="88" width="160" height="6" rx="3" fill="#334155"/>
+    </g>
+
+    <!-- Evaluation Metrics -->
+    <g transform="translate(20, 266)">
+      <rect x="0" y="0" width="270" height="64" rx="8" fill="#061a1a" stroke="#123a3a" stroke-width="1"/>
+      <rect x="14" y="14" width="105" height="6" rx="3" fill="#94a3b8"/>
+      <!-- Metric Bar -->
+      <rect x="14" y="28" width="240" height="8" rx="4" fill="#0a2626"/>
+      <rect x="14" y="28" width="145" height="8" rx="4" fill="#0d9488"/>
+      <!-- Stats Badges -->
+      <rect x="14" y="44" width="45" height="12" rx="6" fill="#092f2f"/>
+      <rect x="65" y="44" width="45" height="12" rx="6" fill="#092f2f"/>
+    </g>
+
+    <!-- Bottom Status / Keep/Drop Indicator -->
+    <g transform="translate(20, 344)">
+      <rect x="0" y="0" width="270" height="32" rx="6" fill="#041212" stroke="#0d2828" stroke-width="1"/>
+      <circle cx="20" cy="16" r="4" fill="#64748b"/>
+      <rect x="32" y="13" width="80" height="6" rx="3" fill="#475569"/>
+      <rect x="210" y="9" width="46" height="14" rx="7" fill="#0b2323"/>
+      <rect x="218" y="13" width="30" height="6" rx="3" fill="#64748b"/>
+    </g>
+  </g>
+
+  <!-- ==================== CONVERGENCE CONDUITS (COMPARISON / WINNER PICK) ==================== -->
+  <path d="M 230 464 C 230 488, 480 496, 570 496" fill="none" stroke="#173b5c" stroke-width="2" stroke-dasharray="4 3"/>
+  <path d="M 600 468 L 600 496" fill="none" stroke="url(#cyanTealLine)" stroke-width="2.5" filter="url(#glow)"/>
+  <path d="M 970 464 C 970 488, 720 496, 630 496" fill="none" stroke="#134e48" stroke-width="2" stroke-dasharray="4 3"/>
+  
+  <!-- Central Comparator Node -->
+  <circle cx="570" cy="496" r="3" fill="#0284c7"/>
+  <circle cx="600" cy="496" r="4.5" fill="#00f2fe" filter="url(#glow)"/>
+  <circle cx="630" cy="496" r="3" fill="#0d9488"/>
+
+  <!-- ==================== TITLE SECTION (EXACTLY 3 WORDS) ==================== -->
+  <g transform="translate(600, 552)" text-anchor="middle">
+    <!-- Subtle Ambient Glow Backdrop -->
+    <text font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'JetBrains Mono', sans-serif" 
+          font-size="42" font-weight="900" letter-spacing="3" fill="#00f2fe" opacity="0.28" filter="url(#textGlow)">
+      SAFE PROMPT EXPERIMENTS
+    </text>
+
+    <!-- Crisp Primary Title: Exactly 3 Words -->
+    <text font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'JetBrains Mono', sans-serif" 
+          font-size="42" font-weight="900" letter-spacing="3">
+      <tspan fill="#ffffff">SAFE </tspan>
+      <tspan fill="#00f2fe">PROMPT </tspan>
+      <tspan fill="#38ef7d">EXPERIMENTS</tspan>
+    </text>
+
+    <!-- Futuristic Terminal Accent Line & Reticles -->
+    <line x1="-320" y1="25" x2="320" y2="25" stroke="url(#cyanTealLine)" stroke-width="2.5" filter="url(#glow)"/>
+    <circle cx="-320" cy="25" r="3.5" fill="#00f2fe"/>
+    <circle cx="0" cy="25" r="4.5" fill="#ffffff" filter="url(#glow)"/>
+    <circle cx="320" cy="25" r="3.5" fill="#38ef7d"/>
+
+    <!-- Sub-reticle tick marks -->
+    <line x1="-320" y1="35" x2="-270" y2="35" stroke="#1d4a75" stroke-width="1.2"/>
+    <circle cx="-270" cy="35" r="1.8" fill="#00f2fe" opacity="0.6"/>
+    <line x1="320" y1="35" x2="270" y2="35" stroke="#174e47" stroke-width="1.2"/>
+    <circle cx="270" cy="35" r="1.8" fill="#38ef7d" opacity="0.6"/>
+  </g>
+</svg>

@@ -1,0 +1,338 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <defs>
+    <!-- Background Radial Gradients -->
+    <radialGradient id="bgGlow" cx="50%" cy="42%" r="75%">
+      <stop offset="0%" stop-color="#0b1e36" stop-opacity="0.95"/>
+      <stop offset="45%" stop-color="#061224" stop-opacity="0.98"/>
+      <stop offset="100%" stop-color="#02060e" stop-opacity="1"/>
+    </radialGradient>
+
+    <radialGradient id="nexusGlow" cx="600" cy="255" r="260" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.32"/>
+      <stop offset="35%" stop-color="#0284c7" stop-opacity="0.16"/>
+      <stop offset="70%" stop-color="#0369a1" stop-opacity="0.05"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="coreSpark" cx="600" cy="255" r="60" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.95"/>
+      <stop offset="25%" stop-color="#67e8f9" stop-opacity="0.8"/>
+      <stop offset="60%" stop-color="#00f2fe" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#00f2fe" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="leftNodeGlow" cx="240" cy="255" r="220" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0284c7" stop-opacity="0.2"/>
+      <stop offset="50%" stop-color="#0f2b48" stop-opacity="0.08"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="rightNodeGlow" cx="960" cy="255" r="220" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0d9488" stop-opacity="0.22"/>
+      <stop offset="50%" stop-color="#0f2b48" stop-opacity="0.08"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Cable Metallic Gradients -->
+    <linearGradient id="cableGradLeft" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1e344f"/>
+      <stop offset="30%" stop-color="#0e1d2f"/>
+      <stop offset="70%" stop-color="#081422"/>
+      <stop offset="100%" stop-color="#16293f"/>
+    </linearGradient>
+
+    <linearGradient id="cableGradRight" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1e344f"/>
+      <stop offset="30%" stop-color="#0e1d2f"/>
+      <stop offset="70%" stop-color="#081422"/>
+      <stop offset="100%" stop-color="#16293f"/>
+    </linearGradient>
+
+    <linearGradient id="coreBeamGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00f2fe"/>
+      <stop offset="50%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#14b8a6"/>
+    </linearGradient>
+
+    <linearGradient id="fiberTeal" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#0284c7"/>
+      <stop offset="50%" stop-color="#00f2fe"/>
+      <stop offset="100%" stop-color="#38bdf8"/>
+    </linearGradient>
+
+    <linearGradient id="fiberCyan" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#0f766e"/>
+      <stop offset="50%" stop-color="#14b8a6"/>
+      <stop offset="100%" stop-color="#2dd4bf"/>
+    </linearGradient>
+
+    <linearGradient id="textGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00f2fe"/>
+      <stop offset="50%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#2dd4bf"/>
+    </linearGradient>
+
+    <!-- Filters -->
+    <filter id="softGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <filter id="brightGlow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="9" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <filter id="arcGlow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="15" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Background Grid -->
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#0f2238" stroke-width="1" stroke-opacity="0.45"/>
+      <circle cx="40" cy="40" r="1" fill="#1b3b5e" fill-opacity="0.5"/>
+    </pattern>
+  </defs>
+
+  <!-- Deep Canvas Background -->
+  <rect width="1200" height="630" fill="#030712"/>
+  <rect width="1200" height="630" fill="url(#bgGlow)"/>
+  <rect width="1200" height="630" fill="url(#grid)"/>
+
+  <!-- Atmospheric Glow Fields -->
+  <circle cx="240" cy="255" r="220" fill="url(#leftNodeGlow)"/>
+  <circle cx="960" cy="255" r="220" fill="url(#rightNodeGlow)"/>
+  <circle cx="600" cy="255" r="260" fill="url(#nexusGlow)"/>
+
+  <!-- HUD Corner Brackets -->
+  <g stroke="#1e3a5f" stroke-width="2" fill="none" opacity="0.8">
+    <path d="M 36 36 L 36 68 M 36 36 L 68 36"/>
+    <path d="M 1164 36 L 1164 68 M 1164 36 L 1132 36"/>
+    <path d="M 36 594 L 36 562 M 36 594 L 68 594"/>
+    <path d="M 1164 594 L 1164 562 M 1164 594 L 1132 594"/>
+  </g>
+
+  <!-- Abstract Terminal Frame Left (Daemon Host Terminal) -->
+  <g transform="translate(100, 155)">
+    <!-- Terminal Outer Frame -->
+    <rect x="0" y="0" width="220" height="200" rx="10" fill="#06101c" stroke="#173452" stroke-width="1.8"/>
+    <!-- Terminal Titlebar -->
+    <rect x="0" y="0" width="220" height="30" rx="10" fill="#0a192c"/>
+    <rect x="0" y="22" width="220" height="8" fill="#0a192c"/>
+    <line x1="0" y1="30" x2="220" y2="30" stroke="#173452" stroke-width="1"/>
+    <!-- Window Controls -->
+    <circle cx="18" cy="15" r="4" fill="#334155"/>
+    <circle cx="32" cy="15" r="4" fill="#334155"/>
+    <circle cx="46" cy="15" r="4" fill="#0284c7" filter="url(#softGlow)"/>
+    <!-- Code / Activity Lines -->
+    <rect x="18" y="46" width="90" height="6" rx="3" fill="#1e3a5f" opacity="0.8"/>
+    <rect x="18" y="60" width="140" height="6" rx="3" fill="#0f2742" opacity="0.9"/>
+    <rect x="18" y="74" width="70" height="6" rx="3" fill="#0284c7" opacity="0.7"/>
+    <rect x="18" y="88" width="120" height="6" rx="3" fill="#0f2742" opacity="0.9"/>
+    <rect x="18" y="102" width="160" height="6" rx="3" fill="#1e3a5f" opacity="0.6"/>
+    <!-- Session Persistence Indicator Badge -->
+    <rect x="18" y="130" width="184" height="48" rx="6" fill="#030c17" stroke="#133352" stroke-width="1.2"/>
+    <circle cx="36" cy="154" r="6" fill="#00f2fe" filter="url(#softGlow)"/>
+    <circle cx="36" cy="154" r="2.5" fill="#ffffff"/>
+    <rect x="52" y="146" width="75" height="6" rx="3" fill="#38bdf8" opacity="0.9"/>
+    <rect x="52" y="157" width="110" height="5" rx="2.5" fill="#1e3a5f"/>
+  </g>
+
+  <!-- Abstract Terminal Frame Right (Remote Edge Client) -->
+  <g transform="translate(880, 155)">
+    <!-- Terminal Outer Frame -->
+    <rect x="0" y="0" width="220" height="200" rx="10" fill="#06101c" stroke="#133d45" stroke-width="1.8"/>
+    <!-- Terminal Titlebar -->
+    <rect x="0" y="0" width="220" height="30" rx="10" fill="#081f26"/>
+    <rect x="0" y="22" width="220" height="8" fill="#081f26"/>
+    <line x1="0" y1="30" x2="220" y2="30" stroke="#133d45" stroke-width="1"/>
+    <!-- Window Controls -->
+    <circle cx="18" cy="15" r="4" fill="#334155"/>
+    <circle cx="32" cy="15" r="4" fill="#334155"/>
+    <circle cx="46" cy="15" r="4" fill="#14b8a6" filter="url(#softGlow)"/>
+    <!-- Code / Activity Lines -->
+    <rect x="18" y="46" width="110" height="6" rx="3" fill="#0f3b42" opacity="0.8"/>
+    <rect x="18" y="60" width="80" height="6" rx="3" fill="#0b2930" opacity="0.9"/>
+    <rect x="18" y="74" width="130" height="6" rx="3" fill="#14b8a6" opacity="0.7"/>
+    <rect x="18" y="88" width="60" height="6" rx="3" fill="#0b2930" opacity="0.9"/>
+    <rect x="18" y="102" width="150" height="6" rx="3" fill="#0f3b42" opacity="0.6"/>
+    <!-- Reconnecting / Active Client Badge -->
+    <rect x="18" y="130" width="184" height="48" rx="6" fill="#021114" stroke="#13474d" stroke-width="1.2"/>
+    <circle cx="36" cy="154" r="6" fill="#2dd4bf" filter="url(#softGlow)"/>
+    <circle cx="36" cy="154" r="2.5" fill="#ffffff"/>
+    <rect x="52" y="146" width="85" height="6" rx="3" fill="#2dd4bf" opacity="0.9"/>
+    <rect x="52" y="157" width="100" height="5" rx="2.5" fill="#114b52"/>
+  </g>
+
+  <!-- Left Cable Assembly (From Host Terminal to Break Point at x=450) -->
+  <g>
+    <!-- Cable Shadow / Outer Halo -->
+    <path d="M 320 255 L 450 255" stroke="#0284c7" stroke-width="36" stroke-linecap="round" opacity="0.15" filter="url(#brightGlow)"/>
+
+    <!-- Main Cable Heavy Body -->
+    <path d="M 315 255 L 440 255" stroke="url(#cableGradLeft)" stroke-width="28" stroke-linecap="round"/>
+    <path d="M 315 255 L 440 255" stroke="#1b395a" stroke-width="28" stroke-linecap="round" stroke-dasharray="16 10" opacity="0.4"/>
+
+    <!-- Armor Collar / Sleeves -->
+    <rect x="340" y="235" width="16" height="40" rx="3" fill="#091829" stroke="#00f2fe" stroke-width="1.5"/>
+    <rect x="375" y="237" width="14" height="36" rx="2" fill="#091829" stroke="#1d4d7a" stroke-width="1.2"/>
+    <rect x="405" y="235" width="18" height="40" rx="3" fill="#091829" stroke="#38bdf8" stroke-width="1.5"/>
+
+    <!-- Severed Cable Connector Housing / Ferrule -->
+    <path d="M 432 233 L 452 237 L 456 250 L 450 260 L 454 273 L 432 277 Z" fill="#0c1f33" stroke="#00f2fe" stroke-width="2"/>
+    
+    <!-- Internal Fiber Strands Exposed Left -->
+    <!-- Top Strand -->
+    <path d="M 452 242 Q 470 236 495 240" fill="none" stroke="#38bdf8" stroke-width="4.5" stroke-linecap="round" filter="url(#softGlow)"/>
+    <circle cx="495" cy="240" r="3.5" fill="#ffffff" filter="url(#softGlow)"/>
+
+    <!-- Center Main Fiber Core -->
+    <path d="M 456 255 L 515 255" fill="none" stroke="#00f2fe" stroke-width="6" stroke-linecap="round" filter="url(#brightGlow)"/>
+    <path d="M 456 255 L 515 255" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round"/>
+    <circle cx="515" cy="255" r="4.5" fill="#ffffff" filter="url(#brightGlow)"/>
+
+    <!-- Bottom Strand -->
+    <path d="M 452 268 Q 475 274 492 270" fill="none" stroke="#0284c7" stroke-width="4.5" stroke-linecap="round" filter="url(#softGlow)"/>
+    <circle cx="492" cy="270" r="3" fill="#ffffff" filter="url(#softGlow)"/>
+  </g>
+
+  <!-- Right Cable Assembly (From Break Point at x=750 to Client Terminal at x=880) -->
+  <g>
+    <!-- Cable Shadow / Outer Halo -->
+    <path d="M 750 255 L 880 255" stroke="#0d9488" stroke-width="36" stroke-linecap="round" opacity="0.15" filter="url(#brightGlow)"/>
+
+    <!-- Main Cable Heavy Body -->
+    <path d="M 760 255 L 885 255" stroke="url(#cableGradRight)" stroke-width="28" stroke-linecap="round"/>
+    <path d="M 760 255 L 885 255" stroke="#13474d" stroke-width="28" stroke-linecap="round" stroke-dasharray="16 10" opacity="0.4"/>
+
+    <!-- Armor Collar / Sleeves -->
+    <rect x="777" y="235" width="18" height="40" rx="3" fill="#041b1e" stroke="#2dd4bf" stroke-width="1.5"/>
+    <rect x="811" y="237" width="14" height="36" rx="2" fill="#041b1e" stroke="#134d54" stroke-width="1.2"/>
+    <rect x="844" y="235" width="16" height="40" rx="3" fill="#041b1e" stroke="#14b8a6" stroke-width="1.5"/>
+
+    <!-- Severed Cable Connector Housing / Ferrule -->
+    <path d="M 768 233 L 748 237 L 744 250 L 750 260 L 746 273 L 768 277 Z" fill="#061d22" stroke="#2dd4bf" stroke-width="2"/>
+
+    <!-- Internal Fiber Strands Exposed Right -->
+    <!-- Top Strand -->
+    <path d="M 748 242 Q 730 236 705 240" fill="none" stroke="#2dd4bf" stroke-width="4.5" stroke-linecap="round" filter="url(#softGlow)"/>
+    <circle cx="705" cy="240" r="3.5" fill="#ffffff" filter="url(#softGlow)"/>
+
+    <!-- Center Main Fiber Core -->
+    <path d="M 744 255 L 685 255" fill="none" stroke="#14b8a6" stroke-width="6" stroke-linecap="round" filter="url(#brightGlow)"/>
+    <path d="M 744 255 L 685 255" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round"/>
+    <circle cx="685" cy="255" r="4.5" fill="#ffffff" filter="url(#brightGlow)"/>
+
+    <!-- Bottom Strand -->
+    <path d="M 748 268 Q 725 274 708 270" fill="none" stroke="#0f766e" stroke-width="4.5" stroke-linecap="round" filter="url(#softGlow)"/>
+    <circle cx="708" cy="270" r="3" fill="#ffffff" filter="url(#softGlow)"/>
+  </g>
+
+  <!-- ==================== THE RECONNECTION ZONE (x: 490 to 710) ==================== -->
+  <!-- Concentric Reconnection Wave Pulses -->
+  <g fill="none" stroke-linecap="round">
+    <ellipse cx="600" cy="255" rx="80" ry="80" stroke="#00f2fe" stroke-width="1.2" opacity="0.3" stroke-dasharray="8 6"/>
+    <ellipse cx="600" cy="255" rx="125" ry="120" stroke="#38bdf8" stroke-width="1.5" opacity="0.22" stroke-dasharray="12 8"/>
+    <ellipse cx="600" cy="255" rx="170" ry="150" stroke="#14b8a6" stroke-width="1" opacity="0.15" stroke-dasharray="16 10"/>
+  </g>
+
+  <!-- Electric Plasma Arcs Bridging Across The Gap -->
+  <g fill="none">
+    <!-- Center Hyper-Bridge Beam -->
+    <path d="M 515 255 Q 560 252 600 255 T 685 255" stroke="url(#coreBeamGrad)" stroke-width="6" filter="url(#brightGlow)"/>
+    <path d="M 515 255 Q 560 252 600 255 T 685 255" stroke="#ffffff" stroke-width="2.5"/>
+
+    <!-- Upper High-Voltage Arc -->
+    <path d="M 495 240 Q 535 205 600 220 T 705 240" stroke="#00f2fe" stroke-width="3" filter="url(#brightGlow)"/>
+    <path d="M 495 240 Q 535 205 600 220 T 705 240" stroke="#ffffff" stroke-width="1" opacity="0.8"/>
+
+    <!-- Lower High-Voltage Arc -->
+    <path d="M 492 270 Q 545 305 600 290 T 708 270" stroke="#2dd4bf" stroke-width="3" filter="url(#brightGlow)"/>
+    <path d="M 492 270 Q 545 305 600 290 T 708 270" stroke="#ffffff" stroke-width="1" opacity="0.8"/>
+
+    <!-- Secondary Micro Energy Tendrils -->
+    <path d="M 510 250 Q 550 230 580 248 T 640 260 T 688 252" stroke="#67e8f9" stroke-width="1.8" opacity="0.85" filter="url(#softGlow)"/>
+    <path d="M 500 262 Q 540 280 575 262 T 630 248 T 695 258" stroke="#38bdf8" stroke-width="1.8" opacity="0.85" filter="url(#softGlow)"/>
+  </g>
+
+  <!-- Central Nexus Energy Burst Core -->
+  <circle cx="600" cy="255" r="50" fill="url(#coreSpark)"/>
+  
+  <!-- Geometric Tech Reconnect Ring & Alignment Markers -->
+  <g transform="translate(600, 255)">
+    <!-- Central Reticle Circle -->
+    <circle cx="0" cy="0" r="32" fill="none" stroke="#00f2fe" stroke-width="2" stroke-dasharray="14 6" filter="url(#softGlow)"/>
+    <circle cx="0" cy="0" r="16" fill="none" stroke="#ffffff" stroke-width="1.5" opacity="0.9"/>
+    <circle cx="0" cy="0" r="4" fill="#ffffff" filter="url(#brightGlow)"/>
+
+    <!-- Crosshair Prongs -->
+    <line x1="-42" y1="0" x2="-22" y2="0" stroke="#00f2fe" stroke-width="2.5" stroke-linecap="round"/>
+    <line x1="22" y1="0" x2="42" y2="0" stroke="#2dd4bf" stroke-width="2.5" stroke-linecap="round"/>
+    <line x1="0" y1="-42" x2="0" y2="-22" stroke="#38bdf8" stroke-width="2.5" stroke-linecap="round"/>
+    <line x1="0" y1="22" x2="0" y2="42" stroke="#38bdf8" stroke-width="2.5" stroke-linecap="round"/>
+
+    <!-- Reconnect Alignment Brackets -->
+    <path d="M -54 -18 L -62 -18 L -62 18 L -54 18" fill="none" stroke="#00f2fe" stroke-width="2.5" filter="url(#softGlow)"/>
+    <path d="M 54 -18 L 62 -18 L 62 18 L 54 18" fill="none" stroke="#2dd4bf" stroke-width="2.5" filter="url(#softGlow)"/>
+  </g>
+
+  <!-- Data Packet Diamonds & Energy Sparks Crossing the Gap -->
+  <g>
+    <!-- Diamonds floating across -->
+    <polygon points="545,236 550,241 545,246 540,241" fill="#ffffff" filter="url(#softGlow)"/>
+    <polygon points="575,270 580,275 575,280 570,275" fill="#00f2fe" filter="url(#softGlow)"/>
+    <polygon points="625,235 631,241 625,247 619,241" fill="#2dd4bf" filter="url(#softGlow)"/>
+    <polygon points="655,268 660,273 655,278 650,273" fill="#ffffff" filter="url(#softGlow)"/>
+
+    <!-- Sparkling particles -->
+    <circle cx="530" cy="225" r="2" fill="#00f2fe" filter="url(#softGlow)"/>
+    <circle cx="560" cy="210" r="1.5" fill="#ffffff"/>
+    <circle cx="640" cy="215" r="2" fill="#38bdf8" filter="url(#softGlow)"/>
+    <circle cx="670" cy="230" r="1.5" fill="#ffffff"/>
+    <circle cx="535" cy="285" r="2" fill="#2dd4bf" filter="url(#softGlow)"/>
+    <circle cx="565" cy="295" r="1.5" fill="#ffffff"/>
+    <circle cx="635" cy="295" r="2" fill="#00f2fe" filter="url(#softGlow)"/>
+    <circle cx="665" cy="285" r="1.5" fill="#ffffff"/>
+  </g>
+
+  <!-- Circuit Trace Accents at Top and Bottom Margins -->
+  <g stroke="#1a3b5c" stroke-width="1.2" fill="none" opacity="0.5">
+    <path d="M 120 90 L 300 90 L 340 120 L 520 120"/>
+    <circle cx="120" cy="90" r="3" fill="#0284c7"/>
+    <circle cx="520" cy="120" r="3" fill="#00f2fe"/>
+
+    <path d="M 1080 90 L 900 90 L 860 120 L 680 120"/>
+    <circle cx="1080" cy="90" r="3" fill="#0d9488"/>
+    <circle cx="680" cy="120" r="3" fill="#2dd4bf"/>
+  </g>
+
+  <!-- ==================== CLEAN DEVELOPER TEXT (EXACTLY 3 WORDS) ==================== -->
+  <g id="title-group" transform="translate(600, 534)" text-anchor="middle">
+    <!-- Glowing Baseline Accent Line -->
+    <line x1="-280" y1="26" x2="280" y2="26" stroke="url(#textGrad)" stroke-width="2.5" opacity="0.8" filter="url(#softGlow)"/>
+    <circle cx="-280" cy="26" r="3.5" fill="#00f2fe" filter="url(#softGlow)"/>
+    <circle cx="280" cy="26" r="3.5" fill="#2dd4bf" filter="url(#softGlow)"/>
+
+    <!-- Subtle Background Glow Behind Text -->
+    <text font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'JetBrains Mono', sans-serif" 
+          font-size="44" font-weight="900" letter-spacing="4" fill="#00f2fe" opacity="0.3" filter="url(#brightGlow)">
+      WHEN&#160;&#160;VPN&#160;&#160;DROPS
+    </text>
+
+    <!-- Crisp Primary Text: Exactly 3 Words ("WHEN VPN DROPS") -->
+    <text font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'JetBrains Mono', sans-serif" 
+          font-size="44" font-weight="900" letter-spacing="4">
+      <tspan fill="#ffffff">WHEN</tspan>&#160;&#160;<tspan fill="#00f2fe">VPN</tspan>&#160;&#160;<tspan fill="#38bdf8">DROPS</tspan>
+    </text>
+  </g>
+</svg>

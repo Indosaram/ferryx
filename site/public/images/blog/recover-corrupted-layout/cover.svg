@@ -1,0 +1,308 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <defs>
+    <!-- Background Gradients -->
+    <radialGradient id="bgGlow" cx="50%" cy="45%" r="65%">
+      <stop offset="0%" stop-color="#0e2338" stop-opacity="0.9"/>
+      <stop offset="55%" stop-color="#081322" stop-opacity="0.96"/>
+      <stop offset="100%" stop-color="#04070e" stop-opacity="1"/>
+    </radialGradient>
+
+    <radialGradient id="reforgeCoreGlow" cx="50%" cy="48%" r="42%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.28"/>
+      <stop offset="40%" stop-color="#0284c7" stop-opacity="0.14"/>
+      <stop offset="100%" stop-color="#04070e" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="fractureGlow" cx="28%" cy="46%" r="35%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.15"/>
+      <stop offset="60%" stop-color="#0f172a" stop-opacity="0.05"/>
+      <stop offset="100%" stop-color="#04070e" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Linear Accents -->
+    <linearGradient id="cyanTealGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00f2fe"/>
+      <stop offset="50%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#0284c7"/>
+    </linearGradient>
+
+    <linearGradient id="reforgeBeam" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0"/>
+      <stop offset="25%" stop-color="#00f2fe" stop-opacity="0.7"/>
+      <stop offset="50%" stop-color="#38ef7d" stop-opacity="0.9"/>
+      <stop offset="75%" stop-color="#00f2fe" stop-opacity="0.7"/>
+      <stop offset="100%" stop-color="#00f2fe" stop-opacity="0"/>
+    </linearGradient>
+
+    <linearGradient id="paneGradSolid" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0d243a"/>
+      <stop offset="100%" stop-color="#071424"/>
+    </linearGradient>
+
+    <linearGradient id="paneGradRestored" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f2f4c"/>
+      <stop offset="100%" stop-color="#091b2e"/>
+    </linearGradient>
+
+    <linearGradient id="paneBorderGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00f2fe"/>
+      <stop offset="100%" stop-color="#38ef7d"/>
+    </linearGradient>
+
+    <!-- Filters -->
+    <filter id="neonGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+
+    <filter id="strongGlow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="14" result="blur1" />
+      <feGaussianBlur stdDeviation="5" result="blur2" />
+      <feMerge>
+        <feMergeNode in="blur1" />
+        <feMergeNode in="blur2" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+
+    <filter id="paneShadow" x="-15%" y="-15%" width="130%" height="135%">
+      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#000000" flood-opacity="0.75"/>
+    </filter>
+
+    <!-- Grid Patterns -->
+    <pattern id="bgGrid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#112438" stroke-width="0.8" stroke-opacity="0.55"/>
+      <circle cx="40" cy="40" r="1" fill="#1b3d60" fill-opacity="0.7"/>
+    </pattern>
+    <pattern id="dotMatrix" width="16" height="16" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="0.8" fill="#00f2fe" fill-opacity="0.12"/>
+    </pattern>
+  </defs>
+
+  <!-- Base Dark Canvas -->
+  <rect width="1200" height="630" fill="#04070e"/>
+  <rect width="1200" height="630" fill="url(#bgGlow)"/>
+  <rect width="1200" height="630" fill="url(#bgGrid)"/>
+
+  <!-- Localized Lighting -->
+  <circle cx="600" cy="265" r="340" fill="url(#reforgeCoreGlow)"/>
+  <circle cx="340" cy="270" r="280" fill="url(#fractureGlow)"/>
+
+  <!-- Technical Framing & Corner Reticles -->
+  <g stroke="#1b3e63" stroke-width="1.5" fill="none">
+    <path d="M 44 44 L 44 74 M 44 44 L 74 44" />
+    <path d="M 1156 44 L 1156 74 M 1156 44 L 1126 44" />
+    <path d="M 44 586 L 44 556 M 44 586 L 74 586" />
+    <path d="M 1156 586 L 1156 556 M 1156 586 L 1126 586" />
+  </g>
+
+  <!-- Top Metadata Status Strip -->
+  <g transform="translate(60, 56)" opacity="0.65">
+    <text font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'JetBrains Mono', monospace" font-size="11" fill="#00f2fe" letter-spacing="2">SYS::LAYOUT_INTEGRITY_TRIAGE</text>
+    <line x1="280" y1="-4" x2="380" y2="-4" stroke="#1d4a73" stroke-width="1"/>
+    <text x="395" y="0" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', monospace" font-size="10" fill="#38ef7d" letter-spacing="1">STATE: REFORGING</text>
+  </g>
+  <g transform="translate(1140, 56)" text-anchor="end" opacity="0.65">
+    <text font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', monospace" font-size="11" fill="#4facfe" letter-spacing="1.5">PANE_TREE::REBUILD</text>
+  </g>
+
+  <!-- ==================== CENTRAL REFORGING AXIS & SEAM ==================== -->
+  <!-- Vertical dynamic alignment laser seam -->
+  <line x1="600" y1="90" x2="600" y2="440" stroke="url(#reforgeBeam)" stroke-width="2.5" filter="url(#neonGlow)"/>
+  <line x1="600" y1="120" x2="600" y2="410" stroke="#ffffff" stroke-width="1" opacity="0.8"/>
+
+  <!-- Caliper Tick Marks on Reforging Seam -->
+  <g stroke="#00f2fe" stroke-width="1.2" opacity="0.75">
+    <line x1="592" y1="150" x2="608" y2="150" />
+    <line x1="595" y1="180" x2="605" y2="180" />
+    <line x1="592" y1="210" x2="608" y2="210" />
+    <line x1="595" y1="240" x2="605" y2="240" />
+    <line x1="588" y1="270" x2="612" y2="270" stroke-width="1.8" />
+    <line x1="595" y1="300" x2="605" y2="300" />
+    <line x1="592" y1="330" x2="608" y2="330" />
+    <line x1="595" y1="360" x2="605" y2="360" />
+    <line x1="592" y1="390" x2="608" y2="390" />
+  </g>
+
+  <!-- Core Alignment Diamond Reticle at Center (600, 270) -->
+  <g transform="translate(600, 270)">
+    <circle cx="0" cy="0" r="26" fill="none" stroke="#00f2fe" stroke-width="1.2" stroke-dasharray="4 4" opacity="0.6"/>
+    <polygon points="0,-14 14,0 0,14 -14,0" fill="#072033" stroke="#38ef7d" stroke-width="1.8" filter="url(#neonGlow)"/>
+    <circle cx="0" cy="0" r="3.5" fill="#ffffff" filter="url(#neonGlow)"/>
+  </g>
+
+  <!-- ==================== LEFT SIDE: BROKEN / FRACTURED GRID ==================== -->
+  <!-- Tension Lines & Displaced Vector Guides -->
+  <g stroke="#0284c7" stroke-width="1.2" stroke-dasharray="5 5" opacity="0.45" fill="none">
+    <path d="M 230 140 L 320 160 L 460 175" />
+    <path d="M 180 310 L 290 295 L 430 305" />
+    <path d="M 270 410 L 380 395 L 500 375" />
+  </g>
+
+  <!-- Fractured Pane 1: Top-Left Displaced / Tilted Pane -->
+  <g transform="translate(200, 130) rotate(-4.5)" filter="url(#paneShadow)">
+    <!-- Broken pane background -->
+    <rect x="0" y="0" width="220" height="115" rx="6" fill="url(#paneGradSolid)" stroke="#1e476d" stroke-width="1.5"/>
+    <!-- Broken pane header bar -->
+    <path d="M 0 6 C 0 2.686 2.686 0 6 0 L 214 0 C 217.314 0 220 2.686 220 6 L 220 24 L 0 24 Z" fill="#0b1b2d" stroke="#1e476d" stroke-width="1"/>
+    <!-- Terminal traffic lights -->
+    <circle cx="14" cy="12" r="3" fill="#ef4444" opacity="0.8"/>
+    <circle cx="25" cy="12" r="3" fill="#f59e0b" opacity="0.8"/>
+    <circle cx="36" cy="12" r="3" fill="#10b981" opacity="0.5"/>
+    <rect x="52" y="8" width="60" height="8" rx="2" fill="#163857"/>
+    <!-- Wireframe code / corrupted buffer lines -->
+    <line x1="18" y1="42" x2="80" y2="42" stroke="#38bdf8" stroke-width="2.5" stroke-linecap="round" opacity="0.7"/>
+    <line x1="90" y1="42" x2="140" y2="42" stroke="#1d4367" stroke-width="2" stroke-linecap="round"/>
+    <line x1="18" y1="58" x2="110" y2="58" stroke="#1d4367" stroke-width="2" stroke-linecap="round"/>
+    <line x1="18" y1="74" x2="65" y2="74" stroke="#f59e0b" stroke-width="2" stroke-linecap="round" opacity="0.85"/>
+    <line x1="75" y1="74" x2="160" y2="74" stroke="#1d4367" stroke-width="2" stroke-linecap="round"/>
+    <line x1="18" y1="90" x2="95" y2="90" stroke="#1d4367" stroke-width="2" stroke-linecap="round"/>
+    <!-- Fracture stress corner indicators -->
+    <path d="M 210 100 L 210 110 L 200 110" stroke="#f59e0b" stroke-width="1.5" fill="none" opacity="0.8"/>
+  </g>
+
+  <!-- Fractured Pane 2: Mid-Left Floating Sub-Pane (Severed Child Node) -->
+  <g transform="translate(160, 275) rotate(3)" filter="url(#paneShadow)">
+    <rect x="0" y="0" width="190" height="120" rx="6" fill="url(#paneGradSolid)" stroke="#1d4163" stroke-width="1.5"/>
+    <path d="M 0 6 C 0 2.686 2.686 0 6 0 L 184 0 C 187.314 0 190 2.686 190 6 L 190 22 L 0 22 Z" fill="#091726"/>
+    <circle cx="12" cy="11" r="2.5" fill="#38bdf8" opacity="0.6"/>
+    <circle cx="22" cy="11" r="2.5" fill="#1e3a58"/>
+    <!-- Ghosted grid pattern inside disconnected pane -->
+    <rect x="12" y="32" width="70" height="6" rx="2" fill="#0284c7" opacity="0.7"/>
+    <rect x="12" y="46" width="140" height="4" rx="2" fill="#142c44"/>
+    <rect x="12" y="58" width="110" height="4" rx="2" fill="#142c44"/>
+    <rect x="12" y="70" width="85" height="4" rx="2" fill="#142c44"/>
+    <!-- Disconnected badge -->
+    <rect x="12" y="88" width="75" height="16" rx="3" fill="#10253a" stroke="#f59e0b" stroke-width="1" opacity="0.8"/>
+    <text x="20" y="100" font-family="-apple-system, monospace" font-size="8" fill="#f59e0b" font-weight="600">UNANCHORED</text>
+  </g>
+
+  <!-- Fractured Pane 3: Center-Left Sliding Pane (Entering Reforge Zone) -->
+  <g transform="translate(370, 210) rotate(-1.5)" filter="url(#paneShadow)">
+    <rect x="0" y="0" width="175" height="165" rx="6" fill="#0a1d30" stroke="#00f2fe" stroke-width="1.8" filter="url(#neonGlow)"/>
+    <path d="M 0 6 C 0 2.686 2.686 0 6 0 L 169 0 C 172.314 0 175 2.686 175 6 L 175 24 L 0 24 Z" fill="#0d2640"/>
+    <rect x="12" y="8" width="55" height="8" rx="2" fill="#00f2fe" opacity="0.8"/>
+    <!-- Buffer lines with active teal glow -->
+    <line x1="14" y1="42" x2="90" y2="42" stroke="#00f2fe" stroke-width="2" stroke-linecap="round"/>
+    <line x1="14" y1="56" x2="145" y2="56" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" opacity="0.75"/>
+    <line x1="14" y1="70" x2="110" y2="70" stroke="#1d476f" stroke-width="2" stroke-linecap="round"/>
+    <line x1="14" y1="84" x2="135" y2="84" stroke="#1d476f" stroke-width="2" stroke-linecap="round"/>
+    <line x1="14" y1="98" x2="80" y2="98" stroke="#38ef7d" stroke-width="2" stroke-linecap="round"/>
+    <rect x="14" y="112" width="6" height="10" fill="#00f2fe" filter="url(#neonGlow)"/>
+  </g>
+
+  <!-- Fracture to Reforge Stitching Arcs & Magnetic Vectors -->
+  <g stroke="#00f2fe" stroke-width="1.5" fill="none">
+    <!-- Snapping arc 1 -->
+    <path d="M 410 145 C 490 145, 530 180, 595 180" stroke-dasharray="4 4" opacity="0.75"/>
+    <circle cx="410" cy="145" r="3" fill="#00f2fe"/>
+    <polygon points="595,177 603,180 595,183" fill="#00f2fe"/>
+
+    <!-- Snapping arc 2 (Main alignment bridge) -->
+    <path d="M 545 270 L 595 270" stroke="#38ef7d" stroke-width="2" filter="url(#neonGlow)"/>
+    <circle cx="545" cy="270" r="4" fill="#38ef7d"/>
+
+    <!-- Snapping arc 3 -->
+    <path d="M 350 340 C 440 370, 520 340, 595 340" stroke-dasharray="4 4" opacity="0.75"/>
+    <circle cx="350" cy="340" r="3" fill="#00f2fe"/>
+    <polygon points="595,337 603,340 595,343" fill="#00f2fe"/>
+  </g>
+
+  <!-- ==================== RIGHT SIDE: REFORGED / RESTORED PRISTINE GRID ==================== -->
+  <!-- Outer Restored Frame (Precision Grid Layout Container) -->
+  <g transform="translate(640, 125)" filter="url(#paneShadow)">
+    <!-- Container chassis -->
+    <rect x="0" y="0" width="440" height="280" rx="8" fill="#071322" stroke="#1d4872" stroke-width="1.5"/>
+    <!-- Top Global App / Workspace Header Bar -->
+    <path d="M 0 8 C 0 3.582 3.582 0 8 0 L 432 0 C 436.418 0 440 3.582 440 8 L 440 28 L 0 28 Z" fill="#0b1e33" stroke="#1d4872" stroke-width="1"/>
+    <!-- Traffic lights -->
+    <circle cx="16" cy="14" r="3.5" fill="#38ef7d" opacity="0.9"/>
+    <circle cx="28" cy="14" r="3.5" fill="#00f2fe" opacity="0.7"/>
+    <circle cx="40" cy="14" r="3.5" fill="#0284c7" opacity="0.5"/>
+    
+    <!-- Tab items -->
+    <rect x="62" y="6" width="95" height="18" rx="3" fill="#133352" stroke="#00f2fe" stroke-width="0.8"/>
+    <text x="74" y="19" font-family="-apple-system, monospace" font-size="9" fill="#00f2fe" font-weight="600">terminal.pty0</text>
+    <rect x="164" y="6" width="85" height="18" rx="3" fill="#0b1a2a"/>
+    <text x="176" y="19" font-family="-apple-system, monospace" font-size="9" fill="#4facfe" opacity="0.6">agent.worktree</text>
+
+    <!-- PANE 1: Top Right Main Buffer (Restored) -->
+    <g transform="translate(10, 38)">
+      <rect x="0" y="0" width="420" height="110" rx="4" fill="url(#paneGradRestored)" stroke="#00f2fe" stroke-width="1.5" stroke-opacity="0.8"/>
+      <!-- Internal code lines -->
+      <line x1="16" y1="20" x2="85" y2="20" stroke="#00f2fe" stroke-width="2" stroke-linecap="round"/>
+      <line x1="95" y1="20" x2="160" y2="20" stroke="#38ef7d" stroke-width="2" stroke-linecap="round"/>
+      <line x1="170" y1="20" x2="240" y2="20" stroke="#255580" stroke-width="2" stroke-linecap="round"/>
+
+      <line x1="16" y1="38" x2="120" y2="38" stroke="#38bdf8" stroke-width="2" stroke-linecap="round"/>
+      <line x1="130" y1="38" x2="210" y2="38" stroke="#255580" stroke-width="2" stroke-linecap="round"/>
+
+      <line x1="16" y1="56" x2="60" y2="56" stroke="#38ef7d" stroke-width="2" stroke-linecap="round"/>
+      <line x1="70" y1="56" x2="190" y2="56" stroke="#255580" stroke-width="2" stroke-linecap="round"/>
+      <line x1="200" y1="56" x2="275" y2="56" stroke="#255580" stroke-width="2" stroke-linecap="round"/>
+
+      <line x1="16" y1="74" x2="150" y2="74" stroke="#00f2fe" stroke-width="2" stroke-linecap="round"/>
+      <line x1="160" y1="74" x2="210" y2="74" stroke="#38ef7d" stroke-width="2" stroke-linecap="round"/>
+
+      <!-- Terminal cursor -->
+      <rect x="220" y="68" width="7" height="12" fill="#38ef7d" filter="url(#neonGlow)"/>
+
+      <!-- Top Right Status badge -->
+      <rect x="330" y="12" width="76" height="16" rx="3" fill="#09253d" stroke="#38ef7d" stroke-width="1"/>
+      <circle cx="340" cy="20" r="3" fill="#38ef7d"/>
+      <text x="348" y="23" font-family="-apple-system, monospace" font-size="8" fill="#38ef7d" font-weight="700">RESTORED</text>
+    </g>
+
+    <!-- Split Divider Line (Geometric precision) -->
+    <line x1="10" y1="156" x2="430" y2="156" stroke="#00f2fe" stroke-width="1.5" stroke-opacity="0.6"/>
+
+    <!-- PANE 2: Bottom-Left Subsplit (Restored) -->
+    <g transform="translate(10, 164)">
+      <rect x="0" y="0" width="202" height="98" rx="4" fill="url(#paneGradRestored)" stroke="#1e4c77" stroke-width="1.2"/>
+      <rect x="10" y="12" width="40" height="6" rx="1.5" fill="#00f2fe" opacity="0.8"/>
+      <line x1="10" y1="30" x2="90" y2="30" stroke="#38bdf8" stroke-width="2" stroke-linecap="round"/>
+      <line x1="10" y1="44" x2="140" y2="44" stroke="#1d456d" stroke-width="2" stroke-linecap="round"/>
+      <line x1="10" y1="58" x2="110" y2="58" stroke="#1d456d" stroke-width="2" stroke-linecap="round"/>
+      <line x1="10" y1="72" x2="80" y2="72" stroke="#38ef7d" stroke-width="2" stroke-linecap="round"/>
+    </g>
+
+    <!-- Vertical Split Bar between bottom subpanes -->
+    <line x1="220" y1="164" x2="220" y2="262" stroke="#00f2fe" stroke-width="1.5" stroke-opacity="0.6"/>
+
+    <!-- PANE 3: Bottom-Right Subsplit (Restored) -->
+    <g transform="translate(228, 164)">
+      <rect x="0" y="0" width="202" height="98" rx="4" fill="url(#paneGradRestored)" stroke="#1e4c77" stroke-width="1.2"/>
+      <rect x="10" y="12" width="50" height="6" rx="1.5" fill="#38ef7d" opacity="0.8"/>
+      <line x1="10" y1="30" x2="120" y2="30" stroke="#00f2fe" stroke-width="2" stroke-linecap="round"/>
+      <line x1="10" y1="44" x2="70" y2="44" stroke="#1d456d" stroke-width="2" stroke-linecap="round"/>
+      <line x1="10" y1="58" x2="135" y2="58" stroke="#1d456d" stroke-width="2" stroke-linecap="round"/>
+      <line x1="10" y1="72" x2="100" y2="72" stroke="#38ef7d" stroke-width="2" stroke-linecap="round"/>
+    </g>
+
+    <!-- Corner Alignment Anchor Nodes -->
+    <circle cx="0" cy="0" r="3.5" fill="#00f2fe" filter="url(#neonGlow)"/>
+    <circle cx="440" cy="0" r="3.5" fill="#00f2fe" filter="url(#neonGlow)"/>
+    <circle cx="0" cy="280" r="3.5" fill="#00f2fe" filter="url(#neonGlow)"/>
+    <circle cx="440" cy="280" r="3.5" fill="#00f2fe" filter="url(#neonGlow)"/>
+  </g>
+
+  <!-- Horizontal Datum Line across footer of the diagram -->
+  <line x1="80" y1="455" x2="1120" y2="455" stroke="#102b44" stroke-width="1.2"/>
+  <circle cx="600" cy="455" r="3" fill="#00f2fe"/>
+
+  <!-- ==================== CLEAN DEVELOPER TEXT (MAX 3 WORDS) ==================== -->
+  <g transform="translate(600, 528)" text-anchor="middle">
+    <!-- Pill Subtitle Badge -->
+    <rect x="-125" y="-36" width="250" height="26" rx="13" fill="#081d30" stroke="#00f2fe" stroke-width="1.2" opacity="0.95"/>
+    <circle cx="-100" cy="-23" r="3.5" fill="#38ef7d" filter="url(#neonGlow)"/>
+    <text x="-86" y="-19" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', monospace" font-size="11" font-weight="700" fill="#00f2fe" letter-spacing="3" text-anchor="start">WORKSPACE RECOVERY</text>
+
+    <!-- Main Title: Exactly 2 words (<= 3 words limit) -->
+    <text x="0" y="34" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', 'Segoe UI', sans-serif" font-size="44" font-weight="800" fill="#ffffff" letter-spacing="1">
+      REFORGING <tspan fill="#00f2fe">LAYOUT</tspan>
+    </text>
+  </g>
+</svg>

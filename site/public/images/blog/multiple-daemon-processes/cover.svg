@@ -1,0 +1,348 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <defs>
+    <!-- Background Radiant Gradients -->
+    <radialGradient id="bgGrad" cx="50%" cy="38%" r="68%">
+      <stop offset="0%" stop-color="#0e233d" stop-opacity="0.95"/>
+      <stop offset="42%" stop-color="#081423" stop-opacity="0.98"/>
+      <stop offset="100%" stop-color="#03070e" stop-opacity="1.0"/>
+    </radialGradient>
+
+    <!-- Gear 1 Glow -->
+    <radialGradient id="gear1Glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.22"/>
+      <stop offset="60%" stop-color="#0066cc" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Gear 2 Glow -->
+    <radialGradient id="gear2Glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#38ef7d" stop-opacity="0.18"/>
+      <stop offset="60%" stop-color="#0099ff" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Lock Central Ambient Aura -->
+    <radialGradient id="lockAura" cx="50%" cy="45%" r="50%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.45"/>
+      <stop offset="40%" stop-color="#0072ff" stop-opacity="0.2"/>
+      <stop offset="75%" stop-color="#081b33" stop-opacity="0.05"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Gear Body Metallic Gradients -->
+    <linearGradient id="gearGrad1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#19426b"/>
+      <stop offset="50%" stop-color="#0e243a"/>
+      <stop offset="100%" stop-color="#071321"/>
+    </linearGradient>
+
+    <linearGradient id="gearGrad2" x1="100%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#14465e"/>
+      <stop offset="50%" stop-color="#0d2539"/>
+      <stop offset="100%" stop-color="#061421"/>
+    </linearGradient>
+
+    <!-- Lock Body Gradient -->
+    <linearGradient id="lockBodyGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1a4269"/>
+      <stop offset="35%" stop-color="#102840"/>
+      <stop offset="100%" stop-color="#071422"/>
+    </linearGradient>
+
+    <!-- Shackle Metal Gradient -->
+    <linearGradient id="shackleGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#0099dd"/>
+      <stop offset="25%" stop-color="#00f2fe"/>
+      <stop offset="50%" stop-color="#ffffff"/>
+      <stop offset="75%" stop-color="#00f2fe"/>
+      <stop offset="100%" stop-color="#0077aa"/>
+    </linearGradient>
+
+    <!-- Cyan to Teal Stroke Gradient -->
+    <linearGradient id="cyanTealGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00f2fe"/>
+      <stop offset="50%" stop-color="#00c3ff"/>
+      <stop offset="100%" stop-color="#38ef7d"/>
+    </linearGradient>
+
+    <!-- Shackle Drop Shadow / Glow -->
+    <filter id="neonGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="4.5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <filter id="lockShadow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="10" result="shadowBlur"/>
+      <feOffset in="shadowBlur" dx="0" dy="6" result="offsetBlur"/>
+      <feFlood flood-color="#000000" flood-opacity="0.9" result="shadowColor"/>
+      <feComposite in="shadowColor" in2="offsetBlur" operator="in" result="shadow"/>
+      <feMerge>
+        <feMergeNode in="shadow"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <filter id="textGlow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="14" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Dot Matrix Pattern -->
+    <pattern id="dotGrid" x="0" y="0" width="28" height="28" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.1" fill="#1b395a" opacity="0.32"/>
+    </pattern>
+
+    <!-- Tech Grid Lines -->
+    <pattern id="techGrid" x="0" y="0" width="112" height="112" patternUnits="userSpaceOnUse">
+      <path d="M 112 0 L 0 0 0 112" fill="none" stroke="#16314f" stroke-width="0.75" opacity="0.22"/>
+    </pattern>
+  </defs>
+
+  <!-- Base Canvas Background -->
+  <rect width="1200" height="630" fill="#03070e"/>
+  <rect width="1200" height="630" fill="url(#bgGrad)"/>
+  <rect width="1200" height="630" fill="url(#dotGrid)"/>
+  <rect width="1200" height="630" fill="url(#techGrid)"/>
+
+  <!-- Subtle Vignette / Terminal UI Frame -->
+  <rect x="24" y="24" width="1152" height="582" rx="14" fill="none" stroke="#153657" stroke-width="1.2" opacity="0.6"/>
+  <rect x="32" y="32" width="1136" height="566" rx="10" fill="none" stroke="#00f2fe" stroke-width="0.75" stroke-dasharray="12 12" opacity="0.25"/>
+
+  <!-- Terminal Corner Accents -->
+  <path d="M 42 58 L 42 42 L 58 42" fill="none" stroke="#00f2fe" stroke-width="2.2" opacity="0.75"/>
+  <path d="M 1158 58 L 1158 42 L 1142 42" fill="none" stroke="#00f2fe" stroke-width="2.2" opacity="0.75"/>
+  <path d="M 42 572 L 42 588 L 58 588" fill="none" stroke="#00f2fe" stroke-width="2.2" opacity="0.75"/>
+  <path d="M 1158 572 L 1158 588 L 1142 588" fill="none" stroke="#00f2fe" stroke-width="2.2" opacity="0.75"/>
+
+  <!-- Top Terminal UI Bar (Abstract - No Text) -->
+  <g transform="translate(60, 56)" opacity="0.85">
+    <circle cx="0" cy="0" r="4.5" fill="#ff5f56" opacity="0.85"/>
+    <circle cx="16" cy="0" r="4.5" fill="#ffbd2e" opacity="0.85"/>
+    <circle cx="32" cy="0" r="4.5" fill="#27c93f" opacity="0.85"/>
+    <line x1="56" y1="0" x2="340" y2="0" stroke="#1d436a" stroke-width="1.5"/>
+    <line x1="355" y1="0" x2="385" y2="0" stroke="#00f2fe" stroke-width="1.5" opacity="0.7"/>
+    <line x1="400" y1="0" x2="1080" y2="0" stroke="#1d436a" stroke-width="1.5" stroke-dasharray="10 6"/>
+  </g>
+
+  <!-- Ambient Light Halos behind Gears -->
+  <circle cx="475" cy="240" r="210" fill="url(#gear1Glow)"/>
+  <circle cx="725" cy="240" r="210" fill="url(#gear2Glow)"/>
+  <circle cx="600" cy="240" r="170" fill="url(#lockAura)"/>
+
+  <!-- Left Side Data Bus Lines (Abstract Shapes) -->
+  <g stroke="#173b5e" stroke-width="1.5" fill="none" opacity="0.65">
+    <path d="M 110 240 L 300 240"/>
+    <path d="M 150 160 L 250 160 L 310 215"/>
+    <path d="M 150 320 L 250 320 L 310 265"/>
+    <circle cx="110" cy="240" r="3" fill="#00f2fe"/>
+    <circle cx="150" cy="160" r="3" fill="#00f2fe"/>
+    <circle cx="150" cy="320" r="3" fill="#00f2fe"/>
+  </g>
+  <circle cx="210" cy="240" r="2.5" fill="#00f2fe" filter="url(#neonGlow)"/>
+
+  <!-- Right Side Data Bus Lines (Abstract Shapes) -->
+  <g stroke="#173b5e" stroke-width="1.5" fill="none" opacity="0.65">
+    <path d="M 1090 240 L 900 240"/>
+    <path d="M 1050 160 L 950 160 L 890 215"/>
+    <path d="M 1050 320 L 950 320 L 890 265"/>
+    <circle cx="1090" cy="240" r="3" fill="#38ef7d"/>
+    <circle cx="1050" cy="160" r="3" fill="#38ef7d"/>
+    <circle cx="1050" cy="320" r="3" fill="#38ef7d"/>
+  </g>
+  <circle cx="990" cy="240" r="2.5" fill="#38ef7d" filter="url(#neonGlow)"/>
+
+  <!-- ==================== LEFT GEAR (PROCESS A) ==================== -->
+  <g id="gear-left">
+    <!-- Telemetry Arcs & Measurement Circles -->
+    <circle cx="475" cy="240" r="162" fill="none" stroke="#153655" stroke-width="1.2" stroke-dasharray="6 6"/>
+    <path d="M 313 240 A 162 162 0 0 1 475 78" fill="none" stroke="#00f2fe" stroke-width="2.2" stroke-dasharray="20 14" opacity="0.8" filter="url(#neonGlow)"/>
+    <circle cx="475" cy="78" r="4" fill="#00f2fe" filter="url(#neonGlow)"/>
+    <circle cx="313" cy="240" r="4" fill="#00f2fe" filter="url(#neonGlow)"/>
+
+    <!-- Outer Gear Body Silhouette with Teal Stroke -->
+    <path d="M 577.00 240.00 L 576.50 250.05 L 608.24 261.72 L 604.47 278.25 L 570.81 274.98 L 566.90 284.26 L 562.09 293.10 L 585.62 317.38 L 575.05 330.63 L 546.15 313.09 L 538.60 319.75 L 530.43 325.63 L 541.10 357.71 L 525.82 365.07 L 507.39 336.72 L 497.70 339.44 L 487.78 341.20 L 483.48 374.73 L 466.52 374.73 L 462.22 341.20 L 452.30 339.44 L 442.61 336.72 L 424.18 365.07 L 408.90 357.71 L 419.57 325.63 L 411.40 319.75 L 403.85 313.09 L 374.95 330.63 L 364.38 317.38 L 387.91 293.10 L 383.10 284.26 L 379.19 274.98 L 345.53 278.25 L 341.76 261.72 L 373.50 250.05 L 373.00 240.00 L 373.50 229.95 L 341.76 218.28 L 345.53 201.75 L 379.19 205.02 L 383.10 195.74 L 387.91 186.90 L 364.38 162.62 L 374.95 149.37 L 403.85 166.91 L 411.40 160.25 L 419.57 154.37 L 408.90 122.29 L 424.18 114.93 L 442.61 143.28 L 452.30 140.56 L 462.22 138.80 L 466.52 105.27 L 483.48 105.27 L 487.78 138.80 L 497.70 140.56 L 507.39 143.28 L 525.82 114.93 L 541.10 122.29 L 530.43 154.37 L 538.60 160.25 L 546.15 166.91 L 575.05 149.37 L 585.62 162.62 L 562.09 186.90 L 566.90 195.74 L 570.81 205.02 L 604.47 201.75 L 608.24 218.28 L 576.50 229.95 L 577.00 240.00 Z" fill="url(#gearGrad1)" stroke="#00f2fe" stroke-width="2.4" filter="url(#neonGlow)"/>
+    
+    <!-- Pitch Reference Ring -->
+    <circle cx="475" cy="240" r="118" fill="none" stroke="#00c3ff" stroke-width="1.2" stroke-dasharray="5 5" opacity="0.55"/>
+
+    <!-- Inner Recessed Hub Rim -->
+    <circle cx="475" cy="240" r="94" fill="#061220" stroke="#173c60" stroke-width="3.5"/>
+    <circle cx="475" cy="240" r="90" fill="none" stroke="#00f2fe" stroke-width="1" opacity="0.4"/>
+
+    <!-- Spokes / Weight-Reduction Cutouts -->
+    <circle cx="539.00" cy="240.00" r="15" fill="#061220" stroke="#00f2fe" stroke-width="1.8" stroke-opacity="0.8"/>
+<circle cx="539.00" cy="240.00" r="6.75" fill="#00f2fe" opacity="0.5"/>
+<circle cx="507.00" cy="295.43" r="15" fill="#061220" stroke="#00f2fe" stroke-width="1.8" stroke-opacity="0.8"/>
+<circle cx="507.00" cy="295.43" r="6.75" fill="#00f2fe" opacity="0.5"/>
+<circle cx="443.00" cy="295.43" r="15" fill="#061220" stroke="#00f2fe" stroke-width="1.8" stroke-opacity="0.8"/>
+<circle cx="443.00" cy="295.43" r="6.75" fill="#00f2fe" opacity="0.5"/>
+<circle cx="411.00" cy="240.00" r="15" fill="#061220" stroke="#00f2fe" stroke-width="1.8" stroke-opacity="0.8"/>
+<circle cx="411.00" cy="240.00" r="6.75" fill="#00f2fe" opacity="0.5"/>
+<circle cx="443.00" cy="184.57" r="15" fill="#061220" stroke="#00f2fe" stroke-width="1.8" stroke-opacity="0.8"/>
+<circle cx="443.00" cy="184.57" r="6.75" fill="#00f2fe" opacity="0.5"/>
+<circle cx="507.00" cy="184.57" r="15" fill="#061220" stroke="#00f2fe" stroke-width="1.8" stroke-opacity="0.8"/>
+<circle cx="507.00" cy="184.57" r="6.75" fill="#00f2fe" opacity="0.5"/>
+
+    <!-- Center Axle / Bearing Hub -->
+    <circle cx="475" cy="240" r="35" fill="#0e263e" stroke="#00f2fe" stroke-width="2.5" filter="url(#neonGlow)"/>
+    <circle cx="475" cy="240" r="26" fill="#050e18" stroke="#1a456e" stroke-width="1.5"/>
+    <circle cx="475" cy="240" r="14" fill="#00f2fe" opacity="0.85" filter="url(#neonGlow)"/>
+    <circle cx="475" cy="240" r="6" fill="#ffffff"/>
+
+    <!-- Circular Tick Ring around Hub -->
+    <circle cx="475" cy="240" r="45" fill="none" stroke="#00f2fe" stroke-width="1.5" stroke-dasharray="2 7" opacity="0.6"/>
+
+    <!-- Bottom Abstract Technical Glyph (No Text) -->
+    <g transform="translate(475, 415)">
+      <rect x="-45" y="-12" width="90" height="24" rx="4" fill="#071626" stroke="#00f2fe" stroke-width="1.2" stroke-opacity="0.6"/>
+      <circle cx="-28" cy="0" r="3" fill="#00f2fe"/>
+      <line x1="-16" y1="0" x2="30" y2="0" stroke="#00f2fe" stroke-width="2" stroke-dasharray="6 4" opacity="0.8"/>
+    </g>
+  </g>
+
+  <!-- ==================== RIGHT GEAR (PROCESS B) ==================== -->
+  <g id="gear-right">
+    <!-- Telemetry Arcs & Measurement Circles -->
+    <circle cx="725" cy="240" r="162" fill="none" stroke="#153655" stroke-width="1.2" stroke-dasharray="6 6"/>
+    <path d="M 887 240 A 162 162 0 0 1 725 402" fill="none" stroke="#38ef7d" stroke-width="2.2" stroke-dasharray="20 14" opacity="0.8" filter="url(#neonGlow)"/>
+    <circle cx="725" cy="402" r="4" fill="#38ef7d" filter="url(#neonGlow)"/>
+    <circle cx="887" cy="240" r="4" fill="#38ef7d" filter="url(#neonGlow)"/>
+
+    <!-- Outer Gear Body Silhouette with Cyan/Green Stroke -->
+    <path d="M 824.44 262.70 L 821.72 272.39 L 850.07 290.82 L 842.71 306.10 L 810.63 295.43 L 804.75 303.60 L 798.09 311.15 L 815.63 340.05 L 802.38 350.62 L 778.10 327.09 L 769.26 331.90 L 759.98 335.81 L 763.25 369.47 L 746.72 373.24 L 735.05 341.50 L 725.00 342.00 L 714.95 341.50 L 703.28 373.24 L 686.75 369.47 L 690.02 335.81 L 680.74 331.90 L 671.90 327.09 L 647.62 350.62 L 634.37 340.05 L 651.91 311.15 L 645.25 303.60 L 639.37 295.43 L 607.29 306.10 L 599.93 290.82 L 628.28 272.39 L 625.56 262.70 L 623.80 252.78 L 590.27 248.48 L 590.27 231.52 L 623.80 227.22 L 625.56 217.30 L 628.28 207.61 L 599.93 189.18 L 607.29 173.90 L 639.37 184.57 L 645.25 176.40 L 651.91 168.85 L 634.37 139.95 L 647.62 129.38 L 671.90 152.91 L 680.74 148.10 L 690.02 144.19 L 686.75 110.53 L 703.28 106.76 L 714.95 138.50 L 725.00 138.00 L 735.05 138.50 L 746.72 106.76 L 763.25 110.53 L 759.98 144.19 L 769.26 148.10 L 778.10 152.91 L 802.38 129.38 L 815.63 139.95 L 798.09 168.85 L 804.75 176.40 L 810.63 184.57 L 842.71 173.90 L 850.07 189.18 L 821.72 207.61 L 824.44 217.30 L 826.20 227.22 L 859.73 231.52 L 859.73 248.48 L 826.20 252.78 L 824.44 262.70 Z" fill="url(#gearGrad2)" stroke="#00c3ff" stroke-width="2.4" filter="url(#neonGlow)"/>
+
+    <!-- Pitch Reference Ring -->
+    <circle cx="725" cy="240" r="118" fill="none" stroke="#38ef7d" stroke-width="1.2" stroke-dasharray="5 5" opacity="0.55"/>
+
+    <!-- Inner Recessed Hub Rim -->
+    <circle cx="725" cy="240" r="94" fill="#061220" stroke="#173c60" stroke-width="3.5"/>
+    <circle cx="725" cy="240" r="90" fill="none" stroke="#38ef7d" stroke-width="1" opacity="0.4"/>
+
+    <!-- Spokes / Weight-Reduction Cutouts -->
+    <circle cx="780.43" cy="272.00" r="15" fill="#061220" stroke="#38ef7d" stroke-width="1.8" stroke-opacity="0.8"/>
+<circle cx="780.43" cy="272.00" r="6.75" fill="#38ef7d" opacity="0.5"/>
+<circle cx="725.00" cy="304.00" r="15" fill="#061220" stroke="#38ef7d" stroke-width="1.8" stroke-opacity="0.8"/>
+<circle cx="725.00" cy="304.00" r="6.75" fill="#38ef7d" opacity="0.5"/>
+<circle cx="669.57" cy="272.00" r="15" fill="#061220" stroke="#38ef7d" stroke-width="1.8" stroke-opacity="0.8"/>
+<circle cx="669.57" cy="272.00" r="6.75" fill="#38ef7d" opacity="0.5"/>
+<circle cx="669.57" cy="208.00" r="15" fill="#061220" stroke="#38ef7d" stroke-width="1.8" stroke-opacity="0.8"/>
+<circle cx="669.57" cy="208.00" r="6.75" fill="#38ef7d" opacity="0.5"/>
+<circle cx="725.00" cy="176.00" r="15" fill="#061220" stroke="#38ef7d" stroke-width="1.8" stroke-opacity="0.8"/>
+<circle cx="725.00" cy="176.00" r="6.75" fill="#38ef7d" opacity="0.5"/>
+<circle cx="780.43" cy="208.00" r="15" fill="#061220" stroke="#38ef7d" stroke-width="1.8" stroke-opacity="0.8"/>
+<circle cx="780.43" cy="208.00" r="6.75" fill="#38ef7d" opacity="0.5"/>
+
+    <!-- Center Axle / Bearing Hub -->
+    <circle cx="725" cy="240" r="35" fill="#0e263e" stroke="#38ef7d" stroke-width="2.5" filter="url(#neonGlow)"/>
+    <circle cx="725" cy="240" r="26" fill="#050e18" stroke="#1a456e" stroke-width="1.5"/>
+    <circle cx="725" cy="240" r="14" fill="#38ef7d" opacity="0.85" filter="url(#neonGlow)"/>
+    <circle cx="725" cy="240" r="6" fill="#ffffff"/>
+
+    <!-- Circular Tick Ring around Hub -->
+    <circle cx="725" cy="240" r="45" fill="none" stroke="#38ef7d" stroke-width="1.5" stroke-dasharray="2 7" opacity="0.6"/>
+
+    <!-- Bottom Abstract Technical Glyph (No Text) -->
+    <g transform="translate(725, 415)">
+      <rect x="-45" y="-12" width="90" height="24" rx="4" fill="#071626" stroke="#38ef7d" stroke-width="1.2" stroke-opacity="0.6"/>
+      <circle cx="-28" cy="0" r="3" fill="#38ef7d"/>
+      <line x1="-16" y1="0" x2="30" y2="0" stroke="#38ef7d" stroke-width="2" stroke-dasharray="6 4" opacity="0.8"/>
+    </g>
+  </g>
+
+  <!-- ==================== THE CENTRAL LOCK (ONE LOCK) ==================== -->
+  <g id="central-lock" transform="translate(600, 240)" filter="url(#lockShadow)">
+    <!-- Radial Soft Core Glow directly behind lock -->
+    
+
+    <!-- Interlocking Clamp Brackets / Mechanical Clasps -->
+    <path d="M -80 -12 L -96 -12 L -96 12 L -80 12" fill="none" stroke="#00f2fe" stroke-width="2.5" opacity="0.85" filter="url(#neonGlow)"/>
+    <path d="M 80 -12 L 96 -12 L 96 12 L 80 12" fill="none" stroke="#38ef7d" stroke-width="2.5" opacity="0.85" filter="url(#neonGlow)"/>
+
+    <!-- Shackle (Heavy Hardened Cyber U-Bar) -->
+    <!-- Outer thick glowing shackle bar -->
+    <path d="M -34 8 
+             L -34 -48 
+             C -34 -85, 34 -85, 34 -48 
+             L 34 8" 
+          fill="none" stroke="url(#shackleGrad)" stroke-width="16" stroke-linecap="round" filter="url(#neonGlow)"/>
+    <!-- Inner bright metallic core highlight -->
+    <path d="M -34 8 
+             L -34 -48 
+             C -34 -83, 34 -83, 34 -48 
+             L 34 8" 
+          fill="none" stroke="#ffffff" stroke-width="4" stroke-linecap="round" opacity="0.95"/>
+
+    <!-- Shackle Mounting Collars -->
+    <rect x="-45" y="0" width="22" height="14" rx="3.5" fill="#08192c" stroke="#00f2fe" stroke-width="2.2"/>
+    <rect x="23" y="0" width="22" height="14" rx="3.5" fill="#08192c" stroke="#00f2fe" stroke-width="2.2"/>
+
+    <!-- Padlock Solid Heavy Body -->
+    <rect x="-56" y="8" width="112" height="92" rx="16" fill="url(#lockBodyGrad)" stroke="url(#cyanTealGrad)" stroke-width="3.2" filter="url(#neonGlow)"/>
+
+    <!-- Inner Chamfer Bevel -->
+    <rect x="-48" y="16" width="96" height="76" rx="10" fill="none" stroke="#00f2fe" stroke-width="1.2" opacity="0.45" stroke-dasharray="8 4"/>
+
+    <!-- Precision Corner Accents on Padlock Face -->
+    <g stroke="#00f2fe" stroke-width="2" opacity="0.8">
+      <line x1="-42" y1="22" x2="-34" y2="22"/>
+      <line x1="-42" y1="22" x2="-42" y2="30"/>
+      <line x1="42" y1="22" x2="34" y2="22"/>
+      <line x1="42" y1="22" x2="42" y2="30"/>
+      <line x1="-42" y1="84" x2="-34" y2="84"/>
+      <line x1="-42" y1="84" x2="-42" y2="76"/>
+      <line x1="42" y1="84" x2="34" y2="84"/>
+      <line x1="42" y1="84" x2="42" y2="76"/>
+    </g>
+
+    <!-- Keyhole / Cryptographic Core Aperture -->
+    <circle cx="0" cy="45" r="15" fill="#040b14" stroke="#00f2fe" stroke-width="2.5" filter="url(#neonGlow)"/>
+    <path d="M -4.5 45 L 4.5 45 L 6.5 66 L -6.5 66 Z" fill="#040b14" stroke="#00f2fe" stroke-width="2"/>
+    
+    <!-- Glowing Core Center -->
+    <circle cx="0" cy="45" r="6.5" fill="#38ef7d" filter="url(#neonGlow)"/>
+    <circle cx="0" cy="45" r="2.8" fill="#ffffff"/>
+
+    <!-- Status Indicator LEDs -->
+    <circle cx="-34" cy="78" r="3.2" fill="#00f2fe" filter="url(#neonGlow)"/>
+    <circle cx="34" cy="78" r="3.2" fill="#38ef7d" filter="url(#neonGlow)"/>
+
+    <!-- Micro status bar (Abstract geometric ticks - No words) -->
+    <rect x="-20" y="74" width="40" height="8" rx="2" fill="#071b2e" stroke="#00f2fe" stroke-width="0.8" opacity="0.8"/>
+    <line x1="-14" y1="78" x2="14" y2="78" stroke="#00f2fe" stroke-width="2" stroke-linecap="round" stroke-dasharray="4 3"/>
+  </g>
+
+  <!-- ==================== TITLE TEXT (EXACTLY 3 WORDS) ==================== -->
+  <g transform="translate(600, 526)" text-anchor="middle">
+    <!-- Glow Backdrop for Title -->
+    <text font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'JetBrains Mono', sans-serif" 
+          font-size="44" font-weight="900" letter-spacing="2.5" fill="#00f2fe" opacity="0.38" filter="url(#textGlow)">
+      MULTIPLE DAEMON PROCESSES
+    </text>
+
+    <!-- Crisp Primary Title: Exactly 3 Words -->
+    <text font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'JetBrains Mono', sans-serif" 
+          font-size="44" font-weight="900" letter-spacing="2.5">
+      <tspan fill="#ffffff">MULTIPLE </tspan>
+      <tspan fill="#00f2fe">DAEMON </tspan>
+      <tspan fill="#38ef7d">PROCESSES</tspan>
+    </text>
+
+    <!-- Futuristic Terminal Accent Line & Reticles -->
+    <line x1="-310" y1="20" x2="310" y2="20" stroke="url(#cyanTealGrad)" stroke-width="2.5" filter="url(#neonGlow)"/>
+    <circle cx="-310" cy="20" r="3.5" fill="#00f2fe"/>
+    <circle cx="310" cy="20" r="3.5" fill="#38ef7d"/>
+    <circle cx="0" cy="20" r="2.5" fill="#ffffff"/>
+
+    <!-- Geometric abstract ticks on baseline (No words) -->
+    <line x1="-310" y1="32" x2="-260" y2="32" stroke="#1d4a75" stroke-width="1.5"/>
+    <circle cx="-260" cy="32" r="2" fill="#00f2fe" opacity="0.7"/>
+    <line x1="310" y1="32" x2="260" y2="32" stroke="#1d4a75" stroke-width="1.5"/>
+    <circle cx="260" cy="32" r="2" fill="#38ef7d" opacity="0.7"/>
+  </g>
+</svg>

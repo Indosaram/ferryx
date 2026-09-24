@@ -1,0 +1,307 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <defs>
+    <!-- Background Gradients -->
+    <radialGradient id="bgGlow" cx="50%" cy="42%" r="68%">
+      <stop offset="0%" stop-color="#092238" stop-opacity="0.95"/>
+      <stop offset="50%" stop-color="#061526" stop-opacity="0.98"/>
+      <stop offset="100%" stop-color="#020710" stop-opacity="1"/>
+    </radialGradient>
+
+    <radialGradient id="centerPulse" cx="50%" cy="40%" r="35%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.25"/>
+      <stop offset="45%" stop-color="#0d9488" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#020710" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="sparkPulse" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.45"/>
+      <stop offset="40%" stop-color="#00f2fe" stop-opacity="0.2"/>
+      <stop offset="100%" stop-color="#00f2fe" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Gradients -->
+    <linearGradient id="wrenchGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#163957"/>
+      <stop offset="45%" stop-color="#0c2033"/>
+      <stop offset="100%" stop-color="#061320"/>
+    </linearGradient>
+
+    <linearGradient id="wrenchBorderGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="35%" stop-color="#00f2fe"/>
+      <stop offset="70%" stop-color="#2dd4bf"/>
+      <stop offset="100%" stop-color="#0ea5e9"/>
+    </linearGradient>
+
+    <linearGradient id="linkGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#10263c"/>
+      <stop offset="50%" stop-color="#0a1a2b"/>
+      <stop offset="100%" stop-color="#040c16"/>
+    </linearGradient>
+
+    <linearGradient id="accentCyanTeal" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00f2fe"/>
+      <stop offset="50%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#2dd4bf"/>
+    </linearGradient>
+
+    <!-- Grid Pattern -->
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#13273c" stroke-width="0.75" opacity="0.45"/>
+      <circle cx="40" cy="40" r="1" fill="#00f2fe" opacity="0.2"/>
+    </pattern>
+
+    <!-- Glow & Shadow Filters -->
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <filter id="strongGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="12" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <filter id="dropShadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="10"/>
+      <feOffset dx="0" dy="8" result="offsetblur"/>
+      <feFlood flood-color="#010408" flood-opacity="0.95"/>
+      <feComposite in2="offsetblur" operator="in"/>
+      <feMerge>
+        <feMergeNode/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background Base Layers -->
+  <rect width="1200" height="630" fill="#020710"/>
+  <rect width="1200" height="630" fill="url(#bgGlow)"/>
+  <rect width="1200" height="630" fill="url(#grid)"/>
+  <rect width="1200" height="630" fill="url(#centerPulse)"/>
+
+  <!-- Decorative Circuit Data Lines & Bus Traces -->
+  <g opacity="0.32">
+    <!-- Top Left trace -->
+    <path d="M 0 100 L 280 100 L 360 180" fill="none" stroke="#00f2fe" stroke-width="1.2" stroke-dasharray="6 6"/>
+    <circle cx="360" cy="180" r="3" fill="#00f2fe"/>
+    
+    <!-- Top Right trace -->
+    <path d="M 1200 100 L 920 100 L 840 180" fill="none" stroke="#2dd4bf" stroke-width="1.2" stroke-dasharray="6 6"/>
+    <circle cx="840" cy="180" r="3" fill="#2dd4bf"/>
+
+    <!-- Bottom Left trace -->
+    <path d="M 60 520 L 260 520 L 340 440" fill="none" stroke="#38bdf8" stroke-width="1.2" stroke-dasharray="4 8"/>
+    <circle cx="340" cy="440" r="3" fill="#38bdf8"/>
+
+    <!-- Bottom Right trace -->
+    <path d="M 1140 520 L 940 520 L 860 440" fill="none" stroke="#2dd4bf" stroke-width="1.2" stroke-dasharray="4 8"/>
+    <circle cx="860" cy="440" r="3" fill="#2dd4bf"/>
+  </g>
+
+  <!-- Terminal HUD Telemetry / Corner Guides -->
+  <g font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace" font-size="11" fill="#4d728f" opacity="0.8">
+    <text x="60" y="55">// PROTOCOL: REPLAY_SYNC_CHECK</text>
+    <text x="60" y="73">// STATE: DISCONNECTED_PAIR</text>
+    <text x="1140" y="55" text-anchor="end">FERRYX :: TROUBLESHOOT</text>
+    <text x="1140" y="73" text-anchor="end">[DIAGNOSTIC_RUN: #042]</text>
+
+    <!-- Corner Reticles -->
+    <path d="M 50 65 L 50 50 L 65 50" fill="none" stroke="#00f2fe" stroke-width="1.5" opacity="0.6"/>
+    <path d="M 1150 65 L 1150 50 L 1135 50" fill="none" stroke="#00f2fe" stroke-width="1.5" opacity="0.6"/>
+    <path d="M 50 565 L 50 580 L 65 580" fill="none" stroke="#00f2fe" stroke-width="1.5" opacity="0.6"/>
+    <path d="M 1150 565 L 1150 580 L 1135 580" fill="none" stroke="#00f2fe" stroke-width="1.5" opacity="0.6"/>
+
+    <!-- Status markers in bottom margins -->
+    <text x="60" y="575">ERROR_CODE: ERR_LINK_LOST (0x19)</text>
+    <text x="1140" y="575" text-anchor="end">REMEDY: WRENCH_INSPECTION_OK</text>
+  </g>
+
+  <!-- ==================== CENTRAL VISUAL: WRENCH OVER BROKEN LINK ==================== -->
+  <g transform="translate(600, 245)">
+    <!-- Decorative Target Reticle & Concentric HUD Circles -->
+    <circle cx="0" cy="0" r="235" fill="none" stroke="#0e283d" stroke-width="1.5"/>
+    <circle cx="0" cy="0" r="235" fill="none" stroke="#00f2fe" stroke-width="2" stroke-dasharray="24 160" opacity="0.65" filter="url(#glow)"/>
+    <circle cx="0" cy="0" r="200" fill="none" stroke="#153654" stroke-width="1" stroke-dasharray="5 7"/>
+    <circle cx="0" cy="0" r="160" fill="none" stroke="#00f2fe" stroke-width="1" opacity="0.25"/>
+
+    <!-- Reticle Tick Marks & Crosshairs -->
+    <line x1="-245" y1="0" x2="-215" y2="0" stroke="#00f2fe" stroke-width="1.5" opacity="0.7"/>
+    <line x1="215" y1="0" x2="245" y2="0" stroke="#00f2fe" stroke-width="1.5" opacity="0.7"/>
+    <line x1="0" y1="-245" x2="0" y2="-215" stroke="#00f2fe" stroke-width="1.5" opacity="0.7"/>
+    <line x1="0" y1="215" x2="0" y2="245" stroke="#00f2fe" stroke-width="1.5" opacity="0.7"/>
+
+    <!-- Sub-reticle bracket lines -->
+    <path d="M -180 -120 L -210 -120 L -210 120 L -180 120" fill="none" stroke="#173e60" stroke-width="2"/>
+    <path d="M 180 -120 L 210 -120 L 210 120 L 180 120" fill="none" stroke="#173e60" stroke-width="2"/>
+
+    <!-- ==================== LAYER 1: BROKEN LINK ==================== -->
+    <g id="broken-link">
+      <!-- Glow under broken gap -->
+      <circle cx="0" cy="0" r="75" fill="url(#sparkPulse)"/>
+
+      <!-- LEFT CHAIN LINK (Tilted -20 deg, fractured at inner edge) -->
+      <g transform="translate(-85, 15) rotate(-20)">
+        <!-- Outer path with jagged break on right -->
+        <path d="M -80 -42 
+                 C -106 -42 -124 -24 -124 0 
+                 C -124 24 -106 42 -80 42 
+                 L 12 42 
+                 L 26 22 
+                 L 4 0 
+                 L 28 -22 
+                 L 10 -42 Z" 
+              fill="url(#linkGrad)" stroke="url(#wrenchBorderGrad)" stroke-width="3" filter="url(#glow)"/>
+        <!-- Inner cutout -->
+        <path d="M -80 -18 
+                 C -92 -18 -100 -9 -100 0 
+                 C -100 9 -92 18 -80 18 
+                 L -15 18 
+                 C -7 18 0 10 0 0 
+                 C 0 -10 -7 -18 -15 -18 Z" 
+              fill="#030c18" stroke="#00f2fe" stroke-width="1.5" opacity="0.75"/>
+        <!-- Sensor nodes on link -->
+        <circle cx="-50" cy="0" r="3.5" fill="#2dd4bf" filter="url(#glow)"/>
+        <line x1="-36" y1="0" x2="-20" y2="0" stroke="#2dd4bf" stroke-width="2" stroke-linecap="round"/>
+        <circle cx="-80" cy="0" r="2.5" fill="#38bdf8"/>
+      </g>
+
+      <!-- RIGHT CHAIN LINK (Tilted -20 deg, fractured at left inner edge) -->
+      <g transform="translate(85, -15) rotate(-20)">
+        <!-- Outer path with jagged break on left -->
+        <path d="M -10 -42 
+                 L 10 -22 
+                 L -12 0 
+                 L 8 22 
+                 L -6 42 
+                 L 80 42 
+                 C 106 42 124 24 124 0 
+                 C 124 -24 106 -42 80 -42 Z" 
+              fill="url(#linkGrad)" stroke="url(#wrenchBorderGrad)" stroke-width="3" filter="url(#glow)"/>
+        <!-- Inner cutout -->
+        <path d="M 15 -18 
+                 C 7 -18 0 -10 0 0 
+                 C 0 10 7 18 15 18 
+                 L 80 18 
+                 C 92 18 100 9 100 0 
+                 C 100 -9 92 -18 80 -18 Z" 
+              fill="#030c18" stroke="#38bdf8" stroke-width="1.5" opacity="0.75"/>
+        <!-- Sensor nodes on link -->
+        <circle cx="50" cy="0" r="3.5" fill="#00f2fe" filter="url(#glow)"/>
+        <line x1="20" y1="0" x2="36" y2="0" stroke="#00f2fe" stroke-width="2" stroke-linecap="round"/>
+        <circle cx="80" cy="0" r="2.5" fill="#2dd4bf"/>
+      </g>
+
+      <!-- FRACTURE ELECTRICAL SPARKS & GLITCH PARTICLES IN GAP -->
+      <g filter="url(#glow)">
+        <!-- Disconnection Spark / Fault Zigzag -->
+        <path d="M -34 22 L -14 -8 L 6 14 L 22 -18 L 38 8" fill="none" stroke="#00f2fe" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M -34 22 L -14 -8 L 6 14 L 22 -18 L 38 8" fill="none" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        
+        <!-- Energy sparks floating around break -->
+        <circle cx="-24" cy="-28" r="3" fill="#38bdf8"/>
+        <circle cx="28" cy="28" r="3" fill="#2dd4bf"/>
+        <circle cx="32" cy="-30" r="2.5" fill="#00f2fe"/>
+        <circle cx="-32" cy="32" r="2.5" fill="#38bdf8"/>
+        <circle cx="-4" cy="4" r="5" fill="#ffffff" filter="url(#strongGlow)"/>
+      </g>
+    </g>
+
+    <!-- ==================== LAYER 2: WRENCH OVER BROKEN LINK ==================== -->
+    <g id="wrench" transform="rotate(40)" filter="url(#dropShadow)">
+      <!-- Soft ambient glow -->
+      <path d="M -22 -160 L 22 -160 L 22 135 C 38 148 44 172 32 192 C 20 212 -20 212 -32 192 C -44 172 -38 148 -22 135 Z"
+            fill="#00f2fe" opacity="0.18" filter="url(#strongGlow)"/>
+
+      <!-- 1. Wrench Shaft -->
+      <rect x="-14" y="-85" width="28" height="215" rx="5" fill="url(#wrenchGrad)" stroke="url(#wrenchBorderGrad)" stroke-width="3"/>
+      <!-- Inner Shaft Recess / Bevel -->
+      <rect x="-5" y="-75" width="10" height="195" rx="3" fill="#040e18" stroke="#00f2fe" stroke-width="1.2" opacity="0.7"/>
+
+      <!-- 2. Wrench Open Head (Clean, Iconic Open-End Jaw Profile) -->
+      <!-- Head center at (0, -115), rotated 15 degrees -->
+      <g transform="translate(0, -115) rotate(15)">
+        <!-- Classic open-end wrench jaw contour:
+             Left neck -> left outer jaw curve -> left jaw tip -> jaw throat -> right jaw tip -> right outer jaw curve -> right neck -->
+        <path d="M -14 30
+                 C -24 22 -44 5 -46 -24
+                 C -47 -46 -36 -68 -18 -78
+                 C -12 -81 -4 -79 0 -72
+                 L -16 -40
+                 C -18 -34 -15 -27 -8 -24
+                 L 8 -17
+                 C 15 -14 23 -18 26 -25
+                 L 38 -55
+                 C 42 -63 50 -63 54 -55
+                 C 60 -42 60 -24 50 -3
+                 C 42 16 26 26 14 30
+                 Z"
+              fill="url(#wrenchGrad)" stroke="url(#wrenchBorderGrad)" stroke-width="3" stroke-linejoin="round"/>
+
+        <!-- Precision tech accents on wrench jaw -->
+        <circle cx="-28" cy="-15" r="3" fill="#2dd4bf" filter="url(#glow)"/>
+        <line x1="-28" y1="-8" x2="-28" y2="4" stroke="#2dd4bf" stroke-width="2"/>
+        <circle cx="30" cy="4" r="2" fill="#00f2fe"/>
+      </g>
+
+      <!-- 3. Wrench Handle Ring / Box End -->
+      <g transform="translate(0, 150)">
+        <!-- Outer Ring -->
+        <circle cx="0" cy="15" r="36" fill="url(#wrenchGrad)" stroke="url(#wrenchBorderGrad)" stroke-width="3"/>
+        <!-- Inner Hex Cutout -->
+        <polygon points="0,0 14,8 14,24 0,32 -14,24 -14,8" fill="#040e18" stroke="#00f2fe" stroke-width="2.2" filter="url(#glow)"/>
+        <!-- Center glowing power core -->
+        <circle cx="0" cy="16" r="4.5" fill="#2dd4bf" filter="url(#glow)"/>
+        <circle cx="0" cy="16" r="2" fill="#ffffff"/>
+      </g>
+
+      <!-- Wrench Calibration / Grip Grooves -->
+      <line x1="-14" y1="-25" x2="-7" y2="-25" stroke="#00f2fe" stroke-width="1.8" stroke-linecap="round"/>
+      <line x1="-14" y1="-5" x2="-5" y2="-5" stroke="#2dd4bf" stroke-width="1.8" stroke-linecap="round"/>
+      <line x1="-14" y1="15" x2="-7" y2="15" stroke="#00f2fe" stroke-width="1.8" stroke-linecap="round"/>
+      <line x1="-14" y1="35" x2="-5" y2="35" stroke="#2dd4bf" stroke-width="1.8" stroke-linecap="round"/>
+      <line x1="-14" y1="55" x2="-7" y2="55" stroke="#00f2fe" stroke-width="1.8" stroke-linecap="round"/>
+
+      <line x1="14" y1="-25" x2="7" y2="-25" stroke="#00f2fe" stroke-width="1.8" stroke-linecap="round"/>
+      <line x1="14" y1="-5" x2="5" y2="-5" stroke="#2dd4bf" stroke-width="1.8" stroke-linecap="round"/>
+      <line x1="14" y1="15" x2="7" y2="15" stroke="#00f2fe" stroke-width="1.8" stroke-linecap="round"/>
+      <line x1="14" y1="35" x2="5" y2="35" stroke="#2dd4bf" stroke-width="1.8" stroke-linecap="round"/>
+      <line x1="14" y1="55" x2="7" y2="55" stroke="#00f2fe" stroke-width="1.8" stroke-linecap="round"/>
+
+      <!-- Center node on wrench -->
+      <circle cx="0" cy="0" r="4.5" fill="#00f2fe" filter="url(#glow)"/>
+      <circle cx="0" cy="0" r="2" fill="#ffffff"/>
+    </g>
+
+    <!-- Foreground Floating HUD Reticle Target (Upper Right) -->
+    <g transform="translate(65, -60)" opacity="0.85">
+      <circle cx="0" cy="0" r="18" fill="none" stroke="#2dd4bf" stroke-width="1.2" stroke-dasharray="4 4"/>
+      <line x1="-24" y1="0" x2="24" y2="0" stroke="#00f2fe" stroke-width="1"/>
+      <line x1="0" y1="-24" x2="0" y2="24" stroke="#00f2fe" stroke-width="1"/>
+      <circle cx="0" cy="0" r="2" fill="#00f2fe" filter="url(#glow)"/>
+    </g>
+  </g>
+
+  <!-- ==================== CLEAN DEVELOPER TEXT (MAX 3 WORDS) ==================== -->
+  <g transform="translate(600, 532)" text-anchor="middle">
+    <!-- Category Pill Badge -->
+    <rect x="-65" y="-52" width="130" height="22" rx="11" fill="#082035" stroke="#00f2fe" stroke-width="1.2" opacity="0.95"/>
+    <text y="-37" font-family="'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace" font-size="11" font-weight="600" fill="#2dd4bf" letter-spacing="1.5">CHECKLIST</text>
+
+    <!-- Main Title (2 Words: PAIRING TROUBLESHOOTING) -->
+    <text y="7" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'JetBrains Mono', sans-serif" font-size="44" font-weight="800" letter-spacing="2.5" fill="#ffffff">
+      PAIRING <tspan fill="#00f2fe">TROUBLESHOOTING</tspan>
+    </text>
+
+    <!-- Glowing Baseline Accent Line -->
+    <line x1="-260" y1="28" x2="260" y2="28" stroke="url(#accentCyanTeal)" stroke-width="2.5" opacity="0.85" filter="url(#glow)"/>
+    <circle cx="0" cy="28" r="4" fill="#00f2fe" filter="url(#glow)"/>
+    <circle cx="0" cy="28" r="1.5" fill="#ffffff"/>
+  </g>
+</svg>

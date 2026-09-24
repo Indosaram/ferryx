@@ -1,0 +1,406 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900" style="background:#080c15; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, 'JetBrains Mono', monospace;">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0a0f1d" />
+      <stop offset="50%" stop-color="#060913" />
+      <stop offset="100%" stop-color="#04060b" />
+    </linearGradient>
+
+    <!-- Card Backgrounds -->
+    <linearGradient id="card-dark" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a" />
+      <stop offset="100%" stop-color="#090e1a" />
+    </linearGradient>
+    <linearGradient id="card-inner" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#141e33" />
+      <stop offset="100%" stop-color="#0c1322" />
+    </linearGradient>
+
+    <!-- Agent Card Gradients -->
+    <linearGradient id="card-agent-teal" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#0c232c" />
+      <stop offset="100%" stop-color="#091722" />
+    </linearGradient>
+    <linearGradient id="card-agent-cyan" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#0a2238" />
+      <stop offset="100%" stop-color="#071526" />
+    </linearGradient>
+    <linearGradient id="card-agent-indigo" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#161c38" />
+      <stop offset="100%" stop-color="#0d1124" />
+    </linearGradient>
+
+    <!-- Accent Highlights -->
+    <linearGradient id="accent-teal" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2dd4bf" />
+      <stop offset="100%" stop-color="#0f766e" />
+    </linearGradient>
+    <linearGradient id="accent-cyan" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#0284c7" />
+    </linearGradient>
+    <linearGradient id="accent-indigo" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#818cf8" />
+      <stop offset="100%" stop-color="#4f46e5" />
+    </linearGradient>
+
+    <!-- Filters for Glow -->
+    <filter id="glow-teal" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+    <filter id="glow-cyan" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <!-- Arrow Markers -->
+    <marker id="arrow-teal" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#14b8a6" />
+    </marker>
+    <marker id="arrow-cyan" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#38bdf8" />
+    </marker>
+    <marker id="arrow-indigo" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#818cf8" />
+    </marker>
+  </defs>
+
+  <!-- Background Canvas -->
+  <rect width="1600" height="900" fill="url(#bg-grad)" />
+
+  <!-- Subtle grid dots pattern -->
+  <g opacity="0.06" fill="#38bdf8">
+    <pattern id="grid-dots" x="0" y="0" width="36" height="36" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.4" />
+    </pattern>
+    <rect width="1600" height="900" fill="url(#grid-dots)" />
+  </g>
+
+  <!-- Ambient Glow Blobs -->
+  <circle cx="300" cy="450" r="280" fill="#0284c7" opacity="0.08" filter="blur(90px)" />
+  <circle cx="680" cy="450" r="250" fill="#0d9488" opacity="0.08" filter="blur(95px)" />
+  <circle cx="1180" cy="450" r="320" fill="#2563eb" opacity="0.07" filter="blur(100px)" />
+
+  <!-- ==================== HEADER ==================== -->
+  <g transform="translate(80, 50)">
+    <!-- Category Badge -->
+    <rect x="0" y="0" width="180" height="26" rx="13" fill="#111e33" stroke="#1e3a5f" stroke-width="1" />
+    <circle cx="14" cy="13" r="4" fill="#14b8a6" filter="url(#glow-teal)" />
+    <text x="26" y="17" fill="#38bdf8" font-size="11" font-weight="700" letter-spacing="1.5">MONOREPO LAYOUT</text>
+
+    <!-- Main Title -->
+    <text x="0" y="58" fill="#f8fafc" font-size="27" font-weight="700" letter-spacing="-0.5">Running Agents on a Monorepo With Worktrees</text>
+    
+    <!-- Subtitle -->
+    <text x="0" y="82" fill="#94a3b8" font-size="14.5" font-weight="400">Single shared Git object store powers isolated agent checkouts without clone bloat or index.lock contention</text>
+  </g>
+
+  <!-- ==================== CONNECTOR PATHS (BG) ==================== -->
+  <g>
+    <!-- Connectors from .git to Agent Worktrees -->
+    <path d="M 500 290 C 580 290, 620 250, 715 250" fill="none" stroke="#14b8a6" stroke-width="2" stroke-dasharray="6,4" marker-end="url(#arrow-teal)" opacity="0.8" />
+    <path d="M 500 290 C 590 290, 620 435, 715 435" fill="none" stroke="#38bdf8" stroke-width="2" stroke-dasharray="6,4" marker-end="url(#arrow-cyan)" opacity="0.8" />
+    <path d="M 500 290 C 580 290, 620 620, 715 620" fill="none" stroke="#818cf8" stroke-width="2" stroke-dasharray="6,4" marker-end="url(#arrow-indigo)" opacity="0.8" />
+  </g>
+
+  <!-- ==================== LEFT: MONOREPO ROOT ==================== -->
+  <g transform="translate(80, 160)">
+    <!-- Outer Card Container -->
+    <rect x="0" y="0" width="420" height="580" rx="14" fill="url(#card-dark)" stroke="#1e293b" stroke-width="1.5" />
+
+    <!-- Card Header -->
+    <rect x="0" y="0" width="420" height="54" rx="14" fill="#0d1526" />
+    <path d="M 0 42 L 0 54 L 420 54 L 420 42 Z" fill="#0d1526" />
+    <line x1="0" y1="54" x2="420" y2="54" stroke="#1e293b" stroke-width="1" />
+
+    <!-- Folder Icon -->
+    <g transform="translate(20, 18)">
+      <path d="M 2 4 L 7 4 L 9 6 L 16 6 C 17.1 6 18 6.9 18 8 L 18 14 C 18 15.1 17.1 16 16 16 L 2 16 C 0.9 16 0 15.1 0 14 L 0 6 C 0 4.9 0.9 4 2 4 Z" fill="#38bdf8" opacity="0.9" />
+    </g>
+    <text x="46" y="32" fill="#f1f5f9" font-size="15" font-weight="700">Monorepo Root</text>
+    <text x="165" y="32" fill="#64748b" font-size="13" font-family="'JetBrains Mono', monospace">/workspace/repo</text>
+    <rect x="330" y="16" width="72" height="22" rx="6" fill="#0284c7" fill-opacity="0.2" stroke="#0284c7" stroke-width="1" />
+    <text x="342" y="31" fill="#38bdf8" font-size="10.5" font-weight="600">PRIMARY</text>
+
+    <!-- SECTION 1: Shared .git Object Store -->
+    <g transform="translate(20, 72)">
+      <rect x="0" y="0" width="380" height="150" rx="10" fill="url(#card-inner)" stroke="#1e3a5f" stroke-width="1.2" />
+      
+      <!-- Git Badge -->
+      <rect x="14" y="14" width="70" height="22" rx="5" fill="#0f766e" fill-opacity="0.3" stroke="#14b8a6" stroke-width="1" />
+      <text x="24" y="29" fill="#2dd4bf" font-size="11" font-weight="700" font-family="'JetBrains Mono', monospace">.git/</text>
+      
+      <text x="94" y="29" fill="#f8fafc" font-size="13.5" font-weight="600">Single Shared Object Store</text>
+
+      <!-- Git internals list -->
+      <g transform="translate(16, 52)" font-family="'JetBrains Mono', monospace" font-size="12" fill="#94a3b8">
+        <text x="0" y="14">├── objects/ <tspan fill="#64748b" font-size="11">(commits, trees, blobs)</tspan></text>
+        <text x="0" y="36">├── refs/heads/ <tspan fill="#64748b" font-size="11">(all agent branches)</tspan></text>
+        <text x="0" y="58">└── worktrees/ <tspan fill="#64748b" font-size="11">(metadata &amp; per-wt HEAD)</tspan></text>
+      </g>
+
+      <!-- Footnote badge -->
+      <rect x="14" y="120" width="352" height="20" rx="4" fill="#0a1926" />
+      <circle cx="24" cy="130" r="3" fill="#38bdf8" />
+      <text x="34" y="134" fill="#38bdf8" font-size="10.5" font-weight="500">Shared once across all agents • 0 MB redundant clone data</text>
+    </g>
+
+    <!-- SECTION 2: Packages Structure -->
+    <g transform="translate(20, 240)">
+      <rect x="0" y="0" width="380" height="220" rx="10" fill="#0b1322" stroke="#1e293b" stroke-width="1" />
+      
+      <text x="16" y="26" fill="#cbd5e1" font-size="13" font-weight="600">Monorepo Package Tree</text>
+      <text x="270" y="26" fill="#64748b" font-size="11" font-family="'JetBrains Mono', monospace">pnpm / cargo</text>
+
+      <line x1="16" y1="38" x2="364" y2="38" stroke="#1e293b" stroke-width="1" />
+
+      <!-- Package Tree Items -->
+      <g transform="translate(16, 52)">
+        <!-- packages/api -->
+        <g transform="translate(0, 0)">
+          <rect x="0" y="0" width="348" height="34" rx="6" fill="#0f2129" stroke="#134e4a" stroke-width="1" />
+          <text x="12" y="21" fill="#2dd4bf" font-family="'JetBrains Mono', monospace" font-size="12" font-weight="600">packages/api/</text>
+          <text x="135" y="21" fill="#64748b" font-size="11">Backend services &amp; DB</text>
+          <rect x="270" y="7" width="66" height="20" rx="4" fill="#14b8a6" fill-opacity="0.2" />
+          <text x="277" y="21" fill="#2dd4bf" font-size="9.5" font-weight="700">AGENT A</text>
+        </g>
+
+        <!-- packages/web -->
+        <g transform="translate(0, 42)">
+          <rect x="0" y="0" width="348" height="34" rx="6" fill="#0c2236" stroke="#0369a1" stroke-width="1" />
+          <text x="12" y="21" fill="#38bdf8" font-family="'JetBrains Mono', monospace" font-size="12" font-weight="600">packages/web/</text>
+          <text x="140" y="21" fill="#64748b" font-size="11">Frontend app &amp; UI</text>
+          <rect x="270" y="7" width="66" height="20" rx="4" fill="#0284c7" fill-opacity="0.2" />
+          <text x="277" y="21" fill="#38bdf8" font-size="9.5" font-weight="700">AGENT B</text>
+        </g>
+
+        <!-- packages/core -->
+        <g transform="translate(0, 84)">
+          <rect x="0" y="0" width="348" height="34" rx="6" fill="#161e38" stroke="#3730a3" stroke-width="1" />
+          <text x="12" y="21" fill="#a5b4fc" font-family="'JetBrains Mono', monospace" font-size="12" font-weight="600">packages/core/</text>
+          <text x="145" y="21" fill="#64748b" font-size="11">Domain engine &amp; types</text>
+          <rect x="270" y="7" width="66" height="20" rx="4" fill="#4338ca" fill-opacity="0.2" />
+          <text x="277" y="21" fill="#a5b4fc" font-size="9.5" font-weight="700">AGENT C</text>
+        </g>
+
+        <!-- packages/shared -->
+        <g transform="translate(0, 126)">
+          <rect x="0" y="0" width="348" height="30" rx="6" fill="#0d1526" />
+          <text x="12" y="19" fill="#94a3b8" font-family="'JetBrains Mono', monospace" font-size="12">packages/shared/</text>
+          <text x="155" y="19" fill="#475569" font-size="11">Shared configs &amp; utils</text>
+        </g>
+      </g>
+    </g>
+
+    <!-- SECTION 3: Root Worktree Jail Warning -->
+    <g transform="translate(20, 480)">
+      <rect x="0" y="0" width="380" height="80" rx="8" fill="#0e172a" stroke="#334155" stroke-width="1" />
+      <g transform="translate(14, 16)">
+        <circle cx="9" cy="9" r="9" fill="#0284c7" fill-opacity="0.2" />
+        <path d="M 9 5 L 9 10 M 9 13 L 9.01 13" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" />
+      </g>
+      <text x="40" y="26" fill="#f1f5f9" font-size="12" font-weight="600">Repository Root Jail Enforced</text>
+      <text x="40" y="44" fill="#94a3b8" font-size="11">All agent paths are pinned inside <tspan fill="#38bdf8" font-family="'JetBrains Mono', monospace">.orca-worktrees/</tspan></text>
+      <text x="40" y="60" fill="#64748b" font-size="10.5">Zero chance of agent checkouts polluting parent file trees</text>
+    </g>
+  </g>
+
+  <!-- ==================== MIDDLE: DISPATCH & POINTERS ==================== -->
+  <g transform="translate(520, 160)">
+    <!-- Central Flow Capsule -->
+    <rect x="25" y="170" width="135" height="180" rx="12" fill="#0d1b2a" stroke="#1e3a5f" stroke-width="1.2" />
+    
+    <text x="92" y="198" fill="#38bdf8" font-size="11" font-weight="700" letter-spacing="1" text-anchor="middle">ORCHESTRATOR</text>
+    <text x="92" y="218" fill="#f8fafc" font-size="13" font-weight="700" text-anchor="middle">Git Worktree</text>
+    <text x="92" y="235" fill="#94a3b8" font-size="11" text-anchor="middle">Link Layer</text>
+
+    <line x1="45" y1="248" x2="140" y2="248" stroke="#1e293b" stroke-width="1" />
+
+    <text x="92" y="270" fill="#2dd4bf" font-size="10" font-family="'JetBrains Mono', monospace" text-anchor="middle">git worktree add</text>
+    <text x="92" y="290" fill="#94a3b8" font-size="9.5" text-anchor="middle">Per-agent Index</text>
+    <text x="92" y="306" fill="#94a3b8" font-size="9.5" text-anchor="middle">Dedicated HEAD</text>
+    <text x="92" y="332" fill="#38bdf8" font-size="10" font-weight="600" text-anchor="middle">No Lock Contention</text>
+  </g>
+
+  <!-- ==================== RIGHT: PARALLEL AGENT WORKTREES ==================== -->
+  <g transform="translate(720, 160)">
+    
+    <!-- CARD 1: Agent Alpha (API) -->
+    <g transform="translate(0, 0)">
+      <rect x="0" y="0" width="800" height="175" rx="14" fill="url(#card-agent-teal)" stroke="#134e4a" stroke-width="1.5" />
+      
+      <!-- Top Bar -->
+      <g transform="translate(24, 20)">
+        <!-- Pill Badge -->
+        <rect x="0" y="0" width="95" height="24" rx="12" fill="#0f766e" fill-opacity="0.35" stroke="#14b8a6" stroke-width="1" />
+        <circle cx="12" cy="12" r="3.5" fill="#2dd4bf" filter="url(#glow-teal)" />
+        <text x="22" y="16" fill="#2dd4bf" font-size="11" font-weight="700">AGENT A</text>
+
+        <!-- Worktree Path -->
+        <text x="110" y="16" fill="#f8fafc" font-size="15" font-weight="700">.orca-worktrees/wt-api-auth</text>
+        <text x="410" y="16" fill="#64748b" font-size="13" font-family="'JetBrains Mono', monospace">branch: orca/ws-1/api-auth</text>
+
+        <!-- Status Badge -->
+        <rect x="635" y="0" width="115" height="24" rx="6" fill="#134e4a" fill-opacity="0.6" stroke="#2dd4bf" stroke-width="0.8" />
+        <text x="692" y="16" fill="#2dd4bf" font-size="11" font-weight="600" text-anchor="middle">Testing Auth API</text>
+      </g>
+
+      <!-- Details Grid -->
+      <g transform="translate(24, 60)">
+        <!-- Col 1: Scope -->
+        <rect x="0" y="0" width="235" height="95" rx="8" fill="#091822" stroke="#1e3a5f" stroke-width="1" />
+        <text x="14" y="24" fill="#64748b" font-size="11" font-weight="600">TARGET SUBDIRECTORY</text>
+        <text x="14" y="48" fill="#2dd4bf" font-size="14" font-weight="600" font-family="'JetBrains Mono', monospace">packages/api</text>
+        <text x="14" y="74" fill="#94a3b8" font-size="11">Endpoints, JWT tests, DB seed</text>
+
+        <!-- Col 2: Git State -->
+        <rect x="250" y="0" width="250" height="95" rx="8" fill="#091822" stroke="#1e3a5f" stroke-width="1" />
+        <text x="14" y="24" fill="#64748b" font-size="11" font-weight="600">ISOLATED GIT METADATA</text>
+        <text x="14" y="48" fill="#f1f5f9" font-size="12" font-family="'JetBrains Mono', monospace">.git/worktrees/wt-api-auth/</text>
+        <text x="14" y="68" fill="#94a3b8" font-size="11">Independent <tspan fill="#38bdf8">index</tspan> &amp; <tspan fill="#38bdf8">HEAD</tspan> pointer</text>
+        <text x="14" y="84" fill="#2dd4bf" font-size="10.5">Ready for fast staging &amp; commit</text>
+
+        <!-- Col 3: Safe Boundary -->
+        <rect x="515" y="0" width="235" height="95" rx="8" fill="#091822" stroke="#1e3a5f" stroke-width="1" />
+        <text x="14" y="24" fill="#64748b" font-size="11" font-weight="600">CONCURRENCY SAFETY</text>
+        <text x="14" y="48" fill="#2dd4bf" font-size="13" font-weight="700">0 index.lock Conflicts</text>
+        <text x="14" y="72" fill="#94a3b8" font-size="11">Can write, build &amp; commit</text>
+        <text x="14" y="87" fill="#64748b" font-size="10.5">while Agent B and C run concurrently</text>
+      </g>
+    </g>
+
+    <!-- CARD 2: Agent Beta (Web) -->
+    <g transform="translate(0, 195)">
+      <rect x="0" y="0" width="800" height="175" rx="14" fill="url(#card-agent-cyan)" stroke="#0369a1" stroke-width="1.5" />
+      
+      <!-- Top Bar -->
+      <g transform="translate(24, 20)">
+        <!-- Pill Badge -->
+        <rect x="0" y="0" width="95" height="24" rx="12" fill="#0284c7" fill-opacity="0.35" stroke="#38bdf8" stroke-width="1" />
+        <circle cx="12" cy="12" r="3.5" fill="#38bdf8" filter="url(#glow-cyan)" />
+        <text x="22" y="16" fill="#38bdf8" font-size="11" font-weight="700">AGENT B</text>
+
+        <!-- Worktree Path -->
+        <text x="110" y="16" fill="#f8fafc" font-size="15" font-weight="700">.orca-worktrees/wt-web-dash</text>
+        <text x="410" y="16" fill="#64748b" font-size="13" font-family="'JetBrains Mono', monospace">branch: orca/ws-1/web-dash</text>
+
+        <!-- Status Badge -->
+        <rect x="635" y="0" width="115" height="24" rx="6" fill="#075985" fill-opacity="0.6" stroke="#38bdf8" stroke-width="0.8" />
+        <text x="692" y="16" fill="#38bdf8" font-size="11" font-weight="600" text-anchor="middle">Building UI View</text>
+      </g>
+
+      <!-- Details Grid -->
+      <g transform="translate(24, 60)">
+        <!-- Col 1: Scope -->
+        <rect x="0" y="0" width="235" height="95" rx="8" fill="#081726" stroke="#1e3a5f" stroke-width="1" />
+        <text x="14" y="24" fill="#64748b" font-size="11" font-weight="600">TARGET SUBDIRECTORY</text>
+        <text x="14" y="48" fill="#38bdf8" font-size="14" font-weight="600" font-family="'JetBrains Mono', monospace">packages/web</text>
+        <text x="14" y="74" fill="#94a3b8" font-size="11">Vite + React, CSS styling</text>
+
+        <!-- Col 2: Git State -->
+        <rect x="250" y="0" width="250" height="95" rx="8" fill="#081726" stroke="#1e3a5f" stroke-width="1" />
+        <text x="14" y="24" fill="#64748b" font-size="11" font-weight="600">ISOLATED GIT METADATA</text>
+        <text x="14" y="48" fill="#f1f5f9" font-size="12" font-family="'JetBrains Mono', monospace">.git/worktrees/wt-web-dash/</text>
+        <text x="14" y="68" fill="#94a3b8" font-size="11">Independent <tspan fill="#38bdf8">index</tspan> &amp; <tspan fill="#38bdf8">HEAD</tspan> pointer</text>
+        <text x="14" y="84" fill="#38bdf8" font-size="10.5">Isolated node_modules caches</text>
+
+        <!-- Col 3: Safe Boundary -->
+        <rect x="515" y="0" width="235" height="95" rx="8" fill="#081726" stroke="#1e3a5f" stroke-width="1" />
+        <text x="14" y="24" fill="#64748b" font-size="11" font-weight="600">CONCURRENCY SAFETY</text>
+        <text x="14" y="48" fill="#38bdf8" font-size="13" font-weight="700">Zero Node/Vite Collisions</text>
+        <text x="14" y="72" fill="#94a3b8" font-size="11">HMR &amp; dev servers bind separate ports</text>
+        <text x="14" y="87" fill="#64748b" font-size="10.5">Independent local artifacts</text>
+      </g>
+    </g>
+
+    <!-- CARD 3: Agent Gamma (Core) -->
+    <g transform="translate(0, 390)">
+      <rect x="0" y="0" width="800" height="175" rx="14" fill="url(#card-agent-indigo)" stroke="#3730a3" stroke-width="1.5" />
+      
+      <!-- Top Bar -->
+      <g transform="translate(24, 20)">
+        <!-- Pill Badge -->
+        <rect x="0" y="0" width="95" height="24" rx="12" fill="#4338ca" fill-opacity="0.35" stroke="#818cf8" stroke-width="1" />
+        <circle cx="12" cy="12" r="3.5" fill="#818cf8" />
+        <text x="22" y="16" fill="#a5b4fc" font-size="11" font-weight="700">AGENT C</text>
+
+        <!-- Worktree Path -->
+        <text x="110" y="16" fill="#f8fafc" font-size="15" font-weight="700">.orca-worktrees/wt-core-engine</text>
+        <text x="410" y="16" fill="#64748b" font-size="13" font-family="'JetBrains Mono', monospace">branch: orca/ws-1/core-engine</text>
+
+        <!-- Status Badge -->
+        <rect x="635" y="0" width="115" height="24" rx="6" fill="#3730a3" fill-opacity="0.6" stroke="#818cf8" stroke-width="0.8" />
+        <text x="692" y="16" fill="#a5b4fc" font-size="11" font-weight="600" text-anchor="middle">Rust Benchmarks</text>
+      </g>
+
+      <!-- Details Grid -->
+      <g transform="translate(24, 60)">
+        <!-- Col 1: Scope -->
+        <rect x="0" y="0" width="235" height="95" rx="8" fill="#0d1124" stroke="#1e293b" stroke-width="1" />
+        <text x="14" y="24" fill="#64748b" font-size="11" font-weight="600">TARGET SUBDIRECTORY</text>
+        <text x="14" y="48" fill="#a5b4fc" font-size="14" font-weight="600" font-family="'JetBrains Mono', monospace">packages/core</text>
+        <text x="14" y="74" fill="#94a3b8" font-size="11">Native parser &amp; AST pipeline</text>
+
+        <!-- Col 2: Git State -->
+        <rect x="250" y="0" width="250" height="95" rx="8" fill="#0d1124" stroke="#1e293b" stroke-width="1" />
+        <text x="14" y="24" fill="#64748b" font-size="11" font-weight="600">ISOLATED GIT METADATA</text>
+        <text x="14" y="48" fill="#f1f5f9" font-size="12" font-family="'JetBrains Mono', monospace">.git/worktrees/wt-core-engine/</text>
+        <text x="14" y="68" fill="#94a3b8" font-size="11">Independent <tspan fill="#38bdf8">index</tspan> &amp; <tspan fill="#38bdf8">HEAD</tspan> pointer</text>
+        <text x="14" y="84" fill="#a5b4fc" font-size="10.5">Isolated target/ build dir</text>
+
+        <!-- Col 3: Safe Boundary -->
+        <rect x="515" y="0" width="235" height="95" rx="8" fill="#0d1124" stroke="#1e293b" stroke-width="1" />
+        <text x="14" y="24" fill="#64748b" font-size="11" font-weight="600">CONCURRENCY SAFETY</text>
+        <text x="14" y="48" fill="#a5b4fc" font-size="13" font-weight="700">Immediate Mergeable Diffs</text>
+        <text x="14" y="72" fill="#94a3b8" font-size="11"><tspan font-family="'JetBrains Mono', monospace">git diff main...core-engine</tspan></text>
+        <text x="14" y="87" fill="#64748b" font-size="10.5">Fast integration into monorepo</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- ==================== BOTTOM FEATURE BAR ==================== -->
+  <g transform="translate(80, 770)">
+    <rect x="0" y="0" width="1440" height="70" rx="10" fill="#0a101d" stroke="#1e293b" stroke-width="1.2" />
+
+    <!-- Feature 1 -->
+    <g transform="translate(40, 16)">
+      <circle cx="16" cy="18" r="16" fill="#14b8a6" fill-opacity="0.15" />
+      <path d="M 11 18 L 15 22 L 22 14" stroke="#2dd4bf" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none" />
+      <text x="44" y="16" fill="#f8fafc" font-size="13" font-weight="700">Zero Clone Overhead</text>
+      <text x="44" y="32" fill="#94a3b8" font-size="11">Shares single .git object database</text>
+    </g>
+
+    <line x1="380" y1="15" x2="380" y2="55" stroke="#1e293b" stroke-width="1" />
+
+    <!-- Feature 2 -->
+    <g transform="translate(415, 16)">
+      <circle cx="16" cy="18" r="16" fill="#0284c7" fill-opacity="0.15" />
+      <path d="M 10 13 L 22 13 M 10 18 L 18 18 M 10 23 L 20 23" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" fill="none" />
+      <text x="44" y="16" fill="#f8fafc" font-size="13" font-weight="700">No index.lock Contention</text>
+      <text x="44" y="32" fill="#94a3b8" font-size="11">Each worktree has its own git index</text>
+    </g>
+
+    <line x1="740" y1="15" x2="740" y2="55" stroke="#1e293b" stroke-width="1" />
+
+    <!-- Feature 3 -->
+    <g transform="translate(775, 16)">
+      <circle cx="16" cy="18" r="16" fill="#6366f1" fill-opacity="0.15" />
+      <rect x="10" y="11" width="12" height="14" rx="2" stroke="#a5b4fc" stroke-width="2" fill="none" />
+      <circle cx="16" cy="18" r="1.5" fill="#a5b4fc" />
+      <text x="44" y="16" fill="#f8fafc" font-size="13" font-weight="700">Enforced Root Jail</text>
+      <text x="44" y="32" fill="#94a3b8" font-size="11">Pinned under .orca-worktrees/</text>
+    </g>
+
+    <line x1="1090" y1="15" x2="1090" y2="55" stroke="#1e293b" stroke-width="1" />
+
+    <!-- Feature 4 -->
+    <g transform="translate(1125, 16)">
+      <circle cx="16" cy="18" r="16" fill="#14b8a6" fill-opacity="0.15" />
+      <path d="M 12 18 L 20 18 M 16 14 L 20 18 L 16 22" stroke="#2dd4bf" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none" />
+      <text x="44" y="16" fill="#f8fafc" font-size="13" font-weight="700">Instant Local Review</text>
+      <text x="44" y="32" fill="#94a3b8" font-size="11">Diff agent work against main in real time</text>
+    </g>
+  </g>
+</svg>

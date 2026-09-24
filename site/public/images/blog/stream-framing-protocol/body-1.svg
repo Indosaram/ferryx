@@ -1,0 +1,398 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900" style="background:#070a12; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, 'JetBrains Mono', monospace;">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#090d16" />
+      <stop offset="50%" stop-color="#060911" />
+      <stop offset="100%" stop-color="#04060a" />
+    </linearGradient>
+
+    <!-- Card Backgrounds -->
+    <linearGradient id="card-grad-dark" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a" />
+      <stop offset="100%" stop-color="#090e1a" />
+    </linearGradient>
+
+    <linearGradient id="card-grad-teal" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0b1e28" />
+      <stop offset="100%" stop-color="#07131a" />
+    </linearGradient>
+
+    <linearGradient id="card-grad-blue" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0e1a30" />
+      <stop offset="100%" stop-color="#081020" />
+    </linearGradient>
+
+    <!-- Byte Header Block Gradients -->
+    <linearGradient id="byte-ver" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0284c7" />
+      <stop offset="100%" stop-color="#0369a1" />
+    </linearGradient>
+
+    <linearGradient id="byte-flags" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#06b6d4" />
+      <stop offset="100%" stop-color="#0891b2" />
+    </linearGradient>
+
+    <linearGradient id="byte-sess-len" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0d9488" />
+      <stop offset="100%" stop-color="#0f766e" />
+    </linearGradient>
+
+    <linearGradient id="byte-seq" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#14b8a6" />
+      <stop offset="100%" stop-color="#0d9488" />
+    </linearGradient>
+
+    <linearGradient id="byte-epoch" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3b82f6" />
+      <stop offset="100%" stop-color="#2563eb" />
+    </linearGradient>
+
+    <linearGradient id="byte-payload" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e293b" />
+      <stop offset="100%" stop-color="#111827" />
+    </linearGradient>
+
+    <!-- Glow & Filters -->
+    <filter id="glow-teal" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <filter id="glow-cyan" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="4" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <!-- Arrow Markers -->
+    <marker id="arrow-teal" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#14b8a6" />
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#38bdf8" />
+    </marker>
+  </defs>
+
+  <!-- Background Canvas -->
+  <rect width="1600" height="900" fill="url(#bg-grad)" />
+
+  <!-- Grid dots pattern -->
+  <g opacity="0.07" fill="#38bdf8">
+    <pattern id="grid-dots" x="0" y="0" width="36" height="36" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.5" />
+    </pattern>
+    <rect width="1600" height="900" fill="url(#grid-dots)" />
+  </g>
+
+  <!-- Ambient Glow Blobs -->
+  <circle cx="320" cy="460" r="260" fill="#0284c7" opacity="0.08" filter="blur(80px)" />
+  <circle cx="800" cy="420" r="320" fill="#0d9488" opacity="0.09" filter="blur(90px)" />
+  <circle cx="1280" cy="460" r="260" fill="#2563eb" opacity="0.07" filter="blur(80px)" />
+
+  <!-- HEADER SECTION -->
+  <g transform="translate(80, 56)">
+    <!-- Category Badge -->
+    <rect x="0" y="0" width="168" height="26" rx="13" fill="#111c2e" stroke="#1e3a5f" stroke-width="1" />
+    <circle cx="14" cy="13" r="4" fill="#14b8a6" />
+    <text x="26" y="17" fill="#38bdf8" font-size="10.5" font-weight="700" letter-spacing="1.5">IPC STREAM PROTOCOL</text>
+
+    <!-- Main Title -->
+    <text x="0" y="65" fill="#f8fafc" font-size="32" font-weight="700" letter-spacing="-0.5">20-Byte Stream Framing Between UI and Daemon</text>
+    
+    <!-- Subtitle / Architecture premise -->
+    <text x="0" y="94" fill="#94a3b8" font-size="15" font-weight="400">Fixed binary header layout, sub-frame tick / 32KB coalescing, and sequence-indexed stream replay</text>
+  </g>
+
+  <!-- MACRO PIPELINE FLOW (TOP BAR) -->
+  <g transform="translate(80, 180)">
+    <!-- Daemon Node -->
+    <g transform="translate(0, 0)">
+      <rect x="0" y="0" width="280" height="90" rx="12" fill="url(#card-grad-dark)" stroke="#1e293b" stroke-width="1.5" />
+      <rect x="18" y="16" width="34" height="34" rx="8" fill="#0284c7" fill-opacity="0.2" stroke="#0284c7" stroke-width="1.2" />
+      <text x="35" y="38" text-anchor="middle" fill="#38bdf8" font-size="16" font-family="'JetBrains Mono', monospace" font-weight="700">PTY</text>
+      <text x="64" y="32" fill="#f1f5f9" font-size="14" font-weight="600">Headless Daemon</text>
+      <text x="64" y="48" fill="#64748b" font-size="12">portable-pty + 512KB ring buffer</text>
+      <path d="M 0 66 L 280 66" stroke="#1e293b" stroke-width="1" />
+      <text x="18" y="80" fill="#0ea5e9" font-size="10.5" font-family="'JetBrains Mono', monospace" font-weight="600">MONOTONIC SEQ: u64</text>
+    </g>
+
+    <!-- Arrow 1 -->
+    <g transform="translate(292, 45)">
+      <line x1="0" y1="0" x2="68" y2="0" stroke="#14b8a6" stroke-width="2" stroke-dasharray="4,4" marker-end="url(#arrow-teal)" />
+      <text x="34" y="-10" text-anchor="middle" fill="#14b8a6" font-size="11" font-family="'JetBrains Mono', monospace">PTY out</text>
+    </g>
+
+    <!-- Framing Engine Node -->
+    <g transform="translate(372, 0)">
+      <rect x="0" y="0" width="380" height="90" rx="12" fill="url(#card-grad-teal)" stroke="#0d9488" stroke-width="1.5" />
+      <rect x="18" y="16" width="34" height="34" rx="8" fill="#0d9488" fill-opacity="0.25" stroke="#14b8a6" stroke-width="1.2" />
+      <text x="35" y="38" text-anchor="middle" fill="#2dd4bf" font-size="15" font-family="'JetBrains Mono', monospace" font-weight="700">20B</text>
+      <text x="64" y="32" fill="#f1f5f9" font-size="14" font-weight="600">Stream Framer &amp; Coalescer</text>
+      <text x="64" y="48" fill="#94a3b8" font-size="12">Fixed header prepend + batch flushing</text>
+      <path d="M 0 66 L 380 66" stroke="#0d9488" stroke-opacity="0.4" stroke-width="1" />
+      <text x="18" y="80" fill="#2dd4bf" font-size="10.5" font-family="'JetBrains Mono', monospace" font-weight="600">COALESCE: &lt;=16ms tick | &lt;=32KB</text>
+    </g>
+
+    <!-- Arrow 2 -->
+    <g transform="translate(764, 45)">
+      <line x1="0" y1="0" x2="68" y2="0" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrow-blue)" />
+      <text x="34" y="-10" text-anchor="middle" fill="#38bdf8" font-size="11" font-family="'JetBrains Mono', monospace">IPC channel</text>
+    </g>
+
+    <!-- IPC Transport Node -->
+    <g transform="translate(844, 0)">
+      <rect x="0" y="0" width="290" height="90" rx="12" fill="url(#card-grad-blue)" stroke="#1e3a5f" stroke-width="1.5" />
+      <rect x="18" y="16" width="34" height="34" rx="8" fill="#2563eb" fill-opacity="0.25" stroke="#3b82f6" stroke-width="1.2" />
+      <text x="35" y="38" text-anchor="middle" fill="#60a5fa" font-size="15" font-family="'JetBrains Mono', monospace" font-weight="700">BIN</text>
+      <text x="64" y="32" fill="#f1f5f9" font-size="14" font-weight="600">Zero-Copy Channel</text>
+      <text x="64" y="48" fill="#64748b" font-size="12">Tauri v2 binary channel pump</text>
+      <path d="M 0 66 L 290 66" stroke="#1e3a5f" stroke-width="1" />
+      <text x="18" y="80" fill="#60a5fa" font-size="10.5" font-family="'JetBrains Mono', monospace" font-weight="600">NO JSON ENCODE OVERHEAD</text>
+    </g>
+
+    <!-- Arrow 3 -->
+    <g transform="translate(1146, 45)">
+      <line x1="0" y1="0" x2="68" y2="0" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrow-blue)" />
+      <text x="34" y="-10" text-anchor="middle" fill="#38bdf8" font-size="11" font-family="'JetBrains Mono', monospace">raw frames</text>
+    </g>
+
+    <!-- UI Renderer Node -->
+    <g transform="translate(1226, 0)">
+      <rect x="0" y="0" width="214" height="90" rx="12" fill="url(#card-grad-dark)" stroke="#1e293b" stroke-width="1.5" />
+      <rect x="18" y="16" width="34" height="34" rx="8" fill="#38bdf8" fill-opacity="0.2" stroke="#38bdf8" stroke-width="1.2" />
+      <text x="35" y="38" text-anchor="middle" fill="#38bdf8" font-size="14" font-family="'JetBrains Mono', monospace" font-weight="700">WGPU</text>
+      <text x="64" y="32" fill="#f1f5f9" font-size="14" font-weight="600">UI Desktop Shell</text>
+      <text x="64" y="48" fill="#64748b" font-size="12">libghostty-vt parse</text>
+      <path d="M 0 66 L 214 66" stroke="#1e293b" stroke-width="1" />
+      <text x="18" y="80" fill="#38bdf8" font-size="10.5" font-family="'JetBrains Mono', monospace" font-weight="600">NATIVE SURFACE PRESENT</text>
+    </g>
+  </g>
+
+  <!-- MAIN FRAME SCHEMATIC CONTAINER (CENTERPIECE) -->
+  <g transform="translate(80, 305)">
+    <!-- Container Outline -->
+    <rect x="0" y="0" width="1440" height="340" rx="16" fill="#0a0f1d" fill-opacity="0.85" stroke="#1e2d42" stroke-width="1.5" />
+    
+    <!-- Title Bar -->
+    <path d="M 0 16 Q 0 0 16 0 L 1424 0 Q 1440 0 1440 16 L 1440 46 L 0 46 Z" fill="#0f172a" stroke="#1e2d42" stroke-width="1" />
+    <circle cx="26" cy="23" r="5" fill="#ef4444" opacity="0.7" />
+    <circle cx="44" cy="23" r="5" fill="#f59e0b" opacity="0.7" />
+    <circle cx="62" cy="23" r="5" fill="#10b981" opacity="0.7" />
+    <text x="86" y="28" fill="#94a3b8" font-size="13" font-family="'JetBrains Mono', monospace">protocol::encode_terminal_output_frame (memory layout)</text>
+    
+    <!-- Badge inside Title Bar -->
+    <rect x="1275" y="11" width="145" height="24" rx="12" fill="#0d9488" fill-opacity="0.2" stroke="#14b8a6" stroke-width="1" />
+    <text x="1347" y="27" text-anchor="middle" fill="#2dd4bf" font-size="11" font-weight="700" letter-spacing="0.5">LITTLE-ENDIAN</text>
+
+    <!-- ================= BYTE STRIP REPRESENTATION ================= -->
+    <g transform="translate(36, 75)">
+      
+      <!-- Bracket / Label above 20-Byte Header -->
+      <g transform="translate(0, 0)">
+        <path d="M 2 24 L 2 12 Q 2 4 10 4 L 435 4 Q 445 4 445 -4 Q 445 4 455 4 L 880 4 Q 888 4 888 12 L 888 24" fill="none" stroke="#2dd4bf" stroke-width="2" />
+        <rect x="360" y="-18" width="170" height="24" rx="6" fill="#0b1e28" stroke="#14b8a6" stroke-width="1.2" />
+        <text x="445" y="-2" text-anchor="middle" fill="#2dd4bf" font-size="12" font-family="'JetBrains Mono', monospace" font-weight="700">FIXED HEADER (20 BYTES)</text>
+      </g>
+
+      <!-- Bracket / Label above Variable Payload -->
+      <g transform="translate(904, 0)">
+        <path d="M 2 24 L 2 12 Q 2 4 10 4 L 225 4 Q 235 4 235 -4 Q 235 4 245 4 L 454 4 Q 462 4 462 12 L 462 24" fill="none" stroke="#64748b" stroke-width="1.5" stroke-dasharray="3,3" />
+        <rect x="155" y="-18" width="160" height="24" rx="6" fill="#111827" stroke="#334155" stroke-width="1" />
+        <text x="235" y="-2" text-anchor="middle" fill="#94a3b8" font-size="11.5" font-family="'JetBrains Mono', monospace" font-weight="600">VARIABLE PAYLOAD</text>
+      </g>
+
+      <!-- Byte Blocks Strip (Y = 32) -->
+      <!-- 1. Version (1 Byte, offset 0) -->
+      <g transform="translate(0, 32)">
+        <rect x="0" y="0" width="76" height="84" rx="8" fill="url(#byte-ver)" stroke="#38bdf8" stroke-width="1.5" />
+        <text x="38" y="24" text-anchor="middle" fill="#bae6fd" font-size="11" font-weight="600">VER</text>
+        <text x="38" y="48" text-anchor="middle" fill="#ffffff" font-size="18" font-family="'JetBrains Mono', monospace" font-weight="700">u8</text>
+        <rect x="8" y="60" width="60" height="16" rx="4" fill="#082f49" fill-opacity="0.8" />
+        <text x="38" y="72" text-anchor="middle" fill="#38bdf8" font-size="10" font-family="'JetBrains Mono', monospace">1 Byte</text>
+      </g>
+
+      <!-- 2. Flags (1 Byte, offset 1) -->
+      <g transform="translate(86, 32)">
+        <rect x="0" y="0" width="76" height="84" rx="8" fill="url(#byte-flags)" stroke="#22d3ee" stroke-width="1.5" />
+        <text x="38" y="24" text-anchor="middle" fill="#cffafe" font-size="11" font-weight="600">FLAGS</text>
+        <text x="38" y="48" text-anchor="middle" fill="#ffffff" font-size="18" font-family="'JetBrains Mono', monospace" font-weight="700">u8</text>
+        <rect x="8" y="60" width="60" height="16" rx="4" fill="#164e63" fill-opacity="0.8" />
+        <text x="38" y="72" text-anchor="middle" fill="#67e8f9" font-size="10" font-family="'JetBrains Mono', monospace">1 Byte</text>
+      </g>
+
+      <!-- 3. Session ID Len (2 Bytes, offset 2..4) -->
+      <g transform="translate(172, 32)">
+        <rect x="0" y="0" width="130" height="84" rx="8" fill="url(#byte-sess-len)" stroke="#2dd4bf" stroke-width="1.5" />
+        <text x="65" y="24" text-anchor="middle" fill="#ccfbf1" font-size="11" font-weight="600">SESSION ID LEN</text>
+        <text x="65" y="48" text-anchor="middle" fill="#ffffff" font-size="18" font-family="'JetBrains Mono', monospace" font-weight="700">u16 LE</text>
+        <rect x="25" y="60" width="80" height="16" rx="4" fill="#134e4a" fill-opacity="0.8" />
+        <text x="65" y="72" text-anchor="middle" fill="#5eead4" font-size="10" font-family="'JetBrains Mono', monospace">2 Bytes</text>
+      </g>
+
+      <!-- 4. Sequence Number (8 Bytes, offset 4..12) -->
+      <g transform="translate(312, 32)">
+        <rect x="0" y="0" width="280" height="84" rx="8" fill="url(#byte-seq)" stroke="#14b8a6" stroke-width="1.5" />
+        <text x="140" y="24" text-anchor="middle" fill="#ccfbf1" font-size="11" font-weight="600">SEQUENCE NUMBER</text>
+        <text x="140" y="48" text-anchor="middle" fill="#ffffff" font-size="18" font-family="'JetBrains Mono', monospace" font-weight="700">u64 LE (monotonic)</text>
+        <rect x="90" y="60" width="100" height="16" rx="4" fill="#134e4a" fill-opacity="0.8" />
+        <text x="140" y="72" text-anchor="middle" fill="#5eead4" font-size="10" font-family="'JetBrains Mono', monospace">8 Bytes</text>
+      </g>
+
+      <!-- 5. Daemon Epoch (8 Bytes, offset 12..20) -->
+      <g transform="translate(602, 32)">
+        <rect x="0" y="0" width="288" height="84" rx="8" fill="url(#byte-epoch)" stroke="#60a5fa" stroke-width="1.5" />
+        <text x="144" y="24" text-anchor="middle" fill="#dbeafe" font-size="11" font-weight="600">DAEMON EPOCH</text>
+        <text x="144" y="48" text-anchor="middle" fill="#ffffff" font-size="18" font-family="'JetBrains Mono', monospace" font-weight="700">u64 LE (instance ID)</text>
+        <rect x="94" y="60" width="100" height="16" rx="4" fill="#1e3a8a" fill-opacity="0.8" />
+        <text x="144" y="72" text-anchor="middle" fill="#93c5fd" font-size="10" font-family="'JetBrains Mono', monospace">8 Bytes</text>
+      </g>
+
+      <!-- Divider / Plus -->
+      <text x="897" y="78" text-anchor="middle" fill="#475569" font-size="20" font-weight="300">+</text>
+
+      <!-- 6. Session ID String (Variable) -->
+      <g transform="translate(908, 32)">
+        <rect x="0" y="0" width="180" height="84" rx="8" fill="url(#byte-payload)" stroke="#334155" stroke-width="1.2" />
+        <text x="90" y="24" text-anchor="middle" fill="#cbd5e1" font-size="11" font-weight="600">SESSION ID</text>
+        <text x="90" y="48" text-anchor="middle" fill="#e2e8f0" font-size="16" font-family="'JetBrains Mono', monospace">UTF-8 bytes</text>
+        <rect x="25" y="60" width="130" height="16" rx="4" fill="#0f172a" />
+        <text x="90" y="72" text-anchor="middle" fill="#94a3b8" font-size="10" font-family="'JetBrains Mono', monospace">session_id_len</text>
+      </g>
+
+      <!-- 7. Optional Gap Info (32B if HAS_GAP) -->
+      <g transform="translate(1098, 32)">
+        <rect x="0" y="0" width="124" height="84" rx="8" fill="url(#byte-payload)" stroke="#475569" stroke-width="1" stroke-dasharray="3,3" />
+        <text x="62" y="24" text-anchor="middle" fill="#94a3b8" font-size="10.5" font-weight="600">[OPT GAP]</text>
+        <text x="62" y="48" text-anchor="middle" fill="#cbd5e1" font-size="14" font-family="'JetBrains Mono', monospace">4x u64</text>
+        <rect x="17" y="60" width="90" height="16" rx="4" fill="#0f172a" />
+        <text x="62" y="72" text-anchor="middle" fill="#64748b" font-size="9.5" font-family="'JetBrains Mono', monospace">+32B (V2)</text>
+      </g>
+
+      <!-- 8. Raw PTY Data Payload (Variable <=32KB) -->
+      <g transform="translate(1232, 32)">
+        <rect x="0" y="0" width="136" height="84" rx="8" fill="#132338" stroke="#0284c7" stroke-width="1.5" />
+        <text x="68" y="24" text-anchor="middle" fill="#38bdf8" font-size="11" font-weight="700">PTY DATA</text>
+        <text x="68" y="48" text-anchor="middle" fill="#f8fafc" font-size="15" font-family="'JetBrains Mono', monospace" font-weight="600">Raw Stream</text>
+        <rect x="18" y="60" width="100" height="16" rx="4" fill="#0c1a29" />
+        <text x="68" y="72" text-anchor="middle" fill="#38bdf8" font-size="10" font-family="'JetBrains Mono', monospace">&lt;= 32 KB chunk</text>
+      </g>
+
+      <!-- Offset Markers Below Strip -->
+      <g transform="translate(0, 126)" fill="#64748b" font-size="11" font-family="'JetBrains Mono', monospace">
+        <text x="0" y="10">Offset 0</text>
+        <text x="86" y="10">1</text>
+        <text x="172" y="10">2</text>
+        <text x="312" y="10">4</text>
+        <text x="602" y="10">12</text>
+        <text x="890" y="10" fill="#2dd4bf" font-weight="700">20</text>
+        <text x="908" y="10">20+N</text>
+        <text x="1232" y="10">Payload Start</text>
+      </g>
+    </g>
+
+    <!-- Field Descriptions / Flag bitfield detail -->
+    <g transform="translate(36, 230)">
+      <!-- Details Box Left: Flag breakdown -->
+      <g transform="translate(0, 0)">
+        <rect x="0" y="0" width="426" height="88" rx="8" fill="#060c18" stroke="#1e293b" stroke-width="1" />
+        <text x="16" y="22" fill="#38bdf8" font-size="11" font-weight="700" letter-spacing="1">FLAGS BITFIELD (BYTE 1)</text>
+        
+        <g transform="translate(16, 38)" font-family="'JetBrains Mono', monospace" font-size="11">
+          <text x="0" y="12" fill="#2dd4bf">bit 0 (0x01):</text>
+          <text x="90" y="12" fill="#94a3b8">TERMINAL_OUTPUT_FRAME_HAS_SEQUENCE</text>
+          
+          <text x="0" y="28" fill="#38bdf8">bit 1 (0x02):</text>
+          <text x="90" y="28" fill="#94a3b8">TERMINAL_OUTPUT_FRAME_HAS_DAEMON_EPOCH</text>
+          
+          <text x="0" y="44" fill="#f59e0b">bit 2 (0x04):</text>
+          <text x="90" y="44" fill="#94a3b8">TERMINAL_OUTPUT_FRAME_HAS_GAP (V2 Replay)</text>
+        </g>
+      </g>
+
+      <!-- Details Box Center: Sequence and Epoch semantics -->
+      <g transform="translate(444, 0)">
+        <rect x="0" y="0" width="466" height="88" rx="8" fill="#060c18" stroke="#1e293b" stroke-width="1" />
+        <text x="16" y="22" fill="#2dd4bf" font-size="11" font-weight="700" letter-spacing="1">REPLAY &amp; INTEGRITY GUARANTEES</text>
+        
+        <g transform="translate(16, 38)" font-family="'JetBrains Mono', monospace" font-size="11">
+          <text x="0" y="12" fill="#2dd4bf">u64 Sequence:</text>
+          <text x="110" y="12" fill="#cbd5e1">Ring-buffer index; client requests missed range</text>
+          
+          <text x="0" y="28" fill="#60a5fa">u64 Epoch:</text>
+          <text x="110" y="28" fill="#cbd5e1">Detects daemon restart / invalidates stale offsets</text>
+          
+          <text x="0" y="44" fill="#94a3b8">Truncation-Safe:</text>
+          <text x="110" y="44" fill="#94a3b8">session_id checked cast; falls back to JSON on overflow</text>
+        </g>
+      </g>
+
+      <!-- Details Box Right: Coalescing parameters -->
+      <g transform="translate(928, 0)">
+        <rect x="0" y="0" width="440" height="88" rx="8" fill="#060c18" stroke="#1e293b" stroke-width="1" />
+        <text x="16" y="22" fill="#38bdf8" font-size="11" font-weight="700" letter-spacing="1">STREAM COALESCING RULES</text>
+        
+        <g transform="translate(16, 38)" font-family="'JetBrains Mono', monospace" font-size="11">
+          <text x="0" y="12" fill="#38bdf8">Tick Interval:</text>
+          <text x="115" y="12" fill="#cbd5e1">Sub-frame cadence prevents UI render thrash</text>
+          
+          <text x="0" y="28" fill="#14b8a6">Chunk Boundary:</text>
+          <text x="115" y="28" fill="#cbd5e1">Flushes immediately on reaching 32 KB ceiling</text>
+          
+          <text x="0" y="44" fill="#22c55e">Zero Allocation:</text>
+          <text x="115" y="44" fill="#94a3b8">Reuses single contiguous frame buffer per pump</text>
+        </g>
+      </g>
+    </g>
+  </g>
+
+  <!-- BOTTOM COMPARISON / KEY TAKEAWAYS BAR -->
+  <g transform="translate(80, 665)">
+    <!-- Column 1: Framing vs Ad-Hoc JSON -->
+    <g transform="translate(0, 0)">
+      <rect x="0" y="0" width="460" height="175" rx="12" fill="url(#card-grad-dark)" stroke="#1e293b" stroke-width="1.5" />
+      <circle cx="28" cy="28" r="8" fill="#0284c7" fill-opacity="0.3" stroke="#38bdf8" stroke-width="1.5" />
+      <text x="28" y="32" text-anchor="middle" fill="#38bdf8" font-size="10" font-weight="bold">1</text>
+      <text x="48" y="33" fill="#f8fafc" font-size="15" font-weight="700">Framing vs. Ad-Hoc JSON</text>
+      <text x="20" y="66" fill="#94a3b8" font-size="13" font-weight="400">Fixed 20-byte headers bypass UTF-8 serialization,</text>
+      <text x="20" y="86" fill="#94a3b8" font-size="13" font-weight="400">base64 escaping, and garbage-collector spikes</text>
+      <text x="20" y="106" fill="#94a3b8" font-size="13" font-weight="400">during heavy terminal emissions (compiler / logs).</text>
+      
+      <rect x="20" y="126" width="420" height="30" rx="6" fill="#060c18" stroke="#1e3a5f" stroke-width="1" />
+      <text x="32" y="146" fill="#38bdf8" font-size="11.5" font-family="'JetBrains Mono', monospace">1 + 1 + 2 + 8 + 8 = 20 fixed bytes prefix</text>
+    </g>
+
+    <!-- Column 2: Predictable Coalescing -->
+    <g transform="translate(490, 0)">
+      <rect x="0" y="0" width="460" height="175" rx="12" fill="url(#card-grad-dark)" stroke="#1e293b" stroke-width="1.5" />
+      <circle cx="28" cy="28" r="8" fill="#0d9488" fill-opacity="0.3" stroke="#2dd4bf" stroke-width="1.5" />
+      <text x="28" y="32" text-anchor="middle" fill="#2dd4bf" font-size="10" font-weight="bold">2</text>
+      <text x="48" y="33" fill="#f8fafc" font-size="15" font-weight="700">Sub-Frame Tick / 32 KB Batching</text>
+      <text x="20" y="66" fill="#94a3b8" font-size="13" font-weight="400">Keystroke feedback delivers sub-millisecond feel</text>
+      <text x="20" y="86" fill="#94a3b8" font-size="13" font-weight="400">while bulk output coalesces up to 32 KB,</text>
+      <text x="20" y="106" fill="#94a3b8" font-size="13" font-weight="400">preventing IPC bridge saturation on burst workloads.</text>
+
+      <rect x="20" y="126" width="420" height="30" rx="6" fill="#060c18" stroke="#134e4a" stroke-width="1" />
+      <text x="32" y="146" fill="#2dd4bf" font-size="11.5" font-family="'JetBrains Mono', monospace">flush_interval &lt;= 16ms || pending &gt;= 32KB</text>
+    </g>
+
+    <!-- Column 3: Honest Replay & Gap Detection -->
+    <g transform="translate(980, 0)">
+      <rect x="0" y="0" width="460" height="175" rx="12" fill="url(#card-grad-dark)" stroke="#1e293b" stroke-width="1.5" />
+      <circle cx="28" cy="28" r="8" fill="#2563eb" fill-opacity="0.3" stroke="#60a5fa" stroke-width="1.5" />
+      <text x="28" y="32" text-anchor="middle" fill="#60a5fa" font-size="10" font-weight="bold">3</text>
+      <text x="48" y="33" fill="#f8fafc" font-size="15" font-weight="700">Honest Replay &amp; Window Reloads</text>
+      <text x="20" y="66" fill="#94a3b8" font-size="13" font-weight="400">Monotonic ring buffer sequences allow GUI clients</text>
+      <text x="20" y="86" fill="#94a3b8" font-size="13" font-weight="400">to re-attach after crash or reload without dropping</text>
+      <text x="20" y="106" fill="#94a3b8" font-size="13" font-weight="400">or silently corrupting unobserved agent outputs.</text>
+
+      <rect x="20" y="126" width="420" height="30" rx="6" fill="#060c18" stroke="#1e3a5f" stroke-width="1" />
+      <text x="32" y="146" fill="#60a5fa" font-size="11.5" font-family="'JetBrains Mono', monospace">ReplayGap packet explicitly signals ring wrap</text>
+    </g>
+  </g>
+
+  <!-- Subtly branded watermark -->
+  <g transform="translate(1420, 862)" opacity="0.4">
+    <text x="0" y="0" fill="#64748b" font-size="11" font-family="'JetBrains Mono', monospace" text-anchor="end">FERRYX PROTOCOL SPEC</text>
+  </g>
+</svg>

@@ -1,0 +1,347 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900" style="background:#070a13; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'JetBrains Mono', monospace;">
+  <defs>
+    <!-- Background Gradients -->
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#090d18" />
+      <stop offset="50%" stop-color="#060911" />
+      <stop offset="100%" stop-color="#040609" />
+    </linearGradient>
+
+    <!-- Card Backgrounds -->
+    <linearGradient id="card-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a" stop-opacity="0.9" />
+      <stop offset="100%" stop-color="#090d16" stop-opacity="0.95" />
+    </linearGradient>
+
+    <linearGradient id="card-active-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0e2338" stop-opacity="0.95" />
+      <stop offset="100%" stop-color="#071524" stop-opacity="0.98" />
+    </linearGradient>
+
+    <!-- Linear Accent Gradients -->
+    <linearGradient id="tealGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#14b8a6" />
+      <stop offset="50%" stop-color="#06b6d4" />
+      <stop offset="100%" stop-color="#0284c7" />
+    </linearGradient>
+
+    <linearGradient id="blueGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#6366f1" />
+    </linearGradient>
+
+    <linearGradient id="cyanTealBorder" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.8" />
+      <stop offset="100%" stop-color="#14b8a6" stop-opacity="0.4" />
+    </linearGradient>
+
+    <!-- Glow & Shadow Filters -->
+    <filter id="glow-teal" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <filter id="drop-shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#000000" flood-opacity="0.6" />
+    </filter>
+
+    <filter id="shadow-card" x="-8%" y="-8%" width="116%" height="120%">
+      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#000000" flood-opacity="0.55" />
+    </filter>
+
+    <!-- Marker Arrowheads -->
+    <marker id="arrow-teal" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#14b8a6" />
+    </marker>
+    <marker id="arrow-cyan" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#00f2fe" />
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#38bdf8" />
+    </marker>
+    <marker id="arrow-red" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#ef4444" />
+    </marker>
+
+    <!-- Subtle Dot Grid -->
+    <pattern id="grid-dots" x="0" y="0" width="32" height="32" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1" fill="#1e293b" fill-opacity="0.4" />
+    </pattern>
+  </defs>
+
+  <!-- Base Canvas Background -->
+  <rect width="1600" height="900" fill="url(#bg-grad)" />
+  <rect width="1600" height="900" fill="url(#grid-dots)" />
+
+  <!-- Ambient Glow Spots -->
+  <circle cx="200" cy="180" r="220" fill="#0284c7" fill-opacity="0.08" filter="url(#glow-teal)" />
+  <circle cx="800" cy="240" r="260" fill="#0d9488" fill-opacity="0.07" filter="url(#glow-teal)" />
+  <circle cx="1400" cy="220" r="240" fill="#00f2fe" fill-opacity="0.06" filter="url(#glow-teal)" />
+  <circle cx="800" cy="680" r="280" fill="#0369a1" fill-opacity="0.06" filter="url(#glow-teal)" />
+
+  <!-- ==================== HEADER SECTION ==================== -->
+  <g transform="translate(80, 48)">
+    <!-- Pill Badges -->
+    <rect x="0" y="0" width="180" height="28" rx="14" fill="#0b2432" stroke="#00f2fe" stroke-width="1.2" stroke-opacity="0.8" />
+    <circle cx="14" cy="14" r="4.5" fill="#00f2fe" />
+    <text x="28" y="18" fill="#38bdf8" font-size="11" font-weight="700" letter-spacing="1.2">RECOVERY PROTOCOL</text>
+
+    <rect x="194" y="0" width="170" height="28" rx="14" fill="#0d1b2a" stroke="#38bdf8" stroke-width="1" stroke-opacity="0.5" />
+    <text x="279" y="18" text-anchor="middle" fill="#94a3b8" font-size="11" font-weight="600" letter-spacing="0.8">STATE RESTORATION</text>
+
+    <!-- Main Title & Subtitle -->
+    <text x="0" y="62" fill="#f8fafc" font-size="28" font-weight="700" letter-spacing="-0.5">Recovering a Corrupted Workspace Layout</text>
+    <text x="0" y="86" fill="#94a3b8" font-size="14" font-weight="400">Deterministic recovery steps to restore pane trees without terminating daemon-owned PTY sessions</text>
+  </g>
+
+  <!-- ==================== TOP CONNECTOR BUS ==================== -->
+  <g fill="none">
+    <!-- Step 1 -> Step 2 -->
+    <path d="M 405 270 L 455 270" stroke="#00f2fe" stroke-width="2.5" marker-end="url(#arrow-cyan)" />
+    <!-- Step 2 -> Step 3 -->
+    <path d="M 775 270 L 825 270" stroke="#14b8a6" stroke-width="2.5" marker-end="url(#arrow-teal)" />
+    <!-- Step 3 -> Step 4 -->
+    <path d="M 1145 270 L 1195 270" stroke="#38bdf8" stroke-width="2.5" marker-end="url(#arrow-blue)" />
+  </g>
+
+  <!-- ==================== 4 WORKFLOW STEPS ==================== -->
+
+  <!-- STEP 01: DETECT DESYNC -->
+  <g transform="translate(80, 175)" filter="url(#shadow-card)">
+    <rect width="325" height="195" rx="12" fill="url(#card-active-grad)" stroke="#0284c7" stroke-width="1.5" />
+    <rect x="18" y="18" width="62" height="20" rx="4" fill="#082f49" />
+    <text x="49" y="32" text-anchor="middle" fill="#38bdf8" font-size="10.5" font-weight="700">STEP 01</text>
+    <text x="92" y="32" fill="#64748b" font-size="11" font-weight="600" letter-spacing="0.5">ISOLATE FAULT</text>
+
+    <text x="18" y="64" fill="#f8fafc" font-size="16" font-weight="700">Detect Tree Desync</text>
+    <text x="18" y="84" fill="#94a3b8" font-size="12" font-weight="400">Snapshot restored invalid split graph;</text>
+    <text x="18" y="100" fill="#94a3b8" font-size="12" font-weight="400">GUI frozen but PTY sessions remain alive.</text>
+
+    <rect x="16" y="116" width="293" height="62" rx="7" fill="#030712" stroke="#1e293b" stroke-width="1" />
+    <circle cx="32" cy="136" r="4.5" fill="#f59e0b" />
+    <text x="44" y="139" fill="#f59e0b" font-size="11" font-family="'JetBrains Mono', monospace" font-weight="600">STATE: PANE_TREE_CORRUPT</text>
+    <text x="32" y="162" fill="#64748b" font-size="10.5" font-family="'JetBrains Mono', monospace">Action: Decouple GUI, spare daemon</text>
+  </g>
+
+  <!-- STEP 02: QUARANTINE SNAPSHOT -->
+  <g transform="translate(450, 175)" filter="url(#shadow-card)">
+    <rect width="325" height="195" rx="12" fill="url(#card-active-grad)" stroke="#0e7490" stroke-width="1.5" />
+    <rect x="18" y="18" width="62" height="20" rx="4" fill="#083344" />
+    <text x="49" y="32" text-anchor="middle" fill="#22d3ee" font-size="10.5" font-weight="700">STEP 02</text>
+    <text x="92" y="32" fill="#64748b" font-size="11" font-weight="600" letter-spacing="0.5">IMMUTABLE BACKUP</text>
+
+    <text x="18" y="64" fill="#f8fafc" font-size="16" font-weight="700">Quarantine Snapshot</text>
+    <text x="18" y="84" fill="#94a3b8" font-size="12" font-weight="400">Archive bad state before mutations</text>
+    <text x="18" y="100" fill="#94a3b8" font-size="12" font-weight="400">to preserve diagnostic ring buffer logs.</text>
+
+    <rect x="16" y="116" width="293" height="62" rx="7" fill="#030712" stroke="#1e293b" stroke-width="1" />
+    <text x="28" y="138" fill="#22d3ee" font-size="11" font-family="'JetBrains Mono', monospace">❯ cp layout.json layout.json.bak</text>
+    <text x="28" y="160" fill="#38bdf8" font-size="10.5" font-family="'JetBrains Mono', monospace">✓ State quarantined to .bak</text>
+  </g>
+
+  <!-- STEP 03: RESET SCHEMA -->
+  <g transform="translate(820, 175)" filter="url(#shadow-card)">
+    <rect width="325" height="195" rx="12" fill="url(#card-active-grad)" stroke="#0d9488" stroke-width="1.5" />
+    <rect x="18" y="18" width="62" height="20" rx="4" fill="#042f2e" />
+    <text x="49" y="32" text-anchor="middle" fill="#2dd4bf" font-size="10.5" font-weight="700">STEP 03</text>
+    <text x="92" y="32" fill="#64748b" font-size="11" font-weight="600" letter-spacing="0.5">SCHEMA SANITIZATION</text>
+
+    <text x="18" y="64" fill="#f8fafc" font-size="16" font-weight="700">Reset Pane Schema</text>
+    <text x="18" y="84" fill="#94a3b8" font-size="12" font-weight="400">Purge broken cyclic node references;</text>
+    <text x="18" y="100" fill="#94a3b8" font-size="12" font-weight="400">re-initialize clean binary split root.</text>
+
+    <rect x="16" y="116" width="293" height="62" rx="7" fill="#030712" stroke="#1e293b" stroke-width="1" />
+    <text x="28" y="138" fill="#2dd4bf" font-size="11" font-family="'JetBrains Mono', monospace">❯ ferryx layout reset --keep-ptys</text>
+    <text x="28" y="160" fill="#10b981" font-size="10.5" font-family="'JetBrains Mono', monospace">✓ Root tree re-initialized</text>
+  </g>
+
+  <!-- STEP 04: REATTACH SESSIONS -->
+  <g transform="translate(1190, 175)" filter="url(#shadow-card)">
+    <rect width="330" height="195" rx="12" fill="url(#card-active-grad)" stroke="#00f2fe" stroke-width="1.5" />
+    <rect x="18" y="18" width="62" height="20" rx="4" fill="#083344" />
+    <text x="49" y="32" text-anchor="middle" fill="#00f2fe" font-size="10.5" font-weight="700">STEP 04</text>
+    <text x="92" y="32" fill="#64748b" font-size="11" font-weight="600" letter-spacing="0.5">ZERO-DATA-LOSS</text>
+
+    <text x="18" y="64" fill="#f8fafc" font-size="16" font-weight="700">Reattach Daemon PTYs</text>
+    <text x="18" y="84" fill="#94a3b8" font-size="12" font-weight="400">Rebind live PTY sessions into fresh slots;</text>
+    <text x="18" y="100" fill="#94a3b8" font-size="12" font-weight="400">replay missing buffer from sequence ID.</text>
+
+    <rect x="16" y="116" width="298" height="62" rx="7" fill="#030712" stroke="#1e293b" stroke-width="1" />
+    <text x="28" y="138" fill="#00f2fe" font-size="11" font-family="'JetBrains Mono', monospace">❯ ferryx session reattach --all</text>
+    <text x="28" y="160" fill="#10b981" font-size="10.5" font-family="'JetBrains Mono', monospace">✓ 4/4 sessions rehydrated</text>
+  </g>
+
+
+  <!-- ==================== BOTTOM ARCHITECTURE SECTION ==================== -->
+
+  <!-- LEFT: CORRUPTED STATE -->
+  <g transform="translate(80, 410)" filter="url(#shadow-card)">
+    <rect width="695" height="435" rx="14" fill="#090e18" stroke="#1e293b" stroke-width="1.5" />
+    
+    <!-- Header Bar -->
+    <path d="M 0,14 Q 0,0 14,0 L 681,0 Q 695,0 695,14 L 695,44 L 0,44 Z" fill="#0d1424" />
+    <line x1="0" y1="44" x2="695" y2="44" stroke="#1e293b" stroke-width="1" />
+
+    <!-- Badges -->
+    <circle cx="24" cy="22" r="5" fill="#ef4444" opacity="0.8" />
+    <text x="38" y="26" fill="#f87171" font-size="11.5" font-weight="700">BEFORE: CORRUPTED SNAPSHOT STATE</text>
+    <text x="545" y="26" fill="#64748b" font-size="11" font-family="'JetBrains Mono', monospace">tree: cyclical / broken</text>
+
+    <!-- Graphic Comparison Visual: Broken Layout -->
+    <g transform="translate(28, 68)">
+      <!-- Left side: Tree Representation -->
+      <text x="0" y="16" fill="#94a3b8" font-size="12" font-weight="600">Corrupted Pane Tree Model</text>
+      
+      <!-- Root Node -->
+      <rect x="65" y="32" width="120" height="34" rx="6" fill="#1e1b2e" stroke="#ef4444" stroke-width="1.2" stroke-dasharray="3,3" />
+      <text x="125" y="53" text-anchor="middle" fill="#fca5a5" font-size="11" font-family="'JetBrains Mono', monospace">Node#Root (Err)</text>
+
+      <!-- Lines to Children -->
+      <path d="M 95 66 L 45 102" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="2,2" />
+      <path d="M 155 66 L 205 102" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="2,2" />
+
+      <!-- Left Child -->
+      <rect x="10" y="102" width="80" height="32" rx="6" fill="#1c1917" stroke="#b45309" stroke-width="1" />
+      <text x="50" y="122" text-anchor="middle" fill="#fcd34d" font-size="10.5" font-family="'JetBrains Mono', monospace">Pane #0</text>
+
+      <!-- Right Child (Cycle loop / Orphan) -->
+      <rect x="160" y="102" width="105" height="32" rx="6" fill="#1c1917" stroke="#ef4444" stroke-width="1.2" />
+      <text x="212" y="122" text-anchor="middle" fill="#fca5a5" font-size="10.5" font-family="'JetBrains Mono', monospace">Pane #1 [Loop]</text>
+
+      <!-- Broken cycle curve -->
+      <path d="M 212 102 C 212 70, 195 49, 185 49" fill="none" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="3,3" marker-end="url(#arrow-red)" />
+      <text x="220" y="78" fill="#ef4444" font-size="10" font-family="'JetBrains Mono', monospace" font-weight="600">Cycle</text>
+
+      <!-- Deserialization Alert -->
+      <rect x="10" y="152" width="280" height="42" rx="6" fill="#2d1215" stroke="#7f1d1d" stroke-width="1" />
+      <text x="22" y="171" fill="#fca5a5" font-size="11" font-family="'JetBrains Mono', monospace">DeserializationException: Invalid tree</text>
+      <text x="22" y="186" fill="#f87171" font-size="10" font-family="'JetBrains Mono', monospace">Orphaned split node: missing child #2</text>
+
+      <!-- Right side: Visual UI Glitch Window -->
+      <g transform="translate(325, 0)">
+        <text x="0" y="16" fill="#94a3b8" font-size="12" font-weight="600">Rendered Viewport Glitch</text>
+        <rect x="0" y="32" width="310" height="162" rx="8" fill="#050811" stroke="#334155" stroke-width="1.2" />
+        
+        <!-- Left broken Pane -->
+        <rect x="10" y="42" width="125" height="142" rx="4" fill="#0f172a" stroke="#ef4444" stroke-width="1" stroke-dasharray="2,2" />
+        <text x="72" y="105" text-anchor="middle" fill="#ef4444" font-size="11" font-weight="600">Collapsed</text>
+        <text x="72" y="122" text-anchor="middle" fill="#94a3b8" font-size="10" font-family="'JetBrains Mono', monospace">(0px width)</text>
+
+        <!-- Right Overlapping Glitch Pane -->
+        <rect x="145" y="42" width="155" height="142" rx="4" fill="#18181b" stroke="#f59e0b" stroke-width="1.2" />
+        <rect x="145" y="42" width="155" height="22" rx="4" fill="#27272a" />
+        <circle cx="157" cy="53" r="3" fill="#ef4444" />
+        <text x="167" y="57" fill="#a1a1aa" font-size="9.5" font-family="'JetBrains Mono', monospace">stuck_pane_id_9</text>
+        <text x="222" y="105" text-anchor="middle" fill="#fbbf24" font-size="12" font-weight="600">View Desync</text>
+        <text x="222" y="124" text-anchor="middle" fill="#71717a" font-size="10" font-family="'JetBrains Mono', monospace">Unresponsive UI</text>
+      </g>
+
+      <!-- Diagnostic Checklist Table Footer -->
+      <g transform="translate(0, 215)">
+        <rect width="635" height="130" rx="8" fill="#0c1220" stroke="#1e293b" stroke-width="1" />
+        <text x="20" y="26" fill="#e2e8f0" font-size="12" font-weight="700">Root Cause Diagnostics</text>
+        
+        <!-- Line 1 -->
+        <circle cx="28" cy="48" r="3.5" fill="#ef4444" />
+        <text x="42" y="52" fill="#94a3b8" font-size="11.5">JSON parser encountered infinite recursion in serialized workspace node references.</text>
+
+        <!-- Line 2 -->
+        <circle cx="28" cy="74" r="3.5" fill="#f59e0b" />
+        <text x="42" y="78" fill="#94a3b8" font-size="11.5">GUI process unable to map WebContents PTY handles to non-existent layout containers.</text>
+
+        <!-- Line 3: The Critical Insight -->
+        <circle cx="28" cy="100" r="3.5" fill="#38bdf8" />
+        <text x="42" y="104" fill="#38bdf8" font-size="11.5" font-weight="600">Daemon isolation: Background PTY master/slave pairs are untouched and running.</text>
+      </g>
+    </g>
+  </g>
+
+
+  <!-- RIGHT: RESTORED HEALTHY STATE -->
+  <g transform="translate(825, 410)" filter="url(#shadow-card)">
+    <rect width="695" height="435" rx="14" fill="#090e18" stroke="url(#cyanTealBorder)" stroke-width="1.5" />
+    
+    <!-- Header Bar -->
+    <path d="M 0,14 Q 0,0 14,0 L 681,0 Q 695,0 695,14 L 695,44 L 0,44 Z" fill="#0a1f2c" />
+    <line x1="0" y1="44" x2="695" y2="44" stroke="#0e7490" stroke-width="1" />
+
+    <!-- Badges -->
+    <circle cx="24" cy="22" r="5" fill="#10b981" />
+    <text x="38" y="26" fill="#34d399" font-size="11.5" font-weight="700">AFTER: REHYDRATED &amp; RESTORED STATE</text>
+    <text x="535" y="26" fill="#38bdf8" font-size="11" font-family="'JetBrains Mono', monospace">tree: valid binary split</text>
+
+    <!-- Graphic Comparison Visual: Clean Restored Layout -->
+    <g transform="translate(28, 68)">
+      <!-- Left side: Tree Representation -->
+      <text x="0" y="16" fill="#94a3b8" font-size="12" font-weight="600">Restored Binary Pane Tree</text>
+      
+      <!-- Root Node -->
+      <rect x="75" y="32" width="115" height="34" rx="6" fill="#06322b" stroke="#10b981" stroke-width="1.2" />
+      <text x="132" y="53" text-anchor="middle" fill="#6ee7b7" font-size="11" font-family="'JetBrains Mono', monospace">Split#Root (H)</text>
+
+      <!-- Lines to Children -->
+      <path d="M 105 66 L 55 102" stroke="#14b8a6" stroke-width="1.5" />
+      <path d="M 160 66 L 210 102" stroke="#14b8a6" stroke-width="1.5" />
+
+      <!-- Left Child -->
+      <rect x="10" y="102" width="90" height="32" rx="6" fill="#082f49" stroke="#38bdf8" stroke-width="1" />
+      <text x="55" y="122" text-anchor="middle" fill="#7dd3fc" font-size="10.5" font-family="'JetBrains Mono', monospace">PTY #0 (Agent)</text>
+
+      <!-- Right Child (Split V) -->
+      <rect x="160" y="102" width="105" height="32" rx="6" fill="#082f49" stroke="#38bdf8" stroke-width="1" />
+      <text x="212" y="122" text-anchor="middle" fill="#7dd3fc" font-size="10.5" font-family="'JetBrains Mono', monospace">Split (V: 1, 2)</text>
+
+      <!-- Status Pill -->
+      <rect x="10" y="152" width="280" height="42" rx="6" fill="#062e28" stroke="#059669" stroke-width="1" />
+      <text x="22" y="171" fill="#a7f3d0" font-size="11" font-family="'JetBrains Mono', monospace">✓ Verified Schema: No cycles</text>
+      <text x="22" y="186" fill="#34d399" font-size="10" font-family="'JetBrains Mono', monospace">Active PTYs mapped: 3/3 | Ring buffers live</text>
+
+      <!-- Right side: Visual UI Clean Window -->
+      <g transform="translate(325, 0)">
+        <text x="0" y="16" fill="#94a3b8" font-size="12" font-weight="600">Restored Viewport Grid</text>
+        <rect x="0" y="32" width="310" height="162" rx="8" fill="#050811" stroke="#0e7490" stroke-width="1.2" />
+        
+        <!-- Left Pane: Agent Shell -->
+        <rect x="10" y="42" width="138" height="142" rx="5" fill="#0b1728" stroke="#0284c7" stroke-width="1" />
+        <rect x="10" y="42" width="138" height="20" rx="5" fill="#0f263e" />
+        <circle cx="20" cy="52" r="3" fill="#00f2fe" />
+        <text x="28" y="56" fill="#38bdf8" font-size="9" font-family="'JetBrains Mono', monospace">agent-worker-1</text>
+        <text x="18" y="76" fill="#38bdf8" font-size="9" font-family="'JetBrains Mono', monospace">❯ cargo test</text>
+        <text x="18" y="90" fill="#10b981" font-size="9" font-family="'JetBrains Mono', monospace">test ok: 42 passed</text>
+
+        <!-- Right Top Pane: Terminal -->
+        <rect x="156" y="42" width="144" height="68" rx="5" fill="#0b1728" stroke="#14b8a6" stroke-width="1" />
+        <rect x="156" y="42" width="144" height="20" rx="5" fill="#083344" />
+        <circle cx="166" cy="52" r="3" fill="#14b8a6" />
+        <text x="174" y="56" fill="#2dd4bf" font-size="9" font-family="'JetBrains Mono', monospace">git-watch</text>
+        <text x="164" y="76" fill="#94a3b8" font-size="9" font-family="'JetBrains Mono', monospace">main ⇡1 (clean)</text>
+
+        <!-- Right Bottom Pane: Output Stream -->
+        <rect x="156" y="116" width="144" height="68" rx="5" fill="#0b1728" stroke="#00f2fe" stroke-width="1" />
+        <rect x="156" y="116" width="144" height="20" rx="5" fill="#082b42" />
+        <circle cx="166" cy="126" r="3" fill="#38bdf8" />
+        <text x="174" y="130" fill="#7dd3fc" font-size="9" font-family="'JetBrains Mono', monospace">ci-pipeline</text>
+        <text x="164" y="150" fill="#34d399" font-size="9" font-family="'JetBrains Mono', monospace">stream seq #1042</text>
+      </g>
+
+      <!-- Recovery Guarantee Table Footer -->
+      <g transform="translate(0, 215)">
+        <rect width="635" height="130" rx="8" fill="#081e28" stroke="#0d9488" stroke-width="1" stroke-opacity="0.6" />
+        <text x="20" y="26" fill="#2dd4bf" font-size="12" font-weight="700">Restoration Guarantees</text>
+        
+        <!-- Line 1 -->
+        <circle cx="28" cy="48" r="3.5" fill="#10b981" />
+        <text x="42" y="52" fill="#cbd5e1" font-size="11.5">Daemon-owned PTY sessions sustained uninterrupted execution during reset.</text>
+
+        <!-- Line 2 -->
+        <circle cx="28" cy="74" r="3.5" fill="#00f2fe" />
+        <text x="42" y="78" fill="#cbd5e1" font-size="11.5">Scrollback buffer replayed from exact monotonic sequence offset after UI mount.</text>
+
+        <!-- Line 3 -->
+        <circle cx="28" cy="100" r="3.5" fill="#38bdf8" />
+        <text x="42" y="104" fill="#cbd5e1" font-size="11.5">No worktree branch locks or active agent terminal jobs were interrupted or killed.</text>
+      </g>
+    </g>
+  </g>
+
+</svg>

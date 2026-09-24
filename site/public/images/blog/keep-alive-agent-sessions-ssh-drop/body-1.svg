@@ -1,0 +1,279 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900" style="background:#070a13; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'JetBrains Mono', monospace;">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0a0f1d" />
+      <stop offset="50%" stop-color="#070a13" />
+      <stop offset="100%" stop-color="#04060a" />
+    </linearGradient>
+
+    <!-- Column Panel Gradients -->
+    <linearGradient id="panel-left-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#161218" stop-opacity="0.8" />
+      <stop offset="100%" stop-color="#0d0a11" stop-opacity="0.9" />
+    </linearGradient>
+
+    <linearGradient id="panel-right-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0c1b26" stop-opacity="0.8" />
+      <stop offset="100%" stop-color="#07121b" stop-opacity="0.9" />
+    </linearGradient>
+
+    <!-- Card Gradients -->
+    <linearGradient id="card-dark" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#151d2f" stop-opacity="0.95" />
+      <stop offset="100%" stop-color="#0e1422" stop-opacity="0.98" />
+    </linearGradient>
+
+    <linearGradient id="card-fail" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#241419" stop-opacity="0.95" />
+      <stop offset="100%" stop-color="#180a0f" stop-opacity="0.98" />
+    </linearGradient>
+
+    <linearGradient id="card-teal" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0d2836" stop-opacity="0.95" />
+      <stop offset="100%" stop-color="#071924" stop-opacity="0.98" />
+    </linearGradient>
+
+    <linearGradient id="card-blue" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#10253f" stop-opacity="0.95" />
+      <stop offset="100%" stop-color="#0a1728" stop-opacity="0.98" />
+    </linearGradient>
+
+    <linearGradient id="card-accent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0e3a47" />
+      <stop offset="100%" stop-color="#0a2533" />
+    </linearGradient>
+
+    <!-- Subtle Grid Dots -->
+    <pattern id="grid-dots" x="0" y="0" width="32" height="32" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.2" fill="#38bdf8" fill-opacity="0.12" />
+    </pattern>
+
+    <!-- Filters for Glow & Shadows -->
+    <filter id="glow-teal" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+    <filter id="glow-red" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+    <filter id="drop-shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#000000" flood-opacity="0.65" />
+    </filter>
+
+    <!-- Marker Arrowheads -->
+    <marker id="arrow-teal" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#14b8a6" />
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#38bdf8" />
+    </marker>
+    <marker id="arrow-rose" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#f43f5e" />
+    </marker>
+    <marker id="arrow-dim" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#64748b" />
+    </marker>
+  </defs>
+
+  <!-- Background Base -->
+  <rect width="1600" height="900" fill="url(#bg-grad)" />
+  <rect width="1600" height="900" fill="url(#grid-dots)" />
+
+  <!-- Ambient Light Accents -->
+  <circle cx="280" cy="220" r="220" fill="#f43f5e" fill-opacity="0.03" />
+  <circle cx="1150" cy="240" r="280" fill="#0284c7" fill-opacity="0.06" />
+  <circle cx="1250" cy="620" r="300" fill="#14b8a6" fill-opacity="0.05" />
+
+  <!-- ==================== HEADER ==================== -->
+  <g transform="translate(80, 48)">
+    <!-- Badges -->
+    <rect x="0" y="0" width="164" height="26" rx="13" fill="#0a202d" stroke="#14b8a6" stroke-width="1.2" />
+    <circle cx="14" cy="13" r="4.5" fill="#14b8a6" />
+    <text x="26" y="17" fill="#2dd4bf" font-size="11" font-weight="700" letter-spacing="1.2">SESSION CONTINUITY</text>
+
+    <rect x="178" y="0" width="180" height="26" rx="13" fill="#0f192a" stroke="#38bdf8" stroke-width="1.2" />
+    <text x="268" y="17" text-anchor="middle" fill="#7dd3fc" font-size="11" font-weight="600" letter-spacing="0.8">PROCESS HIERARCHY</text>
+
+    <!-- Title & Description -->
+    <text x="0" y="62" fill="#f8fafc" font-size="30" font-weight="700" letter-spacing="-0.5">Keep Agent Sessions Alive After an SSH Drop</text>
+    <text x="0" y="88" fill="#94a3b8" font-size="14.5" font-weight="400">Comparing process ownership trees: direct SSH session binding vs decoupled daemon helper persistence</text>
+  </g>
+
+  <!-- ==================== MAIN COMPARISON CONTAINERS ==================== -->
+
+  <!-- LEFT CONTAINER: Direct SSH Ownership (Fragile) -->
+  <g transform="translate(80, 165)">
+    <!-- Column Frame -->
+    <rect x="0" y="0" width="670" height="680" rx="18" fill="url(#panel-left-grad)" stroke="#33212b" stroke-width="1.5" filter="url(#drop-shadow)" />
+
+    <!-- Column Header -->
+    <g transform="translate(32, 28)">
+      <rect x="0" y="0" width="105" height="24" rx="6" fill="#2b1419" stroke="#f43f5e" stroke-width="1" />
+      <text x="52" y="16" text-anchor="middle" fill="#fb7185" font-size="11" font-weight="700" letter-spacing="1">STANDARD SSH</text>
+
+      <text x="120" y="18" fill="#f1f5f9" font-size="20" font-weight="700">SSH Session Ownership</text>
+      <text x="0" y="44" fill="#94a3b8" font-size="13">Processes bound to SSH login session &amp; pty master</text>
+
+      <rect x="520" y="0" width="86" height="24" rx="12" fill="#2a1217" stroke="#e11d48" stroke-width="1" />
+      <text x="563" y="16" text-anchor="middle" fill="#fda4af" font-size="11" font-weight="600">FRAGILE</text>
+    </g>
+
+    <!-- Stack Cards (Top to Bottom) -->
+    <!-- Card 1: Local Client -->
+    <g transform="translate(32, 100)">
+      <rect x="0" y="0" width="606" height="74" rx="12" fill="url(#card-dark)" stroke="#334155" stroke-width="1.2" />
+      <circle cx="28" cy="37" r="14" fill="#1e293b" />
+      <text x="28" y="42" text-anchor="middle" fill="#94a3b8" font-family="'JetBrains Mono', monospace" font-size="12" font-weight="700">1</text>
+      <text x="56" y="32" fill="#f8fafc" font-size="15" font-weight="600">Local SSH Client / Terminal</text>
+      <text x="56" y="52" fill="#64748b" font-family="'JetBrains Mono', monospace" font-size="12">ssh user@remote-host (interactive session)</text>
+    </g>
+
+    <!-- Connector with Drop Indicator -->
+    <path d="M 335 174 L 335 214" stroke="#f43f5e" stroke-width="2" stroke-dasharray="4,4" />
+    <g transform="translate(265, 182)">
+      <rect x="0" y="0" width="140" height="24" rx="12" fill="#351419" stroke="#f43f5e" stroke-width="1" />
+      <text x="70" y="16" text-anchor="middle" fill="#fda4af" font-size="11" font-weight="600">⚡ NETWORK DROP</text>
+    </g>
+
+    <!-- Card 2: Remote sshd -->
+    <g transform="translate(32, 214)">
+      <rect x="0" y="0" width="606" height="74" rx="12" fill="url(#card-dark)" stroke="#334155" stroke-width="1.2" />
+      <circle cx="28" cy="37" r="14" fill="#1e293b" />
+      <text x="28" y="42" text-anchor="middle" fill="#94a3b8" font-family="'JetBrains Mono', monospace" font-size="12" font-weight="700">2</text>
+      <text x="56" y="32" fill="#f8fafc" font-size="15" font-weight="600">Remote SSH Daemon</text>
+      <text x="56" y="52" fill="#64748b" font-family="'JetBrains Mono', monospace" font-size="12">sshd: user@pts/3 (session leader)</text>
+      <rect x="495" y="25" width="95" height="24" rx="6" fill="#1e293b" />
+      <text x="542" y="41" text-anchor="middle" fill="#94a3b8" font-size="11" font-weight="600">Parent PID</text>
+    </g>
+
+    <!-- Direct Parent-Child Tree Line -->
+    <path d="M 335 288 L 335 328" stroke="#f43f5e" stroke-width="2" marker-end="url(#arrow-rose)" />
+    <text x="350" y="312" fill="#fb7185" font-size="11" font-weight="600">SIGHUP cascade</text>
+
+    <!-- Card 3: Interactive Login Shell -->
+    <g transform="translate(32, 328)">
+      <rect x="0" y="0" width="606" height="74" rx="12" fill="url(#card-fail)" stroke="#4c1d24" stroke-width="1.2" />
+      <circle cx="28" cy="37" r="14" fill="#3b171d" />
+      <text x="28" y="42" text-anchor="middle" fill="#fb7185" font-family="'JetBrains Mono', monospace" font-size="12" font-weight="700">3</text>
+      <text x="56" y="32" fill="#fecdd3" font-size="15" font-weight="600">Login Shell (pty slave)</text>
+      <text x="56" y="52" fill="#fda4af" font-family="'JetBrains Mono', monospace" font-size="12">/bin/bash -l (process group leader)</text>
+      <rect x="495" y="25" width="95" height="24" rx="6" fill="#3b171d" />
+      <text x="542" y="41" text-anchor="middle" fill="#f43f5e" font-size="11" font-weight="600">Terminated</text>
+    </g>
+
+    <!-- Tree Line to Agent -->
+    <path d="M 335 402 L 335 442" stroke="#f43f5e" stroke-width="2" marker-end="url(#arrow-rose)" />
+
+    <!-- Card 4: Agent Runner Process (KILLED) -->
+    <g transform="translate(32, 442)">
+      <rect x="0" y="0" width="606" height="96" rx="12" fill="url(#card-fail)" stroke="#e11d48" stroke-width="1.5" />
+      <circle cx="28" cy="48" r="14" fill="#4c121a" />
+      <text x="28" y="53" text-anchor="middle" fill="#f43f5e" font-family="'JetBrains Mono', monospace" font-size="12" font-weight="700">4</text>
+      <text x="56" y="36" fill="#fff" font-size="16" font-weight="700">Agent Runner &amp; Subprocesses</text>
+      <text x="56" y="58" fill="#fda4af" font-family="'JetBrains Mono', monospace" font-size="12">codex / claude-code / runner (PID: 41820)</text>
+      <text x="56" y="80" fill="#f43f5e" font-size="12" font-weight="600">✗ Session dead · Ring buffer discarded · Uncommitted worktree stuck</text>
+      <rect x="500" y="36" width="90" height="26" rx="6" fill="#4c121a" stroke="#e11d48" stroke-width="1" />
+      <text x="545" y="53" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">KILLED</text>
+    </g>
+
+    <!-- Bottom Summary Box Left -->
+    <g transform="translate(32, 560)">
+      <rect x="0" y="0" width="606" height="92" rx="12" fill="#140a0e" stroke="#2e151c" stroke-width="1" />
+      <text x="24" y="28" fill="#fb7185" font-size="13" font-weight="700">FAILURE MODE ON DISCONNECT:</text>
+      <text x="24" y="50" fill="#cbd5e1" font-size="12.5">• Transport disconnect signals pts master hangup (`EIO`)</text>
+      <text x="24" y="70" fill="#cbd5e1" font-size="12.5">• Operating system broadcasts SIGHUP across process group</text>
+    </g>
+  </g>
+
+  <!-- RIGHT CONTAINER: Daemon / Helper Ownership (Resilient) -->
+  <g transform="translate(850, 165)">
+    <!-- Column Frame -->
+    <rect x="0" y="0" width="670" height="680" rx="18" fill="url(#panel-right-grad)" stroke="#164e63" stroke-width="1.5" filter="url(#drop-shadow)" />
+
+    <!-- Column Header -->
+    <g transform="translate(32, 28)">
+      <rect x="0" y="0" width="125" height="24" rx="6" fill="#0c2e3d" stroke="#14b8a6" stroke-width="1" />
+      <text x="62" y="16" text-anchor="middle" fill="#2dd4bf" font-size="11" font-weight="700" letter-spacing="1">DECOUPLED DAEMON</text>
+
+      <text x="140" y="18" fill="#f1f5f9" font-size="20" font-weight="700">Helper Process Ownership</text>
+      <text x="0" y="44" fill="#94a3b8" font-size="13">Agent process reparented to persistent headless helper daemon</text>
+
+      <rect x="500" y="0" width="105" height="24" rx="12" fill="#082c30" stroke="#14b8a6" stroke-width="1" />
+      <text x="552" y="16" text-anchor="middle" fill="#5eead4" font-size="11" font-weight="600">SURVIVES DROP</text>
+    </g>
+
+    <!-- Stack Cards (Top to Bottom) -->
+    <!-- Card 1: Local Ferryx Desktop Client -->
+    <g transform="translate(32, 100)">
+      <rect x="0" y="0" width="606" height="74" rx="12" fill="url(#card-blue)" stroke="#0284c7" stroke-width="1.2" />
+      <circle cx="28" cy="37" r="14" fill="#075985" />
+      <text x="28" y="42" text-anchor="middle" fill="#e0f2fe" font-family="'JetBrains Mono', monospace" font-size="12" font-weight="700">1</text>
+      <text x="56" y="32" fill="#f8fafc" font-size="15" font-weight="600">Local Ferryx Desktop Client</text>
+      <text x="56" y="52" fill="#7dd3fc" font-family="'JetBrains Mono', monospace" font-size="12">ssh bridge channel (ephemeral transport)</text>
+    </g>
+
+    <!-- Transport Line to Bridge -->
+    <path d="M 335 174 L 335 214" stroke="#0ea5e9" stroke-width="2" marker-end="url(#arrow-blue)" />
+    <g transform="translate(235, 182)">
+      <rect x="0" y="0" width="200" height="24" rx="12" fill="#082338" stroke="#0284c7" stroke-width="1" />
+      <text x="100" y="16" text-anchor="middle" fill="#7dd3fc" font-size="11" font-weight="600">AUTO-REATTACH BRIDGE</text>
+    </g>
+
+    <!-- Card 2: Remote Bridge Endpoint (Transient) -->
+    <g transform="translate(32, 214)">
+      <rect x="0" y="0" width="606" height="74" rx="12" fill="url(#card-dark)" stroke="#1e3a5f" stroke-width="1.2" />
+      <circle cx="28" cy="37" r="14" fill="#1e293b" />
+      <text x="28" y="42" text-anchor="middle" fill="#38bdf8" font-family="'JetBrains Mono', monospace" font-size="12" font-weight="700">2</text>
+      <text x="56" y="32" fill="#f8fafc" font-size="15" font-weight="600">Remote SSH Bridge (UDS Client)</text>
+      <text x="56" y="52" fill="#94a3b8" font-family="'JetBrains Mono', monospace" font-size="12">Transient stream bridge &lt;--&gt; Unix domain socket</text>
+      <rect x="495" y="25" width="95" height="24" rx="6" fill="#152e4d" />
+      <text x="542" y="41" text-anchor="middle" fill="#38bdf8" font-size="11" font-weight="600">Stateless</text>
+    </g>
+
+    <!-- Decoupled UDS Connection to Helper -->
+    <path d="M 335 288 L 335 328" stroke="#14b8a6" stroke-width="2" marker-end="url(#arrow-teal)" />
+    <text x="350" y="312" fill="#2dd4bf" font-size="11" font-weight="600">TargetRef socket handshake</text>
+
+    <!-- Card 3: Headless Remote Helper / Daemon (Independent Parent) -->
+    <g transform="translate(32, 328)">
+      <rect x="0" y="0" width="606" height="74" rx="12" fill="url(#card-teal)" stroke="#14b8a6" stroke-width="1.5" />
+      <circle cx="28" cy="37" r="14" fill="#115e59" />
+      <text x="28" y="42" text-anchor="middle" fill="#5eead4" font-family="'JetBrains Mono', monospace" font-size="12" font-weight="700">3</text>
+      <text x="56" y="32" fill="#f0fdfa" font-size="15" font-weight="700">Headless Remote Helper (Daemon)</text>
+      <text x="56" y="52" fill="#5eead4" font-family="'JetBrains Mono', monospace" font-size="12">ferryx-helper daemon (OS lock / systemd / detached)</text>
+      <rect x="495" y="25" width="95" height="24" rx="6" fill="#0d3d44" stroke="#14b8a6" stroke-width="1" />
+      <text x="542" y="41" text-anchor="middle" fill="#5eead4" font-size="11" font-weight="700">PTY Owner</text>
+    </g>
+
+    <!-- Real Parent Ownership Arrow -->
+    <path d="M 335 402 L 335 442" stroke="#14b8a6" stroke-width="2.5" marker-end="url(#arrow-teal)" />
+
+    <!-- Card 4: Agent Process (ALIVE & BUFFERED) -->
+    <g transform="translate(32, 442)">
+      <rect x="0" y="0" width="606" height="96" rx="12" fill="url(#card-accent)" stroke="#0d9488" stroke-width="1.5" />
+      <circle cx="28" cy="48" r="14" fill="#0f766e" />
+      <text x="28" y="53" text-anchor="middle" fill="#ccfbf1" font-family="'JetBrains Mono', monospace" font-size="12" font-weight="700">4</text>
+      <text x="56" y="36" fill="#ffffff" font-size="16" font-weight="700">Agent Process &amp; Ring Buffer</text>
+      <text x="56" y="58" fill="#5eead4" font-family="'JetBrains Mono', monospace" font-size="12">codex / claude-code / runner (PID: 41820)</text>
+      <text x="56" y="80" fill="#2dd4bf" font-size="12" font-weight="600">✓ Stable PID preserved · Bounded output cursor replay · Unbroken state</text>
+      <rect x="495" y="36" width="95" height="26" rx="6" fill="#0f766e" stroke="#2dd4bf" stroke-width="1" />
+      <text x="542" y="53" text-anchor="middle" fill="#ffffff" font-size="11" font-weight="700">ALIVE</text>
+    </g>
+
+    <!-- Bottom Summary Box Right -->
+    <g transform="translate(32, 560)">
+      <rect x="0" y="0" width="606" height="92" rx="12" fill="#071b22" stroke="#0e4e5e" stroke-width="1" />
+      <text x="24" y="28" fill="#2dd4bf" font-size="13" font-weight="700">RECONNECT &amp; REATTACH BEHAVIOR:</text>
+      <text x="24" y="50" fill="#cbd5e1" font-size="12.5">• SSH drop severs only the bridge transport, not helper or PTY</text>
+      <text x="24" y="70" fill="#cbd5e1" font-size="12.5">• New SSH connection re-probes TargetRef UDS and syncs stream cursor</text>
+    </g>
+  </g>
+
+  <!-- ==================== FOOTER / KEY TAKEAWAY ==================== -->
+  <g transform="translate(80, 856)">
+    <text x="0" y="0" fill="#475569" font-size="12" font-family="'JetBrains Mono', monospace">KEY ARCHITECTURAL RULE:</text>
+    <text x="195" y="0" fill="#94a3b8" font-size="12">Remote PTYs belong to a detached daemon instance; SSH channels are disposable pipes.</text>
+  </g>
+</svg>

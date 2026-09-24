@@ -1,0 +1,362 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900" style="background:#060911; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'JetBrains Mono', monospace;">
+  <defs>
+    <!-- Background Gradients -->
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#080e1a" />
+      <stop offset="50%" stop-color="#060912" />
+      <stop offset="100%" stop-color="#030509" />
+    </linearGradient>
+
+    <!-- Zone Gradients -->
+    <linearGradient id="zone-client" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0e1f38" stop-opacity="0.55" />
+      <stop offset="100%" stop-color="#07101e" stop-opacity="0.35" />
+    </linearGradient>
+
+    <linearGradient id="zone-gateway" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#082b35" stop-opacity="0.55" />
+      <stop offset="100%" stop-color="#05161c" stop-opacity="0.35" />
+    </linearGradient>
+
+    <linearGradient id="zone-host" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#092032" stop-opacity="0.55" />
+      <stop offset="100%" stop-color="#05121c" stop-opacity="0.35" />
+    </linearGradient>
+
+    <!-- Card Backgrounds -->
+    <linearGradient id="card-surface" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0f192b" />
+      <stop offset="100%" stop-color="#090f1b" />
+    </linearGradient>
+
+    <linearGradient id="card-inner" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#11223b" />
+      <stop offset="100%" stop-color="#0a1525" />
+    </linearGradient>
+
+    <linearGradient id="card-highlight" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0d2b38" />
+      <stop offset="100%" stop-color="#071922" />
+    </linearGradient>
+
+    <linearGradient id="ring-glow" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#0284c7" />
+      <stop offset="50%" stop-color="#00f2fe" />
+      <stop offset="100%" stop-color="#2dd4bf" />
+    </linearGradient>
+
+    <!-- Glow Filters -->
+    <filter id="glow-teal" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <!-- Arrow Markers -->
+    <marker id="arrow-teal" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#2dd4bf" />
+    </marker>
+    <marker id="arrow-cyan" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#00f2fe" />
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#38bdf8" />
+    </marker>
+  </defs>
+
+  <!-- Background Base -->
+  <rect width="1600" height="900" fill="url(#bg-grad)" />
+
+  <!-- Grid Dots Background Pattern -->
+  <g opacity="0.04" fill="#38bdf8">
+    <pattern id="grid-dots" x="0" y="0" width="32" height="32" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.5" />
+    </pattern>
+    <rect width="1600" height="900" fill="url(#grid-dots)" />
+  </g>
+
+  <!-- Ambient Light Globs -->
+  <circle cx="260" cy="380" r="280" fill="#0284c7" opacity="0.08" filter="blur(90px)" />
+  <circle cx="800" cy="460" r="300" fill="#00f2fe" opacity="0.06" filter="blur(100px)" />
+  <circle cx="1340" cy="420" r="290" fill="#0d9488" opacity="0.09" filter="blur(90px)" />
+
+  <!-- ==================== HEADER ==================== -->
+  <g transform="translate(80, 42)">
+    <!-- Category Pill -->
+    <rect x="0" y="0" width="220" height="26" rx="13" fill="#0c1d2e" stroke="#1d3856" stroke-width="1.2" />
+    <circle cx="14" cy="13" r="4" fill="#00f2fe" />
+    <text x="28" y="17" fill="#38bdf8" font-size="11" font-weight="700" letter-spacing="1.5">GATEWAY REPLAY ARCHITECTURE</text>
+
+    <!-- Main Title -->
+    <text x="0" y="62" fill="#f8fafc" font-size="28" font-weight="700" letter-spacing="-0.5">Remote Session Replay Over Gateway</text>
+    
+    <!-- Subtitle -->
+    <text x="0" y="88" fill="#94a3b8" font-size="14" font-weight="400">Ring buffer catch-up streaming when reconnecting from an offline mobile or browser client</text>
+  </g>
+
+  <!-- ==================== 3 COLUMN ZONES ==================== -->
+
+  <!-- ZONE 1: CLIENT (Left) -->
+  <g transform="translate(80, 150)">
+    <rect width="380" height="670" rx="16" fill="url(#zone-client)" stroke="#1e3a5f" stroke-width="1.2" />
+    
+    <!-- Zone Header -->
+    <g transform="translate(24, 22)">
+      <rect width="36" height="36" rx="8" fill="#0284c7" fill-opacity="0.18" stroke="#38bdf8" stroke-width="1" />
+      <path d="M 12 11 L 24 11 C 25.1 11 26 11.9 26 13 L 26 23 C 26 24.1 25.1 25 24 25 L 12 25 C 10.9 25 10 24.1 10 23 L 10 13 C 10 11.9 10.9 11 12 11 Z M 16 22 L 20 22" stroke="#38bdf8" stroke-width="1.5" stroke-linecap="round" fill="none" />
+      <text x="48" y="18" fill="#f8fafc" font-size="16" font-weight="700">Remote Client</text>
+      <text x="48" y="34" fill="#64748b" font-size="12">Mobile / Browser (DOM Grid)</text>
+    </g>
+
+    <!-- Offline -> Reconnecting Badge -->
+    <g transform="translate(24, 76)">
+      <rect width="332" height="66" rx="10" fill="#0b1626" stroke="#2563eb" stroke-width="1" stroke-opacity="0.5" />
+      <circle cx="20" cy="22" r="5" fill="#f59e0b" />
+      <text x="34" y="26" fill="#f8fafc" font-size="13" font-weight="600">Event: Client Reconnected</text>
+      <text x="20" y="48" fill="#94a3b8" font-size="11" font-family="'JetBrains Mono', monospace">Was offline during agent execution</text>
+    </g>
+
+    <!-- Client State Box -->
+    <g transform="translate(24, 156)">
+      <rect width="332" height="154" rx="10" fill="url(#card-surface)" stroke="#1d2d44" stroke-width="1" />
+      <text x="18" y="26" fill="#38bdf8" font-size="11" font-weight="700" letter-spacing="1">CLIENT LOCAL STATE</text>
+      
+      <!-- Last Acked Seq -->
+      <g transform="translate(18, 40)">
+        <rect width="296" height="42" rx="6" fill="#080f1a" stroke="#17283c" stroke-width="1" />
+        <text x="14" y="26" fill="#94a3b8" font-size="12">Last Acked Sequence:</text>
+        <text x="200" y="26" fill="#38bdf8" font-size="13" font-family="'JetBrains Mono', monospace" font-weight="700">seq: 1420</text>
+      </g>
+
+      <!-- Sync Request -->
+      <g transform="translate(18, 94)">
+        <rect width="296" height="44" rx="6" fill="#080f1a" stroke="#0284c7" stroke-width="1" stroke-opacity="0.4" />
+        <text x="14" y="27" fill="#38bdf8" font-size="12" font-family="'JetBrains Mono', monospace">SyncRequest(since=1420)</text>
+      </g>
+    </g>
+
+    <!-- Terminal Viewport Preview -->
+    <g transform="translate(24, 324)">
+      <rect width="332" height="320" rx="10" fill="#070c16" stroke="#1d2d44" stroke-width="1" />
+      <!-- Window Title Bar -->
+      <rect width="332" height="28" rx="10" fill="#0c1626" />
+      <circle cx="16" cy="14" r="4" fill="#ef4444" opacity="0.8" />
+      <circle cx="28" cy="14" r="4" fill="#f59e0b" opacity="0.8" />
+      <circle cx="40" cy="14" r="4" fill="#10b981" opacity="0.8" />
+      <text x="166" y="18" fill="#64748b" font-size="10" font-family="'JetBrains Mono', monospace" text-anchor="middle">DOM Grid Viewport</text>
+
+      <!-- Terminal content -->
+      <g transform="translate(16, 46)" font-family="'JetBrains Mono', monospace" font-size="11">
+        <text x="0" y="14" fill="#64748b">[1419] cargo check --workspace</text>
+        <text x="0" y="34" fill="#10b981">✓ Finished dev target</text>
+        <text x="0" y="56" fill="#38bdf8">-- REPLAY FROM GATEWAY --</text>
+        <rect x="-4" y="68" width="308" height="114" rx="6" fill="#00f2fe" fill-opacity="0.06" stroke="#00f2fe" stroke-width="1" stroke-dasharray="3,3" />
+        <text x="6" y="92" fill="#00f2fe">[1421] agent &gt; running tests</text>
+        <text x="6" y="114" fill="#2dd4bf">[1455] test git_lock ... ok</text>
+        <text x="6" y="136" fill="#2dd4bf">[1510] test ring_buf ... ok</text>
+        <text x="6" y="158" fill="#f8fafc">[1890] Prompt: Ready.</text>
+        
+        <text x="0" y="212" fill="#94a3b8">Status: </text>
+        <rect x="56" y="198" width="92" height="20" rx="4" fill="#0d9488" fill-opacity="0.3" stroke="#14b8a6" stroke-width="1" />
+        <text x="63" y="212" fill="#2dd4bf" font-weight="700">SYNCHRONIZED</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- ZONE 2: GATEWAY / RELAY (Center) -->
+  <g transform="translate(500, 150)">
+    <rect width="420" height="670" rx="16" fill="url(#zone-gateway)" stroke="#0e4450" stroke-width="1.2" />
+    
+    <!-- Zone Header -->
+    <g transform="translate(24, 22)">
+      <rect width="36" height="36" rx="8" fill="#0d9488" fill-opacity="0.2" stroke="#00f2fe" stroke-width="1" />
+      <path d="M 18 10 L 26 15 L 26 23 L 18 28 L 10 23 L 10 15 Z" stroke="#00f2fe" stroke-width="1.5" stroke-linejoin="round" fill="none" />
+      <circle cx="18" cy="19" r="2.5" fill="#00f2fe" />
+      <text x="48" y="18" fill="#f8fafc" font-size="16" font-weight="700">Authenticated Gateway</text>
+      <text x="48" y="34" fill="#64748b" font-size="12">Outbound Relay &amp; Auth Bridge</text>
+    </g>
+
+    <!-- Handshake / Pairing Security Card -->
+    <g transform="translate(24, 76)">
+      <rect width="372" height="106" rx="10" fill="url(#card-highlight)" stroke="#115e59" stroke-width="1" />
+      <text x="18" y="24" fill="#00f2fe" font-size="11" font-weight="700" letter-spacing="1">AUTHENTICATED HANDSHAKE</text>
+      
+      <g transform="translate(18, 38)">
+        <rect width="160" height="52" rx="6" fill="#06151c" stroke="#0d3b46" stroke-width="1" />
+        <text x="12" y="20" fill="#94a3b8" font-size="11">Pairing Method</text>
+        <text x="12" y="38" fill="#f8fafc" font-size="13" font-weight="600">6-Digit PIN / QR</text>
+      </g>
+      <g transform="translate(194, 38)">
+        <rect width="160" height="52" rx="6" fill="#06151c" stroke="#0d3b46" stroke-width="1" />
+        <text x="12" y="20" fill="#94a3b8" font-size="11">Host Reachability</text>
+        <text x="12" y="38" fill="#2dd4bf" font-size="13" font-weight="600">No Inbound Ports</text>
+      </g>
+    </g>
+
+    <!-- Stream Forwarding & Gap Resolver -->
+    <g transform="translate(24, 196)">
+      <rect width="372" height="216" rx="10" fill="url(#card-surface)" stroke="#163842" stroke-width="1" />
+      <text x="18" y="26" fill="#38bdf8" font-size="11" font-weight="700" letter-spacing="1">STREAM REPLAY ROUTER</text>
+      
+      <!-- Inbound Sync from Client -->
+      <g transform="translate(18, 42)">
+        <rect width="336" height="44" rx="6" fill="#06131c" stroke="#0284c7" stroke-width="1" stroke-opacity="0.6" />
+        <text x="14" y="27" fill="#38bdf8" font-size="12" font-family="'JetBrains Mono', monospace">← Inbound Sync Request (1420)</text>
+      </g>
+
+      <!-- Gateway Query to Host -->
+      <g transform="translate(18, 98)">
+        <rect width="336" height="44" rx="6" fill="#06131c" stroke="#0d9488" stroke-width="1" stroke-opacity="0.6" />
+        <text x="14" y="27" fill="#2dd4bf" font-size="12" font-family="'JetBrains Mono', monospace">Query Buffer [1421 .. latest] →</text>
+      </g>
+
+      <!-- Replay Chunks Fast Forward -->
+      <g transform="translate(18, 154)">
+        <rect width="336" height="46" rx="6" fill="#08252a" stroke="#00f2fe" stroke-width="1.2" />
+        <circle cx="16" cy="23" r="4" fill="#00f2fe" filter="url(#glow-teal)" />
+        <text x="28" y="28" fill="#00f2fe" font-size="12" font-family="'JetBrains Mono', monospace" font-weight="700">Replay Chunks Burst: 470 pkts</text>
+      </g>
+    </g>
+
+    <!-- Sequence Gap Check Guarantee -->
+    <g transform="translate(24, 426)">
+      <rect width="372" height="218" rx="10" fill="#06151f" stroke="#134e4a" stroke-width="1" />
+      <text x="18" y="26" fill="#2dd4bf" font-size="11" font-weight="700" letter-spacing="1">GUARANTEES &amp; RESILIENCE</text>
+      
+      <g transform="translate(18, 42)">
+        <circle cx="8" cy="10" r="3.5" fill="#00f2fe" />
+        <text x="20" y="14" fill="#f8fafc" font-size="13" font-weight="600">Zero-Loss Sequence Delivery</text>
+        <text x="20" y="32" fill="#94a3b8" font-size="12">Strict monotonicity prevents dropped frames</text>
+      </g>
+
+      <g transform="translate(18, 96)">
+        <circle cx="8" cy="10" r="3.5" fill="#2dd4bf" />
+        <text x="20" y="14" fill="#f8fafc" font-size="13" font-weight="600">No Open Inbound Ports</text>
+        <text x="20" y="32" fill="#94a3b8" font-size="12">Host maintains outbound TLS tunnel to relay</text>
+      </g>
+
+      <g transform="translate(18, 150)">
+        <circle cx="8" cy="10" r="3.5" fill="#38bdf8" />
+        <text x="20" y="14" fill="#f8fafc" font-size="13" font-weight="600">Granular Device Revocation</text>
+        <text x="20" y="32" fill="#94a3b8" font-size="12">Revoke stolen phone without touching host</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- ZONE 3: HOST & PTY DAEMON (Right) -->
+  <g transform="translate(960, 150)">
+    <rect width="560" height="670" rx="16" fill="url(#zone-host)" stroke="#114b5f" stroke-width="1.2" />
+    
+    <!-- Zone Header -->
+    <g transform="translate(24, 22)">
+      <rect width="36" height="36" rx="8" fill="#0284c7" fill-opacity="0.2" stroke="#38bdf8" stroke-width="1" />
+      <path d="M 11 12 L 25 12 L 25 24 L 11 24 Z M 15 20 L 21 20 M 18 16 L 18 20" stroke="#38bdf8" stroke-width="1.5" stroke-linecap="round" fill="none" />
+      <text x="48" y="18" fill="#f8fafc" font-size="16" font-weight="700">Host Environment</text>
+      <text x="48" y="34" fill="#64748b" font-size="12">Headless PTY Daemon &amp; Ring Buffer Store</text>
+    </g>
+
+    <!-- Daemon Persistence Box -->
+    <g transform="translate(24, 76)">
+      <rect width="512" height="96" rx="10" fill="url(#card-inner)" stroke="#1e3a5f" stroke-width="1" />
+      <g transform="translate(18, 16)">
+        <circle cx="6" cy="10" r="5" fill="#10b981" />
+        <text x="20" y="14" fill="#f8fafc" font-size="14" font-weight="600">Daemon Outlives Client Connection</text>
+        <text x="20" y="38" fill="#94a3b8" font-size="12">Session processes &amp; agents run continuously in jailed worktrees.</text>
+        <text x="20" y="60" fill="#38bdf8" font-size="11" font-family="'JetBrains Mono', monospace">Active Worktree: /repo/.ferryx/worktrees/agent-replay</text>
+      </g>
+    </g>
+
+    <!-- Ring Buffer Visualizer -->
+    <g transform="translate(24, 186)">
+      <rect width="512" height="274" rx="10" fill="url(#card-surface)" stroke="#0e7490" stroke-width="1.2" />
+      
+      <g transform="translate(18, 24)">
+        <text x="0" y="0" fill="#00f2fe" font-size="11" font-weight="700" letter-spacing="1">SESSION RING BUFFER (CIRCULAR MEMORY STORE)</text>
+      </g>
+
+      <!-- Ring Buffer Bar & Segments -->
+      <g transform="translate(24, 56)">
+        <!-- Buffer Track Background -->
+        <rect x="0" y="0" width="464" height="50" rx="8" fill="#07121e" stroke="#152e46" stroke-width="1" />
+        
+        <!-- Already Acknowledged Section -->
+        <rect x="4" y="4" width="120" height="42" rx="5" fill="#0f2942" opacity="0.6" />
+        <text x="64" y="29" text-anchor="middle" fill="#64748b" font-family="'JetBrains Mono', monospace" font-size="11">seq ≤ 1420</text>
+        <text x="64" y="68" text-anchor="middle" fill="#64748b" font-size="10">Delivered Prior</text>
+
+        <!-- Missed During Offline Section (HIGHLIGHTED) -->
+        <rect x="128" y="4" width="220" height="42" rx="5" fill="url(#ring-glow)" fill-opacity="0.25" stroke="#00f2fe" stroke-width="1.5" />
+        <text x="238" y="29" text-anchor="middle" fill="#00f2fe" font-family="'JetBrains Mono', monospace" font-weight="700" font-size="12">seq: 1421 → 1890</text>
+        <text x="238" y="68" text-anchor="middle" fill="#00f2fe" font-size="11" font-weight="600">Replay Window (Missed Output)</text>
+
+        <!-- Head / Current Output Section -->
+        <rect x="352" y="4" width="108" height="42" rx="5" fill="#0d383b" stroke="#14b8a6" stroke-width="1" />
+        <text x="406" y="29" text-anchor="middle" fill="#2dd4bf" font-family="'JetBrains Mono', monospace" font-size="11">seq 1891+</text>
+        <text x="406" y="68" text-anchor="middle" fill="#2dd4bf" font-size="10">Live Stream Head</text>
+      </g>
+
+      <!-- Buffer Details Grid -->
+      <g transform="translate(24, 156)">
+        <rect width="224" height="94" rx="6" fill="#081422" stroke="#162c42" stroke-width="1" />
+        <text x="14" y="22" fill="#94a3b8" font-size="11">Memory Allocation</text>
+        <text x="14" y="44" fill="#f8fafc" font-size="13" font-family="'JetBrains Mono', monospace" font-weight="600">64 MB Windowed Ring</text>
+        <text x="14" y="68" fill="#64748b" font-size="11">Auto-compaction on wrap</text>
+        <circle cx="198" cy="22" r="3.5" fill="#14b8a6" />
+      </g>
+
+      <g transform="translate(264, 156)">
+        <rect width="224" height="94" rx="6" fill="#081422" stroke="#162c42" stroke-width="1" />
+        <text x="14" y="22" fill="#94a3b8" font-size="11">Snapshot Recovery</text>
+        <text x="14" y="44" fill="#f8fafc" font-size="13" font-family="'JetBrains Mono', monospace" font-weight="600">VT Screen State Dump</text>
+        <text x="14" y="68" fill="#64748b" font-size="11">Instant layout reconstruction</text>
+        <circle cx="198" cy="22" r="3.5" fill="#38bdf8" />
+      </g>
+    </g>
+
+    <!-- Multi-Agent Sessions on Host -->
+    <g transform="translate(24, 474)">
+      <rect width="512" height="170" rx="10" fill="#06121f" stroke="#16314c" stroke-width="1" />
+      <text x="18" y="26" fill="#38bdf8" font-size="11" font-weight="700" letter-spacing="1">HOST WORKSPACE RUNNERS</text>
+      
+      <!-- Session Item 1 -->
+      <g transform="translate(18, 42)">
+        <rect width="476" height="48" rx="6" fill="#0a1a2b" stroke="#1e3a5f" stroke-width="1" />
+        <circle cx="16" cy="24" r="4" fill="#10b981" />
+        <text x="32" y="28" fill="#f8fafc" font-size="12" font-family="'JetBrains Mono', monospace">session-01 (claude-agent) [active]</text>
+        <text x="372" y="28" fill="#2dd4bf" font-size="11" font-family="'JetBrains Mono', monospace">seq: 1891</text>
+      </g>
+
+      <!-- Session Item 2 -->
+      <g transform="translate(18, 102)">
+        <rect width="476" height="48" rx="6" fill="#071422" stroke="#14283f" stroke-width="1" />
+        <circle cx="16" cy="24" r="4" fill="#38bdf8" />
+        <text x="32" y="28" fill="#94a3b8" font-size="12" font-family="'JetBrains Mono', monospace">session-02 (ci-test-runner) [idle]</text>
+        <text x="372" y="28" fill="#64748b" font-size="11" font-family="'JetBrains Mono', monospace">seq: 0942</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- ==================== FLOW CONNECTORS & DATA BEAMS ==================== -->
+
+  <!-- Horizontal Data Flow between cards -->
+  <!-- Sync Request: Left -> Center -> Right -->
+  <g transform="translate(0, 0)">
+    <!-- Client to Gateway Sync -->
+    <path d="M 460 410 L 500 410" stroke="#38bdf8" stroke-width="2.5" marker-end="url(#arrow-blue)" />
+    <!-- Gateway to Host Query -->
+    <path d="M 920 410 L 960 410" stroke="#2dd4bf" stroke-width="2.5" marker-end="url(#arrow-teal)" />
+  </g>
+
+  <!-- Fast Catch-up Replay Stream: Right -> Center -> Left -->
+  <g transform="translate(0, 0)">
+    <!-- Host to Gateway Replay -->
+    <path d="M 960 300 L 920 300" stroke="#00f2fe" stroke-width="3" stroke-linecap="round" marker-end="url(#arrow-cyan)" filter="url(#glow-teal)" />
+    <!-- Gateway to Client Replay -->
+    <path d="M 500 300 L 460 300" stroke="#00f2fe" stroke-width="3" stroke-linecap="round" marker-end="url(#arrow-cyan)" filter="url(#glow-teal)" />
+  </g>
+
+  <!-- ==================== FOOTER ==================== -->
+  <g transform="translate(80, 858)">
+    <text x="0" y="0" fill="#475569" font-size="12" font-family="'JetBrains Mono', monospace">Ferryx Architecture • Remote Gateway Protocol • Ring Buffer Replay</text>
+    <text x="1440" y="0" text-anchor="end" fill="#475569" font-size="12" font-family="'JetBrains Mono', monospace">ferryx.dev/docs/architecture</text>
+  </g>
+</svg>

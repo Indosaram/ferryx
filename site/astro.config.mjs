@@ -16,19 +16,22 @@ const baseUrl = process.env.BASE_URL
 const siteOrigin = process.env.SITE_URL ?? 'https://ferryx.dev';
 const socialImage = `${siteOrigin.replace(/\/$/, '')}${baseUrl ?? '/'}og-image.png`;
 
-// Astro does not rewrite root-relative links written inside markdown, so `/compare/warp/`
-// would 404 on a base-path deployment. Prefixing here keeps the prose portable: the same
-// source builds correctly under /ferryx and at a domain root.
+// Astro does not rewrite root-relative links or images written inside markdown, so
+// `/compare/warp/` would 404 and `/images/...` would break on a base-path deployment.
+// Prefixing here keeps the prose portable: the same source builds correctly under
+// /ferryx and at a domain root.
 function rehypeBasePath() {
   const base = (baseUrl ?? '/').replace(/\/$/, '');
   return (tree) => {
     const walk = (node) => {
-      if (node.tagName === 'a') {
-        const href = node.properties?.href;
-        if (typeof href === 'string' && href.startsWith('/') && !href.startsWith('//')) {
-          if (base && !href.startsWith(`${base}/`)) node.properties.href = `${base}${href}`;
+      const apply = (prop) => {
+        const value = node.properties?.[prop];
+        if (typeof value === 'string' && value.startsWith('/') && !value.startsWith('//')) {
+          if (base && !value.startsWith(`${base}/`)) node.properties[prop] = `${base}${value}`;
         }
-      }
+      };
+      if (node.tagName === 'a') apply('href');
+      if (node.tagName === 'img') apply('src');
       for (const child of node.children ?? []) walk(child);
     };
     walk(tree);
@@ -82,6 +85,10 @@ export default defineConfig({
             { label: 'Git worktree workflow', slug: 'use-cases/git-worktree-workflow' },
             { label: 'Remote terminal access', slug: 'use-cases/remote-terminal-access' },
           ],
+        },
+        {
+          label: 'Blog',
+          autogenerate: { directory: 'blog' },
         },
         {
           label: 'Compare',

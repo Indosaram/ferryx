@@ -1,0 +1,292 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <defs>
+    <!-- Background Radial Gradients -->
+    <radialGradient id="bgBase" cx="50%" cy="42%" r="72%">
+      <stop offset="0%" stop-color="#0a1829" stop-opacity="1"/>
+      <stop offset="48%" stop-color="#060f1b" stop-opacity="1"/>
+      <stop offset="100%" stop-color="#020509" stop-opacity="1"/>
+    </radialGradient>
+
+    <radialGradient id="draftGlow" cx="28%" cy="40%" r="42%">
+      <stop offset="0%" stop-color="#00d2ff" stop-opacity="0.25"/>
+      <stop offset="50%" stop-color="#0066cc" stop-opacity="0.08"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="verifyGlow" cx="72%" cy="40%" r="42%">
+      <stop offset="0%" stop-color="#00f5d4" stop-opacity="0.25"/>
+      <stop offset="50%" stop-color="#059669" stop-opacity="0.08"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="centerCoreGlow" cx="50%" cy="40%" r="32%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.3"/>
+      <stop offset="45%" stop-color="#2dd4bf" stop-opacity="0.15"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Linear Gradients -->
+    <linearGradient id="cyanTealLine" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00f2fe"/>
+      <stop offset="50%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#00f5d4"/>
+    </linearGradient>
+
+    <linearGradient id="draftCardGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0e2238" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#071320" stop-opacity="0.95"/>
+    </linearGradient>
+
+    <linearGradient id="verifyCardGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0c2a27" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#061817" stop-opacity="0.95"/>
+    </linearGradient>
+
+    <!-- Filters for Glow -->
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <filter id="intenseGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="7" result="blur1"/>
+      <feGaussianBlur stdDeviation="18" result="blur2"/>
+      <feMerge>
+        <feMergeNode in="blur2"/>
+        <feMergeNode in="blur1"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Subtle Tech Grid -->
+    <pattern id="terminalGrid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#162a3f" stroke-width="0.7" stroke-opacity="0.4"/>
+      <circle cx="40" cy="0" r="1" fill="#1e3f60" fill-opacity="0.55"/>
+    </pattern>
+  </defs>
+
+  <!-- ==================== BACKGROUND ==================== -->
+  <rect width="1200" height="630" fill="url(#bgBase)"/>
+  <rect width="1200" height="630" fill="url(#terminalGrid)"/>
+  <rect width="1200" height="630" fill="url(#draftGlow)"/>
+  <rect width="1200" height="630" fill="url(#verifyGlow)"/>
+  <rect width="1200" height="630" fill="url(#centerCoreGlow)"/>
+
+  <!-- ==================== TOP SYSTEM STATUS BADGES (ABSTRACT) ==================== -->
+  <!-- Lane A Header Indicator -->
+  <g transform="translate(85, 46)">
+    <rect x="0" y="0" width="180" height="28" rx="14" fill="#091726" stroke="#1d3c5f" stroke-width="1.2"/>
+    <circle cx="16" cy="14" r="4.5" fill="#00f2fe" filter="url(#glow)"/>
+    <rect x="30" y="11" width="38" height="6" rx="3" fill="#38bdf8"/>
+    <rect x="74" y="11" width="10" height="6" rx="3" fill="#1e40af"/>
+    <rect x="90" y="11" width="45" height="6" rx="3" fill="#64748b"/>
+    <rect x="141" y="11" width="24" height="6" rx="3" fill="#0284c7"/>
+  </g>
+
+  <!-- Center Pipeline Indicator -->
+  <g transform="translate(510, 46)">
+    <rect x="0" y="0" width="180" height="28" rx="14" fill="#061322" stroke="url(#cyanTealLine)" stroke-width="1.2"/>
+    <circle cx="20" cy="14" r="3.5" fill="#00f2fe" filter="url(#glow)"/>
+    <path d="M 32 14 L 148 14" stroke="url(#cyanTealLine)" stroke-width="2" stroke-dasharray="4 3"/>
+    <circle cx="160" cy="14" r="3.5" fill="#00f5d4" filter="url(#glow)"/>
+  </g>
+
+  <!-- Lane B Header Indicator -->
+  <g transform="translate(935, 46)">
+    <rect x="0" y="0" width="180" height="28" rx="14" fill="#061a1a" stroke="#174e47" stroke-width="1.2"/>
+    <circle cx="16" cy="14" r="4.5" fill="#00f5d4" filter="url(#glow)"/>
+    <rect x="30" y="11" width="45" height="6" rx="3" fill="#2dd4bf"/>
+    <rect x="81" y="11" width="10" height="6" rx="3" fill="#065f46"/>
+    <rect x="97" y="11" width="40" height="6" rx="3" fill="#64748b"/>
+    <rect x="143" y="11" width="22" height="6" rx="3" fill="#10b981"/>
+  </g>
+
+  <!-- ==================== LANE CONNECTION HIGHWAYS (PIPELINES) ==================== -->
+  <!-- Top Bridge Stream (Draft -> Verify) -->
+  <path d="M 510 175 C 560 175, 640 175, 690 175" fill="none" stroke="url(#cyanTealLine)" stroke-width="2.5" stroke-dasharray="6 4" filter="url(#glow)"/>
+  <polygon points="688,171 696,175 688,179" fill="#00f5d4" filter="url(#glow)"/>
+
+  <!-- Middle Main Energy Conduit -->
+  <path d="M 510 255 C 570 255, 630 255, 690 255" fill="none" stroke="#142b40" stroke-width="6"/>
+  <path d="M 510 255 C 570 255, 630 255, 690 255" fill="none" stroke="url(#cyanTealLine)" stroke-width="2.5" filter="url(#glow)"/>
+  <circle cx="548" cy="255" r="4" fill="#00f2fe" filter="url(#glow)"/>
+  <circle cx="652" cy="255" r="4" fill="#00f5d4" filter="url(#glow)"/>
+
+  <!-- Bottom Return Stream (Verify Feedback -> Draft) -->
+  <path d="M 690 335 C 640 335, 560 335, 510 335" fill="none" stroke="url(#cyanTealLine)" stroke-width="2.5" stroke-dasharray="6 4" opacity="0.8" filter="url(#glow)"/>
+  <polygon points="512,331 504,335 512,339" fill="#00f2fe" filter="url(#glow)"/>
+
+  <!-- Central Sync Core Hub -->
+  <g transform="translate(600, 255)">
+    <ellipse cx="0" cy="0" rx="45" ry="45" fill="#061524" stroke="url(#cyanTealLine)" stroke-width="2" filter="url(#intenseGlow)"/>
+    <circle cx="0" cy="0" r="26" fill="#082035" stroke="#38bdf8" stroke-width="1.5"/>
+    <path d="M -12 -7 L 4 -7 L 12 -7 M 6 -13 L 13 -7 L 6 -1" fill="none" stroke="#00f2fe" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)"/>
+    <path d="M 12 7 L -4 7 L -12 7 M -6 1 L -13 7 L -6 13" fill="none" stroke="#00f5d4" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)"/>
+  </g>
+
+  <!-- ==================== LEFT LANE: DRAFT CARD (AGENT 1) ==================== -->
+  <g transform="translate(85, 105)">
+    <rect x="0" y="0" width="425" height="340" rx="16" fill="url(#draftCardGrad)" stroke="#1d466c" stroke-width="1.8" filter="url(#glow)"/>
+    
+    <rect x="0" y="0" width="425" height="44" rx="16" fill="#0a1b2d"/>
+    <rect x="0" y="30" width="425" height="14" fill="#0a1b2d"/>
+    <line x1="0" y1="44" x2="425" y2="44" stroke="#1d466c" stroke-width="1.2"/>
+    
+    <circle cx="24" cy="22" r="5" fill="#1e3a5a"/>
+    <circle cx="42" cy="22" r="5" fill="#1e3a5a"/>
+    <circle cx="60" cy="22" r="5" fill="#00f2fe" filter="url(#glow)"/>
+    
+    <rect x="82" y="13" width="120" height="18" rx="9" fill="#09233a" stroke="#0284c7" stroke-width="1"/>
+    <circle cx="96" cy="22" r="3.5" fill="#38bdf8"/>
+    <rect x="108" y="19" width="78" height="6" rx="3" fill="#94a3b8"/>
+
+    <rect x="335" y="13" width="68" height="18" rx="9" fill="#032b44" stroke="#00f2fe" stroke-width="1"/>
+    <circle cx="347" cy="22" r="3" fill="#00f2fe" filter="url(#glow)"/>
+    <rect x="357" y="19" width="32" height="6" rx="3" fill="#38bdf8"/>
+
+    <!-- Document Content Elements -->
+    <g transform="translate(30, 68)">
+      <rect x="0" y="0" width="14" height="22" rx="3" fill="#00f2fe" filter="url(#glow)"/>
+      <rect x="22" y="2" width="180" height="18" rx="4" fill="#38bdf8" fill-opacity="0.9"/>
+      <rect x="210" y="2" width="90" height="18" rx="4" fill="#1e40af" fill-opacity="0.8"/>
+    </g>
+
+    <g transform="translate(30, 106)">
+      <rect x="0" y="0" width="365" height="8" rx="4" fill="#1e3f60"/>
+      <rect x="0" y="18" width="330" height="8" rx="4" fill="#1e3f60"/>
+      <rect x="0" y="36" width="290" height="8" rx="4" fill="#1e3f60"/>
+    </g>
+
+    <!-- Code Block / Spec Snippet -->
+    <g transform="translate(30, 168)">
+      <rect x="0" y="0" width="365" height="105" rx="10" fill="#040e18" stroke="#163554" stroke-width="1.4"/>
+      <circle cx="18" cy="18" r="3.5" fill="#0284c7"/>
+      <rect x="30" y="15" width="120" height="6" rx="3" fill="#475569"/>
+      
+      <g transform="translate(18, 38)">
+        <rect x="0" y="0" width="20" height="8" rx="3" fill="#00f2fe" filter="url(#glow)"/>
+        <rect x="28" y="0" width="75" height="8" rx="3" fill="#38bdf8"/>
+        <rect x="111" y="0" width="140" height="8" rx="3" fill="#93c5fd"/>
+      </g>
+
+      <g transform="translate(18, 58)">
+        <rect x="16" y="0" width="85" height="8" rx="3" fill="#38bdf8"/>
+        <rect x="109" y="0" width="110" height="8" rx="3" fill="#60a5fa"/>
+        <rect x="227" y="0" width="40" height="8" rx="3" fill="#00f2fe"/>
+      </g>
+
+      <g transform="translate(18, 78)">
+        <rect x="16" y="0" width="130" height="8" rx="3" fill="#0284c7"/>
+        <rect x="154" y="0" width="65" height="8" rx="3" fill="#38bdf8"/>
+      </g>
+    </g>
+
+    <!-- Active Drafting Agent Indicator (Bottom of Card) -->
+    <g transform="translate(30, 292)">
+      <rect x="0" y="0" width="150" height="26" rx="13" fill="#05253d" stroke="#0284c7" stroke-width="1.2"/>
+      <circle cx="14" cy="13" r="4.5" fill="#00f2fe" filter="url(#glow)"/>
+      <rect x="26" y="10" width="75" height="6" rx="3" fill="#bae6fd"/>
+      <rect x="108" y="10" width="28" height="6" rx="3" fill="#38bdf8"/>
+      <rect x="162" y="4" width="10" height="18" rx="2" fill="#00f2fe" filter="url(#glow)"/>
+    </g>
+  </g>
+
+  <!-- ==================== RIGHT LANE: VERIFY CARD (AGENT 2) ==================== -->
+  <g transform="translate(690, 105)">
+    <rect x="0" y="0" width="425" height="340" rx="16" fill="url(#verifyCardGrad)" stroke="#17544b" stroke-width="1.8" filter="url(#glow)"/>
+    
+    <rect x="0" y="0" width="425" height="44" rx="16" fill="#071f1e"/>
+    <rect x="0" y="30" width="425" height="14" fill="#071f1e"/>
+    <line x1="0" y1="44" x2="425" y2="44" stroke="#17544b" stroke-width="1.2"/>
+    
+    <circle cx="24" cy="22" r="5" fill="#133834"/>
+    <circle cx="42" cy="22" r="5" fill="#133834"/>
+    <circle cx="60" cy="22" r="5" fill="#00f5d4" filter="url(#glow)"/>
+    
+    <rect x="82" y="13" width="120" height="18" rx="9" fill="#052b27" stroke="#059669" stroke-width="1"/>
+    <circle cx="96" cy="22" r="3.5" fill="#34d399"/>
+    <rect x="108" y="19" width="78" height="6" rx="3" fill="#a7f3d0"/>
+
+    <rect x="335" y="13" width="68" height="18" rx="9" fill="#043830" stroke="#00f5d4" stroke-width="1"/>
+    <circle cx="347" cy="22" r="3" fill="#00f5d4" filter="url(#glow)"/>
+    <rect x="357" y="19" width="32" height="6" rx="3" fill="#6ee7b7"/>
+
+    <!-- Verification Item 1: Abstract Syntax & Schema Validation -->
+    <g transform="translate(30, 64)">
+      <rect x="0" y="0" width="365" height="44" rx="9" fill="#061a19" stroke="#134e45" stroke-width="1"/>
+      <circle cx="24" cy="22" r="11" fill="#064e3b" stroke="#10b981" stroke-width="1.4"/>
+      <path d="M 19 22 L 23 26 L 29 18" fill="none" stroke="#34d399" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+      <rect x="46" y="15" width="130" height="8" rx="4" fill="#ccfbf1"/>
+      <rect x="46" y="27" width="80" height="5" rx="2.5" fill="#2dd4bf" opacity="0.7"/>
+      <rect x="295" y="14" width="55" height="16" rx="8" fill="#043e33" stroke="#10b981" stroke-width="1"/>
+      <circle cx="305" cy="22" r="2.5" fill="#34d399"/>
+      <rect x="314" y="19" width="26" height="6" rx="3" fill="#6ee7b7"/>
+    </g>
+
+    <!-- Verification Item 2: Code Execution Sandbox -->
+    <g transform="translate(30, 118)">
+      <rect x="0" y="0" width="365" height="44" rx="9" fill="#061a19" stroke="#134e45" stroke-width="1"/>
+      <circle cx="24" cy="22" r="11" fill="#064e3b" stroke="#10b981" stroke-width="1.4"/>
+      <path d="M 19 22 L 23 26 L 29 18" fill="none" stroke="#34d399" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+      <rect x="46" y="15" width="150" height="8" rx="4" fill="#ccfbf1"/>
+      <rect x="46" y="27" width="95" height="5" rx="2.5" fill="#2dd4bf" opacity="0.7"/>
+      <rect x="295" y="14" width="55" height="16" rx="8" fill="#043e33" stroke="#10b981" stroke-width="1"/>
+      <circle cx="305" cy="22" r="2.5" fill="#34d399"/>
+      <rect x="314" y="19" width="26" height="6" rx="3" fill="#6ee7b7"/>
+    </g>
+
+    <!-- Verification Item 3: API Reference Match -->
+    <g transform="translate(30, 172)">
+      <rect x="0" y="0" width="365" height="44" rx="9" fill="#061a19" stroke="#134e45" stroke-width="1"/>
+      <circle cx="24" cy="22" r="11" fill="#064e3b" stroke="#10b981" stroke-width="1.4"/>
+      <path d="M 19 22 L 23 26 L 29 18" fill="none" stroke="#34d399" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+      <rect x="46" y="15" width="120" height="8" rx="4" fill="#ccfbf1"/>
+      <rect x="46" y="27" width="70" height="5" rx="2.5" fill="#2dd4bf" opacity="0.7"/>
+      <rect x="295" y="14" width="55" height="16" rx="8" fill="#043e33" stroke="#10b981" stroke-width="1"/>
+      <circle cx="305" cy="22" r="2.5" fill="#34d399"/>
+      <rect x="314" y="19" width="26" height="6" rx="3" fill="#6ee7b7"/>
+    </g>
+
+    <!-- Summary Gauge / Score Bar -->
+    <g transform="translate(30, 228)">
+      <rect x="0" y="0" width="365" height="48" rx="9" fill="#032620" stroke="#059669" stroke-width="1.2"/>
+      <rect x="18" y="15" width="160" height="8" rx="4" fill="#6ee7b7"/>
+      <rect x="18" y="29" width="240" height="5" rx="2.5" fill="#059669"/>
+      <rect x="290" y="13" width="60" height="22" rx="6" fill="#064e3b" stroke="#10b981" stroke-width="1"/>
+      <circle cx="302" cy="24" r="3" fill="#34d399" filter="url(#glow)"/>
+      <rect x="312" y="21" width="26" height="6" rx="3" fill="#a7f3d0"/>
+    </g>
+
+    <!-- Active Verifying Agent Indicator (Bottom of Card) -->
+    <g transform="translate(30, 292)">
+      <rect x="0" y="0" width="150" height="26" rx="13" fill="#042a24" stroke="#059669" stroke-width="1.2"/>
+      <circle cx="14" cy="13" r="4.5" fill="#00f5d4" filter="url(#glow)"/>
+      <rect x="26" y="10" width="75" height="6" rx="3" fill="#d1fae5"/>
+      <rect x="108" y="10" width="28" height="6" rx="3" fill="#34d399"/>
+    </g>
+  </g>
+
+  <!-- ==================== ACCENT SENSORS & CORNER BRACKETS ==================== -->
+  <path d="M 40 60 L 40 40 L 60 40" fill="none" stroke="#1e40af" stroke-width="2"/>
+  <path d="M 1160 60 L 1160 40 L 1140 40" fill="none" stroke="#065f46" stroke-width="2"/>
+  <path d="M 40 570 L 40 590 L 60 590" fill="none" stroke="#1e40af" stroke-width="2"/>
+  <path d="M 1160 570 L 1160 590 L 1140 590" fill="none" stroke="#065f46" stroke-width="2"/>
+
+  <!-- ==================== BOTTOM TITLE SECTION (EXACTLY 3 WORDS) ==================== -->
+  <g transform="translate(600, 526)" text-anchor="middle">
+    <!-- Exactly 3 words of text: PARALLEL AGENT DOCS -->
+    <text font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'JetBrains Mono', sans-serif" 
+          font-size="50" font-weight="800" letter-spacing="4" fill="#ffffff">
+      PARALLEL <tspan fill="#00f2fe">AGENT</tspan> <tspan fill="#00f5d4">DOCS</tspan>
+    </text>
+
+    <!-- Glowing Accent Base Rule with Center Pip -->
+    <line x1="-340" y1="25" x2="340" y2="25" stroke="url(#cyanTealLine)" stroke-width="2.6" filter="url(#glow)"/>
+    <circle cx="-340" cy="25" r="3.5" fill="#00f2fe"/>
+    <circle cx="0" cy="25" r="5" fill="#ffffff" filter="url(#glow)"/>
+    <circle cx="340" cy="25" r="3.5" fill="#00f5d4"/>
+  </g>
+</svg>

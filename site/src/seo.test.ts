@@ -121,6 +121,7 @@ const DOC_PAGES = [
   "/use-cases/parallel-ai-agents/index.html",
   "/use-cases/git-worktree-workflow/index.html",
   "/use-cases/remote-terminal-access/index.html",
+  "/blog/index.html",
 ];
 
 const REQUIRED_PAGES = ["/index.html", "/404.html", ...DOC_PAGES];
@@ -532,6 +533,80 @@ describe("SEO — crawlable content and internal linking", () => {
       }
     }
     expect(checked, "no internal links were checked").toBeGreaterThan(40);
+  });
+});
+
+describe("SEO — blog publishing surface", () => {
+  test("the sidebar publishes the auto-generated blog group", () => {
+    // Without autogeneration every future post would need a hand-edited sidebar
+    // entry in astro.config.mjs, and published posts would be unreachable from nav.
+    const html = readFileSync(path.join(DIST, "docs", "introduction", "index.html"), "utf8");
+    const hrefs = tags(html, "a").map((tag) => attr(tag, "href") ?? "");
+    expect(
+      hrefs.some((href) => href === `${BASE_PATH}blog/`),
+      "sidebar has no Blog entry pointing at /blog/",
+    ).toBe(true);
+  });
+
+  test("the blog hub builds with a SERP-sized unique description", () => {
+    const html = readFileSync(path.join(DIST, "blog", "index.html"), "utf8");
+    const description = metaContent(html, { name: "description" }) ?? "";
+    expect(description.length).toBeGreaterThan(50);
+    expect(description.length).toBeLessThanOrEqual(160);
+  });
+
+  test("root-relative images carry the deployment base path", () => {
+    // The same rehype walk already rewrites a[href]; images written as
+    // /images/... would 404 on a subpath deployment without the equivalent.
+    let checked = 0;
+    for (const [route, html] of Object.entries(builtPages())) {
+      for (const tag of tags(html, "img")) {
+        const src = attr(tag, "src") ?? "";
+        if (!src.startsWith("/") || src.startsWith("//")) continue;
+        expect(
+          src.startsWith(BASE_PATH),
+          `${route} img ${src} is missing the ${BASE_PATH} base path`,
+        ).toBe(true);
+        checked += 1;
+      }
+    }
+    expect(checked, "no root-relative images were checked").toBeGreaterThan(0);
+  });
+
+  test("every blog post ships Article JSON-LD with title and description", () => {
+    // GEO/AEO: answer engines need machine-readable article entities, not just
+    // BreadcrumbList. One sample post proves the Head component emits them for
+    // the whole blog/* content type.
+    const sample = path.join(DIST, "blog", "worktree-vs-clone", "index.html");
+    expect(existsSync(sample), `sample blog post missing: ${sample}`).toBe(true);
+    const html = readFileSync(sample, "utf8");
+    const scripts = [...html.matchAll(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/g)];
+    expect(scripts.length, "no JSON-LD scripts on blog post").toBeGreaterThan(0);
+    const blocks = scripts.map((m) => JSON.parse(m[1]));
+    const article = blocks.find(
+      (b) => b["@type"] === "Article" || (Array.isArray(b["@type"]) && b["@type"].includes("Article")),
+    );
+    expect(article, "blog post has no Article JSON-LD").toBeDefined();
+    expect(String(article!.headline ?? "").length).toBeGreaterThan(0);
+    expect(String(article!.description ?? "").length).toBeGreaterThan(50);
+    expect(String(article!.mainEntityOfPage ?? article!.url ?? "")).toContain("/blog/worktree-vs-clone");
+  });
+
+  test("blog posts with FAQ sections ship FAQPage JSON-LD", () => {
+    // AEO: FAQ headings alone do not win answer-engine slots; FAQPage schema
+    // mirrors the on-page ### Q / A pairs the review checklist requires.
+    const sample = path.join(DIST, "blog", "worktree-vs-clone", "index.html");
+    const html = readFileSync(sample, "utf8");
+    const scripts = [...html.matchAll(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/g)];
+    const blocks = scripts.map((m) => JSON.parse(m[1]));
+    const faq = blocks.find((b) => b["@type"] === "FAQPage");
+    expect(faq, "blog post has no FAQPage JSON-LD").toBeDefined();
+    expect(Array.isArray(faq!.mainEntity)).toBe(true);
+    expect(faq!.mainEntity.length).toBeGreaterThanOrEqual(3);
+    for (const q of faq!.mainEntity as Array<{ name?: string; acceptedAnswer?: { text?: string } }>) {
+      expect(String(q.name ?? "").length).toBeGreaterThan(0);
+      expect(String(q.acceptedAnswer?.text ?? "").length).toBeGreaterThan(0);
+    }
   });
 });
 

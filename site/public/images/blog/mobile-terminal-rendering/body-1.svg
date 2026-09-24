@@ -1,0 +1,414 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900" style="background:#070a13; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'JetBrains Mono', monospace;">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0a0f1d" />
+      <stop offset="50%" stop-color="#070a13" />
+      <stop offset="100%" stop-color="#030509" />
+    </linearGradient>
+
+    <!-- Card Gradients -->
+    <linearGradient id="card-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a" stop-opacity="0.95" />
+      <stop offset="100%" stop-color="#090d16" stop-opacity="0.98" />
+    </linearGradient>
+
+    <linearGradient id="hero-card-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0d2338" stop-opacity="0.95" />
+      <stop offset="100%" stop-color="#071424" stop-opacity="0.98" />
+    </linearGradient>
+
+    <linearGradient id="subcard-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#132337" stop-opacity="0.9" />
+      <stop offset="100%" stop-color="#0c1828" stop-opacity="0.95" />
+    </linearGradient>
+
+    <linearGradient id="phone-screen-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0b1320" />
+      <stop offset="100%" stop-color="#050a12" />
+    </linearGradient>
+
+    <!-- Accent Lines / Borders -->
+    <linearGradient id="teal-blue-line" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#14b8a6" />
+      <stop offset="50%" stop-color="#06b6d4" />
+      <stop offset="100%" stop-color="#38bdf8" />
+    </linearGradient>
+
+    <!-- Glow & Shadow Filters -->
+    <filter id="glow-teal" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <filter id="glow-blue" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <filter id="drop-shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="10" stdDeviation="16" flood-color="#000000" flood-opacity="0.75" />
+    </filter>
+
+    <!-- Arrow Markers -->
+    <marker id="arrow-teal" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 8 5 L 0 9 z" fill="#14b8a6" />
+    </marker>
+    <marker id="arrow-cyan" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 8 5 L 0 9 z" fill="#06b6d4" />
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 8 5 L 0 9 z" fill="#38bdf8" />
+    </marker>
+
+    <!-- Subtle Dot Grid Background Pattern -->
+    <pattern id="grid-dots" x="0" y="0" width="32" height="32" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.2" fill="#1e293b" fill-opacity="0.4" />
+    </pattern>
+  </defs>
+
+  <!-- Background Layer -->
+  <rect width="1600" height="900" fill="url(#bg-grad)" />
+  <rect width="1600" height="900" fill="url(#grid-dots)" />
+
+  <!-- Ambient Light Accents -->
+  <circle cx="800" cy="180" r="380" fill="#06b6d4" fill-opacity="0.04" filter="url(#glow-teal)" />
+  <circle cx="1320" cy="520" r="320" fill="#38bdf8" fill-opacity="0.04" filter="url(#glow-blue)" />
+  <circle cx="260" cy="500" r="280" fill="#14b8a6" fill-opacity="0.03" filter="url(#glow-teal)" />
+
+  <!-- Top Header Section -->
+  <g transform="translate(100, 56)">
+    <!-- Badge -->
+    <rect x="0" y="0" width="170" height="28" rx="14" fill="#0f283d" stroke="#14b8a6" stroke-width="1.2" />
+    <circle cx="16" cy="14" r="4" fill="#14b8a6" />
+    <text x="28" y="19" fill="#2dd4bf" font-size="12" font-weight="700" letter-spacing="1.5">FERRYX PIPELINE</text>
+
+    <!-- Title -->
+    <text x="0" y="68" fill="#f8fafc" font-size="34" font-weight="700" letter-spacing="-0.5">Mobile Terminal Render Pipeline</text>
+    <text x="0" y="96" fill="#94a3b8" font-size="16" font-weight="400">Headless Daemon Stream → Incremental DOM Virtual Grid → Low-Power 120Hz Mobile Display</text>
+
+    <!-- Metric Badges (Top Right) -->
+    <g transform="translate(1000, 10)">
+      <rect x="0" y="0" width="180" height="32" rx="8" fill="#0f172a" stroke="#1e293b" stroke-width="1" />
+      <text x="14" y="20" fill="#94a3b8" font-size="12" font-weight="500">BANDWIDTH</text>
+      <text x="96" y="20" fill="#38bdf8" font-size="12" font-weight="700">-84% vs VT</text>
+
+      <rect x="194" y="0" width="186" height="32" rx="8" fill="#0f172a" stroke="#1e293b" stroke-width="1" />
+      <text x="208" y="20" fill="#94a3b8" font-size="12" font-weight="500">LATENCY</text>
+      <text x="276" y="20" fill="#2dd4bf" font-size="12" font-weight="700">&lt; 16ms 60fps</text>
+    </g>
+  </g>
+
+  <!-- ==================== STAGE 1: HOST & DAEMON ==================== -->
+  <g transform="translate(100, 200)" filter="url(#drop-shadow)">
+    <!-- Stage Card -->
+    <rect width="300" height="580" rx="16" fill="url(#card-grad)" stroke="#1e293b" stroke-width="1.5" />
+    <path d="M 0 16 Q 0 0 16 0 L 284 0 Q 300 0 300 16 L 300 48 L 0 48 Z" fill="#0c172a" />
+    <line x1="0" y1="48" x2="300" y2="48" stroke="#1e293b" stroke-width="1" />
+
+    <!-- Card Header -->
+    <circle cx="26" cy="24" r="6" fill="#38bdf8" />
+    <text x="42" y="28" fill="#e2e8f0" font-size="14" font-weight="700" letter-spacing="1">HOST PTY DAEMON</text>
+    <rect x="230" y="14" width="54" height="20" rx="4" fill="#1e293b" />
+    <text x="242" y="28" fill="#94a3b8" font-size="10" font-weight="600">HOST</text>
+
+    <!-- Sub-block 1: Shell & PTY -->
+    <g transform="translate(20, 72)">
+      <rect width="260" height="96" rx="10" fill="url(#subcard-grad)" stroke="#1e293b" stroke-width="1" />
+      <text x="18" y="30" fill="#38bdf8" font-size="12" font-weight="700">SUBPROCESS PTY</text>
+      <text x="18" y="52" fill="#cbd5e1" font-size="14" font-weight="600">Raw ANSI / VT Output</text>
+      <text x="18" y="74" fill="#64748b" font-size="12">Bash, Zsh, Clis, Build Tools</text>
+    </g>
+
+    <!-- Down Arrow -->
+    <path d="M 150 178 L 150 204" stroke="#38bdf8" stroke-width="2" stroke-dasharray="3,3" marker-end="url(#arrow-blue)" />
+
+    <!-- Sub-block 2: Parser & Diff Engine -->
+    <g transform="translate(20, 216)">
+      <rect width="260" height="136" rx="10" fill="url(#subcard-grad)" stroke="#1e293b" stroke-width="1" />
+      <text x="18" y="28" fill="#2dd4bf" font-size="12" font-weight="700">VT STATE MACHINE</text>
+      <text x="18" y="52" fill="#cbd5e1" font-size="14" font-weight="600">libghostty / State Matrix</text>
+      
+      <!-- Mini state rows visual -->
+      <g transform="translate(18, 66)">
+        <rect width="224" height="24" rx="4" fill="#09121f" stroke="#1e3a5f" stroke-width="0.8" />
+        <rect x="6" y="6" width="36" height="12" rx="2" fill="#0284c7" fill-opacity="0.4" />
+        <text x="12" y="16" fill="#38bdf8" font-size="9" font-family="'JetBrains Mono', monospace">ROW 01</text>
+        <circle cx="54" cy="12" r="3" fill="#22c55e" />
+        <text x="64" y="16" fill="#94a3b8" font-size="9" font-family="'JetBrains Mono', monospace">DIRTY CHUNK DETECTED</text>
+      </g>
+
+      <text x="18" y="118" fill="#64748b" font-size="11">Only mutated cells marked dirty</text>
+    </g>
+
+    <!-- Down Arrow -->
+    <path d="M 150 362 L 150 388" stroke="#2dd4bf" stroke-width="2" stroke-dasharray="3,3" marker-end="url(#arrow-teal)" />
+
+    <!-- Sub-block 3: Sequence Framing -->
+    <g transform="translate(20, 400)">
+      <rect width="260" height="110" rx="10" fill="url(#subcard-grad)" stroke="#1e293b" stroke-width="1" />
+      <text x="18" y="28" fill="#38bdf8" font-size="12" font-weight="700">RING BUFFER &amp; REPLAY</text>
+      <text x="18" y="52" fill="#cbd5e1" font-size="14" font-weight="600">Seq-Numbered Framing</text>
+      <text x="18" y="74" fill="#94a3b8" font-size="12" font-family="'JetBrains Mono', monospace">seq_id: 104829 • len: 342B</text>
+      <text x="18" y="94" fill="#64748b" font-size="11">Lossless resume on phone sleep</text>
+    </g>
+
+    <!-- Bottom Badge -->
+    <rect x="20" y="526" width="260" height="34" rx="6" fill="#081422" stroke="#14b8a6" stroke-width="0.8" stroke-dasharray="4,2" />
+    <text x="32" y="548" fill="#2dd4bf" font-size="12" font-weight="600">Outbound Relay / WSS</text>
+    <text x="210" y="548" fill="#64748b" font-size="11">NO SSH</text>
+  </g>
+
+  <!-- ==================== CONNECTOR 1 -> 2 ==================== -->
+  <g transform="translate(400, 480)">
+    <path d="M 0 10 L 60 10" stroke="url(#teal-blue-line)" stroke-width="3" marker-end="url(#arrow-cyan)" filter="url(#glow-blue)" />
+    <rect x="10" y="-18" width="46" height="18" rx="4" fill="#0f172a" stroke="#06b6d4" stroke-width="0.8" />
+    <text x="15" y="-6" fill="#38bdf8" font-size="9" font-weight="700">DELTA</text>
+  </g>
+
+  <!-- ==================== STAGE 2: CLIENT VIRTUAL GRID ==================== -->
+  <!-- HERO CARD (Central focus) -->
+  <g transform="translate(460, 160)" filter="url(#drop-shadow)">
+    <!-- Stage Card -->
+    <rect width="600" height="660" rx="18" fill="url(#hero-card-grad)" stroke="#06b6d4" stroke-width="2" />
+    
+    <!-- Top glowing strip -->
+    <path d="M 0 18 Q 0 0 18 0 L 582 0 Q 600 0 600 18 L 600 56 L 0 56 Z" fill="#0b1e33" />
+    <line x1="0" y1="56" x2="600" y2="56" stroke="#0e3a5a" stroke-width="1.5" />
+    <rect x="0" y="0" width="600" height="4" rx="2" fill="url(#teal-blue-line)" />
+
+    <!-- Card Header -->
+    <circle cx="32" cy="28" r="7" fill="#14b8a6" />
+    <text x="48" y="33" fill="#f8fafc" font-size="16" font-weight="700" letter-spacing="1">FERRYX DOM GRID PIPELINE</text>
+    <rect x="424" y="16" width="154" height="24" rx="6" fill="#0f344d" stroke="#14b8a6" stroke-width="1" />
+    <text x="436" y="32" fill="#2dd4bf" font-size="11" font-weight="700">NO HEAVY CANVAS</text>
+
+    <!-- Sub-block A: Frame & Gap Reassembly -->
+    <g transform="translate(28, 76)">
+      <rect width="544" height="90" rx="12" fill="url(#subcard-grad)" stroke="#1a3b5c" stroke-width="1" />
+      <circle cx="24" cy="26" r="4" fill="#06b6d4" />
+      <text x="36" y="30" fill="#38bdf8" font-size="13" font-weight="700">1. DELTA STREAM &amp; GAP DETECTOR</text>
+      <text x="36" y="56" fill="#cbd5e1" font-size="13.5">Receives row delta packets via WSS</text>
+      <text x="36" y="74" fill="#64748b" font-size="12">Auto-requests backfill from host ring buffer on sequence gap</text>
+
+      <rect x="424" y="24" width="104" height="42" rx="6" fill="#081827" stroke="#1e3a5f" stroke-width="1" />
+      <text x="436" y="42" fill="#94a3b8" font-size="10">BUFFER STATE</text>
+      <text x="436" y="58" fill="#22c55e" font-size="11" font-weight="700">● SYNCED</text>
+    </g>
+
+    <!-- Connecting Flow arrow -->
+    <path d="M 300 176 L 300 196" stroke="#06b6d4" stroke-width="2" marker-end="url(#arrow-cyan)" />
+
+    <!-- Sub-block B: Viewport Slicing & Virtualization -->
+    <g transform="translate(28, 206)">
+      <rect width="544" height="154" rx="12" fill="url(#subcard-grad)" stroke="#14b8a6" stroke-width="1" />
+      <circle cx="24" cy="26" r="4" fill="#14b8a6" />
+      <text x="36" y="30" fill="#2dd4bf" font-size="13" font-weight="700">2. VIEWPORT WINDOW SLICER</text>
+      <text x="36" y="56" fill="#cbd5e1" font-size="14">Calculates active mobile lines (e.g. 42 visible rows)</text>
+      
+      <!-- Visual representation of Scrollback vs Active Viewport -->
+      <g transform="translate(36, 72)">
+        <!-- Full scrollback buffer representation -->
+        <rect width="472" height="60" rx="8" fill="#071320" stroke="#1e293b" stroke-width="1" />
+        
+        <!-- Off-screen rows top -->
+        <rect x="10" y="8" width="100" height="44" rx="4" fill="#0f1d2e" stroke="#1a2d42" stroke-width="1" />
+        <text x="22" y="26" fill="#64748b" font-size="10" font-weight="600">OFF-SCREEN</text>
+        <text x="22" y="42" fill="#475569" font-size="10">10k Rows in Mem</text>
+
+        <!-- Active Viewport (Highlighted glowing box) -->
+        <rect x="120" y="6" width="220" height="48" rx="6" fill="#0f2b3e" stroke="#14b8a6" stroke-width="1.5" filter="url(#glow-teal)" />
+        <rect x="120" y="6" width="220" height="48" rx="6" fill="#0c2334" stroke="#2dd4bf" stroke-width="1.5" />
+        <text x="134" y="24" fill="#2dd4bf" font-size="11" font-weight="700">ACTIVE VIEWPORT (DOM)</text>
+        <text x="134" y="42" fill="#e2e8f0" font-size="10" font-family="'JetBrains Mono', monospace">Only 42 &lt;div&gt; row nodes mounted</text>
+
+        <!-- Off-screen rows bottom -->
+        <rect x="350" y="8" width="112" height="44" rx="4" fill="#0f1d2e" stroke="#1a2d42" stroke-width="1" />
+        <text x="362" y="26" fill="#64748b" font-size="10" font-weight="600">UNRENDERED</text>
+        <text x="362" y="42" fill="#475569" font-size="10">Zero DOM Tree Cost</text>
+      </g>
+    </g>
+
+    <!-- Connecting Flow arrow -->
+    <path d="M 300 370 L 300 390" stroke="#14b8a6" stroke-width="2" marker-end="url(#arrow-teal)" />
+
+    <!-- Sub-block C: Incremental DOM Patch & Hardware Compositor -->
+    <g transform="translate(28, 400)">
+      <rect width="544" height="154" rx="12" fill="url(#subcard-grad)" stroke="#1a3b5c" stroke-width="1" />
+      <circle cx="24" cy="26" r="4" fill="#38bdf8" />
+      <text x="36" y="30" fill="#38bdf8" font-size="13" font-weight="700">3. HARDWARE-ACCELERATED DOM PATCHING</text>
+      <text x="36" y="56" fill="#cbd5e1" font-size="14">Direct CSS Transform &amp; Span Recycling</text>
+
+      <!-- Code & Feature bullets -->
+      <g transform="translate(36, 72)">
+        <rect width="472" height="66" rx="6" fill="#07111c" stroke="#102538" stroke-width="1" />
+        <text x="16" y="24" fill="#38bdf8" font-size="12" font-family="'JetBrains Mono', monospace">style="transform: translate3d(0, y_pos, 0)"</text>
+        <text x="16" y="48" fill="#94a3b8" font-size="11">• GPU layer promotion per row • Zero layout reflow on cursor blink</text>
+      </g>
+    </g>
+
+    <!-- Why DOM Grid Wins Badge Row -->
+    <g transform="translate(28, 574)">
+      <rect width="174" height="62" rx="8" fill="#081827" stroke="#1e3a5f" stroke-width="1" />
+      <text x="14" y="24" fill="#2dd4bf" font-size="11" font-weight="700">NATIVE IME</text>
+      <text x="14" y="44" fill="#94a3b8" font-size="11">Direct mobile text</text>
+      <text x="14" y="56" fill="#64748b" font-size="10">input &amp; autocorrect</text>
+
+      <rect x="212" y="0" width="174" height="62" rx="8" fill="#081827" stroke="#1e3a5f" stroke-width="1" />
+      <text x="226" y="24" fill="#38bdf8" font-size="11" font-weight="700">TOUCH SELECTION</text>
+      <text x="226" y="44" fill="#94a3b8" font-size="11">Standard iOS/Android</text>
+      <text x="226" y="56" fill="#64748b" font-size="10">magnifier &amp; handles</text>
+
+      <rect x="396" y="0" width="176" height="62" rx="8" fill="#081827" stroke="#1e3a5f" stroke-width="1" />
+      <text x="410" y="24" fill="#f59e0b" font-size="11" font-weight="700">BATTERY SAVER</text>
+      <text x="410" y="44" fill="#94a3b8" font-size="11">No 60fps canvas draw</text>
+      <text x="410" y="56" fill="#64748b" font-size="10">loop when idle</text>
+    </g>
+  </g>
+
+  <!-- ==================== CONNECTOR 2 -> 3 ==================== -->
+  <g transform="translate(1060, 480)">
+    <path d="M 0 10 L 60 10" stroke="url(#teal-blue-line)" stroke-width="3" marker-end="url(#arrow-blue)" filter="url(#glow-blue)" />
+    <rect x="8" y="-18" width="48" height="18" rx="4" fill="#0f172a" stroke="#38bdf8" stroke-width="0.8" />
+    <text x="14" y="-6" fill="#38bdf8" font-size="9" font-weight="700">RENDER</text>
+  </g>
+
+  <!-- ==================== STAGE 3: MOBILE DEVICE DISPLAY ==================== -->
+  <g transform="translate(1120, 200)" filter="url(#drop-shadow)">
+    <!-- Stage Card / Phone Outer Frame -->
+    <rect width="380" height="580" rx="32" fill="#080e18" stroke="#1e293b" stroke-width="2" />
+    <rect x="6" y="6" width="368" height="568" rx="26" fill="url(#phone-screen-grad)" stroke="#0f172a" stroke-width="1" />
+
+    <!-- Phone Notch / Dynamic Island -->
+    <rect x="130" y="16" width="120" height="20" rx="10" fill="#000000" />
+    <circle cx="228" cy="26" r="4" fill="#0c1a2e" />
+
+    <!-- Status Bar (Mobile) -->
+    <text x="32" y="30" fill="#94a3b8" font-size="11" font-weight="600">9:41</text>
+    <path d="M 334 22 L 346 22 L 346 30 L 334 30 Z" fill="none" stroke="#94a3b8" stroke-width="1.2" />
+    <rect x="336" y="24" width="7" height="4" fill="#2dd4bf" />
+
+    <!-- Terminal Mobile App Header -->
+    <g transform="translate(20, 52)">
+      <rect width="340" height="40" rx="8" fill="#0c1828" stroke="#162c46" stroke-width="1" />
+      <circle cx="20" cy="20" r="5" fill="#ef4444" />
+      <circle cx="36" cy="20" r="5" fill="#f59e0b" />
+      <circle cx="52" cy="20" r="5" fill="#22c55e" />
+      
+      <text x="76" y="24" fill="#cbd5e1" font-size="12" font-family="'JetBrains Mono', monospace">ferryx: worker-agent</text>
+      
+      <!-- Session PIN badge -->
+      <rect x="254" y="10" width="72" height="20" rx="4" fill="#0f2b3e" stroke="#14b8a6" stroke-width="0.8" />
+      <text x="264" y="24" fill="#2dd4bf" font-size="10" font-weight="700">PIN 481-902</text>
+    </g>
+
+    <!-- Terminal Display Window (DOM Grid rendered content) -->
+    <g transform="translate(20, 102)">
+      <rect width="340" height="340" rx="8" fill="#050a12" stroke="#132337" stroke-width="1" />
+
+      <!-- Terminal Row Lines simulating monospaced DOM grid -->
+      <!-- Row 1 -->
+      <text x="16" y="30" fill="#64748b" font-size="11" font-family="'JetBrains Mono', monospace">1</text>
+      <text x="36" y="30" fill="#38bdf8" font-size="11" font-family="'JetBrains Mono', monospace">$</text>
+      <text x="50" y="30" fill="#f8fafc" font-size="11" font-family="'JetBrains Mono', monospace">ferryx agent --status</text>
+
+      <!-- Row 2 -->
+      <text x="16" y="54" fill="#64748b" font-size="11" font-family="'JetBrains Mono', monospace">2</text>
+      <text x="36" y="54" fill="#22c55e" font-size="11" font-family="'JetBrains Mono', monospace">●</text>
+      <text x="50" y="54" fill="#e2e8f0" font-size="11" font-family="'JetBrains Mono', monospace">daemon: pid 8492 [healthy]</text>
+
+      <!-- Row 3 -->
+      <text x="16" y="78" fill="#64748b" font-size="11" font-family="'JetBrains Mono', monospace">3</text>
+      <text x="36" y="78" fill="#94a3b8" font-size="11" font-family="'JetBrains Mono', monospace">worktree: /wt/agent-bugfix-8</text>
+
+      <!-- Row 4 -->
+      <text x="16" y="102" fill="#64748b" font-size="11" font-family="'JetBrains Mono', monospace">4</text>
+      <text x="36" y="102" fill="#f59e0b" font-size="11" font-family="'JetBrains Mono', monospace">cargo</text>
+      <text x="76" y="102" fill="#cbd5e1" font-size="11" font-family="'JetBrains Mono', monospace">test --workspace</text>
+
+      <!-- Row 5 (Test output) -->
+      <text x="16" y="126" fill="#64748b" font-size="11" font-family="'JetBrains Mono', monospace">5</text>
+      <text x="36" y="126" fill="#22c55e" font-size="11" font-family="'JetBrains Mono', monospace">test terminal_grid::test_render ... ok</text>
+
+      <!-- Row 6 (Test output) -->
+      <text x="16" y="150" fill="#64748b" font-size="11" font-family="'JetBrains Mono', monospace">6</text>
+      <text x="36" y="150" fill="#22c55e" font-size="11" font-family="'JetBrains Mono', monospace">test replay::test_gap_resume ... ok</text>
+
+      <!-- Row 7 (Highlighted selection - showing DOM selection capability) -->
+      <rect x="34" y="160" width="220" height="20" fill="#0284c7" fill-opacity="0.35" rx="3" />
+      <text x="16" y="174" fill="#64748b" font-size="11" font-family="'JetBrains Mono', monospace">7</text>
+      <text x="36" y="174" fill="#38bdf8" font-size="11" font-family="'JetBrains Mono', monospace">Passed 48 tests [0.24s]</text>
+      <!-- Selection handles -->
+      <circle cx="34" cy="160" r="3.5" fill="#38bdf8" />
+      <circle cx="254" cy="180" r="3.5" fill="#38bdf8" />
+
+      <!-- Row 8 (Prompt with Cursor) -->
+      <text x="16" y="198" fill="#64748b" font-size="11" font-family="'JetBrains Mono', monospace">8</text>
+      <text x="36" y="198" fill="#14b8a6" font-size="11" font-family="'JetBrains Mono', monospace">❯</text>
+      <text x="50" y="198" fill="#f8fafc" font-size="11" font-family="'JetBrains Mono', monospace">git commit -m "fix"</text>
+      <rect x="180" y="186" width="7" height="15" fill="#2dd4bf" filter="url(#glow-teal)" />
+
+      <!-- Dimmed empty rows below -->
+      <text x="16" y="222" fill="#334155" font-size="11" font-family="'JetBrains Mono', monospace">~</text>
+      <text x="16" y="246" fill="#334155" font-size="11" font-family="'JetBrains Mono', monospace">~</text>
+      <text x="16" y="270" fill="#334155" font-size="11" font-family="'JetBrains Mono', monospace">~</text>
+      <text x="16" y="294" fill="#334155" font-size="11" font-family="'JetBrains Mono', monospace">~</text>
+
+      <!-- Terminal Status Bar -->
+      <rect x="0" y="316" width="340" height="24" fill="#0d2033" />
+      <rect x="8" y="320" width="48" height="16" rx="3" fill="#14b8a6" />
+      <text x="14" y="332" fill="#04202c" font-size="9" font-weight="800">NORMAL</text>
+      <text x="66" y="332" fill="#94a3b8" font-size="10" font-family="'JetBrains Mono', monospace">utf-8 • 80x24</text>
+      <text x="280" y="332" fill="#38bdf8" font-size="10" font-weight="600">120 Hz</text>
+    </g>
+
+    <!-- Mobile Auxiliary Touch Key Bar -->
+    <g transform="translate(20, 452)">
+      <rect width="340" height="40" rx="8" fill="#0b1726" stroke="#16293d" stroke-width="1" />
+      
+      <!-- Key chips -->
+      <rect x="10" y="8" width="46" height="24" rx="4" fill="#12253b" stroke="#1d3b5e" stroke-width="0.8" />
+      <text x="24" y="24" fill="#cbd5e1" font-size="11" font-weight="600">ESC</text>
+
+      <rect x="64" y="8" width="46" height="24" rx="4" fill="#12253b" stroke="#1d3b5e" stroke-width="0.8" />
+      <text x="76" y="24" fill="#cbd5e1" font-size="11" font-weight="600">TAB</text>
+
+      <rect x="118" y="8" width="46" height="24" rx="4" fill="#12253b" stroke="#1d3b5e" stroke-width="0.8" />
+      <text x="128" y="24" fill="#38bdf8" font-size="11" font-weight="700">CTRL</text>
+
+      <rect x="172" y="8" width="46" height="24" rx="4" fill="#12253b" stroke="#1d3b5e" stroke-width="0.8" />
+      <text x="186" y="24" fill="#cbd5e1" font-size="11" font-weight="600">ALT</text>
+
+      <rect x="226" y="8" width="46" height="24" rx="4" fill="#12253b" stroke="#1d3b5e" stroke-width="0.8" />
+      <text x="244" y="24" fill="#cbd5e1" font-size="11">▲</text>
+
+      <rect x="280" y="8" width="46" height="24" rx="4" fill="#12253b" stroke="#1d3b5e" stroke-width="0.8" />
+      <text x="298" y="24" fill="#cbd5e1" font-size="11">▼</text>
+    </g>
+
+    <!-- Mobile Home Bar Indicator -->
+    <rect x="120" y="556" width="140" height="4" rx="2" fill="#475569" />
+  </g>
+
+  <!-- ==================== FOOTER / LEGEND ==================== -->
+  <g transform="translate(100, 810)">
+    <line x1="0" y1="0" x2="1400" y2="0" stroke="#1e293b" stroke-width="1" />
+    
+    <g transform="translate(0, 22)">
+      <!-- Legend item 1 -->
+      <circle cx="8" cy="8" r="5" fill="#38bdf8" />
+      <text x="22" y="12" fill="#94a3b8" font-size="12">Byte stream / sequence replay framing</text>
+
+      <!-- Legend item 2 -->
+      <circle cx="340" cy="8" r="5" fill="#2dd4bf" />
+      <text x="354" y="12" fill="#94a3b8" font-size="12">Custom virtualized DOM row patching</text>
+
+      <!-- Legend item 3 -->
+      <circle cx="680" cy="8" r="5" fill="#f59e0b" />
+      <text x="694" y="12" fill="#94a3b8" font-size="12">Zero-canvas power savings on mobile WebKit / Blink</text>
+
+      <!-- Watermark / Brand right -->
+      <text x="1310" y="12" fill="#475569" font-size="12" font-family="'JetBrains Mono', monospace">ferryx.org</text>
+    </g>
+  </g>
+</svg>

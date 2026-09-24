@@ -17,6 +17,48 @@ const breadcrumbs = {
     { '@type': 'ListItem', position: 2, name: entry.data.title, item: pageUrl },
   ],
 };
+
+// GEO/AEO structured data for blog/* content: Article entity + FAQPage mirrored
+// from the on-page ## FAQ / ### Q&A section the post template mandates.
+const isBlogPost = Astro.url.pathname.replace(base, '/').startsWith('/blog/') &&
+  !/^\/blog\/?$/.test(Astro.url.pathname.replace(base, '/'));
+const schemas: unknown[] = [];
+if (isBlogPost) {
+  schemas.push({
+    '@context': 'https://schema.org',
+    '@type': 'Article',
+    headline: entry.data.title,
+    description: entry.data.description,
+    mainEntityOfPage: pageUrl,
+    url: pageUrl,
+    inLanguage: 'en',
+    publisher: {
+      '@type': 'Organization',
+      name: 'Ferryx',
+      url: homeUrl,
+    },
+  });
+  const body = typeof (entry as { body?: string }).body === 'string'
+    ? (entry as { body?: string }).body!
+    : '';
+  const faqMatch = body.match(/##\s+FAQ\s*\n([\s\S]+)$/);
+  if (faqMatch) {
+    const mainEntity: Array<{ name: string; acceptedAnswer: { text: string } }> = [];
+    const qaRe = /###\s+(.+?\?)\s*\n+([\s\S]*?)(?=\n###\s+|$)/g;
+    let m: RegExpExecArray | null;
+    while ((m = qaRe.exec(faqMatch[1])) !== null) {
+      const answer = m[2].trim();
+      if (answer) mainEntity.push({ name: m[1].trim(), acceptedAnswer: { text: answer } });
+    }
+    if (mainEntity.length >= 3) {
+      schemas.push({
+        '@context': 'https://schema.org',
+        '@type': 'FAQPage',
+        mainEntity,
+      });
+    }
+  }
+}
 ---
 
 <Default><slot /></Default>
@@ -27,4 +69,7 @@ const breadcrumbs = {
 <link rel="apple-touch-icon" sizes="180x180" href={`${base}apple-touch-icon.png`} />
 <link rel="manifest" href={`${base}site.webmanifest`} />
 <script type="application/ld+json" set:html={JSON.stringify(breadcrumbs)} is:inline />
+{schemas.map((schema) => (
+  <script type="application/ld+json" set:html={JSON.stringify(schema)} is:inline />
+))}
 <SiteAnalytics />

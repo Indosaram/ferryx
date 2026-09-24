@@ -1,0 +1,365 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <defs>
+    <!-- Background Radial Gradients -->
+    <radialGradient id="bgGlow" cx="50%" cy="40%" r="70%">
+      <stop offset="0%" stop-color="#0a1d33" stop-opacity="0.95"/>
+      <stop offset="45%" stop-color="#061222" stop-opacity="0.98"/>
+      <stop offset="100%" stop-color="#02060d" stop-opacity="1"/>
+    </radialGradient>
+
+    <radialGradient id="gatewayGlow" cx="400" cy="250" r="280" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.25"/>
+      <stop offset="45%" stop-color="#0077cc" stop-opacity="0.10"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="bastionGlow" cx="800" cy="250" r="280" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.25"/>
+      <stop offset="45%" stop-color="#1d4ed8" stop-opacity="0.10"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="centerCorridorGlow" cx="600" cy="250" r="160" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.30"/>
+      <stop offset="50%" stop-color="#0284c7" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Linear Gradients for Doors -->
+    <linearGradient id="doorFrameGrad1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1a3b5c"/>
+      <stop offset="50%" stop-color="#0b1b2d"/>
+      <stop offset="100%" stop-color="#142e47"/>
+    </linearGradient>
+
+    <linearGradient id="doorFrameGrad2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1a3458"/>
+      <stop offset="50%" stop-color="#081628"/>
+      <stop offset="100%" stop-color="#122744"/>
+    </linearGradient>
+
+    <linearGradient id="doorLeafLeft" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#081524"/>
+      <stop offset="70%" stop-color="#0f263f"/>
+      <stop offset="100%" stop-color="#16385a"/>
+    </linearGradient>
+
+    <linearGradient id="doorLeafRight" x1="100%" y1="0%" x2="0%" y2="0%">
+      <stop offset="0%" stop-color="#081524"/>
+      <stop offset="70%" stop-color="#0f263f"/>
+      <stop offset="100%" stop-color="#16385a"/>
+    </linearGradient>
+
+    <linearGradient id="door2LeafLeft" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#071322"/>
+      <stop offset="70%" stop-color="#0d2138"/>
+      <stop offset="100%" stop-color="#133052"/>
+    </linearGradient>
+
+    <linearGradient id="door2LeafRight" x1="100%" y1="0%" x2="0%" y2="0%">
+      <stop offset="0%" stop-color="#071322"/>
+      <stop offset="70%" stop-color="#0d2138"/>
+      <stop offset="100%" stop-color="#133052"/>
+    </linearGradient>
+
+    <linearGradient id="cyanTealBorder" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00f2fe"/>
+      <stop offset="50%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#0077ff"/>
+    </linearGradient>
+
+    <linearGradient id="corridorPipe" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.8"/>
+      <stop offset="50%" stop-color="#38bdf8" stop-opacity="1"/>
+      <stop offset="100%" stop-color="#0077ff" stop-opacity="0.8"/>
+    </linearGradient>
+
+    <linearGradient id="tunnelGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0c2035"/>
+      <stop offset="50%" stop-color="#143455"/>
+      <stop offset="100%" stop-color="#071423"/>
+    </linearGradient>
+
+    <!-- Filters -->
+    <filter id="softGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="4" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+
+    <filter id="brightGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+
+    <!-- Background Grid -->
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#0f2238" stroke-width="1" stroke-opacity="0.5"/>
+      <circle cx="40" cy="40" r="1" fill="#1b3b5e" fill-opacity="0.6"/>
+    </pattern>
+  </defs>
+
+  <!-- Deep Canvas Background -->
+  <rect width="1200" height="630" fill="#030712"/>
+  <rect width="1200" height="630" fill="url(#bgGlow)"/>
+  <rect width="1200" height="630" fill="url(#grid)"/>
+
+  <!-- Ambient Light Halos Behind Doors & Corridor -->
+  <circle cx="400" cy="250" r="280" fill="url(#gatewayGlow)"/>
+  <circle cx="800" cy="250" r="280" fill="url(#bastionGlow)"/>
+  <circle cx="600" cy="250" r="160" fill="url(#centerCorridorGlow)"/>
+
+  <!-- HUD Corner Brackets -->
+  <g stroke="#1b3d63" stroke-width="2" fill="none">
+    <path d="M 36 36 L 36 68 M 36 36 L 68 36" />
+    <path d="M 1164 36 L 1164 68 M 1164 36 L 1132 36" />
+    <path d="M 36 594 L 36 562 M 36 594 L 68 594" />
+    <path d="M 1164 594 L 1164 562 M 1164 594 L 1132 594" />
+  </g>
+
+  <!-- Peripheral Tech Traces & Circuit Geometry -->
+  <g stroke="#00f2fe" stroke-width="1.2" fill="none" opacity="0.3">
+    <!-- Left Ingress Circuits (Client to Gateway Door) -->
+    <path d="M 60 140 L 180 140 L 220 180 L 300 180" />
+    <circle cx="60" cy="140" r="3" fill="#00f2fe"/>
+    <circle cx="300" cy="180" r="3" fill="#00f2fe"/>
+
+    <path d="M 80 250 L 240 250 L 280 250 L 300 250" />
+    <circle cx="80" cy="250" r="3" fill="#00f2fe"/>
+
+    <path d="M 60 360 L 180 360 L 220 320 L 300 320" />
+    <circle cx="60" cy="360" r="3" fill="#00f2fe"/>
+    <circle cx="300" cy="320" r="3" fill="#00f2fe"/>
+
+    <!-- Right Egress Circuits (Host Bastion Door to Protected Core) -->
+    <path d="M 1140 140 L 1020 140 L 980 180 L 900 180" stroke="#38bdf8"/>
+    <circle cx="1140" cy="140" r="3" fill="#38bdf8"/>
+    <circle cx="900" cy="180" r="3" fill="#38bdf8"/>
+
+    <path d="M 1120 250 L 960 250 L 920 250 L 900 250" stroke="#38bdf8"/>
+    <circle cx="1120" cy="250" r="3" fill="#38bdf8"/>
+
+    <path d="M 1140 360 L 1020 360 L 980 320 L 900 320" stroke="#38bdf8"/>
+    <circle cx="1140" cy="360" r="3" fill="#38bdf8"/>
+    <circle cx="900" cy="320" r="3" fill="#38bdf8"/>
+  </g>
+
+  <!-- Flow Direction Arrows On Ingress Bus -->
+  <g fill="none" stroke="#00f2fe" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.6">
+    <path d="M 170 244 L 182 250 L 170 256" />
+    <path d="M 230 244 L 242 250 L 230 256" />
+  </g>
+
+  <!-- Flow Direction Arrows On Bastion Protected Bus -->
+  <g fill="none" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.6">
+    <path d="M 970 244 L 982 250 L 970 256" />
+    <path d="M 1030 244 L 1042 250 L 1030 256" />
+  </g>
+
+  <!-- ==================== SECURE CORRIDOR (AIR-GAP BRIDGE BETWEEN DOORS) ==================== -->
+  <g id="secure-corridor" transform="translate(600, 250)">
+    <!-- Corridor Trunk Sleeve -->
+    <rect x="-120" y="-32" width="240" height="64" rx="10" fill="url(#tunnelGrad)" stroke="#1a3b5c" stroke-width="2"/>
+    <rect x="-110" y="-24" width="220" height="48" rx="6" fill="#061220" stroke="#00f2fe" stroke-width="1" stroke-dasharray="8 6" opacity="0.4"/>
+
+    <!-- Corridor Data Rails -->
+    <line x1="-120" y1="-12" x2="120" y2="-12" stroke="#00f2fe" stroke-width="1.5" stroke-dasharray="16 10" opacity="0.75"/>
+    <line x1="-120" y1="12" x2="120" y2="12" stroke="#38bdf8" stroke-width="1.5" stroke-dasharray="16 10" opacity="0.75"/>
+    <line x1="-120" y1="0" x2="120" y2="0" stroke="url(#corridorPipe)" stroke-width="2.5" filter="url(#softGlow)"/>
+
+    <!-- Corridor Collars -->
+    <rect x="-90" y="-36" width="10" height="72" rx="3" fill="#132c47" stroke="#00f2fe" stroke-width="1.5" opacity="0.8"/>
+    <rect x="80" y="-36" width="10" height="72" rx="3" fill="#132c47" stroke="#38bdf8" stroke-width="1.5" opacity="0.8"/>
+
+    <!-- Central Authentication & Protocol Inspection Token -->
+    <g transform="translate(0, 0)">
+      <!-- Outer Hexagonal Reticle -->
+      <polygon points="0,-46 40,-23 40,23 0,46 -40,23 -40,-23" fill="#08182b" stroke="url(#cyanTealBorder)" stroke-width="2.5" filter="url(#softGlow)"/>
+      <polygon points="0,-36 31,-18 31,18 0,36 -31,18 -31,-18" fill="none" stroke="#00f2fe" stroke-width="1" stroke-dasharray="6 4" opacity="0.6"/>
+
+      <!-- Inner Rotating Verification Rings -->
+      <circle cx="0" cy="0" r="22" fill="#040c17" stroke="#38bdf8" stroke-width="2"/>
+      <circle cx="0" cy="0" r="16" fill="none" stroke="#00f2fe" stroke-width="1.5" stroke-dasharray="8 4"/>
+
+      <!-- Cryptographic Shield / Key Icon in Center -->
+      <path d="M 0 -10 L 8 -5 L 8 4 C 8 9, 0 13, 0 13 C 0 13, -8 9, -8 4 L -8 -5 Z" fill="#00f2fe" filter="url(#softGlow)"/>
+      <circle cx="0" cy="0" r="2.5" fill="#030b14"/>
+
+      <!-- Pulse Flow Chevrons Inside Corridor -->
+      <path d="M -50 -5 L -42 0 L -50 5" fill="none" stroke="#00f2fe" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M 42 -5 L 50 0 L 42 5" fill="none" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+
+    <!-- Top & Bottom Shield Link Lines -->
+    <line x1="0" y1="-46" x2="0" y2="-75" stroke="#00f2fe" stroke-width="1.5" stroke-dasharray="4 4" opacity="0.6"/>
+    <circle cx="0" cy="-75" r="4" fill="#08182b" stroke="#00f2fe" stroke-width="1.5"/>
+    <line x1="0" y1="46" x2="0" y2="75" stroke="#38bdf8" stroke-width="1.5" stroke-dasharray="4 4" opacity="0.6"/>
+    <circle cx="0" cy="75" r="4" fill="#08182b" stroke="#38bdf8" stroke-width="1.5"/>
+  </g>
+
+
+  <!-- ==================== DOOR 1: PUBLIC GATEWAY DOOR (EDGE INGRESS) ==================== -->
+  <g id="door-1-gateway" transform="translate(400, 250)">
+    <!-- Outer Vault Perimeter Frame -->
+    <rect x="-115" y="-160" width="230" height="320" rx="18" fill="url(#doorFrameGrad1)" stroke="#1a3d60" stroke-width="2.5"/>
+
+    <!-- Tech Reticle Inner Border -->
+    <rect x="-103" y="-148" width="206" height="296" rx="12" fill="none" stroke="#00f2fe" stroke-width="1.5" stroke-dasharray="14 7" opacity="0.5"/>
+
+    <!-- Frame Corner Sensor Rivets -->
+    <g fill="#00f2fe" opacity="0.75">
+      <circle cx="-88" cy="-136" r="2.5"/>
+      <circle cx="88" cy="-136" r="2.5"/>
+      <circle cx="-88" cy="136" r="2.5"/>
+      <circle cx="88" cy="136" r="2.5"/>
+      <circle cx="0" cy="-136" r="2.5"/>
+      <circle cx="0" cy="136" r="2.5"/>
+    </g>
+
+    <!-- Door Recess / Sill -->
+    <rect x="-92" y="-130" width="184" height="260" rx="8" fill="#040b14" stroke="#122a42" stroke-width="1.5"/>
+
+    <!-- LEFT DOOR SLICE -->
+    <path d="M -88 -124 L -3 -124 L -3 124 L -88 124 Z" fill="url(#doorLeafLeft)" stroke="#1a3f66" stroke-width="1.8"/>
+    <!-- Left Door Ribs -->
+    <rect x="-80" y="-105" width="68" height="50" rx="4" fill="#06121f" stroke="#14314f" stroke-width="1.2"/>
+    <rect x="-80" y="-38" width="68" height="76" rx="4" fill="#06121f" stroke="#14314f" stroke-width="1.2"/>
+    <rect x="-80" y="55" width="68" height="50" rx="4" fill="#06121f" stroke="#14314f" stroke-width="1.2"/>
+    <line x1="-70" y1="-80" x2="-22" y2="-80" stroke="#00f2fe" stroke-width="1.2" opacity="0.4" stroke-dasharray="4 3"/>
+    <line x1="-70" y1="80" x2="-22" y2="80" stroke="#00f2fe" stroke-width="1.2" opacity="0.4" stroke-dasharray="4 3"/>
+
+    <!-- RIGHT DOOR SLICE -->
+    <path d="M 3 -124 L 88 -124 L 88 124 L 3 124 Z" fill="url(#doorLeafRight)" stroke="#1a3f66" stroke-width="1.8"/>
+    <!-- Right Door Ribs -->
+    <rect x="12" y="-105" width="68" height="50" rx="4" fill="#06121f" stroke="#14314f" stroke-width="1.2"/>
+    <rect x="12" y="-38" width="68" height="76" rx="4" fill="#06121f" stroke="#14314f" stroke-width="1.2"/>
+    <rect x="12" y="55" width="68" height="50" rx="4" fill="#06121f" stroke="#14314f" stroke-width="1.2"/>
+    <line x1="22" y1="-80" x2="70" y2="-80" stroke="#00f2fe" stroke-width="1.2" opacity="0.4" stroke-dasharray="4 3"/>
+    <line x1="22" y1="80" x2="70" y2="80" stroke="#00f2fe" stroke-width="1.2" opacity="0.4" stroke-dasharray="4 3"/>
+
+    <!-- Glowing Vertical Seam (Door Seal) -->
+    <line x1="0" y1="-124" x2="0" y2="124" stroke="#00f2fe" stroke-width="2.5" filter="url(#softGlow)"/>
+
+    <!-- Center Rotary Token Aperture / Gate 1 Scanner -->
+    <g transform="translate(0, 0)">
+      <circle cx="0" cy="0" r="46" fill="#081726" stroke="#132c45" stroke-width="6"/>
+      <circle cx="0" cy="0" r="46" fill="none" stroke="#00f2fe" stroke-width="2" stroke-dasharray="10 6" filter="url(#softGlow)"/>
+      <circle cx="0" cy="0" r="36" fill="#040c17" stroke="#1d4872" stroke-width="1.5"/>
+      <circle cx="0" cy="0" r="26" fill="none" stroke="#00f2fe" stroke-width="1.5" stroke-dasharray="6 4" opacity="0.8"/>
+
+      <!-- Center Biometric / Pairing Glyph -->
+      <circle cx="0" cy="0" r="14" fill="#00f2fe" fill-opacity="0.15" stroke="#00f2fe" stroke-width="2" filter="url(#softGlow)"/>
+      <circle cx="0" cy="0" r="6" fill="#00f2fe" filter="url(#brightGlow)"/>
+      <circle cx="0" cy="0" r="2.5" fill="#ffffff"/>
+    </g>
+
+    <!-- Door 1 Status Indicator Bar -->
+    <g transform="translate(0, -118)">
+      <rect x="-35" y="-8" width="70" height="16" rx="4" fill="#050e18" stroke="#00f2fe" stroke-width="1.2"/>
+      <circle cx="-20" cy="0" r="3" fill="#00f2fe" filter="url(#softGlow)"/>
+      <circle cx="0" cy="0" r="3" fill="#00f2fe" filter="url(#softGlow)"/>
+      <circle cx="20" cy="0" r="3" fill="#00f2fe" filter="url(#softGlow)"/>
+    </g>
+
+    <!-- Top Arch Badge Mount -->
+    <path d="M -30 -160 L 30 -160 L 20 -178 L -20 -178 Z" fill="#0b1b2b" stroke="#00f2fe" stroke-width="1.5"/>
+    <circle cx="0" cy="-169" r="3" fill="#00f2fe" filter="url(#softGlow)"/>
+  </g>
+
+
+  <!-- ==================== DOOR 2: ISOLATED HOST BASTION (INNER DAEMON) ==================== -->
+  <g id="door-2-host" transform="translate(800, 250)">
+    <!-- Outer Vault Perimeter Frame -->
+    <rect x="-115" y="-160" width="230" height="320" rx="18" fill="url(#doorFrameGrad2)" stroke="#163255" stroke-width="2.5"/>
+
+    <!-- Tech Reticle Inner Border -->
+    <rect x="-103" y="-148" width="206" height="296" rx="12" fill="none" stroke="#38bdf8" stroke-width="1.5" stroke-dasharray="14 7" opacity="0.5"/>
+
+    <!-- Frame Corner Sensor Rivets -->
+    <g fill="#38bdf8" opacity="0.75">
+      <circle cx="-88" cy="-136" r="2.5"/>
+      <circle cx="88" cy="-136" r="2.5"/>
+      <circle cx="-88" cy="136" r="2.5"/>
+      <circle cx="88" cy="136" r="2.5"/>
+      <circle cx="0" cy="-136" r="2.5"/>
+      <circle cx="0" cy="136" r="2.5"/>
+    </g>
+
+    <!-- Door Recess / Sill -->
+    <rect x="-92" y="-130" width="184" height="260" rx="8" fill="#030913" stroke="#0f243b" stroke-width="1.5"/>
+
+    <!-- LEFT DOOR SLICE -->
+    <path d="M -88 -124 L -3 -124 L -3 124 L -88 124 Z" fill="url(#door2LeafLeft)" stroke="#17395e" stroke-width="1.8"/>
+    <!-- Left Door Ribs -->
+    <rect x="-80" y="-105" width="68" height="50" rx="4" fill="#05101c" stroke="#112942" stroke-width="1.2"/>
+    <rect x="-80" y="-38" width="68" height="76" rx="4" fill="#05101c" stroke="#112942" stroke-width="1.2"/>
+    <rect x="-80" y="55" width="68" height="50" rx="4" fill="#05101c" stroke="#112942" stroke-width="1.2"/>
+    <line x1="-70" y1="-80" x2="-22" y2="-80" stroke="#38bdf8" stroke-width="1.2" opacity="0.4" stroke-dasharray="4 3"/>
+    <line x1="-70" y1="80" x2="-22" y2="80" stroke="#38bdf8" stroke-width="1.2" opacity="0.4" stroke-dasharray="4 3"/>
+
+    <!-- RIGHT DOOR SLICE -->
+    <path d="M 3 -124 L 88 -124 L 88 124 L 3 124 Z" fill="url(#door2LeafRight)" stroke="#17395e" stroke-width="1.8"/>
+    <!-- Right Door Ribs -->
+    <rect x="12" y="-105" width="68" height="50" rx="4" fill="#05101c" stroke="#112942" stroke-width="1.2"/>
+    <rect x="12" y="-38" width="68" height="76" rx="4" fill="#05101c" stroke="#112942" stroke-width="1.2"/>
+    <rect x="12" y="55" width="68" height="50" rx="4" fill="#05101c" stroke="#112942" stroke-width="1.2"/>
+    <line x1="22" y1="-80" x2="70" y2="-80" stroke="#38bdf8" stroke-width="1.2" opacity="0.4" stroke-dasharray="4 3"/>
+    <line x1="22" y1="80" x2="70" y2="80" stroke="#38bdf8" stroke-width="1.2" opacity="0.4" stroke-dasharray="4 3"/>
+
+    <!-- Glowing Vertical Seam (Door Seal) -->
+    <line x1="0" y1="-124" x2="0" y2="124" stroke="#38bdf8" stroke-width="2.5" filter="url(#softGlow)"/>
+
+    <!-- Center Heavy Armored Bastion Lock Core -->
+    <g transform="translate(0, 0)">
+      <circle cx="0" cy="0" r="46" fill="#061322" stroke="#0e2338" stroke-width="6"/>
+      <circle cx="0" cy="0" r="46" fill="none" stroke="#38bdf8" stroke-width="2" stroke-dasharray="10 6" filter="url(#softGlow)"/>
+      <circle cx="0" cy="0" r="36" fill="#030a13" stroke="#153657" stroke-width="1.5"/>
+
+      <!-- Vault Radial Locking Bolts -->
+      <line x1="-34" y1="0" x2="-22" y2="0" stroke="#38bdf8" stroke-width="4" stroke-linecap="round"/>
+      <line x1="22" y1="0" x2="34" y2="0" stroke="#38bdf8" stroke-width="4" stroke-linecap="round"/>
+      <line x1="0" y1="-34" x2="0" y2="-22" stroke="#38bdf8" stroke-width="4" stroke-linecap="round"/>
+      <line x1="0" y1="22" x2="0" y2="34" stroke="#38bdf8" stroke-width="4" stroke-linecap="round"/>
+
+      <circle cx="0" cy="0" r="18" fill="none" stroke="#38bdf8" stroke-width="1.5" stroke-dasharray="5 3"/>
+
+      <!-- Secure Host Terminal Diamond -->
+      <polygon points="0,-12 12,0 0,12 -12,0" fill="#38bdf8" filter="url(#softGlow)"/>
+      <circle cx="0" cy="0" r="4" fill="#040c17"/>
+      <circle cx="0" cy="0" r="1.5" fill="#ffffff"/>
+    </g>
+
+    <!-- Door 2 Status Indicator Bar -->
+    <g transform="translate(0, -118)">
+      <rect x="-35" y="-8" width="70" height="16" rx="4" fill="#040b15" stroke="#38bdf8" stroke-width="1.2"/>
+      <circle cx="-20" cy="0" r="3" fill="#38bdf8" filter="url(#softGlow)"/>
+      <circle cx="0" cy="0" r="3" fill="#38bdf8" filter="url(#softGlow)"/>
+      <circle cx="20" cy="0" r="3" fill="#38bdf8" filter="url(#softGlow)"/>
+    </g>
+
+    <!-- Top Arch Badge Mount -->
+    <path d="M -30 -160 L 30 -160 L 20 -178 L -20 -178 Z" fill="#091624" stroke="#38bdf8" stroke-width="1.5"/>
+    <circle cx="0" cy="-169" r="3" fill="#38bdf8" filter="url(#softGlow)"/>
+  </g>
+
+
+  <!-- ==================== CLEAN DEVELOPER TEXT (MAX 3 WORDS) ==================== -->
+  <g transform="translate(600, 532)" text-anchor="middle">
+    <!-- Exactly 3 words: GATEWAY VS SSH -->
+    <text font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'JetBrains Mono', sans-serif" font-size="44" font-weight="900" letter-spacing="3" fill="#ffffff">
+      GATEWAY <tspan fill="#00f2fe">VS</tspan> <tspan fill="#38bdf8">SSH</tspan>
+    </text>
+
+    <!-- Glowing baseline accent line -->
+    <line x1="-240" y1="24" x2="240" y2="24" stroke="url(#cyanTealBorder)" stroke-width="2.5" opacity="0.8" filter="url(#softGlow)"/>
+
+    <!-- Subtle terminal cursor dot -->
+    <circle cx="240" cy="24" r="3.5" fill="#38bdf8" filter="url(#softGlow)"/>
+    <circle cx="-240" cy="24" r="3.5" fill="#00f2fe" filter="url(#softGlow)"/>
+  </g>
+</svg>

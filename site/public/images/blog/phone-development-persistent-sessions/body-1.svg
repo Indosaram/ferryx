@@ -1,0 +1,323 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900" style="background:#060911; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'JetBrains Mono', monospace;">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#080e1a" />
+      <stop offset="50%" stop-color="#060913" />
+      <stop offset="100%" stop-color="#030509" />
+    </linearGradient>
+
+    <!-- Track & Card Gradients -->
+    <linearGradient id="card-active" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0e2338" stop-opacity="0.9" />
+      <stop offset="100%" stop-color="#081524" stop-opacity="0.95" />
+    </linearGradient>
+
+    <linearGradient id="card-offline" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#181119" stop-opacity="0.85" />
+      <stop offset="100%" stop-color="#0d0a10" stop-opacity="0.95" />
+    </linearGradient>
+
+    <linearGradient id="card-host" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0b242c" stop-opacity="0.9" />
+      <stop offset="100%" stop-color="#051419" stop-opacity="0.95" />
+    </linearGradient>
+
+    <linearGradient id="timeline-beam" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#0284c7" />
+      <stop offset="35%" stop-color="#06b6d4" />
+      <stop offset="70%" stop-color="#14b8a6" />
+      <stop offset="100%" stop-color="#10b981" />
+    </linearGradient>
+
+    <!-- Markers -->
+    <marker id="arrow-teal" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#2dd4bf" />
+    </marker>
+    <marker id="arrow-cyan" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#38bdf8" />
+    </marker>
+
+    <!-- Glow & Shadow Filters -->
+    <filter id="glow-teal" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <filter id="glow-beam" x="-10%" y="-40%" width="120%" height="180%">
+      <feGaussianBlur stdDeviation="5" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <filter id="drop-shadow" x="-5%" y="-5%" width="110%" height="110%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#000000" flood-opacity="0.6" />
+    </filter>
+  </defs>
+
+  <!-- Background Base -->
+  <rect width="1600" height="900" fill="url(#bg-grad)" />
+
+  <!-- Subtle Tech Grid -->
+  <g opacity="0.04" fill="#38bdf8">
+    <pattern id="grid-dots" x="0" y="0" width="32" height="32" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.5" />
+    </pattern>
+    <rect width="1600" height="900" fill="url(#grid-dots)" />
+  </g>
+
+  <!-- Ambient Light Globs -->
+  <circle cx="250" cy="300" r="240" fill="#0284c7" opacity="0.08" filter="blur(80px)" />
+  <circle cx="750" cy="360" r="280" fill="#f43f5e" opacity="0.05" filter="blur(90px)" />
+  <circle cx="1350" cy="320" r="250" fill="#14b8a6" opacity="0.08" filter="blur(80px)" />
+  <circle cx="800" cy="620" r="320" fill="#06b6d4" opacity="0.07" filter="blur(100px)" />
+
+  <!-- ==================== HEADER ==================== -->
+  <g transform="translate(80, 42)">
+    <!-- Pill -->
+    <rect x="0" y="0" width="220" height="26" rx="13" fill="#0c1e30" stroke="#1d3b5c" stroke-width="1.2" />
+    <circle cx="14" cy="13" r="4.5" fill="#2dd4bf" />
+    <text x="28" y="17.5" fill="#38bdf8" font-size="11" font-weight="700" letter-spacing="1.5">SESSION CONTINUITY</text>
+
+    <!-- Main Title -->
+    <text x="0" y="62" fill="#f8fafc" font-size="28" font-weight="700" letter-spacing="-0.5">Develop From Your Phone With Persistent Sessions</text>
+
+    <!-- Subtitle -->
+    <text x="0" y="88" fill="#94a3b8" font-size="14" font-weight="400">Continuity timeline: phone disconnect vs. background process lifetime</text>
+  </g>
+
+  <!-- ==================== TIME PHASE BARRIER MARKERS ==================== -->
+  <g transform="translate(80, 142)">
+    <!-- Phase 1 Header -->
+    <g transform="translate(0, 0)">
+      <text x="0" y="0" fill="#38bdf8" font-size="11" font-weight="700" font-family="'JetBrains Mono', monospace" letter-spacing="1">PHASE 1: ATTACHED</text>
+      <text x="0" y="16" fill="#64748b" font-size="12">Interactive command dispatched</text>
+    </g>
+
+    <!-- Vertical Split Line 1 -->
+    <line x1="380" y1="0" x2="380" y2="610" stroke="#1e293b" stroke-width="1" stroke-dasharray="4 4" opacity="0.8" />
+
+    <!-- Phase 2 Header -->
+    <g transform="translate(405, 0)">
+      <text x="0" y="0" fill="#fb7185" font-size="11" font-weight="700" font-family="'JetBrains Mono', monospace" letter-spacing="1">PHASE 2: PHONE DISCONNECTED</text>
+      <text x="0" y="16" fill="#64748b" font-size="12">Screen sleep · Network drop · Zero battery drain</text>
+    </g>
+
+    <!-- Vertical Split Line 2 -->
+    <line x1="1045" y1="0" x2="1045" y2="610" stroke="#1e293b" stroke-width="1" stroke-dasharray="4 4" opacity="0.8" />
+
+    <!-- Phase 3 Header -->
+    <g transform="translate(1070, 0)">
+      <text x="0" y="0" fill="#2dd4bf" font-size="11" font-weight="700" font-family="'JetBrains Mono', monospace" letter-spacing="1">PHASE 3: REATTACHED</text>
+      <text x="0" y="16" fill="#64748b" font-size="12">Instant replay · Zero state loss</text>
+    </g>
+  </g>
+
+  <!-- ==================== LANE 1: MOBILE CLIENT LIFECYCLE (TOP) ==================== -->
+  <g transform="translate(80, 182)">
+    <!-- Track Container Background -->
+    <rect x="0" y="0" width="1440" height="236" rx="16" fill="#090f1d" fill-opacity="0.65" stroke="#1e293b" stroke-width="1.2" />
+
+    <!-- Track Label Badge -->
+    <g transform="translate(24, 20)">
+      <!-- Phone Icon SVG -->
+      <rect x="0" y="0" width="32" height="32" rx="8" fill="#0284c7" fill-opacity="0.18" stroke="#38bdf8" stroke-width="1" />
+      <rect x="10" y="6" width="12" height="20" rx="2.5" fill="none" stroke="#38bdf8" stroke-width="1.5" />
+      <circle cx="16" cy="22" r="1" fill="#38bdf8" />
+      <line x1="13" y1="9" x2="19" y2="9" stroke="#38bdf8" stroke-width="1" stroke-linecap="round" />
+
+      <text x="44" y="15" fill="#f8fafc" font-size="15" font-weight="700">Phone Client (iOS / Android)</text>
+      <text x="44" y="30" fill="#64748b" font-size="11.5" font-family="'JetBrains Mono', monospace">Transport: Ephemeral WebSocket / Relay</text>
+    </g>
+
+    <!-- Status Track Cards -->
+    <!-- Segment 1: Phone Active -->
+    <g transform="translate(24, 72)">
+      <rect x="0" y="0" width="335" height="140" rx="12" fill="url(#card-active)" stroke="#0284c7" stroke-width="1.2" filter="url(#drop-shadow)" />
+
+      <!-- Active Pill -->
+      <rect x="18" y="16" width="120" height="24" rx="12" fill="#082844" stroke="#0ea5e9" stroke-width="1" />
+      <circle cx="30" cy="28" r="4" fill="#38bdf8" />
+      <text x="42" y="32" fill="#7dd3fc" font-size="11" font-weight="700">ONLINE · ACTIVE</text>
+
+      <text x="18" y="66" fill="#f8fafc" font-size="14" font-weight="600">Dev Task Dispatched</text>
+      <text x="18" y="86" fill="#94a3b8" font-size="12">Live terminal rendering output stream</text>
+
+      <g transform="translate(18, 102)">
+        <rect x="0" y="0" width="298" height="24" rx="6" fill="#061220" />
+        <text x="10" y="16" fill="#38bdf8" font-family="'JetBrains Mono', monospace" font-size="11">&gt; claude run test-suite</text>
+      </g>
+    </g>
+
+    <!-- Segment 2: Phone Disconnected / Offline -->
+    <g transform="translate(395, 72)">
+      <rect x="0" y="0" width="630" height="140" rx="12" fill="url(#card-offline)" stroke="#e11d48" stroke-width="1.2" stroke-dasharray="6 4" filter="url(#drop-shadow)" />
+
+      <!-- Offline Pill -->
+      <rect x="22" y="16" width="175" height="24" rx="12" fill="#2c0c16" stroke="#f43f5e" stroke-width="1" />
+      <circle cx="34" cy="28" r="4" fill="#f43f5e" />
+      <text x="46" y="32" fill="#fda4af" font-size="11" font-weight="700">PHONE OFFLINE / SLEEP</text>
+
+      <text x="22" y="66" fill="#fecdd3" font-size="15" font-weight="600">Client Transport Completely Severed</text>
+
+      <!-- Details in structured lines -->
+      <g transform="translate(22, 78)">
+        <text x="0" y="18" fill="#cbd5e1" font-size="12.5">• Screen locked · Cellular drop · Subway tunnel · Background sleep</text>
+        <g transform="translate(0, 30)">
+          <rect x="0" y="0" width="165" height="22" rx="6" fill="#220b12" stroke="#e11d48" stroke-width="0.8" />
+          <text x="10" y="15" fill="#fb7185" font-size="11" font-weight="600">✕ Zero socket connection</text>
+
+          <rect x="180" y="0" width="165" height="22" rx="6" fill="#1f1807" stroke="#d97706" stroke-width="0.8" />
+          <text x="190" y="15" fill="#fbbf24" font-size="11" font-weight="600">⚡ Zero battery drain</text>
+
+          <rect x="360" y="0" width="180" height="22" rx="6" fill="#141c2b" stroke="#3b82f6" stroke-width="0.8" />
+          <text x="370" y="15" fill="#93c5fd" font-size="11" font-weight="600">↻ No keep-alive ping needed</text>
+        </g>
+      </g>
+    </g>
+
+    <!-- Segment 3: Phone Reconnecting & Rehydrating -->
+    <g transform="translate(1060, 72)">
+      <rect x="0" y="0" width="355" height="140" rx="12" fill="url(#card-active)" stroke="#14b8a6" stroke-width="1.2" filter="url(#drop-shadow)" />
+
+      <!-- Rehydrated Pill -->
+      <rect x="18" y="16" width="138" height="24" rx="12" fill="#082b2c" stroke="#14b8a6" stroke-width="1" />
+      <circle cx="30" cy="28" r="4" fill="#2dd4bf" />
+      <text x="42" y="32" fill="#5eead4" font-size="11" font-weight="700">REATTACH &amp; SYNC</text>
+
+      <text x="18" y="66" fill="#f8fafc" font-size="14" font-weight="600">Instant Screen Rehydration</text>
+      <text x="18" y="86" fill="#94a3b8" font-size="12">Phone wakes; stream cursor synced</text>
+
+      <g transform="translate(18, 102)">
+        <rect x="0" y="0" width="318" height="24" rx="6" fill="#061f22" stroke="#0d9488" stroke-width="1" />
+        <text x="10" y="16" fill="#2dd4bf" font-family="'JetBrains Mono', monospace" font-size="11">✓ Replay synced: #1042 → #1290</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- ==================== INTER-TIER DECOUPLING BRIDGE ==================== -->
+  <g transform="translate(80, 428)">
+    <!-- Connection drop indicator in Phase 2 -->
+    <g transform="translate(560, 0)">
+      <path d="M 0 0 L 0 38" stroke="#f43f5e" stroke-width="2" stroke-dasharray="4 4" />
+      <circle cx="0" cy="19" r="12" fill="#2a0d17" stroke="#e11d48" stroke-width="1" />
+      <text x="0" y="23" text-anchor="middle" fill="#f43f5e" font-size="11" font-weight="700">✕</text>
+      <text x="22" y="23" fill="#fb7185" font-size="11" font-family="'JetBrains Mono', monospace" font-weight="600">Transport Drops · Daemon Untouched</text>
+    </g>
+
+    <!-- Buffer Replay Arrow in Phase 3 -->
+    <g transform="translate(1180, 0)">
+      <!-- Arrow from daemon upward to phone -->
+      <path d="M 0 40 L 0 4" stroke="#2dd4bf" stroke-width="2.5" marker-end="url(#arrow-teal)" />
+      <rect x="18" y="6" width="190" height="26" rx="6" fill="#06282b" stroke="#14b8a6" stroke-width="1" />
+      <text x="28" y="23" fill="#5eead4" font-size="11" font-family="'JetBrains Mono', monospace" font-weight="600">Fast-Replay Buffer Delta ↑</text>
+    </g>
+  </g>
+
+  <!-- ==================== LANE 2: REMOTE HOST / DAEMON LIFECYCLE (BOTTOM) ==================== -->
+  <g transform="translate(80, 474)">
+    <!-- Track Container Background -->
+    <rect x="0" y="0" width="1440" height="280" rx="16" fill="#06151c" fill-opacity="0.8" stroke="#134e5e" stroke-width="1.5" />
+
+    <!-- Track Label Badge -->
+    <g transform="translate(24, 20)">
+      <!-- Server/Host Icon -->
+      <rect x="0" y="0" width="32" height="32" rx="8" fill="#0d9488" fill-opacity="0.2" stroke="#2dd4bf" stroke-width="1" />
+      <rect x="7" y="9" width="18" height="5" rx="1.5" fill="none" stroke="#2dd4bf" stroke-width="1.2" />
+      <rect x="7" y="18" width="18" height="5" rx="1.5" fill="none" stroke="#2dd4bf" stroke-width="1.2" />
+      <circle cx="21" cy="11.5" r="1" fill="#2dd4bf" />
+      <circle cx="21" cy="20.5" r="1" fill="#2dd4bf" />
+
+      <text x="44" y="15" fill="#f8fafc" font-size="15" font-weight="700">Remote Host / Headless Ferryx Daemon</text>
+      <text x="44" y="30" fill="#5eead4" font-size="11.5" font-family="'JetBrains Mono', monospace">Persistent PTY Master · OS-Level Isolation</text>
+    </g>
+
+    <!-- Global Continuous Lifetime Beam -->
+    <g transform="translate(24, 62)">
+      <!-- Glow Underlay -->
+      <rect x="0" y="0" width="1392" height="28" rx="14" fill="url(#timeline-beam)" opacity="0.3" filter="url(#glow-beam)" />
+      <!-- Solid Core Beam -->
+      <rect x="0" y="3" width="1392" height="22" rx="11" fill="url(#timeline-beam)" />
+
+      <!-- Lifetime Badge -->
+      <g transform="translate(24, 0)">
+        <text x="0" y="18" fill="#ffffff" font-size="12" font-weight="800" letter-spacing="1">100% UNINTERRUPTED EXECUTION · ZERO SIGHUP · STABLE PID</text>
+      </g>
+      <g transform="translate(1220, 0)">
+        <text x="0" y="18" fill="#032b21" font-size="11" font-weight="900" font-family="'JetBrains Mono', monospace">CONTINUOUS UPTIME</text>
+      </g>
+    </g>
+
+    <!-- Three Structural Cards Beneath the Beam -->
+    <!-- Host Stage 1 -->
+    <g transform="translate(24, 106)">
+      <rect x="0" y="0" width="335" height="152" rx="12" fill="url(#card-host)" stroke="#0e4e5e" stroke-width="1" />
+      <text x="18" y="28" fill="#2dd4bf" font-size="12.5" font-weight="700">1. DECOUPLED PTY</text>
+      <text x="18" y="50" fill="#f1f5f9" font-size="14" font-weight="600">Detached Process Group</text>
+      <text x="18" y="72" fill="#94a3b8" font-size="12">Master pts owned by headless daemon.</text>
+
+      <g transform="translate(18, 92)">
+        <rect x="0" y="0" width="298" height="46" rx="6" fill="#051b22" />
+        <text x="10" y="20" fill="#7dd3fc" font-family="'JetBrains Mono', monospace" font-size="11">pty_master = posix_openpt()</text>
+        <text x="10" y="36" fill="#5eead4" font-family="'JetBrains Mono', monospace" font-size="11">daemon.register("sess-1")</text>
+      </g>
+    </g>
+
+    <!-- Host Stage 2 (During Disconnect) -->
+    <g transform="translate(395, 106)">
+      <rect x="0" y="0" width="630" height="152" rx="12" fill="url(#card-host)" stroke="#14b8a6" stroke-width="1.4" />
+      <rect x="18" y="14" width="132" height="22" rx="11" fill="#083838" stroke="#2dd4bf" stroke-width="1" />
+      <text x="84" y="29" text-anchor="middle" fill="#5eead4" font-size="10.5" font-weight="700">AUTONOMOUS RUN</text>
+
+      <text x="160" y="30" fill="#f1f5f9" font-size="14" font-weight="700">Background Process Keeps Running at Full Speed</text>
+
+      <!-- Details in 2 columns -->
+      <g transform="translate(18, 48)">
+        <text x="0" y="18" fill="#cbd5e1" font-size="12.5">• Tests run, LLM agent generates patches, compiler outputs</text>
+        <text x="0" y="38" fill="#cbd5e1" font-size="12.5">• PTY ring buffer captures and sequences all stdout / stderr</text>
+
+        <rect x="0" y="48" width="594" height="42" rx="6" fill="#041820" stroke="#0e4e5e" stroke-width="1" />
+        <circle cx="16" cy="69" r="4" fill="#10b981" />
+        <text x="28" y="73" fill="#6ee7b7" font-family="'JetBrains Mono', monospace" font-size="11.5">Ring Buffer: [frame #1042] ... [frame #1180] ... [frame #1290]</text>
+      </g>
+    </g>
+
+    <!-- Host Stage 3 (Reattach) -->
+    <g transform="translate(1060, 106)">
+      <rect x="0" y="0" width="355" height="152" rx="12" fill="url(#card-host)" stroke="#0e4e5e" stroke-width="1" />
+      <text x="18" y="28" fill="#2dd4bf" font-size="12.5" font-weight="700">3. TARGETREF HANDSHAKE</text>
+      <text x="18" y="50" fill="#f1f5f9" font-size="14" font-weight="600">Replay Missed Chunk</text>
+      <text x="18" y="72" fill="#94a3b8" font-size="12">Phone sends cursor; daemon streams delta.</text>
+
+      <g transform="translate(18, 92)">
+        <rect x="0" y="0" width="318" height="46" rx="6" fill="#051b22" />
+        <text x="10" y="20" fill="#7dd3fc" font-family="'JetBrains Mono', monospace" font-size="11">GET_REPLAY_FROM(cursor=1042)</text>
+        <text x="10" y="36" fill="#2dd4bf" font-family="'JetBrains Mono', monospace" font-size="11">STREAM_DELTA_OK (+248 frames)</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- ==================== FOOTER: CORE ARCHITECTURAL COMPARISON ==================== -->
+  <g transform="translate(80, 772)">
+    <!-- Comparison 1: Naive Terminal / SSH -->
+    <g transform="translate(0, 0)">
+      <rect width="695" height="88" rx="12" fill="#140a10" stroke="#3b1522" stroke-width="1" />
+      <rect x="18" y="14" width="130" height="20" rx="10" fill="#2e0f19" />
+      <text x="83" y="28" text-anchor="middle" fill="#f43f5e" font-size="10" font-weight="800" font-family="'JetBrains Mono', monospace">NAIVE SSH / MOBILE</text>
+
+      <text x="160" y="28" fill="#fca5a5" font-size="13" font-weight="700">Phone sleeps → TCP drop → SIGHUP → Process Killed</text>
+      <text x="18" y="52" fill="#94a3b8" font-size="12">Direct connection tightly couples child process to transport socket. Phone lock aborts work.</text>
+      <text x="18" y="70" fill="#e11d48" font-size="11.5" font-weight="600">Result: Broken builds, stranded lockfiles, lost AI agent session progress.</text>
+    </g>
+
+    <!-- Comparison 2: Ferryx Persistent Architecture -->
+    <g transform="translate(745, 0)">
+      <rect width="695" height="88" rx="12" fill="#061c24" stroke="#0e5466" stroke-width="1" />
+      <rect x="18" y="14" width="160" height="20" rx="10" fill="#083842" />
+      <text x="98" y="28" text-anchor="middle" fill="#2dd4bf" font-size="10" font-weight="800" font-family="'JetBrains Mono', monospace">FERRYX PERSISTENT DAEMON</text>
+
+      <text x="190" y="28" fill="#5eead4" font-size="13" font-weight="700">Phone sleeps → Zero SIGHUP → Replay on wake</text>
+      <text x="18" y="52" fill="#94a3b8" font-size="12">PTY belongs to local helper daemon. Mobile client is merely an attachable viewfinder.</text>
+      <text x="18" y="70" fill="#2dd4bf" font-size="11.5" font-weight="600">Result: Free phone movement, commute coding, background agent execution.</text>
+    </g>
+  </g>
+</svg>

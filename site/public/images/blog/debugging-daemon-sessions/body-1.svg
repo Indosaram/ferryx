@@ -1,0 +1,340 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900" style="background:#070a13; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'JetBrains Mono', monospace;">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0a0f1d" />
+      <stop offset="50%" stop-color="#070a13" />
+      <stop offset="100%" stop-color="#04060a" />
+    </linearGradient>
+
+    <!-- Card Backgrounds -->
+    <linearGradient id="card-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#111827" stop-opacity="0.95" />
+      <stop offset="100%" stop-color="#0b1120" stop-opacity="0.98" />
+    </linearGradient>
+
+    <linearGradient id="card-active-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0f2537" stop-opacity="0.95" />
+      <stop offset="100%" stop-color="#081522" stop-opacity="0.98" />
+    </linearGradient>
+
+    <linearGradient id="card-action-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#141c2e" stop-opacity="0.95" />
+      <stop offset="100%" stop-color="#0d1322" stop-opacity="0.98" />
+    </linearGradient>
+
+    <!-- Glow & Shadow Filters -->
+    <filter id="glow-teal" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <filter id="glow-blue" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="5" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <filter id="drop-shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#000000" flood-opacity="0.6" />
+    </filter>
+
+    <!-- Marker Arrowheads -->
+    <marker id="arrow-teal" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 8 5 L 0 9 z" fill="#14b8a6" />
+    </marker>
+
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 8 5 L 0 9 z" fill="#38bdf8" />
+    </marker>
+
+    <marker id="arrow-amber" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 8 5 L 0 9 z" fill="#f59e0b" />
+    </marker>
+
+    <!-- Subtle Dot Grid -->
+    <pattern id="grid-dots" x="0" y="0" width="32" height="32" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1" fill="#1e293b" fill-opacity="0.45" />
+    </pattern>
+  </defs>
+
+  <!-- Base Canvas Background -->
+  <rect width="1600" height="900" fill="url(#bg-grad)" />
+  <rect width="1600" height="900" fill="url(#grid-dots)" />
+
+  <!-- Background Ambient Glows -->
+  <circle cx="240" cy="180" r="180" fill="#0d9488" fill-opacity="0.06" filter="url(#glow-teal)" />
+  <circle cx="780" cy="260" r="220" fill="#0284c7" fill-opacity="0.05" filter="url(#glow-blue)" />
+  <circle cx="1360" cy="460" r="200" fill="#14b8a6" fill-opacity="0.04" filter="url(#glow-teal)" />
+
+  <!-- ==================== HEADER SECTION ==================== -->
+  <g transform="translate(70, 42)">
+    <!-- Badges -->
+    <rect x="0" y="0" width="175" height="26" rx="13" fill="#0b2430" stroke="#14b8a6" stroke-width="1.2" />
+    <circle cx="14" cy="13" r="4.5" fill="#14b8a6" />
+    <text x="28" y="17" fill="#2dd4bf" font-size="11" font-weight="700" letter-spacing="1.2">DIAGNOSTIC PROTOCOL</text>
+
+    <rect x="188" y="0" width="130" height="26" rx="13" fill="#0f1c34" stroke="#38bdf8" stroke-width="1.2" />
+    <text x="253" y="17" text-anchor="middle" fill="#7dd3fc" font-size="11" font-weight="600" letter-spacing="0.8">DECISION TREE</text>
+
+    <!-- Title & Subtitle -->
+    <text x="0" y="60" fill="#f8fafc" font-size="28" font-weight="700" letter-spacing="-0.5">Debugging Stuck Daemon Sessions</text>
+    <text x="0" y="85" fill="#94a3b8" font-size="14" font-weight="400">Systematic isolation checklist to triage frozen panes and inspect ring buffers without killing worktrees</text>
+  </g>
+
+  <!-- ==================== FLOW CONNECTIONS (BEHIND CARDS) ==================== -->
+  <g fill="none">
+    <!-- Start -> Step 1 -->
+    <path d="M 230 240 L 280 240" stroke="#0ea5e9" stroke-width="2.5" marker-end="url(#arrow-blue)" />
+
+    <!-- Step 1 -> No (Down to Action 1) -->
+    <path d="M 430 300 L 430 390" stroke="#f59e0b" stroke-width="2" marker-end="url(#arrow-amber)" />
+
+    <!-- Step 1 -> Yes (Right to Step 2) -->
+    <path d="M 575 240 L 635 240" stroke="#14b8a6" stroke-width="2.5" marker-end="url(#arrow-teal)" />
+
+    <!-- Step 2 -> No (Down to Action 2) -->
+    <path d="M 780 300 L 780 390" stroke="#f59e0b" stroke-width="2" marker-end="url(#arrow-amber)" />
+
+    <!-- Step 2 -> Yes (Right to Step 3) -->
+    <path d="M 925 240 L 985 240" stroke="#14b8a6" stroke-width="2.5" marker-end="url(#arrow-teal)" />
+
+    <!-- Step 3 -> Yes (Down to Action 3) -->
+    <path d="M 1130 300 L 1130 390" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrow-blue)" />
+
+    <!-- Step 3 -> No (Right to Step 4) -->
+    <path d="M 1275 240 L 1335 240" stroke="#14b8a6" stroke-width="2.5" marker-end="url(#arrow-teal)" />
+
+    <!-- Step 4 -> Yes (Down to Action 4) -->
+    <path d="M 1450 300 L 1450 390" stroke="#f59e0b" stroke-width="2" marker-end="url(#arrow-amber)" />
+
+    <!-- Action 4 -> No branch (Down to Action 5) -->
+    <path d="M 1450 540 L 1450 580" stroke="#14b8a6" stroke-width="2" marker-end="url(#arrow-teal)" />
+  </g>
+
+  <!-- Branch Label Pills -->
+  <!-- Step 1 No -->
+  <g transform="translate(442, 335)">
+    <rect x="-22" y="-11" width="44" height="22" rx="6" fill="#2d1d0c" stroke="#f59e0b" stroke-width="1"/>
+    <text x="0" y="4" text-anchor="middle" fill="#fbbf24" font-size="11" font-weight="700">NO</text>
+  </g>
+  <!-- Step 1 Yes -->
+  <g transform="translate(605, 230)">
+    <rect x="-20" y="-11" width="40" height="22" rx="6" fill="#06322b" stroke="#14b8a6" stroke-width="1"/>
+    <text x="0" y="4" text-anchor="middle" fill="#2dd4bf" font-size="11" font-weight="700">YES</text>
+  </g>
+
+  <!-- Step 2 No -->
+  <g transform="translate(792, 335)">
+    <rect x="-22" y="-11" width="44" height="22" rx="6" fill="#2d1d0c" stroke="#f59e0b" stroke-width="1"/>
+    <text x="0" y="4" text-anchor="middle" fill="#fbbf24" font-size="11" font-weight="700">NO</text>
+  </g>
+  <!-- Step 2 Yes -->
+  <g transform="translate(955, 230)">
+    <rect x="-20" y="-11" width="40" height="22" rx="6" fill="#06322b" stroke="#14b8a6" stroke-width="1"/>
+    <text x="0" y="4" text-anchor="middle" fill="#2dd4bf" font-size="11" font-weight="700">YES</text>
+  </g>
+
+  <!-- Step 3 Yes (Output Moving) -->
+  <g transform="translate(1142, 335)">
+    <rect x="-20" y="-11" width="40" height="22" rx="6" fill="#082b42" stroke="#38bdf8" stroke-width="1"/>
+    <text x="0" y="4" text-anchor="middle" fill="#7dd3fc" font-size="11" font-weight="700">YES</text>
+  </g>
+  <!-- Step 3 No (Frozen Output) -->
+  <g transform="translate(1305, 230)">
+    <rect x="-20" y="-11" width="40" height="22" rx="6" fill="#06322b" stroke="#14b8a6" stroke-width="1"/>
+    <text x="0" y="4" text-anchor="middle" fill="#2dd4bf" font-size="11" font-weight="700">NO</text>
+  </g>
+
+  <!-- Step 4 Yes (Blocked Wait) -->
+  <g transform="translate(1462, 335)">
+    <rect x="-20" y="-11" width="40" height="22" rx="6" fill="#2d1d0c" stroke="#f59e0b" stroke-width="1"/>
+    <text x="0" y="4" text-anchor="middle" fill="#fbbf24" font-size="11" font-weight="700">YES</text>
+  </g>
+  <!-- Step 4 No (Buffer Wrapped) -->
+  <g transform="translate(1462, 555)">
+    <rect x="-20" y="-10" width="40" height="20" rx="5" fill="#06322b" stroke="#14b8a6" stroke-width="1"/>
+    <text x="0" y="4" text-anchor="middle" fill="#2dd4bf" font-size="10" font-weight="700">NO</text>
+  </g>
+
+
+  <!-- ==================== FLOW NODES & DECISION CARDS ==================== -->
+
+  <!-- [ROOT ENTRY] -->
+  <g transform="translate(70, 180)" filter="url(#drop-shadow)">
+    <rect width="160" height="120" rx="10" fill="#0e1726" stroke="#0284c7" stroke-width="1.5" />
+    <rect x="0" y="0" width="160" height="6" rx="3" fill="#38bdf8" />
+    
+    <text x="16" y="32" fill="#38bdf8" font-size="10" font-weight="700" letter-spacing="1">SYMPTOM TRIGGER</text>
+    <text x="16" y="56" fill="#f8fafc" font-size="15" font-weight="700">Session Appears</text>
+    <text x="16" y="75" fill="#f8fafc" font-size="15" font-weight="700">Wedged / Stuck</text>
+    <text x="16" y="100" fill="#64748b" font-size="11" font-family="'JetBrains Mono', monospace">keystrokes stall</text>
+  </g>
+
+  <!-- [STEP 1 DECISION] -->
+  <g transform="translate(285, 180)" filter="url(#drop-shadow)">
+    <rect width="290" height="120" rx="10" fill="url(#card-active-grad)" stroke="#0e7490" stroke-width="1.5" />
+    <rect x="16" y="16" width="60" height="18" rx="4" fill="#083344" />
+    <text x="46" y="29" text-anchor="middle" fill="#22d3ee" font-size="10" font-weight="700">STEP 01</text>
+    
+    <text x="86" y="29" fill="#94a3b8" font-size="11" font-weight="600">PROCESS SUPERVISION</text>
+    <text x="16" y="58" fill="#f1f5f9" font-size="16" font-weight="700">Is Daemon Process Alive?</text>
+    
+    <!-- Code inspect probe -->
+    <rect x="16" y="74" width="258" height="30" rx="6" fill="#030712" stroke="#1e293b" stroke-width="1" />
+    <text x="26" y="93" fill="#38bdf8" font-size="11" font-family="'JetBrains Mono', monospace">pgrep -f "ferryx --daemon"</text>
+  </g>
+
+  <!-- [ACTION 1: DAEMON DEAD] -->
+  <g transform="translate(285, 390)" filter="url(#drop-shadow)">
+    <rect width="290" height="150" rx="10" fill="url(#card-action-grad)" stroke="#b45309" stroke-width="1.5" />
+    <circle cx="28" cy="28" r="10" fill="#451a03" stroke="#f59e0b" stroke-width="1.5" />
+    <text x="28" y="32" text-anchor="middle" fill="#f59e0b" font-size="12" font-weight="800">!</text>
+    <text x="48" y="32" fill="#fbbf24" font-size="12" font-weight="700">STATE: PROCESS TERMINATED</text>
+
+    <text x="20" y="60" fill="#e2e8f0" font-size="13" font-weight="600">Daemon stopped or crashed</text>
+    <text x="20" y="80" fill="#94a3b8" font-size="12">Check supervisor service state:</text>
+    
+    <rect x="16" y="92" width="258" height="42" rx="6" fill="#020617" stroke="#1e293b" stroke-width="1" />
+    <text x="26" y="110" fill="#f59e0b" font-size="11" font-family="'JetBrains Mono', monospace">launchctl list | grep ferryx</text>
+    <text x="26" y="125" fill="#64748b" font-size="10" font-family="'JetBrains Mono', monospace">or systemctl --user status</text>
+  </g>
+
+
+  <!-- [STEP 2 DECISION] -->
+  <g transform="translate(635, 180)" filter="url(#drop-shadow)">
+    <rect width="290" height="120" rx="10" fill="url(#card-active-grad)" stroke="#0e7490" stroke-width="1.5" />
+    <rect x="16" y="16" width="60" height="18" rx="4" fill="#083344" />
+    <text x="46" y="29" text-anchor="middle" fill="#22d3ee" font-size="10" font-weight="700">STEP 02</text>
+    
+    <text x="86" y="29" fill="#94a3b8" font-size="11" font-weight="600">IPC TRANSPORT</text>
+    <text x="16" y="58" fill="#f1f5f9" font-size="16" font-weight="700">Is UDS Socket Accessible?</text>
+    
+    <!-- Code inspect probe -->
+    <rect x="16" y="74" width="258" height="30" rx="6" fill="#030712" stroke="#1e293b" stroke-width="1" />
+    <text x="26" y="93" fill="#2dd4bf" font-size="11" font-family="'JetBrains Mono', monospace">ferryx doctor --socket-probe</text>
+  </g>
+
+  <!-- [ACTION 2: STALE SOCKET] -->
+  <g transform="translate(635, 390)" filter="url(#drop-shadow)">
+    <rect width="290" height="150" rx="10" fill="url(#card-action-grad)" stroke="#b45309" stroke-width="1.5" />
+    <circle cx="28" cy="28" r="10" fill="#451a03" stroke="#f59e0b" stroke-width="1.5" />
+    <text x="28" y="32" text-anchor="middle" fill="#f59e0b" font-size="12" font-weight="800">!</text>
+    <text x="48" y="32" fill="#fbbf24" font-size="12" font-weight="700">STATE: SOCKET UNREACHABLE</text>
+
+    <text x="20" y="60" fill="#e2e8f0" font-size="13" font-weight="600">Stale inode or flock held</text>
+    <text x="20" y="80" fill="#94a3b8" font-size="12">Inspect socket state &amp; lock holder:</text>
+    
+    <rect x="16" y="92" width="258" height="42" rx="6" fill="#020617" stroke="#1e293b" stroke-width="1" />
+    <text x="26" y="110" fill="#fbbf24" font-size="11" font-family="'JetBrains Mono', monospace">ls -l /tmp/ferryx-*.sock</text>
+    <text x="26" y="125" fill="#64748b" font-size="10" font-family="'JetBrains Mono', monospace">lsof /tmp/ferryx.lock</text>
+  </g>
+
+
+  <!-- [STEP 3 DECISION] -->
+  <g transform="translate(985, 180)" filter="url(#drop-shadow)">
+    <rect width="290" height="120" rx="10" fill="url(#card-active-grad)" stroke="#0e7490" stroke-width="1.5" />
+    <rect x="16" y="16" width="60" height="18" rx="4" fill="#083344" />
+    <text x="46" y="29" text-anchor="middle" fill="#22d3ee" font-size="10" font-weight="700">STEP 03</text>
+    
+    <text x="86" y="29" fill="#94a3b8" font-size="11" font-weight="600">REPLAY LOG STREAM</text>
+    <text x="16" y="58" fill="#f1f5f9" font-size="16" font-weight="700">Are Sequence IDs Advancing?</text>
+    
+    <!-- Code inspect probe -->
+    <rect x="16" y="74" width="258" height="30" rx="6" fill="#030712" stroke="#1e293b" stroke-width="1" />
+    <text x="26" y="93" fill="#38bdf8" font-size="11" font-family="'JetBrains Mono', monospace">ferryx session seq --watch</text>
+  </g>
+
+  <!-- [ACTION 3: GUI DECOUPLED] -->
+  <g transform="translate(985, 390)" filter="url(#drop-shadow)">
+    <rect width="290" height="150" rx="10" fill="url(#card-action-grad)" stroke="#0284c7" stroke-width="1.5" />
+    <circle cx="28" cy="28" r="10" fill="#082f49" stroke="#38bdf8" stroke-width="1.5" />
+    <text x="28" y="32" text-anchor="middle" fill="#38bdf8" font-size="12" font-weight="800">✓</text>
+    <text x="48" y="32" fill="#7dd3fc" font-size="12" font-weight="700">STATE: OUTPUT FLOWING NORMALLY</text>
+
+    <text x="20" y="60" fill="#e2e8f0" font-size="13" font-weight="600">PTY alive; GUI renderer dropped</text>
+    <text x="20" y="80" fill="#94a3b8" font-size="12">Daemon is healthy. Re-attach GUI:</text>
+    
+    <rect x="16" y="92" width="258" height="42" rx="6" fill="#020617" stroke="#1e293b" stroke-width="1" />
+    <text x="26" y="110" fill="#38bdf8" font-size="11" font-family="'JetBrains Mono', monospace">Cmd+R (Reload Pane View)</text>
+    <text x="26" y="125" fill="#64748b" font-size="10" font-family="'JetBrains Mono', monospace">Ring buffer replays missed output</text>
+  </g>
+
+
+  <!-- [STEP 4 DECISION] -->
+  <g transform="translate(1335, 180)" filter="url(#drop-shadow)">
+    <rect width="230" height="120" rx="10" fill="url(#card-active-grad)" stroke="#0e7490" stroke-width="1.5" />
+    <rect x="14" y="16" width="55" height="18" rx="4" fill="#083344" />
+    <text x="41" y="29" text-anchor="middle" fill="#22d3ee" font-size="10" font-weight="700">STEP 04</text>
+    
+    <text x="75" y="29" fill="#94a3b8" font-size="11" font-weight="600">PTY I/O STATE</text>
+    <text x="14" y="56" fill="#f1f5f9" font-size="14" font-weight="700">Is Child Blocked</text>
+    <text x="14" y="74" fill="#f1f5f9" font-size="14" font-weight="700">on Stdin / Pipe?</text>
+    
+    <text x="14" y="100" fill="#64748b" font-size="10" font-family="'JetBrains Mono', monospace">check proc wchan</text>
+  </g>
+
+  <!-- [ACTION 4: CHILD BLOCKED IN I/O] -->
+  <g transform="translate(1335, 390)" filter="url(#drop-shadow)">
+    <rect width="230" height="150" rx="10" fill="url(#card-action-grad)" stroke="#0e7490" stroke-width="1.5" />
+    <circle cx="26" cy="26" r="9" fill="#083344" stroke="#22d3ee" stroke-width="1.5" />
+    <text x="26" y="30" text-anchor="middle" fill="#22d3ee" font-size="11" font-weight="800">i</text>
+    <text x="44" y="30" fill="#22d3ee" font-size="11" font-weight="700">STATE: PTY I/O WAIT</text>
+
+    <text x="16" y="56" fill="#e2e8f0" font-size="12" font-weight="600">Child awaiting input</text>
+    <text x="16" y="74" fill="#94a3b8" font-size="11">Agent prompt or pipe pause</text>
+    
+    <rect x="14" y="86" width="202" height="48" rx="6" fill="#020617" stroke="#1e293b" stroke-width="1" />
+    <text x="22" y="104" fill="#2dd4bf" font-size="10" font-family="'JetBrains Mono', monospace">ferryx send-key --raw </text>
+    <text x="22" y="122" fill="#64748b" font-size="9" font-family="'JetBrains Mono', monospace">kill -CONT &lt;child_pid&gt;</text>
+  </g>
+
+  <!-- [ACTION 5: RING BUFFER WRAP / REPLAY GAP] -->
+  <g transform="translate(1335, 580)" filter="url(#drop-shadow)">
+    <rect width="230" height="145" rx="10" fill="url(#card-action-grad)" stroke="#0d9488" stroke-width="1.5" />
+    <circle cx="26" cy="26" r="9" fill="#042f2e" stroke="#14b8a6" stroke-width="1.5" />
+    <text x="26" y="30" text-anchor="middle" fill="#14b8a6" font-size="11" font-weight="800">↻</text>
+    <text x="44" y="30" fill="#2dd4bf" font-size="11" font-weight="700">STATE: REPLAY GAP</text>
+
+    <text x="16" y="56" fill="#e2e8f0" font-size="12" font-weight="600">Ring buffer wrapped</text>
+    <text x="16" y="74" fill="#94a3b8" font-size="11">512 KiB limit reached</text>
+    
+    <rect x="14" y="86" width="202" height="44" rx="6" fill="#020617" stroke="#1e293b" stroke-width="1" />
+    <text x="22" y="104" fill="#14b8a6" font-size="10" font-family="'JetBrains Mono', monospace">ack ReplayGap event</text>
+    <text x="22" y="120" fill="#64748b" font-size="9" font-family="'JetBrains Mono', monospace">sync to latest seq_id</text>
+  </g>
+
+
+  <!-- ==================== SAFE INSPECTION GUARANTEE FOOTER ==================== -->
+  <g transform="translate(70, 770)" filter="url(#drop-shadow)">
+    <!-- Container Bar -->
+    <rect width="1495" height="85" rx="12" fill="#09101d" stroke="#1e293b" stroke-width="1.5" />
+    
+    <!-- Accent Left Border -->
+    <rect x="0" y="0" width="6" height="85" rx="3" fill="#14b8a6" />
+
+    <!-- Left Header info -->
+    <text x="28" y="34" fill="#2dd4bf" font-size="12" font-weight="700" letter-spacing="1">SAFE INSPECTION PRINCIPLE</text>
+    <text x="28" y="56" fill="#cbd5e1" font-size="13" font-weight="500">Read-only diagnostic checks verify socket, sequence numbers, and buffer pointers without sending destructive signals.</text>
+
+    <!-- Right Side Badges / Indicators -->
+    <g transform="translate(980, 22)">
+      <!-- Badge 1 -->
+      <rect x="0" y="0" width="160" height="40" rx="8" fill="#061c24" stroke="#0e7490" stroke-width="1" />
+      <circle cx="16" cy="20" r="4" fill="#14b8a6" />
+      <text x="28" y="19" fill="#2dd4bf" font-size="11" font-weight="700">READ-ONLY PROBES</text>
+      <text x="28" y="32" fill="#64748b" font-size="9">Zero SIGKILL risk</text>
+
+      <!-- Badge 2 -->
+      <rect x="172" y="0" width="165" height="40" rx="8" fill="#08182b" stroke="#0284c7" stroke-width="1" />
+      <circle cx="188" cy="20" r="4" fill="#38bdf8" />
+      <text x="200" y="19" fill="#7dd3fc" font-size="11" font-weight="700">512 KiB RING BUFFER</text>
+      <text x="200" y="32" fill="#64748b" font-size="9">Sequence preserved</text>
+
+      <!-- Badge 3 -->
+      <rect x="349" y="0" width="160" height="40" rx="8" fill="#0b172a" stroke="#334155" stroke-width="1" />
+      <circle cx="365" cy="20" r="4" fill="#94a3b8" />
+      <text x="377" y="19" fill="#e2e8f0" font-size="11" font-weight="700">WORKTREE SAFETY</text>
+      <text x="377" y="32" fill="#64748b" font-size="9">In-flight git state safe</text>
+    </g>
+  </g>
+</svg>

@@ -1,0 +1,317 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900" style="background:#090d16; font-family:-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, Helvetica, sans-serif;">
+  <defs>
+    <!-- Background Gradient -->
+    <radialGradient id="bgGlow" cx="50%" cy="45%" r="65%">
+      <stop offset="0%" stop-color="#111c30"/>
+      <stop offset="60%" stop-color="#090d16"/>
+      <stop offset="100%" stop-color="#05070c"/>
+    </radialGradient>
+
+    <!-- Teal Glow Left -->
+    <radialGradient id="tealGlow" cx="22%" cy="40%" r="45%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.14"/>
+      <stop offset="100%" stop-color="#00f2fe" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Blue Glow Right -->
+    <radialGradient id="blueGlow" cx="78%" cy="40%" r="45%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.16"/>
+      <stop offset="100%" stop-color="#38bdf8" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Card Shadow -->
+    <filter id="shadow" x="-8%" y="-8%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="24" stdDeviation="28" flood-color="#000000" flood-opacity="0.65"/>
+      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#000000" flood-opacity="0.45"/>
+    </filter>
+
+    <!-- Teal Accent Border Gradient -->
+    <linearGradient id="tealBorder" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.7"/>
+      <stop offset="40%" stop-color="#0284c7" stop-opacity="0.4"/>
+      <stop offset="100%" stop-color="#1e293b" stop-opacity="0.3"/>
+    </linearGradient>
+
+    <!-- Blue Accent Border Gradient -->
+    <linearGradient id="blueBorder" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.7"/>
+      <stop offset="40%" stop-color="#6366f1" stop-opacity="0.4"/>
+      <stop offset="100%" stop-color="#1e293b" stop-opacity="0.3"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background Base -->
+  <rect width="1600" height="900" fill="url(#bgGlow)"/>
+  <rect width="1600" height="900" fill="url(#tealGlow)"/>
+  <rect width="1600" height="900" fill="url(#blueGlow)"/>
+
+  <!-- Subtle Precision Grid -->
+  <g stroke="#1e293b" stroke-width="1" stroke-opacity="0.2">
+    <line x1="80" y1="0" x2="80" y2="900"/>
+    <line x1="280" y1="0" x2="280" y2="900"/>
+    <line x1="480" y1="0" x2="480" y2="900"/>
+    <line x1="680" y1="0" x2="680" y2="900"/>
+    <line x1="920" y1="0" x2="920" y2="900"/>
+    <line x1="1120" y1="0" x2="1120" y2="900"/>
+    <line x1="1320" y1="0" x2="1320" y2="900"/>
+    <line x1="1520" y1="0" x2="1520" y2="900"/>
+
+    <line x1="0" y1="120" x2="1600" y2="120"/>
+    <line x1="0" y1="320" x2="1600" y2="320"/>
+    <line x1="0" y1="520" x2="1600" y2="520"/>
+    <line x1="0" y1="720" x2="1600" y2="720"/>
+  </g>
+
+  <!-- Top Title / Badge Header -->
+  <g transform="translate(90, 52)">
+    <rect x="0" y="0" width="206" height="30" rx="15" fill="#0f1f33" stroke="#00f2fe" stroke-opacity="0.5" stroke-width="1"/>
+    <circle cx="16" cy="15" r="4" fill="#00f2fe"/>
+    <text x="28" y="19" fill="#38bdf8" font-size="11" font-weight="700" letter-spacing="1.2">DUAL-PANE WORKSPACE</text>
+
+    <text x="228" y="20" fill="#64748b" font-size="14" font-weight="500">Terminal Shell &amp; In-Browser Pipeline Synchronization</text>
+  </g>
+
+  <!-- ========================================== -->
+  <!-- LEFT PANE: TERMINAL / SHELL               -->
+  <!-- ========================================== -->
+  <g transform="translate(90, 108)" filter="url(#shadow)">
+    <!-- Outer Window Border & BG -->
+    <rect x="0" y="0" width="675" height="715" rx="14" fill="#0b101a" stroke="url(#tealBorder)" stroke-width="1.5"/>
+
+    <!-- Terminal Header Bar -->
+    <path d="M 0,14 Q 0,0 14,0 L 661,0 Q 675,0 675,14 L 675,48 L 0,48 Z" fill="#0f1726"/>
+    <line x1="0" y1="48" x2="675" y2="48" stroke="#1e293b" stroke-width="1"/>
+
+    <!-- Window Controls -->
+    <circle cx="24" cy="24" r="5.5" fill="#f43f5e" opacity="0.8"/>
+    <circle cx="42" cy="24" r="5.5" fill="#f59e0b" opacity="0.8"/>
+    <circle cx="60" cy="24" r="5.5" fill="#10b981" opacity="0.8"/>
+
+    <!-- Terminal Title -->
+    <text x="337" y="29" fill="#64748b" font-size="12" font-weight="500" text-anchor="middle" font-family="ui-monospace, Menlo, monospace">zsh — project/core</text>
+
+    <!-- Shell Content Area -->
+    <g transform="translate(32, 86)" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="13.5" letter-spacing="0.2">
+      <!-- Command 1: git commit -->
+      <g>
+        <text x="0" y="0" fill="#38bdf8" font-weight="700">❯</text>
+        <text x="18" y="0" fill="#f1f5f9" font-weight="600">git</text>
+        <text x="48" y="0" fill="#94a3b8">commit -m "feat(api): optimize pipeline stream"</text>
+      </g>
+      <text x="18" y="26" fill="#64748b">[main e4b921d] feat(api): optimize pipeline stream</text>
+      <text x="18" y="48" fill="#64748b"> 3 files changed, 48 insertions(+), 6 deletions(-)</text>
+
+      <!-- Command 2: git push -->
+      <g transform="translate(0, 90)">
+        <text x="0" y="0" fill="#38bdf8" font-weight="700">❯</text>
+        <text x="18" y="0" fill="#f1f5f9" font-weight="600">git</text>
+        <text x="48" y="0" fill="#94a3b8">push origin main</text>
+        <text x="18" y="26" fill="#64748b">To github.com:org/repo.git</text>
+        <text x="18" y="48" fill="#10b981"> * [new branch]      main -&gt; main</text>
+      </g>
+
+      <!-- Command 3: gh run watch -->
+      <g transform="translate(0, 182)">
+        <text x="0" y="0" fill="#00f2fe" font-weight="700">❯</text>
+        <text x="18" y="0" fill="#f1f5f9" font-weight="600">gh</text>
+        <text x="42" y="0" fill="#00f2fe" font-weight="600">run watch</text>
+        <text x="130" y="0" fill="#64748b">--exit-status</text>
+
+        <!-- Status Card inside Terminal -->
+        <g transform="translate(0, 32)">
+          <rect x="0" y="0" width="611" height="280" rx="10" fill="#070b13" stroke="#1a2538" stroke-width="1"/>
+
+          <!-- Job Lines -->
+          <g transform="translate(24, 42)">
+            <!-- Check 1 -->
+            <circle cx="8" cy="-4" r="7" fill="#10b981" fill-opacity="0.2"/>
+            <path d="M 5,-4 L 7,-2 L 12,-7" stroke="#10b981" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+            <text x="28" y="0" fill="#e2e8f0" font-weight="500">Lint &amp; Static Analysis</text>
+            <text x="480" y="0" fill="#64748b">14s</text>
+
+            <!-- Check 2 -->
+            <g transform="translate(0, 46)">
+              <circle cx="8" cy="-4" r="7" fill="#10b981" fill-opacity="0.2"/>
+              <path d="M 5,-4 L 7,-2 L 12,-7" stroke="#10b981" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+              <text x="28" y="0" fill="#e2e8f0" font-weight="500">Unit Tests (x86_64, arm64)</text>
+              <text x="480" y="0" fill="#64748b">42s</text>
+            </g>
+
+            <!-- Check 3 - Running -->
+            <g transform="translate(0, 92)">
+              <circle cx="8" cy="-4" r="7" fill="#00f2fe" fill-opacity="0.25"/>
+              <circle cx="8" cy="-4" r="3" fill="#00f2fe"/>
+              <text x="28" y="0" fill="#00f2fe" font-weight="600">Integration E2E Suite</text>
+              <text x="480" y="0" fill="#00f2fe">1m 18s ...</text>
+
+              <!-- Progress bar in terminal -->
+              <rect x="28" y="16" width="490" height="6" rx="3" fill="#1a2538"/>
+              <rect x="28" y="16" width="310" height="6" rx="3" fill="#00f2fe"/>
+            </g>
+
+            <!-- Check 4 - Queued -->
+            <g transform="translate(0, 150)">
+              <circle cx="8" cy="-4" r="7" fill="#334155" fill-opacity="0.3"/>
+              <circle cx="8" cy="-4" r="2.5" fill="#475569"/>
+              <text x="28" y="0" fill="#64748b">Deploy Preview (Edge)</text>
+              <text x="480" y="0" fill="#475569">queued</text>
+            </g>
+          </g>
+
+          <!-- CLI status footer -->
+          <line x1="0" y1="230" x2="611" y2="230" stroke="#141c2c" stroke-width="1"/>
+          <text x="24" y="256" fill="#38bdf8" font-size="12">Watching workflow: ci.yml · Run #492</text>
+          <text x="515" y="256" fill="#64748b" font-size="12">Refresh: 2s</text>
+        </g>
+      </g>
+    </g>
+  </g>
+
+  <!-- ========================================== -->
+  <!-- RIGHT PANE: BROWSER TAB (CI DASHBOARD)    -->
+  <!-- ========================================== -->
+  <g transform="translate(835, 108)" filter="url(#shadow)">
+    <!-- Outer Window Border & BG -->
+    <rect x="0" y="0" width="675" height="715" rx="14" fill="#0b101a" stroke="url(#blueBorder)" stroke-width="1.5"/>
+
+    <!-- Browser Frame Header -->
+    <path d="M 0,14 Q 0,0 14,0 L 661,0 Q 675,0 675,14 L 675,80 L 0,80 Z" fill="#0f1726"/>
+    <line x1="0" y1="80" x2="675" y2="80" stroke="#1e293b" stroke-width="1"/>
+
+    <!-- Window Controls -->
+    <circle cx="24" cy="22" r="5.5" fill="#f43f5e" opacity="0.8"/>
+    <circle cx="42" cy="22" r="5.5" fill="#f59e0b" opacity="0.8"/>
+    <circle cx="60" cy="22" r="5.5" fill="#10b981" opacity="0.8"/>
+
+    <!-- Browser Active Tab -->
+    <g transform="translate(95, 8)">
+      <path d="M 0,28 L 0,8 Q 0,0 8,0 L 230,0 Q 238,0 238,8 L 238,28 Z" fill="#0b101a"/>
+      <!-- Glowing dot indicator in tab -->
+      <circle cx="20" cy="14" r="4" fill="#00f2fe"/>
+      <text x="32" y="18" fill="#e2e8f0" font-size="12" font-weight="600">CI / CD · Run #492</text>
+      <!-- Close icon -->
+      <text x="216" y="18" fill="#64748b" font-size="14">×</text>
+    </g>
+
+    <!-- Address / Search Bar -->
+    <g transform="translate(18, 44)">
+      <rect x="0" y="0" width="639" height="28" rx="6" fill="#070b13" stroke="#1e293b" stroke-width="1"/>
+      <circle cx="16" cy="14" r="3" fill="#10b981"/>
+      <text x="28" y="18" fill="#64748b" font-size="11" font-family="ui-monospace, monospace">https://github.com/org/repo/actions/runs/492</text>
+      <rect x="588" y="5" width="40" height="18" rx="4" fill="#1e293b"/>
+      <text x="608" y="17" fill="#38bdf8" font-size="9" text-anchor="middle" font-weight="700" letter-spacing="0.5">LIVE</text>
+    </g>
+
+    <!-- Browser Web Body Content -->
+    <g transform="translate(32, 104)">
+      <!-- Workflow Run Header -->
+      <rect x="0" y="0" width="611" height="92" rx="10" fill="#0f1726" stroke="#1e293b" stroke-width="1"/>
+
+      <g transform="translate(22, 28)">
+        <text x="0" y="0" fill="#f8fafc" font-size="17" font-weight="700">feat(api): optimize pipeline stream</text>
+        <text x="0" y="24" fill="#64748b" font-size="12">Commit <tspan fill="#38bdf8" font-family="monospace">e4b921d</tspan> pushed by <tspan fill="#94a3b8">developer</tspan> on <tspan fill="#e2e8f0">main</tspan></text>
+      </g>
+
+      <!-- Status Pill -->
+      <g transform="translate(466, 20)">
+        <rect x="0" y="0" width="124" height="28" rx="14" fill="#08283a" stroke="#00f2fe" stroke-width="1.2"/>
+        <circle cx="16" cy="14" r="4" fill="#00f2fe"/>
+        <text x="28" y="18" fill="#00f2fe" font-size="11" font-weight="700" letter-spacing="0.5">IN PROGRESS</text>
+      </g>
+
+      <!-- Visual Pipeline DAG Graph -->
+      <g transform="translate(0, 114)">
+        <rect x="0" y="0" width="611" height="420" rx="10" fill="#070b13" stroke="#1a2538" stroke-width="1"/>
+
+        <!-- DAG Connecting Lines -->
+        <g stroke-width="2" stroke-linecap="round">
+          <!-- Build to Test -->
+          <line x1="165" y1="80" x2="235" y2="80" stroke="#10b981"/>
+          <!-- Test to Integration (In-progress) -->
+          <line x1="375" y1="80" x2="445" y2="80" stroke="#00f2fe" stroke-dasharray="4,4"/>
+        </g>
+
+        <!-- Stage 1: Build & Setup (Success) -->
+        <g transform="translate(30, 50)">
+          <rect x="0" y="0" width="135" height="60" rx="9" fill="#0d1b26" stroke="#10b981" stroke-width="1.4"/>
+          <circle cx="22" cy="22" r="7.5" fill="#10b981" fill-opacity="0.2"/>
+          <path d="M 19,22 L 21,24 L 25,20" stroke="#10b981" stroke-width="2" fill="none" stroke-linecap="round"/>
+          <text x="38" y="26" fill="#f1f5f9" font-size="13" font-weight="600">Setup</text>
+          <text x="20" y="46" fill="#64748b" font-size="11">node &amp; deps · 8s</text>
+        </g>
+
+        <!-- Stage 2: Unit Tests (Success) -->
+        <g transform="translate(240, 50)">
+          <rect x="0" y="0" width="135" height="60" rx="9" fill="#0d1b26" stroke="#10b981" stroke-width="1.4"/>
+          <circle cx="22" cy="22" r="7.5" fill="#10b981" fill-opacity="0.2"/>
+          <path d="M 19,22 L 21,24 L 25,20" stroke="#10b981" stroke-width="2" fill="none" stroke-linecap="round"/>
+          <text x="38" y="26" fill="#f1f5f9" font-size="13" font-weight="600">Unit Tests</text>
+          <text x="20" y="46" fill="#64748b" font-size="11">42 passed · 34s</text>
+        </g>
+
+        <!-- Stage 3: Integration (Running / Active Glow) -->
+        <g transform="translate(446, 50)">
+          <rect x="-2" y="-2" width="139" height="64" rx="11" fill="#00f2fe" fill-opacity="0.12"/>
+          <rect x="0" y="0" width="135" height="60" rx="9" fill="#0e2336" stroke="#00f2fe" stroke-width="1.8"/>
+          <circle cx="22" cy="22" r="7.5" fill="#00f2fe" fill-opacity="0.25"/>
+          <circle cx="22" cy="22" r="3.5" fill="#00f2fe"/>
+          <text x="38" y="26" fill="#38bdf8" font-size="13" font-weight="700">E2E Suite</text>
+          <text x="20" y="46" fill="#00f2fe" font-size="11" font-weight="500">running 1m 18s</text>
+        </g>
+
+        <!-- Live Step Details Drawer -->
+        <g transform="translate(24, 140)">
+          <rect x="0" y="0" width="563" height="246" rx="9" fill="#0c121e" stroke="#1a2538" stroke-width="1"/>
+
+          <!-- Step Header Bar -->
+          <g transform="translate(20, 26)">
+            <text x="0" y="0" fill="#94a3b8" font-size="11.5" font-weight="600" letter-spacing="1">REALTIME RUNNER STREAM</text>
+            <circle cx="430" cy="-4" r="3.5" fill="#10b981"/>
+            <text x="442" y="0" fill="#10b981" font-size="11" font-family="monospace">SOCKET ACTIVE</text>
+          </g>
+
+          <line x1="20" y1="38" x2="543" y2="38" stroke="#162033" stroke-width="1"/>
+
+          <!-- Stream logs -->
+          <g transform="translate(20, 66)" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" letter-spacing="0.1">
+            <text x="0" y="0" fill="#64748b">12:41:02</text>
+            <text x="75" y="0" fill="#38bdf8">[playwright]</text>
+            <text x="180" y="0" fill="#94a3b8">Starting 12 test workers in parallel...</text>
+
+            <text x="0" y="28" fill="#64748b">12:41:15</text>
+            <text x="75" y="28" fill="#38bdf8">[playwright]</text>
+            <text x="180" y="28" fill="#94a3b8">Authentication handshake passed (2.4s)</text>
+
+            <text x="0" y="56" fill="#64748b">12:41:38</text>
+            <text x="75" y="56" fill="#38bdf8">[playwright]</text>
+            <text x="180" y="56" fill="#e2e8f0">Websocket pipeline streaming test passed</text>
+
+            <text x="0" y="84" fill="#64748b">12:41:44</text>
+            <text x="75" y="84" fill="#00f2fe">[playwright]</text>
+            <text x="180" y="84" fill="#00f2fe">Executing test suite: realtime_sync.spec.ts</text>
+
+            <!-- Cursor block -->
+            <rect x="500" y="73" width="7" height="14" fill="#00f2fe"/>
+
+            <!-- Progress detail -->
+            <g transform="translate(0, 118)">
+              <rect x="0" y="0" width="523" height="34" rx="6" fill="#080c14" stroke="#1a2538" stroke-width="1"/>
+              <text x="14" y="21" fill="#64748b" font-size="11">Progress:</text>
+              <rect x="74" y="13" width="360" height="7" rx="3.5" fill="#1e293b"/>
+              <rect x="74" y="13" width="235" height="7" rx="3.5" fill="#00f2fe"/>
+              <text x="450" y="21" fill="#38bdf8" font-size="11" font-weight="600">65%</text>
+            </g>
+          </g>
+        </g>
+      </g>
+    </g>
+  </g>
+
+  <!-- Center Sync Indicator Badge -->
+  <g transform="translate(775, 435)">
+    <circle cx="25" cy="25" r="23" fill="#0b1322" stroke="#00f2fe" stroke-width="1.5"/>
+    <!-- Left-right sync arrows -->
+    <path d="M 16,21 L 34,21 M 30,17 L 34,21 L 30,25" stroke="#00f2fe" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M 34,29 L 16,29 M 20,25 L 16,29 L 20,33" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

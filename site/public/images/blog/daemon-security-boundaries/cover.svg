@@ -1,0 +1,275 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <defs>
+    <!-- Background Gradients -->
+    <radialGradient id="bgGlow" cx="50%" cy="42%" r="65%">
+      <stop offset="0%" stop-color="#0e263d" stop-opacity="0.9"/>
+      <stop offset="50%" stop-color="#091524" stop-opacity="0.95"/>
+      <stop offset="100%" stop-color="#040810" stop-opacity="1"/>
+    </radialGradient>
+
+    <radialGradient id="portalGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.3"/>
+      <stop offset="40%" stop-color="#0066cc" stop-opacity="0.15"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="lockGlow" cx="50%" cy="45%" r="50%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.4"/>
+      <stop offset="70%" stop-color="#0044aa" stop-opacity="0.05"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Linear Gradients -->
+    <linearGradient id="doorGradientLeft" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#0d1d2e"/>
+      <stop offset="70%" stop-color="#11253b"/>
+      <stop offset="100%" stop-color="#173352"/>
+    </linearGradient>
+
+    <linearGradient id="doorGradientRight" x1="100%" y1="0%" x2="0%" y2="0%">
+      <stop offset="0%" stop-color="#0d1d2e"/>
+      <stop offset="70%" stop-color="#11253b"/>
+      <stop offset="100%" stop-color="#173352"/>
+    </linearGradient>
+
+    <linearGradient id="doorFrameGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e4063"/>
+      <stop offset="50%" stop-color="#0e2238"/>
+      <stop offset="100%" stop-color="#163250"/>
+    </linearGradient>
+
+    <linearGradient id="cyanTealBorder" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00f2fe"/>
+      <stop offset="50%" stop-color="#38ef7d"/>
+      <stop offset="100%" stop-color="#0077ff"/>
+    </linearGradient>
+
+    <linearGradient id="lockBodyGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#16314f"/>
+      <stop offset="50%" stop-color="#0e2136"/>
+      <stop offset="100%" stop-color="#081422"/>
+    </linearGradient>
+
+    <linearGradient id="shackleGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#4facfe"/>
+      <stop offset="30%" stop-color="#00f2fe"/>
+      <stop offset="70%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#00c3ff"/>
+    </linearGradient>
+
+    <linearGradient id="pipeGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#122a42"/>
+      <stop offset="50%" stop-color="#1e4368"/>
+      <stop offset="100%" stop-color="#0b1a2a"/>
+    </linearGradient>
+
+    <!-- Filters -->
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="5" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+
+    <filter id="wideGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="12" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+
+    <!-- Grid Pattern -->
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#132337" stroke-width="1" stroke-opacity="0.55"/>
+      <circle cx="40" cy="40" r="1" fill="#1e3d60" fill-opacity="0.7"/>
+    </pattern>
+  </defs>
+
+  <!-- Deep Terminal Canvas -->
+  <rect width="1200" height="630" fill="#050912"/>
+  <rect width="1200" height="630" fill="url(#bgGlow)"/>
+  <rect width="1200" height="630" fill="url(#grid)"/>
+
+  <!-- HUD Corner Brackets -->
+  <g stroke="#1d3d63" stroke-width="2" fill="none">
+    <path d="M 36 36 L 36 68 M 36 36 L 68 36" />
+    <path d="M 1164 36 L 1164 68 M 1164 36 L 1132 36" />
+    <path d="M 36 594 L 36 562 M 36 594 L 68 594" />
+    <path d="M 1164 594 L 1164 562 M 1164 594 L 1132 594" />
+  </g>
+
+  <!-- Peripheral Circuit Lines & Boundary Partition -->
+  <g stroke="#00f2fe" stroke-width="1.2" fill="none" opacity="0.35">
+    <!-- Left socket trace lines -->
+    <path d="M 60 160 L 220 160 L 280 220 L 420 220" />
+    <circle cx="60" cy="160" r="3" fill="#00f2fe" />
+    <circle cx="420" cy="220" r="3" fill="#00f2fe" />
+
+    <path d="M 80 320 L 260 320 L 320 270 L 420 270" />
+    <circle cx="80" cy="320" r="3" fill="#00f2fe" />
+
+    <path d="M 120 440 L 280 440 L 340 380 L 420 380" />
+    <circle cx="120" cy="440" r="3" fill="#00f2fe" />
+    <circle cx="420" cy="380" r="3" fill="#00f2fe" />
+
+    <!-- Right daemon-side isolated circuit lines -->
+    <path d="M 1140 160 L 980 160 L 920 220 L 780 220" />
+    <circle cx="1140" cy="160" r="3" fill="#38ef7d" />
+    <circle cx="780" cy="220" r="3" fill="#38ef7d" />
+
+    <path d="M 1120 320 L 940 320 L 880 270 L 780 270" />
+    <circle cx="1120" cy="320" r="3" fill="#38ef7d" />
+
+    <path d="M 1080 440 L 920 440 L 860 380 L 780 380" />
+    <circle cx="1080" cy="440" r="3" fill="#38ef7d" />
+    <circle cx="780" cy="380" r="3" fill="#38ef7d" />
+  </g>
+
+  <!-- Left: Client Request Influx (Abstract UDS Pipe) -->
+  <g transform="translate(220, 260)">
+    <!-- Pipe body -->
+    <rect x="0" y="-18" width="200" height="36" rx="4" fill="url(#pipeGrad)" stroke="#1d4670" stroke-width="1.5"/>
+    <line x1="0" y1="0" x2="200" y2="0" stroke="#00f2fe" stroke-width="1.5" stroke-dasharray="12 8" opacity="0.7"/>
+    <!-- Ring collars on pipe -->
+    <rect x="40" y="-22" width="12" height="44" rx="3" fill="#163252" stroke="#00f2fe" stroke-width="1.5" opacity="0.8"/>
+    <rect x="110" y="-22" width="12" height="44" rx="3" fill="#163252" stroke="#00f2fe" stroke-width="1.5" opacity="0.8"/>
+    <rect x="180" y="-25" width="16" height="50" rx="3" fill="#1e446d" stroke="#00f2fe" stroke-width="2" filter="url(#glow)"/>
+    <!-- Influx glow arrows -->
+    <path d="M 70 -5 L 80 0 L 70 5" fill="none" stroke="#00f2fe" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M 140 -5 L 150 0 L 140 5" fill="none" stroke="#00f2fe" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+
+  <!-- Right: Protected Daemon Internal Bus (Behind Door) -->
+  <g transform="translate(780, 260)">
+    <rect x="0" y="-18" width="200" height="36" rx="4" fill="url(#pipeGrad)" stroke="#1d4670" stroke-width="1.5"/>
+    <line x1="0" y1="0" x2="200" y2="0" stroke="#38ef7d" stroke-width="1.5" stroke-dasharray="12 8" opacity="0.7"/>
+    <!-- Collars -->
+    <rect x="4" y="-25" width="16" height="50" rx="3" fill="#1e446d" stroke="#38ef7d" stroke-width="2" filter="url(#glow)"/>
+    <rect x="78" y="-22" width="12" height="44" rx="3" fill="#163252" stroke="#38ef7d" stroke-width="1.5" opacity="0.8"/>
+    <rect x="148" y="-22" width="12" height="44" rx="3" fill="#163252" stroke="#38ef7d" stroke-width="1.5" opacity="0.8"/>
+    <!-- Node indicators -->
+    <circle cx="90" cy="-50" r="6" fill="#0c2136" stroke="#38ef7d" stroke-width="2"/>
+    <line x1="84" y1="-22" x2="90" y2="-44" stroke="#38ef7d" stroke-width="1.5" opacity="0.7"/>
+    <circle cx="160" cy="50" r="6" fill="#0c2136" stroke="#38ef7d" stroke-width="2"/>
+    <line x1="154" y1="22" x2="160" y2="44" stroke="#38ef7d" stroke-width="1.5" opacity="0.7"/>
+  </g>
+
+  <!-- Ambient Light Behind Door Opening -->
+  <circle cx="600" cy="260" r="260" fill="url(#portalGlow)"/>
+
+  <!-- ==================== THE SOCKET DOORWAY ==================== -->
+  <g id="socket-door" transform="translate(600, 260)">
+    <!-- Outer Vault Perimeter Frame -->
+    <rect x="-190" y="-170" width="380" height="340" rx="24" fill="url(#doorFrameGrad)" stroke="#1d456f" stroke-width="3"/>
+    
+    <!-- Outer Cyan Tech Frame Reticle -->
+    <rect x="-175" y="-155" width="350" height="310" rx="16" fill="none" stroke="#00f2fe" stroke-width="1.5" stroke-dasharray="16 8" opacity="0.5"/>
+
+    <!-- Door Sill Top & Bottom Rivets -->
+    <g fill="#00f2fe" opacity="0.6">
+      <circle cx="-150" cy="-155" r="2.5"/>
+      <circle cx="-100" cy="-155" r="2.5"/>
+      <circle cx="-50" cy="-155" r="2.5"/>
+      <circle cx="0" cy="-155" r="2.5"/>
+      <circle cx="50" cy="-155" r="2.5"/>
+      <circle cx="100" cy="-155" r="2.5"/>
+      <circle cx="150" cy="-155" r="2.5"/>
+
+      <circle cx="-150" cy="155" r="2.5"/>
+      <circle cx="-100" cy="155" r="2.5"/>
+      <circle cx="-50" cy="155" r="2.5"/>
+      <circle cx="0" cy="155" r="2.5"/>
+      <circle cx="50" cy="155" r="2.5"/>
+      <circle cx="100" cy="155" r="2.5"/>
+      <circle cx="150" cy="155" r="2.5"/>
+    </g>
+
+    <!-- LEFT DOOR LEAF -->
+    <path d="M -160 -140 L -4 -140 L -4 140 L -160 140 Z" fill="url(#doorGradientLeft)" stroke="#1e4875" stroke-width="2"/>
+    <!-- Left Door Ribs & Panels -->
+    <rect x="-145" y="-120" width="125" height="60" rx="6" fill="#091522" stroke="#163250" stroke-width="1.5"/>
+    <rect x="-145" y="-45" width="125" height="90" rx="6" fill="#091522" stroke="#163250" stroke-width="1.5"/>
+    <rect x="-145" y="60" width="125" height="60" rx="6" fill="#091522" stroke="#163250" stroke-width="1.5"/>
+    <line x1="-130" y1="-90" x2="-40" y2="-90" stroke="#00f2fe" stroke-width="1.5" opacity="0.4" stroke-dasharray="6 4"/>
+    <line x1="-130" y1="90" x2="-40" y2="90" stroke="#00f2fe" stroke-width="1.5" opacity="0.4" stroke-dasharray="6 4"/>
+
+    <!-- RIGHT DOOR LEAF -->
+    <path d="M 4 -140 L 160 -140 L 160 140 L 4 140 Z" fill="url(#doorGradientRight)" stroke="#1e4875" stroke-width="2"/>
+    <!-- Right Door Ribs & Panels -->
+    <rect x="20" y="-120" width="125" height="60" rx="6" fill="#091522" stroke="#163250" stroke-width="1.5"/>
+    <rect x="20" y="-45" width="125" height="90" rx="6" fill="#091522" stroke="#163250" stroke-width="1.5"/>
+    <rect x="20" y="60" width="125" height="60" rx="6" fill="#091522" stroke="#163250" stroke-width="1.5"/>
+    <line x1="40" y1="-90" x2="130" y2="-90" stroke="#38ef7d" stroke-width="1.5" opacity="0.4" stroke-dasharray="6 4"/>
+    <line x1="40" y1="90" x2="130" y2="90" stroke="#38ef7d" stroke-width="1.5" opacity="0.4" stroke-dasharray="6 4"/>
+
+    <!-- Central Vertical Seam between Doors with Neon Seal -->
+    <line x1="0" y1="-140" x2="0" y2="140" stroke="#00f2fe" stroke-width="2.5" filter="url(#glow)"/>
+
+    <!-- Central Circular Socket Aperture (Integrated in Door Seam) -->
+    <circle cx="0" cy="0" r="78" fill="none" stroke="#122a45" stroke-width="8"/>
+    <circle cx="0" cy="0" r="78" fill="none" stroke="#00f2fe" stroke-width="2" stroke-dasharray="12 6" opacity="0.75"/>
+    <circle cx="0" cy="0" r="65" fill="none" stroke="#1a3d66" stroke-width="1.5" stroke-dasharray="4 6"/>
+
+    <!-- Left & Right Heavy Heavy Mounting Hasps / Staples for the Padlock -->
+    <!-- Left Hasp Plate -->
+    <path d="M -48 -22 L -18 -22 L -18 22 L -48 22 Z" fill="#0b1c2e" stroke="#00f2fe" stroke-width="2.5" rx="3" filter="url(#glow)"/>
+    <circle cx="-33" cy="0" r="5" fill="#00f2fe"/>
+    <!-- Right Hasp Plate -->
+    <path d="M 18 -22 L 48 -22 L 48 22 L 18 22 Z" fill="#0b1c2e" stroke="#00f2fe" stroke-width="2.5" rx="3" filter="url(#glow)"/>
+    <circle cx="33" cy="0" r="5" fill="#00f2fe"/>
+
+    <!-- ==================== THE SECURITY PADLOCK ==================== -->
+    <g id="security-lock" transform="translate(0, 5)">
+      <!-- Glow surrounding the lock -->
+      <circle cx="0" cy="0" r="80" fill="url(#lockGlow)"/>
+
+      <!-- Hardened Shackle (U-Bar) -->
+      <!-- Outer curved shackle bar -->
+      <path d="M -34 2 
+               L -34 -44 
+               C -34 -72, 34 -72, 34 -44 
+               L 34 2" 
+            fill="none" stroke="url(#shackleGrad)" stroke-width="12" stroke-linecap="round" filter="url(#glow)"/>
+      <!-- Inner core line of shackle -->
+      <path d="M -34 2 
+               L -34 -44 
+               C -34 -68, 34 -68, 34 -44 
+               L 34 2" 
+            fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" opacity="0.9"/>
+
+      <!-- Padlock Body -->
+      <rect x="-52" y="-12" width="104" height="82" rx="14" fill="url(#lockBodyGrad)" stroke="url(#cyanTealBorder)" stroke-width="3.5" filter="url(#glow)"/>
+      
+      <!-- Inner Bevel Rim -->
+      <rect x="-44" y="-4" width="88" height="66" rx="9" fill="none" stroke="#00f2fe" stroke-width="1.5" opacity="0.5" stroke-dasharray="8 4"/>
+
+      <!-- Center Keyhole / Biometric Sensor / Crypto Core -->
+      <circle cx="0" cy="22" r="15" fill="#071320" stroke="#00f2fe" stroke-width="2.5" filter="url(#glow)"/>
+      <path d="M -4 20 L 4 20 L 6 36 L -6 36 Z" fill="#071320" stroke="#00f2fe" stroke-width="2"/>
+      <!-- Glowing core center -->
+      <circle cx="0" cy="22" r="6" fill="#38ef7d" filter="url(#glow)"/>
+      <circle cx="0" cy="22" r="2.5" fill="#ffffff"/>
+
+      <!-- Status indicator LEDs on lock body -->
+      <circle cx="-30" cy="10" r="3" fill="#00f2fe" filter="url(#glow)"/>
+      <circle cx="30" cy="10" r="3" fill="#38ef7d" filter="url(#glow)"/>
+
+      <!-- Corner accent notches on lock -->
+      <line x1="-40" y1="48" x2="-26" y2="48" stroke="#00f2fe" stroke-width="1.8" stroke-linecap="round" opacity="0.7"/>
+      <line x1="26" y1="48" x2="40" y2="48" stroke="#38ef7d" stroke-width="1.8" stroke-linecap="round" opacity="0.7"/>
+    </g>
+  </g>
+
+  <!-- ==================== CLEAN DEVELOPER TEXT (MAX 3 WORDS) ==================== -->
+  <g transform="translate(600, 535)" text-anchor="middle">
+    <!-- Title Text: Exactly 3 words -->
+    <text font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'JetBrains Mono', sans-serif" font-size="42" font-weight="800" letter-spacing="2" fill="#ffffff">
+      DAEMON <tspan fill="#00f2fe">SECURITY</tspan> <tspan fill="#38ef7d">BOUNDARIES</tspan>
+    </text>
+
+    <!-- Glowing baseline accent line -->
+    <line x1="-240" y1="22" x2="240" y2="22" stroke="url(#cyanTealBorder)" stroke-width="2" opacity="0.7" filter="url(#glow)"/>
+  </g>
+</svg>

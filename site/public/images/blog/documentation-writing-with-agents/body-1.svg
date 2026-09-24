@@ -1,0 +1,351 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900" style="background:#070a13; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'JetBrains Mono', monospace;">
+  <defs>
+    <!-- Background Gradients -->
+    <radialGradient id="bg-radial" cx="50%" cy="40%" r="80%">
+      <stop offset="0%" stop-color="#0b1e36" stop-opacity="0.95"/>
+      <stop offset="50%" stop-color="#060c18" stop-opacity="0.98"/>
+      <stop offset="100%" stop-color="#03060c" stop-opacity="1.0"/>
+    </radialGradient>
+
+    <!-- Glow filters -->
+    <filter id="glow-teal" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+    <filter id="glow-cyan" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+    <filter id="glow-soft" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="14" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+
+    <!-- Card Gradients -->
+    <linearGradient id="card-grad-input" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0a1c2e" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#06121f" stop-opacity="0.96"/>
+    </linearGradient>
+
+    <linearGradient id="card-grad-agent1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0c2d3a" stop-opacity="0.95"/>
+      <stop offset="100%" stop-color="#061824" stop-opacity="0.98"/>
+    </linearGradient>
+
+    <linearGradient id="card-grad-agent2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0c233c" stop-opacity="0.95"/>
+      <stop offset="100%" stop-color="#071424" stop-opacity="0.98"/>
+    </linearGradient>
+
+    <linearGradient id="card-grad-sync" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0e2a38" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#071622" stop-opacity="0.98"/>
+    </linearGradient>
+
+    <linearGradient id="card-grad-output" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0d2836" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#05151c" stop-opacity="0.96"/>
+    </linearGradient>
+
+    <!-- Line & Accent Gradients -->
+    <linearGradient id="grad-teal-blue" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00f2fe"/>
+      <stop offset="50%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#818cf8"/>
+    </linearGradient>
+
+    <linearGradient id="grad-agent-split" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00f2fe"/>
+      <stop offset="100%" stop-color="#0ea5e9"/>
+    </linearGradient>
+
+    <!-- Markers -->
+    <marker id="arrow-teal" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#00f2fe"/>
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#38bdf8"/>
+    </marker>
+    <marker id="arrow-emerald" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#34d399"/>
+    </marker>
+
+    <!-- Pattern -->
+    <pattern id="dot-grid" x="0" y="0" width="32" height="32" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.1" fill="#1e3a5f" opacity="0.3"/>
+    </pattern>
+  </defs>
+
+  <!-- Background Base -->
+  <rect width="1600" height="900" fill="#04070e"/>
+  <rect width="1600" height="900" fill="url(#bg-radial)"/>
+  <rect width="1600" height="900" fill="url(#dot-grid)"/>
+
+  <!-- Blueprint Outer Frame & Guides -->
+  <rect x="32" y="32" width="1536" height="836" rx="16" fill="none" stroke="#122a44" stroke-width="1.2"/>
+  <rect x="40" y="40" width="1520" height="820" rx="12" fill="none" stroke="#00f2fe" stroke-width="0.8" stroke-dasharray="8 8" opacity="0.2"/>
+
+  <!-- Corner Reticles -->
+  <path d="M 48 64 L 48 48 L 64 48" fill="none" stroke="#00f2fe" stroke-width="2" opacity="0.8"/>
+  <path d="M 1552 64 L 1552 48 L 1536 48" fill="none" stroke="#00f2fe" stroke-width="2" opacity="0.8"/>
+  <path d="M 48 832 L 48 848 L 64 848" fill="none" stroke="#00f2fe" stroke-width="2" opacity="0.8"/>
+  <path d="M 1552 832 L 1552 848 L 1536 848" fill="none" stroke="#00f2fe" stroke-width="2" opacity="0.8"/>
+
+  <!-- ==================== HEADER BLOCK ==================== -->
+  <g transform="translate(80, 72)">
+    <!-- Pill Tag -->
+    <rect x="0" y="0" width="170" height="28" rx="14" fill="#082333" stroke="#00f2fe" stroke-width="1.2" stroke-opacity="0.7"/>
+    <circle cx="15" cy="14" r="4.5" fill="#00f2fe" filter="url(#glow-teal)"/>
+    <text x="28" y="18" fill="#00f2fe" font-size="11" font-weight="700" letter-spacing="1.5">PARALLEL PIPELINE</text>
+
+    <!-- Main Title -->
+    <text x="0" y="66" fill="#f8fafc" font-size="28" font-weight="800" letter-spacing="-0.3">
+      Writing Docs in Parallel With Agents
+    </text>
+
+    <!-- Subtitle / Architecture Note -->
+    <text x="0" y="94" fill="#7dd3fc" font-size="14" font-weight="400" opacity="0.85">
+      Drafting agent &amp; verification agent run concurrently in isolated Git worktrees
+    </text>
+  </g>
+
+  <!-- Status / Mode Badge Right -->
+  <g transform="translate(1330, 78)">
+    <rect x="0" y="0" width="190" height="34" rx="8" fill="#061f2d" stroke="#00f2fe" stroke-width="1" stroke-opacity="0.4"/>
+    <circle cx="16" cy="17" r="4.5" fill="#38ef7d" filter="url(#glow-teal)"/>
+    <text x="30" y="21" fill="#e2e8f0" font-size="11.5" font-family="'JetBrains Mono', monospace" font-weight="600">ISOLATION: WORKTREE</text>
+  </g>
+
+
+  <!-- ==================== FLOW CONNECTORS & BUSES ==================== -->
+  <!-- 1. Codebase to Fork -->
+  <path d="M 330 450 L 410 450" fill="none" stroke="#00f2fe" stroke-width="2.5" stroke-dasharray="6 4" opacity="0.9"/>
+  <!-- Branch to Agent 1 (Top) -->
+  <path d="M 410 450 C 450 450, 460 330, 500 330" fill="none" stroke="#00f2fe" stroke-width="2.5" stroke-dasharray="6 4" marker-end="url(#arrow-teal)" filter="url(#glow-teal)" opacity="0.8"/>
+  <!-- Branch to Agent 2 (Bottom) -->
+  <path d="M 410 450 C 450 450, 460 570, 500 570" fill="none" stroke="#38bdf8" stroke-width="2.5" stroke-dasharray="6 4" marker-end="url(#arrow-blue)" filter="url(#glow-cyan)" opacity="0.8"/>
+
+  <!-- Split Node Dot -->
+  <circle cx="410" cy="450" r="6" fill="#00f2fe" filter="url(#glow-teal)"/>
+
+  <!-- Parallel Branch Labels -->
+  <rect x="420" y="365" width="60" height="20" rx="4" fill="#061c28" stroke="#00f2fe" stroke-width="0.8"/>
+  <text x="450" y="379" text-anchor="middle" fill="#00f2fe" font-size="9" font-family="'JetBrains Mono', monospace" font-weight="700">BRANCH A</text>
+
+  <rect x="420" y="515" width="60" height="20" rx="4" fill="#071a2c" stroke="#38bdf8" stroke-width="0.8"/>
+  <text x="450" y="529" text-anchor="middle" fill="#38bdf8" font-size="9" font-family="'JetBrains Mono', monospace" font-weight="700">BRANCH B</text>
+
+  <!-- 2. Agent 1 & Agent 2 into Reconciler / Sync -->
+  <path d="M 940 330 C 990 330, 1000 450, 1040 450" fill="none" stroke="#00f2fe" stroke-width="2.5" stroke-dasharray="6 4" marker-end="url(#arrow-teal)" opacity="0.85"/>
+  <path d="M 940 570 C 990 570, 1000 450, 1040 450" fill="none" stroke="#38bdf8" stroke-width="2.5" stroke-dasharray="6 4" marker-end="url(#arrow-blue)" opacity="0.85"/>
+
+  <!-- Output stream to Production Docs -->
+  <path d="M 1240 450 L 1290 450" fill="none" stroke="#34d399" stroke-width="2.5" marker-end="url(#arrow-emerald)" filter="url(#glow-teal)"/>
+
+
+  <!-- ==================== COLUMN 1: CODE REPOSITORY & PR (LEFT) ==================== -->
+  <g transform="translate(80, 290)">
+    <rect x="0" y="0" width="250" height="320" rx="14" fill="url(#card-grad-input)" stroke="#1e3a5f" stroke-width="1.4"/>
+    
+    <!-- Header -->
+    <path d="M 0 14 Q 0 0 14 0 L 236 0 Q 250 0 250 14 L 250 52 L 0 52 Z" fill="#071828"/>
+    <line x1="0" y1="52" x2="250" y2="52" stroke="#16395b" stroke-width="1"/>
+    
+    <text x="18" y="32" fill="#f8fafc" font-size="15" font-weight="700">Source Changes</text>
+    <rect x="160" y="18" width="74" height="20" rx="4" fill="#0c263d" stroke="#22537c" stroke-width="0.8"/>
+    <text x="197" y="32" text-anchor="middle" fill="#38bdf8" font-size="10.5" font-family="'JetBrains Mono', monospace" font-weight="600">GIT REPO</text>
+
+    <!-- Sub-items -->
+    <g transform="translate(16, 70)">
+      <rect x="0" y="0" width="218" height="58" rx="8" fill="#051422" stroke="#12314d" stroke-width="1"/>
+      <circle cx="18" cy="29" r="6" fill="#00f2fe" fill-opacity="0.3" stroke="#00f2fe" stroke-width="1.2"/>
+      <text x="34" y="24" fill="#e2e8f0" font-size="12" font-weight="600">Code Diff &amp; AST</text>
+      <text x="34" y="42" fill="#64748b" font-size="10.5" font-family="'JetBrains Mono', monospace">src/api/surface.rs</text>
+    </g>
+
+    <g transform="translate(16, 142)">
+      <rect x="0" y="0" width="218" height="58" rx="8" fill="#051422" stroke="#12314d" stroke-width="1"/>
+      <circle cx="18" cy="29" r="6" fill="#38bdf8" fill-opacity="0.3" stroke="#38bdf8" stroke-width="1.2"/>
+      <text x="34" y="24" fill="#e2e8f0" font-size="12" font-weight="600">Spec &amp; Contracts</text>
+      <text x="34" y="42" fill="#64748b" font-size="10.5" font-family="'JetBrains Mono', monospace">specs/behavior.md</text>
+    </g>
+
+    <!-- Bottom summary tag -->
+    <g transform="translate(16, 218)">
+      <rect x="0" y="0" width="218" height="74" rx="8" fill="#061826" stroke="#0c3852" stroke-width="0.8"/>
+      <text x="14" y="26" fill="#7dd3fc" font-size="11" font-weight="600">Parallel Fan-out</text>
+      <text x="14" y="46" fill="#94a3b8" font-size="10.5">Isolated worktree per agent</text>
+      <text x="14" y="62" fill="#00f2fe" font-size="10" font-family="'JetBrains Mono', monospace">no git.lock contention</text>
+    </g>
+  </g>
+
+
+  <!-- ==================== COLUMN 2: PARALLEL AGENTS ==================== -->
+
+  <!-- Top Card: Agent 1 (Drafting) -->
+  <g transform="translate(500, 190)">
+    <rect x="0" y="0" width="440" height="230" rx="14" fill="url(#card-grad-agent1)" stroke="#00f2fe" stroke-width="1.8" filter="url(#glow-teal)"/>
+    
+    <!-- Banner Header -->
+    <path d="M 0 14 Q 0 0 14 0 L 426 0 Q 440 0 440 14 L 440 50 L 0 50 Z" fill="#08293d"/>
+    <line x1="0" y1="50" x2="440" y2="50" stroke="#0d4663" stroke-width="1"/>
+
+    <circle cx="24" cy="25" r="7" fill="#00f2fe" filter="url(#glow-teal)"/>
+    <text x="42" y="30" fill="#ffffff" font-size="16" font-weight="700">Agent 1: Drafting Agent</text>
+    
+    <rect x="320" y="14" width="104" height="22" rx="4" fill="#06384a" stroke="#00f2fe" stroke-width="1"/>
+    <text x="372" y="29" text-anchor="middle" fill="#00f2fe" font-size="10.5" font-family="'JetBrains Mono', monospace" font-weight="700">wt-docs-draft</text>
+
+    <!-- Content Items -->
+    <g transform="translate(20, 68)">
+      <rect x="0" y="0" width="400" height="46" rx="8" fill="#051b27" stroke="#103c52" stroke-width="1"/>
+      <text x="16" y="22" fill="#e2e8f0" font-size="12" font-weight="600">Drafts Markdown &amp; API Reference</text>
+      <text x="16" y="37" fill="#38bdf8" font-size="10.5" font-family="'JetBrains Mono', monospace">docs/api/surface.md • guide/quickstart.md</text>
+    </g>
+
+    <g transform="translate(20, 124)">
+      <rect x="0" y="0" width="400" height="46" rx="8" fill="#051b27" stroke="#103c52" stroke-width="1"/>
+      <text x="16" y="22" fill="#e2e8f0" font-size="12" font-weight="600">Extracts Claims &amp; Code Samples</text>
+      <text x="16" y="37" fill="#64748b" font-size="10.5" font-family="'JetBrains Mono', monospace">emits runnable snippets + asserted behavior</text>
+    </g>
+
+    <!-- Bottom Status Strip -->
+    <g transform="translate(20, 182)">
+      <rect x="0" y="0" width="400" height="34" rx="6" fill="#041622"/>
+      <circle cx="16" cy="17" r="4" fill="#00f2fe"/>
+      <text x="28" y="21" fill="#7dd3fc" font-size="11" font-weight="500">Output: Candidate Documentation Draft</text>
+      <text x="384" y="21" text-anchor="end" fill="#00f2fe" font-size="11" font-family="'JetBrains Mono', monospace">STREAMING</text>
+    </g>
+  </g>
+
+
+  <!-- Bottom Card: Agent 2 (Verification) -->
+  <g transform="translate(500, 480)">
+    <rect x="0" y="0" width="440" height="230" rx="14" fill="url(#card-grad-agent2)" stroke="#38bdf8" stroke-width="1.8" filter="url(#glow-cyan)"/>
+    
+    <!-- Banner Header -->
+    <path d="M 0 14 Q 0 0 14 0 L 426 0 Q 440 0 440 14 L 440 50 L 0 50 Z" fill="#092742"/>
+    <line x1="0" y1="50" x2="440" y2="50" stroke="#143c61" stroke-width="1"/>
+
+    <circle cx="24" cy="25" r="7" fill="#38bdf8" filter="url(#glow-cyan)"/>
+    <text x="42" y="30" fill="#ffffff" font-size="16" font-weight="700">Agent 2: Verification Agent</text>
+    
+    <rect x="314" y="14" width="110" height="22" rx="4" fill="#0a3254" stroke="#38bdf8" stroke-width="1"/>
+    <text x="369" y="29" text-anchor="middle" fill="#38bdf8" font-size="10.5" font-family="'JetBrains Mono', monospace" font-weight="700">wt-fact-check</text>
+
+    <!-- Content Items -->
+    <g transform="translate(20, 68)">
+      <rect x="0" y="0" width="400" height="46" rx="8" fill="#06182c" stroke="#123659" stroke-width="1"/>
+      <text x="16" y="22" fill="#e2e8f0" font-size="12" font-weight="600">Validates Claims Against AST &amp; Tests</text>
+      <text x="16" y="37" fill="#38bdf8" font-size="10.5" font-family="'JetBrains Mono', monospace">cargo check • doctest runner • symbol map</text>
+    </g>
+
+    <g transform="translate(20, 124)">
+      <rect x="0" y="0" width="400" height="46" rx="8" fill="#06182c" stroke="#123659" stroke-width="1"/>
+      <text x="16" y="22" fill="#e2e8f0" font-size="12" font-weight="600">Cross-References Official Sources</text>
+      <text x="16" y="37" fill="#64748b" font-size="10.5" font-family="'JetBrains Mono', monospace">flags hallucinations • verifies CLI syntax</text>
+    </g>
+
+    <!-- Bottom Status Strip -->
+    <g transform="translate(20, 182)">
+      <rect x="0" y="0" width="400" height="34" rx="6" fill="#051424"/>
+      <circle cx="16" cy="17" r="4" fill="#38bdf8"/>
+      <text x="28" y="21" fill="#93c5fd" font-size="11" font-weight="500">Output: Claim Verification Report</text>
+      <text x="384" y="21" text-anchor="end" fill="#38bdf8" font-size="11" font-family="'JetBrains Mono', monospace">ASSERTING</text>
+    </g>
+  </g>
+
+
+  <!-- ==================== COLUMN 3: RECONCILER / SYNC GATE ==================== -->
+  <g transform="translate(1040, 310)">
+    <rect x="0" y="0" width="200" height="280" rx="14" fill="url(#card-grad-sync)" stroke="#0ea5e9" stroke-width="1.6" filter="url(#glow-teal)"/>
+    
+    <!-- Header -->
+    <path d="M 0 14 Q 0 0 14 0 L 186 0 Q 200 0 200 14 L 200 50 L 0 50 Z" fill="#082233"/>
+    <line x1="0" y1="50" x2="200" y2="50" stroke="#0e3d5a" stroke-width="1"/>
+
+    <text x="100" y="32" text-anchor="middle" fill="#ffffff" font-size="14.5" font-weight="700">Reconciler Gate</text>
+
+    <!-- Visual Sync Engine Icon -->
+    <g transform="translate(100, 105)">
+      <circle cx="0" cy="0" r="30" fill="#051926" stroke="#00f2fe" stroke-width="1.5" stroke-dasharray="4 3"/>
+      <circle cx="0" cy="0" r="16" fill="#082e42" stroke="#38bdf8" stroke-width="1.2"/>
+      <!-- Dual Arrow / Sync Icon -->
+      <path d="M -6 -5 L 0 -11 L 6 -5 M 0 -11 L 0 3" fill="none" stroke="#00f2fe" stroke-width="1.8" stroke-linecap="round"/>
+      <path d="M 6 5 L 0 11 L -6 5 M 0 11 L 0 -3" fill="none" stroke="#38bdf8" stroke-width="1.8" stroke-linecap="round"/>
+    </g>
+
+    <!-- Checklist Items -->
+    <g transform="translate(14, 155)">
+      <rect x="0" y="0" width="172" height="28" rx="5" fill="#051622" stroke="#0d354d" stroke-width="0.8"/>
+      <text x="10" y="18" fill="#38ef7d" font-size="11" font-weight="700">✓</text>
+      <text x="26" y="18" fill="#e2e8f0" font-size="11" font-weight="500">Claims Verified</text>
+    </g>
+
+    <g transform="translate(14, 190)">
+      <rect x="0" y="0" width="172" height="28" rx="5" fill="#051622" stroke="#0d354d" stroke-width="0.8"/>
+      <text x="10" y="18" fill="#38ef7d" font-size="11" font-weight="700">✓</text>
+      <text x="26" y="18" fill="#e2e8f0" font-size="11" font-weight="500">Snippets Tested</text>
+    </g>
+
+    <g transform="translate(14, 225)">
+      <rect x="0" y="0" width="172" height="28" rx="5" fill="#051622" stroke="#0d354d" stroke-width="0.8"/>
+      <text x="10" y="18" fill="#00f2fe" font-size="11" font-weight="700">•</text>
+      <text x="26" y="18" fill="#7dd3fc" font-size="10.5" font-weight="600">Auto-Patch Diffs</text>
+    </g>
+  </g>
+
+
+  <!-- ==================== COLUMN 4: VERIFIED DOCS OUTPUT (RIGHT) ==================== -->
+  <g transform="translate(1290, 310)">
+    <rect x="0" y="0" width="230" height="280" rx="14" fill="url(#card-grad-output)" stroke="#34d399" stroke-width="1.8" filter="url(#glow-teal)"/>
+
+    <!-- Header -->
+    <path d="M 0 14 Q 0 0 14 0 L 216 0 Q 230 0 230 14 L 230 50 L 0 50 Z" fill="#062420"/>
+    <line x1="0" y1="50" x2="230" y2="50" stroke="#0f453a" stroke-width="1"/>
+
+    <circle cx="20" cy="25" r="5" fill="#34d399" filter="url(#glow-teal)"/>
+    <text x="34" y="30" fill="#ffffff" font-size="14.5" font-weight="700">Published Docs</text>
+
+    <!-- Document Card Representation -->
+    <g transform="translate(16, 68)">
+      <rect x="0" y="0" width="198" height="120" rx="8" fill="#041917" stroke="#0e3d34" stroke-width="1"/>
+      
+      <!-- Doc lines preview -->
+      <rect x="14" y="16" width="90" height="8" rx="3" fill="#34d399" opacity="0.8"/>
+      <rect x="14" y="32" width="168" height="5" rx="2" fill="#5eead4" opacity="0.4"/>
+      <rect x="14" y="44" width="150" height="5" rx="2" fill="#5eead4" opacity="0.3"/>
+      <rect x="14" y="56" width="130" height="5" rx="2" fill="#5eead4" opacity="0.3"/>
+
+      <!-- Code block simulation inside doc -->
+      <rect x="14" y="70" width="170" height="36" rx="4" fill="#02100e" stroke="#134e48" stroke-width="0.8"/>
+      <text x="22" y="85" fill="#34d399" font-size="9" font-family="'JetBrains Mono', monospace">$ ferryx docs verify</text>
+      <text x="22" y="97" fill="#5eead4" font-size="8.5" font-family="'JetBrains Mono', monospace">0 hallucinations, 100% test pass</text>
+    </g>
+
+    <!-- Bottom Badge -->
+    <g transform="translate(16, 204)">
+      <rect x="0" y="0" width="198" height="58" rx="8" fill="#051f1c" stroke="#105648" stroke-width="1"/>
+      <text x="14" y="24" fill="#34d399" font-size="11" font-weight="700">Production Ready</text>
+      <text x="14" y="44" fill="#a7f3d0" font-size="10" font-family="'JetBrains Mono', monospace">site/public/docs/ • PR green</text>
+    </g>
+  </g>
+
+
+  <!-- ==================== BOTTOM ARCHITECTURE FOOTER ==================== -->
+  <g transform="translate(80, 770)">
+    <rect x="0" y="0" width="1440" height="56" rx="10" fill="#06121f" stroke="#122a44" stroke-width="1"/>
+    
+    <!-- Isolation pill -->
+    <rect x="18" y="14" width="28" height="28" rx="6" fill="#0b2438" stroke="#00f2fe" stroke-width="1"/>
+    <text x="32" y="32" text-anchor="middle" fill="#00f2fe" font-size="13" font-family="'JetBrains Mono', monospace">&#8644;</text>
+    
+    <text x="58" y="33" fill="#cbd5e1" font-size="12.5" font-weight="600">Daemon-Owned Worktree Isolation:</text>
+    <text x="320" y="33" fill="#64748b" font-size="12">Closing the terminal never terminates the verification pass. Reconciler merges verified claims only.</text>
+
+    <!-- Right indicator -->
+    <circle cx="1320" cy="28" r="4.5" fill="#38ef7d" filter="url(#glow-teal)"/>
+    <text x="1334" y="32" fill="#38ef7d" font-size="11" font-family="'JetBrains Mono', monospace" font-weight="700">PARALLEL: SYNCED</text>
+  </g>
+
+</svg>

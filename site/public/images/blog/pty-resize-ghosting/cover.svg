@@ -1,0 +1,417 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <defs>
+    <!-- Background Radial Gradients -->
+    <radialGradient id="bgGlow" cx="50%" cy="46%" r="60%">
+      <stop offset="0%" stop-color="#0b1b30" stop-opacity="0.9"/>
+      <stop offset="45%" stop-color="#07101f" stop-opacity="0.95"/>
+      <stop offset="100%" stop-color="#03060c" stop-opacity="1"/>
+    </radialGradient>
+
+    <radialGradient id="leftScreenGlow" cx="40%" cy="40%" r="50%">
+      <stop offset="0%" stop-color="#0ea5e9" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="rightGhostGlow" cx="50%" cy="50%" r="55%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.22"/>
+      <stop offset="60%" stop-color="#0284c7" stop-opacity="0.1"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Linear Gradients -->
+    <linearGradient id="cyanTeal" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00f2fe"/>
+      <stop offset="100%" stop-color="#38bdf8"/>
+    </linearGradient>
+
+    <linearGradient id="ghostTeal" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.8"/>
+      <stop offset="50%" stop-color="#38bdf8" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#818cf8" stop-opacity="0.6"/>
+    </linearGradient>
+
+    <linearGradient id="monitorBezel" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1e293b"/>
+      <stop offset="100%" stop-color="#0f172a"/>
+    </linearGradient>
+
+    <linearGradient id="monitorStand" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#334155"/>
+      <stop offset="100%" stop-color="#0f172a"/>
+    </linearGradient>
+
+    <linearGradient id="bridgeBeam" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#0284c7" stop-opacity="0.2"/>
+      <stop offset="50%" stop-color="#00f2fe" stop-opacity="0.8"/>
+      <stop offset="100%" stop-color="#0284c7" stop-opacity="0.2"/>
+    </linearGradient>
+
+    <!-- Glow & Shadow Filters -->
+    <filter id="neonGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+
+    <filter id="strongGlow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="14" result="blur1" />
+      <feGaussianBlur stdDeviation="5" result="blur2" />
+      <feMerge>
+        <feMergeNode in="blur1" />
+        <feMergeNode in="blur2" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+
+    <filter id="monitorShadow" x="-10%" y="-10%" width="125%" height="130%">
+      <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#000000" flood-opacity="0.7" />
+    </filter>
+
+    <!-- Grid Patterns -->
+    <pattern id="bgGrid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#132338" stroke-width="0.8" stroke-opacity="0.6"/>
+      <circle cx="40" cy="40" r="1" fill="#1e3a5f" fill-opacity="0.6"/>
+    </pattern>
+
+    <pattern id="subtleDots" width="16" height="16" patternUnits="userSpaceOnUse">
+      <circle cx="1.5" cy="1.5" r="0.75" fill="#38bdf8" fill-opacity="0.12"/>
+    </pattern>
+
+    <!-- Clip Paths for Terminal Screens -->
+    <clipPath id="screenClipLeft">
+      <rect x="146" y="112" width="378" height="236" rx="4"/>
+    </clipPath>
+
+    <clipPath id="screenClipRight">
+      <rect x="676" y="112" width="378" height="236" rx="4"/>
+    </clipPath>
+  </defs>
+
+  <!-- Base Canvas Background -->
+  <rect width="1200" height="630" fill="#040810"/>
+  <rect width="1200" height="630" fill="url(#bgGlow)"/>
+  <rect width="1200" height="630" fill="url(#bgGrid)"/>
+  <rect width="1200" height="630" fill="url(#subtleDots)"/>
+
+  <!-- Architectural Frame / Technical Accents -->
+  <g stroke="#1e3352" stroke-width="1.5" fill="none">
+    <!-- Top-left corner -->
+    <path d="M 45 65 L 45 45 L 65 45" />
+    <circle cx="45" cy="45" r="2.5" fill="#00f2fe" />
+    <!-- Top-right corner -->
+    <path d="M 1155 65 L 1155 45 L 1135 45" />
+    <circle cx="1155" cy="45" r="2.5" fill="#00f2fe" />
+    <!-- Bottom-left corner -->
+    <path d="M 45 565 L 45 585 L 65 585" />
+    <circle cx="45" cy="585" r="2.5" fill="#00f2fe" />
+    <!-- Bottom-right corner -->
+    <path d="M 1155 565 L 1155 585 L 1135 585" />
+    <circle cx="1155" cy="585" r="2.5" fill="#00f2fe" />
+  </g>
+
+  <!-- Horizontal Datum Line -->
+  <line x1="80" y1="230" x2="1120" y2="230" stroke="#0ea5e9" stroke-width="0.8" stroke-dasharray="4 8" opacity="0.25"/>
+
+  <!-- Center Bridge: Monitor Transition & Sync Wave -->
+  <g id="displayBridge">
+    <!-- Connection Bus Line -->
+    <path d="M 534 230 C 580 230, 620 230, 666 230" stroke="url(#bridgeBeam)" stroke-width="2.5" fill="none" filter="url(#neonGlow)"/>
+    <path d="M 534 230 C 580 230, 620 230, 666 230" stroke="#00f2fe" stroke-width="1" stroke-dasharray="6 6" fill="none"/>
+    
+    <!-- Central Desync / Display Swap Pulse Glyph -->
+    <g transform="translate(600, 230)">
+      <circle cx="0" cy="0" r="26" fill="#071322" stroke="#00f2fe" stroke-width="1.5" filter="url(#neonGlow)"/>
+      <circle cx="0" cy="0" r="34" fill="none" stroke="#0ea5e9" stroke-width="0.8" stroke-dasharray="4 4" opacity="0.5"/>
+      <!-- Swap Arrows (Abstract) -->
+      <path d="M -10 -5 L 10 -5 M 6 -9 L 10 -5 L 6 -1" stroke="#00f2fe" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M 10 5 L -10 5 M -6 1 L -10 5 L -6 9" stroke="#38bdf8" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+      <!-- Small pulse dots -->
+      <circle cx="-18" cy="0" r="2" fill="#00f2fe"/>
+      <circle cx="18" cy="0" r="2" fill="#00f2fe"/>
+    </g>
+  </g>
+
+  <!-- ======================================================== -->
+  <!-- MONITOR 1 (LEFT): Crisp Primary Terminal Display        -->
+  <!-- ======================================================== -->
+  <g id="monitorLeft" filter="url(#monitorShadow)">
+    <!-- Stand -->
+    <path d="M 320 370 L 350 370 L 343 430 L 327 430 Z" fill="url(#monitorStand)" stroke="#1e293b" stroke-width="1"/>
+    <rect x="290" y="430" width="90" height="8" rx="3" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+
+    <!-- Bezel Outer Frame -->
+    <rect x="136" y="98" width="398" height="264" rx="10" fill="url(#monitorBezel)" stroke="#334155" stroke-width="1.8"/>
+    <!-- Inner Screen Bezel Border -->
+    <rect x="144" y="106" width="382" height="248" rx="6" fill="#050a14" stroke="#0f172a" stroke-width="1"/>
+
+    <!-- Screen Content with Clip -->
+    <g clip-path="url(#screenClipLeft)">
+      <!-- Screen Backlight -->
+      <rect x="146" y="112" width="378" height="236" fill="#070d18"/>
+      <rect x="146" y="112" width="378" height="236" fill="url(#leftScreenGlow)"/>
+
+      <!-- Window Titlebar -->
+      <rect x="146" y="112" width="378" height="26" fill="#0b1322"/>
+      <line x1="146" y1="138" x2="524" y2="138" stroke="#17263c" stroke-width="1"/>
+
+      <!-- Window Controls (Teal/Slate dots) -->
+      <circle cx="162" cy="125" r="4" fill="#38bdf8" opacity="0.8"/>
+      <circle cx="174" cy="125" r="4" fill="#1e3a5f"/>
+      <circle cx="186" cy="125" r="4" fill="#1e3a5f"/>
+
+      <!-- Clean Tab / Session Bar -->
+      <rect x="206" y="118" width="70" height="14" rx="3" fill="#132238" stroke="#0284c7" stroke-width="0.8"/>
+      <rect x="212" y="123" width="32" height="4" rx="1" fill="#38bdf8"/>
+
+      <!-- Clean Crisp Character Grid (Columns & Rows) -->
+      <g opacity="0.35" stroke="#0ea5e9" stroke-width="0.6">
+        <!-- Vertical Column Grid Lines -->
+        <line x1="170" y1="148" x2="170" y2="330"/>
+        <line x1="205" y1="148" x2="205" y2="330"/>
+        <line x1="240" y1="148" x2="240" y2="330"/>
+        <line x1="275" y1="148" x2="275" y2="330"/>
+        <line x1="310" y1="148" x2="310" y2="330"/>
+        <line x1="345" y1="148" x2="345" y2="330"/>
+        <line x1="380" y1="148" x2="380" y2="330"/>
+        <line x1="415" y1="148" x2="415" y2="330"/>
+        <line x1="450" y1="148" x2="450" y2="330"/>
+        <line x1="485" y1="148" x2="485" y2="330"/>
+
+        <!-- Horizontal Row Grid Lines -->
+        <line x1="156" y1="170" x2="514" y2="170"/>
+        <line x1="156" y1="192" x2="514" y2="192"/>
+        <line x1="156" y1="214" x2="514" y2="214"/>
+        <line x1="156" y1="236" x2="514" y2="236"/>
+        <line x1="156" y1="258" x2="514" y2="258"/>
+        <line x1="156" y1="280" x2="514" y2="280"/>
+        <line x1="156" y1="302" x2="514" y2="302"/>
+        <line x1="156" y1="324" x2="514" y2="324"/>
+      </g>
+
+      <!-- Clean Terminal Content (Prompt & Blocks) -->
+      <!-- Line 1: Prompt -->
+      <path d="M 160 160 L 165 163 L 160 166" fill="none" stroke="#00f2fe" stroke-width="2" stroke-linecap="round"/>
+      <rect x="172" y="160" width="38" height="6" rx="2" fill="#00f2fe" filter="url(#neonGlow)"/>
+      <rect x="216" y="160" width="64" height="6" rx="2" fill="#38bdf8"/>
+      <rect x="286" y="160" width="88" height="6" rx="2" fill="#1e3a5f"/>
+
+      <!-- Line 2: Output Blocks -->
+      <rect x="172" y="182" width="110" height="6" rx="2" fill="#0284c7" opacity="0.8"/>
+      <rect x="288" y="182" width="50" height="6" rx="2" fill="#1e3a5f"/>
+      <rect x="344" y="182" width="70" height="6" rx="2" fill="#1e3a5f"/>
+
+      <!-- Line 3: Structured Data -->
+      <rect x="172" y="204" width="75" height="6" rx="2" fill="#38bdf8" opacity="0.9"/>
+      <rect x="253" y="204" width="120" height="6" rx="2" fill="#1e3a5f"/>
+      <rect x="380" y="204" width="40" height="6" rx="2" fill="#00f2fe" opacity="0.6"/>
+
+      <!-- Line 4 -->
+      <rect x="172" y="226" width="140" height="6" rx="2" fill="#1e3a5f"/>
+      <rect x="318" y="226" width="60" height="6" rx="2" fill="#0284c7" opacity="0.7"/>
+
+      <!-- Line 5: Active Prompt with Clean Blinking Cursor -->
+      <path d="M 160 270 L 165 273 L 160 276" fill="none" stroke="#00f2fe" stroke-width="2" stroke-linecap="round"/>
+      <rect x="172" y="270" width="80" height="6" rx="2" fill="#38bdf8"/>
+      <!-- Active Cursor Box -->
+      <rect x="258" y="267" width="8" height="12" fill="#00f2fe" filter="url(#neonGlow)"/>
+
+      <!-- Clean Status Footer Bar -->
+      <rect x="146" y="334" width="378" height="14" fill="#08101d"/>
+      <rect x="156" y="338" width="45" height="6" rx="1.5" fill="#0284c7"/>
+      <rect x="206" y="338" width="60" height="6" rx="1.5" fill="#132338"/>
+      <circle cx="508" cy="341" r="3" fill="#38bdf8"/>
+    </g>
+
+    <!-- Monitor 1 Active Accent Border -->
+    <rect x="146" y="112" width="378" height="236" rx="4" fill="none" stroke="#0284c7" stroke-width="1.2" opacity="0.6"/>
+  </g>
+
+  <!-- ======================================================== -->
+  <!-- MONITOR 2 (RIGHT): Stale Grid & Ghosting Terminal       -->
+  <!-- ======================================================== -->
+  <g id="monitorRight" filter="url(#monitorShadow)">
+    <!-- Stand -->
+    <path d="M 850 370 L 880 370 L 873 430 L 857 430 Z" fill="url(#monitorStand)" stroke="#1e293b" stroke-width="1"/>
+    <rect x="820" y="430" width="90" height="8" rx="3" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+
+    <!-- Bezel Outer Frame -->
+    <rect x="666" y="98" width="398" height="264" rx="10" fill="url(#monitorBezel)" stroke="#0ea5e9" stroke-width="1.8" filter="url(#neonGlow)"/>
+    <!-- Inner Screen Bezel Border -->
+    <rect x="674" y="106" width="382" height="248" rx="6" fill="#050a14" stroke="#00f2fe" stroke-width="1.2"/>
+
+    <!-- Screen Content with Clip -->
+    <g clip-path="url(#screenClipRight)">
+      <!-- Screen Backlight with Desync Glow -->
+      <rect x="676" y="112" width="378" height="236" fill="#060c18"/>
+      <rect x="676" y="112" width="378" height="236" fill="url(#rightGhostGlow)"/>
+
+      <!-- Window Titlebar -->
+      <rect x="676" y="112" width="378" height="26" fill="#0b1424"/>
+      <line x1="676" y1="138" x2="1054" y2="138" stroke="#17263c" stroke-width="1"/>
+
+      <!-- Window Controls -->
+      <circle cx="692" cy="125" r="4" fill="#00f2fe" filter="url(#neonGlow)"/>
+      <circle cx="704" cy="125" r="4" fill="#38bdf8" opacity="0.6"/>
+      <circle cx="716" cy="125" r="4" fill="#1e3a5f"/>
+
+      <!-- Desync Tab Indicator -->
+      <rect x="736" y="118" width="85" height="14" rx="3" fill="#0c233d" stroke="#00f2fe" stroke-width="1"/>
+      <rect x="742" y="123" width="42" height="4" rx="1" fill="#00f2fe"/>
+
+      <!-- ============================================== -->
+      <!-- THE STALE GRID / GHOSTING PHENOMENON (VISUAL CORE) -->
+      <!-- ============================================== -->
+
+      <!-- Background Stale Outer Boundary (Old geometry stuck) -->
+      <rect x="696" y="152" width="280" height="140" fill="none" stroke="#0284c7" stroke-width="1.5" stroke-dasharray="4 4" opacity="0.4"/>
+      <!-- Resize Target Boundary (New geometry expanded) -->
+      <rect x="696" y="152" width="340" height="180" fill="none" stroke="#00f2fe" stroke-width="1.5" opacity="0.75" filter="url(#neonGlow)"/>
+
+      <!-- 1. GHOST LAYER A (Shifted Offset Down-Right - Severe Ghosting) -->
+      <g transform="translate(18, 14)" opacity="0.45">
+        <!-- Ghost Grid Wireframe -->
+        <g stroke="#00f2fe" stroke-width="1" stroke-dasharray="3 3">
+          <line x1="700" y1="150" x2="700" y2="290"/>
+          <line x1="735" y1="150" x2="735" y2="290"/>
+          <line x1="770" y1="150" x2="770" y2="290"/>
+          <line x1="805" y1="150" x2="805" y2="290"/>
+          <line x1="840" y1="150" x2="840" y2="290"/>
+          <line x1="875" y1="150" x2="875" y2="290"/>
+          <line x1="910" y1="150" x2="910" y2="290"/>
+          <line x1="945" y1="150" x2="945" y2="290"/>
+
+          <line x1="690" y1="172" x2="960" y2="172"/>
+          <line x1="690" y1="194" x2="960" y2="194"/>
+          <line x1="690" y1="216" x2="960" y2="216"/>
+          <line x1="690" y1="238" x2="960" y2="238"/>
+          <line x1="690" y1="260" x2="960" y2="260"/>
+        </g>
+        <!-- Ghost Text Duplicates -->
+        <rect x="702" y="162" width="55" height="5" rx="1.5" fill="#00f2fe"/>
+        <rect x="764" y="162" width="70" height="5" rx="1.5" fill="#38bdf8"/>
+        <rect x="702" y="184" width="95" height="5" rx="1.5" fill="#0284c7"/>
+        <rect x="804" y="184" width="45" height="5" rx="1.5" fill="#00f2fe"/>
+        <rect x="702" y="206" width="130" height="5" rx="1.5" fill="#38bdf8"/>
+        <rect x="702" y="228" width="80" height="5" rx="1.5" fill="#0284c7"/>
+      </g>
+
+      <!-- 2. GHOST LAYER B (Shifted Offset Up-Left - Echo Artifacts) -->
+      <g transform="translate(-10, -8)" opacity="0.35">
+        <g stroke="#818cf8" stroke-width="0.8" stroke-dasharray="2 4">
+          <line x1="710" y1="155" x2="970" y2="155"/>
+          <line x1="710" y1="177" x2="970" y2="177"/>
+          <line x1="710" y1="199" x2="970" y2="199"/>
+          <line x1="710" y1="221" x2="970" y2="221"/>
+          <line x1="710" y1="243" x2="970" y2="243"/>
+        </g>
+        <!-- Offset Ghost Character Blocks -->
+        <rect x="710" y="167" width="50" height="5" rx="1" fill="#818cf8"/>
+        <rect x="768" y="167" width="60" height="5" rx="1" fill="#818cf8"/>
+        <rect x="710" y="189" width="110" height="5" rx="1" fill="#818cf8"/>
+      </g>
+
+      <!-- 3. CURRENT ACTIVE (BUT MISALIGNED & GLITCHING) GRID -->
+      <g transform="translate(0, 0)">
+        <!-- Crisp Neon Foreground Grid with Desync Breaks -->
+        <g stroke="#00f2fe" stroke-width="1.2" opacity="0.85">
+          <!-- Horizontal Rows -->
+          <line x1="702" y1="170" x2="1030" y2="170"/>
+          <line x1="702" y1="192" x2="1030" y2="192"/>
+          <line x1="702" y1="214" x2="1030" y2="214"/>
+          <line x1="702" y1="236" x2="1030" y2="236"/>
+          <line x1="702" y1="258" x2="1030" y2="258"/>
+          <line x1="702" y1="280" x2="1030" y2="280"/>
+          <line x1="702" y1="302" x2="1030" y2="302"/>
+
+          <!-- Vertical Columns -->
+          <line x1="702" y1="160" x2="702" y2="310"/>
+          <line x1="738" y1="160" x2="738" y2="310"/>
+          <line x1="774" y1="160" x2="774" y2="310"/>
+          <line x1="810" y1="160" x2="810" y2="310"/>
+          <line x1="846" y1="160" x2="846" y2="310"/>
+          <line x1="882" y1="160" x2="882" y2="310"/>
+          <line x1="918" y1="160" x2="918" y2="310"/>
+          <line x1="954" y1="160" x2="954" y2="310"/>
+          <line x1="990" y1="160" x2="990" y2="310"/>
+          <line x1="1026" y1="160" x2="1026" y2="310"/>
+        </g>
+
+        <!-- Glitched / Wrapped Content Cells -->
+        <!-- Stale Row 1 with Ghost Prompt -->
+        <path d="M 708 160 L 713 163 L 708 166" fill="none" stroke="#00f2fe" stroke-width="2.2" stroke-linecap="round"/>
+        <rect x="720" y="160" width="48" height="6" rx="2" fill="#00f2fe" filter="url(#neonGlow)"/>
+        <rect x="774" y="160" width="60" height="6" rx="2" fill="#38bdf8"/>
+        <!-- Wrapped ghost text overflowing stale boundary -->
+        <rect x="840" y="160" width="85" height="6" rx="2" fill="#0284c7" opacity="0.9"/>
+        <rect x="932" y="160" width="45" height="6" rx="2" fill="#00f2fe" opacity="0.6"/>
+
+        <!-- Row 2: Overlapping stale rows -->
+        <rect x="720" y="182" width="105" height="6" rx="2" fill="#38bdf8"/>
+        <rect x="832" y="182" width="70" height="6" rx="2" fill="#0284c7"/>
+        <rect x="910" y="182" width="60" height="6" rx="2" fill="#38bdf8" opacity="0.7"/>
+
+        <!-- Row 3: Double-printed ghost artifact line -->
+        <rect x="720" y="204" width="70" height="6" rx="2" fill="#00f2fe" filter="url(#neonGlow)"/>
+        <rect x="798" y="204" width="120" height="6" rx="2" fill="#1e3a5f"/>
+        <rect x="926" y="204" width="80" height="6" rx="2" fill="#0284c7" opacity="0.75"/>
+
+        <!-- Row 4: Tear / Glitch displacement band -->
+        <g opacity="0.9">
+          <!-- Glitch Slice Shift -->
+          <rect x="702" y="222" width="328" height="18" fill="#00f2fe" fill-opacity="0.08"/>
+          <line x1="702" y1="222" x2="1030" y2="222" stroke="#00f2fe" stroke-width="1.5" stroke-dasharray="8 4" filter="url(#neonGlow)"/>
+          <line x1="702" y1="240" x2="1030" y2="240" stroke="#38bdf8" stroke-width="1.2" stroke-dasharray="5 3"/>
+
+          <!-- Shifted character blocks in the tear -->
+          <rect x="735" y="226" width="90" height="6" rx="2" fill="#00f2fe"/>
+          <rect x="835" y="226" width="110" height="6" rx="2" fill="#38bdf8"/>
+          <rect x="955" y="226" width="40" height="6" rx="2" fill="#ffffff" filter="url(#neonGlow)"/>
+        </g>
+
+        <!-- Row 5: Stale Ghosted Double Cursor -->
+        <!-- True Cursor -->
+        <rect x="750" y="267" width="8" height="12" fill="#00f2fe" filter="url(#strongGlow)"/>
+        <!-- Ghost Cursor (Stuck at old coordinate) -->
+        <rect x="880" y="267" width="8" height="12" fill="none" stroke="#00f2fe" stroke-width="1.8" stroke-dasharray="2 2" opacity="0.8" filter="url(#neonGlow)"/>
+        <line x1="758" y1="273" x2="880" y2="273" stroke="#00f2fe" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"/>
+
+        <!-- Diagonal Shear Artifacts / Scanning trails -->
+        <line x1="710" y1="165" x2="745" y2="285" stroke="#00f2fe" stroke-width="0.8" stroke-dasharray="4 6" opacity="0.3"/>
+        <line x1="790" y1="165" x2="825" y2="285" stroke="#38bdf8" stroke-width="0.8" stroke-dasharray="4 6" opacity="0.3"/>
+        <line x1="870" y1="165" x2="905" y2="285" stroke="#00f2fe" stroke-width="0.8" stroke-dasharray="4 6" opacity="0.3"/>
+      </g>
+
+      <!-- Bottom Status Bar (Glitching) -->
+      <rect x="676" y="334" width="378" height="14" fill="#081426"/>
+      <rect x="686" y="338" width="55" height="6" rx="1.5" fill="#00f2fe" opacity="0.8"/>
+      <rect x="748" y="338" width="70" height="6" rx="1.5" fill="#132a48"/>
+      <!-- Desync status beacon -->
+      <circle cx="1038" cy="341" r="3" fill="#00f2fe" filter="url(#neonGlow)"/>
+    </g>
+
+    <!-- Monitor 2 Active Glowing Rim -->
+    <rect x="676" y="112" width="378" height="236" rx="4" fill="none" stroke="#00f2fe" stroke-width="1.5" opacity="0.8" filter="url(#neonGlow)"/>
+  </g>
+
+  <!-- ======================================================== -->
+  <!-- TYPOGRAPHY: EXACTLY 2 WORDS ("RESIZE GHOSTING")          -->
+  <!-- Strictly <= 3 words of text, clean developer aesthetic   -->
+  <!-- ======================================================== -->
+  <g transform="translate(600, 528)" text-anchor="middle">
+    <!-- Subtle Backlight Glow for Text -->
+    <ellipse cx="0" cy="-6" rx="240" ry="25" fill="#00f2fe" fill-opacity="0.12" filter="url(#strongGlow)"/>
+
+    <!-- Main Title: Exactly 2 words -->
+    <text x="0" y="8" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', 'Segoe UI', sans-serif" font-size="46" font-weight="900" letter-spacing="3" fill="#ffffff">
+      RESIZE <tspan fill="#00f2fe" filter="url(#neonGlow)">GHOSTING</tspan>
+    </text>
+
+    <!-- Technical Decorative Framing Line below Title -->
+    <line x1="-160" y1="28" x2="160" y2="28" stroke="url(#cyanTeal)" stroke-width="2" stroke-linecap="round"/>
+    <circle cx="-160" cy="28" r="3" fill="#00f2fe"/>
+    <circle cx="160" cy="28" r="3" fill="#00f2fe"/>
+    <circle cx="0" cy="28" r="3.5" fill="#ffffff" filter="url(#neonGlow)"/>
+  </g>
+</svg>

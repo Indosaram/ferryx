@@ -1,0 +1,377 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900" style="background:#070a13; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'JetBrains Mono', monospace;">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0a0f1d" />
+      <stop offset="50%" stop-color="#070a13" />
+      <stop offset="100%" stop-color="#030509" />
+    </linearGradient>
+
+    <!-- Card Gradients -->
+    <linearGradient id="card-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a" stop-opacity="0.95" />
+      <stop offset="100%" stop-color="#090d16" stop-opacity="0.98" />
+    </linearGradient>
+
+    <linearGradient id="daemon-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0c1e33" stop-opacity="0.95" />
+      <stop offset="100%" stop-color="#07111d" stop-opacity="0.98" />
+    </linearGradient>
+
+    <linearGradient id="subcard-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#12253d" stop-opacity="0.9" />
+      <stop offset="100%" stop-color="#0c1a2d" stop-opacity="0.95" />
+    </linearGradient>
+
+    <linearGradient id="term-header" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#161f30" />
+      <stop offset="100%" stop-color="#101826" />
+    </linearGradient>
+
+    <!-- Glow & Shadow Filters -->
+    <filter id="glow-teal" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <filter id="glow-blue" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="5" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <filter id="drop-shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#000000" flood-opacity="0.65" />
+    </filter>
+
+    <!-- Arrow Markers -->
+    <marker id="arrow-teal" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 8 5 L 0 9 z" fill="#14b8a6" />
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 8 5 L 0 9 z" fill="#38bdf8" />
+    </marker>
+
+    <!-- Dot Grid Pattern -->
+    <pattern id="grid-dots" x="0" y="0" width="32" height="32" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1" fill="#1e293b" fill-opacity="0.45" />
+    </pattern>
+  </defs>
+
+  <!-- Background Base -->
+  <rect width="1600" height="900" fill="url(#bg-grad)" />
+  <rect width="1600" height="900" fill="url(#grid-dots)" />
+
+  <!-- Ambient Glow Blobs -->
+  <circle cx="200" cy="460" r="180" fill="#0284c7" fill-opacity="0.06" filter="url(#glow-blue)" />
+  <circle cx="820" cy="480" r="280" fill="#0d9488" fill-opacity="0.08" filter="url(#glow-teal)" />
+  <circle cx="1400" cy="490" r="190" fill="#38bdf8" fill-opacity="0.06" filter="url(#glow-blue)" />
+
+  <!-- ==================== HEADER ==================== -->
+  <g transform="translate(80, 50)">
+    <!-- Badges -->
+    <rect x="0" y="0" width="165" height="26" rx="13" fill="#092735" stroke="#14b8a6" stroke-width="1.2" />
+    <circle cx="14" cy="13" r="4.5" fill="#14b8a6" />
+    <text x="28" y="17" fill="#2dd4bf" font-size="11" font-weight="700" letter-spacing="1.2">HEALTH CHECK FLOW</text>
+
+    <rect x="178" y="0" width="140" height="26" rx="13" fill="#0c1d37" stroke="#38bdf8" stroke-width="1.2" />
+    <text x="248" y="17" text-anchor="middle" fill="#7dd3fc" font-size="11" font-weight="600" letter-spacing="0.8">NON-BLOCKING IPC</text>
+
+    <!-- Title & Subtitle -->
+    <text x="0" y="62" fill="#f8fafc" font-size="30" font-weight="700" letter-spacing="-0.5">Observing Daemon Health From the CLI</text>
+    <text x="0" y="88" fill="#94a3b8" font-size="14" font-weight="400">Subsystem probe sequence, lockless ring buffer audit, and real-time status telemetry</text>
+  </g>
+
+  <!-- ==================== INTER-MODULE CONNECTORS ==================== -->
+  <g fill="none">
+    <!-- CLI Client to Daemon (Request Flow) -->
+    <path d="M 330 420 L 485 420" stroke="#38bdf8" stroke-width="2.5" stroke-dasharray="6 4" marker-end="url(#arrow-blue)" />
+    <!-- Daemon to Response Collector (Response Flow) -->
+    <path d="M 1160 420 L 1245 420" stroke="#14b8a6" stroke-width="2.5" marker-end="url(#arrow-teal)" />
+  </g>
+
+  <!-- Flow Direction Badges -->
+  <g transform="translate(340, 390)">
+    <rect x="0" y="0" width="135" height="22" rx="4" fill="#081d30" stroke="#0284c7" stroke-width="1" />
+    <text x="67" y="15" text-anchor="middle" fill="#38bdf8" font-size="10.5" font-family="'JetBrains Mono', monospace" font-weight="600">GET /daemon/health</text>
+  </g>
+
+  <g transform="translate(1165, 390)">
+    <rect x="0" y="0" width="70" height="22" rx="4" fill="#062624" stroke="#0d9488" stroke-width="1" />
+    <text x="35" y="15" text-anchor="middle" fill="#2dd4bf" font-size="10.5" font-family="'JetBrains Mono', monospace" font-weight="600">200 OK</text>
+  </g>
+
+  <!-- ==================== COLUMN 1: CLI CLIENT ==================== -->
+  <g transform="translate(80, 200)" filter="url(#drop-shadow)">
+    <!-- Main Card Body -->
+    <rect x="0" y="0" width="250" height="535" rx="14" fill="url(#card-grad)" stroke="#1e293b" stroke-width="1.5" />
+    
+    <!-- Top Accent Bar -->
+    <rect x="0" y="0" width="250" height="5" rx="2" fill="#38bdf8" />
+
+    <!-- Card Header -->
+    <g transform="translate(20, 28)">
+      <circle cx="10" cy="10" r="10" fill="#0c2a42" />
+      <text x="10" y="14" text-anchor="middle" fill="#38bdf8" font-size="11" font-weight="800">1</text>
+      <text x="32" y="14" fill="#f8fafc" font-size="16" font-weight="700">CLI Initiator</text>
+      <text x="32" y="32" fill="#64748b" font-size="12">Terminal Client</text>
+    </g>
+
+    <!-- Terminal Emulation Box -->
+    <g transform="translate(16, 85)">
+      <rect x="0" y="0" width="218" height="150" rx="8" fill="#060910" stroke="#1e293b" stroke-width="1" />
+      <rect x="0" y="0" width="218" height="24" rx="8" fill="url(#term-header)" />
+      <circle cx="12" cy="12" r="3.5" fill="#ef4444" />
+      <circle cx="24" cy="12" r="3.5" fill="#f59e0b" />
+      <circle cx="36" cy="12" r="3.5" fill="#10b981" />
+      <text x="109" y="16" text-anchor="middle" fill="#64748b" font-size="10" font-family="'JetBrains Mono', monospace">bash - 80x24</text>
+
+      <text x="12" y="48" fill="#94a3b8" font-size="11" font-family="'JetBrains Mono', monospace">$ ferryx health</text>
+      <text x="12" y="68" fill="#38bdf8" font-size="11" font-family="'JetBrains Mono', monospace">--probe-timeout</text>
+      <text x="12" y="88" fill="#38bdf8" font-size="11" font-family="'JetBrains Mono', monospace">  500ms</text>
+      <text x="12" y="114" fill="#64748b" font-size="10" font-family="'JetBrains Mono', monospace">connecting...</text>
+      <rect x="96" y="104" width="6" height="11" fill="#38bdf8" />
+    </g>
+
+    <!-- Details / Highlights -->
+    <g transform="translate(16, 255)">
+      <rect x="0" y="0" width="218" height="74" rx="8" fill="#0b1322" stroke="#1d283a" stroke-width="1" />
+      <text x="14" y="24" fill="#94a3b8" font-size="11" font-weight="600">Transport Layer</text>
+      <text x="14" y="44" fill="#e2e8f0" font-size="11" font-family="'JetBrains Mono', monospace">UNIX Domain Socket</text>
+      <text x="14" y="62" fill="#64748b" font-size="10.5">/run/user/1000/ferryx.sock</text>
+    </g>
+
+    <g transform="translate(16, 345)">
+      <rect x="0" y="0" width="218" height="74" rx="8" fill="#0b1322" stroke="#1d283a" stroke-width="1" />
+      <text x="14" y="24" fill="#94a3b8" font-size="11" font-weight="600">Probe Guarantees</text>
+      <text x="14" y="44" fill="#38bdf8" font-size="12" font-weight="600">Non-blocking / Zero Locks</text>
+      <text x="14" y="62" fill="#64748b" font-size="11">Zero impact on active PTYs</text>
+    </g>
+
+    <g transform="translate(16, 435)">
+      <rect x="0" y="0" width="218" height="74" rx="8" fill="#0b1322" stroke="#1d283a" stroke-width="1" />
+      <text x="14" y="24" fill="#94a3b8" font-size="11" font-weight="600">Fail-Safe Policy</text>
+      <text x="14" y="44" fill="#f59e0b" font-size="11" font-family="'JetBrains Mono', monospace">Timeout = Daemon Dead</text>
+      <text x="14" y="62" fill="#64748b" font-size="10.5">Fast exit code 2 on freeze</text>
+    </g>
+  </g>
+
+  <!-- ==================== COLUMN 2: DAEMON CORE & SUBSYSTEMS ==================== -->
+  <g transform="translate(490, 150)" filter="url(#drop-shadow)">
+    <!-- Container Boundary -->
+    <rect x="0" y="0" width="670" height="635" rx="16" fill="url(#daemon-grad)" stroke="#1e3a5f" stroke-width="1.8" />
+    
+    <!-- Top Accent Bar -->
+    <rect x="0" y="0" width="670" height="5" rx="2" fill="#14b8a6" />
+
+    <!-- Container Header -->
+    <g transform="translate(28, 26)">
+      <rect x="0" y="0" width="118" height="24" rx="12" fill="#082937" stroke="#14b8a6" stroke-width="1" />
+      <circle cx="12" cy="12" r="4" fill="#14b8a6" />
+      <text x="24" y="16" fill="#2dd4bf" font-size="11" font-weight="700">TARGET DAEMON</text>
+
+      <text x="135" y="18" fill="#f8fafc" font-size="18" font-weight="700">Daemon Runtime Inspection Engine</text>
+      <text x="0" y="46" fill="#94a3b8" font-size="13">Concurrent isolated health probes across state machines and internal workers</text>
+    </g>
+
+    <!-- Subsystem Internal Connections -->
+    <g fill="none">
+      <!-- Dispatcher to Subsystems Fan-out -->
+      <path d="M 95 230 L 125 125" stroke="#38bdf8" stroke-width="1.5" marker-end="url(#arrow-blue)" />
+      <path d="M 95 230 L 125 230" stroke="#38bdf8" stroke-width="1.5" marker-end="url(#arrow-blue)" />
+      <path d="M 95 230 L 125 335" stroke="#38bdf8" stroke-width="1.5" marker-end="url(#arrow-blue)" />
+
+      <!-- Subsystems to Aggregator Fan-in -->
+      <path d="M 425 125 L 450 170" stroke="#14b8a6" stroke-width="1.5" marker-end="url(#arrow-teal)" />
+      <path d="M 425 230 L 450 230" stroke="#14b8a6" stroke-width="1.5" marker-end="url(#arrow-teal)" />
+      <path d="M 425 335 L 450 290" stroke="#14b8a6" stroke-width="1.5" marker-end="url(#arrow-teal)" />
+    </g>
+
+    <!-- Subsystem 0: Socket Dispatcher -->
+    <g transform="translate(24, 75)">
+      <rect x="0" y="0" width="70" height="310" rx="10" fill="#081525" stroke="#1d3557" stroke-width="1.2" />
+      <text x="35" y="36" text-anchor="middle" fill="#38bdf8" font-size="11" font-weight="700">IPC</text>
+      <text x="35" y="52" text-anchor="middle" fill="#94a3b8" font-size="10">Listener</text>
+      
+      <circle cx="35" cy="115" r="14" fill="#0c233c" stroke="#38bdf8" stroke-width="1.5" />
+      <path d="M 28 115 L 42 115 M 35 108 L 35 122" stroke="#38bdf8" stroke-width="2" />
+
+      <text x="35" y="195" text-anchor="middle" fill="#64748b" font-size="10" transform="rotate(-90 35 195)">DISPATCHER</text>
+
+      <circle cx="35" cy="275" r="5" fill="#10b981" />
+      <text x="35" y="295" text-anchor="middle" fill="#10b981" font-size="9" font-weight="600">READY</text>
+    </g>
+
+    <!-- Subsystem 1: PTY & Session Registry -->
+    <g transform="translate(130, 75)">
+      <rect x="0" y="0" width="295" height="96" rx="10" fill="url(#subcard-grad)" stroke="#1e3a5f" stroke-width="1.2" />
+      <circle cx="22" cy="24" r="8" fill="#093144" stroke="#14b8a6" stroke-width="1" />
+      <text x="22" y="28" text-anchor="middle" fill="#14b8a6" font-size="10" font-weight="800">A</text>
+      
+      <text x="40" y="28" fill="#f1f5f9" font-size="13.5" font-weight="700">PTY Process Registry</text>
+      
+      <text x="16" y="56" fill="#94a3b8" font-size="11">Active Panes / PIDs:</text>
+      <text x="280" y="56" text-anchor="end" fill="#38bdf8" font-size="11" font-family="'JetBrains Mono', monospace" font-weight="600">8 running</text>
+      
+      <text x="16" y="78" fill="#94a3b8" font-size="11">Zombie / Orphan PTYs:</text>
+      <text x="280" y="78" text-anchor="end" fill="#10b981" font-size="11" font-family="'JetBrains Mono', monospace" font-weight="600">0 detected</text>
+    </g>
+
+    <!-- Subsystem 2: Ring Buffer & Memory Health -->
+    <g transform="translate(130, 185)">
+      <rect x="0" y="0" width="295" height="96" rx="10" fill="url(#subcard-grad)" stroke="#1e3a5f" stroke-width="1.2" />
+      <circle cx="22" cy="24" r="8" fill="#093144" stroke="#14b8a6" stroke-width="1" />
+      <text x="22" y="28" text-anchor="middle" fill="#14b8a6" font-size="10" font-weight="800">B</text>
+
+      <text x="40" y="28" fill="#f1f5f9" font-size="13.5" font-weight="700">Ring Buffer Integrity</text>
+
+      <text x="16" y="56" fill="#94a3b8" font-size="11">Memory Utilization:</text>
+      <text x="280" y="56" text-anchor="end" fill="#38bdf8" font-size="11" font-family="'JetBrains Mono', monospace" font-weight="600">18.4MB / 64MB</text>
+
+      <text x="16" y="78" fill="#94a3b8" font-size="11">Replay Drift / Lag:</text>
+      <text x="280" y="78" text-anchor="end" fill="#10b981" font-size="11" font-family="'JetBrains Mono', monospace" font-weight="600">0 ms (sync)</text>
+    </g>
+
+    <!-- Subsystem 3: Event Loop Watchdog -->
+    <g transform="translate(130, 295)">
+      <rect x="0" y="0" width="295" height="96" rx="10" fill="url(#subcard-grad)" stroke="#1e3a5f" stroke-width="1.2" />
+      <circle cx="22" cy="24" r="8" fill="#093144" stroke="#14b8a6" stroke-width="1" />
+      <text x="22" y="28" text-anchor="middle" fill="#14b8a6" font-size="10" font-weight="800">C</text>
+
+      <text x="40" y="28" fill="#f1f5f9" font-size="13.5" font-weight="700">Event Loop Watchdog</text>
+
+      <text x="16" y="56" fill="#94a3b8" font-size="11">Loop Latency (P99):</text>
+      <text x="280" y="56" text-anchor="end" fill="#10b981" font-size="11" font-family="'JetBrains Mono', monospace" font-weight="600">0.32 ms</text>
+
+      <text x="16" y="78" fill="#94a3b8" font-size="11">Heartbeat Timer:</text>
+      <text x="280" y="78" text-anchor="end" fill="#38bdf8" font-size="11" font-family="'JetBrains Mono', monospace" font-weight="600">every 1000ms</text>
+    </g>
+
+    <!-- Subsystem 4: Health Aggregator & Status Evaluator -->
+    <g transform="translate(455, 115)">
+      <rect x="0" y="0" width="195" height="236" rx="12" fill="#08182b" stroke="#14b8a6" stroke-width="1.5" />
+      
+      <rect x="14" y="16" width="167" height="26" rx="6" fill="#072b38" stroke="#14b8a6" stroke-width="1" />
+      <text x="97" y="33" text-anchor="middle" fill="#2dd4bf" font-size="10.5" font-weight="700">STATUS AGGREGATOR</text>
+
+      <g transform="translate(14, 56)">
+        <text x="0" y="16" fill="#94a3b8" font-size="11">Subsystem Matrix:</text>
+        
+        <rect x="0" y="28" width="167" height="24" rx="4" fill="#06121f" />
+        <circle cx="12" cy="40" r="3.5" fill="#10b981" />
+        <text x="22" y="44" fill="#e2e8f0" font-size="10">PTY Health</text>
+        <text x="155" y="44" text-anchor="end" fill="#10b981" font-size="10" font-weight="700">OK</text>
+
+        <rect x="0" y="56" width="167" height="24" rx="4" fill="#06121f" />
+        <circle cx="12" cy="68" r="3.5" fill="#10b981" />
+        <text x="22" y="72" fill="#e2e8f0" font-size="10">Buffer Sync</text>
+        <text x="155" y="72" text-anchor="end" fill="#10b981" font-size="10" font-weight="700">OK</text>
+
+        <rect x="0" y="84" width="167" height="24" rx="4" fill="#06121f" />
+        <circle cx="12" cy="96" r="3.5" fill="#10b981" />
+        <text x="22" y="100" fill="#e2e8f0" font-size="10">Event Loop</text>
+        <text x="155" y="100" text-anchor="end" fill="#10b981" font-size="10" font-weight="700">OK</text>
+      </g>
+
+      <rect x="14" y="186" width="167" height="34" rx="6" fill="#062e2a" stroke="#10b981" stroke-width="1.2" />
+      <text x="97" y="208" text-anchor="middle" fill="#34d399" font-size="11.5" font-weight="800" letter-spacing="1">STATE: HEALTHY</text>
+    </g>
+
+    <!-- Bottom Diagnostic Stream Bar inside Daemon -->
+    <g transform="translate(24, 410)">
+      <rect x="0" y="0" width="622" height="200" rx="10" fill="#071220" stroke="#172b43" stroke-width="1" />
+      <rect x="0" y="0" width="622" height="26" rx="10" fill="#0a182b" />
+      <circle cx="16" cy="13" r="3" fill="#38bdf8" />
+      <text x="28" y="17" fill="#7dd3fc" font-size="10.5" font-weight="700">TELEMETRY FRAME PAYLOAD (IPC WIRE ENCODING)</text>
+
+      <g transform="translate(18, 44)" font-family="'JetBrains Mono', monospace" font-size="11">
+        <text x="0" y="16" fill="#64748b">/* Frame Header: Magic + Type + Subsystems + Latency */</text>
+        <text x="0" y="38" fill="#e2e8f0">{</text>
+        <text x="20" y="60" fill="#94a3b8">"daemon_pid": <tspan fill="#38bdf8">4219</tspan>, "uptime_sec": <tspan fill="#38bdf8">86400</tspan>, "rss_bytes": <tspan fill="#38bdf8">19280384</tspan>,</text>
+        <text x="20" y="82" fill="#94a3b8">"ptys": { "count": <tspan fill="#38bdf8">8</tspan>, "stuck": <tspan fill="#10b981">0</tspan> }, "ring_buf": { "bytes": <tspan fill="#38bdf8">19333120</tspan>, "drops": <tspan fill="#10b981">0</tspan> },</text>
+        <text x="20" y="104" fill="#94a3b8">"event_loop": { "p99_latency_us": <tspan fill="#10b981">320</tspan>, "state": <tspan fill="#2dd4bf">"NOMINAL"</tspan> }</text>
+        <text x="0" y="126" fill="#e2e8f0">}</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- ==================== COLUMN 3: CLI OUTPUT / REPORT ==================== -->
+  <g transform="translate(1250, 200)" filter="url(#drop-shadow)">
+    <!-- Main Card Body -->
+    <rect x="0" y="0" width="270" height="535" rx="14" fill="url(#card-grad)" stroke="#1e293b" stroke-width="1.5" />
+    
+    <!-- Top Accent Bar -->
+    <rect x="0" y="0" width="270" height="5" rx="2" fill="#10b981" />
+
+    <!-- Card Header -->
+    <g transform="translate(20, 28)">
+      <circle cx="10" cy="10" r="10" fill="#082b24" />
+      <text x="10" y="14" text-anchor="middle" fill="#10b981" font-size="11" font-weight="800">2</text>
+      <text x="32" y="14" fill="#f8fafc" font-size="16" font-weight="700">CLI Diagnostic View</text>
+      <text x="32" y="32" fill="#64748b" font-size="12">Formatted Health Status</text>
+    </g>
+
+    <!-- Terminal Render Output Box -->
+    <g transform="translate(16, 85)">
+      <rect x="0" y="0" width="238" height="425" rx="8" fill="#04070e" stroke="#1a273b" stroke-width="1" />
+      <rect x="0" y="0" width="238" height="24" rx="8" fill="url(#term-header)" />
+      
+      <circle cx="12" cy="12" r="3.5" fill="#ef4444" />
+      <circle cx="24" cy="12" r="3.5" fill="#f59e0b" />
+      <circle cx="36" cy="12" r="3.5" fill="#10b981" />
+      <text x="119" y="16" text-anchor="middle" fill="#64748b" font-size="10" font-family="'JetBrains Mono', monospace">ferryx health</text>
+
+      <!-- Terminal Content -->
+      <g transform="translate(14, 45)" font-family="'JetBrains Mono', monospace" font-size="10.5">
+        <text x="0" y="0" fill="#38bdf8">== Ferryx Daemon Health ==</text>
+        
+        <text x="0" y="24" fill="#64748b">STATUS:</text>
+        <rect x="52" y="13" width="70" height="15" rx="3" fill="#062e26" />
+        <text x="58" y="24" fill="#34d399" font-weight="700">HEALTHY</text>
+
+        <text x="0" y="48" fill="#64748b">PID:       <tspan fill="#f1f5f9">4219</tspan></text>
+        <text x="0" y="66" fill="#64748b">UPTIME:    <tspan fill="#f1f5f9">24h 00m</tspan></text>
+        <text x="0" y="84" fill="#64748b">SOCKET:    <tspan fill="#2dd4bf">READY (0.4ms)</tspan></text>
+
+        <line x1="0" y1="100" x2="210" y2="100" stroke="#162234" stroke-width="1" />
+
+        <text x="0" y="120" fill="#7dd3fc" font-weight="700">Subsystem Diagnostics</text>
+
+        <text x="0" y="142" fill="#10b981">&#10003; <tspan fill="#94a3b8">PTY Registry</tspan></text>
+        <text x="16" y="158" fill="#64748b">8 active, 0 hung</text>
+
+        <text x="0" y="182" fill="#10b981">&#10003; <tspan fill="#94a3b8">Ring Buffers</tspan></text>
+        <text x="16" y="198" fill="#64748b">18.4MB (0 drops)</text>
+
+        <text x="0" y="222" fill="#10b981">&#10003; <tspan fill="#94a3b8">Event Loop P99</tspan></text>
+        <text x="16" y="238" fill="#64748b">320 us (latency ok)</text>
+
+        <text x="0" y="262" fill="#10b981">&#10003; <tspan fill="#94a3b8">Worker Threads</tspan></text>
+        <text x="16" y="278" fill="#64748b">4/4 alive &amp; idle</text>
+
+        <line x1="0" y1="294" x2="210" y2="294" stroke="#162234" stroke-width="1" />
+
+        <text x="0" y="316" fill="#10b981">[PASSED] <tspan fill="#f1f5f9">All checks ok</tspan></text>
+        <text x="0" y="338" fill="#64748b">Exit code: 0</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- ==================== FOOTER / LEGEND ==================== -->
+  <g transform="translate(80, 835)">
+    <rect x="0" y="0" width="1440" height="38" rx="8" fill="#080e18" stroke="#172437" stroke-width="1" />
+    
+    <circle cx="24" cy="19" r="4" fill="#38bdf8" />
+    <text x="36" y="23" fill="#94a3b8" font-size="12">Client Probe Request (Non-blocking)</text>
+
+    <circle cx="340" cy="19" r="4" fill="#14b8a6" />
+    <text x="352" y="23" fill="#94a3b8" font-size="12">Subsystem Parallel Inspection</text>
+
+    <circle cx="630" cy="19" r="4" fill="#10b981" />
+    <text x="642" y="23" fill="#94a3b8" font-size="12">Zero-lock Status Aggregation</text>
+
+    <circle cx="920" cy="19" r="4" fill="#f59e0b" />
+    <text x="932" y="23" fill="#94a3b8" font-size="12">Fail-safe Fast Timeout &lt; 500ms</text>
+
+    <text x="1420" y="23" text-anchor="end" fill="#64748b" font-size="11" font-family="'JetBrains Mono', monospace">Ferryx Daemon Observability</text>
+  </g>
+</svg>

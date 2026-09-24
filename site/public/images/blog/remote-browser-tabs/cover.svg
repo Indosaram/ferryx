@@ -1,0 +1,460 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <defs>
+    <!-- Background Radial Gradients -->
+    <radialGradient id="bgGlow" cx="50%" cy="45%" r="75%">
+      <stop offset="0%" stop-color="#0c233c" stop-opacity="0.85"/>
+      <stop offset="45%" stop-color="#081424" stop-opacity="0.95"/>
+      <stop offset="100%" stop-color="#04070d" stop-opacity="1"/>
+    </radialGradient>
+
+    <radialGradient id="phoneAura" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#10b981" stop-opacity="0.22"/>
+      <stop offset="40%" stop-color="#0284c7" stop-opacity="0.14"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="greenPulse" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#34d399" stop-opacity="0.8"/>
+      <stop offset="60%" stop-color="#10b981" stop-opacity="0.2"/>
+      <stop offset="100%" stop-color="#047857" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="tealAura" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.25"/>
+      <stop offset="50%" stop-color="#0284c7" stop-opacity="0.1"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Linear Gradients -->
+    <linearGradient id="phoneBorder" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="25%" stop-color="#10b981"/>
+      <stop offset="60%" stop-color="#1e293b"/>
+      <stop offset="100%" stop-color="#00f2fe"/>
+    </linearGradient>
+
+    <linearGradient id="screenGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#081220"/>
+      <stop offset="100%" stop-color="#040810"/>
+    </linearGradient>
+
+    <linearGradient id="greenGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#10b981"/>
+      <stop offset="100%" stop-color="#34d399"/>
+    </linearGradient>
+
+    <linearGradient id="tealGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00f2fe"/>
+      <stop offset="100%" stop-color="#38bdf8"/>
+    </linearGradient>
+
+    <linearGradient id="barGradGreen" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#059669"/>
+      <stop offset="60%" stop-color="#10b981"/>
+      <stop offset="100%" stop-color="#34d399"/>
+    </linearGradient>
+
+    <linearGradient id="cardGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0c2035"/>
+      <stop offset="100%" stop-color="#071322"/>
+    </linearGradient>
+
+    <linearGradient id="urlGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#0d243c"/>
+      <stop offset="100%" stop-color="#09182a"/>
+    </linearGradient>
+
+    <!-- Glow Filters -->
+    <filter id="softGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <filter id="brightGreenGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="8" result="b1"/>
+      <feGaussianBlur stdDeviation="3" result="b2"/>
+      <feMerge>
+        <feMergeNode in="b1"/>
+        <feMergeNode in="b2"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <filter id="brightCyanGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="8" result="b1"/>
+      <feGaussianBlur stdDeviation="3" result="b2"/>
+      <feMerge>
+        <feMergeNode in="b1"/>
+        <feMergeNode in="b2"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Coordinate Grid Pattern -->
+    <pattern id="baseGrid" width="30" height="30" patternUnits="userSpaceOnUse">
+      <path d="M 30 0 L 0 0 0 30" fill="none" stroke="#102035" stroke-width="0.75" stroke-opacity="0.65"/>
+      <circle cx="30" cy="30" r="0.8" fill="#1e3a5f" fill-opacity="0.85"/>
+    </pattern>
+  </defs>
+
+  <!-- Background Layer -->
+  <rect width="1200" height="630" fill="#04070d"/>
+  <rect width="1200" height="630" fill="url(#bgGlow)"/>
+  <rect width="1200" height="630" fill="url(#baseGrid)"/>
+
+  <!-- Ambient Light Halos -->
+  <circle cx="600" cy="260" r="320" fill="url(#phoneAura)"/>
+  <circle cx="280" cy="240" r="220" fill="url(#tealAura)" opacity="0.45"/>
+  <circle cx="920" cy="280" r="240" fill="url(#phoneAura)" opacity="0.5"/>
+
+  <!-- Architectural Circuit / Grid Lines -->
+  <g stroke="#0e2844" stroke-width="1.2" fill="none" opacity="0.55">
+    <line x1="80" y1="110" x2="1120" y2="110" stroke-dasharray="3 6"/>
+    <line x1="80" y1="480" x2="1120" y2="480" stroke-dasharray="3 6"/>
+    <line x1="200" y1="50" x2="200" y2="540" stroke-dasharray="2 4"/>
+    <line x1="1000" y1="50" x2="1000" y2="540" stroke-dasharray="2 4"/>
+    <line x1="140" y1="80" x2="380" y2="220" stroke="#00f2fe" stroke-opacity="0.2"/>
+    <line x1="1060" y1="80" x2="820" y2="220" stroke="#10b981" stroke-opacity="0.2"/>
+    <line x1="140" y1="520" x2="380" y2="380" stroke="#00f2fe" stroke-opacity="0.2"/>
+    <line x1="1060" y1="520" x2="820" y2="380" stroke="#10b981" stroke-opacity="0.2"/>
+  </g>
+
+  <!-- ==================== LEFT ABSTRACT SHAPE: CI PIPELINE STAGES & GRAPH ==================== -->
+  <g transform="translate(130, 130)">
+    <!-- Container Frame -->
+    <rect x="0" y="0" width="200" height="250" rx="8" fill="#071220" stroke="#163456" stroke-width="1.5" opacity="0.9"/>
+    
+    <!-- Header / Title of Pipeline Panel -->
+    <rect x="0" y="0" width="200" height="32" rx="8" fill="#091b30"/>
+    <circle cx="16" cy="16" r="3.5" fill="#34d399" filter="url(#softGlow)"/>
+    <text x="28" y="20" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="11" font-weight="700" fill="#38bdf8" letter-spacing="1">PIPELINE GRAPH</text>
+    <text x="184" y="20" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="10" font-weight="600" fill="#10b981" text-anchor="end">READY</text>
+    <line x1="0" y1="32" x2="200" y2="32" stroke="#163456" stroke-width="1"/>
+
+    <!-- Pipeline DAG Nodes -->
+    <!-- Node 1: BUILD -->
+    <g transform="translate(18, 48)">
+      <rect x="0" y="0" width="164" height="36" rx="5" fill="#0a1e35" stroke="#1e4570" stroke-width="1"/>
+      <circle cx="18" cy="18" r="8" fill="#064e3b" stroke="#10b981" stroke-width="1.5"/>
+      <path d="M 14 18 L 17 21 L 22 15" fill="none" stroke="#34d399" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="36" y="16" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="11" font-weight="700" fill="#f8fafc">build:artifacts</text>
+      <text x="36" y="28" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="9" font-weight="500" fill="#64748b">target/release • 34s</text>
+      <circle cx="152" cy="18" r="3" fill="#10b981" filter="url(#softGlow)"/>
+    </g>
+
+    <!-- Connector 1-2 -->
+    <line x1="100" y1="84" x2="100" y2="96" stroke="#10b981" stroke-width="1.5" stroke-dasharray="2 2"/>
+    <circle cx="100" cy="90" r="2" fill="#34d399"/>
+
+    <!-- Node 2: UNIT TEST -->
+    <g transform="translate(18, 96)">
+      <rect x="0" y="0" width="164" height="36" rx="5" fill="#0a1e35" stroke="#10b981" stroke-width="1.2"/>
+      <circle cx="18" cy="18" r="8" fill="#064e3b" stroke="#10b981" stroke-width="1.5"/>
+      <path d="M 14 18 L 17 21 L 22 15" fill="none" stroke="#34d399" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="36" y="16" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="11" font-weight="700" fill="#f8fafc">test:cargo-test</text>
+      <text x="36" y="28" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="9" font-weight="500" fill="#64748b">412 passed • 48s</text>
+      <circle cx="152" cy="18" r="3" fill="#10b981" filter="url(#softGlow)"/>
+    </g>
+
+    <!-- Connector 2-3 -->
+    <line x1="100" y1="132" x2="100" y2="144" stroke="#10b981" stroke-width="1.5" stroke-dasharray="2 2"/>
+    <circle cx="100" cy="138" r="2" fill="#34d399"/>
+
+    <!-- Node 3: LINT & CHECK -->
+    <g transform="translate(18, 144)">
+      <rect x="0" y="0" width="164" height="36" rx="5" fill="#0a1e35" stroke="#1e4570" stroke-width="1"/>
+      <circle cx="18" cy="18" r="8" fill="#064e3b" stroke="#10b981" stroke-width="1.5"/>
+      <path d="M 14 18 L 17 21 L 22 15" fill="none" stroke="#34d399" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="36" y="16" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="11" font-weight="700" fill="#f8fafc">lint:clippy</text>
+      <text x="36" y="28" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="9" font-weight="500" fill="#64748b">0 warnings • 16s</text>
+      <circle cx="152" cy="18" r="3" fill="#10b981" filter="url(#softGlow)"/>
+    </g>
+
+    <!-- Node 4: Micro summary bar -->
+    <g transform="translate(18, 196)">
+      <rect x="0" y="0" width="164" height="38" rx="4" fill="#050e18" stroke="#163456" stroke-width="1"/>
+      <text x="12" y="18" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="9" font-weight="600" fill="#94a3b8">CI MATRIX HEALTH</text>
+      <text x="152" y="18" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="9" font-weight="700" fill="#10b981" text-anchor="end">100%</text>
+      <!-- Mini Segmented Bar -->
+      <rect x="12" y="24" width="26" height="6" rx="1.5" fill="#10b981"/>
+      <rect x="42" y="24" width="26" height="6" rx="1.5" fill="#10b981"/>
+      <rect x="72" y="24" width="26" height="6" rx="1.5" fill="#10b981"/>
+      <rect x="102" y="24" width="26" height="6" rx="1.5" fill="#34d399" filter="url(#softGlow)"/>
+      <rect x="132" y="24" width="20" height="6" rx="1.5" fill="#10b981"/>
+    </g>
+
+    <!-- Data beam connecting left panel toward mobile screen -->
+    <path d="M 200 125 C 260 125, 300 200, 390 200" fill="none" stroke="#00f2fe" stroke-width="1.5" stroke-dasharray="4 4" opacity="0.75"/>
+    <circle cx="280" cy="150" r="3" fill="#00f2fe" filter="url(#softGlow)"/>
+    <circle cx="340" cy="188" r="2.5" fill="#34d399" filter="url(#softGlow)"/>
+  </g>
+
+  <!-- ==================== RIGHT ABSTRACT SHAPE: PARALLEL WORKERS & TELEMETRY ==================== -->
+  <g transform="translate(870, 130)">
+    <!-- Container Frame -->
+    <rect x="0" y="0" width="200" height="250" rx="8" fill="#071220" stroke="#163456" stroke-width="1.5" opacity="0.9"/>
+
+    <!-- Header / Title -->
+    <rect x="0" y="0" width="200" height="32" rx="8" fill="#091b30"/>
+    <circle cx="16" cy="16" r="3.5" fill="#00f2fe" filter="url(#softGlow)"/>
+    <text x="28" y="20" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="11" font-weight="700" fill="#38bdf8" letter-spacing="1">RUNNER NODES</text>
+    <text x="184" y="20" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="10" font-weight="600" fill="#34d399" text-anchor="end">4/4 LIVE</text>
+    <line x1="0" y1="32" x2="200" y2="32" stroke="#163456" stroke-width="1"/>
+
+    <!-- Matrix of Parallel CI Worker Nodes (2x4) -->
+    <g transform="translate(16, 44)">
+      <!-- Worker 1 -->
+      <rect x="0" y="0" width="78" height="36" rx="4" fill="#091c32" stroke="#153b60" stroke-width="1"/>
+      <circle cx="12" cy="18" r="4" fill="#10b981" filter="url(#softGlow)"/>
+      <text x="24" y="16" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="9" font-weight="700" fill="#f1f5f9">node-01</text>
+      <text x="24" y="27" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="8" font-weight="500" fill="#10b981">green 28s</text>
+
+      <!-- Worker 2 -->
+      <rect x="90" y="0" width="78" height="36" rx="4" fill="#091c32" stroke="#153b60" stroke-width="1"/>
+      <circle cx="102" cy="18" r="4" fill="#10b981" filter="url(#softGlow)"/>
+      <text x="114" y="16" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="9" font-weight="700" fill="#f1f5f9">node-02</text>
+      <text x="114" y="27" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="8" font-weight="500" fill="#10b981">green 42s</text>
+
+      <!-- Worker 3 -->
+      <rect x="0" y="44" width="78" height="36" rx="4" fill="#091c32" stroke="#153b60" stroke-width="1"/>
+      <circle cx="12" cy="62" r="4" fill="#10b981" filter="url(#softGlow)"/>
+      <text x="24" y="60" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="9" font-weight="700" fill="#f1f5f9">node-03</text>
+      <text x="24" y="71" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="8" font-weight="500" fill="#10b981">green 35s</text>
+
+      <!-- Worker 4 -->
+      <rect x="90" y="44" width="78" height="36" rx="4" fill="#091c32" stroke="#153b60" stroke-width="1"/>
+      <circle cx="102" cy="62" r="4" fill="#10b981" filter="url(#softGlow)"/>
+      <text x="114" y="60" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="9" font-weight="700" fill="#f1f5f9">node-04</text>
+      <text x="114" y="71" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="8" font-weight="500" fill="#10b981">green 19s</text>
+    </g>
+
+    <!-- Mini Telemetry Sparkline Chart -->
+    <g transform="translate(16, 136)">
+      <rect x="0" y="0" width="168" height="52" rx="4" fill="#050e18" stroke="#163456" stroke-width="1"/>
+      <text x="10" y="14" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="8" font-weight="600" fill="#94a3b8">TEST RUN DURATION (s)</text>
+      <text x="158" y="14" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="8" font-weight="700" fill="#34d399" text-anchor="end">AVG 31s</text>
+      <!-- Sparkline path -->
+      <path d="M 12 38 L 38 42 L 64 30 L 92 34 L 120 24 L 148 20" fill="none" stroke="#10b981" stroke-width="1.8" filter="url(#softGlow)"/>
+      <!-- Sparkline area -->
+      <path d="M 12 38 L 38 42 L 64 30 L 92 34 L 120 24 L 148 20 L 148 46 L 12 46 Z" fill="#10b981" fill-opacity="0.12"/>
+      <circle cx="148" cy="20" r="2.5" fill="#34d399"/>
+    </g>
+
+    <!-- Live Log Stream Snippet -->
+    <g transform="translate(16, 198)">
+      <rect x="0" y="0" width="168" height="40" rx="4" fill="#040a12" stroke="#10253f" stroke-width="1"/>
+      <text x="10" y="14" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="8" font-weight="500" fill="#34d399">✓ 412 unit tests passed</text>
+      <text x="10" y="25" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="8" font-weight="500" fill="#38bdf8">✓ 0 failed, 0 flaked</text>
+      <text x="10" y="35" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="8" font-weight="600" fill="#10b981">✓ pipeline check: OK</text>
+    </g>
+
+    <!-- Data beam connecting right panel toward mobile screen -->
+    <path d="M 0 140 C -60 140, -100 230, -170 230" fill="none" stroke="#10b981" stroke-width="1.5" stroke-dasharray="4 4" opacity="0.75"/>
+    <circle cx="-80" cy="180" r="3" fill="#10b981" filter="url(#softGlow)"/>
+  </g>
+
+  <!-- ==================== CENTER COMPOSITION: SMARTPHONE WITH BROWSER TAB & CI GREEN BOARD ==================== -->
+  <g transform="translate(440, 24)">
+    <!-- Deep Phone Drop Shadow -->
+    <rect x="-8" y="10" width="336" height="500" rx="44" fill="#000000" opacity="0.8" filter="url(#brightGreenGlow)"/>
+
+    <!-- Phone Chassis Outer Frame (Titanium Slate Edge) -->
+    <rect x="0" y="0" width="320" height="490" rx="40" fill="#0c1726" stroke="url(#phoneBorder)" stroke-width="2.5"/>
+
+    <!-- Inner Bezel -->
+    <rect x="5" y="5" width="310" height="480" rx="36" fill="#060c16" stroke="#162a44" stroke-width="1.2"/>
+
+    <!-- Phone Screen Display Glass -->
+    <rect x="10" y="10" width="300" height="470" rx="31" fill="url(#screenGrad)"/>
+
+    <!-- Top Dynamic Island Notch Sensor -->
+    <rect x="115" y="18" width="90" height="13" rx="6.5" fill="#020408"/>
+    <circle cx="186" cy="24.5" r="3" fill="#0a1a2e"/>
+
+    <!-- Ambient Screen Light Glow -->
+    <rect x="10" y="65" width="300" height="260" fill="url(#phoneAura)" opacity="0.6"/>
+
+    <!-- ==================== MOBILE BROWSER TAB UI ==================== -->
+    <g transform="translate(18, 40)">
+      <!-- Top Browser Tab Bar / Address Bar -->
+      <rect x="0" y="0" width="284" height="34" rx="8" fill="url(#urlGrad)" stroke="#1a3b5c" stroke-width="1"/>
+      
+      <!-- HTTPS Security Lock Icon -->
+      <g transform="translate(12, 10)">
+        <rect x="0" y="5" width="10" height="8" rx="1.5" fill="#10b981"/>
+        <path d="M 2 5 L 2 3 C 2 1.3 3.3 0 5 0 C 6.7 0 8 1.3 8 3 L 8 5" fill="none" stroke="#10b981" stroke-width="1.4"/>
+      </g>
+
+      <!-- URL Address Text -->
+      <text x="30" y="21" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="11" font-weight="600" fill="#f1f5f9">
+        ferryx.local<tspan fill="#38bdf8">/ci/pipeline</tspan>
+      </text>
+
+      <!-- Reload / Refresh Icon -->
+      <g transform="translate(254, 9)">
+        <path d="M 12 7 A 5 5 0 1 1 10 3 L 13 3" fill="none" stroke="#38bdf8" stroke-width="1.4" stroke-linecap="round"/>
+        <polygon points="13,0.5 13,5.5 9,3" fill="#38bdf8"/>
+      </g>
+
+      <line x1="0" y1="42" x2="284" y2="42" stroke="#122740" stroke-width="1"/>
+
+      <!-- ==================== CI GREEN BOARD CONTENT ==================== -->
+      <!-- Pipeline Status Summary Banner -->
+      <g transform="translate(0, 50)">
+        <rect x="0" y="0" width="284" height="52" rx="8" fill="url(#cardGrad)" stroke="#10b981" stroke-width="1.4"/>
+        
+        <!-- Big Green Status Badge -->
+        <rect x="10" y="10" width="102" height="32" rx="6" fill="#064e3b" stroke="#34d399" stroke-width="1.2"/>
+        <circle cx="24" cy="26" r="5" fill="#34d399" filter="url(#softGlow)"/>
+        <text x="36" y="30" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', sans-serif" font-size="11" font-weight="800" fill="#34d399" letter-spacing="0.5">ALL GREEN</text>
+
+        <!-- Pipeline Meta Details -->
+        <text x="124" y="22" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="10" font-weight="700" fill="#f8fafc">Run #1482 • main</text>
+        <text x="124" y="36" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="9" font-weight="500" fill="#94a3b8">14/14 checks passed</text>
+        <text x="274" y="30" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="10" font-weight="700" fill="#38bdf8" text-anchor="end">2m 14s</text>
+      </g>
+
+      <!-- CI Pipeline Stages List (The Green Board) -->
+      <g transform="translate(0, 112)">
+        <!-- Step 1: Lint & Clippy -->
+        <g transform="translate(0, 0)">
+          <rect x="0" y="0" width="284" height="36" rx="6" fill="#091b2e" stroke="#16385a" stroke-width="1"/>
+          <!-- Checkmark Pill -->
+          <circle cx="18" cy="18" r="7.5" fill="#064e3b" stroke="#10b981" stroke-width="1.2"/>
+          <path d="M 14 18 L 17 21 L 22 15" fill="none" stroke="#34d399" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          <text x="34" y="17" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="10" font-weight="700" fill="#f1f5f9">cargo-clippy &amp; fmt</text>
+          <text x="34" y="28" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="8" font-weight="500" fill="#64748b">18s • 0 warnings</text>
+          <!-- Status pill right -->
+          <rect x="226" y="9" width="48" height="18" rx="4" fill="#064e3b"/>
+          <text x="250" y="22" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="9" font-weight="700" fill="#34d399" text-anchor="middle">PASS</text>
+        </g>
+
+        <!-- Step 2: Unit Tests -->
+        <g transform="translate(0, 42)">
+          <rect x="0" y="0" width="284" height="36" rx="6" fill="#091b2e" stroke="#10b981" stroke-width="1.2" filter="url(#softGlow)"/>
+          <circle cx="18" cy="18" r="7.5" fill="#064e3b" stroke="#10b981" stroke-width="1.2"/>
+          <path d="M 14 18 L 17 21 L 22 15" fill="none" stroke="#34d399" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          <text x="34" y="17" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="10" font-weight="700" fill="#f1f5f9">test-core (412 tests)</text>
+          <text x="34" y="28" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="8" font-weight="500" fill="#34d399">42s • 100% ok</text>
+          <!-- Status pill right -->
+          <rect x="226" y="9" width="48" height="18" rx="4" fill="#064e3b" stroke="#34d399" stroke-width="1"/>
+          <text x="250" y="22" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="9" font-weight="700" fill="#34d399" text-anchor="middle">PASS</text>
+        </g>
+
+        <!-- Step 3: Browser PTY Integration Tests -->
+        <g transform="translate(0, 84)">
+          <rect x="0" y="0" width="284" height="36" rx="6" fill="#091b2e" stroke="#16385a" stroke-width="1"/>
+          <circle cx="18" cy="18" r="7.5" fill="#064e3b" stroke="#10b981" stroke-width="1.2"/>
+          <path d="M 14 18 L 17 21 L 22 15" fill="none" stroke="#34d399" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          <text x="34" y="17" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="10" font-weight="700" fill="#f1f5f9">e2e-browser-pty</text>
+          <text x="34" y="28" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="8" font-weight="500" fill="#64748b">58s • 24 suites</text>
+          <!-- Status pill right -->
+          <rect x="226" y="9" width="48" height="18" rx="4" fill="#064e3b"/>
+          <text x="250" y="22" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="9" font-weight="700" fill="#34d399" text-anchor="middle">PASS</text>
+        </g>
+
+        <!-- Step 4: Multi-Arch Build -->
+        <g transform="translate(0, 126)">
+          <rect x="0" y="0" width="284" height="36" rx="6" fill="#091b2e" stroke="#16385a" stroke-width="1"/>
+          <circle cx="18" cy="18" r="7.5" fill="#064e3b" stroke="#10b981" stroke-width="1.2"/>
+          <path d="M 14 18 L 17 21 L 22 15" fill="none" stroke="#34d399" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          <text x="34" y="17" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="10" font-weight="700" fill="#f1f5f9">build:darwin-arm64</text>
+          <text x="34" y="28" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="8" font-weight="500" fill="#64748b">36s • binaries verified</text>
+          <!-- Status pill right -->
+          <rect x="226" y="9" width="48" height="18" rx="4" fill="#064e3b"/>
+          <text x="250" y="22" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="9" font-weight="700" fill="#34d399" text-anchor="middle">PASS</text>
+        </g>
+      </g>
+
+      <!-- CI GREEN BOARD MATRIX TILES (Matrix of Passing Test Suites) -->
+      <g transform="translate(0, 280)">
+        <rect x="0" y="0" width="284" height="82" rx="6" fill="#071524" stroke="#14324f" stroke-width="1"/>
+        <text x="12" y="16" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="9" font-weight="700" fill="#38bdf8" letter-spacing="1">TEST MATRIX SUITES</text>
+        <text x="272" y="16" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="9" font-weight="700" fill="#10b981" text-anchor="end">28 / 28</text>
+        
+        <!-- 7 columns x 3 rows glowing green matrix blocks -->
+        <!-- Row 0 -->
+        <g transform="translate(12, 24)">
+          <rect x="0" y="0" width="32" height="14" rx="2.5" fill="#10b981"/>
+          <rect x="38" y="0" width="32" height="14" rx="2.5" fill="#10b981"/>
+          <rect x="76" y="0" width="32" height="14" rx="2.5" fill="#10b981"/>
+          <rect x="114" y="0" width="32" height="14" rx="2.5" fill="#34d399" filter="url(#softGlow)"/>
+          <rect x="152" y="0" width="32" height="14" rx="2.5" fill="#10b981"/>
+          <rect x="190" y="0" width="32" height="14" rx="2.5" fill="#10b981"/>
+          <rect x="228" y="0" width="32" height="14" rx="2.5" fill="#34d399"/>
+        </g>
+        <!-- Row 1 -->
+        <g transform="translate(12, 42)">
+          <rect x="0" y="0" width="32" height="14" rx="2.5" fill="#10b981"/>
+          <rect x="38" y="0" width="32" height="14" rx="2.5" fill="#34d399" filter="url(#softGlow)"/>
+          <rect x="76" y="0" width="32" height="14" rx="2.5" fill="#10b981"/>
+          <rect x="114" y="0" width="32" height="14" rx="2.5" fill="#10b981"/>
+          <rect x="152" y="0" width="32" height="14" rx="2.5" fill="#10b981"/>
+          <rect x="190" y="0" width="32" height="14" rx="2.5" fill="#34d399" filter="url(#softGlow)"/>
+          <rect x="228" y="0" width="32" height="14" rx="2.5" fill="#10b981"/>
+        </g>
+        <!-- Row 2 -->
+        <g transform="translate(12, 60)">
+          <rect x="0" y="0" width="32" height="14" rx="2.5" fill="#10b981"/>
+          <rect x="38" y="0" width="32" height="14" rx="2.5" fill="#10b981"/>
+          <rect x="76" y="0" width="32" height="14" rx="2.5" fill="#34d399"/>
+          <rect x="114" y="0" width="32" height="14" rx="2.5" fill="#10b981"/>
+          <rect x="152" y="0" width="32" height="14" rx="2.5" fill="#34d399" filter="url(#softGlow)"/>
+          <rect x="190" y="0" width="32" height="14" rx="2.5" fill="#10b981"/>
+          <rect x="228" y="0" width="32" height="14" rx="2.5" fill="#10b981"/>
+        </g>
+      </g>
+
+      <!-- Bottom Browser Tab Toolbar -->
+      <g transform="translate(0, 372)">
+        <line x1="0" y1="0" x2="284" y2="0" stroke="#122740" stroke-width="1"/>
+        <!-- Browser back/forward navigation icons -->
+        <path d="M 24 16 L 16 23 L 24 30" fill="none" stroke="#64748b" stroke-width="1.8" stroke-linecap="round"/>
+        <path d="M 64 16 L 72 23 L 64 30" fill="none" stroke="#64748b" stroke-width="1.8" stroke-linecap="round"/>
+        <!-- Share icon -->
+        <path d="M 142 16 L 142 27 M 137 21 L 142 16 L 147 21 M 134 24 L 134 31 L 150 31 L 150 24" fill="none" stroke="#38bdf8" stroke-width="1.5" stroke-linecap="round"/>
+        <!-- Tab Switcher Box -->
+        <rect x="210" y="16" width="16" height="16" rx="3" fill="none" stroke="#38bdf8" stroke-width="1.5"/>
+        <text x="218" y="28" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="9" font-weight="700" fill="#38bdf8" text-anchor="middle">1</text>
+        <!-- Menu dots -->
+        <circle cx="266" cy="24" r="1.5" fill="#64748b"/>
+        <circle cx="272" cy="24" r="1.5" fill="#64748b"/>
+        <circle cx="278" cy="24" r="1.5" fill="#64748b"/>
+      </g>
+    </g>
+
+    <!-- Bottom Home Touch Bar -->
+    <rect x="110" y="462" width="100" height="4" rx="2" fill="#334155"/>
+
+    <!-- Screen Glass Sheen Diagonal -->
+    <path d="M 12 12 L 220 12 L 80 478 L 12 478 Z" fill="#ffffff" opacity="0.02"/>
+  </g>
+
+  <!-- ==================== HIGHLIGHT OVERLAY BRACKETS (CI RUNNER FOCUS) ==================== -->
+  <g transform="translate(440, 24)">
+    <g transform="translate(12, 86)">
+      <rect x="0" y="0" width="296" height="60" rx="8" fill="none" stroke="#10b981" stroke-width="1.8" filter="url(#brightGreenGlow)" opacity="0.8"/>
+      <!-- Callout indicator line -->
+      <polyline points="296,30 350,30 390,-10 460,-10" fill="none" stroke="#10b981" stroke-width="1.5"/>
+      <circle cx="460" cy="-10" r="3" fill="#34d399" filter="url(#softGlow)"/>
+    </g>
+  </g>
+
+  <!-- ==================== BLOG COVER HEADLINE TEXT (MAX 3 WORDS) ==================== -->
+  <!-- EXACTLY 3 WORDS: "MOBILE CI TABS" -->
+  <g transform="translate(600, 584)" text-anchor="middle">
+    <!-- Soft background glow for legibility -->
+    <text x="0" y="0" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', 'Segoe UI', sans-serif" font-size="36" font-weight="900" fill="#10b981" letter-spacing="4" opacity="0.35" filter="url(#brightGreenGlow)">
+      MOBILE&#160;&#160;CI&#160;&#160;TABS
+    </text>
+
+    <!-- Crisp Primary Text -->
+    <text x="0" y="0" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', 'Segoe UI', sans-serif" font-size="36" font-weight="900" letter-spacing="4">
+      <tspan fill="#ffffff">MOBILE</tspan>&#160;&#160;<tspan fill="#ffffff">CI</tspan>&#160;&#160;<tspan fill="#34d399">TABS</tspan>
+    </text>
+  </g>
+
+</svg>

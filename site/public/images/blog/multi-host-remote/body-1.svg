@@ -1,0 +1,453 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900" style="background:#070a13; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'JetBrains Mono', monospace;">
+  <defs>
+    <!-- Background Gradients -->
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#090e1c" />
+      <stop offset="50%" stop-color="#060912" />
+      <stop offset="100%" stop-color="#030509" />
+    </linearGradient>
+
+    <!-- Column Gradients -->
+    <linearGradient id="col-client-bg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0d1829" stop-opacity="0.8" />
+      <stop offset="100%" stop-color="#080f1a" stop-opacity="0.9" />
+    </linearGradient>
+
+    <linearGradient id="col-router-bg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0a212e" stop-opacity="0.85" />
+      <stop offset="100%" stop-color="#06141d" stop-opacity="0.95" />
+    </linearGradient>
+
+    <linearGradient id="col-hosts-bg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0d1b2a" stop-opacity="0.75" />
+      <stop offset="100%" stop-color="#07101a" stop-opacity="0.85" />
+    </linearGradient>
+
+    <!-- Card Gradients -->
+    <linearGradient id="card-active" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0d2c3a" />
+      <stop offset="100%" stop-color="#071a24" />
+    </linearGradient>
+
+    <linearGradient id="card-idle" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f1a2a" />
+      <stop offset="100%" stop-color="#0a121d" />
+    </linearGradient>
+
+    <linearGradient id="card-subtle" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#111f32" />
+      <stop offset="100%" stop-color="#0a1320" />
+    </linearGradient>
+
+    <!-- Glow Filters -->
+    <filter id="glow-cyan" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <filter id="glow-strong" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="12" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <!-- Arrow Marker -->
+    <marker id="arrow-active" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#00f2fe" />
+    </marker>
+    <marker id="arrow-muted" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#1e3a5f" />
+    </marker>
+  </defs>
+
+  <!-- Background Base -->
+  <rect width="1600" height="900" fill="url(#bg-grad)" />
+
+  <!-- Subtle Dot Grid -->
+  <g opacity="0.04" fill="#38bdf8">
+    <pattern id="grid-dots" x="0" y="0" width="32" height="32" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.5" />
+    </pattern>
+    <rect width="1600" height="900" fill="url(#grid-dots)" />
+  </g>
+
+  <!-- Ambient Glows -->
+  <circle cx="280" cy="460" r="260" fill="#0284c7" opacity="0.07" filter="blur(90px)" />
+  <circle cx="690" cy="450" r="280" fill="#00f2fe" opacity="0.09" filter="blur(110px)" />
+  <circle cx="1250" cy="460" r="300" fill="#0d9488" opacity="0.07" filter="blur(100px)" />
+
+  <!-- ==================== HEADER ==================== -->
+  <g transform="translate(80, 44)">
+    <!-- Category Pill -->
+    <rect x="0" y="0" width="180" height="26" rx="13" fill="#0f1f33" stroke="#1d3b5e" stroke-width="1" />
+    <circle cx="14" cy="13" r="4" fill="#00f2fe" />
+    <text x="26" y="17" fill="#38bdf8" font-size="11" font-weight="700" letter-spacing="1.2">HOST SELECTION</text>
+
+    <!-- Main Title & Subtitle -->
+    <text x="0" y="58" fill="#f8fafc" font-size="28" font-weight="700" letter-spacing="-0.5">Managing Remote Access to Multiple Hosts</text>
+    <text x="0" y="82" fill="#64748b" font-size="14" font-weight="400">Deterministic client dispatch: distinct daemon identities, isolated pairing grants, and zero session cross-wiring</text>
+  </g>
+
+  <!-- ==================== CONNECTING BEAMS / PIPELINES ==================== -->
+  <g>
+    <!-- Client to Router Connection -->
+    <path d="M 440 280 L 530 280" stroke="#10253e" stroke-width="6" stroke-linecap="round" />
+    <path d="M 440 280 L 530 280" stroke="#00f2fe" stroke-width="2.5" stroke-dasharray="6,4" />
+
+    <!-- Router to Host A (Active Connection - Glowing Cyan) -->
+    <path d="M 850 310 C 895 310, 905 310, 950 310" stroke="#00f2fe" stroke-width="6" opacity="0.3" filter="url(#glow-cyan)" />
+    <path d="M 850 310 C 895 310, 905 310, 950 310" stroke="#00f2fe" stroke-width="2.5" marker-end="url(#arrow-active)" />
+
+    <!-- Router to Host B (Standby Path - Muted Blue) -->
+    <path d="M 850 495 C 895 495, 905 525, 950 525" stroke="#1e3552" stroke-width="2" stroke-dasharray="5,5" marker-end="url(#arrow-muted)" />
+
+    <!-- Router to Host C (Standby Path - Muted Blue) -->
+    <path d="M 850 620 C 895 620, 905 735, 950 735" stroke="#1e3552" stroke-width="2" stroke-dasharray="5,5" marker-end="url(#arrow-muted)" />
+  </g>
+
+  <!-- ==================== COLUMN 1: REMOTE CLIENT (LEFT) ==================== -->
+  <g transform="translate(80, 150)">
+    <!-- Container Outline -->
+    <rect x="0" y="0" width="360" height="705" rx="16" fill="url(#col-client-bg)" stroke="#1a2e47" stroke-width="1.5" />
+
+    <!-- Zone Top Bar -->
+    <path d="M 0 16 Q 0 0 16 0 L 344 0 Q 360 0 360 16 L 360 44 L 0 44 Z" fill="#0d1c30" />
+    <circle cx="22" cy="22" r="5" fill="#38bdf8" />
+    <text x="36" y="26" fill="#94a3b8" font-size="12" font-weight="700" letter-spacing="1">REMOTE CLIENT</text>
+    <text x="340" y="26" fill="#475569" font-size="11" text-anchor="end">WEB / MOBILE / DESKTOP</text>
+
+    <!-- Card 1: Host Switcher Dropdown UI -->
+    <g transform="translate(18, 62)">
+      <rect x="0" y="0" width="324" height="236" rx="10" fill="url(#card-subtle)" stroke="#1d3858" stroke-width="1.2" />
+
+      <g transform="translate(16, 16)">
+        <text x="0" y="14" fill="#cbd5e1" font-size="12" font-weight="700" letter-spacing="0.5">HOST SELECTOR</text>
+        <rect x="220" y="2" width="72" height="18" rx="9" fill="#0b2838" stroke="#0284c7" stroke-width="0.8" />
+        <text x="256" y="14" fill="#38bdf8" font-size="9" font-weight="600" text-anchor="middle">SWITCHER</text>
+
+        <!-- Dropdown Option 1 (Selected / Active) -->
+        <g transform="translate(0, 32)">
+          <rect x="0" y="0" width="292" height="52" rx="8" fill="#0a2533" stroke="#00f2fe" stroke-width="1.5" filter="url(#glow-cyan)" stroke-opacity="0.8" />
+          <rect x="0" y="0" width="292" height="52" rx="8" fill="#0a2533" stroke="#00f2fe" stroke-width="1.5" />
+          <circle cx="16" cy="26" r="4.5" fill="#00f2fe" />
+          <text x="30" y="22" fill="#f8fafc" font-size="13" font-weight="700">mac-studio-m2</text>
+          <text x="30" y="38" fill="#2dd4bf" font-size="10.5" font-family="'JetBrains Mono', monospace">● Connected (3 sessions)</text>
+          <!-- Active Badge -->
+          <rect x="222" y="16" width="56" height="20" rx="4" fill="#00f2fe" fill-opacity="0.15" stroke="#00f2fe" stroke-width="1" />
+          <text x="250" y="30" fill="#00f2fe" font-size="9" font-weight="700" text-anchor="middle">ACTIVE</text>
+        </g>
+
+        <!-- Dropdown Option 2 (Standby) -->
+        <g transform="translate(0, 94)">
+          <rect x="0" y="0" width="292" height="46" rx="8" fill="#091422" stroke="#162c46" stroke-width="1" />
+          <circle cx="16" cy="23" r="4" fill="#475569" />
+          <text x="30" y="20" fill="#94a3b8" font-size="12" font-weight="600">linux-build-box</text>
+          <text x="30" y="34" fill="#64748b" font-size="10" font-family="'JetBrains Mono', monospace">○ Standby (1 session)</text>
+          <text x="276" y="28" fill="#475569" font-size="10" text-anchor="end">relay</text>
+        </g>
+
+        <!-- Dropdown Option 3 (Standby) -->
+        <g transform="translate(0, 148)">
+          <rect x="0" y="0" width="292" height="46" rx="8" fill="#091422" stroke="#162c46" stroke-width="1" />
+          <circle cx="16" cy="23" r="4" fill="#475569" />
+          <text x="30" y="20" fill="#94a3b8" font-size="12" font-weight="600">cloud-gpu-worker</text>
+          <text x="30" y="34" fill="#64748b" font-size="10" font-family="'JetBrains Mono', monospace">○ Standby (2 sessions)</text>
+          <text x="276" y="28" fill="#475569" font-size="10" text-anchor="end">relay</text>
+        </g>
+      </g>
+    </g>
+
+    <!-- Card 2: Active Terminal Viewport -->
+    <g transform="translate(18, 316)">
+      <rect x="0" y="0" width="324" height="230" rx="10" fill="#070d17" stroke="#162b45" stroke-width="1.2" />
+
+      <!-- Terminal Header / Tab Bar -->
+      <path d="M 0 10 Q 0 0 10 0 L 314 0 Q 324 0 324 10 L 324 32 L 0 32 Z" fill="#0c1726" />
+      <circle cx="14" cy="16" r="3.5" fill="#ef4444" opacity="0.8" />
+      <circle cx="24" cy="16" r="3.5" fill="#eab308" opacity="0.8" />
+      <circle cx="34" cy="16" r="3.5" fill="#22c55e" opacity="0.8" />
+      
+      <!-- Current Scope Tab -->
+      <g transform="translate(50, 6)">
+        <rect x="0" y="0" width="168" height="20" rx="4" fill="#14263e" stroke="#0284c7" stroke-width="0.8" />
+        <text x="8" y="14" fill="#38bdf8" font-size="10" font-family="'JetBrains Mono', monospace">mac-studio-m2 : #1</text>
+      </g>
+
+      <!-- Terminal Body -->
+      <g transform="translate(16, 48)">
+        <text x="0" y="16" fill="#64748b" font-size="10" font-family="'JetBrains Mono', monospace">// DOM Grid Viewport</text>
+        <text x="0" y="34" fill="#2dd4bf" font-size="10.5" font-family="'JetBrains Mono', monospace">host$ cargo test --workspace</text>
+        <text x="0" y="52" fill="#94a3b8" font-size="10" font-family="'JetBrains Mono', monospace">   running 14 tests</text>
+        <text x="0" y="70" fill="#38bdf8" font-size="10" font-family="'JetBrains Mono', monospace">test test_host_identity ... ok</text>
+        <text x="0" y="88" fill="#38bdf8" font-size="10" font-family="'JetBrains Mono', monospace">test test_daemon_scope  ... ok</text>
+        <text x="0" y="106" fill="#22c55e" font-size="10" font-family="'JetBrains Mono', monospace">result: ok. 14 passed; 0 failed</text>
+
+        <!-- Cursor -->
+        <rect x="0" y="120" width="7" height="13" fill="#00f2fe" opacity="0.9" />
+        <text x="12" y="131" fill="#f8fafc" font-size="10.5" font-family="'JetBrains Mono', monospace">git status</text>
+      </g>
+
+      <line x1="16" y1="202" x2="308" y2="202" stroke="#162b45" stroke-width="1" />
+      <text x="16" y="218" fill="#64748b" font-size="9.5" font-family="'JetBrains Mono', monospace">Viewport scoped to Target Host ID</text>
+    </g>
+
+    <!-- Card 3: Cryptographic Pairing Token -->
+    <g transform="translate(18, 562)">
+      <rect x="0" y="0" width="324" height="122" rx="10" fill="url(#card-subtle)" stroke="#1a2d45" stroke-width="1" />
+      <g transform="translate(16, 16)">
+        <text x="0" y="12" fill="#cbd5e1" font-size="11.5" font-weight="700">IDENTITY &amp; PAIRING</text>
+        <rect x="0" y="24" width="292" height="26" rx="4" fill="#07121f" stroke="#162c47" stroke-width="1" />
+        <text x="8" y="41" fill="#00f2fe" font-size="9.5" font-family="'JetBrains Mono', monospace">Grant: ed25519:7f9c..e3b1</text>
+
+        <text x="0" y="72" fill="#94a3b8" font-size="10.5">Authenticated 6-digit PIN / QR</text>
+        <text x="0" y="88" fill="#64748b" font-size="10">Explicit device grant per target machine</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- ==================== COLUMN 2: DISPATCHER / ROUTER (CENTER) ==================== -->
+  <g transform="translate(530, 150)">
+    <!-- Container Outline -->
+    <rect x="0" y="0" width="320" height="705" rx="16" fill="url(#col-router-bg)" stroke="#00f2fe" stroke-width="1.8" filter="url(#glow-cyan)" stroke-opacity="0.8" />
+    <rect x="0" y="0" width="320" height="705" rx="16" fill="url(#col-router-bg)" stroke="#00f2fe" stroke-width="1.8" />
+
+    <!-- Zone Top Bar -->
+    <path d="M 0 16 Q 0 0 16 0 L 304 0 Q 320 0 320 16 L 320 44 L 0 44 Z" fill="#082330" />
+    <circle cx="22" cy="22" r="5" fill="#00f2fe" />
+    <text x="36" y="26" fill="#2dd4bf" font-size="12" font-weight="700" letter-spacing="1">ROUTER / GATEWAY</text>
+    <text x="300" y="26" fill="#38bdf8" font-size="11" text-anchor="end">DISPATCH LAYER</text>
+
+    <!-- Main Router Logic Box -->
+    <g transform="translate(18, 62)">
+      <rect x="0" y="0" width="284" height="270" rx="10" fill="url(#card-active)" stroke="#00f2fe" stroke-width="1.4" />
+
+      <g transform="translate(16, 18)">
+        <!-- Router Icon -->
+        <rect x="0" y="0" width="32" height="32" rx="6" fill="#083344" stroke="#00f2fe" stroke-width="1" />
+        <path d="M 7 16 L 25 16 M 16 7 L 16 25 M 10 10 L 22 22 M 22 10 L 10 22" stroke="#00f2fe" stroke-width="1.4" stroke-linecap="round" />
+
+        <text x="42" y="14" fill="#f8fafc" font-size="13" font-weight="700">Host Dispatcher</text>
+        <text x="42" y="28" fill="#2dd4bf" font-size="10.5" font-family="'JetBrains Mono', monospace">ferryx-gateway</text>
+
+        <!-- Route Matching Mechanism -->
+        <g transform="translate(0, 44)">
+          <rect x="0" y="0" width="252" height="88" rx="6" fill="#06131c" stroke="#0e3646" stroke-width="1" />
+          <text x="10" y="18" fill="#38bdf8" font-size="10" font-weight="700">Target Matcher Engine:</text>
+          
+          <rect x="8" y="26" width="236" height="22" rx="4" fill="#0a212d" />
+          <text x="14" y="41" fill="#00f2fe" font-size="9.5" font-family="'JetBrains Mono', monospace">Match: host_id == "host-m2"</text>
+          
+          <text x="10" y="66" fill="#94a3b8" font-size="9.5">Action: Forward frame to Host 1</text>
+          <text x="10" y="80" fill="#64748b" font-size="9.5">State: Zero cross-channel leakage</text>
+        </g>
+
+        <!-- Active Dispatch Indicator -->
+        <g transform="translate(0, 148)">
+          <rect x="0" y="0" width="252" height="42" rx="6" fill="#0b2432" stroke="#00f2fe" stroke-width="1" />
+          <circle cx="16" cy="21" r="4" fill="#00f2fe" />
+          <text x="28" y="18" fill="#f8fafc" font-size="10.5" font-weight="700">Route 1: ACTIVE STREAM</text>
+          <text x="28" y="32" fill="#2dd4bf" font-size="9.5" font-family="'JetBrains Mono', monospace">TLS :443 -&gt; host-studio-m2</text>
+        </g>
+
+        <text x="0" y="210" fill="#94a3b8" font-size="10">Routes each frame by Host ID</text>
+        <text x="0" y="225" fill="#64748b" font-size="10">No mixing of input/output rings</text>
+      </g>
+    </g>
+
+    <!-- Isolation Policy Box -->
+    <g transform="translate(18, 350)">
+      <rect x="0" y="0" width="284" height="175" rx="10" fill="#091824" stroke="#16384a" stroke-width="1.2" />
+
+      <g transform="translate(16, 16)">
+        <text x="0" y="14" fill="#cbd5e1" font-size="12" font-weight="700">ANTI CROSS-WIRING</text>
+        <text x="0" y="32" fill="#2dd4bf" font-size="10" font-family="'JetBrains Mono', monospace">Strict Host Boundary Checks</text>
+
+        <g transform="translate(0, 44)">
+          <circle cx="4" cy="6" r="3" fill="#00f2fe" />
+          <text x="14" y="10" fill="#94a3b8" font-size="10.5">Isolated token per machine</text>
+
+          <circle cx="4" cy="26" r="3" fill="#00f2fe" />
+          <text x="14" y="30" fill="#94a3b8" font-size="10.5">Daemon-verified session IDs</text>
+
+          <circle cx="4" cy="46" r="3" fill="#00f2fe" />
+          <text x="14" y="50" fill="#94a3b8" font-size="10.5">No shared socket across hosts</text>
+
+          <circle cx="4" cy="66" r="3" fill="#00f2fe" />
+          <text x="14" y="70" fill="#94a3b8" font-size="10.5">Outbound relay bypasses NAT</text>
+        </g>
+      </g>
+    </g>
+
+    <!-- Status Card -->
+    <g transform="translate(18, 542)">
+      <rect x="0" y="0" width="284" height="142" rx="10" fill="#06121c" stroke="#143242" stroke-width="1" />
+      <g transform="translate(16, 16)">
+        <text x="0" y="12" fill="#94a3b8" font-size="11" font-weight="700">DISPATCH PROTOCOL</text>
+        <text x="0" y="32" fill="#38bdf8" font-size="10" font-family="'JetBrains Mono', monospace">Binary WebSocket Framing</text>
+        <text x="0" y="48" fill="#64748b" font-size="9.5" font-family="'JetBrains Mono', monospace">Seq-numbered ring packets</text>
+
+        <rect x="0" y="60" width="252" height="24" rx="4" fill="#0a1d29" stroke="#16384a" stroke-width="0.8" />
+        <text x="8" y="76" fill="#2dd4bf" font-size="9.5" font-family="'JetBrains Mono', monospace">Route Status: 1 active, 2 standby</text>
+
+        <text x="0" y="104" fill="#64748b" font-size="9.5">Switching host immediately unbinds</text>
+        <text x="0" y="117" fill="#64748b" font-size="9.5">terminal input to prevent errant keystrokes</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- ==================== COLUMN 3: REMOTE HOSTS (RIGHT) ==================== -->
+  <g transform="translate(950, 150)">
+    <!-- Container Outline -->
+    <rect x="0" y="0" width="570" height="705" rx="16" fill="url(#col-hosts-bg)" stroke="#1d304a" stroke-width="1.5" />
+
+    <!-- Zone Top Bar -->
+    <path d="M 0 16 Q 0 0 16 0 L 554 0 Q 570 0 570 16 L 570 44 L 0 44 Z" fill="#0d1f33" />
+    <circle cx="22" cy="22" r="5" fill="#2dd4bf" />
+    <text x="36" y="26" fill="#94a3b8" font-size="12" font-weight="700" letter-spacing="1">PAIRED HOST DAEMONS</text>
+    <text x="550" y="26" fill="#475569" font-size="11" text-anchor="end">ISOLATED MACHINE RUNTIMES</text>
+
+    <!-- ================= HOST 1 (ACTIVE) ================= -->
+    <g transform="translate(20, 62)">
+      <!-- Highlighted Active Border -->
+      <rect x="0" y="0" width="530" height="198" rx="12" fill="url(#card-active)" stroke="#00f2fe" stroke-width="1.8" filter="url(#glow-cyan)" stroke-opacity="0.85" />
+      <rect x="0" y="0" width="530" height="198" rx="12" fill="url(#card-active)" stroke="#00f2fe" stroke-width="1.8" />
+
+      <!-- Host 1 Header -->
+      <g transform="translate(18, 16)">
+        <!-- Server Icon -->
+        <rect x="0" y="0" width="34" height="34" rx="7" fill="#083444" stroke="#00f2fe" stroke-width="1.2" />
+        <rect x="7" y="9" width="20" height="4" rx="1" fill="#00f2fe" />
+        <rect x="7" y="15" width="20" height="4" rx="1" fill="#00f2fe" />
+        <rect x="7" y="21" width="20" height="4" rx="1" fill="#00f2fe" />
+
+        <text x="46" y="14" fill="#f8fafc" font-size="14.5" font-weight="700">mac-studio-m2</text>
+        <text x="46" y="30" fill="#2dd4bf" font-size="10.5" font-family="'JetBrains Mono', monospace">macOS Universal • ferryx-daemon [PID 4820]</text>
+
+        <!-- Active Badge -->
+        <rect x="390" y="2" width="104" height="24" rx="6" fill="#00f2fe" fill-opacity="0.2" stroke="#00f2fe" stroke-width="1.2" />
+        <circle cx="404" cy="14" r="3.5" fill="#00f2fe" />
+        <text x="454" y="17" fill="#00f2fe" font-size="10" font-weight="700" text-anchor="middle">ACTIVE ROUTE</text>
+
+        <!-- Sessions Container -->
+        <g transform="translate(0, 46)">
+          <rect x="0" y="0" width="494" height="84" rx="8" fill="#061622" stroke="#0e3a4e" stroke-width="1" />
+
+          <!-- Session 1 (Focused) -->
+          <g transform="translate(12, 10)">
+            <rect x="0" y="0" width="228" height="64" rx="6" fill="#0c2536" stroke="#00f2fe" stroke-width="1.2" />
+            <circle cx="12" cy="14" r="3.5" fill="#00f2fe" />
+            <text x="22" y="18" fill="#f8fafc" font-size="11" font-weight="700">session-01 [eval-agent]</text>
+            <text x="12" y="34" fill="#94a3b8" font-size="9.5" font-family="'JetBrains Mono', monospace">worktree: /src/eval-run</text>
+            <text x="12" y="50" fill="#2dd4bf" font-size="9.5" font-family="'JetBrains Mono', monospace">status: streaming pty (active)</text>
+          </g>
+
+          <!-- Session 2 (Background) -->
+          <g transform="translate(254, 10)">
+            <rect x="0" y="0" width="228" height="64" rx="6" fill="#081b28" stroke="#143c50" stroke-width="0.8" />
+            <circle cx="12" cy="14" r="3.5" fill="#38bdf8" />
+            <text x="22" y="18" fill="#cbd5e1" font-size="11" font-weight="600">session-02 [ci-watch]</text>
+            <text x="12" y="34" fill="#64748b" font-size="9.5" font-family="'JetBrains Mono', monospace">worktree: /src/ci-pipeline</text>
+            <text x="12" y="50" fill="#64748b" font-size="9.5" font-family="'JetBrains Mono', monospace">status: ring-buffer backlog (idle)</text>
+          </g>
+        </g>
+
+        <!-- Host Footer -->
+        <g transform="translate(0, 142)">
+          <text x="0" y="14" fill="#94a3b8" font-size="10.5">Host ID: <tspan fill="#38bdf8" font-family="'JetBrains Mono', monospace">host-m2-9a4f</tspan> • Pairing: <tspan fill="#2dd4bf" font-family="'JetBrains Mono', monospace">grant-ok</tspan></text>
+          <text x="494" y="14" fill="#00f2fe" font-size="10.5" font-weight="600" text-anchor="end">Connected over Direct LAN :443</text>
+        </g>
+      </g>
+    </g>
+
+    <!-- ================= HOST 2 (STANDBY) ================= -->
+    <g transform="translate(20, 276)">
+      <rect x="0" y="0" width="530" height="198" rx="12" fill="url(#card-idle)" stroke="#1a334d" stroke-width="1.2" />
+
+      <!-- Host 2 Header -->
+      <g transform="translate(18, 16)">
+        <rect x="0" y="0" width="34" height="34" rx="7" fill="#0f1f33" stroke="#254870" stroke-width="1" />
+        <rect x="7" y="9" width="20" height="4" rx="1" fill="#475569" />
+        <rect x="7" y="15" width="20" height="4" rx="1" fill="#475569" />
+        <rect x="7" y="21" width="20" height="4" rx="1" fill="#475569" />
+
+        <text x="46" y="14" fill="#e2e8f0" font-size="14.5" font-weight="700">linux-build-box</text>
+        <text x="46" y="30" fill="#64748b" font-size="10.5" font-family="'JetBrains Mono', monospace">Ubuntu x86_64 • ferryx-daemon [PID 9114]</text>
+
+        <!-- Standby Badge -->
+        <rect x="390" y="2" width="104" height="24" rx="6" fill="#14263e" stroke="#254870" stroke-width="1" />
+        <circle cx="404" cy="14" r="3.5" fill="#64748b" />
+        <text x="454" y="17" fill="#94a3b8" font-size="10" font-weight="600" text-anchor="middle">STANDBY</text>
+
+        <!-- Sessions Container -->
+        <g transform="translate(0, 46)">
+          <rect x="0" y="0" width="494" height="84" rx="8" fill="#081320" stroke="#12253b" stroke-width="1" />
+
+          <!-- Session 1 (Persisting in Background) -->
+          <g transform="translate(12, 10)">
+            <rect x="0" y="0" width="228" height="64" rx="6" fill="#0b1a2c" stroke="#1a3554" stroke-width="0.8" />
+            <circle cx="12" cy="14" r="3.5" fill="#475569" />
+            <text x="22" y="18" fill="#94a3b8" font-size="11" font-weight="600">session-01 [kernel-build]</text>
+            <text x="12" y="34" fill="#64748b" font-size="9.5" font-family="'JetBrains Mono', monospace">worktree: /opt/kernel</text>
+            <text x="12" y="50" fill="#475569" font-size="9.5" font-family="'JetBrains Mono', monospace">daemon maintains ring buffer</text>
+          </g>
+
+          <g transform="translate(254, 10)">
+            <rect x="0" y="0" width="228" height="64" rx="6" fill="#081422" stroke="#102236" stroke-width="0.8" stroke-dasharray="3,3" />
+            <text x="114" y="36" fill="#475569" font-size="10.5" text-anchor="middle">+ No Active Input Stream</text>
+          </g>
+        </g>
+
+        <!-- Host Footer -->
+        <g transform="translate(0, 142)">
+          <text x="0" y="14" fill="#64748b" font-size="10.5">Host ID: <tspan fill="#475569" font-family="'JetBrains Mono', monospace">host-lnx-3c1e</tspan> • Pairing: <tspan fill="#475569" font-family="'JetBrains Mono', monospace">standby</tspan></text>
+          <text x="494" y="14" fill="#64748b" font-size="10.5" text-anchor="end">Connected via Self-Hosted Relay</text>
+        </g>
+      </g>
+    </g>
+
+    <!-- ================= HOST 3 (STANDBY) ================= -->
+    <g transform="translate(20, 490)">
+      <rect x="0" y="0" width="530" height="198" rx="12" fill="url(#card-idle)" stroke="#1a334d" stroke-width="1.2" />
+
+      <!-- Host 3 Header -->
+      <g transform="translate(18, 16)">
+        <rect x="0" y="0" width="34" height="34" rx="7" fill="#0f1f33" stroke="#254870" stroke-width="1" />
+        <rect x="7" y="9" width="20" height="4" rx="1" fill="#475569" />
+        <rect x="7" y="15" width="20" height="4" rx="1" fill="#475569" />
+        <rect x="7" y="21" width="20" height="4" rx="1" fill="#475569" />
+
+        <text x="46" y="14" fill="#e2e8f0" font-size="14.5" font-weight="700">cloud-gpu-worker</text>
+        <text x="46" y="30" fill="#64748b" font-size="10.5" font-family="'JetBrains Mono', monospace">Debian A100 • ferryx-daemon [PID 1042]</text>
+
+        <!-- Standby Badge -->
+        <rect x="390" y="2" width="104" height="24" rx="6" fill="#14263e" stroke="#254870" stroke-width="1" />
+        <circle cx="404" cy="14" r="3.5" fill="#64748b" />
+        <text x="454" y="17" fill="#94a3b8" font-size="10" font-weight="600" text-anchor="middle">STANDBY</text>
+
+        <!-- Sessions Container -->
+        <g transform="translate(0, 46)">
+          <rect x="0" y="0" width="494" height="84" rx="8" fill="#081320" stroke="#12253b" stroke-width="1" />
+
+          <!-- Session 1 -->
+          <g transform="translate(12, 10)">
+            <rect x="0" y="0" width="228" height="64" rx="6" fill="#0b1a2c" stroke="#1a3554" stroke-width="0.8" />
+            <circle cx="12" cy="14" r="3.5" fill="#475569" />
+            <text x="22" y="18" fill="#94a3b8" font-size="11" font-weight="600">session-01 [vllm-eval]</text>
+            <text x="12" y="34" fill="#64748b" font-size="9.5" font-family="'JetBrains Mono', monospace">worktree: /data/models</text>
+            <text x="12" y="50" fill="#475569" font-size="9.5" font-family="'JetBrains Mono', monospace">daemon maintains ring buffer</text>
+          </g>
+
+          <g transform="translate(254, 10)">
+            <rect x="0" y="0" width="228" height="64" rx="6" fill="#081422" stroke="#102236" stroke-width="0.8" stroke-dasharray="3,3" />
+            <text x="114" y="36" fill="#475569" font-size="10.5" text-anchor="middle">+ No Active Input Stream</text>
+          </g>
+        </g>
+
+        <!-- Host Footer -->
+        <g transform="translate(0, 142)">
+          <text x="0" y="14" fill="#64748b" font-size="10.5">Host ID: <tspan fill="#475569" font-family="'JetBrains Mono', monospace">host-cld-6f8b</tspan> • Pairing: <tspan fill="#475569" font-family="'JetBrains Mono', monospace">standby</tspan></text>
+          <text x="494" y="14" fill="#64748b" font-size="10.5" text-anchor="end">Connected via Self-Hosted Relay</text>
+        </g>
+      </g>
+    </g>
+  </g>
+</svg>

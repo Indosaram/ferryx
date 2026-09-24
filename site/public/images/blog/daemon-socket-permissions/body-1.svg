@@ -1,0 +1,373 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900" style="background:#070a13; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'JetBrains Mono', monospace;">
+  <defs>
+    <!-- Background Gradients -->
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#090e1a" />
+      <stop offset="45%" stop-color="#060912" />
+      <stop offset="100%" stop-color="#030509" />
+    </linearGradient>
+
+    <!-- Card Gradients -->
+    <linearGradient id="card-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#10192a" stop-opacity="0.95" />
+      <stop offset="100%" stop-color="#090f1d" stop-opacity="0.98" />
+    </linearGradient>
+
+    <linearGradient id="subcard-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#142138" stop-opacity="0.9" />
+      <stop offset="100%" stop-color="#0c1524" stop-opacity="0.95" />
+    </linearGradient>
+
+    <linearGradient id="terminal-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#050a12" />
+      <stop offset="100%" stop-color="#03060a" />
+    </linearGradient>
+
+    <!-- Border Gradients -->
+    <linearGradient id="border-teal" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.8" />
+      <stop offset="50%" stop-color="#14b8a6" stop-opacity="0.4" />
+      <stop offset="100%" stop-color="#0d9488" stop-opacity="0.2" />
+    </linearGradient>
+
+    <linearGradient id="border-blue" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.8" />
+      <stop offset="50%" stop-color="#0284c7" stop-opacity="0.4" />
+      <stop offset="100%" stop-color="#0369a1" stop-opacity="0.2" />
+    </linearGradient>
+
+    <linearGradient id="border-emerald" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#34d399" stop-opacity="0.8" />
+      <stop offset="50%" stop-color="#059669" stop-opacity="0.4" />
+      <stop offset="100%" stop-color="#065f46" stop-opacity="0.2" />
+    </linearGradient>
+
+    <linearGradient id="line-glow-h" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0" />
+      <stop offset="40%" stop-color="#00f2fe" stop-opacity="0.9" />
+      <stop offset="60%" stop-color="#38bdf8" stop-opacity="0.9" />
+      <stop offset="100%" stop-color="#38bdf8" stop-opacity="0" />
+    </linearGradient>
+
+    <!-- Glow & Shadow Filters -->
+    <filter id="glow-teal" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <filter id="glow-blue" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <filter id="card-shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#000000" flood-opacity="0.55" />
+    </filter>
+
+    <!-- Markers -->
+    <marker id="arrow-teal" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#00f2fe" />
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#38bdf8" />
+    </marker>
+
+    <!-- Grid Pattern -->
+    <pattern id="grid-dots" x="0" y="0" width="36" height="36" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.2" fill="#1e293b" fill-opacity="0.38" />
+    </pattern>
+  </defs>
+
+  <!-- Background Base -->
+  <rect width="1600" height="900" fill="url(#bg-grad)" />
+  <rect width="1600" height="900" fill="url(#grid-dots)" />
+
+  <!-- Ambient Glow Blobs -->
+  <circle cx="280" cy="190" r="220" fill="#0d9488" fill-opacity="0.07" filter="url(#glow-teal)" />
+  <circle cx="800" cy="280" r="260" fill="#0284c7" fill-opacity="0.06" filter="url(#glow-blue)" />
+  <circle cx="1320" cy="220" r="240" fill="#00f2fe" fill-opacity="0.05" filter="url(#glow-teal)" />
+
+  <!-- ==================== HEADER ==================== -->
+  <g transform="translate(80, 48)">
+    <!-- Badges -->
+    <rect x="0" y="0" width="160" height="28" rx="14" fill="#0b2430" stroke="#00f2fe" stroke-width="1.2" />
+    <circle cx="15" cy="14" r="4.5" fill="#00f2fe" />
+    <text x="28" y="18" fill="#5eead4" font-size="11" font-weight="700" letter-spacing="1.2">SOCKET DIAGNOSTICS</text>
+
+    <rect x="175" y="0" width="150" height="28" rx="14" fill="#0f1c34" stroke="#38bdf8" stroke-width="1.2" />
+    <text x="250" y="18" text-anchor="middle" fill="#7dd3fc" font-size="11" font-weight="600" letter-spacing="0.8">SYSTEM TRIAGE FLOW</text>
+
+    <!-- Title & Subtitle -->
+    <text x="0" y="66" fill="#f8fafc" font-size="28" font-weight="700" letter-spacing="-0.5">Daemon Socket Permission &amp; IPC Diagnostics</text>
+    <text x="0" y="92" fill="#94a3b8" font-size="14" font-weight="400">Deterministic triage pipeline: path resolution, ownership validation, flock cleanup, and socket probe</text>
+  </g>
+
+  <!-- ==================== FLOW CONNECTIONS (INTER-CARD) ==================== -->
+  <g fill="none">
+    <!-- Card 1 to Card 2 Connectors -->
+    <path d="M 520 480 L 575 480" stroke="#00f2fe" stroke-width="2" stroke-dasharray="4 4" opacity="0.6" />
+    <path d="M 520 480 L 575 480" stroke="#00f2fe" stroke-width="2.5" marker-end="url(#arrow-teal)" />
+
+    <!-- Card 2 to Card 3 Connectors -->
+    <path d="M 1030 480 L 1085 480" stroke="#38bdf8" stroke-width="2" stroke-dasharray="4 4" opacity="0.6" />
+    <path d="M 1030 480 L 1085 480" stroke="#38bdf8" stroke-width="2.5" marker-end="url(#arrow-blue)" />
+  </g>
+
+  <!-- ==================== CARD 1: PATH RESOLUTION ==================== -->
+  <g transform="translate(80, 180)" filter="url(#card-shadow)">
+    <!-- Card Base -->
+    <rect width="440" height="650" rx="16" fill="url(#card-grad)" stroke="url(#border-teal)" stroke-width="1.5" />
+    
+    <!-- Top Accent Line -->
+    <rect x="2" y="2" width="436" height="3" fill="#00f2fe" opacity="0.8" rx="1" />
+
+    <!-- Card Header -->
+    <g transform="translate(28, 32)">
+      <rect x="0" y="0" width="34" height="34" rx="8" fill="#082b35" stroke="#00f2fe" stroke-width="1" />
+      <!-- Folder / Path Icon -->
+      <path d="M 9 12 L 15 12 L 17 15 L 25 15 C 26 15 26.5 15.5 26.5 16.5 L 26.5 23 C 26.5 24 26 24.5 25 24.5 L 9 24.5 C 8 24.5 7.5 24 7.5 23 L 7.5 13.5 C 7.5 12.5 8 12 9 12 Z" fill="none" stroke="#2dd4bf" stroke-width="1.6" stroke-linejoin="round" />
+      
+      <text x="46" y="16" fill="#f1f5f9" font-size="16" font-weight="700">01. Path Resolution</text>
+      <text x="46" y="32" fill="#64748b" font-size="12">Runtime directory &amp; socket target</text>
+    </g>
+
+    <!-- Subcard 1: Priority Locations -->
+    <g transform="translate(28, 95)">
+      <rect width="384" height="185" rx="10" fill="url(#subcard-grad)" stroke="#1e293b" stroke-width="1" />
+      <text x="20" y="28" fill="#94a3b8" font-size="11" font-weight="700" letter-spacing="0.8">HIERARCHICAL DISCOVERY</text>
+
+      <!-- Row 1 -->
+      <g transform="translate(20, 44)">
+        <circle cx="6" cy="14" r="3.5" fill="#00f2fe" />
+        <text x="18" y="12" fill="#e2e8f0" font-size="12" font-weight="600">Standard XDG Path (Linux / macOS)</text>
+        <text x="18" y="28" fill="#38bdf8" font-size="11" font-family="'JetBrains Mono', monospace">$XDG_RUNTIME_DIR/ferryx/daemon.sock</text>
+      </g>
+
+      <!-- Row 2 -->
+      <g transform="translate(20, 102)">
+        <circle cx="6" cy="14" r="3.5" fill="#64748b" />
+        <text x="18" y="12" fill="#94a3b8" font-size="12" font-weight="600">Fallback Per-User Sandbox Path</text>
+        <text x="18" y="28" fill="#64748b" font-size="11" font-family="'JetBrains Mono', monospace">/tmp/ferryx-$UID/daemon.sock</text>
+      </g>
+
+      <!-- Status Tag -->
+      <g transform="translate(20, 146)">
+        <rect width="78" height="20" rx="4" fill="#064e3b" stroke="#059669" stroke-width="0.8" />
+        <text x="39" y="14" text-anchor="middle" fill="#6ee7b7" font-size="10" font-weight="700">ISOLATED</text>
+        <text x="90" y="14" fill="#64748b" font-size="11">UID-isolated namespace</text>
+      </g>
+    </g>
+
+    <!-- Subcard 2: Parent Dir Checks -->
+    <g transform="translate(28, 300)">
+      <rect width="384" height="180" rx="10" fill="url(#subcard-grad)" stroke="#1e293b" stroke-width="1" />
+      <text x="20" y="28" fill="#94a3b8" font-size="11" font-weight="700" letter-spacing="0.8">DIRECTORY ACL REQUIREMENTS</text>
+
+      <!-- Terminal output preview -->
+      <rect x="18" y="42" width="348" height="68" rx="6" fill="url(#terminal-grad)" stroke="#1e2d42" stroke-width="1" />
+      <text x="30" y="64" fill="#64748b" font-size="11" font-family="'JetBrains Mono', monospace">$ ls -ld /tmp/ferryx-501</text>
+      <text x="30" y="86" fill="#38bdf8" font-size="11" font-family="'JetBrains Mono', monospace">drwx------  user  staff  (0700)</text>
+
+      <!-- Verification bullets -->
+      <g transform="translate(20, 126)">
+        <path d="M 2 8 L 6 12 L 14 4" fill="none" stroke="#2dd4bf" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+        <text x="22" y="10" fill="#cbd5e1" font-size="12">Sticky bit &amp; private runtime boundary</text>
+      </g>
+      <g transform="translate(20, 150)">
+        <path d="M 2 8 L 6 12 L 14 4" fill="none" stroke="#2dd4bf" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+        <text x="22" y="10" fill="#cbd5e1" font-size="12">Prevents symlink hijacking across UIDs</text>
+      </g>
+    </g>
+
+    <!-- Bottom Metric / Rule -->
+    <g transform="translate(28, 500)">
+      <rect width="384" height="115" rx="8" fill="#081422" stroke="#14324d" stroke-width="1" />
+      <text x="20" y="30" fill="#7dd3fc" font-size="12" font-weight="700">Triage Rule</text>
+      <text x="20" y="50" fill="#94a3b8" font-size="11">
+        <tspan x="20" dy="0">Verify parent directory permissions before checking</tspan>
+        <tspan x="20" dy="16">the socket inode itself to isolate access errors.</tspan>
+      </text>
+      
+      <circle cx="26" cy="88" r="4" fill="#00f2fe" />
+      <text x="38" y="92" fill="#38bdf8" font-size="11" font-family="'JetBrains Mono', monospace">Err: ENOENT | EACCES</text>
+    </g>
+  </g>
+
+  <!-- ==================== CARD 2: PERMISSIONS & FLOCK ==================== -->
+  <g transform="translate(580, 180)" filter="url(#card-shadow)">
+    <!-- Card Base -->
+    <rect width="450" height="650" rx="16" fill="url(#card-grad)" stroke="url(#border-blue)" stroke-width="1.5" />
+
+    <!-- Top Accent Line -->
+    <rect x="2" y="2" width="446" height="3" fill="#38bdf8" opacity="0.8" rx="1" />
+
+    <!-- Card Header -->
+    <g transform="translate(28, 32)">
+      <rect x="0" y="0" width="34" height="34" rx="8" fill="#08233d" stroke="#38bdf8" stroke-width="1" />
+      <!-- Lock / Shield Icon -->
+      <path d="M 12 15 L 12 12 C 12 9.2 14.2 7 17 7 C 19.8 7 22 9.2 22 12 L 22 15 M 10 15 L 24 15 C 25.1 15 26 15.9 26 17 L 26 24 C 26 25.1 25.1 26 24 26 L 10 26 C 8.9 26 8 25.1 8 24 L 8 17 C 8 15.9 8.9 15 10 15 Z" fill="none" stroke="#38bdf8" stroke-width="1.6" stroke-linejoin="round" />
+
+      <text x="46" y="16" fill="#f1f5f9" font-size="16" font-weight="700">02. Ownership &amp; Flock</text>
+      <text x="46" y="32" fill="#64748b" font-size="12">Inode permissions &amp; mutual exclusion</text>
+    </g>
+
+    <!-- Subcard 1: Inode Permission Validation -->
+    <g transform="translate(28, 95)">
+      <rect width="394" height="215" rx="10" fill="url(#subcard-grad)" stroke="#1e293b" stroke-width="1" />
+      <text x="20" y="28" fill="#94a3b8" font-size="11" font-weight="700" letter-spacing="0.8">INODE MODE INSPECTION</text>
+
+      <!-- Terminal output preview -->
+      <rect x="18" y="42" width="358" height="74" rx="6" fill="url(#terminal-grad)" stroke="#1e2d42" stroke-width="1" />
+      <text x="26" y="64" fill="#64748b" font-size="11" font-family="'JetBrains Mono', monospace">$ ls -l /tmp/ferryx-501/daemon.sock</text>
+      <text x="26" y="86" fill="#2dd4bf" font-size="11" font-family="'JetBrains Mono', monospace">srwx------ 1 user staff 0 Sep 24</text>
+      <text x="26" y="104" fill="#f43f5e" font-size="10" font-family="'JetBrains Mono', monospace"># Error if UID != current user</text>
+
+      <!-- Perm comparison table -->
+      <g transform="translate(20, 134)">
+        <rect width="170" height="66" rx="6" fill="#081827" stroke="#14324d" stroke-width="1" />
+        <text x="12" y="20" fill="#2dd4bf" font-size="11" font-weight="700">Valid Inode</text>
+        <text x="12" y="38" fill="#e2e8f0" font-size="10" font-family="'JetBrains Mono', monospace">Mode: 0600 / 0700</text>
+        <text x="12" y="54" fill="#94a3b8" font-size="10">UID matches caller</text>
+
+        <rect x="184" y="0" width="170" height="66" rx="6" fill="#220b12" stroke="#4c1d24" stroke-width="1" />
+        <text x="196" y="20" fill="#fb7185" font-size="11" font-weight="700">Invalid State</text>
+        <text x="196" y="38" fill="#fca5a5" font-size="10" font-family="'JetBrains Mono', monospace">Mode: 0777 / root</text>
+        <text x="196" y="54" fill="#f87171" font-size="10">EACCES on connect()</text>
+      </g>
+    </g>
+
+    <!-- Subcard 2: Flock & Orphan Detection -->
+    <g transform="translate(28, 330)">
+      <rect width="394" height="150" rx="10" fill="url(#subcard-grad)" stroke="#1e293b" stroke-width="1" />
+      <text x="20" y="28" fill="#94a3b8" font-size="11" font-weight="700" letter-spacing="0.8">STALE FLOCK LOCKFILE CHECK</text>
+
+      <g transform="translate(20, 48)">
+        <rect width="354" height="34" rx="6" fill="#0a1828" stroke="#153655" stroke-width="1" />
+        <text x="14" y="22" fill="#38bdf8" font-size="11" font-family="'JetBrains Mono', monospace">flock -n /tmp/ferryx-501/daemon.lock</text>
+      </g>
+
+      <g transform="translate(20, 98)">
+        <path d="M 2 8 L 6 12 L 14 4" fill="none" stroke="#38bdf8" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+        <text x="22" y="10" fill="#cbd5e1" font-size="12">If lock held &amp; PID alive: attach to session</text>
+      </g>
+      <g transform="translate(20, 122)">
+        <path d="M 2 8 L 6 12 L 14 4" fill="none" stroke="#f59e0b" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+        <text x="22" y="10" fill="#fbbf24" font-size="12">If PID dead: automatically clean stale socket</text>
+      </g>
+    </g>
+
+    <!-- Bottom Metric / Rule -->
+    <g transform="translate(28, 500)">
+      <rect width="394" height="115" rx="8" fill="#081422" stroke="#14324d" stroke-width="1" />
+      <text x="20" y="30" fill="#7dd3fc" font-size="12" font-weight="700">Atomic Guard</text>
+      <text x="20" y="50" fill="#94a3b8" font-size="11">
+        <tspan x="20" dy="0">Flock guarantees single-daemon invariant per user.</tspan>
+        <tspan x="20" dy="16">Verify daemon PID liveness before removing locks.</tspan>
+      </text>
+
+      <circle cx="26" cy="88" r="4" fill="#38bdf8" />
+      <text x="38" y="92" fill="#7dd3fc" font-size="11" font-family="'JetBrains Mono', monospace">PID Check: kill -0 &lt;pid&gt;</text>
+    </g>
+  </g>
+
+  <!-- ==================== CARD 3: IPC PROBE & RECOVERY ==================== -->
+  <g transform="translate(1080, 180)" filter="url(#card-shadow)">
+    <!-- Card Base -->
+    <rect width="440" height="650" rx="16" fill="url(#card-grad)" stroke="url(#border-emerald)" stroke-width="1.5" />
+
+    <!-- Top Accent Line -->
+    <rect x="2" y="2" width="436" height="3" fill="#34d399" opacity="0.8" rx="1" />
+
+    <!-- Card Header -->
+    <g transform="translate(28, 32)">
+      <rect x="0" y="0" width="34" height="34" rx="8" fill="#082b20" stroke="#34d399" stroke-width="1" />
+      <!-- Signal / Probe Icon -->
+      <path d="M 8 20 A 12 12 0 0 1 26 20 M 11 22 A 8 8 0 0 1 23 22 M 17 24 L 17 25" fill="none" stroke="#34d399" stroke-width="2" stroke-linecap="round" />
+      <circle cx="17" cy="24" r="1.5" fill="#34d399" />
+
+      <text x="46" y="16" fill="#f1f5f9" font-size="16" font-weight="700">03. Handshake &amp; Probe</text>
+      <text x="46" y="32" fill="#64748b" font-size="12">Non-blocking UDS connect verification</text>
+    </g>
+
+    <!-- Subcard 1: Ping / Health Probe -->
+    <g transform="translate(28, 95)">
+      <rect width="384" height="185" rx="10" fill="url(#subcard-grad)" stroke="#1e293b" stroke-width="1" />
+      <text x="20" y="28" fill="#94a3b8" font-size="11" font-weight="700" letter-spacing="0.8">NON-BLOCKING IPC PROBE</text>
+
+      <!-- Ping/Pong visual -->
+      <g transform="translate(20, 48)">
+        <rect width="160" height="42" rx="6" fill="#091f1a" stroke="#10b981" stroke-width="1" />
+        <text x="14" y="26" fill="#6ee7b7" font-size="11" font-family="'JetBrains Mono', monospace">GUI Client</text>
+        
+        <path d="M 165 21 L 195 21" stroke="#34d399" stroke-width="1.8" marker-end="url(#arrow-teal)" />
+        <text x="180" y="15" text-anchor="middle" fill="#6ee7b7" font-size="9" font-family="'JetBrains Mono', monospace">PING</text>
+
+        <rect x="205" y="0" width="140" height="42" rx="6" fill="#08233d" stroke="#38bdf8" stroke-width="1" />
+        <text x="219" y="26" fill="#7dd3fc" font-size="11" font-family="'JetBrains Mono', monospace">PTY Daemon</text>
+      </g>
+
+      <!-- Result banner -->
+      <g transform="translate(20, 108)">
+        <rect width="345" height="56" rx="6" fill="url(#terminal-grad)" stroke="#14324d" stroke-width="1" />
+        <text x="16" y="24" fill="#34d399" font-size="11" font-family="'JetBrains Mono', monospace">✓ Handshake OK (latency &lt; 0.4ms)</text>
+        <text x="16" y="44" fill="#64748b" font-size="10" font-family="'JetBrains Mono', monospace">Protocol: ferryx-uds-v1 (framed)</text>
+      </g>
+    </g>
+
+    <!-- Subcard 2: Error Matrix & Recovery -->
+    <g transform="translate(28, 300)">
+      <rect width="384" height="180" rx="10" fill="url(#subcard-grad)" stroke="#1e293b" stroke-width="1" />
+      <text x="20" y="28" fill="#94a3b8" font-size="11" font-weight="700" letter-spacing="0.8">ERROR CODE RECOVERY MATRIX</text>
+
+      <g transform="translate(18, 42)">
+        <!-- Error 1 -->
+        <g transform="translate(0, 0)">
+          <rect width="80" height="22" rx="4" fill="#2d1217" stroke="#e11d48" stroke-width="0.8" />
+          <text x="40" y="15" text-anchor="middle" fill="#fda4af" font-size="10" font-family="'JetBrains Mono', monospace">ECONNREF</text>
+          <text x="92" y="16" fill="#cbd5e1" font-size="11">Stale socket file. Unlink &amp; respawn.</text>
+        </g>
+
+        <!-- Error 2 -->
+        <g transform="translate(0, 32)">
+          <rect width="80" height="22" rx="4" fill="#2d1217" stroke="#e11d48" stroke-width="0.8" />
+          <text x="40" y="15" text-anchor="middle" fill="#fda4af" font-size="10" font-family="'JetBrains Mono', monospace">EACCES</text>
+          <text x="92" y="16" fill="#cbd5e1" font-size="11">UID mismatch. Fix dir permissions.</text>
+        </g>
+
+        <!-- Error 3 -->
+        <g transform="translate(0, 64)">
+          <rect width="80" height="22" rx="4" fill="#2d1d08" stroke="#d97706" stroke-width="0.8" />
+          <text x="40" y="15" text-anchor="middle" fill="#fde68a" font-size="10" font-family="'JetBrains Mono', monospace">ENOENT</text>
+          <text x="92" y="16" fill="#cbd5e1" font-size="11">Socket missing. Daemon starting up.</text>
+        </g>
+
+        <!-- Error 4 -->
+        <g transform="translate(0, 96)">
+          <rect width="80" height="22" rx="4" fill="#082b20" stroke="#059669" stroke-width="0.8" />
+          <text x="40" y="15" text-anchor="middle" fill="#6ee7b7" font-size="10" font-family="'JetBrains Mono', monospace">ESTABLISHED</text>
+          <text x="92" y="16" fill="#a7f3d0" font-size="11">Session active. Attach pane layout.</text>
+        </g>
+      </g>
+    </g>
+
+    <!-- Bottom Metric / Rule -->
+    <g transform="translate(28, 500)">
+      <rect width="384" height="115" rx="8" fill="#081422" stroke="#14324d" stroke-width="1" />
+      <text x="20" y="30" fill="#34d399" font-size="12" font-weight="700">Resilient Reconnect</text>
+      <text x="20" y="50" fill="#94a3b8" font-size="11">
+        <tspan x="20" dy="0">GUI reconnects with backoff up to 2.5s</tspan>
+        <tspan x="20" dy="16">before surfacing terminal error dialogs.</tspan>
+      </text>
+
+      <circle cx="26" cy="88" r="4" fill="#34d399" />
+      <text x="38" y="92" fill="#6ee7b7" font-size="11" font-family="'JetBrains Mono', monospace">Status: READY_ACTIVE</text>
+    </g>
+  </g>
+
+  <!-- ==================== FOOTER / ATTRIBUTION BAR ==================== -->
+  <g transform="translate(80, 850)">
+    <line x1="0" y1="0" x2="1440" y2="0" stroke="url(#line-glow-h)" stroke-width="1" />
+    <text x="0" y="24" fill="#475569" font-size="11" font-weight="500">FERRYX CORE ARCHITECTURE · DAEMON IPC SUBSYSTEM</text>
+    <text x="1440" y="24" text-anchor="end" fill="#475569" font-size="11" font-family="'JetBrains Mono', monospace">DOCS/ARCHITECTURE#SOCKET-PERMISSIONS</text>
+  </g>
+</svg>

@@ -1,0 +1,309 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900" style="background:#070a12; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'JetBrains Mono', monospace;">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#080d18" />
+      <stop offset="50%" stop-color="#060911" />
+      <stop offset="100%" stop-color="#030509" />
+    </linearGradient>
+
+    <!-- Actor Card Gradients -->
+    <linearGradient id="card-ui" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0e1f38" />
+      <stop offset="100%" stop-color="#091322" />
+    </linearGradient>
+
+    <linearGradient id="card-daemon" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#09252c" />
+      <stop offset="100%" stop-color="#05161b" />
+    </linearGradient>
+
+    <!-- Phase Background Gradients -->
+    <linearGradient id="phase1-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0c1b2c" stop-opacity="0.32" />
+      <stop offset="100%" stop-color="#070e17" stop-opacity="0.12" />
+    </linearGradient>
+
+    <linearGradient id="phase2-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0a262e" stop-opacity="0.38" />
+      <stop offset="100%" stop-color="#051419" stop-opacity="0.18" />
+    </linearGradient>
+
+    <linearGradient id="phase3-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#241320" stop-opacity="0.35" />
+      <stop offset="100%" stop-color="#120914" stop-opacity="0.16" />
+    </linearGradient>
+
+    <!-- Arrow markers -->
+    <marker id="arrow-teal" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#14b8a6" />
+    </marker>
+    <marker id="arrow-cyan" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#38bdf8" />
+    </marker>
+    <marker id="arrow-amber" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#f59e0b" />
+    </marker>
+
+    <!-- Glow filters -->
+    <filter id="glow-teal" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <!-- Background Base -->
+  <rect width="1600" height="900" fill="url(#bg-grad)" />
+
+  <!-- Grid Dots Background Pattern -->
+  <g opacity="0.05" fill="#38bdf8">
+    <pattern id="grid-dots" x="0" y="0" width="32" height="32" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.2" />
+    </pattern>
+    <rect width="1600" height="900" fill="url(#grid-dots)" />
+  </g>
+
+  <!-- Ambient Light Blobs -->
+  <circle cx="320" cy="360" r="260" fill="#0284c7" opacity="0.065" filter="blur(80px)" />
+  <circle cx="1280" cy="460" r="280" fill="#0d9488" opacity="0.075" filter="blur(90px)" />
+  <circle cx="800" cy="640" r="220" fill="#2563eb" opacity="0.045" filter="blur(80px)" />
+
+  <!-- ==================== HEADER ==================== -->
+  <g transform="translate(80, 42)">
+    <!-- Category Pill -->
+    <rect x="0" y="0" width="186" height="24" rx="12" fill="#0c1829" stroke="#1d3557" stroke-width="1" />
+    <circle cx="12" cy="12" r="3.5" fill="#14b8a6" />
+    <text x="24" y="16" fill="#38bdf8" font-size="10" font-weight="700" letter-spacing="1.5">REPLAY &amp; SEQUENCING</text>
+
+    <!-- Main Title -->
+    <text x="0" y="58" fill="#f8fafc" font-size="28" font-weight="700" letter-spacing="-0.5">Sequence Numbers That Make Replay Trustworthy</text>
+    
+    <!-- Subtitle -->
+    <text x="0" y="83" fill="#94a3b8" font-size="14" font-weight="400">Deterministic stream ordering, windowed ring buffer replay, and fail-safe gap detection</text>
+  </g>
+
+  <!-- ==================== PARTICIPANTS HEADER ==================== -->
+  <!-- Left Actor: UI Client (Center x=320) -->
+  <g transform="translate(320, 146)">
+    <rect x="-135" y="0" width="270" height="66" rx="10" fill="url(#card-ui)" stroke="#1e3a5f" stroke-width="1.5" />
+    <rect x="-120" y="13" width="40" height="40" rx="8" fill="#0284c7" fill-opacity="0.15" stroke="#38bdf8" stroke-width="1" />
+    <text x="-100" y="37" text-anchor="middle" fill="#38bdf8" font-size="13" font-family="'JetBrains Mono', monospace" font-weight="700">UI</text>
+    <text x="-66" y="29" fill="#f8fafc" font-size="14" font-weight="600">Ferryx Desktop Client</text>
+    <text x="-66" y="47" fill="#64748b" font-size="11" font-family="'JetBrains Mono', monospace">Tauri v2 • libghostty-vt</text>
+  </g>
+
+  <!-- Right Actor: PTY Daemon (Center x=1280) -->
+  <g transform="translate(1280, 146)">
+    <rect x="-135" y="0" width="270" height="66" rx="10" fill="url(#card-daemon)" stroke="#0f766e" stroke-width="1.5" />
+    <rect x="-120" y="13" width="40" height="40" rx="8" fill="#0d9488" fill-opacity="0.15" stroke="#14b8a6" stroke-width="1" />
+    <text x="-100" y="37" text-anchor="middle" fill="#14b8a6" font-size="12" font-family="'JetBrains Mono', monospace" font-weight="700">PTY</text>
+    <text x="-66" y="29" fill="#f8fafc" font-size="14" font-weight="600">Headless PTY Daemon</text>
+    <text x="-66" y="47" fill="#64748b" font-size="11" font-family="'JetBrains Mono', monospace">512KB RingBuffer • UDS</text>
+  </g>
+
+  <!-- ==================== LIFELINES ==================== -->
+  <!-- UI Lifeline (x=320) -->
+  <line x1="320" y1="212" x2="320" y2="782" stroke="#1e293b" stroke-width="2" stroke-dasharray="6,6" />
+  <!-- UI Active Column Bar Segments (x=315..325) -->
+  <rect x="315" y="235" width="10" height="135" rx="4" fill="#1e3a5f" />
+  <rect x="315" y="450" width="10" height="132" rx="4" fill="#1e3a5f" />
+  <rect x="315" y="660" width="10" height="106" rx="4" fill="#1e3a5f" />
+
+  <!-- Daemon Lifeline (x=1280) -->
+  <line x1="1280" y1="212" x2="1280" y2="782" stroke="#134e4a" stroke-width="2" stroke-dasharray="6,6" />
+  <!-- Daemon Active Column Bar (x=1275..1285) -->
+  <rect x="1275" y="235" width="10" height="531" rx="4" fill="#0f766e" />
+
+  <!-- ==================== PHASE 1: MONOTONIC STREAMING ==================== -->
+  <g transform="translate(80, 230)">
+    <!-- Phase boundary background -->
+    <rect x="0" y="0" width="1440" height="135" rx="10" fill="url(#phase1-bg)" stroke="#1e293b" stroke-width="1" stroke-dasharray="4,4" />
+    
+    <!-- Phase Label Chip -->
+    <rect x="16" y="10" width="200" height="22" rx="6" fill="#0f172a" stroke="#334155" stroke-width="1" />
+    <text x="26" y="25" fill="#38bdf8" font-size="10" font-family="'JetBrains Mono', monospace" font-weight="700">PHASE 1: LIVE STREAMING</text>
+    
+    <!-- Message 1: Frame #101 (y=48) -->
+    <g transform="translate(0, 48)">
+      <!-- Left State Chip (UI) -->
+      <rect x="46" y="-12" width="170" height="24" rx="5" fill="#091929" stroke="#1e3a5f" stroke-width="1" />
+      <text x="56" y="4" fill="#38bdf8" font-size="10" font-family="'JetBrains Mono', monospace">seq = 101 [synced]</text>
+
+      <!-- Arrow (1195 to 247) -->
+      <line x1="1195" y1="0" x2="247" y2="0" stroke="#14b8a6" stroke-width="1.8" marker-end="url(#arrow-teal)" />
+      
+      <!-- Center Message Box -->
+      <rect x="520" y="-17" width="400" height="34" rx="6" fill="#091824" stroke="#14b8a6" stroke-width="1" />
+      <text x="536" y="4" fill="#2dd4bf" font-size="11" font-family="'JetBrains Mono', monospace" font-weight="700">FRAME #101</text>
+      <text x="635" y="4" fill="#94a3b8" font-size="11" font-family="'JetBrains Mono', monospace">len: 1024B • epoch: 1</text>
+
+      <!-- Right State Chip (Daemon) -->
+      <rect x="1224" y="-12" width="170" height="24" rx="5" fill="#061c24" stroke="#0f766e" stroke-width="1" />
+      <text x="1234" y="4" fill="#14b8a6" font-size="10" font-family="'JetBrains Mono', monospace">buffer: [100..101]</text>
+    </g>
+
+    <!-- Message 2: Frame #102 (y=95) -->
+    <g transform="translate(0, 95)">
+      <!-- Left State Chip (UI) -->
+      <rect x="46" y="-12" width="170" height="24" rx="5" fill="#091929" stroke="#1e3a5f" stroke-width="1" />
+      <text x="56" y="4" fill="#38bdf8" font-size="10" font-family="'JetBrains Mono', monospace">seq = 102 [synced]</text>
+
+      <!-- Arrow (1195 to 247) -->
+      <line x1="1195" y1="0" x2="247" y2="0" stroke="#14b8a6" stroke-width="1.8" marker-end="url(#arrow-teal)" />
+      
+      <!-- Center Message Box -->
+      <rect x="520" y="-17" width="400" height="34" rx="6" fill="#091824" stroke="#14b8a6" stroke-width="1" />
+      <text x="536" y="4" fill="#2dd4bf" font-size="11" font-family="'JetBrains Mono', monospace" font-weight="700">FRAME #102</text>
+      <text x="635" y="4" fill="#94a3b8" font-size="11" font-family="'JetBrains Mono', monospace">len: 2048B • epoch: 1</text>
+
+      <!-- Right State Chip (Daemon) -->
+      <rect x="1224" y="-12" width="170" height="24" rx="5" fill="#061c24" stroke="#0f766e" stroke-width="1" />
+      <text x="1234" y="4" fill="#14b8a6" font-size="10" font-family="'JetBrains Mono', monospace">buffer: [100..102]</text>
+    </g>
+  </g>
+
+  <!-- ==================== EVENT 1: DISCONNECT & AUTONOMOUS BUFFERING ==================== -->
+  <g transform="translate(80, 380)">
+    <rect x="10" y="0" width="1420" height="42" rx="8" fill="#111827" stroke="#374151" stroke-width="1" />
+    <circle cx="36" cy="21" r="4.5" fill="#f59e0b" />
+    <text x="52" y="25" fill="#f3f4f6" font-size="12.5" font-weight="600">Client Window Reloads / Process Crash</text>
+    <text x="345" y="25" fill="#9ca3af" font-size="12">— Daemon preserves PTY session and sequences background output into RingBuffer</text>
+    
+    <!-- Daemon Autonomous Buffering Chip -->
+    <rect x="1150" y="9" width="265" height="24" rx="5" fill="#061f26" stroke="#0d9488" stroke-width="1" />
+    <text x="1162" y="25" fill="#2dd4bf" font-size="10.5" font-family="'JetBrains Mono', monospace">RingBuffer appends #103..#108</text>
+  </g>
+
+  <!-- ==================== PHASE 2: IN-BOUNDS REPLAY (TRUSTED CATCH-UP) ==================== -->
+  <g transform="translate(80, 436)">
+    <rect x="0" y="0" width="1440" height="150" rx="10" fill="url(#phase2-bg)" stroke="#0f766e" stroke-width="1" stroke-dasharray="4,4" />
+    
+    <!-- Phase Label Chip -->
+    <rect x="16" y="10" width="245" height="22" rx="6" fill="#061c24" stroke="#0f766e" stroke-width="1" />
+    <text x="26" y="25" fill="#2dd4bf" font-size="10" font-family="'JetBrains Mono', monospace" font-weight="700">PHASE 2: VERIFIED REPLAY CATCH-UP</text>
+
+    <!-- Message 3: UI to Daemon ReplayRequest (y=48) -->
+    <g transform="translate(0, 48)">
+      <!-- Left State Chip (UI) -->
+      <rect x="46" y="-12" width="170" height="24" rx="5" fill="#0c1e33" stroke="#2563eb" stroke-width="1" />
+      <text x="56" y="4" fill="#93c5fd" font-size="10" font-family="'JetBrains Mono', monospace">reconnected: req 103</text>
+
+      <!-- Arrow (245 to 1193) -->
+      <line x1="245" y1="0" x2="1193" y2="0" stroke="#38bdf8" stroke-width="1.8" marker-end="url(#arrow-cyan)" />
+      
+      <!-- Center Message Box -->
+      <rect x="490" y="-17" width="460" height="34" rx="6" fill="#091b2e" stroke="#0284c7" stroke-width="1" />
+      <text x="506" y="4" fill="#38bdf8" font-size="11" font-family="'JetBrains Mono', monospace" font-weight="700">REPLAY_REQUEST</text>
+      <text x="635" y="4" fill="#93c5fd" font-size="11" font-family="'JetBrains Mono', monospace">since_seq: 103 • max_bytes: 512KB</text>
+
+      <!-- Right Evaluation Chip (Daemon) -->
+      <rect x="1205" y="-12" width="215" height="24" rx="5" fill="#06221d" stroke="#059669" stroke-width="1" />
+      <text x="1215" y="4" fill="#34d399" font-size="9.5" font-family="'JetBrains Mono', monospace">103 &gt;= tail 100 (In Bounds ✓)</text>
+    </g>
+
+    <!-- Message 4: Daemon Replay Burst (y=98) -->
+    <g transform="translate(0, 98)">
+      <!-- Left Success Status Chip -->
+      <rect x="46" y="-13" width="170" height="26" rx="5" fill="#064e3b" stroke="#059669" stroke-width="1" />
+      <text x="56" y="4" fill="#6ee7b7" font-size="10" font-family="'JetBrains Mono', monospace" font-weight="700">✓ ZERO BYTES LOST</text>
+
+      <!-- Replay Burst Arrow (Dashed thick: 1195 to 247) -->
+      <line x1="1195" y1="0" x2="247" y2="0" stroke="#14b8a6" stroke-width="2.2" stroke-dasharray="6,3" marker-end="url(#arrow-teal)" />
+      
+      <!-- Center Message Box -->
+      <rect x="450" y="-17" width="540" height="34" rx="6" fill="#052026" stroke="#14b8a6" stroke-width="1.2" />
+      <text x="466" y="4" fill="#2dd4bf" font-size="11" font-family="'JetBrains Mono', monospace" font-weight="700">REPLAY_BURST</text>
+      <text x="575" y="4" fill="#e2e8f0" font-size="11" font-family="'JetBrains Mono', monospace">frames #103..#108 (contiguous VT stream replay)</text>
+
+      <!-- Right State Chip (Daemon) -->
+      <rect x="1224" y="-12" width="170" height="24" rx="5" fill="#061c24" stroke="#0f766e" stroke-width="1" />
+      <text x="1234" y="4" fill="#14b8a6" font-size="10" font-family="'JetBrains Mono', monospace">buffer: [100..108]</text>
+    </g>
+
+    <!-- Explanatory text -->
+    <text x="520" y="138" fill="#64748b" font-size="11" font-weight="500">Terminal re-syncs state cleanly without redraw flicker or duplicated escape sequences</text>
+  </g>
+
+  <!-- ==================== EVENT 2: BUFFER WRAP / CAPACITY EXCEEDED ==================== -->
+  <g transform="translate(80, 600)">
+    <rect x="10" y="0" width="1420" height="42" rx="8" fill="#1e101b" stroke="#4c1d3d" stroke-width="1" />
+    <circle cx="36" cy="21" r="4.5" fill="#f43f5e" />
+    <text x="52" y="25" fill="#fda4af" font-size="12.5" font-weight="600">Extended Sleep / Heavy Output Burst Exceeds 512KB Ring Capacity</text>
+    <text x="570" y="25" fill="#f472b6" font-size="12">— Ring tail advances past client's last seen sequence (tail: 120 &gt; client: 108)</text>
+  </g>
+
+  <!-- ==================== PHASE 3: BUFFER WRAP & HONEST GAP ==================== -->
+  <g transform="translate(80, 656)">
+    <rect x="0" y="0" width="1440" height="124" rx="10" fill="url(#phase3-bg)" stroke="#831843" stroke-width="1" stroke-dasharray="4,4" />
+    
+    <!-- Phase Label Chip -->
+    <rect x="16" y="10" width="280" height="22" rx="6" fill="#1f0e1c" stroke="#9d174d" stroke-width="1" />
+    <text x="26" y="25" fill="#f472b6" font-size="10" font-family="'JetBrains Mono', monospace" font-weight="700">PHASE 3: BUFFER WRAP &amp; HONEST GAP</text>
+
+    <!-- Message 5: UI requests since 109 (y=42) -->
+    <g transform="translate(0, 42)">
+      <!-- Left State Chip (UI) -->
+      <rect x="46" y="-12" width="170" height="24" rx="5" fill="#0c1e33" stroke="#2563eb" stroke-width="1" />
+      <text x="56" y="4" fill="#93c5fd" font-size="10" font-family="'JetBrains Mono', monospace">req since: 109</text>
+
+      <!-- Arrow (245 to 1193) -->
+      <line x1="245" y1="0" x2="1193" y2="0" stroke="#38bdf8" stroke-width="1.8" marker-end="url(#arrow-cyan)" />
+      
+      <!-- Center Message Box -->
+      <rect x="520" y="-15" width="400" height="30" rx="6" fill="#131b2e" stroke="#2563eb" stroke-width="1" />
+      <text x="536" y="4" fill="#93c5fd" font-size="11" font-family="'JetBrains Mono', monospace" font-weight="700">REPLAY_REQUEST</text>
+      <text x="655" y="4" fill="#bfdbfe" font-size="11" font-family="'JetBrains Mono', monospace">since_seq: 109</text>
+
+      <!-- Right State Chip (Daemon) -->
+      <rect x="1205" y="-12" width="215" height="24" rx="5" fill="#2d121c" stroke="#e11d48" stroke-width="1" />
+      <text x="1215" y="4" fill="#fda4af" font-size="9.5" font-family="'JetBrains Mono', monospace">109 &lt; tail 120 (Evicted!)</text>
+    </g>
+
+    <!-- Message 6: Daemon GAP_NOTICE (y=84) -->
+    <g transform="translate(0, 84)">
+      <!-- Left Gap Alert Chip -->
+      <rect x="46" y="-13" width="170" height="26" rx="5" fill="#450a0a" stroke="#dc2626" stroke-width="1" />
+      <text x="56" y="4" fill="#fca5a5" font-size="10" font-family="'JetBrains Mono', monospace" font-weight="700">⚠ GAP DETECTED</text>
+
+      <!-- Gap Notice Arrow (1195 to 247) -->
+      <line x1="1195" y1="0" x2="247" y2="0" stroke="#f59e0b" stroke-width="2" marker-end="url(#arrow-amber)" />
+      
+      <!-- Center Message Box -->
+      <rect x="460" y="-17" width="520" height="34" rx="6" fill="#241505" stroke="#f59e0b" stroke-width="1.2" />
+      <text x="476" y="4" fill="#fbbf24" font-size="11" font-family="'JetBrains Mono', monospace" font-weight="700">GAP_NOTICE</text>
+      <text x="570" y="4" fill="#fed7aa" font-size="11" font-family="'JetBrains Mono', monospace">dropped: [109..119] • earliest_available: 120</text>
+
+      <!-- Right State Chip (Daemon) -->
+      <rect x="1224" y="-12" width="170" height="24" rx="5" fill="#061c24" stroke="#0f766e" stroke-width="1" />
+      <text x="1234" y="4" fill="#14b8a6" font-size="10" font-family="'JetBrains Mono', monospace">buffer: [120..145]</text>
+    </g>
+  </g>
+
+  <!-- ==================== FOOTER TRUST PILLARS ==================== -->
+  <g transform="translate(80, 800)">
+    <!-- Guarantee 1: Monotonic Ordering -->
+    <g transform="translate(0, 0)">
+      <rect x="0" y="0" width="460" height="56" rx="8" fill="#091322" stroke="#1e293b" stroke-width="1" />
+      <circle cx="24" cy="28" r="6" fill="#0284c7" />
+      <text x="42" y="24" fill="#f1f5f9" font-size="12.5" font-weight="600">Strict Monotonic Ordering</text>
+      <text x="42" y="43" fill="#64748b" font-size="11">64-bit continuous frame index prevents out-of-order VT decoding</text>
+    </g>
+
+    <!-- Guarantee 2: Windowed Catch-Up -->
+    <g transform="translate(490, 0)">
+      <rect x="0" y="0" width="460" height="56" rx="8" fill="#06181e" stroke="#134e4a" stroke-width="1" />
+      <circle cx="24" cy="28" r="6" fill="#14b8a6" />
+      <text x="42" y="24" fill="#f1f5f9" font-size="12.5" font-weight="600">Sub-Frame Catch-Up</text>
+      <text x="42" y="43" fill="#64748b" font-size="11">Client requests exact missing slice; avoids full-screen re-transmits</text>
+    </g>
+
+    <!-- Guarantee 3: Honest Gap Detection -->
+    <g transform="translate(980, 0)">
+      <rect x="0" y="0" width="460" height="56" rx="8" fill="#1c0f18" stroke="#4c1d3d" stroke-width="1" />
+      <circle cx="24" cy="28" r="6" fill="#f59e0b" />
+      <text x="42" y="24" fill="#f1f5f9" font-size="12.5" font-weight="600">Never Silently Desync</text>
+      <text x="42" y="43" fill="#64748b" font-size="11">Buffer overflow emits explicit bounds; UI never displays corrupt state</text>
+    </g>
+  </g>
+
+</svg>

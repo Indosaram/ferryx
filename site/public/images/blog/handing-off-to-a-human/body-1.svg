@@ -1,0 +1,374 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900" style="background:#070a13; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0a0f1d" />
+      <stop offset="50%" stop-color="#070a13" />
+      <stop offset="100%" stop-color="#04060a" />
+    </linearGradient>
+
+    <!-- Card Backgrounds -->
+    <linearGradient id="card-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#111827" stop-opacity="0.95" />
+      <stop offset="100%" stop-color="#0b1120" stop-opacity="0.98" />
+    </linearGradient>
+
+    <linearGradient id="card-highlight-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0c2333" stop-opacity="0.95" />
+      <stop offset="100%" stop-color="#071421" stop-opacity="0.98" />
+    </linearGradient>
+
+    <linearGradient id="pill-teal-grad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#0d9488" stop-opacity="0.22" />
+      <stop offset="100%" stop-color="#14b8a6" stop-opacity="0.08" />
+    </linearGradient>
+
+    <!-- Glow & Shadow Filters -->
+    <filter id="glow-teal" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <filter id="glow-blue" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <filter id="drop-shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="6" stdDeviation="12" flood-color="#000000" flood-opacity="0.75" />
+    </filter>
+
+    <!-- Subtle Dot Grid -->
+    <pattern id="grid-dots" x="0" y="0" width="32" height="32" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.2" fill="#1e293b" fill-opacity="0.45" />
+    </pattern>
+
+    <!-- Arrow Markers -->
+    <marker id="arrow-teal" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 8 5 L 0 9 z" fill="#14b8a6" />
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 8 5 L 0 9 z" fill="#38bdf8" />
+    </marker>
+  </defs>
+
+  <!-- Base Canvas Background -->
+  <rect width="1600" height="900" fill="url(#bg-grad)" />
+  <rect width="1600" height="900" fill="url(#grid-dots)" />
+
+  <!-- Ambient Glow Orbs -->
+  <circle cx="220" cy="240" r="220" fill="#0284c7" fill-opacity="0.08" filter="url(#glow-blue)" />
+  <circle cx="800" cy="480" r="280" fill="#0d9488" fill-opacity="0.06" filter="url(#glow-teal)" />
+  <circle cx="1380" cy="500" r="240" fill="#0284c7" fill-opacity="0.07" filter="url(#glow-blue)" />
+
+  <!-- ==================== HEADER ==================== -->
+  <g transform="translate(80, 50)">
+    <!-- Pill Badges -->
+    <rect x="0" y="0" width="186" height="28" rx="14" fill="#0b2430" stroke="#14b8a6" stroke-width="1.2" />
+    <circle cx="15" cy="14" r="4.5" fill="#14b8a6" />
+    <text x="30" y="18" fill="#2dd4bf" font-size="11" font-weight="700" letter-spacing="1.2">WORKFLOW PROTOCOL</text>
+
+    <rect x="198" y="0" width="194" height="28" rx="14" fill="#0f1c34" stroke="#38bdf8" stroke-width="1.2" />
+    <text x="295" y="18" text-anchor="middle" fill="#7dd3fc" font-size="11" font-weight="600" letter-spacing="0.8">AGENT → HUMAN HANDOFF</text>
+
+    <!-- Title & Subtitle -->
+    <text x="0" y="68" fill="#f8fafc" font-size="30" font-weight="700" letter-spacing="-0.5">The Agent-to-Human Handoff Checklist</text>
+    <text x="0" y="96" fill="#94a3b8" font-size="15" font-weight="400">Essential artifacts to leave behind: isolated worktree state, self-explaining layout, and verifiable logs</text>
+  </g>
+
+  <!-- ==================== FLOW CONNECTORS (BEHIND CARDS) ==================== -->
+  <g fill="none">
+    <!-- From Agent Card to Checklist Cards -->
+    <path d="M 370 380 L 440 380 L 440 255 L 480 255" stroke="#0ea5e9" stroke-width="2" stroke-dasharray="5 5" opacity="0.5" marker-end="url(#arrow-blue)" />
+    <path d="M 370 425 L 480 425" stroke="#0ea5e9" stroke-width="2.5" marker-end="url(#arrow-blue)" />
+    <path d="M 370 480 L 440 480 L 440 605 L 480 605" stroke="#0ea5e9" stroke-width="2" stroke-dasharray="5 5" opacity="0.5" marker-end="url(#arrow-blue)" />
+
+    <!-- From Checklist Cards to Human Card -->
+    <path d="M 1120 255 L 1160 255 L 1160 380 L 1230 380" stroke="#14b8a6" stroke-width="2" stroke-dasharray="5 5" opacity="0.5" marker-end="url(#arrow-teal)" />
+    <path d="M 1120 425 L 1230 425" stroke="#14b8a6" stroke-width="2.5" marker-end="url(#arrow-teal)" />
+    <path d="M 1120 605 L 1160 605 L 1160 480 L 1230 480" stroke="#14b8a6" stroke-width="2" stroke-dasharray="5 5" opacity="0.5" marker-end="url(#arrow-teal)" />
+  </g>
+
+  <!-- ==================== LEFT: AGENT ACTOR CARD ==================== -->
+  <g transform="translate(80, 195)" filter="url(#drop-shadow)">
+    <!-- Container -->
+    <rect width="290" height="625" rx="16" fill="url(#card-grad)" stroke="#1e293b" stroke-width="1.5" />
+    <rect width="290" height="52" rx="16" fill="#0f172a" />
+    <line x1="0" y1="52" x2="290" y2="52" stroke="#1e293b" stroke-width="1" />
+
+    <!-- Header -->
+    <rect x="18" y="14" width="24" height="24" rx="6" fill="#0369a1" fill-opacity="0.3" stroke="#38bdf8" stroke-width="1.2" />
+    <!-- Bot Icon -->
+    <path d="M 24 23 L 36 23 M 30 18 L 30 23 M 23 27 L 37 27 C 38 27 38.5 28 38.5 29 L 38.5 33 C 38.5 34 38 34.5 37 34.5 L 23 34.5 C 22 34.5 21.5 34 21.5 33 L 21.5 29 C 21.5 28 22 27 23 27 Z M 26 31 A 1 1 0 1 1 26 31.01 M 34 31 A 1 1 0 1 1 34 31.01" fill="none" stroke="#7dd3fc" stroke-width="1.4" stroke-linecap="round" />
+    <text x="50" y="31" fill="#f1f5f9" font-size="13" font-weight="700" letter-spacing="0.5">AGENT IN PROGRESS</text>
+    <circle cx="266" cy="26" r="4.5" fill="#f59e0b" />
+
+    <!-- Status Sub-card -->
+    <g transform="translate(18, 70)">
+      <rect width="254" height="96" rx="10" fill="#09101d" stroke="#1e293b" stroke-width="1" />
+      <text x="14" y="24" fill="#64748b" font-size="10" font-weight="700" letter-spacing="0.8">SESSION CONTEXT</text>
+      <text x="14" y="47" fill="#f8fafc" font-size="13" font-weight="600">Task: Implement Auth Check</text>
+      <text x="14" y="68" fill="#38bdf8" font-size="12" font-family="'JetBrains Mono', monospace">branch: feat/jwt-auth</text>
+      <text x="14" y="86" fill="#94a3b8" font-size="11">Worktree: /trees/jwt-auth</text>
+    </g>
+
+    <!-- Trigger Event Card -->
+    <g transform="translate(18, 182)">
+      <rect width="254" height="152" rx="10" fill="#141a29" stroke="#f59e0b" stroke-width="1.2" stroke-opacity="0.8" />
+      <rect x="12" y="12" width="102" height="20" rx="10" fill="#451a03" stroke="#f59e0b" stroke-width="1" />
+      <text x="63" y="26" text-anchor="middle" fill="#fcd34d" font-size="10" font-weight="700">NEEDS ATTENTION</text>
+
+      <text x="14" y="54" fill="#f1f5f9" font-size="13" font-weight="600">Handoff Triggered</text>
+      <text x="14" y="74" fill="#94a3b8" font-size="11">Agent hit decision boundary or</text>
+      <text x="14" y="90" fill="#94a3b8" font-size="11">finished parallel code phase.</text>
+
+      <rect x="14" y="104" width="226" height="34" rx="6" fill="#0b0f19" stroke="#334155" stroke-width="1" />
+      <circle cx="28" cy="121" r="4.5" fill="#ef4444" />
+      <text x="40" y="125" fill="#f87171" font-size="11" font-family="'JetBrains Mono', monospace" font-weight="600">Attention Badge: +1</text>
+    </g>
+
+    <!-- Signal Routing -->
+    <g transform="translate(18, 350)">
+      <rect width="254" height="142" rx="10" fill="#09101d" stroke="#1e293b" stroke-width="1" />
+      <text x="14" y="24" fill="#64748b" font-size="10" font-weight="700" letter-spacing="0.8">ROUTING SIGNALS</text>
+      
+      <circle cx="22" cy="48" r="3.5" fill="#38bdf8" />
+      <text x="34" y="52" fill="#cbd5e1" font-size="12">Dock attention counter</text>
+      <text x="34" y="66" fill="#64748b" font-size="10">App-level badge alert</text>
+
+      <circle cx="22" cy="86" r="3.5" fill="#38bdf8" />
+      <text x="34" y="90" fill="#cbd5e1" font-size="12">Tab status badge: WAITING</text>
+      <text x="34" y="104" fill="#64748b" font-size="10">Identifies blocked pane</text>
+
+      <circle cx="22" cy="124" r="3.5" fill="#38bdf8" />
+      <text x="34" y="128" fill="#cbd5e1" font-size="12">Daemon session preserved</text>
+    </g>
+
+    <!-- Bottom Principle -->
+    <g transform="translate(18, 508)">
+      <rect width="254" height="98" rx="10" fill="url(#pill-teal-grad)" stroke="#14b8a6" stroke-width="1" stroke-opacity="0.4" />
+      <text x="14" y="24" fill="#2dd4bf" font-size="11" font-weight="700">CORE PRINCIPLE</text>
+      <text x="14" y="46" fill="#e2e8f0" font-size="11" font-weight="500">"Never kill the daemon window.</text>
+      <text x="14" y="64" fill="#e2e8f0" font-size="11" font-weight="500">Package the workspace state</text>
+      <text x="14" y="82" fill="#e2e8f0" font-size="11" font-weight="500">before transferring focus."</text>
+    </g>
+  </g>
+
+  <!-- ==================== CENTER: THE 4 CHECKPOINTS ==================== -->
+  
+  <!-- Checkpoint 1: Isolation -->
+  <g transform="translate(480, 195)" filter="url(#drop-shadow)">
+    <rect width="640" height="142" rx="14" fill="url(#card-highlight-grad)" stroke="#14b8a6" stroke-width="1.6" />
+    <!-- Checkmark Circle -->
+    <circle cx="44" cy="40" r="18" fill="#0f3733" stroke="#14b8a6" stroke-width="1.8" />
+    <path d="M 36 40 L 42 46 L 52 34" fill="none" stroke="#2dd4bf" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" />
+    
+    <text x="76" y="34" fill="#2dd4bf" font-size="11" font-weight="700" letter-spacing="1">CHECKPOINT 01 · ISOLATION</text>
+    <text x="76" y="56" fill="#ffffff" font-size="17" font-weight="700">Dedicated Git Worktree Left Behind</text>
+    
+    <!-- 3 Checklist boxes -->
+    <g transform="translate(76, 74)">
+      <!-- Item 1 -->
+      <g transform="translate(0, 0)">
+        <rect width="170" height="52" rx="8" fill="#09121f" stroke="#1e293b" stroke-width="1" />
+        <circle cx="14" cy="18" r="3.5" fill="#14b8a6" />
+        <text x="26" y="22" fill="#cbd5e1" font-size="12" font-weight="600">Clean Branch</text>
+        <text x="26" y="38" fill="#64748b" font-size="10">Dedicated checkout</text>
+      </g>
+
+      <!-- Item 2 -->
+      <g transform="translate(182, 0)">
+        <rect width="170" height="52" rx="8" fill="#09121f" stroke="#1e293b" stroke-width="1" />
+        <circle cx="14" cy="18" r="3.5" fill="#14b8a6" />
+        <text x="26" y="22" fill="#cbd5e1" font-size="12" font-weight="600">Zero Contention</text>
+        <text x="26" y="38" fill="#64748b" font-size="10">No index lock collision</text>
+      </g>
+
+      <!-- Item 3 -->
+      <g transform="translate(364, 0)">
+        <rect width="170" height="52" rx="8" fill="#09121f" stroke="#1e293b" stroke-width="1" />
+        <circle cx="14" cy="18" r="3.5" fill="#14b8a6" />
+        <text x="26" y="22" fill="#cbd5e1" font-size="12" font-weight="600">Safe Isolation</text>
+        <text x="26" y="38" fill="#64748b" font-size="10">Discard / merge freely</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- Checkpoint 2: Visibility -->
+  <g transform="translate(480, 355)" filter="url(#drop-shadow)">
+    <rect width="640" height="142" rx="14" fill="url(#card-grad)" stroke="#1e293b" stroke-width="1.4" />
+    <!-- Checkmark Circle -->
+    <circle cx="44" cy="40" r="18" fill="#0f2b3e" stroke="#38bdf8" stroke-width="1.8" />
+    <path d="M 36 40 L 42 46 L 52 34" fill="none" stroke="#7dd3fc" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" />
+    
+    <text x="76" y="34" fill="#38bdf8" font-size="11" font-weight="700" letter-spacing="1">CHECKPOINT 02 · VISIBILITY</text>
+    <text x="76" y="56" fill="#ffffff" font-size="17" font-weight="700">Self-Explaining Split Pane Layout</text>
+    
+    <!-- 3 Checklist boxes -->
+    <g transform="translate(76, 74)">
+      <!-- Item 1 -->
+      <g transform="translate(0, 0)">
+        <rect width="170" height="52" rx="8" fill="#09121f" stroke="#1e293b" stroke-width="1" />
+        <circle cx="14" cy="18" r="3.5" fill="#38bdf8" />
+        <text x="26" y="22" fill="#cbd5e1" font-size="12" font-weight="600">Terminal Split</text>
+        <text x="26" y="38" fill="#64748b" font-size="10">Active shell preserved</text>
+      </g>
+
+      <!-- Item 2 -->
+      <g transform="translate(182, 0)">
+        <rect width="170" height="52" rx="8" fill="#09121f" stroke="#1e293b" stroke-width="1" />
+        <circle cx="14" cy="18" r="3.5" fill="#38bdf8" />
+        <text x="26" y="22" fill="#cbd5e1" font-size="12" font-weight="600">Adjacent Preview</text>
+        <text x="26" y="38" fill="#64748b" font-size="10">Browser / test pane</text>
+      </g>
+
+      <!-- Item 3 -->
+      <g transform="translate(364, 0)">
+        <rect width="170" height="52" rx="8" fill="#09121f" stroke="#1e293b" stroke-width="1" />
+        <circle cx="14" cy="18" r="3.5" fill="#38bdf8" />
+        <text x="26" y="22" fill="#cbd5e1" font-size="12" font-weight="600">Badge Signal</text>
+        <text x="26" y="38" fill="#64748b" font-size="10">Target pane highlighted</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- Checkpoint 3: Persistence -->
+  <g transform="translate(480, 515)" filter="url(#drop-shadow)">
+    <rect width="640" height="142" rx="14" fill="url(#card-grad)" stroke="#1e293b" stroke-width="1.4" />
+    <!-- Checkmark Circle -->
+    <circle cx="44" cy="40" r="18" fill="#0f2b3e" stroke="#38bdf8" stroke-width="1.8" />
+    <path d="M 36 40 L 42 46 L 52 34" fill="none" stroke="#7dd3fc" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" />
+    
+    <text x="76" y="34" fill="#38bdf8" font-size="11" font-weight="700" letter-spacing="1">CHECKPOINT 03 · PERSISTENCE</text>
+    <text x="76" y="56" fill="#ffffff" font-size="17" font-weight="700">Daemon Process &amp; Ring Buffer Replay</text>
+    
+    <!-- 3 Checklist boxes -->
+    <g transform="translate(76, 74)">
+      <!-- Item 1 -->
+      <g transform="translate(0, 0)">
+        <rect width="170" height="52" rx="8" fill="#09121f" stroke="#1e293b" stroke-width="1" />
+        <circle cx="14" cy="18" r="3.5" fill="#38bdf8" />
+        <text x="26" y="22" fill="#cbd5e1" font-size="12" font-weight="600">PTY Survival</text>
+        <text x="26" y="38" fill="#64748b" font-size="10">Outlives window close</text>
+      </g>
+
+      <!-- Item 2 -->
+      <g transform="translate(182, 0)">
+        <rect width="170" height="52" rx="8" fill="#09121f" stroke="#1e293b" stroke-width="1" />
+        <circle cx="14" cy="18" r="3.5" fill="#38bdf8" />
+        <text x="26" y="22" fill="#cbd5e1" font-size="12" font-weight="600">Framed Replay</text>
+        <text x="26" y="38" fill="#64748b" font-size="10">Sequence numbers intact</text>
+      </g>
+
+      <!-- Item 3 -->
+      <g transform="translate(364, 0)">
+        <rect width="170" height="52" rx="8" fill="#09121f" stroke="#1e293b" stroke-width="1" />
+        <circle cx="14" cy="18" r="3.5" fill="#38bdf8" />
+        <text x="26" y="22" fill="#cbd5e1" font-size="12" font-weight="600">Scrollback Ready</text>
+        <text x="26" y="38" fill="#64748b" font-size="10">Complete output buffer</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- Checkpoint 4: Evidence & Notes -->
+  <g transform="translate(480, 675)" filter="url(#drop-shadow)">
+    <rect width="640" height="145" rx="14" fill="url(#card-highlight-grad)" stroke="#14b8a6" stroke-width="1.6" />
+    <!-- Checkmark Circle -->
+    <circle cx="44" cy="40" r="18" fill="#0f3733" stroke="#14b8a6" stroke-width="1.8" />
+    <path d="M 36 40 L 42 46 L 52 34" fill="none" stroke="#2dd4bf" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" />
+    
+    <text x="76" y="34" fill="#2dd4bf" font-size="11" font-weight="700" letter-spacing="1">CHECKPOINT 04 · EVIDENCE &amp; NOTES</text>
+    <text x="76" y="56" fill="#ffffff" font-size="17" font-weight="700">Reproducible State &amp; Next Action Gate</text>
+    
+    <!-- 3 Checklist boxes -->
+    <g transform="translate(76, 74)">
+      <!-- Item 1 -->
+      <g transform="translate(0, 0)">
+        <rect width="170" height="54" rx="8" fill="#09121f" stroke="#1e293b" stroke-width="1" />
+        <circle cx="14" cy="18" r="3.5" fill="#14b8a6" />
+        <text x="26" y="22" fill="#cbd5e1" font-size="12" font-weight="600">Repro Command</text>
+        <text x="26" y="38" fill="#64748b" font-size="10">Exact CLI invocation</text>
+      </g>
+
+      <!-- Item 2 -->
+      <g transform="translate(182, 0)">
+        <rect width="170" height="54" rx="8" fill="#09121f" stroke="#1e293b" stroke-width="1" />
+        <circle cx="14" cy="18" r="3.5" fill="#14b8a6" />
+        <text x="26" y="22" fill="#cbd5e1" font-size="12" font-weight="600">Failed Checks</text>
+        <text x="26" y="38" fill="#64748b" font-size="10">Captured error output</text>
+      </g>
+
+      <!-- Item 3 -->
+      <g transform="translate(364, 0)">
+        <rect width="170" height="54" rx="8" fill="#09121f" stroke="#1e293b" stroke-width="1" />
+        <circle cx="14" cy="18" r="3.5" fill="#14b8a6" />
+        <text x="26" y="22" fill="#cbd5e1" font-size="12" font-weight="600">Decision Gate</text>
+        <text x="26" y="38" fill="#64748b" font-size="10">Approve / patch / reset</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- ==================== RIGHT: HUMAN TEAMMATE CARD ==================== -->
+  <g transform="translate(1230, 195)" filter="url(#drop-shadow)">
+    <!-- Container -->
+    <rect width="290" height="625" rx="16" fill="url(#card-grad)" stroke="#1e293b" stroke-width="1.5" />
+    <rect width="290" height="52" rx="16" fill="#0f172a" />
+    <line x1="0" y1="52" x2="290" y2="52" stroke="#1e293b" stroke-width="1" />
+
+    <!-- Header -->
+    <rect x="18" y="14" width="24" height="24" rx="6" fill="#0d9488" fill-opacity="0.3" stroke="#14b8a6" stroke-width="1.2" />
+    <!-- Human Icon -->
+    <path d="M 30 22 A 3.5 3.5 0 1 0 30 29 A 3.5 3.5 0 1 0 30 22 Z M 22 34 C 22 31.5 25.5 30 30 30 C 34.5 30 38 31.5 38 34" fill="none" stroke="#2dd4bf" stroke-width="1.5" stroke-linecap="round" />
+    <text x="50" y="31" fill="#f1f5f9" font-size="13" font-weight="700" letter-spacing="0.5">HUMAN TEAMMATE</text>
+    <circle cx="266" cy="26" r="4.5" fill="#10b981" />
+
+    <!-- Takeover Sub-card -->
+    <g transform="translate(18, 70)">
+      <rect width="254" height="96" rx="10" fill="#09101d" stroke="#1e293b" stroke-width="1" />
+      <text x="14" y="24" fill="#64748b" font-size="10" font-weight="700" letter-spacing="0.8">RECEIVING CONTEXT</text>
+      <text x="14" y="47" fill="#f8fafc" font-size="13" font-weight="600">Zero Cold Start</text>
+      <text x="14" y="68" fill="#14b8a6" font-size="12" font-family="'JetBrains Mono', monospace">attach session: #4</text>
+      <text x="14" y="86" fill="#94a3b8" font-size="11">Direct daemon connection</text>
+    </g>
+
+    <!-- Inspection Steps -->
+    <g transform="translate(18, 182)">
+      <rect width="254" height="152" rx="10" fill="#0b1726" stroke="#14b8a6" stroke-width="1.2" stroke-opacity="0.7" />
+      <rect x="12" y="12" width="102" height="20" rx="10" fill="#064e3b" stroke="#10b981" stroke-width="1" />
+      <text x="63" y="26" text-anchor="middle" fill="#6ee7b7" font-size="10" font-weight="700">READY TO RESUME</text>
+
+      <text x="14" y="54" fill="#f1f5f9" font-size="13" font-weight="600">Immediate Verification</text>
+      
+      <circle cx="20" cy="74" r="3.5" fill="#14b8a6" />
+      <text x="32" y="78" fill="#cbd5e1" font-size="11">Read pane scrollback &amp; diff</text>
+
+      <circle cx="20" cy="98" r="3.5" fill="#14b8a6" />
+      <text x="32" y="102" fill="#cbd5e1" font-size="11">Run reproducible test command</text>
+
+      <circle cx="20" cy="122" r="3.5" fill="#14b8a6" />
+      <text x="32" y="126" fill="#cbd5e1" font-size="11">Decide next action &amp; clear badge</text>
+    </g>
+
+    <!-- Efficiency Stats -->
+    <g transform="translate(18, 350)">
+      <rect width="254" height="142" rx="10" fill="#09101d" stroke="#1e293b" stroke-width="1" />
+      <text x="14" y="24" fill="#64748b" font-size="10" font-weight="700" letter-spacing="0.8">BENEFITS REALIZED</text>
+      
+      <text x="14" y="52" fill="#f8fafc" font-size="12" font-weight="600">Zero Branch Collisions</text>
+      <text x="14" y="68" fill="#64748b" font-size="11">Main repo worktree is untouched</text>
+
+      <text x="14" y="98" fill="#f8fafc" font-size="12" font-weight="600">No Polling Fatigue</text>
+      <text x="14" y="114" fill="#64748b" font-size="11">Event badge pushes notification</text>
+    </g>
+
+    <!-- Bottom Outcome -->
+    <g transform="translate(18, 508)">
+      <rect width="254" height="98" rx="10" fill="url(#pill-teal-grad)" stroke="#14b8a6" stroke-width="1" stroke-opacity="0.4" />
+      <text x="14" y="24" fill="#2dd4bf" font-size="11" font-weight="700">RESULT</text>
+      <text x="14" y="46" fill="#e2e8f0" font-size="11" font-weight="500">Autonomous speed +</text>
+      <text x="14" y="64" fill="#e2e8f0" font-size="11" font-weight="500">human judgment at</text>
+      <text x="14" y="82" fill="#2dd4bf" font-size="12" font-weight="700">zero context overhead.</text>
+    </g>
+  </g>
+
+</svg>

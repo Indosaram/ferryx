@@ -1,0 +1,465 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <defs>
+    <!-- Background Radial Gradients -->
+    <radialGradient id="bgGlow" cx="50%" cy="45%" r="75%">
+      <stop offset="0%" stop-color="#0c233c" stop-opacity="0.85"/>
+      <stop offset="45%" stop-color="#081424" stop-opacity="0.95"/>
+      <stop offset="100%" stop-color="#04070d" stop-opacity="1"/>
+    </radialGradient>
+
+    <radialGradient id="phoneAura" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.28"/>
+      <stop offset="40%" stop-color="#0284c7" stop-opacity="0.14"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="cellGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.9"/>
+      <stop offset="50%" stop-color="#0284c7" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#00f2fe" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Linear Gradients -->
+    <linearGradient id="phoneBorder" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="30%" stop-color="#1e293b"/>
+      <stop offset="70%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#00f2fe"/>
+    </linearGradient>
+
+    <linearGradient id="screenGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#070c18"/>
+      <stop offset="100%" stop-color="#03060c"/>
+    </linearGradient>
+
+    <linearGradient id="tealGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00f2fe"/>
+      <stop offset="100%" stop-color="#38bdf8"/>
+    </linearGradient>
+
+    <linearGradient id="beamGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0"/>
+      <stop offset="50%" stop-color="#00f2fe" stop-opacity="0.7"/>
+      <stop offset="100%" stop-color="#38bdf8" stop-opacity="0"/>
+    </linearGradient>
+
+    <linearGradient id="scanlineGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0"/>
+      <stop offset="50%" stop-color="#00f2fe" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#00f2fe" stop-opacity="0"/>
+    </linearGradient>
+
+    <!-- Glow Filters -->
+    <filter id="softGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <filter id="brightGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="10" result="b1"/>
+      <feGaussianBlur stdDeviation="3" result="b2"/>
+      <feMerge>
+        <feMergeNode in="b1"/>
+        <feMergeNode in="b2"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Coordinate Grid Pattern -->
+    <pattern id="baseGrid" width="30" height="30" patternUnits="userSpaceOnUse">
+      <path d="M 30 0 L 0 0 0 30" fill="none" stroke="#102035" stroke-width="0.75" stroke-opacity="0.6"/>
+      <circle cx="30" cy="30" r="0.8" fill="#1e3a5f" fill-opacity="0.8"/>
+    </pattern>
+  </defs>
+
+  <!-- Background Layer -->
+  <rect width="1200" height="630" fill="#04070d"/>
+  <rect width="1200" height="630" fill="url(#bgGlow)"/>
+  <rect width="1200" height="630" fill="url(#baseGrid)"/>
+
+  <!-- Ambient Light Halos -->
+  <circle cx="600" cy="270" r="320" fill="url(#phoneAura)"/>
+  <circle cx="280" cy="240" r="220" fill="url(#phoneAura)" opacity="0.4"/>
+  <circle cx="920" cy="300" r="240" fill="url(#phoneAura)" opacity="0.4"/>
+
+  <!-- Background Decorative Vector Architecture Lines -->
+  <g stroke="#0e2844" stroke-width="1.2" fill="none" opacity="0.55">
+    <!-- Horizontal alignment axes -->
+    <line x1="80" y1="120" x2="1120" y2="120" stroke-dasharray="3 6"/>
+    <line x1="80" y1="470" x2="1120" y2="470" stroke-dasharray="3 6"/>
+    <line x1="220" y1="60" x2="220" y2="540" stroke-dasharray="2 4"/>
+    <line x1="980" y1="60" x2="980" y2="540" stroke-dasharray="2 4"/>
+    <!-- Diagonal projection rays -->
+    <line x1="160" y1="80" x2="380" y2="220" stroke="#00f2fe" stroke-opacity="0.25"/>
+    <line x1="1040" y1="80" x2="820" y2="220" stroke="#00f2fe" stroke-opacity="0.25"/>
+    <line x1="160" y1="520" x2="380" y2="380" stroke="#00f2fe" stroke-opacity="0.25"/>
+    <line x1="1040" y1="520" x2="820" y2="380" stroke="#00f2fe" stroke-opacity="0.25"/>
+  </g>
+
+  <!-- LEFT ABSTRACT SHAPE: Decomposed Vector Glyph Geometry -->
+  <g transform="translate(140, 160)">
+    <!-- Glyph Atlas Coordinate Frame -->
+    <rect x="0" y="0" width="180" height="200" rx="6" fill="#071220" stroke="#163456" stroke-width="1.5" opacity="0.85"/>
+    <!-- Coordinate Subdivisions -->
+    <line x1="0" y1="50" x2="180" y2="50" stroke="#10253f" stroke-width="1" stroke-dasharray="2 2"/>
+    <line x1="0" y1="100" x2="180" y2="100" stroke="#10253f" stroke-width="1" stroke-dasharray="2 2"/>
+    <line x1="0" y1="150" x2="180" y2="150" stroke="#10253f" stroke-width="1" stroke-dasharray="2 2"/>
+    <line x1="45" y1="0" x2="45" y2="200" stroke="#10253f" stroke-width="1" stroke-dasharray="2 2"/>
+    <line x1="90" y1="0" x2="90" y2="200" stroke="#10253f" stroke-width="1" stroke-dasharray="2 2"/>
+    <line x1="135" y1="0" x2="135" y2="200" stroke="#10253f" stroke-width="1" stroke-dasharray="2 2"/>
+
+    <!-- Large Monospace Glyph Contour Outline with Bezier Control Points -->
+    <path d="M 40 160 L 90 40 L 140 160 M 60 120 L 120 120" fill="none" stroke="#00f2fe" stroke-width="2.5" filter="url(#softGlow)"/>
+    <!-- Rasterized Glyph Horizontal Scanlines -->
+    <line x1="48" y1="140" x2="132" y2="140" stroke="#38bdf8" stroke-width="3" opacity="0.75"/>
+    <line x1="56" y1="120" x2="124" y2="120" stroke="#00f2fe" stroke-width="3" opacity="0.9"/>
+    <line x1="68" y1="95" x2="112" y2="95" stroke="#38bdf8" stroke-width="3" opacity="0.6"/>
+    <line x1="80" y1="70" x2="100" y2="70" stroke="#00f2fe" stroke-width="3" opacity="0.6"/>
+
+    <!-- Control Point Anchors -->
+    <circle cx="90" cy="40" r="4" fill="#38ef7d" stroke="#000" stroke-width="1"/>
+    <circle cx="40" cy="160" r="4" fill="#00f2fe" stroke="#000" stroke-width="1"/>
+    <circle cx="140" cy="160" r="4" fill="#00f2fe" stroke="#000" stroke-width="1"/>
+    <circle cx="60" cy="120" r="3.5" fill="#38bdf8"/>
+    <circle cx="120" cy="120" r="3.5" fill="#38bdf8"/>
+
+    <!-- Dimension Bracket Indicators -->
+    <path d="M -8 0 L -16 0 L -16 200 L -8 200" fill="none" stroke="#0284c7" stroke-width="1.5"/>
+    <path d="M 0 208 L 0 216 L 180 216 L 180 208" fill="none" stroke="#0284c7" stroke-width="1.5"/>
+
+    <!-- Connecting data ray toward mobile screen -->
+    <path d="M 180 100 C 260 100, 320 180, 420 180" fill="none" stroke="#00f2fe" stroke-width="1.5" stroke-dasharray="4 4" opacity="0.7"/>
+    <circle cx="300" cy="135" r="3" fill="#00f2fe" filter="url(#softGlow)"/>
+  </g>
+
+  <!-- RIGHT ABSTRACT SHAPE: GPU Texture Atlas & Raster Buffer Blocks -->
+  <g transform="translate(860, 150)">
+    <!-- Texture Atlas Container Frame -->
+    <rect x="0" y="0" width="200" height="220" rx="8" fill="#071220" stroke="#163456" stroke-width="1.5" opacity="0.85"/>
+    
+    <!-- Mini Cell Matrix within Atlas -->
+    <!-- Row 0 -->
+    <rect x="15" y="15" width="38" height="42" rx="4" fill="#0a2038" stroke="#00f2fe" stroke-width="1.2"/>
+    <text x="34" y="42" font-family="monospace" font-size="18" font-weight="700" fill="#00f2fe" text-anchor="middle">❯</text>
+
+    <rect x="60" y="15" width="38" height="42" rx="4" fill="#081729" stroke="#1a3b60" stroke-width="1"/>
+    <text x="79" y="42" font-family="monospace" font-size="16" font-weight="600" fill="#38bdf8" text-anchor="middle">λ</text>
+
+    <rect x="105" y="15" width="38" height="42" rx="4" fill="#081729" stroke="#1a3b60" stroke-width="1"/>
+    <text x="124" y="42" font-family="monospace" font-size="16" font-weight="600" fill="#94a3b8" text-anchor="middle">_</text>
+
+    <rect x="150" y="15" width="38" height="42" rx="4" fill="#0e2a4a" stroke="#38ef7d" stroke-width="1.2"/>
+    <circle cx="169" cy="36" r="6" fill="#38ef7d" opacity="0.8"/>
+
+    <!-- Row 1 -->
+    <rect x="15" y="65" width="38" height="42" rx="4" fill="#081729" stroke="#1a3b60" stroke-width="1"/>
+    <text x="34" y="92" font-family="monospace" font-size="15" font-weight="600" fill="#94a3b8" text-anchor="middle">%</text>
+
+    <rect x="60" y="65" width="38" height="42" rx="4" fill="#0b2440" stroke="#00f2fe" stroke-width="1.2"/>
+    <rect x="73" y="76" width="12" height="20" fill="#00f2fe" filter="url(#softGlow)"/>
+
+    <rect x="105" y="65" width="38" height="42" rx="4" fill="#081729" stroke="#1a3b60" stroke-width="1"/>
+    <text x="124" y="92" font-family="monospace" font-size="15" font-weight="600" fill="#38bdf8" text-anchor="middle">#</text>
+
+    <rect x="150" y="65" width="38" height="42" rx="4" fill="#081729" stroke="#1a3b60" stroke-width="1"/>
+    <text x="169" y="92" font-family="monospace" font-size="15" font-weight="600" fill="#64748b" text-anchor="middle">~</text>
+
+    <!-- Row 2 -->
+    <rect x="15" y="115" width="38" height="42" rx="4" fill="#081729" stroke="#1a3b60" stroke-width="1"/>
+    <text x="34" y="142" font-family="monospace" font-size="14" font-weight="600" fill="#64748b" text-anchor="middle">::</text>
+
+    <rect x="60" y="115" width="38" height="42" rx="4" fill="#081729" stroke="#1a3b60" stroke-width="1"/>
+    <text x="79" y="142" font-family="monospace" font-size="14" font-weight="600" fill="#94a3b8" text-anchor="middle">0</text>
+
+    <rect x="105" y="115" width="38" height="42" rx="4" fill="#081729" stroke="#1a3b60" stroke-width="1"/>
+    <text x="124" y="142" font-family="monospace" font-size="14" font-weight="600" fill="#94a3b8" text-anchor="middle">1</text>
+
+    <rect x="150" y="115" width="38" height="42" rx="4" fill="#0a223c" stroke="#00f2fe" stroke-width="1.2"/>
+    <text x="169" y="142" font-family="monospace" font-size="14" font-weight="700" fill="#00f2fe" text-anchor="middle">&amp;</text>
+
+    <!-- Row 3: Memory Buffer Bar -->
+    <rect x="15" y="170" width="173" height="34" rx="4" fill="#050e18" stroke="#163456" stroke-width="1"/>
+    <rect x="18" y="174" width="45" height="26" rx="2" fill="#0284c7" opacity="0.6"/>
+    <rect x="67" y="174" width="60" height="26" rx="2" fill="#00f2fe" opacity="0.75" filter="url(#softGlow)"/>
+    <rect x="131" y="174" width="30" height="26" rx="2" fill="#38ef7d" opacity="0.5"/>
+
+    <!-- Connecting data ray toward mobile screen -->
+    <path d="M 0 110 C -60 110, -100 240, -160 240" fill="none" stroke="#38bdf8" stroke-width="1.5" stroke-dasharray="4 4" opacity="0.7"/>
+    <circle cx="-80" cy="180" r="3" fill="#38bdf8" filter="url(#softGlow)"/>
+  </g>
+
+  <!-- ==================== CENTER COMPOSITION: MOBILE PHONE WITH GLYPH MATRIX GRID ==================== -->
+  <g transform="translate(450, 36)">
+    <!-- Deep Phone Drop Shadow -->
+    <rect x="-6" y="6" width="312" height="478" rx="40" fill="#000000" opacity="0.75" filter="url(#brightGlow)"/>
+
+    <!-- Phone Chassis Outer Frame -->
+    <rect x="0" y="0" width="300" height="470" rx="36" fill="#0b1322" stroke="url(#phoneBorder)" stroke-width="2.5"/>
+
+    <!-- Subtle Bezel Inner Edge -->
+    <rect x="5" y="5" width="290" height="460" rx="32" fill="#070c16" stroke="#162842" stroke-width="1.2"/>
+
+    <!-- Phone Screen Display Glass -->
+    <rect x="10" y="10" width="280" height="450" rx="27" fill="url(#screenGrad)"/>
+
+    <!-- Top Dynamic Island Sensor Notch -->
+    <rect x="110" y="18" width="80" height="12" rx="6" fill="#020408"/>
+    <circle cx="174" cy="24" r="2.5" fill="#0b1e38"/>
+
+    <!-- Ambient Screen Scanline Glow -->
+    <rect x="10" y="80" width="280" height="180" fill="url(#scanlineGrad)"/>
+
+    <!-- GLYPH CELL MATRIX GRID -->
+    <!-- Grid Outer Container -->
+    <g transform="translate(20, 42)">
+      <!-- Terminal Header Info Bar -->
+      <line x1="0" y1="0" x2="260" y2="0" stroke="#142c4a" stroke-width="1"/>
+      <circle cx="8" cy="12" r="3" fill="#334155"/>
+      <circle cx="18" cy="12" r="3" fill="#334155"/>
+      <circle cx="28" cy="12" r="3" fill="#334155"/>
+      <line x1="220" y1="12" x2="252" y2="12" stroke="#00f2fe" stroke-width="1.5" stroke-dasharray="3 3"/>
+      <line x1="0" y1="22" x2="260" y2="22" stroke="#142c4a" stroke-width="1"/>
+
+      <!-- Matrix Grid Cells: 10 columns x 11 rows -->
+      <!-- Cell width: 26px, height: 32px -->
+      <!-- Embedded Glyph Cells -->
+
+      <rect x="0" y="28" width="26" height="32" fill="#0b2644" stroke="#00f2fe" stroke-width="1.2" rx="2" filter="url(#softGlow)"/>
+      <text x="13" y="49" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="700" fill="#00f2fe" text-anchor="middle" filter="url(#softGlow)">❯</text>
+      <rect x="26" y="28" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="39" y="49" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#f1f5f9" text-anchor="middle">c</text>
+      <rect x="52" y="28" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="65" y="49" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#f1f5f9" text-anchor="middle">d</text>
+      <rect x="78" y="28" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <rect x="104" y="28" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="117" y="49" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#38bdf8" text-anchor="middle">~</text>
+      <rect x="130" y="28" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="143" y="49" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#64748b" text-anchor="middle">/</text>
+      <rect x="156" y="28" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="169" y="49" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#f1f5f9" text-anchor="middle">p</text>
+      <rect x="182" y="28" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="195" y="49" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#f1f5f9" text-anchor="middle">t</text>
+      <rect x="208" y="28" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="221" y="49" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#f1f5f9" text-anchor="middle">y</text>
+      <rect x="234" y="28" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <rect x="0" y="60" width="26" height="32" fill="#0b2644" stroke="#00f2fe" stroke-width="1.2" rx="2" filter="url(#softGlow)"/>
+      <text x="13" y="81" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="700" fill="#38ef7d" text-anchor="middle" filter="url(#softGlow)">❯</text>
+      <rect x="26" y="60" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="39" y="81" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#f1f5f9" text-anchor="middle">r</text>
+      <rect x="52" y="60" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="65" y="81" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#f1f5f9" text-anchor="middle">u</text>
+      <rect x="78" y="60" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="91" y="81" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#f1f5f9" text-anchor="middle">n</text>
+      <rect x="104" y="60" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <rect x="130" y="60" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="143" y="81" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#38bdf8" text-anchor="middle">-</text>
+      <rect x="156" y="60" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="169" y="81" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#38bdf8" text-anchor="middle">v</text>
+      <rect x="182" y="60" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <rect x="208" y="60" width="26" height="32" fill="#0b2644" stroke="#00f2fe" stroke-width="1.2" rx="2" filter="url(#softGlow)"/>
+      <text x="221" y="81" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="700" fill="#00f2fe" text-anchor="middle" filter="url(#softGlow)">▊</text>
+      <rect x="234" y="60" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <rect x="0" y="92" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="13" y="113" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#00f2fe" text-anchor="middle">λ</text>
+      <rect x="26" y="92" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="39" y="113" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#64748b" text-anchor="middle">:</text>
+      <rect x="52" y="92" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="65" y="113" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#f1f5f9" text-anchor="middle">g</text>
+      <rect x="78" y="92" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="91" y="113" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#f1f5f9" text-anchor="middle">p</text>
+      <rect x="104" y="92" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="117" y="113" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#f1f5f9" text-anchor="middle">u</text>
+      <rect x="130" y="92" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="143" y="113" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#64748b" text-anchor="middle">-</text>
+      <rect x="156" y="92" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="169" y="113" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#00f2fe" text-anchor="middle">c</text>
+      <rect x="182" y="92" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="195" y="113" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#00f2fe" text-anchor="middle">e</text>
+      <rect x="208" y="92" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="221" y="113" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#00f2fe" text-anchor="middle">l</text>
+      <rect x="234" y="92" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="247" y="113" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#00f2fe" text-anchor="middle">l</text>
+      <rect x="0" y="124" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="13" y="145" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#64748b" text-anchor="middle">#</text>
+      <rect x="26" y="124" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="39" y="145" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#0284c7" text-anchor="middle">[</text>
+      <rect x="52" y="124" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="65" y="145" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#38ef7d" text-anchor="middle">8</text>
+      <rect x="78" y="124" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="91" y="145" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#38ef7d" text-anchor="middle">0</text>
+      <rect x="104" y="124" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="117" y="145" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#64748b" text-anchor="middle">x</text>
+      <rect x="130" y="124" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="143" y="145" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#38ef7d" text-anchor="middle">2</text>
+      <rect x="156" y="124" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="169" y="145" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#38ef7d" text-anchor="middle">4</text>
+      <rect x="182" y="124" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="195" y="145" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#0284c7" text-anchor="middle">]</text>
+      <rect x="208" y="124" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <rect x="234" y="124" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="247" y="145" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#38ef7d" text-anchor="middle">✔</text>
+      <rect x="0" y="156" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <rect x="26" y="156" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="39" y="177" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#1e3a5f" text-anchor="middle">[</text>
+      <rect x="52" y="156" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="65" y="177" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#94a3b8" text-anchor="middle">g</text>
+      <rect x="78" y="156" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="91" y="177" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#94a3b8" text-anchor="middle">l</text>
+      <rect x="104" y="156" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="117" y="177" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#94a3b8" text-anchor="middle">y</text>
+      <rect x="130" y="156" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="143" y="177" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#94a3b8" text-anchor="middle">p</text>
+      <rect x="156" y="156" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="169" y="177" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#94a3b8" text-anchor="middle">h</text>
+      <rect x="182" y="156" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="195" y="177" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#1e3a5f" text-anchor="middle">]</text>
+      <rect x="208" y="156" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <rect x="234" y="156" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <rect x="0" y="188" width="26" height="32" fill="#0b2644" stroke="#00f2fe" stroke-width="1.2" rx="2" filter="url(#softGlow)"/>
+      <text x="13" y="209" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="700" fill="#38bdf8" text-anchor="middle" filter="url(#softGlow)">0</text>
+      <rect x="26" y="188" width="26" height="32" fill="#0b2644" stroke="#00f2fe" stroke-width="1.2" rx="2" filter="url(#softGlow)"/>
+      <text x="39" y="209" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="700" fill="#38bdf8" text-anchor="middle" filter="url(#softGlow)">x</text>
+      <rect x="52" y="188" width="26" height="32" fill="#0b2644" stroke="#00f2fe" stroke-width="1.2" rx="2" filter="url(#softGlow)"/>
+      <text x="65" y="209" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="700" fill="#00f2fe" text-anchor="middle" filter="url(#softGlow)">F</text>
+      <rect x="78" y="188" width="26" height="32" fill="#0b2644" stroke="#00f2fe" stroke-width="1.2" rx="2" filter="url(#softGlow)"/>
+      <text x="91" y="209" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="700" fill="#00f2fe" text-anchor="middle" filter="url(#softGlow)">F</text>
+      <rect x="104" y="188" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <rect x="130" y="188" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="143" y="209" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#f1f5f9" text-anchor="middle">b</text>
+      <rect x="156" y="188" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="169" y="209" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#f1f5f9" text-anchor="middle">u</text>
+      <rect x="182" y="188" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="195" y="209" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#f1f5f9" text-anchor="middle">f</text>
+      <rect x="208" y="188" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="221" y="209" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#f1f5f9" text-anchor="middle">f</text>
+      <rect x="234" y="188" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="247" y="209" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#38ef7d" text-anchor="middle">0</text>
+      <rect x="0" y="220" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="13" y="241" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#1e3a5f" text-anchor="middle">·</text>
+      <rect x="26" y="220" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="39" y="241" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#1e3a5f" text-anchor="middle">·</text>
+      <rect x="52" y="220" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="65" y="241" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#1e3a5f" text-anchor="middle">·</text>
+      <rect x="78" y="220" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="91" y="241" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#1e3a5f" text-anchor="middle">·</text>
+      <rect x="104" y="220" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="117" y="241" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#1e3a5f" text-anchor="middle">·</text>
+      <rect x="130" y="220" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="143" y="241" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#1e3a5f" text-anchor="middle">·</text>
+      <rect x="156" y="220" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="169" y="241" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#1e3a5f" text-anchor="middle">·</text>
+      <rect x="182" y="220" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="195" y="241" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#1e3a5f" text-anchor="middle">·</text>
+      <rect x="208" y="220" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="221" y="241" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#1e3a5f" text-anchor="middle">·</text>
+      <rect x="234" y="220" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="247" y="241" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#1e3a5f" text-anchor="middle">·</text>
+      <rect x="0" y="252" width="26" height="32" fill="#0b2644" stroke="#00f2fe" stroke-width="1.2" rx="2" filter="url(#softGlow)"/>
+      <text x="13" y="273" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="700" fill="#00f2fe" text-anchor="middle" filter="url(#softGlow)">❯</text>
+      <rect x="26" y="252" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="39" y="273" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#f1f5f9" text-anchor="middle">f</text>
+      <rect x="52" y="252" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="65" y="273" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#f1f5f9" text-anchor="middle">p</text>
+      <rect x="78" y="252" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="91" y="273" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#f1f5f9" text-anchor="middle">s</text>
+      <rect x="104" y="252" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="117" y="273" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#64748b" text-anchor="middle">:</text>
+      <rect x="130" y="252" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <rect x="156" y="252" width="26" height="32" fill="#0b2644" stroke="#00f2fe" stroke-width="1.2" rx="2" filter="url(#softGlow)"/>
+      <text x="169" y="273" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="700" fill="#38ef7d" text-anchor="middle" filter="url(#softGlow)">1</text>
+      <rect x="182" y="252" width="26" height="32" fill="#0b2644" stroke="#00f2fe" stroke-width="1.2" rx="2" filter="url(#softGlow)"/>
+      <text x="195" y="273" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="700" fill="#38ef7d" text-anchor="middle" filter="url(#softGlow)">2</text>
+      <rect x="208" y="252" width="26" height="32" fill="#0b2644" stroke="#00f2fe" stroke-width="1.2" rx="2" filter="url(#softGlow)"/>
+      <text x="221" y="273" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="700" fill="#38ef7d" text-anchor="middle" filter="url(#softGlow)">0</text>
+      <rect x="234" y="252" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <rect x="0" y="284" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="13" y="305" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#38bdf8" text-anchor="middle">⎈</text>
+      <rect x="26" y="284" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <rect x="52" y="284" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="65" y="305" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#94a3b8" text-anchor="middle">m</text>
+      <rect x="78" y="284" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="91" y="305" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#94a3b8" text-anchor="middle">e</text>
+      <rect x="104" y="284" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="117" y="305" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#94a3b8" text-anchor="middle">s</text>
+      <rect x="130" y="284" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="143" y="305" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#94a3b8" text-anchor="middle">h</text>
+      <rect x="156" y="284" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="169" y="305" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#64748b" text-anchor="middle">:</text>
+      <rect x="182" y="284" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="195" y="305" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#38ef7d" text-anchor="middle">o</text>
+      <rect x="208" y="284" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="221" y="305" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#38ef7d" text-anchor="middle">k</text>
+      <rect x="234" y="284" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <rect x="0" y="316" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="13" y="337" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#00f2fe" text-anchor="middle">━</text>
+      <rect x="26" y="316" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="39" y="337" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#00f2fe" text-anchor="middle">━</text>
+      <rect x="52" y="316" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="65" y="337" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#00f2fe" text-anchor="middle">━</text>
+      <rect x="78" y="316" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="91" y="337" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#00f2fe" text-anchor="middle">━</text>
+      <rect x="104" y="316" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="117" y="337" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#00f2fe" text-anchor="middle">━</text>
+      <rect x="130" y="316" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="143" y="337" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#00f2fe" text-anchor="middle">━</text>
+      <rect x="156" y="316" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="169" y="337" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#00f2fe" text-anchor="middle">━</text>
+      <rect x="182" y="316" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="195" y="337" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#00f2fe" text-anchor="middle">━</text>
+      <rect x="208" y="316" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="221" y="337" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#00f2fe" text-anchor="middle">━</text>
+      <rect x="234" y="316" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <text x="247" y="337" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="500" fill="#00f2fe" text-anchor="middle">━</text>
+      <rect x="0" y="348" width="26" height="32" fill="#0b2644" stroke="#00f2fe" stroke-width="1.2" rx="2" filter="url(#softGlow)"/>
+      <text x="13" y="369" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="700" fill="#38ef7d" text-anchor="middle" filter="url(#softGlow)">❯</text>
+      <rect x="26" y="348" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <rect x="52" y="348" width="26" height="32" fill="#0b2644" stroke="#00f2fe" stroke-width="1.2" rx="2" filter="url(#softGlow)"/>
+      <text x="65" y="369" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace" font-size="14" font-weight="700" fill="#00f2fe" text-anchor="middle" filter="url(#softGlow)">█</text>
+      <rect x="78" y="348" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <rect x="104" y="348" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <rect x="130" y="348" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <rect x="156" y="348" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <rect x="182" y="348" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <rect x="208" y="348" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+      <rect x="234" y="348" width="26" height="32" fill="#060c16" stroke="#12253d" stroke-width="0.75" rx="1.5"/>
+    </g>
+
+    <!-- Bottom Home Touch Indicator -->
+    <rect x="100" y="445" width="100" height="4" rx="2" fill="#334155"/>
+
+    <!-- Subtle Phone Screen Glass Reflection Angle -->
+    <path d="M 12 12 L 200 12 L 80 458 L 12 458 Z" fill="#ffffff" opacity="0.018"/>
+  </g>
+
+  <!-- ==================== HIGHLIGHT OVERLAY BRACKETS (GRID CELL FOCUS) ==================== -->
+  <g transform="translate(450, 36)">
+    <!-- Focus Box on Row 5 (Glyph Matrix Cell Buffer) -->
+    <g transform="translate(18, 226)">
+      <rect x="0" y="0" width="112" height="36" rx="4" fill="none" stroke="#00f2fe" stroke-width="2" filter="url(#brightGlow)"/>
+      <rect x="-2" y="-2" width="116" height="40" rx="5" fill="none" stroke="#38bdf8" stroke-width="1" stroke-dasharray="4 2"/>
+      
+      <!-- Coordinate Callout Lines Extending Out -->
+      <polyline points="112,18 160,18 200,-30 290,-30" fill="none" stroke="#00f2fe" stroke-width="1.5"/>
+      <circle cx="290" cy="-30" r="3" fill="#00f2fe" filter="url(#softGlow)"/>
+    </g>
+  </g>
+
+  <!-- ==================== BLOG COVER HEADLINE TEXT (MAX 3 WORDS) ==================== -->
+  <!-- EXACTLY 3 WORDS: "MOBILE TERMINAL RENDERING" -->
+  <g transform="translate(600, 580)" text-anchor="middle">
+    <!-- Subtle glow behind main text -->
+    <text x="0" y="0" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', 'Segoe UI', sans-serif" font-size="38" font-weight="900" fill="#00f2fe" letter-spacing="4" opacity="0.3" filter="url(#brightGlow)">
+      MOBILE TERMINAL RENDERING
+    </text>
+
+    <!-- Crisp Primary Text -->
+    <text x="0" y="0" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', 'Segoe UI', sans-serif" font-size="38" font-weight="900" letter-spacing="4">
+      <tspan fill="#ffffff">MOBILE TERMINAL </tspan>
+      <tspan fill="#00f2fe">RENDERING</tspan>
+    </text>
+  </g>
+
+</svg>

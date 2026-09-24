@@ -1,0 +1,305 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <defs>
+    <!-- Background Gradients -->
+    <radialGradient id="bgGlow" cx="50%" cy="40%" r="70%">
+      <stop offset="0%" stop-color="#0c223a" stop-opacity="0.9"/>
+      <stop offset="45%" stop-color="#091424" stop-opacity="0.95"/>
+      <stop offset="100%" stop-color="#05080f" stop-opacity="1"/>
+    </radialGradient>
+
+    <radialGradient id="moonGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.35"/>
+      <stop offset="40%" stop-color="#0077ff" stop-opacity="0.15"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="sleepBreathingGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.9"/>
+      <stop offset="30%" stop-color="#00c8ff" stop-opacity="0.4"/>
+      <stop offset="100%" stop-color="#00f2fe" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Linear Gradients -->
+    <linearGradient id="moonGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#cffafe"/>
+      <stop offset="40%" stop-color="#38bdf8"/>
+      <stop offset="80%" stop-color="#0284c7"/>
+      <stop offset="100%" stop-color="#0369a1"/>
+    </linearGradient>
+
+    <linearGradient id="laptopGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1e293b"/>
+      <stop offset="40%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#090d16"/>
+    </linearGradient>
+
+    <linearGradient id="laptopLidGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#334155"/>
+      <stop offset="50%" stop-color="#1e293b"/>
+      <stop offset="100%" stop-color="#0f172a"/>
+    </linearGradient>
+
+    <linearGradient id="terminalBg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0e1e33" stop-opacity="0.92"/>
+      <stop offset="100%" stop-color="#091322" stop-opacity="0.96"/>
+    </linearGradient>
+
+    <linearGradient id="borderGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00f2fe"/>
+      <stop offset="50%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#818cf8"/>
+    </linearGradient>
+
+    <linearGradient id="pulseLineGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0"/>
+      <stop offset="25%" stop-color="#00f2fe" stop-opacity="0.8"/>
+      <stop offset="50%" stop-color="#38ef7d" stop-opacity="1"/>
+      <stop offset="75%" stop-color="#00f2fe" stop-opacity="0.8"/>
+      <stop offset="100%" stop-color="#00f2fe" stop-opacity="0"/>
+    </linearGradient>
+
+    <linearGradient id="creviceGlow" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.1"/>
+      <stop offset="50%" stop-color="#00f2fe" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#00f2fe" stop-opacity="0.1"/>
+    </linearGradient>
+
+    <!-- Filters -->
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+
+    <filter id="intenseGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="16" result="blur1" />
+      <feGaussianBlur stdDeviation="5" result="blur2" />
+      <feMerge>
+        <feMergeNode in="blur1" />
+        <feMergeNode in="blur2" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+
+    <!-- Grid Pattern -->
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#16273d" stroke-width="0.8" stroke-opacity="0.55"/>
+      <circle cx="40" cy="40" r="1" fill="#1e3a5f" fill-opacity="0.7"/>
+    </pattern>
+  </defs>
+
+  <!-- Deep Terminal Background -->
+  <rect width="1200" height="630" fill="#060a12"/>
+  <rect width="1200" height="630" fill="url(#bgGlow)"/>
+  <rect width="1200" height="630" fill="url(#grid)"/>
+
+  <!-- Ambient Lunar & Night Glow behind central composition -->
+  <circle cx="600" cy="190" r="280" fill="url(#moonGlow)"/>
+  <circle cx="600" cy="380" r="200" fill="url(#moonGlow)" opacity="0.5"/>
+
+  <!-- Technical Frame Brackets -->
+  <g stroke="#1e3a5f" stroke-width="1.5" fill="none">
+    <path d="M 40 40 L 40 70 M 40 40 L 70 40" />
+    <path d="M 1160 40 L 1160 70 M 1160 40 L 1130 40" />
+    <path d="M 40 590 L 40 560 M 40 590 L 70 590" />
+    <path d="M 1160 590 L 1160 560 M 1160 590 L 1130 590" />
+  </g>
+
+  <!-- Constellation / Session Node Network Lines (Background) -->
+  <g opacity="0.3" stroke="#00f2fe" stroke-width="1" fill="none">
+    <!-- Left constellation lines -->
+    <path d="M 140 130 L 260 170 L 340 140 L 440 200" stroke-dasharray="3 3"/>
+    <circle cx="140" cy="130" r="2" fill="#38bdf8"/>
+    <circle cx="260" cy="170" r="3" fill="#00f2fe"/>
+    <circle cx="340" cy="140" r="2" fill="#38bdf8"/>
+    <circle cx="440" cy="200" r="3" fill="#00f2fe"/>
+
+    <path d="M 100 280 L 220 280 L 300 340 L 400 340" stroke-dasharray="4 4"/>
+    <circle cx="100" cy="280" r="2.5" fill="#00f2fe"/>
+    <circle cx="220" cy="280" r="2" fill="#38bdf8"/>
+    <circle cx="300" cy="340" r="3" fill="#38ef7d"/>
+    <circle cx="400" cy="340" r="2" fill="#00f2fe"/>
+
+    <!-- Right constellation lines -->
+    <path d="M 1060 130 L 940 170 L 860 140 L 760 200" stroke-dasharray="3 3"/>
+    <circle cx="1060" cy="130" r="2" fill="#38bdf8"/>
+    <circle cx="940" cy="170" r="3" fill="#00f2fe"/>
+    <circle cx="860" cy="140" r="2" fill="#38bdf8"/>
+    <circle cx="760" cy="200" r="3" fill="#00f2fe"/>
+
+    <path d="M 1100 280 L 980 280 L 900 340 L 800 340" stroke-dasharray="4 4"/>
+    <circle cx="1100" cy="280" r="2.5" fill="#00f2fe"/>
+    <circle cx="980" cy="280" r="2" fill="#38bdf8"/>
+    <circle cx="900" cy="340" r="3" fill="#38ef7d"/>
+    <circle cx="800" cy="340" r="2" fill="#00f2fe"/>
+  </g>
+
+  <!-- Left Technical Status Widget (Session Snapshot Stats) -->
+  <g transform="translate(140, 210)" opacity="0.65">
+    <rect x="0" y="0" width="150" height="34" rx="6" fill="#0b1b2d" stroke="#1d4368" stroke-width="1.2"/>
+    <circle cx="18" cy="17" r="4.5" fill="#38ef7d" filter="url(#glow)"/>
+    <text x="32" y="21" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Menlo', monospace" font-size="11" font-weight="600" fill="#94a3b8" letter-spacing="1">STATE: SUSPEND</text>
+
+    <rect x="15" y="44" width="150" height="34" rx="6" fill="#0b1b2d" stroke="#1d4368" stroke-width="1.2"/>
+    <circle cx="33" cy="61" r="4.5" fill="#00f2fe" filter="url(#glow)"/>
+    <text x="47" y="65" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Menlo', monospace" font-size="11" font-weight="600" fill="#94a3b8" letter-spacing="1">PTY: PRESERVED</text>
+
+    <rect x="30" y="88" width="150" height="34" rx="6" fill="#0c233c" stroke="#00f2fe" stroke-width="1.2" filter="url(#glow)"/>
+    <circle cx="48" cy="105" r="4.5" fill="#00f2fe"/>
+    <text x="62" y="109" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Menlo', monospace" font-size="11" font-weight="700" fill="#38ef7d" letter-spacing="1">ZERO DROP: 100%</text>
+  </g>
+
+  <!-- Right Technical Status Widget (Daemon Replay Stats) -->
+  <g transform="translate(910, 210)" opacity="0.65">
+    <rect x="0" y="0" width="150" height="34" rx="6" fill="#0b1b2d" stroke="#1d4368" stroke-width="1.2"/>
+    <line x1="16" y1="17" x2="30" y2="17" stroke="#00f2fe" stroke-width="2.5" stroke-linecap="round"/>
+    <text x="38" y="21" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Menlo', monospace" font-size="11" font-weight="600" fill="#94a3b8" letter-spacing="1">RING BUF: OK</text>
+
+    <rect x="-15" y="44" width="150" height="34" rx="6" fill="#0b1b2d" stroke="#1d4368" stroke-width="1.2"/>
+    <line x1="1" y1="61" x2="15" y2="61" stroke="#38bdf8" stroke-width="2.5" stroke-linecap="round"/>
+    <text x="23" y="65" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Menlo', monospace" font-size="11" font-weight="600" fill="#94a3b8" letter-spacing="1">UDS SOCKET: UP</text>
+
+    <rect x="-30" y="88" width="150" height="34" rx="6" fill="#0c233c" stroke="#38ef7d" stroke-width="1.2" filter="url(#glow)"/>
+    <line x1="-14" y1="105" x2="0" y2="105" stroke="#38ef7d" stroke-width="2.5" stroke-linecap="round"/>
+    <text x="8" y="109" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Menlo', monospace" font-size="11" font-weight="700" fill="#00f2fe" letter-spacing="1">PERSIST: ALIVE</text>
+  </g>
+
+  <!-- ==================== CENTRAL ICONIC COMPOSITION ==================== -->
+
+  <!-- Celestial Orbit & Star Ring -->
+  <g transform="translate(600, 140)">
+    <ellipse cx="0" cy="0" rx="140" ry="60" fill="none" stroke="#00f2fe" stroke-width="1" stroke-dasharray="4 8" opacity="0.25" transform="rotate(-15)"/>
+    <ellipse cx="0" cy="0" rx="190" ry="75" fill="none" stroke="#38bdf8" stroke-width="1" stroke-dasharray="6 12" opacity="0.2" transform="rotate(15)"/>
+  </g>
+
+  <!-- THE GLOWING CRESCENT MOON OVER SLEEPING LAPTOP TERMINAL -->
+  <g transform="translate(600, 125)">
+    <!-- Moon Halo Blur -->
+    <path d="M 0 -45 
+             A 45 45 0 0 1 42 16
+             A 45 45 0 0 1 -22 40
+             A 38 38 0 0 0 0 -45 Z"
+          fill="#00f2fe" opacity="0.35" filter="url(#intenseGlow)"/>
+
+    <!-- Crescent Moon Silhouette with Glowing Edge -->
+    <path d="M 0 -45 
+             A 45 45 0 0 1 42 16
+             A 45 45 0 0 1 -22 40
+             A 38 38 0 0 0 0 -45 Z"
+          fill="url(#moonGrad)" filter="url(#glow)"/>
+
+    <!-- Geometric Moon Facet Accents -->
+    <path d="M 5 -36 A 36 36 0 0 1 35 12 A 42 42 0 0 0 5 -36 Z" fill="#ffffff" opacity="0.45"/>
+
+    <!-- Subtle Suspended 'Z z' Sleep Particles drifting into night -->
+    <g opacity="0.8" fill="#38ef7d" filter="url(#glow)">
+      <circle cx="55" cy="-28" r="2.5"/>
+      <circle cx="72" cy="-45" r="3.5"/>
+      <circle cx="95" cy="-60" r="4.5"/>
+    </g>
+  </g>
+
+  <!-- PERSISTENT TERMINAL WINDOW (FLOATING IN SUSPENDED STATE) -->
+  <g transform="translate(425, 195)">
+    <!-- Window Outer Glow -->
+    <rect x="-2" y="-2" width="354" height="154" rx="10" fill="none" stroke="#00f2fe" stroke-width="2" opacity="0.4" filter="url(#glow)"/>
+
+    <!-- Terminal Window Container -->
+    <rect x="0" y="0" width="350" height="150" rx="8" fill="url(#terminalBg)" stroke="url(#borderGrad)" stroke-width="1.8"/>
+
+    <!-- Title Bar -->
+    <rect x="0" y="0" width="350" height="26" rx="8" fill="#0c1728"/>
+    <line x1="0" y1="26" x2="350" y2="26" stroke="#1e324a" stroke-width="1"/>
+
+    <!-- Window Dots -->
+    <circle cx="16" cy="13" r="4" fill="#334155"/>
+    <circle cx="30" cy="13" r="4" fill="#334155"/>
+    <circle cx="44" cy="13" r="4" fill="#334155"/>
+
+    <text x="175" y="17" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Menlo', monospace" font-size="10" font-weight="600" fill="#64748b" text-anchor="middle" letter-spacing="1">pty-daemon: session-402 (detached)</text>
+
+    <!-- Terminal Content (Monospace Lines) -->
+    <!-- Prompt Line 1 -->
+    <text x="18" y="50" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', 'Courier New', monospace" font-size="11" font-weight="700" fill="#38ef7d">❯</text>
+    <text x="32" y="50" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', 'Courier New', monospace" font-size="11" font-weight="500" fill="#f1f5f9">sleep --suspend-safe &amp;</text>
+
+    <!-- Status Line 2 -->
+    <text x="18" y="72" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', 'Courier New', monospace" font-size="10" font-weight="500" fill="#00f2fe">[daemon]</text>
+    <text x="80" y="72" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', 'Courier New', monospace" font-size="10" font-weight="400" fill="#94a3b8">host entered S3 sleep: FD preserved</text>
+
+    <!-- Status Line 3 -->
+    <text x="18" y="92" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', 'Courier New', monospace" font-size="10" font-weight="500" fill="#38ef7d">[resume]</text>
+    <text x="80" y="92" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', 'Courier New', monospace" font-size="10" font-weight="400" fill="#94a3b8">wake signal received · ring-buffer replayed</text>
+
+    <!-- Active Prompt with Glowing Cyan Cursor -->
+    <text x="18" y="116" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', 'Courier New', monospace" font-size="11" font-weight="700" fill="#00f2fe">❯</text>
+    <text x="32" y="116" font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', 'Courier New', monospace" font-size="11" font-weight="500" fill="#f1f5f9">pty session intact</text>
+    <!-- Blinking Cursor Rect -->
+    <rect x="156" y="106" width="7" height="13" fill="#00f2fe" filter="url(#glow)"/>
+
+    <!-- Bottom Mini-Heartbeat / Persistence Wave Line inside terminal -->
+    <path d="M 18 135 L 120 135 L 130 128 L 140 142 L 150 126 L 160 140 L 170 135 L 332 135" fill="none" stroke="url(#pulseLineGrad)" stroke-width="2"/>
+  </g>
+
+  <!-- CONTINUOUS PERSISTENCE PULSE BEAM (Connecting Floating Terminal to Sleeping Laptop) -->
+  <g stroke="#00f2fe" stroke-width="1.5" fill="none" opacity="0.5">
+    <line x1="600" y1="346" x2="600" y2="385" stroke-dasharray="4 4"/>
+    <circle cx="600" cy="365" r="3" fill="#00f2fe" filter="url(#glow)"/>
+  </g>
+
+  <!-- ==================== SLEEPING LAPTOP ==================== -->
+  <g transform="translate(600, 395)">
+    <!-- Sleeping Laptop Base (Top Isometric / Sleek Perspective View) -->
+    <!-- Shadow underneath laptop -->
+    <ellipse cx="0" cy="52" rx="200" ry="18" fill="#000000" opacity="0.6" filter="url(#glow)"/>
+
+    <!-- Laptop Lower Body -->
+    <path d="M -180 32 
+             C -180 30, -170 28, -150 28 
+             L 150 28 
+             C 170 28, 180 30, 180 32 
+             L 170 46 
+             C 165 49, 140 50, 120 50 
+             L -120 50 
+             C -140 50, -165 49, -170 46 Z"
+          fill="url(#laptopGrad)" stroke="#1e3a5f" stroke-width="1.5"/>
+
+    <!-- Sleek Front Edge Chamfer -->
+    <path d="M -170 46 L 170 46" stroke="#334155" stroke-width="1"/>
+
+    <!-- Laptop Lid (Closed in Sleep Mode) -->
+    <path d="M -168 12 
+             C -168 8, -155 6, -135 6 
+             L 135 6 
+             C 155 6, 168 8, 168 12 
+             L 176 28 
+             L -176 28 Z"
+          fill="url(#laptopLidGrad)" stroke="#2a4365" stroke-width="1.5"/>
+
+    <!-- Glowing Crevice of Light (Display Light Seeping Through Closed Sleeping Lid) -->
+    <line x1="-165" y1="28" x2="165" y2="28" stroke="url(#creviceGlow)" stroke-width="2.5" filter="url(#glow)"/>
+
+    <!-- Sleek Center Notch / Opening Lip -->
+    <path d="M -24 28 L -18 31 L 18 31 L 24 28 Z" fill="#090d16" stroke="#1e293b" stroke-width="0.8"/>
+
+    <!-- SLEEP BREATHING INDICATOR (Pulsing glowing teal LED on front lip) -->
+    <ellipse cx="0" cy="40" rx="18" ry="8" fill="url(#sleepBreathingGlow)"/>
+    <ellipse cx="0" cy="40" rx="5" ry="2" fill="#ffffff" filter="url(#glow)"/>
+    <ellipse cx="0" cy="40" rx="2.5" ry="1.2" fill="#cffafe"/>
+  </g>
+
+  <!-- ==================== MINIMAL TEXT (MAX 3 WORDS) ==================== -->
+  <g transform="translate(600, 520)" text-anchor="middle">
+    <!-- Subtitle Pill Badge -->
+    <rect x="-125" y="-36" width="250" height="28" rx="14" fill="#091b2c" stroke="#00f2fe" stroke-width="1.2" opacity="0.9"/>
+    <circle cx="-100" cy="-22" r="4" fill="#38ef7d" filter="url(#glow)"/>
+    <text x="-86" y="-17" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Menlo', monospace" font-size="11" font-weight="700" fill="#00f2fe" letter-spacing="3" text-anchor="start">TERMINAL SESSION LIFE</text>
+
+    <!-- Main Title: EXACTLY 2 WORDS (<= 3 words limit) -->
+    <text x="0" y="32" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'Inter', sans-serif" font-size="44" font-weight="800" fill="#ffffff" letter-spacing="2">
+      PTY <tspan fill="#00f2fe">PERSISTENCE</tspan>
+    </text>
+  </g>
+</svg>

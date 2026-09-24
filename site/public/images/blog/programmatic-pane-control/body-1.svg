@@ -1,0 +1,437 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900" style="background:#070a13; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#090e1b" />
+      <stop offset="45%" stop-color="#060912" />
+      <stop offset="100%" stop-color="#030509" />
+    </linearGradient>
+
+    <!-- Column Card Backgrounds -->
+    <linearGradient id="col-bg-default" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0e172a" stop-opacity="0.65" />
+      <stop offset="100%" stop-color="#080e1b" stop-opacity="0.88" />
+    </linearGradient>
+
+    <linearGradient id="col-bg-featured" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0a2633" stop-opacity="0.75" />
+      <stop offset="100%" stop-color="#061620" stop-opacity="0.94" />
+    </linearGradient>
+
+    <!-- Actor Headers -->
+    <linearGradient id="actor-amber" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#2a1b0e" />
+      <stop offset="100%" stop-color="#180f08" />
+    </linearGradient>
+
+    <linearGradient id="actor-blue" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#10233e" />
+      <stop offset="100%" stop-color="#0a1426" />
+    </linearGradient>
+
+    <linearGradient id="actor-teal" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0c2f3b" />
+      <stop offset="100%" stop-color="#061a22" />
+    </linearGradient>
+
+    <!-- Arrow Markers -->
+    <marker id="arrow-amber" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#f59e0b" />
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#38bdf8" />
+    </marker>
+    <marker id="arrow-teal" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#2dd4bf" />
+    </marker>
+    <marker id="arrow-muted" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#64748b" />
+    </marker>
+
+    <!-- Glow Filter -->
+    <filter id="glow-teal" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <!-- Background Base -->
+  <rect width="1600" height="900" fill="url(#bg-grad)" />
+
+  <!-- Grid Dots Background Pattern -->
+  <g opacity="0.045" fill="#38bdf8">
+    <pattern id="grid-dots" x="0" y="0" width="32" height="32" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.2" />
+    </pattern>
+    <rect width="1600" height="900" fill="url(#grid-dots)" />
+  </g>
+
+  <!-- Ambient Light Blobs -->
+  <circle cx="280" cy="380" r="220" fill="#f59e0b" opacity="0.03" filter="blur(90px)" />
+  <circle cx="800" cy="400" r="250" fill="#0284c7" opacity="0.05" filter="blur(90px)" />
+  <circle cx="1320" cy="380" r="260" fill="#0d9488" opacity="0.08" filter="blur(90px)" />
+
+  <!-- ==================== HEADER ==================== -->
+  <g transform="translate(70, 38)">
+    <!-- Category Pill -->
+    <rect x="0" y="0" width="224" height="24" rx="12" fill="#0c192c" stroke="#1d385c" stroke-width="1" />
+    <circle cx="12" cy="12" r="3.5" fill="#14b8a6" />
+    <text x="24" y="16.5" fill="#38bdf8" font-size="10.5" font-weight="700" letter-spacing="1.5">TERMINAL IPC ARCHITECTURE</text>
+
+    <!-- Main Title -->
+    <text x="0" y="58" fill="#f8fafc" font-size="28" font-weight="700" letter-spacing="-0.5">Send Keystrokes to a Terminal Pane Programmatically</text>
+    
+    <!-- Subtitle -->
+    <text x="0" y="83" fill="#94a3b8" font-size="14" font-weight="400">Comparing one-shot CLI execution, control mode stdio streaming, and direct native socket IPC</text>
+  </g>
+
+  <!-- ==================== COLUMN 1: CLI SEND-KEYS ==================== -->
+  <g transform="translate(70, 138)">
+    <!-- Column Card Outer -->
+    <rect x="0" y="0" width="460" height="718" rx="14" fill="url(#col-bg-default)" stroke="#1e293b" stroke-width="1.2" />
+
+    <!-- Column Header -->
+    <rect x="1" y="1" width="458" height="66" rx="13" fill="#111a2e" fill-opacity="0.6" />
+    <line x1="0" y1="67" x2="460" y2="67" stroke="#1e293b" stroke-width="1" />
+    <rect x="18" y="15" width="24" height="24" rx="6" fill="#f59e0b" fill-opacity="0.15" stroke="#f59e0b" stroke-width="1" />
+    <text x="30" y="32" text-anchor="middle" fill="#f59e0b" font-size="12" font-weight="800">1</text>
+    <text x="52" y="32" fill="#f8fafc" font-size="16" font-weight="700">CLI send-keys</text>
+    
+    <!-- Status Badge (Right aligned) -->
+    <rect x="332" y="16" width="110" height="22" rx="5" fill="#291e10" stroke="#78350f" stroke-width="1" />
+    <text x="387" y="31" text-anchor="middle" fill="#fbbf24" font-size="9.5" font-weight="700" letter-spacing="0.5">ONE-SHOT EXEC</text>
+    <text x="52" y="52" fill="#94a3b8" font-size="11.5">Spawns a new binary per keystroke/command</text>
+
+    <!-- Actors -->
+    <!-- Caller / Script -->
+    <rect x="18" y="82" width="102" height="34" rx="7" fill="url(#actor-amber)" stroke="#b45309" stroke-width="1" />
+    <text x="69" y="103" text-anchor="middle" fill="#fde68a" font-size="11" font-weight="600">Caller / Script</text>
+
+    <!-- CLI Process -->
+    <rect x="164" y="82" width="116" height="34" rx="7" fill="#18181b" stroke="#52525b" stroke-width="1" stroke-dasharray="3,3" />
+    <text x="222" y="103" text-anchor="middle" fill="#a1a1aa" font-size="11" font-family="'JetBrains Mono', monospace" font-weight="600">tmux send-keys</text>
+
+    <!-- Daemon / PTY -->
+    <rect x="325" y="82" width="112" height="34" rx="7" fill="#141923" stroke="#334155" stroke-width="1" />
+    <text x="381" y="103" text-anchor="middle" fill="#cbd5e1" font-size="11" font-weight="600">Daemon PTY</text>
+
+    <!-- Lifelines -->
+    <!-- Caller (x=69) -->
+    <line x1="69" y1="122" x2="69" y2="445" stroke="#334155" stroke-width="1.5" stroke-dasharray="4,4" />
+    <rect x="65" y="132" width="8" height="305" rx="3" fill="#2d1c0c" stroke="#b45309" stroke-width="1" />
+
+    <!-- CLI Process (transient) (x=222) -->
+    <line x1="222" y1="122" x2="222" y2="445" stroke="#27272a" stroke-width="1" stroke-dasharray="3,3" />
+    <rect x="218" y="145" width="8" height="205" rx="3" fill="#27272a" stroke="#71717a" stroke-width="1" />
+
+    <!-- Daemon (x=381) -->
+    <line x1="381" y1="122" x2="381" y2="445" stroke="#334155" stroke-width="1.5" stroke-dasharray="4,4" />
+    <rect x="377" y="132" width="8" height="305" rx="3" fill="#1e293b" stroke="#475569" stroke-width="1" />
+
+    <!-- Sequence Interactions -->
+    <!-- 1. Fork/Exec -->
+    <g transform="translate(0, 155)">
+      <line x1="73" y1="0" x2="214" y2="0" stroke="#f59e0b" stroke-width="1.5" marker-end="url(#arrow-amber)" />
+      <rect x="89" y="-12" width="110" height="20" rx="4" fill="#18120b" stroke="#78350f" stroke-width="0.8" />
+      <text x="144" y="2" text-anchor="middle" fill="#fbbf24" font-size="9.5" font-family="'JetBrains Mono', monospace">fork() + execve</text>
+    </g>
+
+    <!-- 2. Socket Connect -->
+    <g transform="translate(0, 208)">
+      <line x1="226" y1="0" x2="373" y2="0" stroke="#94a3b8" stroke-width="1.2" marker-end="url(#arrow-muted)" />
+      <rect x="243" y="-12" width="112" height="20" rx="4" fill="#111827" stroke="#374151" stroke-width="0.8" />
+      <text x="299" y="2" text-anchor="middle" fill="#cbd5e1" font-size="9.5" font-family="'JetBrains Mono', monospace">connect(sock)</text>
+    </g>
+
+    <!-- 3. CLI Command Payload -->
+    <g transform="translate(0, 260)">
+      <line x1="226" y1="0" x2="373" y2="0" stroke="#f59e0b" stroke-width="1.5" marker-end="url(#arrow-amber)" />
+      <rect x="238" y="-13" width="124" height="22" rx="4" fill="#20150b" stroke="#b45309" stroke-width="0.8" />
+      <text x="300" y="2" text-anchor="middle" fill="#fed7aa" font-size="9.5" font-family="'JetBrains Mono', monospace">MSG_COMMAND</text>
+    </g>
+
+    <!-- 4. Daemon PTY Write -->
+    <g transform="translate(385, 305)">
+      <path d="M 0 0 L 16 0 L 16 18 L 2 18" fill="none" stroke="#f59e0b" stroke-width="1.3" marker-end="url(#arrow-amber)" />
+      <text x="22" y="13" fill="#fde68a" font-size="9" font-family="'JetBrains Mono', monospace">write(pty)</text>
+    </g>
+
+    <!-- 5. Process Exit -->
+    <g transform="translate(0, 350)">
+      <circle cx="222" cy="0" r="5" fill="#71717a" />
+      <line x1="218" y1="-4" x2="226" y2="4" stroke="#ffffff" stroke-width="1.2" />
+      <line x1="226" y1="-4" x2="218" y2="4" stroke="#ffffff" stroke-width="1.2" />
+      <text x="234" y="4" fill="#71717a" font-size="9.5" font-family="'JetBrains Mono', monospace">exit(0) teardown</text>
+    </g>
+
+    <!-- 6. Blind Caller Execution -->
+    <g transform="translate(0, 405)">
+      <line x1="377" y1="0" x2="73" y2="0" stroke="#64748b" stroke-width="1" stroke-dasharray="4,3" />
+      <rect x="136" y="-12" width="176" height="22" rx="4" fill="#141824" stroke="#334155" stroke-width="0.8" />
+      <text x="224" y="3" text-anchor="middle" fill="#94a3b8" font-size="9.5">No Ack / Blind Fire-and-Forget</text>
+    </g>
+
+    <!-- Overhead highlight card -->
+    <g transform="translate(20, 456)">
+      <rect x="0" y="0" width="420" height="48" rx="8" fill="#1b120c" stroke="#78350f" stroke-width="1" />
+      <circle cx="20" cy="24" r="7" fill="#dc2626" fill-opacity="0.2" stroke="#ef4444" stroke-width="1" />
+      <text x="20" y="28" text-anchor="middle" fill="#f87171" font-size="10" font-weight="700">!</text>
+      <text x="36" y="21" fill="#fed7aa" font-size="11" font-weight="600">High Overhead &amp; Quoting Hazards</text>
+      <text x="36" y="38" fill="#d97706" font-size="9.5">Spawns process per command; shell argument escaping risks</text>
+    </g>
+
+    <!-- Column Evaluation Cards -->
+    <g transform="translate(20, 524)">
+      <rect x="0" y="0" width="420" height="174" rx="10" fill="#090d18" stroke="#1e293b" stroke-width="1" />
+      <text x="16" y="24" fill="#94a3b8" font-size="11" font-weight="700" letter-spacing="1">ARCHITECTURAL METRICS</text>
+
+      <g transform="translate(16, 42)">
+        <text x="0" y="0" fill="#64748b" font-size="11">Invocation Latency</text>
+        <text x="388" y="0" text-anchor="end" fill="#f87171" font-size="12" font-family="'JetBrains Mono', monospace" font-weight="700">15 – 45 ms</text>
+      </g>
+      <line x1="16" y1="54" x2="404" y2="54" stroke="#1e293b" stroke-width="1" />
+
+      <g transform="translate(16, 78)">
+        <text x="0" y="0" fill="#64748b" font-size="11">Connection Lifecycle</text>
+        <text x="388" y="0" text-anchor="end" fill="#f59e0b" font-size="11" font-family="'JetBrains Mono', monospace">Ephemeral (per-exec)</text>
+      </g>
+      <line x1="16" y1="90" x2="404" y2="90" stroke="#1e293b" stroke-width="1" />
+
+      <g transform="translate(16, 114)">
+        <text x="0" y="0" fill="#64748b" font-size="11">Delivery Guarantee</text>
+        <text x="388" y="0" text-anchor="end" fill="#ef4444" font-size="11" font-family="'JetBrains Mono', monospace">Unconfirmed (Fire/Forget)</text>
+      </g>
+      <line x1="16" y1="126" x2="404" y2="126" stroke="#1e293b" stroke-width="1" />
+
+      <g transform="translate(16, 150)">
+        <text x="0" y="0" fill="#64748b" font-size="11">Concurrency Safety</text>
+        <text x="388" y="0" text-anchor="end" fill="#f59e0b" font-size="11" font-family="'JetBrains Mono', monospace">Race Prone</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- ==================== COLUMN 2: CONTROL MODE ==================== -->
+  <g transform="translate(570, 138)">
+    <!-- Column Card Outer -->
+    <rect x="0" y="0" width="460" height="718" rx="14" fill="url(#col-bg-default)" stroke="#1e293b" stroke-width="1.2" />
+
+    <!-- Column Header -->
+    <rect x="1" y="1" width="458" height="66" rx="13" fill="#111c30" fill-opacity="0.6" />
+    <line x1="0" y1="67" x2="460" y2="67" stroke="#1e293b" stroke-width="1" />
+    <rect x="18" y="15" width="24" height="24" rx="6" fill="#0284c7" fill-opacity="0.15" stroke="#38bdf8" stroke-width="1" />
+    <text x="30" y="32" text-anchor="middle" fill="#38bdf8" font-size="12" font-weight="800">2</text>
+    <text x="52" y="32" fill="#f8fafc" font-size="16" font-weight="700">Control Mode (-C)</text>
+    
+    <!-- Status Badge (Right aligned) -->
+    <rect x="334" y="16" width="108" height="22" rx="5" fill="#0c2338" stroke="#0369a1" stroke-width="1" />
+    <text x="388" y="31" text-anchor="middle" fill="#38bdf8" font-size="9.5" font-weight="700" letter-spacing="0.5">STDIO STREAM</text>
+    <text x="52" y="52" fill="#94a3b8" font-size="11.5">Long-lived process via line-oriented stdio protocol</text>
+
+    <!-- Actors -->
+    <!-- Caller Process -->
+    <rect x="25" y="82" width="124" height="34" rx="7" fill="url(#actor-blue)" stroke="#0284c7" stroke-width="1" />
+    <text x="87" y="103" text-anchor="middle" fill="#bae6fd" font-size="11" font-weight="600">Caller Process</text>
+
+    <!-- Multiplexer Host -->
+    <rect x="275" y="82" width="134" height="34" rx="7" fill="#101e35" stroke="#1e40af" stroke-width="1" />
+    <text x="342" y="103" text-anchor="middle" fill="#bfdbfe" font-size="11" font-weight="600">tmux -C Controller</text>
+
+    <!-- Lifelines -->
+    <!-- Caller (x=87) -->
+    <line x1="87" y1="122" x2="87" y2="445" stroke="#334155" stroke-width="1.5" stroke-dasharray="4,4" />
+    <rect x="83" y="132" width="8" height="305" rx="3" fill="#0f213a" stroke="#0284c7" stroke-width="1" />
+
+    <!-- Multiplexer (x=342) -->
+    <line x1="342" y1="122" x2="342" y2="445" stroke="#334155" stroke-width="1.5" stroke-dasharray="4,4" />
+    <rect x="338" y="132" width="8" height="305" rx="3" fill="#112240" stroke="#1e40af" stroke-width="1" />
+
+    <!-- Sequence Interactions -->
+    <!-- 1. Stdio Pipe Attached -->
+    <g transform="translate(0, 155)">
+      <line x1="91" y1="0" x2="334" y2="0" stroke="#38bdf8" stroke-width="1.4" marker-end="url(#arrow-blue)" />
+      <rect x="157" y="-12" width="115" height="20" rx="4" fill="#0d1b2e" stroke="#0369a1" stroke-width="0.8" />
+      <text x="214" y="2" text-anchor="middle" fill="#7dd3fc" font-size="9.5" font-family="'JetBrains Mono', monospace">spawn("tmux -C")</text>
+    </g>
+
+    <!-- 2. Control Mode Ready Notification -->
+    <g transform="translate(0, 208)">
+      <line x1="338" y1="0" x2="95" y2="0" stroke="#38bdf8" stroke-width="1.2" stroke-dasharray="4,3" marker-end="url(#arrow-blue)" />
+      <rect x="156" y="-12" width="118" height="20" rx="4" fill="#0d1b2e" stroke="#0369a1" stroke-width="0.8" />
+      <text x="215" y="2" text-anchor="middle" fill="#93c5fd" font-size="9.5" font-family="'JetBrains Mono', monospace">%begin ... %ready</text>
+    </g>
+
+    <!-- 3. Line Command via Stdin -->
+    <g transform="translate(0, 260)">
+      <line x1="91" y1="0" x2="334" y2="0" stroke="#38bdf8" stroke-width="1.5" marker-end="url(#arrow-blue)" />
+      <rect x="128" y="-13" width="174" height="22" rx="4" fill="#0e233d" stroke="#0284c7" stroke-width="0.8" />
+      <text x="215" y="2" text-anchor="middle" fill="#bae6fd" font-size="9.5" font-family="'JetBrains Mono', monospace">send-keys -t %1 "cmd\n"</text>
+    </g>
+
+    <!-- 4. Internal Multiplexer Dispatch -->
+    <g transform="translate(346, 305)">
+      <path d="M 0 0 L 16 0 L 16 18 L 2 18" fill="none" stroke="#38bdf8" stroke-width="1.3" marker-end="url(#arrow-blue)" />
+      <text x="22" y="13" fill="#7dd3fc" font-size="9" font-family="'JetBrains Mono', monospace">write(pty)</text>
+    </g>
+
+    <!-- 5. Output Stream Wrapping -->
+    <g transform="translate(0, 350)">
+      <line x1="338" y1="0" x2="95" y2="0" stroke="#38bdf8" stroke-width="1.4" marker-end="url(#arrow-blue)" />
+      <rect x="127" y="-13" width="176" height="22" rx="4" fill="#0b1b30" stroke="#0369a1" stroke-width="0.8" />
+      <text x="215" y="2" text-anchor="middle" fill="#7dd3fc" font-size="9.5" font-family="'JetBrains Mono', monospace">%output %1 \012... %end</text>
+    </g>
+
+    <!-- 6. Line Delimited Parsing -->
+    <g transform="translate(0, 405)">
+      <rect x="120" y="-12" width="190" height="22" rx="4" fill="#091424" stroke="#1e3a5f" stroke-width="0.8" />
+      <text x="215" y="3" text-anchor="middle" fill="#94a3b8" font-size="9.5">Unescape Octal &amp; % Delimiters</text>
+    </g>
+
+    <!-- Overhead highlight card -->
+    <g transform="translate(20, 456)">
+      <rect x="0" y="0" width="420" height="48" rx="8" fill="#0d1b2e" stroke="#1e40af" stroke-width="1" />
+      <circle cx="20" cy="24" r="7" fill="#0284c7" fill-opacity="0.2" stroke="#38bdf8" stroke-width="1" />
+      <text x="20" y="28" text-anchor="middle" fill="#38bdf8" font-size="10" font-weight="700">~</text>
+      <text x="36" y="21" fill="#bae6fd" font-size="11" font-weight="600">Persistent Stdio with Text Parsing Overhead</text>
+      <text x="36" y="38" fill="#60a5fa" font-size="9.5">Solves process churn; line buffering and escaping remain brittle</text>
+    </g>
+
+    <!-- Column Evaluation Cards -->
+    <g transform="translate(20, 524)">
+      <rect x="0" y="0" width="420" height="174" rx="10" fill="#090d18" stroke="#1e293b" stroke-width="1" />
+      <text x="16" y="24" fill="#94a3b8" font-size="11" font-weight="700" letter-spacing="1">ARCHITECTURAL METRICS</text>
+
+      <g transform="translate(16, 42)">
+        <text x="0" y="0" fill="#64748b" font-size="11">Invocation Latency</text>
+        <text x="388" y="0" text-anchor="end" fill="#38bdf8" font-size="12" font-family="'JetBrains Mono', monospace" font-weight="700">2 – 8 ms</text>
+      </g>
+      <line x1="16" y1="54" x2="404" y2="54" stroke="#1e293b" stroke-width="1" />
+
+      <g transform="translate(16, 78)">
+        <text x="0" y="0" fill="#64748b" font-size="11">Connection Lifecycle</text>
+        <text x="388" y="0" text-anchor="end" fill="#7dd3fc" font-size="11" font-family="'JetBrains Mono', monospace">Long-lived Pipe (stdio)</text>
+      </g>
+      <line x1="16" y1="90" x2="404" y2="90" stroke="#1e293b" stroke-width="1" />
+
+      <g transform="translate(16, 114)">
+        <text x="0" y="0" fill="#64748b" font-size="11">Delivery Guarantee</text>
+        <text x="388" y="0" text-anchor="end" fill="#fcd34d" font-size="11" font-family="'JetBrains Mono', monospace">Asynchronous Stream</text>
+      </g>
+      <line x1="16" y1="126" x2="404" y2="126" stroke="#1e293b" stroke-width="1" />
+
+      <g transform="translate(16, 150)">
+        <text x="0" y="0" fill="#64748b" font-size="11">Concurrency Safety</text>
+        <text x="388" y="0" text-anchor="end" fill="#93c5fd" font-size="11" font-family="'JetBrains Mono', monospace">Interleaved Output</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- ==================== COLUMN 3: DIRECT SOCKET API ==================== -->
+  <g transform="translate(1070, 138)">
+    <!-- Column Card Outer (Glow / Highlight) -->
+    <rect x="-1" y="-1" width="462" height="720" rx="15" fill="none" stroke="#14b8a6" stroke-width="1.8" opacity="0.6" filter="url(#glow-teal)" />
+    <rect x="0" y="0" width="460" height="718" rx="14" fill="url(#col-bg-featured)" stroke="#14b8a6" stroke-width="1.5" />
+
+    <!-- Column Header -->
+    <rect x="1" y="1" width="458" height="66" rx="13" fill="#092832" fill-opacity="0.6" />
+    <line x1="0" y1="67" x2="460" y2="67" stroke="#0f766e" stroke-width="1" />
+    <rect x="18" y="15" width="24" height="24" rx="6" fill="#14b8a6" fill-opacity="0.2" stroke="#2dd4bf" stroke-width="1" />
+    <text x="30" y="32" text-anchor="middle" fill="#2dd4bf" font-size="12" font-weight="800">3</text>
+    <text x="52" y="32" fill="#f8fafc" font-size="16" font-weight="700">Direct Socket API</text>
+    
+    <!-- Status Badge (Right aligned) -->
+    <rect x="330" y="16" width="112" height="22" rx="5" fill="#042f2e" stroke="#14b8a6" stroke-width="1" />
+    <text x="386" y="31" text-anchor="middle" fill="#2dd4bf" font-size="9.5" font-weight="700" letter-spacing="0.5">STRUCTURED IPC</text>
+    <text x="52" y="52" fill="#5eead4" font-size="11.5">Persistent Unix Domain Socket • Zero-copy framing</text>
+
+    <!-- Actors -->
+    <!-- Caller / Client -->
+    <rect x="25" y="82" width="124" height="34" rx="7" fill="url(#actor-teal)" stroke="#14b8a6" stroke-width="1.2" />
+    <text x="87" y="103" text-anchor="middle" fill="#ccfbf1" font-size="11" font-weight="600">Client / Agent</text>
+
+    <!-- FerryX Daemon -->
+    <rect x="275" y="82" width="134" height="34" rx="7" fill="#06222b" stroke="#0d9488" stroke-width="1.2" />
+    <text x="342" y="103" text-anchor="middle" fill="#a7f3d0" font-size="11" font-weight="600">PTY Daemon IPC</text>
+
+    <!-- Lifelines -->
+    <!-- Caller (x=87) -->
+    <line x1="87" y1="122" x2="87" y2="445" stroke="#0f766e" stroke-width="1.5" stroke-dasharray="4,4" />
+    <rect x="83" y="132" width="8" height="305" rx="3" fill="#07232a" stroke="#14b8a6" stroke-width="1.2" />
+
+    <!-- Daemon (x=342) -->
+    <line x1="342" y1="122" x2="342" y2="445" stroke="#0f766e" stroke-width="1.5" stroke-dasharray="4,4" />
+    <rect x="338" y="132" width="8" height="305" rx="3" fill="#092d35" stroke="#0d9488" stroke-width="1.2" />
+
+    <!-- Sequence Interactions -->
+    <!-- 1. Established Socket Connection -->
+    <g transform="translate(0, 155)">
+      <line x1="91" y1="0" x2="334" y2="0" stroke="#2dd4bf" stroke-width="1.5" marker-end="url(#arrow-teal)" />
+      <rect x="145" y="-12" width="140" height="20" rx="4" fill="#06282e" stroke="#0d9488" stroke-width="0.8" />
+      <text x="215" y="2" text-anchor="middle" fill="#5eead4" font-size="9.5" font-family="'JetBrains Mono', monospace">connect(daemon.sock)</text>
+    </g>
+
+    <!-- 2. Framed Input Payload -->
+    <g transform="translate(0, 215)">
+      <line x1="91" y1="0" x2="334" y2="0" stroke="#2dd4bf" stroke-width="1.8" marker-end="url(#arrow-teal)" />
+      <rect x="121" y="-15" width="188" height="24" rx="4" fill="#042f2e" stroke="#14b8a6" stroke-width="1" />
+      <text x="215" y="1.5" text-anchor="middle" fill="#a7f3d0" font-size="9.5" font-family="'JetBrains Mono', monospace">{"op":"input","p":2,"seq":42}</text>
+    </g>
+
+    <!-- 3. Zero-Copy PTY Write -->
+    <g transform="translate(346, 268)">
+      <path d="M 0 0 L 16 0 L 16 18 L 2 18" fill="none" stroke="#2dd4bf" stroke-width="1.5" marker-end="url(#arrow-teal)" />
+      <text x="22" y="13" fill="#5eead4" font-size="9" font-family="'JetBrains Mono', monospace">write(master_fd)</text>
+    </g>
+
+    <!-- 4. Immediate Deterministic ACK -->
+    <g transform="translate(0, 325)">
+      <line x1="338" y1="0" x2="95" y2="0" stroke="#2dd4bf" stroke-width="1.8" marker-end="url(#arrow-teal)" />
+      <rect x="131" y="-14" width="168" height="23" rx="4" fill="#062e2d" stroke="#14b8a6" stroke-width="1" />
+      <text x="215" y="1.5" text-anchor="middle" fill="#6ee7b7" font-size="9.5" font-family="'JetBrains Mono', monospace">{"status":"ok","ack":42}</text>
+    </g>
+
+    <!-- 5. Streaming Event RingBuffer -->
+    <g transform="translate(0, 385)">
+      <line x1="338" y1="0" x2="95" y2="0" stroke="#38bdf8" stroke-width="1.4" stroke-dasharray="4,3" marker-end="url(#arrow-blue)" />
+      <rect x="121" y="-13" width="188" height="22" rx="4" fill="#082230" stroke="#0284c7" stroke-width="0.8" />
+      <text x="215" y="2" text-anchor="middle" fill="#7dd3fc" font-size="9.5" font-family="'JetBrains Mono', monospace">{"event":"output","seq":43}</text>
+    </g>
+
+    <!-- Overhead highlight card -->
+    <g transform="translate(20, 456)">
+      <rect x="0" y="0" width="420" height="48" rx="8" fill="#042a2b" stroke="#0d9488" stroke-width="1.2" />
+      <circle cx="20" cy="24" r="7" fill="#14b8a6" fill-opacity="0.25" stroke="#2dd4bf" stroke-width="1" />
+      <text x="20" y="28" text-anchor="middle" fill="#2dd4bf" font-size="10" font-weight="700">✓</text>
+      <text x="36" y="21" fill="#ccfbf1" font-size="11" font-weight="700">Sub-Millisecond Direct Dispatch</text>
+      <text x="36" y="38" fill="#5eead4" font-size="9.5">Zero process forks, zero shell escaping risks, deterministic sequence acks</text>
+    </g>
+
+    <!-- Column Evaluation Cards -->
+    <g transform="translate(20, 524)">
+      <rect x="0" y="0" width="420" height="174" rx="10" fill="#04181f" stroke="#0f766e" stroke-width="1" />
+      <text x="16" y="24" fill="#5eead4" font-size="11" font-weight="700" letter-spacing="1">ARCHITECTURAL METRICS</text>
+
+      <g transform="translate(16, 42)">
+        <text x="0" y="0" fill="#99f6e4" font-size="11">Invocation Latency</text>
+        <text x="388" y="0" text-anchor="end" fill="#2dd4bf" font-size="12" font-family="'JetBrains Mono', monospace" font-weight="700">&lt; 0.2 ms</text>
+      </g>
+      <line x1="16" y1="54" x2="404" y2="54" stroke="#0f766e" stroke-width="1" />
+
+      <g transform="translate(16, 78)">
+        <text x="0" y="0" fill="#99f6e4" font-size="11">Connection Lifecycle</text>
+        <text x="388" y="0" text-anchor="end" fill="#5eead4" font-size="11" font-family="'JetBrains Mono', monospace">Persistent Socket (UDS)</text>
+      </g>
+      <line x1="16" y1="90" x2="404" y2="90" stroke="#0f766e" stroke-width="1" />
+
+      <g transform="translate(16, 114)">
+        <text x="0" y="0" fill="#99f6e4" font-size="11">Delivery Guarantee</text>
+        <text x="388" y="0" text-anchor="end" fill="#2dd4bf" font-size="11" font-family="'JetBrains Mono', monospace">Synchronous Ack + Seq</text>
+      </g>
+      <line x1="16" y1="126" x2="404" y2="126" stroke="#0f766e" stroke-width="1" />
+
+      <g transform="translate(16, 150)">
+        <text x="0" y="0" fill="#99f6e4" font-size="11">Concurrency Safety</text>
+        <text x="388" y="0" text-anchor="end" fill="#5eead4" font-size="11" font-family="'JetBrains Mono', monospace">Strict Sequence Ordering</text>
+      </g>
+    </g>
+  </g>
+</svg>

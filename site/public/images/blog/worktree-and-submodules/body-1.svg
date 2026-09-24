@@ -1,0 +1,284 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900" style="background:#090d16; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'JetBrains Mono', monospace;">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0b101b" />
+      <stop offset="50%" stop-color="#070a12" />
+      <stop offset="100%" stop-color="#04060a" />
+    </linearGradient>
+
+    <!-- Card Backgrounds -->
+    <linearGradient id="blue-card" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#141e30" />
+      <stop offset="100%" stop-color="#0c1320" />
+    </linearGradient>
+
+    <linearGradient id="teal-card" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0f2631" />
+      <stop offset="100%" stop-color="#091820" />
+    </linearGradient>
+
+    <linearGradient id="emerald-card" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0f2b26" />
+      <stop offset="100%" stop-color="#071b17" />
+    </linearGradient>
+
+    <!-- Filters for subtle glow -->
+    <filter id="glow-teal" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+    <filter id="glow-soft" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="3" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <!-- Arrow Markers -->
+    <marker id="arrow-cyan" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#00f2fe" />
+    </marker>
+    <marker id="arrow-emerald" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#34d399" />
+    </marker>
+  </defs>
+
+  <!-- Background Canvas -->
+  <rect width="1600" height="900" fill="url(#bg-grad)" />
+
+  <!-- Grid dots -->
+  <g opacity="0.08" fill="#38bdf8">
+    <pattern id="grid-dots" x="0" y="0" width="40" height="40" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.5" />
+    </pattern>
+    <rect width="1600" height="900" fill="url(#grid-dots)" />
+  </g>
+
+  <!-- Ambient Glow Blobs -->
+  <circle cx="280" cy="450" r="260" fill="#0284c7" opacity="0.06" filter="blur(80px)" />
+  <circle cx="800" cy="450" r="300" fill="#0d9488" opacity="0.07" filter="blur(90px)" />
+  <circle cx="1320" cy="450" r="280" fill="#059669" opacity="0.06" filter="blur(85px)" />
+
+  <!-- Header Section -->
+  <g transform="translate(80, 70)">
+    <rect x="0" y="0" width="160" height="26" rx="13" fill="#1e293b" stroke="#334155" stroke-width="1" />
+    <circle cx="14" cy="13" r="4" fill="#2dd4bf" />
+    <text x="26" y="17" fill="#94a3b8" font-size="11" font-weight="600" letter-spacing="1.5">GIT ARCHITECTURE</text>
+
+    <text x="0" y="65" fill="#f8fafc" font-size="34" font-weight="700" letter-spacing="-0.5">Git Submodules Inside Agent Worktrees</text>
+    <text x="0" y="94" fill="#64748b" font-size="16" font-weight="400">Isolated workspace execution with detached commit pointer tracking</text>
+  </g>
+
+  <!-- WORKTREE BOUNDARY CONTAINER (LEFT) -->
+  <g transform="translate(80, 195)">
+    <!-- Container frame: Worktree Directory -->
+    <rect x="0" y="0" width="880" height="625" rx="18" fill="#0b1220" fill-opacity="0.8" stroke="#1e2d42" stroke-width="1.5" />
+    
+    <!-- Title bar -->
+    <path d="M 0 18 Q 0 0 18 0 L 862 0 Q 880 0 880 18 L 880 44 L 0 44 Z" fill="#111c2e" stroke="#1e2d42" stroke-width="1" />
+    <circle cx="26" cy="22" r="5" fill="#ef4444" opacity="0.8" />
+    <circle cx="42" cy="22" r="5" fill="#f59e0b" opacity="0.8" />
+    <circle cx="58" cy="22" r="5" fill="#10b981" opacity="0.8" />
+    
+    <text x="82" y="27" fill="#94a3b8" font-size="13" font-family="'JetBrains Mono', monospace">worktrees/agent-session-42/</text>
+    <rect x="736" y="10" width="128" height="24" rx="12" fill="#0369a1" fill-opacity="0.3" stroke="#0284c7" stroke-width="1" />
+    <text x="748" y="26" fill="#38bdf8" font-size="11" font-weight="600">AGENT WORKTREE</text>
+
+    <!-- Sub-block 1: Parent Superproject Tree -->
+    <g transform="translate(30, 65)">
+      <rect x="0" y="0" width="385" height="530" rx="12" fill="url(#blue-card)" stroke="#1e3a5f" stroke-width="1.5" />
+      
+      <!-- Card header -->
+      <path d="M 0 12 Q 0 0 12 0 L 373 0 Q 385 0 385 12 L 385 40 L 0 40 Z" fill="#15253d" />
+      <text x="18" y="25" fill="#38bdf8" font-size="13" font-weight="700">SUPERPROJECT (WORKTREE)</text>
+      <text x="365" y="25" fill="#64748b" font-size="11" font-family="'JetBrains Mono', monospace" text-anchor="end">HEAD: feat/x</text>
+
+      <!-- Git Tree Objects -->
+      <g transform="translate(18, 55)">
+        <!-- Commit Node -->
+        <rect x="0" y="0" width="349" height="66" rx="8" fill="#09111f" stroke="#2563eb" stroke-width="1.2" />
+        <rect x="12" y="12" width="42" height="42" rx="6" fill="#1d4ed8" fill-opacity="0.25" stroke="#3b82f6" stroke-width="1" />
+        <text x="33" y="38" text-anchor="middle" fill="#60a5fa" font-size="18" font-weight="bold">C</text>
+        <text x="64" y="28" fill="#e2e8f0" font-size="13" font-weight="600">Commit Object</text>
+        <text x="64" y="47" fill="#38bdf8" font-size="12" font-family="'JetBrains Mono', monospace">a8f21bc</text>
+        <text x="335" y="38" fill="#94a3b8" font-size="11" font-family="'JetBrains Mono', monospace" text-anchor="end">tree 4b825dc</text>
+
+        <!-- Downward pointer from Commit to Root Tree -->
+        <line x1="174" y1="66" x2="174" y2="92" stroke="#38bdf8" stroke-width="1.5" stroke-dasharray="3,3" />
+
+        <!-- Tree Object Node -->
+        <g transform="translate(0, 95)">
+          <rect x="0" y="0" width="349" height="175" rx="8" fill="#09111f" stroke="#1e3a5f" stroke-width="1.2" />
+          <path d="M 0 8 Q 0 0 8 0 L 341 0 Q 349 0 349 8 L 349 28 L 0 28 Z" fill="#111f35" />
+          <text x="12" y="19" fill="#94a3b8" font-size="11" font-weight="600">ROOT TREE OBJECT</text>
+
+          <!-- Tree entry 1 -->
+          <g transform="translate(14, 42)">
+            <text x="0" y="14" fill="#64748b" font-family="'JetBrains Mono', monospace" font-size="11">100644 blob</text>
+            <text x="120" y="14" fill="#cbd5e1" font-family="'JetBrains Mono', monospace" font-size="11">src/main.rs</text>
+            <text x="320" y="14" fill="#475569" font-family="'JetBrains Mono', monospace" font-size="10" text-anchor="end">e69de29</text>
+          </g>
+
+          <!-- Tree entry 2: GITLINK (HIGHLIGHTED) -->
+          <g transform="translate(8, 72)">
+            <rect x="0" y="0" width="333" height="50" rx="6" fill="#0a2636" stroke="#00f2fe" stroke-width="1.8" filter="url(#glow-soft)" />
+            <text x="10" y="20" fill="#2dd4bf" font-family="'JetBrains Mono', monospace" font-weight="bold" font-size="10.5">160000 commit (gitlink)</text>
+            <text x="10" y="38" fill="#ffffff" font-family="'JetBrains Mono', monospace" font-weight="bold" font-size="12">libs/core-engine</text>
+            <text x="320" y="30" fill="#00f2fe" font-family="'JetBrains Mono', monospace" font-size="12" font-weight="bold" text-anchor="end">9d4e5f1 →</text>
+          </g>
+
+          <!-- Tree entry 3: .gitmodules blob -->
+          <g transform="translate(14, 145)">
+            <text x="0" y="12" fill="#64748b" font-family="'JetBrains Mono', monospace" font-size="11">100644 blob</text>
+            <text x="120" y="12" fill="#94a3b8" font-family="'JetBrains Mono', monospace" font-size="11">.gitmodules</text>
+            <text x="320" y="12" fill="#475569" font-family="'JetBrains Mono', monospace" font-size="10" text-anchor="end">3f12a08</text>
+          </g>
+        </g>
+
+        <!-- Sub-block: .git file (Pointer to main git dir) -->
+        <g transform="translate(0, 290)">
+          <rect x="0" y="0" width="349" height="155" rx="8" fill="#080e1a" stroke="#25354c" stroke-width="1" stroke-dasharray="4,3" />
+          <text x="14" y="24" fill="#94a3b8" font-size="12" font-weight="600">Worktree Git Linkage</text>
+          <text x="14" y="44" fill="#64748b" font-family="'JetBrains Mono', monospace" font-size="11">.git [file]:</text>
+          
+          <rect x="14" y="54" width="321" height="34" rx="4" fill="#050a12" stroke="#172338" stroke-width="1" />
+          <text x="22" y="76" fill="#38bdf8" font-family="'JetBrains Mono', monospace" font-size="10">gitdir: /repo/.git/worktrees/session-42</text>
+          
+          <text x="14" y="112" fill="#64748b" font-size="11">Submodule gitdir redirection:</text>
+          <text x="14" y="132" fill="#2dd4bf" font-family="'JetBrains Mono', monospace" font-size="10.5">.git/modules/core-engine/config</text>
+        </g>
+      </g>
+    </g>
+
+    <!-- Sub-block 2: Submodule Directory in Working Tree -->
+    <g transform="translate(450, 65)">
+      <rect x="0" y="0" width="395" height="530" rx="12" fill="url(#teal-card)" stroke="#0e7490" stroke-width="1.5" />
+      
+      <!-- Card Header -->
+      <path d="M 0 12 Q 0 0 12 0 L 383 0 Q 395 0 395 12 L 395 40 L 0 40 Z" fill="#0c313f" />
+      <text x="18" y="25" fill="#2dd4bf" font-size="13" font-weight="700">SUBMODULE WORKING TREE</text>
+      <text x="377" y="25" fill="#38bdf8" font-size="11" font-family="'JetBrains Mono', monospace" text-anchor="end">libs/core-engine/</text>
+
+      <g transform="translate(20, 55)">
+        <!-- Target of Gitlink: Checked-out SHA card -->
+        <g id="target-sha-card">
+          <rect x="0" y="0" width="355" height="82" rx="8" fill="#071b26" stroke="#14b8a6" stroke-width="1.5" />
+          <rect x="12" y="14" width="46" height="54" rx="6" fill="#0f766e" fill-opacity="0.3" stroke="#14b8a6" stroke-width="1" />
+          <text x="35" y="47" text-anchor="middle" fill="#2dd4bf" font-size="20">🔗</text>
+          <text x="70" y="32" fill="#e2e8f0" font-size="13" font-weight="600">Exact Checked-out SHA</text>
+          <text x="70" y="55" fill="#2dd4bf" font-family="'JetBrains Mono', monospace" font-size="14" font-weight="bold">9d4e5f1... (HEAD)</text>
+        </g>
+
+        <!-- Submodule .git file redirect -->
+        <g transform="translate(0, 102)">
+          <rect x="0" y="0" width="355" height="74" rx="8" fill="#061822" stroke="#0e7490" stroke-width="1" />
+          <text x="14" y="25" fill="#94a3b8" font-size="12" font-weight="600">Submodule .git file:</text>
+          <rect x="14" y="34" width="327" height="28" rx="4" fill="#031017" stroke="#155e75" stroke-width="1" />
+          <text x="22" y="52" fill="#38bdf8" font-family="'JetBrains Mono', monospace" font-size="9.5">gitdir: ../../.git/modules/core-engine</text>
+        </g>
+
+        <!-- Detached HEAD Callout -->
+        <g transform="translate(0, 196)">
+          <rect x="0" y="0" width="355" height="118" rx="8" fill="#0a232c" stroke="#2dd4bf" stroke-width="1.2" stroke-dasharray="3,2" />
+          <text x="14" y="26" fill="#f8fafc" font-size="12" font-weight="700">STATE: DETACHED HEAD</text>
+          <text x="14" y="48" fill="#94a3b8" font-size="11.5">Worktrees track submodules by specific</text>
+          <text x="14" y="68" fill="#94a3b8" font-size="11.5">commit hash, not symbolic branch refs.</text>
+          <rect x="14" y="82" width="138" height="22" rx="4" fill="#042f2e" stroke="#0d9488" stroke-width="1" />
+          <text x="22" y="97" fill="#5eead4" font-size="10" font-family="'JetBrains Mono', monospace">git status: detached</text>
+        </g>
+
+        <!-- Local Submodule Working files -->
+        <g transform="translate(0, 334)">
+          <rect x="0" y="0" width="355" height="96" rx="8" fill="#061822" stroke="#155e75" stroke-width="1" />
+          <text x="14" y="24" fill="#64748b" font-size="11" font-weight="600">SUBMODULE LOCAL FILES</text>
+          <text x="14" y="48" fill="#cbd5e1" font-family="'JetBrains Mono', monospace" font-size="11">├── Cargo.toml</text>
+          <text x="14" y="68" fill="#cbd5e1" font-family="'JetBrains Mono', monospace" font-size="11">└── src/lib.rs</text>
+          <text x="335" y="68" fill="#2dd4bf" font-size="10" font-weight="600" text-anchor="end">ISOLATED</text>
+        </g>
+      </g>
+    </g>
+
+    <!-- POINTER CONNECTOR ARROW 1: Gitlink (Superproject) -> Submodule HEAD SHA -->
+    <!-- Start at (385 + 30 - 32, 65 + 55 + 95 + 72 + 25) = (383, 312) inside Worktree, End at (470, 312) -->
+    <path d="M 405 342 C 430 342, 440 342, 465 342" fill="none" stroke="#00f2fe" stroke-width="3" marker-end="url(#arrow-cyan)" filter="url(#glow-soft)" />
+  </g>
+
+  <!-- RIGHT SIDE CARD: SHARED CENTRAL REPO (.git) -->
+  <g transform="translate(1010, 195)">
+    <rect x="0" y="0" width="510" height="625" rx="18" fill="url(#emerald-card)" stroke="#059669" stroke-width="1.5" />
+
+    <!-- Card Header -->
+    <path d="M 0 18 Q 0 0 18 0 L 492 0 Q 510 0 510 18 L 510 44 L 0 44 Z" fill="#0c352d" />
+    <circle cx="26" cy="22" r="5" fill="#34d399" />
+    <text x="42" y="27" fill="#6ee7b7" font-size="14" font-weight="700">CENTRAL REPOSITORY (.git/)</text>
+    <rect x="360" y="10" width="130" height="24" rx="12" fill="#064e3b" stroke="#059669" stroke-width="1" />
+    <text x="375" y="26" fill="#a7f3d0" font-size="11" font-weight="600">SHARED STORAGE</text>
+
+    <!-- Submodule Commits History -->
+    <g transform="translate(30, 75)">
+      <text x="0" y="0" fill="#94a3b8" font-size="13" font-weight="600">Submodule Commit Graph (.git/modules/)</text>
+      
+      <!-- Commit Chain Timeline -->
+      <g transform="translate(30, 30)">
+        <!-- Vertical connector line -->
+        <line x1="20" y1="20" x2="20" y2="300" stroke="#059669" stroke-width="2" stroke-dasharray="4,4" />
+
+        <!-- Node 1 -->
+        <circle cx="20" cy="30" r="10" fill="#071b17" stroke="#34d399" stroke-width="2" />
+        <rect x="50" y="14" width="370" height="46" rx="6" fill="#09221e" stroke="#134e4a" stroke-width="1" />
+        <text x="64" y="32" fill="#6ee7b7" font-family="'JetBrains Mono', monospace" font-size="12" font-weight="bold">c71a390</text>
+        <text x="140" y="32" fill="#94a3b8" font-size="11">fix: update buffer capacity</text>
+        <text x="64" y="49" fill="#475569" font-size="10">Branch: main (submodule remote)</text>
+
+        <!-- Node 2 (THE TARGET COMMIT POINTER) -->
+        <circle cx="20" cy="130" r="14" fill="#00f2fe" filter="url(#glow-soft)" />
+        <circle cx="20" cy="130" r="7" fill="#071b17" />
+        <rect x="50" y="102" width="370" height="70" rx="8" fill="#0f3b37" stroke="#2dd4bf" stroke-width="1.8" filter="url(#glow-soft)" />
+        <text x="64" y="126" fill="#ffffff" font-family="'JetBrains Mono', monospace" font-size="13" font-weight="bold">9d4e5f1</text>
+        <rect x="140" y="112" width="134" height="20" rx="10" fill="#0e7490" />
+        <text x="148" y="126" fill="#e0f2fe" font-size="10" font-weight="bold">POINTED BY GITLINK</text>
+        <text x="64" y="154" fill="#99f6e4" font-size="11">feat: zero-copy parser interface</text>
+
+        <!-- Node 3 -->
+        <circle cx="20" cy="230" r="10" fill="#071b17" stroke="#34d399" stroke-width="2" />
+        <rect x="50" y="214" width="370" height="46" rx="6" fill="#09221e" stroke="#134e4a" stroke-width="1" />
+        <text x="64" y="232" fill="#6ee7b7" font-family="'JetBrains Mono', monospace" font-size="12" font-weight="bold">e2b104c</text>
+        <text x="140" y="232" fill="#94a3b8" font-size="11">initial submodule core setup</text>
+        <text x="64" y="249" fill="#475569" font-size="10">Tags: v0.1.0</text>
+      </g>
+    </g>
+
+    <!-- Info Box: Object deduplication & Worktree safety -->
+    <g transform="translate(30, 435)">
+      <rect x="0" y="0" width="450" height="150" rx="10" fill="#051714" stroke="#115e59" stroke-width="1" />
+      <text x="18" y="28" fill="#2dd4bf" font-size="12" font-weight="700">WORKTREE SUBMODULE KEY RULE</text>
+      
+      <circle cx="24" cy="54" r="3" fill="#38bdf8" />
+      <text x="36" y="58" fill="#e2e8f0" font-size="11.5">No duplicate submodule object cloning per agent</text>
+
+      <circle cx="24" cy="84" r="3" fill="#38bdf8" />
+      <text x="36" y="88" fill="#e2e8f0" font-size="11.5">Agent commits update the gitlink SHA in parent index</text>
+
+      <circle cx="24" cy="114" r="3" fill="#38bdf8" />
+      <text x="36" y="118" fill="#e2e8f0" font-size="11.5">Requires 'git submodule update --init' per worktree</text>
+    </g>
+  </g>
+
+  <!-- CROSS-CONTAINER CONNECTOR: Submodule HEAD SHA -> Central Repository Commit -->
+  <path d="M 875 355 C 930 355, 960 430, 1050 430" fill="none" stroke="#2dd4bf" stroke-width="2.5" stroke-dasharray="6,4" marker-end="url(#arrow-emerald)" />
+  <rect x="905" y="375" width="136" height="24" rx="4" fill="#041a20" stroke="#0e7490" stroke-width="1" />
+  <text x="913" y="391" fill="#38bdf8" font-size="10.5" font-family="'JetBrains Mono', monospace">resolves commit SHA</text>
+
+  <!-- Bottom Legend / Status Bar -->
+  <g transform="translate(80, 850)">
+    <circle cx="6" cy="6" r="4" fill="#00f2fe" />
+    <text x="18" y="10" fill="#94a3b8" font-size="12">160000 Gitlink Pointer</text>
+
+    <circle cx="220" cy="6" r="4" fill="#2dd4bf" />
+    <text x="232" y="10" fill="#94a3b8" font-size="12">Detached HEAD Checkouts</text>
+
+    <circle cx="440" cy="6" r="4" fill="#34d399" />
+    <text x="452" y="10" fill="#94a3b8" font-size="12">Shared .git/modules Object Cache</text>
+
+    <text x="1440" y="10" text-anchor="end" fill="#475569" font-family="'JetBrains Mono', monospace" font-size="11">ferryx tech blog</text>
+  </g>
+</svg>

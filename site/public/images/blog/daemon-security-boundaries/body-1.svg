@@ -1,0 +1,412 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900" style="background:#070a13; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'JetBrains Mono', monospace;">
+  <defs>
+    <!-- Background Gradients -->
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#090e1a" />
+      <stop offset="45%" stop-color="#060912" />
+      <stop offset="100%" stop-color="#030509" />
+    </linearGradient>
+
+    <!-- Zone Gradients -->
+    <linearGradient id="client-zone-bg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0e1726" stop-opacity="0.75" />
+      <stop offset="100%" stop-color="#080d18" stop-opacity="0.85" />
+    </linearGradient>
+
+    <linearGradient id="daemon-zone-bg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#071b24" stop-opacity="0.8" />
+      <stop offset="100%" stop-color="#05121a" stop-opacity="0.9" />
+    </linearGradient>
+
+    <linearGradient id="sandbox-zone-bg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#081e28" stop-opacity="0.65" />
+      <stop offset="100%" stop-color="#05131b" stop-opacity="0.75" />
+    </linearGradient>
+
+    <!-- Card Gradients -->
+    <linearGradient id="card-blue" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#13233a" />
+      <stop offset="100%" stop-color="#0c1726" />
+    </linearGradient>
+
+    <linearGradient id="card-teal" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0e2a36" />
+      <stop offset="100%" stop-color="#071a22" />
+    </linearGradient>
+
+    <linearGradient id="card-dark" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#111827" />
+      <stop offset="100%" stop-color="#090d16" />
+    </linearGradient>
+
+    <linearGradient id="card-danger" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#2a1215" />
+      <stop offset="100%" stop-color="#180a0c" />
+    </linearGradient>
+
+    <!-- Accent Highlights -->
+    <linearGradient id="border-glow-teal" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.9" />
+      <stop offset="50%" stop-color="#2dd4bf" stop-opacity="0.4" />
+      <stop offset="100%" stop-color="#0284c7" stop-opacity="0.8" />
+    </linearGradient>
+
+    <!-- Filters for Glow -->
+    <filter id="glow-teal" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="5" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <filter id="glow-boundary" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <!-- Arrow Markers -->
+    <marker id="arrow-teal" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#00f2fe" />
+    </marker>
+    <marker id="arrow-cyan" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#38bdf8" />
+    </marker>
+    <marker id="arrow-danger" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#f43f5e" />
+    </marker>
+  </defs>
+
+  <!-- Background Base -->
+  <rect width="1600" height="900" fill="url(#bg-grad)" />
+
+  <!-- Technical Background Grid -->
+  <g opacity="0.05" fill="#38bdf8">
+    <pattern id="grid-dots" x="0" y="0" width="36" height="36" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.5" />
+    </pattern>
+    <rect width="1600" height="900" fill="url(#grid-dots)" />
+  </g>
+
+  <!-- Ambient Glow Blobs -->
+  <circle cx="270" cy="500" r="260" fill="#0284c7" opacity="0.05" filter="blur(90px)" />
+  <circle cx="800" cy="500" r="280" fill="#00f2fe" opacity="0.06" filter="blur(100px)" />
+  <circle cx="1320" cy="500" r="260" fill="#0d9488" opacity="0.05" filter="blur(90px)" />
+
+  <!-- HEADER -->
+  <g transform="translate(80, 45)">
+    <!-- Category Pill -->
+    <rect x="0" y="0" width="165" height="26" rx="13" fill="#111c2e" stroke="#1e2e47" stroke-width="1" />
+    <circle cx="14" cy="13" r="4" fill="#00f2fe" />
+    <text x="26" y="17" fill="#38bdf8" font-size="11" font-weight="700" letter-spacing="1.2">FERRYX SECURITY</text>
+
+    <!-- Main Title & Subtitle -->
+    <text x="0" y="60" fill="#f8fafc" font-size="30" font-weight="700" letter-spacing="-0.5">Daemon Trust Boundaries on a Shared Host</text>
+    <text x="0" y="82" fill="#64748b" font-size="14.5" font-weight="400">Process lifetime decoupling, per-user socket permissions (0600), and isolated agent workspaces</text>
+  </g>
+
+  <!-- ==================== ZONE 1: UNTRUSTED / CLIENT REALM (LEFT) ==================== -->
+  <g transform="translate(80, 160)">
+    <rect x="0" y="0" width="395" height="690" rx="16" fill="url(#client-zone-bg)" stroke="#1e2d44" stroke-width="1.5" />
+    
+    <!-- Zone Header -->
+    <path d="M 0 16 Q 0 0 16 0 L 379 0 Q 395 0 395 16 L 395 44 L 0 44 Z" fill="#0c1626" />
+    <circle cx="22" cy="22" r="5" fill="#38bdf8" opacity="0.8" />
+    <text x="36" y="27" fill="#94a3b8" font-size="12" font-weight="700" letter-spacing="1">CLIENT &amp; HOST ACTORS</text>
+    <text x="375" y="26" fill="#475569" font-size="11" text-anchor="end">SHARED OS</text>
+
+    <!-- Card 1: Authorized User GUI Client -->
+    <g transform="translate(20, 65)">
+      <rect x="0" y="0" width="355" height="150" rx="10" fill="url(#card-blue)" stroke="#1d4ed8" stroke-width="1.3" />
+      <g transform="translate(16, 20)">
+        <rect x="0" y="0" width="32" height="32" rx="7" fill="#1e3a8a" fill-opacity="0.4" stroke="#3b82f6" stroke-width="1" />
+        <!-- Window Icon -->
+        <rect x="7" y="9" width="18" height="14" rx="2" fill="none" stroke="#60a5fa" stroke-width="1.6" />
+        <line x1="7" y1="14" x2="25" y2="14" stroke="#60a5fa" stroke-width="1.4" />
+        
+        <text x="44" y="14" fill="#f1f5f9" font-size="13.5" font-weight="700">Desktop GUI Client</text>
+        <text x="44" y="30" fill="#38bdf8" font-size="11" font-family="'JetBrains Mono', monospace">Ferryx UI (uid: 1001)</text>
+
+        <rect x="0" y="44" width="323" height="24" rx="4" fill="#070d18" stroke="#172439" stroke-width="1" />
+        <text x="8" y="60" fill="#94a3b8" font-size="10.5" font-family="'JetBrains Mono', monospace">Consumer only • Disposable window</text>
+
+        <text x="0" y="94" fill="#64748b" font-size="11.5">Closing window does NOT stop PTY processes.</text>
+        <text x="0" y="112" fill="#38bdf8" font-size="11" font-weight="600">Reattaches cleanly via sequence replay</text>
+      </g>
+    </g>
+
+    <!-- Card 2: Remote Gateway / CLI Worker -->
+    <g transform="translate(20, 235)">
+      <rect x="0" y="0" width="355" height="150" rx="10" fill="url(#card-blue)" stroke="#0284c7" stroke-width="1.3" />
+      <g transform="translate(16, 20)">
+        <rect x="0" y="0" width="32" height="32" rx="7" fill="#0369a1" fill-opacity="0.3" stroke="#0284c7" stroke-width="1" />
+        <!-- Terminal Icon -->
+        <path d="M 8 11 L 14 16 L 8 21" fill="none" stroke="#38bdf8" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+        <line x1="16" y1="21" x2="24" y2="21" stroke="#38bdf8" stroke-width="1.8" stroke-linecap="round" />
+
+        <text x="44" y="14" fill="#f1f5f9" font-size="13.5" font-weight="700">Remote Gateway / CLI</text>
+        <text x="44" y="30" fill="#38bdf8" font-size="11" font-family="'JetBrains Mono', monospace">ferryx-cli / SSH session</text>
+
+        <rect x="0" y="44" width="323" height="24" rx="4" fill="#070d18" stroke="#172439" stroke-width="1" />
+        <text x="8" y="60" fill="#94a3b8" font-size="10.5" font-family="'JetBrains Mono', monospace">Bearer token auth • TLS stream</text>
+
+        <text x="0" y="94" fill="#64748b" font-size="11.5">Pairing grants verified at gateway boundary.</text>
+        <text x="0" y="112" fill="#2dd4bf" font-size="11" font-weight="600">Cryptographically scoped permissions</text>
+      </g>
+    </g>
+
+    <!-- Card 3: Untrusted Multi-Tenant Actor (Blocked) -->
+    <g transform="translate(20, 405)">
+      <rect x="0" y="0" width="355" height="150" rx="10" fill="url(#card-danger)" stroke="#be123c" stroke-width="1.3" />
+      <g transform="translate(16, 20)">
+        <rect x="0" y="0" width="32" height="32" rx="7" fill="#881337" fill-opacity="0.3" stroke="#f43f5e" stroke-width="1" />
+        <!-- Cross / Alert Icon -->
+        <circle cx="16" cy="16" r="8" fill="none" stroke="#f43f5e" stroke-width="1.6" />
+        <line x1="12" y1="12" x2="20" y2="20" stroke="#f43f5e" stroke-width="1.6" stroke-linecap="round" />
+        <line x1="20" y1="12" x2="12" y2="20" stroke="#f43f5e" stroke-width="1.6" stroke-linecap="round" />
+
+        <text x="44" y="14" fill="#fda4af" font-size="13.5" font-weight="700">Other User / Foreign Process</text>
+        <text x="44" y="30" fill="#f43f5e" font-size="11" font-family="'JetBrains Mono', monospace">untrusted (uid: 1002)</text>
+
+        <rect x="0" y="44" width="323" height="24" rx="4" fill="#130709" stroke="#3b1218" stroke-width="1" />
+        <text x="8" y="60" fill="#f87171" font-size="10.5" font-family="'JetBrains Mono', monospace">EACCES • Permission denied (0600)</text>
+
+        <text x="0" y="94" fill="#9f1239" font-size="11.5">No access to daemon socket or memory.</text>
+        <text x="0" y="112" fill="#fb7185" font-size="11" font-weight="600">Cross-tenant snooping prevented by kernel</text>
+      </g>
+    </g>
+
+    <!-- Zone Footer Metric -->
+    <g transform="translate(20, 580)">
+      <rect x="0" y="0" width="355" height="75" rx="8" fill="#080e18" stroke="#162235" stroke-width="1" />
+      <text x="16" y="24" fill="#94a3b8" font-size="11" font-weight="700">SECURITY POSTURE</text>
+      <text x="16" y="46" fill="#cbd5e1" font-size="11.5">Host machine multi-tenancy assumes zero-trust</text>
+      <text x="16" y="63" fill="#64748b" font-size="11">between distinct local OS user accounts.</text>
+    </g>
+  </g>
+
+  <!-- ==================== TRUST BOUNDARY (CENTER PERIMETER) ==================== -->
+  <g transform="translate(585, 160)">
+    <!-- Vertical Glow Ribbon -->
+    <rect x="-2" y="45" width="4" height="635" fill="url(#border-glow-teal)" filter="url(#glow-boundary)" opacity="0.8" />
+    <line x1="0" y1="45" x2="0" y2="680" stroke="#00f2fe" stroke-width="2.5" stroke-dasharray="6,4" />
+
+    <!-- Top Perimeter Shield Badge -->
+    <g transform="translate(-85, 0)">
+      <rect x="0" y="0" width="170" height="34" rx="17" fill="#051b24" stroke="#00f2fe" stroke-width="1.8" filter="url(#glow-teal)" />
+      <!-- Shield Icon -->
+      <path d="M 18 10 L 27 6 L 36 10 C 36 18 27 24 27 24 C 27 24 18 18 18 10 Z" fill="#00f2fe" fill-opacity="0.2" stroke="#00f2fe" stroke-width="1.5" />
+      <text x="44" y="22" fill="#00f2fe" font-size="11" font-weight="800" letter-spacing="1">TRUST BOUNDARY</text>
+    </g>
+
+    <!-- Verification Gate 1: UDS Socket 0600 -->
+    <g transform="translate(-95, 105)">
+      <rect x="0" y="0" width="190" height="66" rx="8" fill="#071b26" stroke="#00f2fe" stroke-width="1.5" />
+      <text x="12" y="22" fill="#2dd4bf" font-size="11" font-weight="700">UNIX SOCKET (0600)</text>
+      <text x="12" y="40" fill="#94a3b8" font-size="9.5" font-family="'JetBrains Mono', monospace">/run/user/1001/ferryx.sock</text>
+      <text x="12" y="55" fill="#38bdf8" font-size="9.5" font-family="'JetBrains Mono', monospace">SO_PEERCRED UID Match</text>
+    </g>
+
+    <!-- Verification Gate 2: Gateway Token -->
+    <g transform="translate(-95, 275)">
+      <rect x="0" y="0" width="190" height="66" rx="8" fill="#071b26" stroke="#00f2fe" stroke-width="1.5" />
+      <text x="12" y="22" fill="#2dd4bf" font-size="11" font-weight="700">GATEWAY AUTH GATE</text>
+      <text x="12" y="40" fill="#94a3b8" font-size="9.5" font-family="'JetBrains Mono', monospace">Mutual TLS Handshake</text>
+      <text x="12" y="55" fill="#38bdf8" font-size="9.5" font-family="'JetBrains Mono', monospace">Scoped Pairing Token</text>
+    </g>
+
+    <!-- Blocked Access Marker -->
+    <g transform="translate(-95, 450)">
+      <rect x="0" y="0" width="190" height="54" rx="8" fill="#1f090c" stroke="#f43f5e" stroke-width="1.5" />
+      <text x="12" y="22" fill="#fda4af" font-size="11" font-weight="700">REJECTED PROBE</text>
+      <text x="12" y="40" fill="#f43f5e" font-size="10" font-family="'JetBrains Mono', monospace">flock / UID Mismatch</text>
+    </g>
+
+    <!-- Connecting Arrows from Left to Gate -->
+    <line x1="-110" y1="138" x2="-97" y2="138" stroke="#38bdf8" stroke-width="1.8" marker-end="url(#arrow-cyan)" />
+    <line x1="-110" y1="308" x2="-97" y2="308" stroke="#38bdf8" stroke-width="1.8" marker-end="url(#arrow-cyan)" />
+    <line x1="-110" y1="477" x2="-97" y2="477" stroke="#f43f5e" stroke-width="1.8" stroke-dasharray="4,3" marker-end="url(#arrow-danger)" />
+
+    <!-- Connecting Arrows from Gate to Daemon Zone -->
+    <line x1="95" y1="138" x2="108" y2="138" stroke="#00f2fe" stroke-width="1.8" marker-end="url(#arrow-teal)" />
+    <line x1="95" y1="308" x2="108" y2="308" stroke="#00f2fe" stroke-width="1.8" marker-end="url(#arrow-teal)" />
+  </g>
+
+  <!-- ==================== ZONE 2: ISOLATED DAEMON CORE (RIGHT-CENTER) ==================== -->
+  <g transform="translate(700, 160)">
+    <rect x="0" y="0" width="410" height="690" rx="16" fill="url(#daemon-zone-bg)" stroke="#0d9488" stroke-width="1.5" />
+    
+    <!-- Zone Header -->
+    <path d="M 0 16 Q 0 0 16 0 L 394 0 Q 410 0 410 16 L 410 44 L 0 44 Z" fill="#07222c" />
+    <circle cx="22" cy="22" r="5" fill="#00f2fe" />
+    <text x="36" y="27" fill="#5eead4" font-size="12" font-weight="700" letter-spacing="1">ISOLATED DAEMON CORE</text>
+    <text x="390" y="26" fill="#14b8a6" font-size="11" font-weight="600" text-anchor="end">RUST HEADLESS PTY</text>
+
+    <!-- Block 1: flock Singleton Guard -->
+    <g transform="translate(20, 65)">
+      <rect x="0" y="0" width="370" height="110" rx="10" fill="url(#card-teal)" stroke="#14b8a6" stroke-width="1.3" />
+      <g transform="translate(18, 20)">
+        <!-- Lock Icon -->
+        <rect x="0" y="0" width="28" height="28" rx="6" fill="#134e4a" stroke="#2dd4bf" stroke-width="1" />
+        <rect x="8" y="12" width="12" height="10" rx="2" fill="none" stroke="#5eead4" stroke-width="1.5" />
+        <path d="M 11 12 L 11 9 C 11 6.5 17 6.5 17 9 L 17 12" fill="none" stroke="#5eead4" stroke-width="1.5" />
+
+        <text x="38" y="14" fill="#ffffff" font-size="13" font-weight="700">flock Singleton Ownership</text>
+        <text x="38" y="29" fill="#2dd4bf" font-size="10.5" font-family="'JetBrains Mono', monospace">Single daemon per machine</text>
+
+        <rect x="0" y="40" width="334" height="24" rx="4" fill="#05141c" stroke="#113642" stroke-width="1" />
+        <text x="10" y="56" fill="#94a3b8" font-size="10.5" font-family="'JetBrains Mono', monospace">Rolling handover: predecessor drains</text>
+
+        <text x="0" y="84" fill="#cbd5e1" font-size="11">Zero mid-upgrade disruption • No socket clash</text>
+      </g>
+    </g>
+
+    <!-- Block 2: Ring Buffer Isolation Engine -->
+    <g transform="translate(20, 195)">
+      <rect x="0" y="0" width="370" height="185" rx="10" fill="url(#card-teal)" stroke="#00f2fe" stroke-width="1.3" filter="url(#glow-teal)" />
+      <g transform="translate(18, 20)">
+        <text x="0" y="14" fill="#ffffff" font-size="13.5" font-weight="700">512 KiB Ring Buffer Engine</text>
+        <text x="0" y="32" fill="#5eead4" font-size="11" font-family="'JetBrains Mono', monospace">Monotonic sequence numbering</text>
+
+        <!-- Visual Ring Buffer Slots -->
+        <g transform="translate(0, 48)">
+          <rect x="0" y="0" width="60" height="34" rx="4" fill="#04222b" stroke="#00f2fe" stroke-width="1.2" />
+          <text x="30" y="18" fill="#38bdf8" font-size="9.5" font-family="'JetBrains Mono', monospace" text-anchor="middle">Seq #1024</text>
+          <text x="30" y="28" fill="#64748b" font-size="8" text-anchor="middle">ACKED</text>
+
+          <rect x="68" y="0" width="60" height="34" rx="4" fill="#04222b" stroke="#00f2fe" stroke-width="1.2" />
+          <text x="98" y="18" fill="#38bdf8" font-size="9.5" font-family="'JetBrains Mono', monospace" text-anchor="middle">Seq #1025</text>
+          <text x="98" y="28" fill="#64748b" font-size="8" text-anchor="middle">ACKED</text>
+
+          <rect x="136" y="0" width="60" height="34" rx="4" fill="#083344" stroke="#2dd4bf" stroke-width="1.4" />
+          <text x="166" y="18" fill="#2dd4bf" font-size="9.5" font-family="'JetBrains Mono', monospace" font-weight="bold" text-anchor="middle">Seq #1026</text>
+          <text x="166" y="28" fill="#2dd4bf" font-size="8" text-anchor="middle">BUFFER</text>
+
+          <rect x="204" y="0" width="60" height="34" rx="4" fill="#083344" stroke="#2dd4bf" stroke-width="1.4" />
+          <text x="234" y="18" fill="#2dd4bf" font-size="9.5" font-family="'JetBrains Mono', monospace" font-weight="bold" text-anchor="middle">Seq #1027</text>
+          <text x="234" y="28" fill="#2dd4bf" font-size="8" text-anchor="middle">BUFFER</text>
+
+          <rect x="272" y="0" width="62" height="34" rx="4" fill="#061a22" stroke="#164e63" stroke-width="1" stroke-dasharray="3,2" />
+          <text x="303" y="18" fill="#64748b" font-size="9.5" font-family="'JetBrains Mono', monospace" text-anchor="middle">HEAD</text>
+          <text x="303" y="28" fill="#00f2fe" font-size="8" text-anchor="middle">APPEND</text>
+        </g>
+
+        <rect x="0" y="96" width="334" height="24" rx="4" fill="#05141c" stroke="#113642" stroke-width="1" />
+        <text x="10" y="112" fill="#2dd4bf" font-size="10.5" font-family="'JetBrains Mono', monospace">ReplayGap check on wrap-around</text>
+
+        <text x="0" y="142" fill="#cbd5e1" font-size="11.5">Survives GUI reloads, crashes &amp; sleep policies.</text>
+        <text x="0" y="158" fill="#64748b" font-size="11">Exact replay proves zero missed bytes</text>
+      </g>
+    </g>
+
+    <!-- Block 3: Intentional Non-Exposures -->
+    <g transform="translate(20, 400)">
+      <rect x="0" y="0" width="370" height="155" rx="10" fill="url(#card-dark)" stroke="#1e2e44" stroke-width="1.3" />
+      <g transform="translate(18, 20)">
+        <text x="0" y="14" fill="#f1f5f9" font-size="13" font-weight="700">Explicit Non-Exposed Surfaces</text>
+        <text x="0" y="30" fill="#64748b" font-size="11">What the daemon intentionally does NOT expose:</text>
+
+        <g transform="translate(0, 44)">
+          <circle cx="5" cy="5" r="3.5" fill="#f43f5e" />
+          <text x="16" y="9" fill="#cbd5e1" font-size="11">No direct arbitrary root privilege escalation</text>
+
+          <circle cx="5" cy="27" r="3.5" fill="#f43f5e" />
+          <text x="16" y="31" fill="#cbd5e1" font-size="11">No cross-session memory inspection</text>
+
+          <circle cx="5" cy="49" r="3.5" fill="#f43f5e" />
+          <text x="16" y="53" fill="#cbd5e1" font-size="11">No unauthenticated remote RPC endpoints</text>
+        </g>
+
+        <rect x="0" y="112" width="334" height="20" rx="4" fill="#090f19" />
+        <text x="8" y="126" fill="#94a3b8" font-size="10" font-family="'JetBrains Mono', monospace">Strict least-privilege daemon footprint</text>
+      </g>
+    </g>
+
+    <!-- Zone Footer Metric -->
+    <g transform="translate(20, 580)">
+      <rect x="0" y="0" width="370" height="75" rx="8" fill="#04151d" stroke="#0e3a47" stroke-width="1" />
+      <text x="16" y="24" fill="#2dd4bf" font-size="11" font-weight="700">DAEMON LIFETIME GUARANTEE</text>
+      <text x="16" y="46" fill="#cbd5e1" font-size="11.5">PTYs belong to the daemon, never the window.</text>
+      <text x="16" y="63" fill="#64748b" font-size="11">GUI crash or window close leaves jobs alive.</text>
+    </g>
+  </g>
+
+  <!-- ==================== ZONE 3: SANDBOXED AGENT WORKTREES (FAR RIGHT) ==================== -->
+  <g transform="translate(1140, 160)">
+    <rect x="0" y="0" width="380" height="690" rx="16" fill="url(#sandbox-zone-bg)" stroke="#164e63" stroke-width="1.5" />
+    
+    <!-- Zone Header -->
+    <path d="M 0 16 Q 0 0 16 0 L 364 0 Q 380 0 380 16 L 380 44 L 0 44 Z" fill="#061d28" />
+    <circle cx="22" cy="22" r="5" fill="#2dd4bf" />
+    <text x="36" y="27" fill="#5eead4" font-size="12" font-weight="700" letter-spacing="1">JAILED AGENT WORKSPACES</text>
+    <text x="360" y="26" fill="#2dd4bf" font-size="11" font-weight="600" text-anchor="end">ISOLATED</text>
+
+    <!-- Agent PTY Instance 1 -->
+    <g transform="translate(20, 65)">
+      <rect x="0" y="0" width="340" height="150" rx="10" fill="url(#card-teal)" stroke="#0e7490" stroke-width="1.3" />
+      <g transform="translate(16, 20)">
+        <rect x="0" y="0" width="28" height="28" rx="6" fill="#083344" stroke="#06b6d4" stroke-width="1" />
+        <text x="14" y="19" text-anchor="middle" fill="#22d3ee" font-size="13" font-weight="bold">#1</text>
+
+        <text x="38" y="14" fill="#ffffff" font-size="13.5" font-weight="700">Agent Session A (PTY #1)</text>
+        <text x="38" y="30" fill="#22d3ee" font-size="11" font-family="'JetBrains Mono', monospace">worktrees/agent-fix-auth</text>
+
+        <rect x="0" y="44" width="308" height="24" rx="4" fill="#051722" stroke="#104254" stroke-width="1" />
+        <text x="8" y="60" fill="#94a3b8" font-size="10" font-family="'JetBrains Mono', monospace">Root Jail: /repo/.git/worktrees/fix-auth</text>
+
+        <text x="0" y="94" fill="#cbd5e1" font-size="11.5">Own git staging area &amp; branch ref.</text>
+        <text x="0" y="112" fill="#5eead4" font-size="11" font-weight="600">No cross-agent git lock contention</text>
+      </g>
+    </g>
+
+    <!-- Agent PTY Instance 2 -->
+    <g transform="translate(20, 235)">
+      <rect x="0" y="0" width="340" height="150" rx="10" fill="url(#card-teal)" stroke="#0e7490" stroke-width="1.3" />
+      <g transform="translate(16, 20)">
+        <rect x="0" y="0" width="28" height="28" rx="6" fill="#083344" stroke="#06b6d4" stroke-width="1" />
+        <text x="14" y="19" text-anchor="middle" fill="#22d3ee" font-size="13" font-weight="bold">#2</text>
+
+        <text x="38" y="14" fill="#ffffff" font-size="13.5" font-weight="700">Agent Session B (PTY #2)</text>
+        <text x="38" y="30" fill="#22d3ee" font-size="11" font-family="'JetBrains Mono', monospace">worktrees/agent-perf-test</text>
+
+        <rect x="0" y="44" width="308" height="24" rx="4" fill="#051722" stroke="#104254" stroke-width="1" />
+        <text x="8" y="60" fill="#94a3b8" font-size="10" font-family="'JetBrains Mono', monospace">Root Jail: /repo/.git/worktrees/perf-test</text>
+
+        <text x="0" y="94" fill="#cbd5e1" font-size="11.5">Independent build artifacts &amp; PID tree.</text>
+        <text x="0" y="112" fill="#5eead4" font-size="11" font-weight="600">Attention inbox tracks completion</text>
+      </g>
+    </g>
+
+    <!-- Agent Isolation Box: Worktree Root Jail -->
+    <g transform="translate(20, 405)">
+      <rect x="0" y="0" width="340" height="150" rx="10" fill="url(#card-dark)" stroke="#155e75" stroke-width="1.3" />
+      <g transform="translate(16, 20)">
+        <text x="0" y="14" fill="#f1f5f9" font-size="13" font-weight="700">Worktree Root Jail Policy</text>
+        <text x="0" y="30" fill="#64748b" font-size="11">Filesystem perimeter enforced per agent:</text>
+
+        <rect x="0" y="44" width="308" height="24" rx="4" fill="#071520" stroke="#0e3a47" stroke-width="1" />
+        <text x="8" y="60" fill="#2dd4bf" font-size="10.5" font-family="'JetBrains Mono', monospace">Scoped canonical root verification</text>
+
+        <text x="0" y="94" fill="#94a3b8" font-size="11.5">Agents cannot modify files outside target tree.</text>
+        <text x="0" y="112" fill="#38bdf8" font-size="11" font-weight="600">Shared bare repo objects stay clean</text>
+      </g>
+    </g>
+
+    <!-- Zone Footer Metric -->
+    <g transform="translate(20, 580)">
+      <rect x="0" y="0" width="340" height="75" rx="8" fill="#04151d" stroke="#0e3a47" stroke-width="1" />
+      <text x="16" y="24" fill="#5eead4" font-size="11" font-weight="700">AUDITABILITY &amp; VISIBILITY</text>
+      <text x="16" y="46" fill="#cbd5e1" font-size="11.5">Attention counters indicate who needs input</text>
+      <text x="16" y="63" fill="#64748b" font-size="11">without background polling loops.</text>
+    </g>
+  </g>
+
+  <!-- Connectors Between Daemon and Worktrees -->
+  <path d="M 1110 240 L 1140 240" fill="none" stroke="#00f2fe" stroke-width="2" marker-end="url(#arrow-teal)" />
+  <path d="M 1110 410 L 1140 410" fill="none" stroke="#00f2fe" stroke-width="2" marker-end="url(#arrow-teal)" />
+
+  <!-- Verification Watermark -->
+  <g transform="translate(80, 868)">
+    <text x="0" y="0" fill="#334155" font-size="11" font-family="'JetBrains Mono', monospace">ferryx :: daemon-security-boundaries :: trust-boundary-diagram</text>
+  </g>
+  <g transform="translate(1520, 868)">
+    <text x="0" y="0" fill="#334155" font-size="11" font-family="'JetBrains Mono', monospace" text-anchor="end">claims map to ferryx docs</text>
+  </g>
+</svg>

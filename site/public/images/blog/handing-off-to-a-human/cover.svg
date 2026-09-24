@@ -1,0 +1,257 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630" style="background:#040711; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif;">
+  <defs>
+    <!-- Background Gradients -->
+    <radialGradient id="bg-glow-center" cx="50%" cy="50%" r="55%">
+      <stop offset="0%" stop-color="#0a2a4a" stop-opacity="0.5" />
+      <stop offset="45%" stop-color="#07182c" stop-opacity="0.3" />
+      <stop offset="100%" stop-color="#040711" stop-opacity="0" />
+    </radialGradient>
+
+    <radialGradient id="left-glow" cx="22%" cy="48%" r="35%">
+      <stop offset="0%" stop-color="#0284c7" stop-opacity="0.28" />
+      <stop offset="100%" stop-color="#0284c7" stop-opacity="0" />
+    </radialGradient>
+
+    <radialGradient id="right-glow" cx="78%" cy="48%" r="35%">
+      <stop offset="0%" stop-color="#0d9488" stop-opacity="0.28" />
+      <stop offset="100%" stop-color="#0d9488" stop-opacity="0" />
+    </radialGradient>
+
+    <radialGradient id="folder-core-glow" cx="50%" cy="45%" r="45%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.35" />
+      <stop offset="60%" stop-color="#0d9488" stop-opacity="0.12" />
+      <stop offset="100%" stop-color="#030810" stop-opacity="0" />
+    </radialGradient>
+
+    <!-- Linear Gradients -->
+    <linearGradient id="folder-front" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f2b48" stop-opacity="0.95" />
+      <stop offset="50%" stop-color="#0b1e33" stop-opacity="0.92" />
+      <stop offset="100%" stop-color="#071424" stop-opacity="0.98" />
+    </linearGradient>
+
+    <linearGradient id="folder-back" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e3a5f" />
+      <stop offset="100%" stop-color="#0c1f36" />
+    </linearGradient>
+
+    <linearGradient id="folder-border" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="50%" stop-color="#2dd4bf" />
+      <stop offset="100%" stop-color="#0284c7" />
+    </linearGradient>
+
+    <linearGradient id="card-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0e1726" stop-opacity="0.85" />
+      <stop offset="100%" stop-color="#060b14" stop-opacity="0.92" />
+    </linearGradient>
+
+    <linearGradient id="card-border-agent" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.6" />
+      <stop offset="100%" stop-color="#1e293b" stop-opacity="0.3" />
+    </linearGradient>
+
+    <linearGradient id="card-border-human" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#2dd4bf" stop-opacity="0.6" />
+      <stop offset="100%" stop-color="#1e293b" stop-opacity="0.3" />
+    </linearGradient>
+
+    <linearGradient id="doc-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e293b" stop-opacity="0.95" />
+      <stop offset="100%" stop-color="#0f172a" stop-opacity="0.98" />
+    </linearGradient>
+
+    <linearGradient id="stream-cyan-teal" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#0284c7" />
+      <stop offset="45%" stop-color="#00f2fe" />
+      <stop offset="70%" stop-color="#2dd4bf" />
+      <stop offset="100%" stop-color="#10b981" />
+    </linearGradient>
+
+    <!-- Filters -->
+    <filter id="soft-glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+
+    <filter id="deep-shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="16" stdDeviation="24" flood-color="#000000" flood-opacity="0.85" />
+    </filter>
+
+    <!-- Dot Grid Pattern -->
+    <pattern id="grid-dots" width="36" height="36" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1" fill="#334155" fill-opacity="0.3" />
+    </pattern>
+  </defs>
+
+  <!-- 1. Background Fill -->
+  <rect width="1200" height="630" fill="#040711" />
+  <rect width="1200" height="630" fill="url(#bg-glow-center)" />
+  <rect width="1200" height="630" fill="url(#left-glow)" />
+  <rect width="1200" height="630" fill="url(#right-glow)" />
+  <rect width="1200" height="630" fill="url(#grid-dots)" />
+
+  <!-- 2. Tech Framing Accents (HUD Corners) -->
+  <g stroke="#38bdf8" stroke-width="1.5" opacity="0.4" fill="none">
+    <path d="M 45 65 L 45 45 L 65 45" />
+    <path d="M 1155 65 L 1155 45 L 1135 45" />
+    <path d="M 45 565 L 45 585 L 65 585" />
+    <path d="M 1155 565 L 1155 585 L 1135 585" />
+  </g>
+
+  <!-- Subtle Horizon / Axis Guide Lines -->
+  <line x1="80" y1="315" x2="1120" y2="315" stroke="#1e293b" stroke-width="1" stroke-dasharray="4 8" opacity="0.45" />
+  <line x1="600" y1="80" x2="600" y2="550" stroke="#1e293b" stroke-width="1" stroke-dasharray="4 8" opacity="0.25" />
+
+  <!-- 3. Handoff Flow Connector / Energy Rail -->
+  <g>
+    <!-- Background Rail Glow -->
+    <path d="M 280 315 C 400 315, 460 270, 600 270 C 740 270, 800 315, 920 315" fill="none" stroke="url(#stream-cyan-teal)" stroke-width="3" opacity="0.75" filter="url(#soft-glow)" />
+    <!-- Secondary Dashed Rail -->
+    <path d="M 280 345 C 420 345, 460 375, 600 375 C 740 375, 780 345, 920 345" fill="none" stroke="#0284c7" stroke-width="1.5" stroke-dasharray="6 6" opacity="0.4" />
+    
+    <!-- Pulse Dots along the trajectory -->
+    <circle cx="360" cy="308" r="3" fill="#38bdf8" opacity="0.8" />
+    <circle cx="440" cy="285" r="3.5" fill="#00f2fe" opacity="0.9" />
+    <circle cx="510" cy="273" r="4" fill="#00f2fe" filter="url(#soft-glow)" />
+    <circle cx="690" cy="273" r="4" fill="#2dd4bf" filter="url(#soft-glow)" />
+    <circle cx="760" cy="285" r="3.5" fill="#2dd4bf" opacity="0.9" />
+    <circle cx="840" cy="308" r="3" fill="#10b981" opacity="0.8" />
+
+    <!-- Directional chevrons in stream -->
+    <path d="M 470 270 L 478 274 L 470 278" fill="none" stroke="#00f2fe" stroke-width="2" stroke-linecap="round" opacity="0.7" />
+    <path d="M 720 270 L 728 274 L 720 278" fill="none" stroke="#2dd4bf" stroke-width="2" stroke-linecap="round" opacity="0.7" />
+  </g>
+
+  <!-- 4. Left Node: AGENT (Automated Process) -->
+  <g transform="translate(130, 185)" filter="url(#deep-shadow)">
+    <!-- Container Card -->
+    <rect width="210" height="260" rx="16" fill="url(#card-grad)" stroke="url(#card-border-agent)" stroke-width="1.5" />
+    
+    <!-- Card Header / Terminal Dots -->
+    <rect width="210" height="38" rx="16" fill="#0a1220" />
+    <path d="M 0 38 L 210 38" stroke="#1e293b" stroke-width="1" />
+    <circle cx="24" cy="19" r="4.5" fill="#38bdf8" opacity="0.7" />
+    <circle cx="40" cy="19" r="4.5" fill="#1e293b" />
+    <circle cx="56" cy="19" r="4.5" fill="#1e293b" />
+
+    <!-- Agent Node Icon Core -->
+    <g transform="translate(105, 110)">
+      <circle cx="0" cy="0" r="38" fill="#0369a1" fill-opacity="0.15" stroke="#0284c7" stroke-width="1.5" stroke-dasharray="4 4" />
+      <rect x="-24" y="-24" width="48" height="48" rx="12" fill="#0c2338" stroke="#38bdf8" stroke-width="1.5" />
+      <!-- Abstract Agent Chip / Logic glyph -->
+      <path d="M -12 -5 L -5 -12 L 5 -12 L 12 -5 L 12 5 L 5 12 L -5 12 L -12 5 Z" fill="none" stroke="#38bdf8" stroke-width="1.5" />
+      <circle cx="0" cy="0" r="4" fill="#00f2fe" filter="url(#soft-glow)" />
+      <!-- Connection Pins -->
+      <line x1="-12" y1="0" x2="-18" y2="0" stroke="#38bdf8" stroke-width="1.5" />
+      <line x1="12" y1="0" x2="18" y2="0" stroke="#38bdf8" stroke-width="1.5" />
+      <line x1="0" y1="-12" x2="0" y2="-18" stroke="#38bdf8" stroke-width="1.5" />
+      <line x1="0" y1="12" x2="0" y2="18" stroke="#38bdf8" stroke-width="1.5" />
+    </g>
+
+    <!-- Abstract Process Data Bars -->
+    <rect x="30" y="175" width="150" height="7" rx="3.5" fill="#1e293b" />
+    <rect x="30" y="175" width="110" height="7" rx="3.5" fill="#0284c7" opacity="0.7" />
+    
+    <rect x="30" y="195" width="150" height="7" rx="3.5" fill="#1e293b" />
+    <rect x="30" y="195" width="85" height="7" rx="3.5" fill="#38bdf8" opacity="0.6" />
+
+    <rect x="30" y="215" width="90" height="7" rx="3.5" fill="#1e293b" />
+  </g>
+
+  <!-- 5. Right Node: HUMAN (Teammate / Workstation) -->
+  <g transform="translate(860, 185)" filter="url(#deep-shadow)">
+    <!-- Container Card -->
+    <rect width="210" height="260" rx="16" fill="url(#card-grad)" stroke="url(#card-border-human)" stroke-width="1.5" />
+    
+    <!-- Card Header / Terminal Dots -->
+    <rect width="210" height="38" rx="16" fill="#0a151b" />
+    <path d="M 0 38 L 210 38" stroke="#1e293b" stroke-width="1" />
+    <circle cx="24" cy="19" r="4.5" fill="#2dd4bf" opacity="0.7" />
+    <circle cx="40" cy="19" r="4.5" fill="#1e293b" />
+    <circle cx="56" cy="19" r="4.5" fill="#1e293b" />
+
+    <!-- Human Teammate Avatar Core -->
+    <g transform="translate(105, 110)">
+      <circle cx="0" cy="0" r="38" fill="#0f766e" fill-opacity="0.15" stroke="#14b8a6" stroke-width="1.5" stroke-dasharray="4 4" />
+      <rect x="-24" y="-24" width="48" height="48" rx="12" fill="#082828" stroke="#2dd4bf" stroke-width="1.5" />
+      <!-- Modern Human Profile Glyph -->
+      <circle cx="0" cy="-6" r="6.5" fill="none" stroke="#2dd4bf" stroke-width="1.6" />
+      <path d="M -11 11 C -11 4, 11 4, 11 11" fill="none" stroke="#2dd4bf" stroke-width="1.6" stroke-linecap="round" />
+    </g>
+
+    <!-- Ready / Terminal Input Simulation -->
+    <g transform="translate(30, 175)">
+      <rect width="150" height="28" rx="6" fill="#09181d" stroke="#134e4a" stroke-width="1" />
+      <!-- Command prompt chevron & cursor -->
+      <path d="M 12 10 L 16 14 L 12 18" fill="none" stroke="#2dd4bf" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+      <rect x="23" y="10" width="7" height="9" rx="1" fill="#2dd4bf" filter="url(#soft-glow)" />
+    </g>
+
+    <rect x="30" y="215" width="130" height="7" rx="3.5" fill="#1e293b" />
+    <rect x="30" y="215" width="70" height="7" rx="3.5" fill="#14b8a6" opacity="0.6" />
+  </g>
+
+  <!-- 6. Central Highlight: THE HANDOFF FOLDER GRAPHIC -->
+  <g transform="translate(600, 290)">
+    <!-- Central Aura -->
+    <circle cx="0" cy="0" r="140" fill="url(#folder-core-glow)" />
+
+    <!-- Orbiting Accent Rings / Transfer Geometry -->
+    <ellipse cx="0" cy="0" rx="170" ry="70" fill="none" stroke="#00f2fe" stroke-width="1" stroke-dasharray="6 10" opacity="0.3" transform="rotate(-12)" />
+    <ellipse cx="0" cy="0" rx="140" ry="55" fill="none" stroke="#2dd4bf" stroke-width="1.2" stroke-dasharray="4 6" opacity="0.45" transform="rotate(-6)" />
+    
+    <!-- Floating Folder Group (Isometric Tilt) -->
+    <g transform="translate(0, -10) rotate(-4)" filter="url(#deep-shadow)">
+      
+      <!-- Back Flap of Folder -->
+      <path d="M -125 -65 L -45 -65 L -30 -45 L 125 -45 C 132 -45, 137 -40, 137 -33 L 137 75 C 137 82, 132 87, 125 87 L -125 87 C -132 87, -137 82, -137 75 L -137 -53 C -137 -60, -132 -65, -125 -65 Z" fill="url(#folder-back)" stroke="#1e3a5f" stroke-width="1.5" />
+
+      <!-- Document Peeking Out (The Agent's Task Payload / Context) -->
+      <g transform="translate(0, -32)">
+        <rect x="-105" y="-45" width="210" height="100" rx="8" fill="url(#doc-grad)" stroke="#38bdf8" stroke-width="1.2" />
+        <!-- Code / Spec lines on document -->
+        <line x1="-85" y1="-25" x2="-20" y2="-25" stroke="#38bdf8" stroke-width="3" stroke-linecap="round" />
+        <line x1="-85" y1="-12" x2="45" y2="-12" stroke="#64748b" stroke-width="2.5" stroke-linecap="round" />
+        <line x1="-85" y1="1" x2="15" y2="1" stroke="#64748b" stroke-width="2.5" stroke-linecap="round" />
+        <line x1="-85" y1="14" x2="65" y2="14" stroke="#64748b" stroke-width="2.5" stroke-linecap="round" />
+        <line x1="-85" y1="27" x2="-40" y2="27" stroke="#2dd4bf" stroke-width="2.5" stroke-linecap="round" />
+        
+        <!-- Status Badge on Document -->
+        <rect x="42" y="-33" width="50" height="15" rx="7.5" fill="#0284c7" fill-opacity="0.3" stroke="#00f2fe" stroke-width="1" />
+        <circle cx="50" cy="-25.5" r="3" fill="#00f2fe" />
+        <line x1="58" y1="-25.5" x2="82" y2="-25.5" stroke="#00f2fe" stroke-width="2" stroke-linecap="round" />
+      </g>
+
+      <!-- Front Flap of Folder (Angled forward for 3D depth) -->
+      <path d="M -137 -15 L -20 -15 L 0 5 L 137 5 C 143 5, 147 9, 147 15 L 137 92 C 137 98, 132 103, 125 103 L -125 103 C -132 103, -137 98, -137 92 Z" fill="url(#folder-front)" stroke="url(#folder-border)" stroke-width="2" />
+
+      <!-- Neon Energy Crease / Trim on Folder Lip -->
+      <path d="M -135 -13 L -20 -13 L 0 7 L 145 7" fill="none" stroke="#00f2fe" stroke-width="2.5" stroke-linecap="round" opacity="0.9" filter="url(#soft-glow)" />
+
+      <!-- Glowing Central Transfer Token / Handoff Seal on Folder -->
+      <g transform="translate(0, 52)">
+        <circle cx="0" cy="0" r="22" fill="#081827" stroke="url(#folder-border)" stroke-width="2" />
+        <circle cx="0" cy="0" r="18" fill="#0a253a" fill-opacity="0.6" />
+        <!-- Dynamic Transfer Arrows Glyph -->
+        <path d="M -7 -4 L 0 3 L 7 -4" fill="none" stroke="#00f2fe" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" transform="rotate(-90)" />
+        <path d="M 0 -6 L 0 6" fill="none" stroke="#2dd4bf" stroke-width="2" stroke-linecap="round" />
+        <circle cx="0" cy="0" r="3.5" fill="#00f2fe" filter="url(#soft-glow)" />
+      </g>
+    </g>
+  </g>
+
+  <!-- 7. Typography Badge: Exactly 2 words (<= 3 words max rule) -->
+  <g transform="translate(600, 510)">
+    <!-- Background Pill -->
+    <rect x="-140" y="-20" width="280" height="40" rx="20" fill="#071524" stroke="url(#stream-cyan-teal)" stroke-width="1.4" filter="url(#soft-glow)" />
+    <!-- Text: TASK HANDOFF (Exactly 2 words) -->
+    <text x="0" y="6" text-anchor="middle" fill="#f8fafc" font-size="18" font-weight="800" letter-spacing="4">TASK HANDOFF</text>
+  </g>
+
+  <!-- Bottom Sub-glow Beam -->
+  <ellipse cx="600" cy="625" rx="300" ry="15" fill="#00f2fe" fill-opacity="0.12" filter="url(#soft-glow)" />
+</svg>

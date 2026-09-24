@@ -1,0 +1,459 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <defs>
+    <!-- Background Radial Gradients -->
+    <radialGradient id="bgGlow" cx="50%" cy="42%" r="65%">
+      <stop offset="0%" stop-color="#0b243b" stop-opacity="0.95"/>
+      <stop offset="45%" stop-color="#061626" stop-opacity="0.98"/>
+      <stop offset="100%" stop-color="#02060c" stop-opacity="1"/>
+    </radialGradient>
+
+    <radialGradient id="daemonCoreGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.7"/>
+      <stop offset="35%" stop-color="#00a8ff" stop-opacity="0.35"/>
+      <stop offset="70%" stop-color="#004488" stop-opacity="0.1"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="pulseGlowBurst" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#38ef7d" stop-opacity="0.6"/>
+      <stop offset="40%" stop-color="#00f2fe" stop-opacity="0.3"/>
+      <stop offset="80%" stop-color="#002b4d" stop-opacity="0.05"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Linear Accents -->
+    <linearGradient id="cyanTealGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00a8ff"/>
+      <stop offset="45%" stop-color="#00f2fe"/>
+      <stop offset="80%" stop-color="#20e3b2"/>
+      <stop offset="100%" stop-color="#38ef7d"/>
+    </linearGradient>
+
+    <linearGradient id="pulseGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#0077ff" stop-opacity="0.3"/>
+      <stop offset="15%" stop-color="#00a8ff" stop-opacity="0.8"/>
+      <stop offset="45%" stop-color="#00f2fe"/>
+      <stop offset="55%" stop-color="#ffffff"/>
+      <stop offset="70%" stop-color="#20e3b2"/>
+      <stop offset="90%" stop-color="#38ef7d" stop-opacity="0.8"/>
+      <stop offset="100%" stop-color="#00ffaa" stop-opacity="0.3"/>
+    </linearGradient>
+
+    <linearGradient id="daemonArmorGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#142c47"/>
+      <stop offset="50%" stop-color="#0c1e33"/>
+      <stop offset="100%" stop-color="#061220"/>
+    </linearGradient>
+
+    <linearGradient id="daemonPlateHighlight" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1e4670"/>
+      <stop offset="100%" stop-color="#091b2e"/>
+    </linearGradient>
+
+    <linearGradient id="hornGradL" x1="100%" y1="100%" x2="0%" y2="0%">
+      <stop offset="0%" stop-color="#082a47"/>
+      <stop offset="50%" stop-color="#0077cc"/>
+      <stop offset="100%" stop-color="#00f2fe"/>
+    </linearGradient>
+
+    <linearGradient id="hornGradR" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#082a47"/>
+      <stop offset="50%" stop-color="#0099bb"/>
+      <stop offset="100%" stop-color="#20e3b2"/>
+    </linearGradient>
+
+    <!-- Glow Filters -->
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <filter id="intenseGlow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="7" result="blur1"/>
+      <feGaussianBlur stdDeviation="20" result="blur2"/>
+      <feMerge>
+        <feMergeNode in="blur2"/>
+        <feMergeNode in="blur1"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <filter id="softGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="2.5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Terminal Coordinate Grid Pattern -->
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#0e2338" stroke-width="1" stroke-opacity="0.45"/>
+      <circle cx="40" cy="40" r="1.1" fill="#1b4066" fill-opacity="0.5"/>
+    </pattern>
+
+    <pattern id="subgrid" width="10" height="10" patternUnits="userSpaceOnUse">
+      <circle cx="10" cy="10" r="0.6" fill="#0d243b" fill-opacity="0.3"/>
+    </pattern>
+  </defs>
+
+  <!-- Background Layers -->
+  <rect width="1200" height="630" fill="#02060c"/>
+  <rect width="1200" height="630" fill="url(#bgGlow)"/>
+  <rect width="1200" height="630" fill="url(#subgrid)"/>
+  <rect width="1200" height="630" fill="url(#grid)"/>
+
+  <!-- Subtle Horizon Beam & Center Diagnostic Ambient -->
+  <line x1="60" y1="270" x2="1140" y2="270" stroke="#00f2fe" stroke-width="1" stroke-opacity="0.12"/>
+  <circle cx="600" cy="270" r="230" fill="url(#daemonCoreGlow)"/>
+  <circle cx="600" cy="270" r="130" fill="url(#pulseGlowBurst)"/>
+
+  <!-- Terminal HUD Outer Framing & Corner Brackets -->
+  <g stroke="#1a3b5c" stroke-width="2" fill="none">
+    <path d="M 36 36 L 36 72 M 36 36 L 72 36"/>
+    <path d="M 1164 36 L 1164 72 M 1164 36 L 1128 36"/>
+    <path d="M 36 594 L 36 558 M 36 594 L 72 594"/>
+    <path d="M 1164 594 L 1164 558 M 1164 594 L 1128 594"/>
+  </g>
+
+  <!-- Top Terminal CLI Status Bar (Pure geometric abstract telemetry) -->
+  <g fill="none">
+    <!-- Top Left Terminal Dot Status Array -->
+    <g transform="translate(60, 48)">
+      <circle cx="0" cy="0" r="4.5" fill="#00f2fe" filter="url(#glow)"/>
+      <circle cx="18" cy="0" r="4.5" fill="#20e3b2" opacity="0.8"/>
+      <circle cx="36" cy="0" r="4.5" fill="#1b4066"/>
+      <line x1="56" y1="0" x2="160" y2="0" stroke="#102d4a" stroke-width="2" stroke-dasharray="4 4"/>
+      <rect x="175" y="-5" width="24" height="10" rx="2" stroke="#16385a" stroke-width="1.2"/>
+      <line x1="210" y1="0" x2="260" y2="0" stroke="#102d4a" stroke-width="1.5"/>
+    </g>
+
+    <!-- Top Center Telemetry Frequency Meter (Abstract) -->
+    <g transform="translate(600, 48)">
+      <line x1="-120" y1="0" x2="-30" y2="0" stroke="#123252" stroke-width="1.5"/>
+      <line x1="30" y1="0" x2="120" y2="0" stroke="#123252" stroke-width="1.5"/>
+      <!-- Frequency ticks -->
+      <line x1="-20" y1="-6" x2="-20" y2="6" stroke="#00a8ff" stroke-width="1.5"/>
+      <line x1="-12" y1="-9" x2="-12" y2="9" stroke="#00f2fe" stroke-width="1.5" filter="url(#softGlow)"/>
+      <line x1="-4" y1="-14" x2="-4" y2="14" stroke="#20e3b2" stroke-width="1.8" filter="url(#softGlow)"/>
+      <line x1="4" y1="-14" x2="4" y2="14" stroke="#20e3b2" stroke-width="1.8" filter="url(#softGlow)"/>
+      <line x1="12" y1="-9" x2="12" y2="9" stroke="#00f2fe" stroke-width="1.5" filter="url(#softGlow)"/>
+      <line x1="20" y1="-6" x2="20" y2="6" stroke="#00a8ff" stroke-width="1.5"/>
+    </g>
+
+    <!-- Top Right Telemetry Buffer Indicator -->
+    <g transform="translate(1020, 48)">
+      <line x1="0" y1="0" x2="50" y2="0" stroke="#102d4a" stroke-width="1.5"/>
+      <rect x="60" y="-6" width="30" height="12" rx="3" stroke="#20e3b2" stroke-width="1.5" filter="url(#glow)"/>
+      <rect x="63" y="-3" width="16" height="6" rx="1.5" fill="#20e3b2"/>
+      <circle cx="106" cy="0" r="3.5" fill="#38ef7d" filter="url(#glow)"/>
+    </g>
+  </g>
+
+  <!-- ==================== RADAR & CONCENTRIC TELEMETRY GAUGES ==================== -->
+  <g transform="translate(600, 270)" fill="none">
+    <!-- Outer dashed observation ring -->
+    <circle cx="0" cy="0" r="215" stroke="#102d4a" stroke-width="1.5" stroke-dasharray="5 7"/>
+    <circle cx="0" cy="0" r="185" stroke="#00a8ff" stroke-width="1" stroke-opacity="0.25" stroke-dasharray="2 10"/>
+    <!-- Cardinal gauge ticks -->
+    <line x1="-225" y1="0" x2="-205" y2="0" stroke="#00f2fe" stroke-width="2" stroke-opacity="0.5"/>
+    <line x1="205" y1="0" x2="225" y2="0" stroke="#00f2fe" stroke-width="2" stroke-opacity="0.5"/>
+    <line x1="0" y1="-225" x2="0" y2="-205" stroke="#00f2fe" stroke-width="2" stroke-opacity="0.5"/>
+    <line x1="0" y1="205" x2="0" y2="225" stroke="#00f2fe" stroke-width="2" stroke-opacity="0.5"/>
+
+    <!-- Concentric Target Reticle -->
+    <circle cx="0" cy="0" r="145" stroke="#163e63" stroke-width="1.5"/>
+    <path d="M -145 0 A 145 145 0 0 1 0 -145" stroke="#00f2fe" stroke-width="2.5" stroke-dasharray="14 10" stroke-opacity="0.8" filter="url(#glow)"/>
+    <path d="M 0 145 A 145 145 0 0 1 145 0" stroke="#20e3b2" stroke-width="2.5" stroke-dasharray="14 10" stroke-opacity="0.8" filter="url(#glow)"/>
+
+    <circle cx="0" cy="0" r="95" stroke="#00a8ff" stroke-width="1" stroke-opacity="0.3" stroke-dasharray="6 4"/>
+  </g>
+
+  <!-- ==================== THE DAEMON ICON (SERVICE / PROCESS ENTITY) ==================== -->
+  <g id="daemon-icon" transform="translate(600, 270)">
+    <!-- Daemon Outer Geometric Aura Shield -->
+    <polygon points="0,-160 110,-95 110,65 0,145 -110,65 -110,-95" 
+             fill="#04111d" fill-opacity="0.7" stroke="#123659" stroke-width="2" stroke-dasharray="8 6"/>
+
+    <!-- Left Daemon Horn (Geometric, Precision Clipped) -->
+    <path d="M -42 -75 C -75 -125, -105 -165, -135 -178 C -115 -148, -80 -105, -60 -65 Z" 
+          fill="url(#hornGradL)" filter="url(#glow)"/>
+    <!-- Left Inner Horn Spine -->
+    <path d="M -40 -72 Q -85 -125 -115 -152" fill="none" stroke="#ffffff" stroke-width="2" opacity="0.6"/>
+
+    <!-- Right Daemon Horn (Geometric, Precision Clipped) -->
+    <path d="M 42 -75 C 75 -125, 105 -165, 135 -178 C 115 -148, 80 -105, 60 -65 Z" 
+          fill="url(#hornGradR)" filter="url(#glow)"/>
+    <!-- Right Inner Horn Spine -->
+    <path d="M 40 -72 Q 85 -125 115 -152" fill="none" stroke="#ffffff" stroke-width="2" opacity="0.6"/>
+
+    <!-- Daemon Outer Cranium Armor Plates -->
+    <polygon points="0,-105 68,-78 88,-25 80,48 0,102 -80,48 -88,-25 -68,-78" 
+             fill="url(#daemonArmorGrad)" stroke="#1a466f" stroke-width="3"/>
+    
+    <!-- Top Brow Plate Highlight -->
+    <polygon points="0,-98 56,-74 72,-30 0,-15 -72,-30 -56,-74" 
+             fill="url(#daemonPlateHighlight)" stroke="#00a8ff" stroke-width="1.8" stroke-opacity="0.6"/>
+
+    <!-- Daemon Cheekbone & Chin Chassis Facets -->
+    <polygon points="-75,42 -45,86 0,102 45,86 75,42 0,64" 
+             fill="#081829" stroke="#164066" stroke-width="2"/>
+
+    <!-- Inner Terminal Mask / Core Well -->
+    <polygon points="0,-72 48,-52 56,-8 0,42 -56,-8 -48,-52" 
+             fill="#020912" stroke="#00f2fe" stroke-width="2.5" filter="url(#glow)"/>
+
+    <!-- Glowing Cyber Daemon Visor Eyes (Horizontal CLI Sensor Array) -->
+    <g filter="url(#glow)">
+      <!-- Left Eye Sensor Slot -->
+      <polygon points="-42,-22 -12,-22 -16,-12 -44,-12" fill="#00f2fe"/>
+      <line x1="-39" y1="-17" x2="-14" y2="-17" stroke="#ffffff" stroke-width="2.5"/>
+      <!-- Right Eye Sensor Slot -->
+      <polygon points="12,-22 42,-22 44,-12 16,-12" fill="#20e3b2"/>
+      <line x1="14" y1="-17" x2="39" y2="-17" stroke="#ffffff" stroke-width="2.5"/>
+    </g>
+
+    <!-- Daemon Heart Reactor / Process Core (Center Anchor) -->
+    <g transform="translate(0, 14)">
+      <circle cx="0" cy="0" r="24" fill="#041424" stroke="#00a8ff" stroke-width="2.5"/>
+      <circle cx="0" cy="0" r="17" fill="#082844" stroke="#00f2fe" stroke-width="2" filter="url(#glow)"/>
+      <circle cx="0" cy="0" r="9" fill="#20e3b2" filter="url(#intenseGlow)"/>
+      <circle cx="0" cy="0" r="4" fill="#ffffff"/>
+      <!-- Process spin ticks -->
+      <line x1="0" y1="-28" x2="0" y2="-21" stroke="#00f2fe" stroke-width="2"/>
+      <line x1="0" y1="21" x2="0" y2="28" stroke="#00f2fe" stroke-width="2"/>
+      <line x1="-28" y1="0" x2="-21" y2="0" stroke="#00f2fe" stroke-width="2"/>
+      <line x1="21" y1="0" x2="28" y2="0" stroke="#00f2fe" stroke-width="2"/>
+    </g>
+
+    <!-- Outer Tech Accents & Circuit Nodes on Daemon -->
+    <circle cx="-68" cy="-78" r="3.5" fill="#00f2fe" filter="url(#glow)"/>
+    <circle cx="68" cy="-78" r="3.5" fill="#20e3b2" filter="url(#glow)"/>
+    <circle cx="-88" cy="-25" r="3" fill="#00a8ff"/>
+    <circle cx="88" cy="-25" r="3" fill="#00a8ff"/>
+    <circle cx="-80" cy="48" r="3" fill="#1b4066"/>
+    <circle cx="80" cy="48" r="3" fill="#1b4066"/>
+    <circle cx="0" cy="102" r="3.5" fill="#00f2fe" filter="url(#glow)"/>
+
+    <!-- Process Bus Traces running down Chin -->
+    <path d="M -24 45 L -24 68 L 0 84 L 24 68 L 24 45" fill="none" stroke="#00a8ff" stroke-width="1.8" stroke-dasharray="3 3"/>
+  </g>
+
+  <!-- ==================== PULSE LINE OVER DAEMON ICON (THE CENTRAL VISUAL) ==================== -->
+  <!-- Background EKG Waveform Shadow for high contrast -->
+  <path d="M 80 270 
+           L 240 270 
+           L 270 270 
+           L 285 250 
+           L 300 286 
+           L 315 270 
+           L 410 270 
+           L 435 270 
+           L 450 258 
+           L 468 288 
+           L 485 220 
+           L 508 325 
+           L 530 270 
+           L 555 270 
+           L 570 235 
+           L 588 340 
+           L 612 110 
+           L 638 385 
+           L 658 240 
+           L 680 295 
+           L 702 270 
+           L 755 270 
+           L 775 245 
+           L 795 292 
+           L 815 270 
+           L 910 270 
+           L 930 255 
+           L 945 282 
+           L 960 270 
+           L 1120 270"
+        fill="none" stroke="#010a14" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Pulse Outer Atmospheric Glow -->
+  <path d="M 80 270 
+           L 240 270 
+           L 270 270 
+           L 285 250 
+           L 300 286 
+           L 315 270 
+           L 410 270 
+           L 435 270 
+           L 450 258 
+           L 468 288 
+           L 485 220 
+           L 508 325 
+           L 530 270 
+           L 555 270 
+           L 570 235 
+           L 588 340 
+           L 612 110 
+           L 638 385 
+           L 658 240 
+           L 680 295 
+           L 702 270 
+           L 755 270 
+           L 775 245 
+           L 795 292 
+           L 815 270 
+           L 910 270 
+           L 930 255 
+           L 945 282 
+           L 960 270 
+           L 1120 270"
+        fill="none" stroke="url(#pulseGrad)" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"
+        filter="url(#intenseGlow)" opacity="0.85"/>
+
+  <!-- Pulse Mid Sharp Beam -->
+  <path d="M 80 270 
+           L 240 270 
+           L 270 270 
+           L 285 250 
+           L 300 286 
+           L 315 270 
+           L 410 270 
+           L 435 270 
+           L 450 258 
+           L 468 288 
+           L 485 220 
+           L 508 325 
+           L 530 270 
+           L 555 270 
+           L 570 235 
+           L 588 340 
+           L 612 110 
+           L 638 385 
+           L 658 240 
+           L 680 295 
+           L 702 270 
+           L 755 270 
+           L 775 245 
+           L 795 292 
+           L 815 270 
+           L 910 270 
+           L 930 255 
+           L 945 282 
+           L 960 270 
+           L 1120 270"
+        fill="none" stroke="url(#pulseGrad)" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"
+        filter="url(#glow)"/>
+
+  <!-- Pulse Core Hot Laser Filament -->
+  <path d="M 80 270 
+           L 240 270 
+           L 270 270 
+           L 285 250 
+           L 300 286 
+           L 315 270 
+           L 410 270 
+           L 435 270 
+           L 450 258 
+           L 468 288 
+           L 485 220 
+           L 508 325 
+           L 530 270 
+           L 555 270 
+           L 570 235 
+           L 588 340 
+           L 612 110 
+           L 638 385 
+           L 658 240 
+           L 680 295 
+           L 702 270 
+           L 755 270 
+           L 775 245 
+           L 795 292 
+           L 815 270 
+           L 910 270 
+           L 930 255 
+           L 945 282 
+           L 960 270 
+           L 1120 270"
+        fill="none" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Vital Peak Telemetry Beacons / Spark Points -->
+  <!-- Apex Peak Flare (Top of Vitals) -->
+  <g transform="translate(612, 110)">
+    <circle cx="0" cy="0" r="18" fill="url(#pulseGlowBurst)"/>
+    <circle cx="0" cy="0" r="7" fill="#00f2fe" filter="url(#intenseGlow)"/>
+    <circle cx="0" cy="0" r="3.5" fill="#ffffff"/>
+    <!-- Measurement Crosshairs -->
+    <line x1="-12" y1="0" x2="-6" y2="0" stroke="#00f2fe" stroke-width="1.5"/>
+    <line x1="6" y1="0" x2="12" y2="0" stroke="#00f2fe" stroke-width="1.5"/>
+    <line x1="0" y1="-12" x2="0" y2="-6" stroke="#00f2fe" stroke-width="1.5"/>
+    <line x1="0" y1="6" x2="0" y2="12" stroke="#00f2fe" stroke-width="1.5"/>
+  </g>
+
+  <!-- Nadir Valley Flare (Bottom rebound) -->
+  <g transform="translate(638, 385)">
+    <circle cx="0" cy="0" r="14" fill="url(#pulseGlowBurst)"/>
+    <circle cx="0" cy="0" r="6" fill="#38ef7d" filter="url(#glow)"/>
+    <circle cx="0" cy="0" r="3" fill="#ffffff"/>
+  </g>
+
+  <!-- Secondary Health Peak Flares -->
+  <g transform="translate(485, 220)">
+    <circle cx="0" cy="0" r="5" fill="#00a8ff" filter="url(#glow)"/>
+    <circle cx="0" cy="0" r="2.5" fill="#ffffff"/>
+  </g>
+  <g transform="translate(775, 245)">
+    <circle cx="0" cy="0" r="5" fill="#20e3b2" filter="url(#glow)"/>
+    <circle cx="0" cy="0" r="2.5" fill="#ffffff"/>
+  </g>
+
+  <!-- Telemetry Baseline Coordinate Marks & Scope Scale (CLI Diagnostic UI) -->
+  <g stroke="#123554" stroke-width="1">
+    <!-- Vertical measurement tick lines -->
+    <line x1="240" y1="262" x2="240" y2="278"/>
+    <line x1="410" y1="262" x2="410" y2="278"/>
+    <line x1="755" y1="262" x2="755" y2="278"/>
+    <line x1="910" y1="262" x2="910" y2="278"/>
+    <!-- Diagnostic threshold guides -->
+    <line x1="200" y1="180" x2="1000" y2="180" stroke="#0e2a45" stroke-dasharray="3 6"/>
+    <line x1="200" y1="360" x2="1000" y2="360" stroke="#0e2a45" stroke-dasharray="3 6"/>
+  </g>
+
+  <!-- Left & Right Waveform Baseline Node Dots -->
+  <circle cx="80" cy="270" r="4" fill="#00a8ff" filter="url(#glow)"/>
+  <circle cx="1120" cy="270" r="4" fill="#38ef7d" filter="url(#glow)"/>
+
+  <!-- ==================== CLEAN DEVELOPER TEXT (MAX 3 WORDS) ==================== -->
+  <!-- Exactly 3 words of text: "OBSERVE DAEMON HEALTH" -->
+  <g transform="translate(600, 528)" text-anchor="middle">
+    <!-- Elegant Monospace Command Prompt Header -->
+    <text font-family="ui-monospace, 'SF Mono', 'JetBrains Mono', 'Fira Code', Menlo, Monaco, Consolas, monospace" 
+          font-size="44" font-weight="800" letter-spacing="4">
+      <tspan fill="#ffffff">OBSERVE</tspan> <tspan fill="#00f2fe">DAEMON</tspan> <tspan fill="#38ef7d">HEALTH</tspan>
+    </text>
+
+    <!-- Glowing Terminal Accent Base Rule -->
+    <line x1="-310" y1="24" x2="310" y2="24" stroke="url(#cyanTealGrad)" stroke-width="2.5" opacity="0.85" filter="url(#glow)"/>
+    <circle cx="-310" cy="24" r="3.5" fill="#00a8ff" filter="url(#glow)"/>
+    <circle cx="310" cy="24" r="3.5" fill="#38ef7d" filter="url(#glow)"/>
+
+    <!-- Subtle CLI Prompt Symbol Indicator -->
+    <g transform="translate(-336, 1)">
+      <text font-family="ui-monospace, 'SF Mono', 'JetBrains Mono', monospace" font-size="28" font-weight="700" fill="#00f2fe" opacity="0.7">></text>
+    </g>
+  </g>
+
+  <!-- Bottom Left & Right Abstract Status Nodes -->
+  <g fill="none">
+    <g transform="translate(60, 575)">
+      <circle cx="0" cy="0" r="3" fill="#00a8ff"/>
+      <line x1="10" y1="0" x2="80" y2="0" stroke="#102b45" stroke-width="1.5"/>
+      <rect x="90" y="-4" width="8" height="8" rx="1" fill="#00f2fe" opacity="0.6"/>
+    </g>
+    <g transform="translate(1050, 575)">
+      <rect x="0" y="-4" width="8" height="8" rx="1" fill="#38ef7d" opacity="0.6"/>
+      <line x1="18" y1="0" x2="88" y2="0" stroke="#102b45" stroke-width="1.5"/>
+      <circle cx="98" cy="0" r="3" fill="#38ef7d"/>
+    </g>
+  </g>
+</svg>

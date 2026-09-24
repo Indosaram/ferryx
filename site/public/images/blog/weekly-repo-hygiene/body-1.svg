@@ -1,0 +1,305 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1376 768" width="1376" height="768" style="background:#070b14; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'JetBrains Mono', monospace;">
+  <defs>
+    <!-- Background Gradient -->
+    <radialGradient id="bgGrad" cx="50%" cy="30%" r="80%">
+      <stop offset="0%" stop-color="#0c1829" />
+      <stop offset="50%" stop-color="#070c17" />
+      <stop offset="100%" stop-color="#04060b" />
+    </radialGradient>
+
+    <!-- Ambient Glows -->
+    <radialGradient id="glowTeal" cx="25%" cy="35%" r="40%">
+      <stop offset="0%" stop-color="#14b8a6" stop-opacity="0.12" />
+      <stop offset="100%" stop-color="#14b8a6" stop-opacity="0" />
+    </radialGradient>
+    <radialGradient id="glowCyan" cx="75%" cy="50%" r="45%">
+      <stop offset="0%" stop-color="#0ea5e9" stop-opacity="0.14" />
+      <stop offset="100%" stop-color="#0ea5e9" stop-opacity="0" />
+    </radialGradient>
+
+    <!-- Card Background Gradients -->
+    <linearGradient id="cardGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0f1b2e" stop-opacity="0.9" />
+      <stop offset="100%" stop-color="#09111e" stop-opacity="0.95" />
+    </linearGradient>
+    <linearGradient id="cardGradActive" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#13263e" stop-opacity="0.95" />
+      <stop offset="100%" stop-color="#0a1727" stop-opacity="0.98" />
+    </linearGradient>
+
+    <!-- Accents -->
+    <linearGradient id="accentTeal" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2dd4bf" />
+      <stop offset="100%" stop-color="#0d9488" />
+    </linearGradient>
+    <linearGradient id="accentCyan" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#0284c7" />
+    </linearGradient>
+
+    <!-- Border Gradients -->
+    <linearGradient id="borderGradTeal" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2dd4bf" stop-opacity="0.6" />
+      <stop offset="100%" stop-color="#0ea5e9" stop-opacity="0.15" />
+    </linearGradient>
+    <linearGradient id="borderGradSubtle" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1e3a5f" stop-opacity="0.6" />
+      <stop offset="100%" stop-color="#0f223a" stop-opacity="0.3" />
+    </linearGradient>
+
+    <!-- Glow Filter -->
+    <filter id="softGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="4" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <!-- Grid Pattern -->
+    <pattern id="gridPattern" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M 32 0 L 0 0 0 32" fill="none" stroke="#162740" stroke-width="0.75" stroke-opacity="0.35" />
+    </pattern>
+  </defs>
+
+  <!-- Background Base -->
+  <rect width="1376" height="768" fill="url(#bgGrad)" />
+  <rect width="1376" height="768" fill="url(#gridPattern)" />
+  <rect width="1376" height="768" fill="url(#glowTeal)" />
+  <rect width="1376" height="768" fill="url(#glowCyan)" />
+
+  <!-- Outer Canvas Border -->
+  <rect x="20" y="20" width="1336" height="728" rx="16" fill="none" stroke="#162c4a" stroke-width="1.2" stroke-opacity="0.6" />
+
+  <!-- ==================== HEADER AREA ==================== -->
+  <g transform="translate(60, 48)">
+    <!-- Pill tag -->
+    <rect x="0" y="0" width="150" height="24" rx="12" fill="#0c2538" stroke="#14b8a6" stroke-width="1" stroke-opacity="0.6" />
+    <circle cx="12" cy="12" r="4" fill="#2dd4bf" filter="url(#softGlow)" />
+    <text x="24" y="16" fill="#2dd4bf" font-size="11" font-weight="700" letter-spacing="1.5">REPO HYGIENE</text>
+
+    <!-- Main Title -->
+    <text x="0" y="58" fill="#f1f5f9" font-size="26" font-weight="700" letter-spacing="-0.5">Weekly Hygiene Ritual Checklist</text>
+    
+    <!-- Subtitle -->
+    <text x="0" y="80" fill="#94a3b8" font-size="13" font-weight="400">Systematic audit &amp; teardown loop for parallel managed worktrees</text>
+
+    <!-- Header status metric badges -->
+    <g transform="translate(940, 10)">
+      <rect x="0" y="0" width="140" height="52" rx="8" fill="#0a1829" stroke="#1e3a5f" stroke-width="1" />
+      <text x="16" y="22" fill="#64748b" font-size="10" font-weight="600" letter-spacing="1">WORKTREES</text>
+      <text x="16" y="42" fill="#38bdf8" font-size="18" font-weight="700">4 AUDITED</text>
+
+      <rect x="156" y="0" width="160" height="52" rx="8" fill="#0c242b" stroke="#14b8a6" stroke-width="1" stroke-opacity="0.6" />
+      <text x="172" y="22" fill="#2dd4bf" font-size="10" font-weight="600" letter-spacing="1">DRIFT DETECTED</text>
+      <text x="172" y="42" fill="#2dd4bf" font-size="18" font-weight="700">0 · CONVERGED</text>
+    </g>
+  </g>
+
+  <!-- Horizontal divider line -->
+  <line x1="60" y1="152" x2="1316" y2="152" stroke="#15263d" stroke-width="1.2" />
+
+  <!-- ==================== LEFT COLUMN: CHECKLIST STEPS ==================== -->
+  <g transform="translate(60, 176)">
+    <!-- Header label -->
+    <text x="0" y="0" fill="#38bdf8" font-size="11" font-weight="700" letter-spacing="1.5">HYGIENE CHECKPOINTS</text>
+
+    <!-- Item 1: Audit Worktree Leases -->
+    <g transform="translate(0, 18)">
+      <rect x="0" y="0" width="580" height="110" rx="10" fill="url(#cardGrad)" stroke="url(#borderGradTeal)" stroke-width="1.2" />
+      <!-- Left accent bar -->
+      <rect x="0" y="0" width="4" height="110" rx="2" fill="#2dd4bf" />
+      
+      <!-- Checkbox circle -->
+      <circle cx="36" cy="40" r="16" fill="#0d2c38" stroke="#14b8a6" stroke-width="1.5" />
+      <path d="M 29 40 L 34 45 L 43 35" fill="none" stroke="#2dd4bf" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
+
+      <!-- Step text -->
+      <text x="68" y="34" fill="#f8fafc" font-size="15" font-weight="600">1. Audit Worktree Leases &amp; Locks</text>
+      <text x="68" y="54" fill="#94a3b8" font-size="12">Inspect active leases, detached HEAD states, and stale lockfiles</text>
+      
+      <!-- Monospace terminal command tag -->
+      <rect x="68" y="70" width="230" height="24" rx="5" fill="#081320" stroke="#162c46" stroke-width="1" />
+      <text x="78" y="86" fill="#38bdf8" font-family="'JetBrains Mono', monospace" font-size="11">$ git worktree list --porcelain</text>
+      
+      <!-- Status pill -->
+      <rect x="480" y="24" width="76" height="22" rx="11" fill="#0b2c34" stroke="#14b8a6" stroke-width="1" />
+      <text x="518" y="39" fill="#2dd4bf" font-size="10" font-weight="700" text-anchor="middle">VERIFIED</text>
+    </g>
+
+    <!-- Item 2: Prune Stale & Merged Worktrees -->
+    <g transform="translate(0, 144)">
+      <rect x="0" y="0" width="580" height="110" rx="10" fill="url(#cardGradActive)" stroke="url(#borderGradTeal)" stroke-width="1.2" />
+      <rect x="0" y="0" width="4" height="110" rx="2" fill="#38bdf8" />
+      
+      <!-- Checkbox circle -->
+      <circle cx="36" cy="40" r="16" fill="#0a2842" stroke="#0ea5e9" stroke-width="1.5" />
+      <path d="M 29 40 L 34 45 L 43 35" fill="none" stroke="#38bdf8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
+
+      <!-- Step text -->
+      <text x="68" y="34" fill="#f8fafc" font-size="15" font-weight="600">2. Prune Merged Trees &amp; Clear Locks</text>
+      <text x="68" y="54" fill="#94a3b8" font-size="12">Safely tear down merged branch checkouts &amp; orphaned metadata</text>
+      
+      <!-- Monospace command tag -->
+      <rect x="68" y="70" width="195" height="24" rx="5" fill="#081320" stroke="#162c46" stroke-width="1" />
+      <text x="78" y="86" fill="#38bdf8" font-family="'JetBrains Mono', monospace" font-size="11">$ git worktree prune -v</text>
+
+      <!-- Status pill -->
+      <rect x="480" y="24" width="76" height="22" rx="11" fill="#09283f" stroke="#0ea5e9" stroke-width="1" />
+      <text x="518" y="39" fill="#38bdf8" font-size="10" font-weight="700" text-anchor="middle">PRUNED</text>
+    </g>
+
+    <!-- Item 3: Rebase & Purge Stale Local Branches -->
+    <g transform="translate(0, 270)">
+      <rect x="0" y="0" width="580" height="110" rx="10" fill="url(#cardGrad)" stroke="url(#borderGradSubtle)" stroke-width="1.2" />
+      <rect x="0" y="0" width="4" height="110" rx="2" fill="#2dd4bf" />
+      
+      <circle cx="36" cy="40" r="16" fill="#0d2c38" stroke="#14b8a6" stroke-width="1.5" />
+      <path d="M 29 40 L 34 45 L 43 35" fill="none" stroke="#2dd4bf" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
+
+      <text x="68" y="34" fill="#f8fafc" font-size="15" font-weight="600">3. Sync Remotes &amp; Purge Deleted Branches</text>
+      <text x="68" y="54" fill="#94a3b8" font-size="12">Prune tracking refs and remove local branches merged to main</text>
+      
+      <rect x="68" y="70" width="220" height="24" rx="5" fill="#081320" stroke="#162c46" stroke-width="1" />
+      <text x="78" y="86" fill="#38bdf8" font-family="'JetBrains Mono', monospace" font-size="11">$ git fetch -p &amp;&amp; git branch -d</text>
+
+      <rect x="480" y="24" width="76" height="22" rx="11" fill="#0b2c34" stroke="#14b8a6" stroke-width="1" />
+      <text x="518" y="39" fill="#2dd4bf" font-size="10" font-weight="700" text-anchor="middle">SYNCED</text>
+    </g>
+
+    <!-- Item 4: Verify Zero-Drift & Attention Drawer -->
+    <g transform="translate(0, 396)">
+      <rect x="0" y="0" width="580" height="110" rx="10" fill="url(#cardGrad)" stroke="url(#borderGradSubtle)" stroke-width="1.2" />
+      <rect x="0" y="0" width="4" height="110" rx="2" fill="#2dd4bf" />
+      
+      <circle cx="36" cy="40" r="16" fill="#0d2c38" stroke="#14b8a6" stroke-width="1.5" />
+      <path d="M 29 40 L 34 45 L 43 35" fill="none" stroke="#2dd4bf" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
+
+      <text x="68" y="34" fill="#f8fafc" font-size="15" font-weight="600">4. Verify Zero Drift &amp; Clear Drawer State</text>
+      <text x="68" y="54" fill="#94a3b8" font-size="12">Confirm clean working trees and reconcile daemon session table</text>
+      
+      <rect x="68" y="70" width="210" height="24" rx="5" fill="#081320" stroke="#162c46" stroke-width="1" />
+      <text x="78" y="86" fill="#38bdf8" font-family="'JetBrains Mono', monospace" font-size="11">$ ferryx workspace status</text>
+
+      <rect x="480" y="24" width="76" height="22" rx="11" fill="#0b2c34" stroke="#14b8a6" stroke-width="1" />
+      <text x="518" y="39" fill="#2dd4bf" font-size="10" font-weight="700" text-anchor="middle">OPTIMAL</text>
+    </g>
+  </g>
+
+  <!-- ==================== RIGHT COLUMN: TOPOLOGY / STATE DIAGRAM ==================== -->
+  <g transform="translate(690, 176)">
+    <!-- Header label -->
+    <text x="0" y="0" fill="#38bdf8" font-size="11" font-weight="700" letter-spacing="1.5">TOPOLOGY &amp; WORKTREE STATE</text>
+
+    <!-- Diagram Container Box -->
+    <g transform="translate(0, 18)">
+      <rect x="0" y="0" width="626" height="506" rx="12" fill="#08101e" stroke="#162842" stroke-width="1.2" />
+
+      <!-- Top Mini Terminal Bar -->
+      <rect x="0" y="0" width="626" height="36" rx="12" fill="#0c1626" />
+      <rect x="0" y="24" width="626" height="12" fill="#0c1626" />
+      <circle cx="20" cy="18" r="5" fill="#ef4444" opacity="0.8" />
+      <circle cx="36" cy="18" r="5" fill="#eab308" opacity="0.8" />
+      <circle cx="52" cy="18" r="5" fill="#22c55e" opacity="0.8" />
+      <text x="80" y="22" fill="#64748b" font-family="'JetBrains Mono', monospace" font-size="11">managed-worktree-hygiene // ritual-view</text>
+
+      <!-- Central Bare / Root Node -->
+      <g transform="translate(170, 62)">
+        <rect x="0" y="0" width="286" height="74" rx="8" fill="#0d1f35" stroke="#1e406d" stroke-width="1.2" />
+        <circle cx="28" cy="37" r="14" fill="#142e50" stroke="#38bdf8" stroke-width="1.5" />
+        <!-- Git Branch Icon -->
+        <path d="M 24 30 L 24 44 M 24 34 Q 32 34 32 40" fill="none" stroke="#38bdf8" stroke-width="1.8" stroke-linecap="round" />
+        <circle cx="24" cy="31" r="2.5" fill="#38bdf8" />
+        <circle cx="24" cy="43" r="2.5" fill="#38bdf8" />
+        <circle cx="32" cy="40" r="2.5" fill="#38bdf8" />
+        
+        <text x="52" y="32" fill="#f8fafc" font-size="13" font-weight="700">Primary Git Store</text>
+        <text x="52" y="50" fill="#38bdf8" font-family="'JetBrains Mono', monospace" font-size="11">.git/worktrees/</text>
+        <rect x="202" y="14" width="72" height="18" rx="9" fill="#082b3d" stroke="#0ea5e9" stroke-width="0.8" />
+        <text x="238" y="26" fill="#38bdf8" font-size="9" font-weight="700" text-anchor="middle">CANONICAL</text>
+      </g>
+
+      <!-- Connecting SVG connector lines with glowing pulses -->
+      <!-- Branch down-left -->
+      <path d="M 240 136 L 240 180 L 130 180 L 130 210" fill="none" stroke="#14b8a6" stroke-width="1.8" stroke-dasharray="4 3" opacity="0.8" />
+      <!-- Branch down-middle -->
+      <path d="M 313 136 L 313 210" fill="none" stroke="#0ea5e9" stroke-width="1.8" stroke-dasharray="4 3" opacity="0.8" />
+      <!-- Branch down-right -->
+      <path d="M 386 136 L 386 180 L 496 180 L 496 210" fill="none" stroke="#64748b" stroke-width="1.5" stroke-dasharray="3 3" opacity="0.5" />
+
+      <!-- Worktree Node 1: Active Feature Worktree (Retained) -->
+      <g transform="translate(25, 210)">
+        <rect x="0" y="0" width="180" height="140" rx="8" fill="#091b2c" stroke="#14b8a6" stroke-width="1.2" />
+        <rect x="12" y="14" width="70" height="20" rx="10" fill="#0c2e36" stroke="#14b8a6" stroke-width="1" />
+        <text x="47" y="28" fill="#2dd4bf" font-size="9" font-weight="700" text-anchor="middle">ACTIVE LEASE</text>
+
+        <text x="14" y="58" fill="#f8fafc" font-size="13" font-weight="600">agent-session-01</text>
+        <text x="14" y="76" fill="#38bdf8" font-family="'JetBrains Mono', monospace" font-size="10">feat/perf-kernel</text>
+        
+        <line x1="14" y1="90" x2="166" y2="90" stroke="#152b42" stroke-width="1" />
+        <circle cx="22" cy="106" r="3" fill="#2dd4bf" />
+        <text x="32" y="110" fill="#94a3b8" font-size="10">Head: clean</text>
+        <circle cx="22" cy="122" r="3" fill="#2dd4bf" />
+        <text x="32" y="126" fill="#94a3b8" font-size="10">Keep active lease</text>
+      </g>
+
+      <!-- Worktree Node 2: Merged Worktree (Pruned during ritual) -->
+      <g transform="translate(223, 210)">
+        <rect x="0" y="0" width="180" height="140" rx="8" fill="#141824" stroke="#e06c75" stroke-width="1.2" stroke-dasharray="4 2" />
+        <rect x="12" y="14" width="76" height="20" rx="10" fill="#2a151b" stroke="#e06c75" stroke-width="1" />
+        <text x="50" y="28" fill="#f87171" font-size="9" font-weight="700" text-anchor="middle">PRUNED / DEAD</text>
+
+        <text x="14" y="58" fill="#94a3b8" font-size="13" font-weight="600" text-decoration="line-through">agent-session-02</text>
+        <text x="14" y="76" fill="#64748b" font-family="'JetBrains Mono', monospace" font-size="10">fix/pty-overflow</text>
+        
+        <line x1="14" y1="90" x2="166" y2="90" stroke="#221e2c" stroke-width="1" />
+        <!-- Teardown badge -->
+        <rect x="14" y="98" width="152" height="30" rx="4" fill="#201319" />
+        <text x="90" y="117" fill="#f87171" font-size="10" font-weight="600" text-anchor="middle">Safely Teardown [OK]</text>
+      </g>
+
+      <!-- Worktree Node 3: Rebase Candidate (Updated) -->
+      <g transform="translate(421, 210)">
+        <rect x="0" y="0" width="180" height="140" rx="8" fill="#091b2c" stroke="#38bdf8" stroke-width="1.2" />
+        <rect x="12" y="14" width="70" height="20" rx="10" fill="#0b2940" stroke="#38bdf8" stroke-width="1" />
+        <text x="47" y="28" fill="#38bdf8" font-size="9" font-weight="700" text-anchor="middle">REBASED</text>
+
+        <text x="14" y="58" fill="#f8fafc" font-size="13" font-weight="600">agent-review-03</text>
+        <text x="14" y="76" fill="#38bdf8" font-family="'JetBrains Mono', monospace" font-size="10">docs/arch-update</text>
+        
+        <line x1="14" y1="90" x2="166" y2="90" stroke="#152b42" stroke-width="1" />
+        <circle cx="22" cy="106" r="3" fill="#38bdf8" />
+        <text x="32" y="110" fill="#94a3b8" font-size="10">Synced upstream</text>
+        <circle cx="22" cy="122" r="3" fill="#38bdf8" />
+        <text x="32" y="126" fill="#94a3b8" font-size="10">0 merge conflicts</text>
+      </g>
+
+      <!-- Bottom Panel: Daemon Health & Attention Banner -->
+      <g transform="translate(25, 372)">
+        <rect x="0" y="0" width="576" height="112" rx="8" fill="#071322" stroke="#193354" stroke-width="1" />
+        
+        <rect x="16" y="14" width="120" height="22" rx="11" fill="#0b2734" stroke="#14b8a6" stroke-width="1" />
+        <circle cx="27" cy="25" r="3.5" fill="#2dd4bf" filter="url(#softGlow)" />
+        <text x="36" y="29" fill="#2dd4bf" font-size="10" font-weight="700">RITUAL SUMMARY</text>
+
+        <text x="16" y="56" fill="#f8fafc" font-size="13" font-weight="600">Repository State: Pruned · Zero Orphaned Leases · Fully Synced</text>
+        <text x="16" y="76" fill="#94a3b8" font-size="11">Daemon sessions mapped 1:1 to live worktree roots. Stale locks eliminated.</text>
+
+        <!-- Status chips -->
+        <g transform="translate(16, 86)">
+          <rect x="0" y="0" width="110" height="18" rx="4" fill="#0d2438" />
+          <text x="55" y="13" fill="#38bdf8" font-size="9" font-family="'JetBrains Mono', monospace" text-anchor="middle">LOCKS: 0 REMAINING</text>
+          
+          <rect x="118" y="0" width="120" height="18" rx="4" fill="#0c2a2f" />
+          <text x="178" y="13" fill="#2dd4bf" font-size="9" font-family="'JetBrains Mono', monospace" text-anchor="middle">TREES: 2 PRUNED</text>
+          
+          <rect x="246" y="0" width="116" height="18" rx="4" fill="#0d2438" />
+          <text x="304" y="13" fill="#38bdf8" font-size="9" font-family="'JetBrains Mono', monospace" text-anchor="middle">STATUS: CLEAN PASS</text>
+        </g>
+      </g>
+    </g>
+  </g>
+
+  <!-- Subtle Footer Signature -->
+  <g transform="translate(60, 724)">
+    <text x="0" y="0" fill="#475569" font-size="11" font-family="'JetBrains Mono', monospace">FERRYX // DOCS &amp; REPO HYGIENE WORKFLOW SPECIFICATION</text>
+    <text x="1256" y="0" fill="#14b8a6" font-size="11" font-weight="700" letter-spacing="1" text-anchor="end">WEEKLY RITUAL ✓</text>
+  </g>
+</svg>

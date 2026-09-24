@@ -1,0 +1,317 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <defs>
+    <!-- Background Radial Gradients -->
+    <radialGradient id="bgGlow" cx="50%" cy="40%" r="68%">
+      <stop offset="0%" stop-color="#0c2538" stop-opacity="0.95"/>
+      <stop offset="45%" stop-color="#071424" stop-opacity="0.98"/>
+      <stop offset="100%" stop-color="#03070f" stop-opacity="1"/>
+    </radialGradient>
+
+    <radialGradient id="badgeBackGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.25"/>
+      <stop offset="40%" stop-color="#ff3b69" stop-opacity="0.12"/>
+      <stop offset="80%" stop-color="#0066aa" stop-opacity="0.04"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="alertGlow" cx="50%" cy="45%" r="50%">
+      <stop offset="0%" stop-color="#ff3b69" stop-opacity="0.45"/>
+      <stop offset="60%" stop-color="#ff5252" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Linear Gradients -->
+    <linearGradient id="shieldBorder" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00f2fe"/>
+      <stop offset="40%" stop-color="#ff3b69"/>
+      <stop offset="80%" stop-color="#00c3ff"/>
+      <stop offset="100%" stop-color="#0055ff"/>
+    </linearGradient>
+
+    <linearGradient id="shieldFill" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0f273d"/>
+      <stop offset="40%" stop-color="#091829"/>
+      <stop offset="100%" stop-color="#040b14"/>
+    </linearGradient>
+
+    <linearGradient id="badgeInnerFill" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#14324d"/>
+      <stop offset="50%" stop-color="#0b1e30"/>
+      <stop offset="100%" stop-color="#050e18"/>
+    </linearGradient>
+
+    <linearGradient id="lockShackleGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ff5252"/>
+      <stop offset="30%" stop-color="#ffffff"/>
+      <stop offset="70%" stop-color="#00f2fe"/>
+      <stop offset="100%" stop-color="#ff3b69"/>
+    </linearGradient>
+
+    <linearGradient id="lockBodyGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#2a1420"/>
+      <stop offset="50%" stop-color="#190d16"/>
+      <stop offset="100%" stop-color="#0c060b"/>
+    </linearGradient>
+
+    <linearGradient id="pipeGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#132c45"/>
+      <stop offset="50%" stop-color="#1e4670"/>
+      <stop offset="100%" stop-color="#0b1b2c"/>
+    </linearGradient>
+
+    <linearGradient id="deniedBannerGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ff3b69"/>
+      <stop offset="50%" stop-color="#ff5252"/>
+      <stop offset="100%" stop-color="#ff1744"/>
+    </linearGradient>
+
+    <linearGradient id="cyanLineGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0"/>
+      <stop offset="30%" stop-color="#00f2fe" stop-opacity="0.9"/>
+      <stop offset="70%" stop-color="#00d2ff" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#00f2fe" stop-opacity="0"/>
+    </linearGradient>
+
+    <!-- Filters -->
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="5" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+
+    <filter id="redGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="6" result="blur" />
+      <feColorMatrix type="matrix" values="1 0 0 0 0  0 0.2 0 0 0  0 0 0.3 0 0  0 0 0 1 0" in="blur" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+
+    <filter id="wideGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="14" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+
+    <!-- Grid Pattern -->
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#122438" stroke-width="1" stroke-opacity="0.55"/>
+      <circle cx="40" cy="40" r="1" fill="#1b3b60" fill-opacity="0.75"/>
+    </pattern>
+  </defs>
+
+  <!-- Deep Canvas Layering -->
+  <rect width="1200" height="630" fill="#040711"/>
+  <rect width="1200" height="630" fill="url(#bgGlow)"/>
+  <rect width="1200" height="630" fill="url(#grid)"/>
+
+  <!-- HUD Corner Brackets & Terminal Metadata -->
+  <g stroke="#1d426a" stroke-width="2" fill="none">
+    <path d="M 36 36 L 36 68 M 36 36 L 68 36" />
+    <path d="M 1164 36 L 1164 68 M 1164 36 L 1132 36" />
+    <path d="M 36 594 L 36 562 M 36 594 L 68 594" />
+    <path d="M 1164 594 L 1164 562 M 1164 594 L 1132 594" />
+  </g>
+
+  <!-- Top Status Bar in Terminal Aesthetic -->
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Menlo', 'Monaco', 'JetBrains Mono', monospace" font-size="12" fill="#4d7298" letter-spacing="1.5">
+    <text x="75" y="54">IPC // UNIX_DOMAIN_SOCKET</text>
+    <text x="1125" y="54" text-anchor="end" fill="#ff5252">ERR: EACCES [13]</text>
+  </g>
+
+  <!-- Peripheral Tech Circuits & Broken Socket Paths -->
+  <g stroke="#00f2fe" stroke-width="1.2" fill="none" opacity="0.32">
+    <!-- Left client incoming traces -->
+    <path d="M 60 160 L 220 160 L 290 220 L 410 220" />
+    <circle cx="60" cy="160" r="3" fill="#00f2fe" />
+    <circle cx="410" cy="220" r="3.5" fill="#00f2fe" />
+
+    <path d="M 70 300 L 230 300 L 300 260 L 400 260" />
+    <circle cx="70" cy="300" r="3" fill="#00f2fe" />
+
+    <path d="M 100 440 L 260 440 L 330 370 L 420 370" />
+    <circle cx="100" cy="440" r="3" fill="#00f2fe" />
+    <circle cx="420" cy="370" r="3.5" fill="#00f2fe" />
+
+    <!-- Right daemon-side blocked traces (tinted red/amber) -->
+    <path d="M 1140 160 L 980 160 L 910 220 L 790 220" stroke="#ff3b69" opacity="0.45" />
+    <circle cx="1140" cy="160" r="3" fill="#ff3b69" />
+    <circle cx="790" cy="220" r="3.5" fill="#ff3b69" />
+
+    <path d="M 1130 300 L 970 300 L 900 260 L 800 260" stroke="#ff3b69" opacity="0.45" />
+    <circle cx="1130" cy="300" r="3" fill="#ff3b69" />
+
+    <path d="M 1100 440 L 940 440 L 870 370 L 780 370" stroke="#ff3b69" opacity="0.45" />
+    <circle cx="1100" cy="440" r="3" fill="#ff3b69" />
+    <circle cx="780" cy="370" r="3.5" fill="#ff3b69" />
+  </g>
+
+  <!-- Left: Client Socket Attempt (Pipe connecting into badge) -->
+  <g transform="translate(190, 245)">
+    <!-- Pipe casing -->
+    <rect x="0" y="-18" width="220" height="36" rx="4" fill="url(#pipeGrad)" stroke="#1a416b" stroke-width="1.5"/>
+    <line x1="0" y1="0" x2="220" y2="0" stroke="#00f2fe" stroke-width="1.5" stroke-dasharray="10 6" opacity="0.75"/>
+    <!-- Pipe collars -->
+    <rect x="50" y="-22" width="12" height="44" rx="3" fill="#14304e" stroke="#00f2fe" stroke-width="1.5" opacity="0.8"/>
+    <rect x="130" y="-22" width="12" height="44" rx="3" fill="#14304e" stroke="#00f2fe" stroke-width="1.5" opacity="0.8"/>
+    <rect x="200" y="-26" width="16" height="52" rx="3" fill="#1b4572" stroke="#00f2fe" stroke-width="2" filter="url(#glow)"/>
+    <!-- Pulse arrows -->
+    <path d="M 90 -6 L 100 0 L 90 6" fill="none" stroke="#00f2fe" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M 160 -6 L 170 0 L 160 6" fill="none" stroke="#00f2fe" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <!-- Socket address annotation -->
+    <text x="100" y="32" font-family="-apple-system, BlinkMacSystemFont, 'Menlo', 'Monaco', monospace" font-size="11" fill="#00f2fe" opacity="0.75" letter-spacing="1">/run/daemon.sock</text>
+  </g>
+
+  <!-- Right: Daemon Side Blocked Pipe -->
+  <g transform="translate(790, 245)">
+    <rect x="0" y="-18" width="220" height="36" rx="4" fill="url(#pipeGrad)" stroke="#1a416b" stroke-width="1.5"/>
+    <line x1="0" y1="0" x2="220" y2="0" stroke="#ff3b69" stroke-width="1.5" stroke-dasharray="8 6" opacity="0.5"/>
+    <rect x="4" y="-26" width="16" height="52" rx="3" fill="#1b4572" stroke="#ff3b69" stroke-width="2" filter="url(#redGlow)"/>
+    <rect x="80" y="-22" width="12" height="44" rx="3" fill="#14304e" stroke="#ff3b69" stroke-width="1.5" opacity="0.7"/>
+    <rect x="160" y="-22" width="12" height="44" rx="3" fill="#14304e" stroke="#ff3b69" stroke-width="1.5" opacity="0.7"/>
+    <!-- Permissions annotation -->
+    <text x="120" y="32" font-family="-apple-system, BlinkMacSystemFont, 'Menlo', 'Monaco', monospace" font-size="11" fill="#ff5252" opacity="0.8" letter-spacing="1">mode: 0600 (root:root)</text>
+  </g>
+
+  <!-- Ambient Glow Behind Central Badge -->
+  <circle cx="600" cy="245" r="280" fill="url(#badgeBackGlow)"/>
+  <circle cx="600" cy="245" r="140" fill="url(#alertGlow)"/>
+
+  <!-- ==================== CENTRAL PERMISSION DENIED BADGE ==================== -->
+  <g id="permission-badge" transform="translate(600, 245)">
+    <!-- Outer Octagonal Reticle Ring -->
+    <circle cx="0" cy="0" r="190" fill="none" stroke="#16395e" stroke-width="2"/>
+    <circle cx="0" cy="0" r="190" fill="none" stroke="#00f2fe" stroke-width="2" stroke-dasharray="14 10" opacity="0.45"/>
+    <circle cx="0" cy="0" r="215" fill="none" stroke="#ff3b69" stroke-width="1.2" stroke-dasharray="6 14" opacity="0.35"/>
+
+    <!-- Reticle Tick Marks -->
+    <g stroke="#00f2fe" stroke-width="2" opacity="0.7">
+      <line x1="0" y1="-198" x2="0" y2="-182"/>
+      <line x1="0" y1="182" x2="0" y2="198"/>
+      <line x1="-198" y1="0" x2="-182" y2="0"/>
+      <line x1="182" y1="0" x2="198" y2="0"/>
+    </g>
+
+    <!-- Main Tech Shield Geometric Body -->
+    <!-- Path defines high-tech angular shield -->
+    <path d="M 0 -160 
+             L 135 -105 
+             L 135 45 
+             C 135 115, 75 160, 0 185 
+             C -75 160, -135 115, -135 45 
+             L -135 -105 Z"
+          fill="url(#shieldFill)"
+          stroke="url(#shieldBorder)"
+          stroke-width="3.5"
+          filter="url(#glow)"/>
+
+    <!-- Inner Shield Inset Ring -->
+    <path d="M 0 -145 
+             L 120 -95 
+             L 120 40 
+             C 120 102, 68 142, 0 166 
+             C -68 142, -120 102, -120 40 
+             L -120 -95 Z"
+          fill="url(#badgeInnerFill)"
+          stroke="#00f2fe"
+          stroke-width="1.5"
+          opacity="0.6"
+          stroke-dasharray="12 6"/>
+
+    <!-- Socket Plug Base Geometry (Abstract Daemon Socket Interface) -->
+    <g transform="translate(0, -15)">
+      <!-- Socket Outer Collar Ring -->
+      <circle cx="0" cy="0" r="76" fill="#06121f" stroke="#1c4772" stroke-width="3"/>
+      <circle cx="0" cy="0" r="76" fill="none" stroke="#00f2fe" stroke-width="1.5" stroke-dasharray="10 6" opacity="0.6"/>
+      <circle cx="0" cy="0" r="62" fill="#040b13" stroke="#25121b" stroke-width="2"/>
+
+      <!-- Socket Pin Receptacles -->
+      <circle cx="-32" cy="-20" r="7" fill="#0c2338" stroke="#00f2fe" stroke-width="2"/>
+      <circle cx="32" cy="-20" r="7" fill="#0c2338" stroke="#00f2fe" stroke-width="2"/>
+      <circle cx="-32" cy="20" r="7" fill="#0c2338" stroke="#00f2fe" stroke-width="2"/>
+      <circle cx="32" cy="20" r="7" fill="#0c2338" stroke="#00f2fe" stroke-width="2"/>
+      <circle cx="0" cy="-35" r="5" fill="#0c2338" stroke="#00f2fe" stroke-width="1.5"/>
+
+      <!-- Cross Interlock Bars (Physical Lock Barrier) -->
+      <line x1="-50" y1="-50" x2="50" y2="50" stroke="#ff3b69" stroke-width="3" stroke-dasharray="8 6" opacity="0.4" />
+      <line x1="50" y1="-50" x2="-50" y2="50" stroke="#ff3b69" stroke-width="3" stroke-dasharray="8 6" opacity="0.4" />
+
+      <!-- ==================== THE FORBIDDEN PADLOCK EMBLEM ==================== -->
+      <!-- Heavy Security Padlock Locking the Socket -->
+      <g id="lock-emblem" transform="translate(0, 5)">
+        <!-- Padlock Shackle -->
+        <path d="M -26 -4
+                 L -26 -38
+                 C -26 -60, 26 -60, 26 -38
+                 L 26 -4"
+              fill="none"
+              stroke="url(#lockShackleGrad)"
+              stroke-width="10"
+              stroke-linecap="round"
+              filter="url(#redGlow)"/>
+
+        <!-- Shackle Core Glow Line -->
+        <path d="M -26 -4
+                 L -26 -38
+                 C -26 -57, 26 -57, 26 -38
+                 L 26 -4"
+              fill="none"
+              stroke="#ffffff"
+              stroke-width="2.5"
+              stroke-linecap="round"
+              opacity="0.9"/>
+
+        <!-- Padlock Body -->
+        <rect x="-44" y="-12" width="88" height="70" rx="12" fill="url(#lockBodyGrad)" stroke="#ff3b69" stroke-width="3" filter="url(#redGlow)"/>
+        
+        <!-- Padlock Inner Inset -->
+        <rect x="-37" y="-5" width="74" height="56" rx="8" fill="none" stroke="#00f2fe" stroke-width="1.2" opacity="0.5"/>
+
+        <!-- Keyhole / Denied Aperture -->
+        <circle cx="0" cy="16" r="11" fill="#050a12" stroke="#ff3b69" stroke-width="2" filter="url(#redGlow)"/>
+        <path d="M -3 15 L 3 15 L 5 30 L -5 30 Z" fill="#050a12" stroke="#ff3b69" stroke-width="1.8"/>
+
+        <!-- Glowing Red Forbidden Core Core -->
+        <circle cx="0" cy="16" r="4.5" fill="#ff3b69" filter="url(#glow)"/>
+        <circle cx="0" cy="16" r="2" fill="#ffffff"/>
+
+        <!-- Lock Body Corner Tech Bolts -->
+        <circle cx="-28" cy="4" r="2.5" fill="#00f2fe" opacity="0.8"/>
+        <circle cx="28" cy="4" r="2.5" fill="#00f2fe" opacity="0.8"/>
+        <circle cx="-28" cy="38" r="2.5" fill="#ff3b69" opacity="0.8"/>
+        <circle cx="28" cy="38" r="2.5" fill="#ff3b69" opacity="0.8"/>
+      </g>
+    </g>
+
+    <!-- Prominent "DENIED" Stamped Sub-Badge Across Lower Half -->
+    <g transform="translate(0, 110)">
+      <!-- Ribbon Bar Background -->
+      <rect x="-95" y="-18" width="190" height="36" rx="6" fill="#150810" stroke="#ff3b69" stroke-width="2" filter="url(#redGlow)"/>
+      <rect x="-91" y="-14" width="182" height="28" rx="4" fill="none" stroke="#ff5252" stroke-width="1" opacity="0.6"/>
+      <text font-family="-apple-system, BlinkMacSystemFont, 'Menlo', 'Monaco', 'JetBrains Mono', sans-serif" font-size="14" font-weight="900" fill="#ffffff" letter-spacing="4" text-anchor="middle" y="5">
+        ACCESS RESTRICTED
+      </text>
+    </g>
+  </g>
+
+  <!-- ==================== CLEAN DEVELOPER TEXT (MAX 3 WORDS) ==================== -->
+  <g transform="translate(600, 535)" text-anchor="middle">
+    <!-- Glowing Baseline Accent Line -->
+    <line x1="-320" y1="26" x2="320" y2="26" stroke="url(#cyanLineGrad)" stroke-width="2" filter="url(#glow)"/>
+
+    <!-- Exact 3-Word Title: PERMISSION DENIED FIX -->
+    <text font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', 'Segoe UI', Roboto, 'JetBrains Mono', sans-serif" font-size="44" font-weight="900" letter-spacing="3" fill="#ffffff">
+      PERMISSION <tspan fill="#ff3b69">DENIED</tspan> <tspan fill="#00f2fe">FIX</tspan>
+    </text>
+
+    <!-- Subtitle / Terminal Path Metadata -->
+    <text y="50" font-family="-apple-system, BlinkMacSystemFont, 'Menlo', 'Monaco', monospace" font-size="13" fill="#527a9e" letter-spacing="2">
+      UNIX DOMAIN SOCKET PERMISSIONS &amp; DAEMON IPC
+    </text>
+  </g>
+</svg>

@@ -1,0 +1,500 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2560 1440" width="2560" height="1440" style="background:#030712; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', 'Segoe UI', Roboto, 'JetBrains Mono', sans-serif;">
+  <defs>
+    <!-- Background Gradients -->
+    <radialGradient id="bgGlow" cx="50%" cy="30%" r="70%">
+      <stop offset="0%" stop-color="#0a233d" stop-opacity="0.85"/>
+      <stop offset="45%" stop-color="#051020" stop-opacity="0.95"/>
+      <stop offset="100%" stop-color="#02050b" stop-opacity="1"/>
+    </radialGradient>
+
+    <!-- Linear Gradients for Cards & Nodes -->
+    <linearGradient id="headerGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00f2fe"/>
+      <stop offset="40%" stop-color="#38bdf8"/>
+      <stop offset="80%" stop-color="#2dd4bf"/>
+      <stop offset="100%" stop-color="#818cf8"/>
+    </linearGradient>
+
+    <linearGradient id="nodeStartGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0e2a47"/>
+      <stop offset="100%" stop-color="#08182b"/>
+    </linearGradient>
+
+    <linearGradient id="nodeRouteGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0c233c"/>
+      <stop offset="100%" stop-color="#071524"/>
+    </linearGradient>
+
+    <linearGradient id="nodeSuccessGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#064e3b"/>
+      <stop offset="100%" stop-color="#022c22"/>
+    </linearGradient>
+
+    <!-- Diamond Gradients -->
+    <linearGradient id="diamondGrad1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#311042"/>
+      <stop offset="50%" stop-color="#1e0a2b"/>
+      <stop offset="100%" stop-color="#0d0414"/>
+    </linearGradient>
+
+    <linearGradient id="diamondGrad2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3b2306"/>
+      <stop offset="50%" stop-color="#241403"/>
+      <stop offset="100%" stop-color="#0f0701"/>
+    </linearGradient>
+
+    <linearGradient id="diamondGrad3" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3b0d1e"/>
+      <stop offset="50%" stop-color="#220610"/>
+      <stop offset="100%" stop-color="#0d0206"/>
+    </linearGradient>
+
+    <!-- Column Card Gradients -->
+    <linearGradient id="cardBgViolet" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#140f28" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#0a0817" stop-opacity="0.98"/>
+    </linearGradient>
+
+    <linearGradient id="cardBgAmber" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1a140a" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#0d0a04" stop-opacity="0.98"/>
+    </linearGradient>
+
+    <linearGradient id="cardBgRose" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1c0e16" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#0d060a" stop-opacity="0.98"/>
+    </linearGradient>
+
+    <!-- Code Block Gradients -->
+    <linearGradient id="codeBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#030712"/>
+      <stop offset="100%" stop-color="#050b18"/>
+    </linearGradient>
+
+    <!-- Glow & Shadow Filters -->
+    <filter id="glowTeal" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+
+    <filter id="glowRose" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+
+    <filter id="glowAmber" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+
+    <filter id="glowGreen" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+
+    <filter id="cardShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#000000" flood-opacity="0.6"/>
+    </filter>
+
+    <!-- Arrow Markers -->
+    <marker id="arrowCyan" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#00f2fe"/>
+    </marker>
+    <marker id="arrowGreen" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#10b981"/>
+    </marker>
+    <marker id="arrowRose" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#f43f5e"/>
+    </marker>
+    <marker id="arrowAmber" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#f59e0b"/>
+    </marker>
+
+    <!-- Dot Grid Pattern -->
+    <pattern id="dotGrid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.2" fill="#1e3a5f" opacity="0.32"/>
+    </pattern>
+  </defs>
+
+  <!-- Background Base -->
+  <rect width="2560" height="1440" fill="#02050b"/>
+  <rect width="2560" height="1440" fill="url(#bgGlow)"/>
+  <rect width="2560" height="1440" fill="url(#dotGrid)"/>
+
+  <!-- Blueprint Frame & Technical Reticles -->
+  <rect x="40" y="40" width="2480" height="1360" rx="16" fill="none" stroke="#122538" stroke-width="1.5"/>
+  <rect x="52" y="52" width="2456" height="1336" rx="12" fill="none" stroke="#00f2fe" stroke-width="0.8" stroke-dasharray="12 12" opacity="0.25"/>
+
+  <!-- Corner Reticles -->
+  <path d="M 64 88 L 64 64 L 88 64" fill="none" stroke="#00f2fe" stroke-width="2.5" opacity="0.9"/>
+  <path d="M 2496 88 L 2496 64 L 2472 64" fill="none" stroke="#00f2fe" stroke-width="2.5" opacity="0.9"/>
+  <path d="M 64 1352 L 64 1376 L 88 1376" fill="none" stroke="#00f2fe" stroke-width="2.5" opacity="0.9"/>
+  <path d="M 2496 1352 L 2496 1376 L 2472 1376" fill="none" stroke="#00f2fe" stroke-width="2.5" opacity="0.9"/>
+
+  <!-- ==================== HEADER BLOCK ==================== -->
+  <g transform="translate(100, 75)">
+    <!-- Pill Badge -->
+    <rect x="0" y="0" width="230" height="32" rx="16" fill="#061c2d" stroke="#00f2fe" stroke-width="1.2" stroke-opacity="0.7"/>
+    <circle cx="18" cy="16" r="5" fill="#00f2fe" filter="url(#glowTeal)"/>
+    <text x="36" y="21" fill="#00f2fe" font-size="13" font-weight="700" letter-spacing="1.5">FERRYX 2.0 PROTOCOL</text>
+
+    <!-- Main Title -->
+    <text x="0" y="80" fill="#ffffff" font-size="36" font-weight="800" letter-spacing="-0.5">
+      Remote Pairing Failure Triage Flowchart
+    </text>
+
+    <!-- Subtitle -->
+    <text x="0" y="112" fill="#94a3b8" font-size="18" font-weight="400">
+      Systematic decision trees &amp; branch recoveries for PIN rejection, relay reachability, and device handshake stalls.
+    </text>
+
+    <!-- Top Right Meta Pills -->
+    <g transform="translate(1820, 10)">
+      <rect x="0" y="0" width="220" height="36" rx="8" fill="#0b1726" stroke="#1e3a5f" stroke-width="1"/>
+      <circle cx="20" cy="18" r="4.5" fill="#10b981"/>
+      <text x="36" y="23" fill="#cbd5e1" font-size="13" font-family="'JetBrains Mono', monospace">DIAGNOSTIC RUNBOOK</text>
+
+      <rect x="235" y="0" width="165" height="36" rx="8" fill="#0b1726" stroke="#1e3a5f" stroke-width="1"/>
+      <circle cx="255" cy="18" r="4.5" fill="#00f2fe"/>
+      <text x="271" y="23" fill="#cbd5e1" font-size="13" font-family="'JetBrains Mono', monospace">WIDE 16:9 MAP</text>
+    </g>
+  </g>
+
+  <!-- ==================== TOP PIPELINE (HAPPY PATH & DECISION NODES) ==================== -->
+
+  <!-- Top Pipeline Track Backdrop -->
+  <rect x="100" y="235" width="2360" height="175" rx="16" fill="#061220" fill-opacity="0.6" stroke="#10263c" stroke-width="1"/>
+
+  <!-- 1. START NODE -->
+  <g transform="translate(130, 260)" filter="url(#cardShadow)">
+    <rect x="0" y="0" width="210" height="125" rx="14" fill="url(#nodeStartGrad)" stroke="#00f2fe" stroke-width="1.8"/>
+    <rect x="14" y="14" width="70" height="22" rx="11" fill="#00f2fe" fill-opacity="0.15"/>
+    <text x="49" y="29" fill="#00f2fe" font-size="10.5" font-weight="800" text-anchor="middle">START</text>
+    <text x="16" y="62" fill="#ffffff" font-size="16" font-weight="700">Client Pairing</text>
+    <text x="16" y="84" fill="#38bdf8" font-size="14" font-weight="600">Handshake Init</text>
+    <text x="16" y="106" fill="#64748b" font-size="12" font-family="'JetBrains Mono', monospace">PIN / QR Scan</text>
+  </g>
+
+  <!-- Arrow: Start -> Diamond 1 -->
+  <line x1="340" y1="322" x2="398" y2="322" stroke="#00f2fe" stroke-width="2.5" marker-end="url(#arrowCyan)"/>
+
+  <!-- 2. DIAMOND DECISION NODE 1: PIN ACCEPTED? (Center: 470) -->
+  <g transform="translate(470, 322)">
+    <polygon points="0,-72 72,0 0,72 -72,0" fill="url(#diamondGrad1)" stroke="#a855f7" stroke-width="2.5" filter="url(#glowRose)"/>
+    <polygon points="0,-64 64,0 0,64 -64,0" fill="#130820" stroke="#c084fc" stroke-width="1" stroke-dasharray="4 4"/>
+    <text x="0" y="-12" fill="#e9d5ff" font-size="13" font-weight="800" text-anchor="middle" letter-spacing="1">DECISION 1</text>
+    <text x="0" y="10" fill="#ffffff" font-size="16" font-weight="800" text-anchor="middle">PIN / QR</text>
+    <text x="0" y="30" fill="#c084fc" font-size="14" font-weight="700" text-anchor="middle">Validated?</text>
+  </g>
+
+  <!-- Arrow: Diamond 1 -> Intermediate Routing Node (PASS: YES) -->
+  <line x1="542" y1="322" x2="680" y2="322" stroke="#10b981" stroke-width="2.5" marker-end="url(#arrowGreen)"/>
+  <rect x="568" y="304" width="85" height="24" rx="12" fill="#064e3b" stroke="#10b981" stroke-width="1"/>
+  <text x="610" y="320" fill="#a7f3d0" font-size="11" font-weight="800" text-anchor="middle">YES [PASS]</text>
+
+  <!-- Down Branch: Diamond 1 -> Column 1 (FAIL: REJECTED) -->
+  <path d="M 470 394 L 470 470" fill="none" stroke="#f43f5e" stroke-width="2.5" stroke-dasharray="6 4" marker-end="url(#arrowRose)"/>
+  <rect x="410" y="415" width="120" height="26" rx="13" fill="#4c0519" stroke="#f43f5e" stroke-width="1.2"/>
+  <text x="470" y="432" fill="#fecdd3" font-size="11" font-weight="800" text-anchor="middle">NO / REJECTED</text>
+
+  <!-- 3. INTERMEDIATE ROUTE SELECTION NODE -->
+  <g transform="translate(680, 260)" filter="url(#cardShadow)">
+    <rect x="0" y="0" width="220" height="125" rx="14" fill="url(#nodeRouteGrad)" stroke="#38bdf8" stroke-width="1.8"/>
+    <rect x="14" y="14" width="85" height="22" rx="11" fill="#38bdf8" fill-opacity="0.15"/>
+    <text x="56" y="29" fill="#38bdf8" font-size="10.5" font-weight="800" text-anchor="middle">TRANSPORT</text>
+    <text x="16" y="62" fill="#ffffff" font-size="16" font-weight="700">Route Discovery</text>
+    <text x="16" y="84" fill="#38bdf8" font-size="13" font-weight="600">Direct vs Relay</text>
+    <text x="16" y="106" fill="#94a3b8" font-size="12" font-family="'JetBrains Mono', monospace">NAT / mDNS Check</text>
+  </g>
+
+  <!-- Arrow: Route Node -> Diamond 2 -->
+  <line x1="900" y1="322" x2="1208" y2="322" stroke="#00f2fe" stroke-width="2.5" marker-end="url(#arrowCyan)"/>
+  <rect x="1005" y="304" width="110" height="24" rx="12" fill="#082b45" stroke="#00f2fe" stroke-width="1"/>
+  <text x="1060" y="320" fill="#00f2fe" font-size="11" font-weight="800" text-anchor="middle">OFF-LAN / NAT</text>
+
+  <!-- 4. DIAMOND DECISION NODE 2: RELAY REACHABLE? (Center: 1280) -->
+  <g transform="translate(1280, 322)">
+    <polygon points="0,-72 72,0 0,72 -72,0" fill="url(#diamondGrad2)" stroke="#f59e0b" stroke-width="2.5" filter="url(#glowAmber)"/>
+    <polygon points="0,-64 64,0 0,64 -64,0" fill="#1c0f03" stroke="#fbbf24" stroke-width="1" stroke-dasharray="4 4"/>
+    <text x="0" y="-12" fill="#fde68a" font-size="13" font-weight="800" text-anchor="middle" letter-spacing="1">DECISION 2</text>
+    <text x="0" y="10" fill="#ffffff" font-size="16" font-weight="800" text-anchor="middle">Relay Endpoint</text>
+    <text x="0" y="30" fill="#fbbf24" font-size="14" font-weight="700" text-anchor="middle">Reachable?</text>
+  </g>
+
+  <!-- Arrow: Diamond 2 -> Diamond 3 (PASS: YES) -->
+  <line x1="1352" y1="322" x2="1733" y2="322" stroke="#10b981" stroke-width="2.5" marker-end="url(#arrowGreen)"/>
+  <rect x="1495" y="304" width="105" height="24" rx="12" fill="#064e3b" stroke="#10b981" stroke-width="1"/>
+  <text x="1547" y="320" fill="#a7f3d0" font-size="11" font-weight="800" text-anchor="middle">YES [WSS OK]</text>
+
+  <!-- Down Branch: Diamond 2 -> Column 2 (FAIL: UNREACHABLE) -->
+  <path d="M 1280 394 L 1280 470" fill="none" stroke="#f59e0b" stroke-width="2.5" stroke-dasharray="6 4" marker-end="url(#arrowAmber)"/>
+  <rect x="1210" y="415" width="140" height="26" rx="13" fill="#451a03" stroke="#f59e0b" stroke-width="1.2"/>
+  <text x="1280" y="432" fill="#fde68a" font-size="11" font-weight="800" text-anchor="middle">NO / UNREACHABLE</text>
+
+  <!-- 5. DIAMOND DECISION NODE 3: DEVICE CONNECTED? (Center: 1805) -->
+  <g transform="translate(1805, 322)">
+    <polygon points="0,-72 72,0 0,72 -72,0" fill="url(#diamondGrad3)" stroke="#f43f5e" stroke-width="2.5" filter="url(#glowRose)"/>
+    <polygon points="0,-64 64,0 0,64 -64,0" fill="#1f0710" stroke="#fb7185" stroke-width="1" stroke-dasharray="4 4"/>
+    <text x="0" y="-12" fill="#fecdd3" font-size="13" font-weight="800" text-anchor="middle" letter-spacing="1">DECISION 3</text>
+    <text x="0" y="10" fill="#ffffff" font-size="16" font-weight="800" text-anchor="middle">Device Session</text>
+    <text x="0" y="30" fill="#fb7185" font-size="14" font-weight="700" text-anchor="middle">Connecting?</text>
+  </g>
+
+  <!-- Arrow: Diamond 3 -> Success Node (PASS: YES) -->
+  <line x1="1877" y1="322" x2="2070" y2="322" stroke="#10b981" stroke-width="2.5" marker-end="url(#arrowGreen)"/>
+  <rect x="1935" y="304" width="85" height="24" rx="12" fill="#064e3b" stroke="#10b981" stroke-width="1"/>
+  <text x="1977" y="320" fill="#a7f3d0" font-size="11" font-weight="800" text-anchor="middle">YES [PAIRED]</text>
+
+  <!-- Down Branch: Diamond 3 -> Column 3 (FAIL: NOT CONNECTING) -->
+  <path d="M 1805 394 L 1805 440 L 2090 440 L 2090 470" fill="none" stroke="#f43f5e" stroke-width="2.5" stroke-dasharray="6 4" marker-end="url(#arrowRose)"/>
+  <rect x="1875" y="427" width="155" height="26" rx="13" fill="#4c0519" stroke="#f43f5e" stroke-width="1.2"/>
+  <text x="1952" y="444" fill="#fecdd3" font-size="11" font-weight="800" text-anchor="middle">NO / NOT CONNECTING</text>
+
+  <!-- 6. TERMINAL SUCCESS NODE -->
+  <g transform="translate(2080, 255)" filter="url(#cardShadow)">
+    <rect x="0" y="0" width="345" height="135" rx="14" fill="url(#nodeSuccessGrad)" stroke="#10b981" stroke-width="2" filter="url(#glowGreen)"/>
+    <rect x="18" y="16" width="95" height="24" rx="12" fill="#10b981" fill-opacity="0.25"/>
+    <circle cx="30" cy="28" r="4.5" fill="#10b981"/>
+    <text x="66" y="32" fill="#a7f3d0" font-size="11" font-weight="800" text-anchor="middle">STABLE LINK</text>
+    <text x="18" y="68" fill="#ffffff" font-size="18" font-weight="800">Session Nominal</text>
+    <text x="18" y="90" fill="#34d399" font-size="13.5" font-weight="600">Full Duplex Terminal Grid Active</text>
+    <text x="18" y="114" fill="#a7f3d0" font-size="12" font-family="'JetBrains Mono', monospace">daemon-owned | 0 dropped frames</text>
+  </g>
+
+  <!-- ==================== COLUMN 1: PIN REJECTED / AUTH TRIAGE ==================== -->
+  <g transform="translate(100, 480)">
+    <!-- Column Header -->
+    <rect x="0" y="0" width="740" height="54" rx="10" fill="#180e2b" stroke="#a855f7" stroke-width="1.5"/>
+    <circle cx="28" cy="27" r="6" fill="#c084fc"/>
+    <text x="46" y="32" fill="#f3e8ff" font-size="17" font-weight="800" letter-spacing="0.5">BRANCH 1: PIN REJECTED / AUTH FAILURES</text>
+    <rect x="580" y="14" width="145" height="26" rx="6" fill="#3b0764" stroke="#c084fc" stroke-width="1"/>
+    <text x="652" y="31" fill="#e9d5ff" font-size="11.5" font-weight="700" font-family="'JetBrains Mono', monospace" text-anchor="middle">ERR_AUTH_REJECTED</text>
+
+    <!-- Card 1A: Clock Drift -->
+    <g transform="translate(0, 68)" filter="url(#cardShadow)">
+      <rect x="0" y="0" width="740" height="205" rx="12" fill="url(#cardBgViolet)" stroke="#6b21a8" stroke-width="1.2"/>
+      <rect x="18" y="16" width="115" height="22" rx="6" fill="#3b0764"/>
+      <text x="75" y="31" fill="#e9d5ff" font-size="10.5" font-weight="700" font-family="'JetBrains Mono', monospace" text-anchor="middle">ROOT CAUSE 1A</text>
+      <text x="145" y="32" fill="#ffffff" font-size="16" font-weight="700">System Clock Drift (> 30s Window)</text>
+      <text x="18" y="64" fill="#cbd5e1" font-size="13.5" font-weight="400">
+        Host daemon &amp; client clock desync breaks rolling TOTP token validation. Gateway rejects valid codes.
+      </text>
+      <rect x="18" y="78" width="704" height="48" rx="8" fill="url(#codeBg)" stroke="#2e1065" stroke-width="1"/>
+      <text x="32" y="108" fill="#c084fc" font-size="13" font-family="'JetBrains Mono', monospace">sudo chronyd -q 'server pool.ntp.org iburst' &amp;&amp; sntp -s</text>
+      <rect x="18" y="136" width="704" height="52" rx="8" fill="#130924"/>
+      <circle cx="36" cy="162" r="4" fill="#00f2fe"/>
+      <text x="50" y="156" fill="#38bdf8" font-size="12" font-weight="700">RESOLUTION FIX:</text>
+      <text x="50" y="174" fill="#94a3b8" font-size="12.5">
+        Resynchronize NTP pool on host machine; ensures pairing timestamp lies within 60s window.
+      </text>
+    </g>
+
+    <!-- Card 1B: Expired PIN TTL -->
+    <g transform="translate(0, 290)" filter="url(#cardShadow)">
+      <rect x="0" y="0" width="740" height="205" rx="12" fill="url(#cardBgViolet)" stroke="#6b21a8" stroke-width="1.2"/>
+      <rect x="18" y="16" width="115" height="22" rx="6" fill="#3b0764"/>
+      <text x="75" y="31" fill="#e9d5ff" font-size="10.5" font-weight="700" font-family="'JetBrains Mono', monospace" text-anchor="middle">ROOT CAUSE 1B</text>
+      <text x="145" y="32" fill="#ffffff" font-size="16" font-weight="700">Stale Pairing Token (TTL 180s Exceeded)</text>
+      <text x="18" y="64" fill="#cbd5e1" font-size="13.5" font-weight="400">
+        Generated 6-digit one-time PIN expires after 3 minutes for replay protection. Re-entry fails.
+      </text>
+      <rect x="18" y="78" width="704" height="48" rx="8" fill="url(#codeBg)" stroke="#2e1065" stroke-width="1"/>
+      <text x="32" y="108" fill="#c084fc" font-size="13" font-family="'JetBrains Mono', monospace">ferryx pair --generate --ttl 300 --print-qr</text>
+      <rect x="18" y="136" width="704" height="52" rx="8" fill="#130924"/>
+      <circle cx="36" cy="162" r="4" fill="#00f2fe"/>
+      <text x="50" y="156" fill="#38bdf8" font-size="12" font-weight="700">RESOLUTION FIX:</text>
+      <text x="50" y="174" fill="#94a3b8" font-size="12.5">
+        Issue fresh PIN from host GUI or terminal CLI. Optionally extend nonce TTL for mobile entry.
+      </text>
+    </g>
+
+    <!-- Card 1C: Device Revocation / Stale Grant -->
+    <g transform="translate(0, 512)" filter="url(#cardShadow)">
+      <rect x="0" y="0" width="740" height="205" rx="12" fill="url(#cardBgViolet)" stroke="#6b21a8" stroke-width="1.2"/>
+      <rect x="18" y="16" width="115" height="22" rx="6" fill="#3b0764"/>
+      <text x="75" y="31" fill="#e9d5ff" font-size="10.5" font-weight="700" font-family="'JetBrains Mono', monospace" text-anchor="middle">ROOT CAUSE 1C</text>
+      <text x="145" y="32" fill="#ffffff" font-size="16" font-weight="700">Client Public Key Revoked / Cache Conflict</text>
+      <text x="18" y="64" fill="#cbd5e1" font-size="13.5" font-weight="400">
+        Previously authorized hardware ID was purged from host whitelist. Client attempts cached handshake.
+      </text>
+      <rect x="18" y="78" width="704" height="48" rx="8" fill="url(#codeBg)" stroke="#2e1065" stroke-width="1"/>
+      <text x="32" y="108" fill="#c084fc" font-size="13" font-family="'JetBrains Mono', monospace">ferryx devices --revoke &lt;device_id&gt; &amp;&amp; ferryx pair --rebind</text>
+      <rect x="18" y="136" width="704" height="52" rx="8" fill="#130924"/>
+      <circle cx="36" cy="162" r="4" fill="#00f2fe"/>
+      <text x="50" y="156" fill="#38bdf8" font-size="12" font-weight="700">RESOLUTION FIX:</text>
+      <text x="50" y="174" fill="#94a3b8" font-size="12.5">
+        Clear stale client localStorage in remote client and initiate clean enrollment grant on host.
+      </text>
+    </g>
+  </g>
+
+  <!-- ==================== COLUMN 2: RELAY UNREACHABLE TRIAGE ==================== -->
+  <g transform="translate(910, 480)">
+    <!-- Column Header -->
+    <rect x="0" y="0" width="740" height="54" rx="10" fill="#241406" stroke="#f59e0b" stroke-width="1.5"/>
+    <circle cx="28" cy="27" r="6" fill="#fbbf24"/>
+    <text x="46" y="32" fill="#fef3c7" font-size="17" font-weight="800" letter-spacing="0.5">BRANCH 2: RELAY UNREACHABLE TRIAGE</text>
+    <rect x="580" y="14" width="145" height="26" rx="6" fill="#451a03" stroke="#fbbf24" stroke-width="1"/>
+    <text x="652" y="31" fill="#fde68a" font-size="11.5" font-weight="700" font-family="'JetBrains Mono', monospace" text-anchor="middle">ERR_RELAY_TIMEOUT</text>
+
+    <!-- Card 2A: Firewall / Port 443 -->
+    <g transform="translate(0, 68)" filter="url(#cardShadow)">
+      <rect x="0" y="0" width="740" height="205" rx="12" fill="url(#cardBgAmber)" stroke="#92400e" stroke-width="1.2"/>
+      <rect x="18" y="16" width="115" height="22" rx="6" fill="#451a03"/>
+      <text x="75" y="31" fill="#fde68a" font-size="10.5" font-weight="700" font-family="'JetBrains Mono', monospace" text-anchor="middle">ROOT CAUSE 2A</text>
+      <text x="145" y="32" fill="#ffffff" font-size="16" font-weight="700">Egress Firewall / Port 443 Blocking</text>
+      <text x="18" y="64" fill="#cbd5e1" font-size="13.5" font-weight="400">
+        Strict corporate NAT or egress filter blocks outbound WebSocket packets to relay IP address.
+      </text>
+      <rect x="18" y="78" width="704" height="48" rx="8" fill="url(#codeBg)" stroke="#451a03" stroke-width="1"/>
+      <text x="32" y="108" fill="#fbbf24" font-size="13" font-family="'JetBrains Mono', monospace">nc -zv -w3 relay.ferryx.dev 443 || curl -ivs https://relay.ferryx.dev/health</text>
+      <rect x="18" y="136" width="704" height="52" rx="8" fill="#1b1206"/>
+      <circle cx="36" cy="162" r="4" fill="#00f2fe"/>
+      <text x="50" y="156" fill="#38bdf8" font-size="12" font-weight="700">RESOLUTION FIX:</text>
+      <text x="50" y="174" fill="#94a3b8" font-size="12.5">
+        Ensure outbound TCP 443 allows persistent TLS connections; verify no corporate DPI drops WSS frames.
+      </text>
+    </g>
+
+    <!-- Card 2B: Custom Relay TLS / SNI Failure -->
+    <g transform="translate(0, 290)" filter="url(#cardShadow)">
+      <rect x="0" y="0" width="740" height="205" rx="12" fill="url(#cardBgAmber)" stroke="#92400e" stroke-width="1.2"/>
+      <rect x="18" y="16" width="115" height="22" rx="6" fill="#451a03"/>
+      <text x="75" y="31" fill="#fde68a" font-size="10.5" font-weight="700" font-family="'JetBrains Mono', monospace" text-anchor="middle">ROOT CAUSE 2B</text>
+      <text x="145" y="32" fill="#ffffff" font-size="16" font-weight="700">Self-Hosted Relay TLS / Cert Untrusted</text>
+      <text x="18" y="64" fill="#cbd5e1" font-size="13.5" font-weight="400">
+        Private self-hosted relay uses expired cert or custom CA certificate missing from client trust store.
+      </text>
+      <rect x="18" y="78" width="704" height="48" rx="8" fill="url(#codeBg)" stroke="#451a03" stroke-width="1"/>
+      <text x="32" y="108" fill="#fbbf24" font-size="13" font-family="'JetBrains Mono', monospace">ferryx relay verify --domain relay.myinfra.net --ca-cert /etc/ssl/ca.pem</text>
+      <rect x="18" y="136" width="704" height="52" rx="8" fill="#1b1206"/>
+      <circle cx="36" cy="162" r="4" fill="#00f2fe"/>
+      <text x="50" y="156" fill="#38bdf8" font-size="12" font-weight="700">RESOLUTION FIX:</text>
+      <text x="50" y="174" fill="#94a3b8" font-size="12.5">
+        Install custom root CA in client profile or deploy valid Let's Encrypt certificate on relay domain.
+      </text>
+    </g>
+
+    <!-- Card 2C: Host Daemon Tunnel Down -->
+    <g transform="translate(0, 512)" filter="url(#cardShadow)">
+      <rect x="0" y="0" width="740" height="205" rx="12" fill="url(#cardBgAmber)" stroke="#92400e" stroke-width="1.2"/>
+      <rect x="18" y="16" width="115" height="22" rx="6" fill="#451a03"/>
+      <text x="75" y="31" fill="#fde68a" font-size="10.5" font-weight="700" font-family="'JetBrains Mono', monospace" text-anchor="middle">ROOT CAUSE 2C</text>
+      <text x="145" y="32" fill="#ffffff" font-size="16" font-weight="700">Host Daemon Outbound Bridge Offline</text>
+      <text x="18" y="64" fill="#cbd5e1" font-size="13.5" font-weight="400">
+        Relay is up, but host machine daemon never registered outbound connection to relay broker.
+      </text>
+      <rect x="18" y="78" width="704" height="48" rx="8" fill="url(#codeBg)" stroke="#451a03" stroke-width="1"/>
+      <text x="32" y="108" fill="#fbbf24" font-size="13" font-family="'JetBrains Mono', monospace">ferryx relay ping &amp;&amp; ferryx gateway restart --relay</text>
+      <rect x="18" y="136" width="704" height="52" rx="8" fill="#1b1206"/>
+      <circle cx="36" cy="162" r="4" fill="#00f2fe"/>
+      <text x="50" y="156" fill="#38bdf8" font-size="12" font-weight="700">RESOLUTION FIX:</text>
+      <text x="50" y="174" fill="#94a3b8" font-size="12.5">
+        Restart host gateway daemon; check ~/.ferryx/daemon.log for relay registration confirmation token.
+      </text>
+    </g>
+  </g>
+
+  <!-- ==================== COLUMN 3: DEVICE NOT CONNECTING TRIAGE ==================== -->
+  <g transform="translate(1720, 480)">
+    <!-- Column Header -->
+    <rect x="0" y="0" width="740" height="54" rx="10" fill="#250914" stroke="#f43f5e" stroke-width="1.5"/>
+    <circle cx="28" cy="27" r="6" fill="#fb7185"/>
+    <text x="46" y="32" fill="#ffe4e6" font-size="17" font-weight="800" letter-spacing="0.5">BRANCH 3: DEVICE NOT CONNECTING</text>
+    <rect x="580" y="14" width="145" height="26" rx="6" fill="#4c0519" stroke="#fb7185" stroke-width="1"/>
+    <text x="652" y="31" fill="#fecdd3" font-size="11.5" font-weight="700" font-family="'JetBrains Mono', monospace" text-anchor="middle">ERR_CONN_DROPPED</text>
+
+    <!-- Card 3A: Reverse Proxy WebSocket Stripping -->
+    <g transform="translate(0, 68)" filter="url(#cardShadow)">
+      <rect x="0" y="0" width="740" height="205" rx="12" fill="url(#cardBgRose)" stroke="#9f1239" stroke-width="1.2"/>
+      <rect x="18" y="16" width="115" height="22" rx="6" fill="#4c0519"/>
+      <text x="75" y="31" fill="#fecdd3" font-size="10.5" font-weight="700" font-family="'JetBrains Mono', monospace" text-anchor="middle">ROOT CAUSE 3A</text>
+      <text x="145" y="32" fill="#ffffff" font-size="16" font-weight="700">Reverse Proxy Stripped Upgrade Headers</text>
+      <text x="18" y="64" fill="#cbd5e1" font-size="13.5" font-weight="400">
+        Nginx, Caddy, or Cloudflare drops HTTP 101 WebSocket Upgrade headers, hanging the duplex session.
+      </text>
+      <rect x="18" y="78" width="704" height="48" rx="8" fill="url(#codeBg)" stroke="#4c0519" stroke-width="1"/>
+      <text x="32" y="108" fill="#fb7185" font-size="13" font-family="'JetBrains Mono', monospace">proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade";</text>
+      <rect x="18" y="136" width="704" height="52" rx="8" fill="#1b0810"/>
+      <circle cx="36" cy="162" r="4" fill="#00f2fe"/>
+      <text x="50" y="156" fill="#38bdf8" font-size="12" font-weight="700">RESOLUTION FIX:</text>
+      <text x="50" y="174" fill="#94a3b8" font-size="12.5">
+        Ensure reverse proxy preserves Upgrade and Connection headers for /gateway and /relay paths.
+      </text>
+    </g>
+
+    <!-- Card 3B: Daemon Socket Permissions / Ownership -->
+    <g transform="translate(0, 290)" filter="url(#cardShadow)">
+      <rect x="0" y="0" width="740" height="205" rx="12" fill="url(#cardBgRose)" stroke="#9f1239" stroke-width="1.2"/>
+      <rect x="18" y="16" width="115" height="22" rx="6" fill="#4c0519"/>
+      <text x="75" y="31" fill="#fecdd3" font-size="10.5" font-weight="700" font-family="'JetBrains Mono', monospace" text-anchor="middle">ROOT CAUSE 3B</text>
+      <text x="145" y="32" fill="#ffffff" font-size="16" font-weight="700">Daemon Socket Conflict / Stale PID Lock</text>
+      <text x="18" y="64" fill="#cbd5e1" font-size="13.5" font-weight="400">
+        Daemon IPC socket owned by root or stale pid lock prevents gateway from accepting client stream.
+      </text>
+      <rect x="18" y="78" width="704" height="48" rx="8" fill="url(#codeBg)" stroke="#4c0519" stroke-width="1"/>
+      <text x="32" y="108" fill="#fb7185" font-size="13" font-family="'JetBrains Mono', monospace">ferryx doctor --fix-socket &amp;&amp; ls -la ~/.ferryx/daemon.sock</text>
+      <rect x="18" y="136" width="704" height="52" rx="8" fill="#1b0810"/>
+      <circle cx="36" cy="162" r="4" fill="#00f2fe"/>
+      <text x="50" y="156" fill="#38bdf8" font-size="12" font-weight="700">RESOLUTION FIX:</text>
+      <text x="50" y="174" fill="#94a3b8" font-size="12.5">
+        Run ferryx doctor to clear orphaned socket files and verify current user ownership (0600 mode).
+      </text>
+    </g>
+
+    <!-- Card 3C: Client DOM Grid Render Desync -->
+    <g transform="translate(0, 512)" filter="url(#cardShadow)">
+      <rect x="0" y="0" width="740" height="205" rx="12" fill="url(#cardBgRose)" stroke="#9f1239" stroke-width="1.2"/>
+      <rect x="18" y="16" width="115" height="22" rx="6" fill="#4c0519"/>
+      <text x="75" y="31" fill="#fecdd3" font-size="10.5" font-weight="700" font-family="'JetBrains Mono', monospace" text-anchor="middle">ROOT CAUSE 3C</text>
+      <text x="145" y="32" fill="#ffffff" font-size="16" font-weight="700">Mobile Sleep / WebWorker Buffer Desync</text>
+      <text x="18" y="64" fill="#cbd5e1" font-size="13.5" font-weight="400">
+        Mobile OS backgrounded browser tab mid-handshake, dropping initial ANSI ring buffer replay.
+      </text>
+      <rect x="18" y="78" width="704" height="48" rx="8" fill="url(#codeBg)" stroke="#4c0519" stroke-width="1"/>
+      <text x="32" y="108" fill="#fb7185" font-size="13" font-family="'JetBrains Mono', monospace">ferryx attach --resync-grid || tap 'Re-sync Terminal Grid'</text>
+      <rect x="18" y="136" width="704" height="52" rx="8" fill="#1b0810"/>
+      <circle cx="36" cy="162" r="4" fill="#00f2fe"/>
+      <text x="50" y="156" fill="#38bdf8" font-size="12" font-weight="700">RESOLUTION FIX:</text>
+      <text x="50" y="174" fill="#94a3b8" font-size="12.5">
+        Tap the status badge in mobile client to request full ring-buffer replay without tearing session.
+      </text>
+    </g>
+  </g>
+
+  <!-- ==================== BOTTOM DIAGNOSTIC TOOLBAR / CHEATSHEET ==================== -->
+  <g transform="translate(100, 1285)" filter="url(#cardShadow)">
+    <rect x="0" y="0" width="2360" height="85" rx="12" fill="#071322" stroke="#1b3855" stroke-width="1.2"/>
+    
+    <!-- Left Label -->
+    <rect x="20" y="18" width="160" height="48" rx="8" fill="#0c2338" stroke="#00f2fe" stroke-width="1"/>
+    <text x="100" y="40" fill="#00f2fe" font-size="11" font-weight="800" text-anchor="middle" letter-spacing="1">CLI CHEATSHEET</text>
+    <text x="100" y="55" fill="#94a3b8" font-size="10.5" text-anchor="middle">QUICK VERIFICATION</text>
+
+    <!-- 4 Command Badges -->
+    <g transform="translate(205, 18)">
+      <rect x="0" y="0" width="510" height="48" rx="8" fill="#030814" stroke="#162e4a" stroke-width="1"/>
+      <text x="16" y="22" fill="#94a3b8" font-size="11" font-weight="600">FULL SYSTEM AUDIT</text>
+      <text x="16" y="39" fill="#38bdf8" font-size="13" font-family="'JetBrains Mono', monospace">ferryx doctor --remote --verbose</text>
+    </g>
+
+    <g transform="translate(735, 18)">
+      <rect x="0" y="0" width="510" height="48" rx="8" fill="#030814" stroke="#162e4a" stroke-width="1"/>
+      <text x="16" y="22" fill="#94a3b8" font-size="11" font-weight="600">RELAY HEALTH &amp; LATENCY CHECK</text>
+      <text x="16" y="39" fill="#00f2fe" font-size="13" font-family="'JetBrains Mono', monospace">ferryx relay ping --domain relay.ferryx.dev</text>
+    </g>
+
+    <g transform="translate(1265, 18)">
+      <rect x="0" y="0" width="510" height="48" rx="8" fill="#030814" stroke="#162e4a" stroke-width="1"/>
+      <text x="16" y="22" fill="#94a3b8" font-size="11" font-weight="600">ACTIVE PAIRINGS &amp; TOKEN TTL</text>
+      <text x="16" y="39" fill="#c084fc" font-size="13" font-family="'JetBrains Mono', monospace">ferryx pair --status --list-grants</text>
+    </g>
+
+    <g transform="translate(1795, 18)">
+      <rect x="0" y="0" width="545" height="48" rx="8" fill="#030814" stroke="#162e4a" stroke-width="1"/>
+      <text x="16" y="22" fill="#94a3b8" font-size="11" font-weight="600">GATEWAY STREAM EVENT MONITOR</text>
+      <text x="16" y="39" fill="#10b981" font-size="13" font-family="'JetBrains Mono', monospace">ferryx logs --gateway --follow</text>
+    </g>
+  </g>
+
+</svg>

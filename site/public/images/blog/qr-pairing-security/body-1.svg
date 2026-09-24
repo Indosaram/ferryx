@@ -1,0 +1,456 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900" style="background:#070a13; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'JetBrains Mono', Menlo, monospace;">
+  <defs>
+    <!-- Background Gradients -->
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#090e1a" />
+      <stop offset="45%" stop-color="#060912" />
+      <stop offset="100%" stop-color="#030509" />
+    </linearGradient>
+
+    <!-- Zone Gradients -->
+    <linearGradient id="zone-bg-blue" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0d1b2a" stop-opacity="0.75" />
+      <stop offset="100%" stop-color="#08101a" stop-opacity="0.85" />
+    </linearGradient>
+
+    <linearGradient id="zone-bg-teal" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#071e28" stop-opacity="0.8" />
+      <stop offset="100%" stop-color="#05121a" stop-opacity="0.9" />
+    </linearGradient>
+
+    <!-- Card Gradients -->
+    <linearGradient id="card-grad-blue" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#112238" />
+      <stop offset="100%" stop-color="#0a1524" />
+    </linearGradient>
+
+    <linearGradient id="card-grad-teal" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0c2633" />
+      <stop offset="100%" stop-color="#061822" />
+    </linearGradient>
+
+    <linearGradient id="card-grad-dark" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0f1726" />
+      <stop offset="100%" stop-color="#090e18" />
+    </linearGradient>
+
+    <!-- Badge / Accent Gradients -->
+    <linearGradient id="accent-cyan" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00f2fe" />
+      <stop offset="100%" stop-color="#38bdf8" />
+    </linearGradient>
+
+    <linearGradient id="accent-teal" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#2dd4bf" />
+      <stop offset="100%" stop-color="#0d9488" />
+    </linearGradient>
+
+    <linearGradient id="border-glow-teal" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.85" />
+      <stop offset="50%" stop-color="#2dd4bf" stop-opacity="0.35" />
+      <stop offset="100%" stop-color="#0284c7" stop-opacity="0.7" />
+    </linearGradient>
+
+    <linearGradient id="border-glow-blue" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.8" />
+      <stop offset="50%" stop-color="#1d4ed8" stop-opacity="0.3" />
+      <stop offset="100%" stop-color="#0284c7" stop-opacity="0.6" />
+    </linearGradient>
+
+    <!-- Glow Filters -->
+    <filter id="glow-teal" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="5" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+
+    <filter id="glow-soft" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+
+    <!-- Arrow Markers -->
+    <marker id="arr-teal" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#00f2fe" />
+    </marker>
+    <marker id="arr-cyan" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#38bdf8" />
+    </marker>
+    <marker id="arr-emerald" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#34d399" />
+    </marker>
+    <marker id="arr-rose" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#f43f5e" />
+    </marker>
+  </defs>
+
+  <!-- Base Background -->
+  <rect width="1600" height="900" fill="url(#bg-grad)" />
+
+  <!-- Subtle Dot Grid -->
+  <g opacity="0.04" fill="#38bdf8">
+    <pattern id="dot-grid" x="0" y="0" width="32" height="32" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.2" />
+    </pattern>
+    <rect width="1600" height="900" fill="url(#dot-grid)" />
+  </g>
+
+  <!-- Ambient Glow Backdrops -->
+  <circle cx="280" cy="480" r="260" fill="#0284c7" opacity="0.06" filter="blur(90px)" />
+  <circle cx="800" cy="480" r="300" fill="#00f2fe" opacity="0.07" filter="blur(110px)" />
+  <circle cx="1320" cy="480" r="260" fill="#0d9488" opacity="0.06" filter="blur(90px)" />
+
+  <!-- HEADER SECTION -->
+  <g transform="translate(80, 32)">
+    <!-- Pill Badge -->
+    <rect x="0" y="0" width="175" height="24" rx="12" fill="#0d1b2e" stroke="#1d3557" stroke-width="1" />
+    <circle cx="12" cy="12" r="4" fill="#00f2fe" />
+    <text x="24" y="16" fill="#38bdf8" font-size="11" font-weight="700" letter-spacing="1.2">FERRYX SECURITY</text>
+
+    <!-- Main Title & Subtitle -->
+    <text x="0" y="54" fill="#f8fafc" font-size="24" font-weight="700" letter-spacing="-0.5">QR Pairing Security: Pairing Trust &amp; Capability Grant</text>
+    <text x="0" y="76" fill="#64748b" font-size="13" font-weight="400">Cryptographic trust exchange, scoped capability tokens, and host revocation control</text>
+
+    <!-- Top Right Telemetry Badges -->
+    <g transform="translate(1440, 14)">
+      <g font-family="'JetBrains Mono', Menlo, monospace" font-size="11" text-anchor="end">
+        <text x="0" y="0" fill="#00f2fe" font-weight="600">ED25519-HANDSHAKE</text>
+        <text x="0" y="18" fill="#475569">GRANT :: SCOPED_SESSION</text>
+        <text x="0" y="36" fill="#38bdf8">TTL :: EPHEMERAL</text>
+      </g>
+    </g>
+
+    <!-- Header Divider Line -->
+    <line x1="0" y1="92" x2="1440" y2="92" stroke="#1e293b" stroke-width="1" opacity="0.8" />
+  </g>
+
+  <!-- COLUMN 1: REMOTE CLIENT (INITIATOR) -->
+  <g transform="translate(80, 180)">
+    <!-- Container Card -->
+    <rect x="0" y="0" width="410" height="660" rx="14" fill="url(#zone-bg-blue)" stroke="#1e3a5f" stroke-width="1.2" />
+    <rect x="0" y="0" width="410" height="48" rx="14" fill="#0b1728" />
+    <path d="M 0 34 L 0 48 L 410 48 L 410 34 Z" fill="#0b1728" />
+    <line x1="0" y1="48" x2="410" y2="48" stroke="#1e3a5f" stroke-width="1" />
+
+    <!-- Column Title -->
+    <rect x="20" y="16" width="16" height="16" rx="4" fill="#0284c7" />
+    <path d="M 24 24 L 28 20 L 32 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+    <text x="46" y="29" fill="#e2e8f0" font-size="14" font-weight="700" letter-spacing="0.2">REMOTE CLIENT (INITIATOR)</text>
+    <text x="390" y="29" fill="#38bdf8" font-size="11" font-family="'JetBrains Mono', monospace" text-anchor="end">PHONE / BROWSER</text>
+
+    <!-- Sub-card 1: Optical QR Ingestion -->
+    <g transform="translate(20, 68)">
+      <rect x="0" y="0" width="370" height="180" rx="10" fill="url(#card-grad-blue)" stroke="#1e3a5f" stroke-width="1" />
+      
+      <!-- Mini QR Schematic Graphic -->
+      <g transform="translate(20, 20)">
+        <rect x="0" y="0" width="60" height="60" rx="6" fill="#091422" stroke="#00f2fe" stroke-width="1.2" opacity="0.9" />
+        <!-- QR Corners -->
+        <rect x="6" y="6" width="16" height="16" rx="2" fill="none" stroke="#00f2fe" stroke-width="2" />
+        <rect x="10" y="10" width="8" height="8" fill="#00f2fe" />
+        <rect x="38" y="6" width="16" height="16" rx="2" fill="none" stroke="#00f2fe" stroke-width="2" />
+        <rect x="42" y="10" width="8" height="8" fill="#00f2fe" />
+        <rect x="6" y="38" width="16" height="16" rx="2" fill="none" stroke="#00f2fe" stroke-width="2" />
+        <rect x="10" y="42" width="8" height="8" fill="#00f2fe" />
+        <!-- QR Random Matrix Bits -->
+        <rect x="26" y="10" width="4" height="4" fill="#38bdf8" />
+        <rect x="30" y="18" width="4" height="4" fill="#38bdf8" />
+        <rect x="26" y="26" width="4" height="4" fill="#00f2fe" />
+        <rect x="18" y="28" width="4" height="4" fill="#38bdf8" />
+        <rect x="38" y="28" width="4" height="4" fill="#2dd4bf" />
+        <rect x="30" y="38" width="4" height="4" fill="#38bdf8" />
+        <rect x="38" y="44" width="4" height="4" fill="#00f2fe" />
+        <rect x="46" y="38" width="4" height="4" fill="#38bdf8" />
+        <line x1="2" y1="30" x2="58" y2="30" stroke="#00f2fe" stroke-width="1.5" opacity="0.75" />
+      </g>
+
+      <text x="96" y="36" fill="#f1f5f9" font-size="14" font-weight="600">Ephemeral QR Ingestion</text>
+      <text x="96" y="54" fill="#64748b" font-size="12">Air-gapped host credential delivery</text>
+
+      <!-- Fields list -->
+      <g transform="translate(20, 95)" font-family="'JetBrains Mono', monospace" font-size="11">
+        <rect x="0" y="0" width="330" height="22" rx="4" fill="#091322" />
+        <text x="10" y="15" fill="#94a3b8">payload.token</text>
+        <text x="320" y="15" fill="#38bdf8" text-anchor="end">one-time nonce (256-bit)</text>
+
+        <rect x="0" y="26" width="330" height="22" rx="4" fill="#091322" />
+        <text x="10" y="41" fill="#94a3b8">host.fp</text>
+        <text x="320" y="41" fill="#2dd4bf" text-anchor="end">sha256:8f4c...31e0</text>
+
+        <rect x="0" y="52" width="330" height="22" rx="4" fill="#091322" />
+        <text x="10" y="67" fill="#94a3b8">auth.fallback</text>
+        <text x="320" y="67" fill="#e2e8f0" text-anchor="end">6-digit PIN</text>
+      </g>
+    </g>
+
+    <!-- Sub-card 2: Ephemeral Client Keys -->
+    <g transform="translate(20, 268)">
+      <rect x="0" y="0" width="370" height="150" rx="10" fill="url(#card-grad-dark)" stroke="#1e2e47" stroke-width="1" />
+      <circle cx="32" cy="30" r="12" fill="#0f283d" />
+      <path d="M 28 30 C 28 26, 36 26, 36 30 C 36 34, 30 36, 30 38" fill="none" stroke="#38bdf8" stroke-width="1.8" />
+      <circle cx="30" cy="41" r="1" fill="#38bdf8" />
+      <text x="56" y="34" fill="#e2e8f0" font-size="13" font-weight="600">Ephemeral Device Identity</text>
+
+      <text x="20" y="70" fill="#94a3b8" font-size="12">Generates fresh curve25519 keypair:</text>
+      
+      <g transform="translate(20, 85)" font-family="'JetBrains Mono', monospace" font-size="11">
+        <rect x="0" y="0" width="330" height="24" rx="4" fill="#060c16" stroke="#132238" stroke-width="1" />
+        <text x="10" y="16" fill="#38bdf8">client_pubkey</text>
+        <text x="320" y="16" fill="#64748b" text-anchor="end">ed25519 :: local_only</text>
+
+        <rect x="0" y="28" width="330" height="24" rx="4" fill="#060c16" stroke="#132238" stroke-width="1" />
+        <text x="10" y="44" fill="#34d399">storage_mode</text>
+        <text x="320" y="44" fill="#64748b" text-anchor="end">in-memory session state</text>
+      </g>
+    </g>
+
+    <!-- Sub-card 3: Client Rendering Boundary -->
+    <g transform="translate(20, 438)">
+      <rect x="0" y="0" width="370" height="190" rx="10" fill="url(#card-grad-blue)" stroke="#1e3a5f" stroke-width="1" />
+      <rect x="20" y="18" width="24" height="24" rx="5" fill="#0b2238" stroke="#00f2fe" stroke-width="1" />
+      <path d="M 25 30 L 30 35 L 39 25" fill="none" stroke="#00f2fe" stroke-width="1.8" stroke-linecap="round" />
+      <text x="54" y="34" fill="#f1f5f9" font-size="13" font-weight="600">Zero Shell Execution Surface</text>
+
+      <g transform="translate(20, 58)" font-size="12" fill="#94a3b8">
+        <circle cx="6" cy="10" r="3" fill="#00f2fe" />
+        <text x="18" y="14" fill="#cbd5e1">Renders DOM grid tiles (no raw PTY on client)</text>
+
+        <circle cx="6" cy="34" r="3" fill="#00f2fe" />
+        <text x="18" y="38" fill="#cbd5e1">No inbound listening socket on phone</text>
+
+        <circle cx="6" cy="58" r="3" fill="#00f2fe" />
+        <text x="18" y="62" fill="#cbd5e1">Binds strictly to host daemon public identity</text>
+
+        <circle cx="6" cy="82" r="3" fill="#00f2fe" />
+        <text x="18" y="86" fill="#cbd5e1">Loss of device = revoked via host control</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- COLUMN 2: TRUST BOUNDARY & HANDSHAKE -->
+  <g transform="translate(530, 180)">
+    <!-- Boundary Box Container with glow -->
+    <rect x="0" y="0" width="540" height="660" rx="14" fill="url(#zone-bg-teal)" stroke="url(#border-glow-teal)" stroke-width="1.5" />
+    <rect x="0" y="0" width="540" height="48" rx="14" fill="#061922" />
+    <path d="M 0 34 L 0 48 L 540 48 L 540 34 Z" fill="#061922" />
+    <line x1="0" y1="48" x2="540" y2="48" stroke="#123d4b" stroke-width="1" />
+
+    <!-- Column Title -->
+    <circle cx="30" cy="24" r="7" fill="#00f2fe" filter="url(#glow-teal)" />
+    <circle cx="30" cy="24" r="3" fill="#030810" />
+    <text x="48" y="29" fill="#f1f5f9" font-size="14" font-weight="700" letter-spacing="0.2">CRYPTOGRAPHIC TRUST BOUNDARY</text>
+    <text x="520" y="29" fill="#2dd4bf" font-size="11" font-family="'JetBrains Mono', monospace" text-anchor="end">MUTUAL AUTH</text>
+
+    <!-- Handshake Steps Interactive Cards -->
+    <g transform="translate(20, 68)">
+      <!-- Stage 1: Optical Scan Verification -->
+      <g transform="translate(0, 0)">
+        <rect x="0" y="0" width="500" height="105" rx="8" fill="url(#card-grad-teal)" stroke="#114b59" stroke-width="1" />
+        <rect x="16" y="14" width="22" height="22" rx="4" fill="#0d9488" />
+        <text x="27" y="29" fill="#fff" font-size="11" font-weight="700" text-anchor="middle">1</text>
+        <text x="48" y="29" fill="#e2e8f0" font-size="13" font-weight="600">Out-of-Band Nonce &amp; Host Identity Verification</text>
+
+        <text x="20" y="56" fill="#94a3b8" font-size="12">Client scans QR out-of-band to acquire host fingerprint and pairing secret.</text>
+        <text x="20" y="74" fill="#2dd4bf" font-family="'JetBrains Mono', monospace" font-size="11">Single-use nonce binds host identity and prevents replay</text>
+      </g>
+
+      <!-- Down Flow Connector -->
+      <path d="M 250 105 L 250 128" fill="none" stroke="#00f2fe" stroke-width="1.5" stroke-dasharray="3 3" marker-end="url(#arr-teal)" />
+
+      <!-- Stage 2: Ephemeral ECDH & Mutual Key Exchange -->
+      <g transform="translate(0, 135)">
+        <rect x="0" y="0" width="500" height="120" rx="8" fill="url(#card-grad-teal)" stroke="#165b6d" stroke-width="1.2" />
+        <rect x="16" y="14" width="22" height="22" rx="4" fill="#00f2fe" />
+        <text x="27" y="29" fill="#030810" font-size="11" font-weight="700" text-anchor="middle">2</text>
+        <text x="48" y="29" fill="#f1f5f9" font-size="13" font-weight="700">Authenticated Handshake via Gateway / Relay</text>
+
+        <!-- Symmetric Derivation details -->
+        <g transform="translate(20, 48)" font-family="'JetBrains Mono', monospace" font-size="11">
+          <rect x="0" y="0" width="460" height="24" rx="4" fill="#041219" stroke="#0e3a47" stroke-width="1" />
+          <text x="10" y="16" fill="#38bdf8">ECDH</text>
+          <text x="60" y="16" fill="#94a3b8">(Client_PrivKey × Host_PubKey) → Shared Secret</text>
+
+          <rect x="0" y="28" width="460" height="24" rx="4" fill="#041219" stroke="#0e3a47" stroke-width="1" />
+          <text x="10" y="44" fill="#34d399">AEAD</text>
+          <text x="60" y="44" fill="#94a3b8">ChaCha20-Poly1305 encrypted bi-directional frame</text>
+        </g>
+      </g>
+
+      <!-- Down Flow Connector -->
+      <path d="M 250 255 L 250 278" fill="none" stroke="#2dd4bf" stroke-width="1.5" stroke-dasharray="3 3" marker-end="url(#arr-emerald)" />
+
+      <!-- Stage 3: Scoped Capability Token -->
+      <g transform="translate(0, 285)">
+        <rect x="0" y="0" width="500" height="130" rx="8" fill="url(#card-grad-teal)" stroke="#114b59" stroke-width="1" />
+        <rect x="16" y="14" width="22" height="22" rx="4" fill="#38bdf8" />
+        <text x="27" y="29" fill="#030810" font-size="11" font-weight="700" text-anchor="middle">3</text>
+        <text x="48" y="29" fill="#e2e8f0" font-size="13" font-weight="600">Scoped Session Grant Issued</text>
+
+        <g transform="translate(20, 48)" font-size="12">
+          <!-- Allowed Scope -->
+          <rect x="0" y="0" width="225" height="66" rx="6" fill="#04141d" stroke="#0d9488" stroke-width="1" />
+          <text x="12" y="18" fill="#34d399" font-weight="700" font-size="11">✓ GRANTED CAPABILITIES</text>
+          <text x="12" y="36" fill="#cbd5e1" font-size="11">• Stream DOM grid tiles</text>
+          <text x="12" y="52" fill="#cbd5e1" font-size="11">• Forward keystrokes / PTY input</text>
+
+          <!-- Denied Scope -->
+          <rect x="235" y="0" width="225" height="66" rx="6" fill="#180c10" stroke="#f43f5e" stroke-width="0.8" />
+          <text x="247" y="18" fill="#fb7185" font-weight="700" font-size="11">✕ STRICTLY DENIED</text>
+          <text x="247" y="36" fill="#cbd5e1" font-size="11">• No raw SSH root access</text>
+          <text x="247" y="52" fill="#cbd5e1" font-size="11">• No arbitrary host daemon exec</text>
+        </g>
+      </g>
+
+      <!-- Stage 4: TTL / Expiry Status Bar -->
+      <g transform="translate(0, 430)">
+        <rect x="0" y="0" width="500" height="135" rx="8" fill="#05151e" stroke="#123a48" stroke-width="1" />
+        <text x="20" y="28" fill="#f1f5f9" font-size="13" font-weight="600">Session Lifecycle Enforcement</text>
+        
+        <g transform="translate(20, 45)" font-family="'JetBrains Mono', monospace" font-size="11">
+          <g transform="translate(0, 0)">
+            <text x="0" y="12" fill="#94a3b8">Grant Expiry:</text>
+            <rect x="110" y="0" width="350" height="16" rx="4" fill="#091f2c" />
+            <rect x="110" y="0" width="240" height="16" rx="4" fill="url(#accent-teal)" />
+            <text x="360" y="12" fill="#fff" font-size="10" text-anchor="middle">ACTIVE (TTL BOUND)</text>
+          </g>
+
+          <g transform="translate(0, 32)">
+            <text x="0" y="12" fill="#94a3b8">Heartbeat:</text>
+            <text x="110" y="12" fill="#2dd4bf">Ping every 15s • Auto-drop on disconnect</text>
+          </g>
+
+          <g transform="translate(0, 56)">
+            <text x="0" y="12" fill="#94a3b8">Host Killswitch:</text>
+            <text x="110" y="12" fill="#fb7185">Synchronous invalidation across all nodes</text>
+          </g>
+        </g>
+      </g>
+    </g>
+  </g>
+
+  <!-- COLUMN 3: HOST DAEMON & CONTROL (AUTHORIZER) -->
+  <g transform="translate(1110, 180)">
+    <!-- Container Card -->
+    <rect x="0" y="0" width="410" height="660" rx="14" fill="url(#zone-bg-blue)" stroke="#1e3a5f" stroke-width="1.2" />
+    <rect x="0" y="0" width="410" height="48" rx="14" fill="#0b1728" />
+    <path d="M 0 34 L 0 48 L 410 48 L 410 34 Z" fill="#0b1728" />
+    <line x1="0" y1="48" x2="410" y2="48" stroke="#1e3a5f" stroke-width="1" />
+
+    <!-- Column Title -->
+    <rect x="20" y="16" width="16" height="16" rx="4" fill="#0d9488" />
+    <path d="M 23 24 L 33 24 M 28 19 L 28 29" stroke="#fff" stroke-width="1.8" stroke-linecap="round" />
+    <text x="46" y="29" fill="#e2e8f0" font-size="14" font-weight="700" letter-spacing="0.2">HOST DAEMON (AUTHORIZER)</text>
+    <text x="390" y="29" fill="#2dd4bf" font-size="11" font-family="'JetBrains Mono', monospace" text-anchor="end">LOCAL CONTROL</text>
+
+    <!-- Sub-card 1: Authenticated Gateway -->
+    <g transform="translate(20, 68)">
+      <rect x="0" y="0" width="370" height="170" rx="10" fill="url(#card-grad-blue)" stroke="#1e3a5f" stroke-width="1" />
+      <circle cx="32" cy="30" r="12" fill="#092036" />
+      <path d="M 26 30 L 32 36 L 38 24" fill="none" stroke="#00f2fe" stroke-width="1.8" />
+      <text x="56" y="34" fill="#f1f5f9" font-size="13" font-weight="600">Gateway &amp; PTY Isolation</text>
+
+      <g transform="translate(20, 58)" font-family="'JetBrains Mono', monospace" font-size="11">
+        <rect x="0" y="0" width="330" height="26" rx="4" fill="#091322" stroke="#12253d" stroke-width="1" />
+        <text x="10" y="17" fill="#94a3b8">host_daemon</text>
+        <text x="320" y="17" fill="#00f2fe" text-anchor="end">PID 4120 [SUPERVISED]</text>
+
+        <rect x="0" y="32" width="330" height="26" rx="4" fill="#091322" stroke="#12253d" stroke-width="1" />
+        <text x="10" y="49" fill="#94a3b8">network_reach</text>
+        <text x="320" y="49" fill="#2dd4bf" text-anchor="end">Outbound Relay / LAN</text>
+
+        <rect x="0" y="64" width="330" height="26" rx="4" fill="#091322" stroke="#12253d" stroke-width="1" />
+        <text x="10" y="81" fill="#94a3b8">firewall_req</text>
+        <text x="320" y="81" fill="#38bdf8" text-anchor="end">0 Inbound Ports Open</text>
+      </g>
+    </g>
+
+    <!-- Sub-card 2: Active Paired Devices Registry -->
+    <g transform="translate(20, 258)">
+      <rect x="0" y="0" width="370" height="180" rx="10" fill="url(#card-grad-dark)" stroke="#1e2e47" stroke-width="1" />
+      <text x="20" y="30" fill="#e2e8f0" font-size="13" font-weight="600">Paired Device Registry</text>
+      <text x="350" y="30" fill="#34d399" font-size="11" font-family="'JetBrains Mono', monospace" text-anchor="end">2 PAIRED</text>
+
+      <!-- Device Row 1 (Current Active) -->
+      <g transform="translate(20, 48)">
+        <rect x="0" y="0" width="330" height="48" rx="6" fill="#081424" stroke="#1a3b5c" stroke-width="1" />
+        <circle cx="16" cy="24" r="5" fill="#34d399" />
+        <text x="32" y="21" fill="#f1f5f9" font-size="12" font-weight="600">iPhone 16 Pro (Mobile)</text>
+        <text x="32" y="38" fill="#64748b" font-size="10" font-family="'JetBrains Mono', monospace">Bound: 14m ago • Last active: 2s ago</text>
+        <text x="318" y="28" fill="#38bdf8" font-size="10" font-family="'JetBrains Mono', monospace" text-anchor="end">GRANT_OK</text>
+      </g>
+
+      <!-- Device Row 2 (Secondary) -->
+      <g transform="translate(20, 106)">
+        <rect x="0" y="0" width="330" height="48" rx="6" fill="#081424" stroke="#15263a" stroke-width="1" />
+        <circle cx="16" cy="24" r="5" fill="#64748b" />
+        <text x="32" y="21" fill="#cbd5e1" font-size="12" font-weight="600">MacBook Air (Browser)</text>
+        <text x="32" y="38" fill="#64748b" font-size="10" font-family="'JetBrains Mono', monospace">Bound: 2d ago • Idle</text>
+        <text x="318" y="28" fill="#64748b" font-size="10" font-family="'JetBrains Mono', monospace" text-anchor="end">IDLE</text>
+      </g>
+    </g>
+
+    <!-- Sub-card 3: Host Revocation Killswitch -->
+    <g transform="translate(20, 458)">
+      <rect x="0" y="0" width="370" height="170" rx="10" fill="#14080b" stroke="#4c1d24" stroke-width="1.2" />
+      <rect x="18" y="16" width="24" height="24" rx="5" fill="#4c0519" stroke="#f43f5e" stroke-width="1" />
+      <path d="M 24 28 L 36 28 M 30 22 L 30 34" transform="rotate(45 30 28)" stroke="#f43f5e" stroke-width="2" stroke-linecap="round" />
+      <text x="52" y="32" fill="#fda4af" font-size="13" font-weight="700">Immediate Revocation Killswitch</text>
+
+      <g transform="translate(20, 56)" font-size="12" fill="#cbd5e1">
+        <text x="0" y="14" fill="#fda4af">If phone is lost or compromised:</text>
+        <rect x="0" y="26" width="330" height="32" rx="6" fill="#240c12" stroke="#e11d48" stroke-width="1" />
+        <text x="16" y="47" fill="#ffe4e6" font-family="'JetBrains Mono', monospace" font-size="11" font-weight="700">ferryx auth revoke &lt;device_id&gt;</text>
+        <text x="0" y="78" fill="#94a3b8" font-size="11">• Session grant instantly invalidated</text>
+        <text x="0" y="94" fill="#94a3b8" font-size="11">• Cryptographic channel drops immediately</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- CROSS-COLUMN CONNECTORS & FLOW ARROWS -->
+  <!-- Connector 1: Optical QR Delivery (Host -> Client) -->
+  <g opacity="0.9">
+    <path d="M 1110 330 L 1090 330 L 1090 148 L 510 148 L 510 330 L 490 330" 
+          fill="none" stroke="#00f2fe" stroke-width="1.8" stroke-dasharray="6 4" marker-end="url(#arr-teal)" />
+    <rect x="700" y="135" width="200" height="26" rx="13" fill="#041b29" stroke="#00f2fe" stroke-width="1.2" />
+    <text x="800" y="152" fill="#00f2fe" font-size="11" font-family="'JetBrains Mono', monospace" font-weight="600" text-anchor="middle">1. OPTICAL QR TRANSFER</text>
+  </g>
+
+  <!-- Connector 2: Mutual Handshake (Client <-> Gateway) -->
+  <g opacity="0.9">
+    <path d="M 490 400 L 530 400" fill="none" stroke="#38bdf8" stroke-width="2" marker-end="url(#arr-cyan)" />
+    <path d="M 1070 400 L 1110 400" fill="none" stroke="#38bdf8" stroke-width="2" marker-end="url(#arr-cyan)" />
+  </g>
+
+  <!-- Connector 3: Scoped Stream (Gateway -> Client) -->
+  <g opacity="0.9">
+    <path d="M 530 520 L 490 520" fill="none" stroke="#2dd4bf" stroke-width="2" marker-end="url(#arr-emerald)" />
+    <path d="M 1110 520 L 1070 520" fill="none" stroke="#2dd4bf" stroke-width="2" marker-end="url(#arr-emerald)" />
+  </g>
+
+  <!-- Connector 4: Revocation Killswitch (Host -> Grant Invalidation) -->
+  <g opacity="0.9">
+    <path d="M 1110 705 L 1070 705" fill="none" stroke="#f43f5e" stroke-width="2" marker-end="url(#arr-rose)" />
+  </g>
+
+  <!-- Bottom Technical Legend Bar -->
+  <g transform="translate(80, 856)" font-family="'JetBrains Mono', monospace" font-size="11" fill="#64748b">
+    <circle cx="6" cy="6" r="4" fill="#00f2fe" />
+    <text x="16" y="10" fill="#94a3b8">Ephemeral Nonce</text>
+
+    <circle cx="160" cy="6" r="4" fill="#38bdf8" />
+    <text x="170" y="10" fill="#94a3b8">ECDH Channel</text>
+
+    <circle cx="290" cy="6" r="4" fill="#2dd4bf" />
+    <text x="300" y="10" fill="#94a3b8">DOM Grid Stream</text>
+
+    <circle cx="440" cy="6" r="4" fill="#f43f5e" />
+    <text x="450" y="10" fill="#94a3b8">Instant Revoke</text>
+
+    <text x="1440" y="10" text-anchor="end" fill="#475569">FERRYX SPEC // AUTH-GATEWAY-V1</text>
+  </g>
+</svg>

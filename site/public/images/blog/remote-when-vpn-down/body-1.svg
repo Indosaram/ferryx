@@ -1,0 +1,451 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900" style="background:#070a13; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'JetBrains Mono', monospace;">
+  <defs>
+    <!-- Background Gradients -->
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#080d1a" />
+      <stop offset="50%" stop-color="#050811" />
+      <stop offset="100%" stop-color="#020408" />
+    </linearGradient>
+
+    <!-- Card Backgrounds -->
+    <linearGradient id="card-connected" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0a1d2e" stop-opacity="0.92" />
+      <stop offset="100%" stop-color="#05101a" stop-opacity="0.96" />
+    </linearGradient>
+    <linearGradient id="card-dropped" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#24121a" stop-opacity="0.92" />
+      <stop offset="100%" stop-color="#12070c" stop-opacity="0.96" />
+    </linearGradient>
+    <linearGradient id="card-persists" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0f1e38" stop-opacity="0.92" />
+      <stop offset="100%" stop-color="#070e1c" stop-opacity="0.96" />
+    </linearGradient>
+    <linearGradient id="card-recovered" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#092524" stop-opacity="0.92" />
+      <stop offset="100%" stop-color="#041212" stop-opacity="0.96" />
+    </linearGradient>
+
+    <!-- Inner Panel Gradients -->
+    <linearGradient id="inner-panel" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0f1c2e" />
+      <stop offset="100%" stop-color="#091220" />
+    </linearGradient>
+    <linearGradient id="inner-panel-alert" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#221217" />
+      <stop offset="100%" stop-color="#15080c" />
+    </linearGradient>
+    <linearGradient id="inner-panel-success" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0d2b27" />
+      <stop offset="100%" stop-color="#071715" />
+    </linearGradient>
+
+    <!-- Glow Filters -->
+    <filter id="glow-teal" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+    <filter id="glow-red" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+    <filter id="glow-amber" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <!-- Base Canvas -->
+  <rect width="1600" height="900" fill="url(#bg-grad)" />
+
+  <!-- Subtle Dot Grid -->
+  <g opacity="0.035" fill="#38bdf8">
+    <pattern id="grid-dots" x="0" y="0" width="32" height="32" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.2" />
+    </pattern>
+    <rect width="1600" height="900" fill="url(#grid-dots)" />
+  </g>
+
+  <!-- Ambient Backdrop Glows -->
+  <circle cx="248" cy="480" r="260" fill="#0284c7" opacity="0.08" filter="url(#glow-teal)" />
+  <circle cx="608" cy="480" r="240" fill="#f43f5e" opacity="0.06" filter="url(#glow-red)" />
+  <circle cx="968" cy="480" r="260" fill="#00f2fe" opacity="0.07" filter="url(#glow-teal)" />
+  <circle cx="1328" cy="480" r="260" fill="#10b981" opacity="0.07" filter="url(#glow-teal)" />
+
+  <!-- ==================== HEADER ==================== -->
+  <g transform="translate(80, 42)">
+    <!-- Category Pill -->
+    <rect x="0" y="0" width="168" height="26" rx="13" fill="#0c1d2e" stroke="#0284c7" stroke-width="1" />
+    <circle cx="14" cy="13" r="4" fill="#00f2fe" />
+    <text x="26" y="17" fill="#38bdf8" font-size="11" font-weight="700" letter-spacing="1.2">OUTAGE TIMELINE</text>
+
+    <!-- Main Title -->
+    <text x="0" y="58" fill="#f8fafc" font-size="28" font-weight="700" letter-spacing="-0.5">Remote Terminals When the VPN Drops</text>
+    <text x="0" y="82" fill="#64748b" font-size="14" font-weight="400">Daemon-owned session lifecycle: how processes persist, ring buffers spool, and DOM grids resync</text>
+  </g>
+
+  <!-- ==================== TIMELINE CONNECTOR BAR ==================== -->
+  <g transform="translate(0, 150)">
+    <!-- Base track line -->
+    <line x1="248" y1="20" x2="1328" y2="20" stroke="#16273d" stroke-width="3" />
+
+    <!-- Stage 1 -> 2 connection: healthy to drop -->
+    <line x1="270" y1="20" x2="580" y2="20" stroke="#00f2fe" stroke-width="2.5" stroke-dasharray="6,4" />
+    <polygon points="586,20 576,15 576,25" fill="#00f2fe" />
+
+    <!-- Stage 2 -> 3 connection: drop to daemon persistence -->
+    <line x1="630" y1="20" x2="940" y2="20" stroke="#f43f5e" stroke-width="2.5" stroke-dasharray="5,5" />
+    <polygon points="946,20 936,15 936,25" fill="#f43f5e" />
+
+    <!-- Stage 3 -> 4 connection: persistence to recovery -->
+    <line x1="990" y1="20" x2="1300" y2="20" stroke="#10b981" stroke-width="2.5" stroke-dasharray="6,4" />
+    <polygon points="1306,20 1296,15 1296,25" fill="#10b981" />
+
+    <!-- Node 1 -->
+    <circle cx="248" cy="20" r="16" fill="#091b2c" stroke="#00f2fe" stroke-width="2.5" />
+    <circle cx="248" cy="20" r="6" fill="#00f2fe" />
+    <text x="248" y="-8" fill="#38bdf8" font-size="12" font-weight="700" text-anchor="middle" font-family="'JetBrains Mono', monospace">T₀ : ACTIVE</text>
+
+    <!-- Node 2 -->
+    <circle cx="608" cy="20" r="16" fill="#1f0e15" stroke="#f43f5e" stroke-width="2.5" />
+    <circle cx="608" cy="20" r="6" fill="#f43f5e" />
+    <text x="608" y="-8" fill="#fb7185" font-size="12" font-weight="700" text-anchor="middle" font-family="'JetBrains Mono', monospace">T₁ : OUTAGE</text>
+
+    <!-- Node 3 -->
+    <circle cx="968" cy="20" r="16" fill="#0a1a30" stroke="#38bdf8" stroke-width="2.5" />
+    <circle cx="968" cy="20" r="6" fill="#38bdf8" />
+    <text x="968" y="-8" fill="#7dd3fc" font-size="12" font-weight="700" text-anchor="middle" font-family="'JetBrains Mono', monospace">T₂ : PERSISTENCE</text>
+
+    <!-- Node 4 -->
+    <circle cx="1328" cy="20" r="16" fill="#082320" stroke="#10b981" stroke-width="2.5" />
+    <circle cx="1328" cy="20" r="6" fill="#10b981" />
+    <text x="1328" y="-8" fill="#34d399" font-size="12" font-weight="700" text-anchor="middle" font-family="'JetBrains Mono', monospace">T₃ : RECOVERY</text>
+  </g>
+
+  <!-- ==================== COLUMN 1: CONNECTED ==================== -->
+  <g transform="translate(80, 205)">
+    <!-- Container Outline -->
+    <rect x="0" y="0" width="335" height="645" rx="14" fill="url(#card-connected)" stroke="#163854" stroke-width="1.5" />
+
+    <!-- Header bar -->
+    <path d="M 0 14 Q 0 0 14 0 L 321 0 Q 335 0 335 14 L 335 48 L 0 48 Z" fill="#0a2238" />
+    <circle cx="20" cy="24" r="5" fill="#00f2fe" />
+    <text x="34" y="28" fill="#e2e8f0" font-size="13" font-weight="700" letter-spacing="0.8">01 CONNECTED</text>
+    <rect x="238" y="14" width="82" height="20" rx="10" fill="#00f2fe" fill-opacity="0.15" stroke="#00f2fe" stroke-width="1" />
+    <text x="279" y="28" fill="#00f2fe" font-size="10" font-weight="700" text-anchor="middle">STREAM LIVE</text>
+
+    <!-- Sub-card: Remote Client (Web / Mobile) -->
+    <g transform="translate(18, 66)">
+      <rect x="0" y="0" width="299" height="135" rx="8" fill="url(#inner-panel)" stroke="#1a3b5c" stroke-width="1" />
+      <text x="14" y="24" fill="#94a3b8" font-size="11" font-weight="700" letter-spacing="0.5">REMOTE CLIENT</text>
+      <text x="285" y="24" fill="#38bdf8" font-size="10" font-family="'JetBrains Mono', monospace" text-anchor="end">DOM GRID</text>
+
+      <!-- Terminal Preview Box -->
+      <g transform="translate(14, 36)">
+        <rect x="0" y="0" width="271" height="82" rx="5" fill="#050b14" stroke="#132a42" stroke-width="1" />
+        <circle cx="10" cy="10" r="3" fill="#f43f5e" opacity="0.7"/>
+        <circle cx="20" cy="10" r="3" fill="#eab308" opacity="0.7"/>
+        <circle cx="30" cy="10" r="3" fill="#10b981" opacity="0.7"/>
+        <text x="12" y="32" fill="#38bdf8" font-size="10.5" font-family="'JetBrains Mono', monospace">$ ferryx remote attach</text>
+        <text x="12" y="50" fill="#2dd4bf" font-size="10" font-family="'JetBrains Mono', monospace">✓ Session paired: dev-host</text>
+        <text x="12" y="68" fill="#e2e8f0" font-size="10" font-family="'JetBrains Mono', monospace">▸ agent test --run-all ...</text>
+      </g>
+    </g>
+
+    <!-- Mid-channel indicator: Bidirectional Tunnel -->
+    <g transform="translate(18, 218)">
+      <rect x="0" y="0" width="299" height="52" rx="8" fill="#07192a" stroke="#00f2fe" stroke-width="1.2" stroke-opacity="0.6" />
+      <circle cx="20" cy="26" r="4" fill="#00f2fe" />
+      <text x="32" y="23" fill="#f8fafc" font-size="11.5" font-weight="600">VPN Tunnel &amp; Gateway</text>
+      <text x="32" y="38" fill="#38bdf8" font-size="9.5" font-family="'JetBrains Mono', monospace">Full duplex • TLS 1.3 • Heartbeat 1s</text>
+      <path d="M 275 21 L 285 26 L 275 31" fill="none" stroke="#00f2fe" stroke-width="1.8" />
+    </g>
+
+    <!-- Sub-card: Host Daemon & PTY -->
+    <g transform="translate(18, 286)">
+      <rect x="0" y="0" width="299" height="180" rx="8" fill="url(#inner-panel)" stroke="#1a3b5c" stroke-width="1" />
+      <text x="14" y="24" fill="#94a3b8" font-size="11" font-weight="700" letter-spacing="0.5">HOST DAEMON (TARGET)</text>
+      <text x="285" y="24" fill="#2dd4bf" font-size="10" font-family="'JetBrains Mono', monospace" text-anchor="end">ONLINE</text>
+
+      <!-- Daemon components -->
+      <g transform="translate(14, 38)">
+        <rect x="0" y="0" width="271" height="54" rx="6" fill="#071424" stroke="#173550" stroke-width="1" />
+        <text x="12" y="20" fill="#cbd5e1" font-size="11" font-weight="600">PTY Process Controller</text>
+        <text x="12" y="38" fill="#64748b" font-size="9.5" font-family="'JetBrains Mono', monospace">PID: 49102 • Task: running</text>
+        <circle cx="255" cy="27" r="4" fill="#10b981" />
+      </g>
+
+      <g transform="translate(14, 102)">
+        <rect x="0" y="0" width="271" height="62" rx="6" fill="#071424" stroke="#173550" stroke-width="1" />
+        <text x="12" y="20" fill="#cbd5e1" font-size="11" font-weight="600">Buffer Pipe &amp; Worktrees</text>
+        <text x="12" y="38" fill="#64748b" font-size="9.5" font-family="'JetBrains Mono', monospace">Worktree: /repo/worktree-a</text>
+        <text x="12" y="52" fill="#38bdf8" font-size="9" font-family="'JetBrains Mono', monospace">Ring buffer sync active</text>
+      </g>
+    </g>
+
+    <!-- Bottom Metrics -->
+    <g transform="translate(18, 482)">
+      <rect x="0" y="0" width="299" height="145" rx="8" fill="#040f1a" stroke="#132c45" stroke-width="1" />
+      <text x="14" y="24" fill="#64748b" font-size="10.5" font-weight="700" letter-spacing="0.5">STATE SUMMARY</text>
+      
+      <line x1="14" y1="36" x2="285" y2="36" stroke="#0e2338" stroke-width="1" />
+      
+      <text x="14" y="56" fill="#94a3b8" font-size="11">Connection</text>
+      <text x="285" y="56" fill="#2dd4bf" font-size="11" font-family="'JetBrains Mono', monospace" text-anchor="end">Stable (100%)</text>
+
+      <text x="14" y="82" fill="#94a3b8" font-size="11">Job Execution</text>
+      <text x="285" y="82" fill="#38bdf8" font-size="11" font-family="'JetBrains Mono', monospace" text-anchor="end">In Foreground</text>
+
+      <text x="14" y="108" fill="#94a3b8" font-size="11">Input Flow</text>
+      <text x="285" y="108" fill="#cbd5e1" font-size="11" font-family="'JetBrains Mono', monospace" text-anchor="end">Live Interactive</text>
+
+      <text x="14" y="132" fill="#94a3b8" font-size="11">Data Buffer</text>
+      <text x="285" y="132" fill="#00f2fe" font-size="11" font-family="'JetBrains Mono', monospace" text-anchor="end">Direct Pass</text>
+    </g>
+  </g>
+
+  <!-- ==================== COLUMN 2: VPN DROPS ==================== -->
+  <g transform="translate(440, 205)">
+    <!-- Container Outline -->
+    <rect x="0" y="0" width="335" height="645" rx="14" fill="url(#card-dropped)" stroke="#521d28" stroke-width="1.5" />
+
+    <!-- Header bar -->
+    <path d="M 0 14 Q 0 0 14 0 L 321 0 Q 335 0 335 14 L 335 48 L 0 48 Z" fill="#2e101a" />
+    <circle cx="20" cy="24" r="5" fill="#f43f5e" />
+    <text x="34" y="28" fill="#fecdd3" font-size="13" font-weight="700" letter-spacing="0.8">02 VPN DROPS</text>
+    <rect x="234" y="14" width="86" height="20" rx="10" fill="#f43f5e" fill-opacity="0.18" stroke="#f43f5e" stroke-width="1" />
+    <text x="277" y="28" fill="#fb7185" font-size="10" font-weight="700" text-anchor="middle">LINK SEVERED</text>
+
+    <!-- Sub-card: Remote Client (Disconnected) -->
+    <g transform="translate(18, 66)">
+      <rect x="0" y="0" width="299" height="135" rx="8" fill="url(#inner-panel-alert)" stroke="#451824" stroke-width="1" />
+      <text x="14" y="24" fill="#fda4af" font-size="11" font-weight="700" letter-spacing="0.5">REMOTE CLIENT</text>
+      <text x="285" y="24" fill="#fb7185" font-size="10" font-family="'JetBrains Mono', monospace" text-anchor="end">RECONNECTING</text>
+
+      <!-- Terminal Preview Box (Frozen DOM Grid) -->
+      <g transform="translate(14, 36)">
+        <rect x="0" y="0" width="271" height="82" rx="5" fill="#14060b" stroke="#36101c" stroke-width="1" />
+        <circle cx="10" cy="10" r="3" fill="#f43f5e" opacity="0.4"/>
+        <circle cx="20" cy="10" r="3" fill="#eab308" opacity="0.4"/>
+        <circle cx="30" cy="10" r="3" fill="#10b981" opacity="0.4"/>
+        <text x="12" y="32" fill="#94a3b8" font-size="10" font-family="'JetBrains Mono', monospace">▸ agent test --run-all ...</text>
+        <!-- Overlay banner -->
+        <rect x="18" y="44" width="235" height="28" rx="4" fill="#290d16" stroke="#f43f5e" stroke-width="1" stroke-dasharray="3,2" />
+        <circle cx="32" cy="58" r="3" fill="#f43f5e" />
+        <text x="44" y="62" fill="#fecdd3" font-size="9.5" font-weight="600">Transport lost • Retrying...</text>
+      </g>
+    </g>
+
+    <!-- Mid-channel indicator: Severed Link -->
+    <g transform="translate(18, 218)">
+      <rect x="0" y="0" width="299" height="52" rx="8" fill="#1f0910" stroke="#f43f5e" stroke-width="1.2" stroke-dasharray="5,3" />
+      <circle cx="20" cy="26" r="4" fill="#f43f5e" />
+      <text x="32" y="23" fill="#fecdd3" font-size="11.5" font-weight="600">Tunnel Breakdown (NAT / IP Change)</text>
+      <text x="32" y="38" fill="#fb7185" font-size="9.5" font-family="'JetBrains Mono', monospace">Socket closed • Heartbeat timeout</text>
+      <!-- X mark -->
+      <path d="M 270 20 L 282 32 M 282 20 L 270 32" stroke="#f43f5e" stroke-width="2" />
+    </g>
+
+    <!-- Sub-card: Host Daemon (Safe Isolation) -->
+    <g transform="translate(18, 286)">
+      <rect x="0" y="0" width="299" height="180" rx="8" fill="url(#inner-panel)" stroke="#2b3b55" stroke-width="1" />
+      <text x="14" y="24" fill="#94a3b8" font-size="11" font-weight="700" letter-spacing="0.5">HOST DAEMON (DECOUPLED)</text>
+      <text x="285" y="24" fill="#38bdf8" font-size="10" font-family="'JetBrains Mono', monospace" text-anchor="end">UNAFFECTED</text>
+
+      <!-- Daemon components -->
+      <g transform="translate(14, 38)">
+        <rect x="0" y="0" width="271" height="54" rx="6" fill="#071424" stroke="#173550" stroke-width="1" />
+        <text x="12" y="20" fill="#cbd5e1" font-size="11" font-weight="600">PTY Shields Process</text>
+        <text x="12" y="38" fill="#34d399" font-size="9.5" font-family="'JetBrains Mono', monospace">No SIGHUP sent to child</text>
+        <circle cx="255" cy="27" r="4" fill="#10b981" />
+      </g>
+
+      <g transform="translate(14, 102)">
+        <rect x="0" y="0" width="271" height="62" rx="6" fill="#071424" stroke="#0284c7" stroke-width="1.2" />
+        <text x="12" y="20" fill="#cbd5e1" font-size="11" font-weight="600">Disconnection Hook Triggered</text>
+        <text x="12" y="38" fill="#7dd3fc" font-size="9.5" font-family="'JetBrains Mono', monospace">Route shifted to spool memory</text>
+        <text x="12" y="52" fill="#64748b" font-size="9" font-family="'JetBrains Mono', monospace">Session retained in daemon registry</text>
+      </g>
+    </g>
+
+    <!-- Bottom Metrics -->
+    <g transform="translate(18, 482)">
+      <rect x="0" y="0" width="299" height="145" rx="8" fill="#14060b" stroke="#3d141e" stroke-width="1" />
+      <text x="14" y="24" fill="#fb7185" font-size="10.5" font-weight="700" letter-spacing="0.5">IMPACT COMPARISON</text>
+      
+      <line x1="14" y1="36" x2="285" y2="36" stroke="#260b13" stroke-width="1" />
+      
+      <text x="14" y="56" fill="#94a3b8" font-size="11">Standard SSH</text>
+      <text x="285" y="56" fill="#f43f5e" font-size="11" font-family="'JetBrains Mono', monospace" text-anchor="end">Killed on SIGHUP</text>
+
+      <text x="14" y="82" fill="#94a3b8" font-size="11">Ferryx Daemon</text>
+      <text x="285" y="82" fill="#2dd4bf" font-size="11" font-family="'JetBrains Mono', monospace" text-anchor="end">Kept Alive (100%)</text>
+
+      <text x="14" y="108" fill="#94a3b8" font-size="11">Pending Input</text>
+      <text x="285" y="108" fill="#fbbf24" font-size="11" font-family="'JetBrains Mono', monospace" text-anchor="end">Cached Locally</text>
+
+      <text x="14" y="132" fill="#94a3b8" font-size="11">Terminal Window</text>
+      <text x="285" y="132" fill="#cbd5e1" font-size="11" font-family="'JetBrains Mono', monospace" text-anchor="end">Layout Retained</text>
+    </g>
+  </g>
+
+  <!-- ==================== COLUMN 3: DAEMON PERSISTS ==================== -->
+  <g transform="translate(800, 205)">
+    <!-- Container Outline -->
+    <rect x="0" y="0" width="335" height="645" rx="14" fill="url(#card-persists)" stroke="#1d4072" stroke-width="1.5" />
+
+    <!-- Header bar -->
+    <path d="M 0 14 Q 0 0 14 0 L 321 0 Q 335 0 335 14 L 335 48 L 0 48 Z" fill="#0d2447" />
+    <circle cx="20" cy="24" r="5" fill="#38bdf8" />
+    <text x="34" y="28" fill="#e2e8f0" font-size="13" font-weight="700" letter-spacing="0.8">03 DAEMON PERSISTS</text>
+    <rect x="228" y="14" width="92" height="20" rx="10" fill="#38bdf8" fill-opacity="0.15" stroke="#38bdf8" stroke-width="1" />
+    <text x="274" y="28" fill="#38bdf8" font-size="10" font-weight="700" text-anchor="middle">SPOOLS BUFFER</text>
+
+    <!-- Sub-card: Remote Client (Offline / Sleep) -->
+    <g transform="translate(18, 66)">
+      <rect x="0" y="0" width="299" height="135" rx="8" fill="url(#inner-panel)" stroke="#1a2f4c" stroke-width="1" />
+      <text x="14" y="24" fill="#94a3b8" font-size="11" font-weight="700" letter-spacing="0.5">REMOTE CLIENT</text>
+      <text x="285" y="24" fill="#64748b" font-size="10" font-family="'JetBrains Mono', monospace" text-anchor="end">BACKGROUND</text>
+
+      <!-- Client Standby Box -->
+      <g transform="translate(14, 36)">
+        <rect x="0" y="0" width="271" height="82" rx="5" fill="#060f1c" stroke="#12253d" stroke-width="1" />
+        <text x="14" y="28" fill="#64748b" font-size="10" font-family="'JetBrains Mono', monospace">State: Standby / Polling</text>
+        <text x="14" y="48" fill="#94a3b8" font-size="10" font-family="'JetBrains Mono', monospace">Device closed or switching Wi-Fi</text>
+        <text x="14" y="68" fill="#00f2fe" font-size="10" font-family="'JetBrains Mono', monospace">Auth token cached for fast reconnect</text>
+      </g>
+    </g>
+
+    <!-- Mid-channel indicator: Outage Gap -->
+    <g transform="translate(18, 218)">
+      <rect x="0" y="0" width="299" height="52" rx="8" fill="#0a1728" stroke="#1e3a5f" stroke-width="1.2" stroke-dasharray="3,3" />
+      <circle cx="20" cy="26" r="4" fill="#64748b" />
+      <text x="32" y="23" fill="#cbd5e1" font-size="11.5" font-weight="600">Zero Transport Wire</text>
+      <text x="32" y="38" fill="#64748b" font-size="9.5" font-family="'JetBrains Mono', monospace">Autonomous host execution phase</text>
+    </g>
+
+    <!-- Sub-card: Host Daemon (Spooling in memory) -->
+    <g transform="translate(18, 286)">
+      <rect x="0" y="0" width="299" height="180" rx="8" fill="url(#inner-panel)" stroke="#0284c7" stroke-width="1.5" />
+      <text x="14" y="24" fill="#38bdf8" font-size="11" font-weight="700" letter-spacing="0.5">HOST DAEMON (ACTIVE)</text>
+      <text x="285" y="24" fill="#00f2fe" font-size="10" font-family="'JetBrains Mono', monospace" text-anchor="end">SPOOLING</text>
+
+      <!-- Active Job running -->
+      <g transform="translate(14, 38)">
+        <rect x="0" y="0" width="271" height="54" rx="6" fill="#051426" stroke="#0284c7" stroke-width="1" />
+        <text x="12" y="20" fill="#f8fafc" font-size="11" font-weight="600">Job Still Running Uninterrupted</text>
+        <text x="12" y="38" fill="#2dd4bf" font-size="9.5" font-family="'JetBrains Mono', monospace">agent test: 42/60 suites passed</text>
+        <circle cx="255" cy="27" r="4" fill="#00f2fe" />
+      </g>
+
+      <!-- Ring buffer spooling -->
+      <g transform="translate(14, 102)">
+        <rect x="0" y="0" width="271" height="62" rx="6" fill="#051426" stroke="#00f2fe" stroke-width="1.2" />
+        <text x="12" y="20" fill="#f8fafc" font-size="11" font-weight="600">Circular Ring Buffer</text>
+        <text x="12" y="38" fill="#38bdf8" font-size="9.5" font-family="'JetBrains Mono', monospace">128 KB stdout spooled in RAM</text>
+        <text x="12" y="52" fill="#64748b" font-size="9" font-family="'JetBrains Mono', monospace">Sequenced for gap-free replay</text>
+      </g>
+    </g>
+
+    <!-- Bottom Metrics -->
+    <g transform="translate(18, 482)">
+      <rect x="0" y="0" width="299" height="145" rx="8" fill="#051020" stroke="#162e4c" stroke-width="1" />
+      <text x="14" y="24" fill="#38bdf8" font-size="10.5" font-weight="700" letter-spacing="0.5">DAEMON GUARANTEES</text>
+      
+      <line x1="14" y1="36" x2="285" y2="36" stroke="#0f243d" stroke-width="1" />
+      
+      <text x="14" y="56" fill="#94a3b8" font-size="11">Process Survival</text>
+      <text x="285" y="56" fill="#2dd4bf" font-size="11" font-family="'JetBrains Mono', monospace" text-anchor="end">100% Unbroken</text>
+
+      <text x="14" y="82" fill="#94a3b8" font-size="11">Worktree Lock</text>
+      <text x="285" y="82" fill="#38bdf8" font-size="11" font-family="'JetBrains Mono', monospace" text-anchor="end">Preserved</text>
+
+      <text x="14" y="108" fill="#94a3b8" font-size="11">Memory Overhead</text>
+      <text x="285" y="108" fill="#cbd5e1" font-size="11" font-family="'JetBrains Mono', monospace" text-anchor="end">Ring Buffer Cap</text>
+
+      <text x="14" y="132" fill="#94a3b8" font-size="11">Multi-pane state</text>
+      <text x="285" y="132" fill="#00f2fe" font-size="11" font-family="'JetBrains Mono', monospace" text-anchor="end">Retained</text>
+    </g>
+  </g>
+
+  <!-- ==================== COLUMN 4: RECOVERY ==================== -->
+  <g transform="translate(1160, 205)">
+    <!-- Container Outline -->
+    <rect x="0" y="0" width="335" height="645" rx="14" fill="url(#card-recovered)" stroke="#134e48" stroke-width="1.5" />
+
+    <!-- Header bar -->
+    <path d="M 0 14 Q 0 0 14 0 L 321 0 Q 335 0 335 14 L 335 48 L 0 48 Z" fill="#09302c" />
+    <circle cx="20" cy="24" r="5" fill="#10b981" />
+    <text x="34" y="28" fill="#ccfbf1" font-size="13" font-weight="700" letter-spacing="0.8">04 RESTORE &amp; RESYNC</text>
+    <rect x="228" y="14" width="92" height="20" rx="10" fill="#10b981" fill-opacity="0.18" stroke="#10b981" stroke-width="1" />
+    <text x="274" y="28" fill="#2dd4bf" font-size="10" font-weight="700" text-anchor="middle">RECONNECTED</text>
+
+    <!-- Sub-card: Remote Client (Re-attached) -->
+    <g transform="translate(18, 66)">
+      <rect x="0" y="0" width="299" height="135" rx="8" fill="url(#inner-panel-success)" stroke="#134e48" stroke-width="1" />
+      <text x="14" y="24" fill="#a7f3d0" font-size="11" font-weight="700" letter-spacing="0.5">REMOTE CLIENT</text>
+      <text x="285" y="24" fill="#34d399" font-size="10" font-family="'JetBrains Mono', monospace" text-anchor="end">RE-ATTACHED</text>
+
+      <!-- Terminal Preview Box (Buffer replayed) -->
+      <g transform="translate(14, 36)">
+        <rect x="0" y="0" width="271" height="82" rx="5" fill="#041210" stroke="#0e3a35" stroke-width="1" />
+        <circle cx="10" cy="10" r="3" fill="#f43f5e" opacity="0.7"/>
+        <circle cx="20" cy="10" r="3" fill="#eab308" opacity="0.7"/>
+        <circle cx="30" cy="10" r="3" fill="#10b981" opacity="0.7"/>
+        <text x="12" y="30" fill="#34d399" font-size="10" font-family="'JetBrains Mono', monospace">✓ Tunnel restored: 142ms</text>
+        <text x="12" y="48" fill="#2dd4bf" font-size="10" font-family="'JetBrains Mono', monospace">✓ Replayed 82 lines from spool</text>
+        <text x="12" y="68" fill="#38bdf8" font-size="10" font-family="'JetBrains Mono', monospace">All 60 tests passed [OK]</text>
+      </g>
+    </g>
+
+    <!-- Mid-channel indicator: Re-established Link -->
+    <g transform="translate(18, 218)">
+      <rect x="0" y="0" width="299" height="52" rx="8" fill="#06211e" stroke="#10b981" stroke-width="1.2" stroke-opacity="0.8" />
+      <circle cx="20" cy="26" r="4" fill="#10b981" />
+      <text x="32" y="23" fill="#f0fdf4" font-size="11.5" font-weight="600">Fast Token Handshake</text>
+      <text x="32" y="38" fill="#34d399" font-size="9.5" font-family="'JetBrains Mono', monospace">Zero auth prompt • Sequence check</text>
+      <path d="M 275 21 L 285 26 L 275 31" fill="none" stroke="#10b981" stroke-width="1.8" />
+    </g>
+
+    <!-- Sub-card: Host Daemon (Synchronized) -->
+    <g transform="translate(18, 286)">
+      <rect x="0" y="0" width="299" height="180" rx="8" fill="url(#inner-panel)" stroke="#134e48" stroke-width="1" />
+      <text x="14" y="24" fill="#a7f3d0" font-size="11" font-weight="700" letter-spacing="0.5">HOST DAEMON (SYNCED)</text>
+      <text x="285" y="24" fill="#2dd4bf" font-size="10" font-family="'JetBrains Mono', monospace" text-anchor="end">STREAMING</text>
+
+      <!-- Daemon components -->
+      <g transform="translate(14, 38)">
+        <rect x="0" y="0" width="271" height="54" rx="6" fill="#061c19" stroke="#0e4b44" stroke-width="1" />
+        <text x="12" y="20" fill="#f0fdf4" font-size="11" font-weight="600">DOM Grid Geometry Updated</text>
+        <text x="12" y="38" fill="#2dd4bf" font-size="9.5" font-family="'JetBrains Mono', monospace">Rows &amp; cols negotiated to screen</text>
+        <circle cx="255" cy="27" r="4" fill="#10b981" />
+      </g>
+
+      <g transform="translate(14, 102)">
+        <rect x="0" y="0" width="271" height="62" rx="6" fill="#061c19" stroke="#0e4b44" stroke-width="1" />
+        <text x="12" y="20" fill="#f0fdf4" font-size="11" font-weight="600">Buffer Flushed &amp; Live</text>
+        <text x="12" y="38" fill="#38bdf8" font-size="9.5" font-family="'JetBrains Mono', monospace">Backfilled to client seamlessly</text>
+        <text x="12" y="52" fill="#34d399" font-size="9" font-family="'JetBrains Mono', monospace">Full interactive shell restored</text>
+      </g>
+    </g>
+
+    <!-- Bottom Metrics -->
+    <g transform="translate(18, 482)">
+      <rect x="0" y="0" width="299" height="145" rx="8" fill="#051412" stroke="#0e3833" stroke-width="1" />
+      <text x="14" y="24" fill="#34d399" font-size="10.5" font-weight="700" letter-spacing="0.5">RECOVERY RESULTS</text>
+      
+      <line x1="14" y1="36" x2="285" y2="36" stroke="#0c2a27" stroke-width="1" />
+      
+      <text x="14" y="56" fill="#94a3b8" font-size="11">Data Dropped</text>
+      <text x="285" y="56" fill="#2dd4bf" font-size="11" font-family="'JetBrains Mono', monospace" text-anchor="end">0 bytes</text>
+
+      <text x="14" y="82" fill="#94a3b8" font-size="11">Process Exit Code</text>
+      <text x="285" y="82" fill="#34d399" font-size="11" font-family="'JetBrains Mono', monospace" text-anchor="end">Exit 0 (Success)</text>
+
+      <text x="14" y="108" fill="#94a3b8" font-size="11">Re-pairing Needed</text>
+      <text x="285" y="108" fill="#cbd5e1" font-size="11" font-family="'JetBrains Mono', monospace" text-anchor="end">None (Cached PIN)</text>
+
+      <text x="14" y="132" fill="#94a3b8" font-size="11">Session Status</text>
+      <text x="285" y="132" fill="#00f2fe" font-size="11" font-family="'JetBrains Mono', monospace" text-anchor="end">Fully Healthy</text>
+    </g>
+  </g>
+</svg>

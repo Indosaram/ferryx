@@ -1,0 +1,649 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <defs>
+    <!-- Background Radial Gradients -->
+    <radialGradient id="bgGrad" cx="50%" cy="40%" r="75%">
+      <stop offset="0%" stop-color="#0c1d34" stop-opacity="1.0"/>
+      <stop offset="45%" stop-color="#07101e" stop-opacity="1.0"/>
+      <stop offset="100%" stop-color="#03060c" stop-opacity="1.0"/>
+    </radialGradient>
+
+    <!-- Ambient Center Blooms -->
+    <radialGradient id="ambientCyan" cx="45%" cy="38%" r="48%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.16"/>
+      <stop offset="50%" stop-color="#0066cc" stop-opacity="0.04"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="ambientTeal" cx="72%" cy="42%" r="42%">
+      <stop offset="0%" stop-color="#00e5a3" stop-opacity="0.14"/>
+      <stop offset="55%" stop-color="#0077ff" stop-opacity="0.03"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="broomSweepAura" cx="62%" cy="46%" r="35%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.22"/>
+      <stop offset="40%" stop-color="#00e5a3" stop-opacity="0.10"/>
+      <stop offset="80%" stop-color="#071324" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Linear Gradients for UI Cards -->
+    <linearGradient id="cardBgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0e223d" stop-opacity="0.88"/>
+      <stop offset="100%" stop-color="#071324" stop-opacity="0.94"/>
+    </linearGradient>
+
+    <linearGradient id="activeCardBgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#122d4f" stop-opacity="0.95"/>
+      <stop offset="100%" stop-color="#09182d" stop-opacity="0.98"/>
+    </linearGradient>
+
+    <linearGradient id="cellBgGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#102540" stop-opacity="0.7"/>
+      <stop offset="100%" stop-color="#09182b" stop-opacity="0.85"/>
+    </linearGradient>
+
+    <linearGradient id="highlightCellGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#003d5c" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#00223b" stop-opacity="0.95"/>
+    </linearGradient>
+
+    <!-- Neon Accents Gradients -->
+    <linearGradient id="cyanTealGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00f2fe"/>
+      <stop offset="50%" stop-color="#00b4d8"/>
+      <stop offset="100%" stop-color="#00e5a3"/>
+    </linearGradient>
+
+    <linearGradient id="cyanBlueGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00f2fe"/>
+      <stop offset="100%" stop-color="#0284c7"/>
+    </linearGradient>
+
+    <linearGradient id="broomBristleGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.95"/>
+      <stop offset="70%" stop-color="#00e5a3" stop-opacity="0.7"/>
+      <stop offset="100%" stop-color="#00f2fe" stop-opacity="0.1"/>
+    </linearGradient>
+
+    <linearGradient id="sweepParticleGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="50%" stop-color="#00f2fe"/>
+      <stop offset="100%" stop-color="#00e5a3"/>
+    </linearGradient>
+
+    <!-- Glow Filters -->
+    <filter id="neonGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <filter id="strongGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="9" result="blur1"/>
+      <feGaussianBlur stdDeviation="3" result="blur2"/>
+      <feMerge>
+        <feMergeNode in="blur1"/>
+        <feMergeNode in="blur2"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <filter id="cardShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="14" result="blur"/>
+      <feOffset dx="0" dy="12" result="offset"/>
+      <feFlood flood-color="#010408" flood-opacity="0.85" result="color"/>
+      <feComposite in="color" in2="offset" operator="in" result="shadow"/>
+      <feMerge>
+        <feMergeNode in="shadow"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <filter id="textGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="14" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Dot Matrix Grid Pattern -->
+    <pattern id="dotGrid" x="0" y="0" width="30" height="30" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.1" fill="#183658" opacity="0.38"/>
+    </pattern>
+
+    <!-- Subtle Tech Linear Grid -->
+    <pattern id="lineGrid" x="0" y="0" width="90" height="90" patternUnits="userSpaceOnUse">
+      <path d="M 90 0 L 0 0 0 90" fill="none" stroke="#12253d" stroke-width="0.7" opacity="0.45"/>
+    </pattern>
+  </defs>
+
+  <!-- ===================================================================== -->
+  <!-- BACKGROUND BASE & ATMOSPHERE                                          -->
+  <!-- ===================================================================== -->
+  <rect width="1200" height="630" fill="url(#bgGrad)"/>
+  <rect width="1200" height="630" fill="url(#dotGrid)"/>
+  <rect width="1200" height="630" fill="url(#lineGrid)"/>
+  <rect width="1200" height="630" fill="url(#ambientCyan)"/>
+  <rect width="1200" height="630" fill="url(#ambientTeal)"/>
+  <rect width="1200" height="630" fill="url(#broomSweepAura)"/>
+
+  <!-- Technical Corner Brackets and Framing Reticles -->
+  <g stroke="#00f2fe" stroke-width="1.5" opacity="0.6">
+    <path d="M 40 60 L 40 40 L 60 40" fill="none"/>
+    <circle cx="40" cy="40" r="2.5" fill="#00f2fe"/>
+    <path d="M 1160 60 L 1160 40 L 1140 40" fill="none"/>
+    <circle cx="1160" cy="40" r="2.5" fill="#00f2fe"/>
+    <path d="M 40 570 L 40 590 L 60 590" fill="none"/>
+    <circle cx="40" cy="590" r="2.5" fill="#00f2fe"/>
+    <path d="M 1160 570 L 1160 590 L 1140 590" fill="none"/>
+    <circle cx="1160" cy="590" r="2.5" fill="#00f2fe"/>
+  </g>
+
+  <!-- Coordinate Crosshairs -->
+  <g stroke="#1b3a5c" stroke-width="1" opacity="0.6">
+    <path d="M 180 35 L 180 45 M 175 40 L 185 40"/>
+    <path d="M 600 35 L 600 45 M 595 40 L 605 40"/>
+    <path d="M 1020 35 L 1020 45 M 1015 40 L 1025 40"/>
+    <path d="M 180 585 L 180 595 M 175 590 L 185 590"/>
+    <path d="M 1020 585 L 1020 595 M 1015 590 L 1025 590"/>
+  </g>
+
+  <!-- ===================================================================== -->
+  <!-- LEFT: CALENDAR TERMINAL WINDOW (WEEKLY RITUAL VIEW)                   -->
+  <!-- ===================================================================== -->
+  <g id="calendar-window" transform="translate(100, 68)" filter="url(#cardShadow)">
+    <!-- Terminal Outer Frame -->
+    <rect width="610" height="395" rx="12" fill="url(#cardBgGrad)" stroke="#1a3d66" stroke-width="1.8"/>
+
+    <!-- Terminal Header Bar -->
+    <path d="M 0 12 C 0 5.37 5.37 0 12 0 L 598 0 C 604.63 0 610 5.37 610 12 L 610 38 L 0 38 Z" fill="#0c1e34"/>
+    <line x1="0" y1="38" x2="610" y2="38" stroke="#16385d" stroke-width="1.2"/>
+
+    <!-- Terminal Window Controls (Traffic Lights - Dev Palette) -->
+    <circle cx="22" cy="19" r="4.5" fill="#ef4444" opacity="0.8"/>
+    <circle cx="38" cy="19" r="4.5" fill="#f59e0b" opacity="0.8"/>
+    <circle cx="54" cy="19" r="4.5" fill="#10b981" opacity="0.8"/>
+
+    <!-- Calendar Terminal Header Status Pill -->
+    <rect x="76" y="11" width="130" height="16" rx="4" fill="#071324" stroke="#1a3d66" stroke-width="1"/>
+    <circle cx="86" cy="19" r="3" fill="#00f2fe" filter="url(#neonGlow)"/>
+    <rect x="96" y="16" width="95" height="6" rx="2" fill="#00f2fe" opacity="0.75"/>
+
+    <!-- Right Header Indicator Icons -->
+    <rect x="520" y="13" width="72" height="12" rx="3" fill="#102540"/>
+    <rect x="526" y="16" width="30" height="6" rx="1.5" fill="#00e5a3" opacity="0.8"/>
+    <circle cx="580" cy="19" r="3" fill="#00e5a3" filter="url(#neonGlow)"/>
+
+    <!-- Calendar Column Days (7 Columns Header) -->
+    <g id="calendar-header-cols" transform="translate(20, 52)">
+      <!-- Col 01 to 07 -->
+      <g transform="translate(0, 0)">
+        <rect width="75" height="24" rx="4" fill="#0c1d33" stroke="#183658" stroke-width="1"/>
+        <rect x="22" y="8" width="30" height="7" rx="2" fill="#2d6194"/>
+      </g>
+      <g transform="translate(82, 0)">
+        <rect width="75" height="24" rx="4" fill="#0c1d33" stroke="#183658" stroke-width="1"/>
+        <rect x="22" y="8" width="30" height="7" rx="2" fill="#2d6194"/>
+      </g>
+      <g transform="translate(164, 0)">
+        <rect width="75" height="24" rx="4" fill="#0c1d33" stroke="#183658" stroke-width="1"/>
+        <rect x="22" y="8" width="30" height="7" rx="2" fill="#2d6194"/>
+      </g>
+      <g transform="translate(246, 0)">
+        <rect width="75" height="24" rx="4" fill="#0c1d33" stroke="#183658" stroke-width="1"/>
+        <rect x="22" y="8" width="30" height="7" rx="2" fill="#2d6194"/>
+      </g>
+      <!-- Friday (Ritual Day) Highlighted Column Header -->
+      <g transform="translate(328, 0)">
+        <rect width="75" height="24" rx="4" fill="#0c2944" stroke="#00f2fe" stroke-width="1.5" filter="url(#neonGlow)"/>
+        <rect x="18" y="8" width="38" height="7" rx="2" fill="#00f2fe"/>
+      </g>
+      <g transform="translate(410, 0)">
+        <rect width="75" height="24" rx="4" fill="#0a182b" stroke="#183658" stroke-width="1"/>
+        <rect x="22" y="8" width="30" height="7" rx="2" fill="#1b4269"/>
+      </g>
+      <g transform="translate(492, 0)">
+        <rect width="75" height="24" rx="4" fill="#0a182b" stroke="#183658" stroke-width="1"/>
+        <rect x="22" y="8" width="30" height="7" rx="2" fill="#1b4269"/>
+      </g>
+    </g>
+
+    <!-- =================================================================== -->
+    <!-- CALENDAR GRID CELLS (ROWS OF WORKTREE RITUAL DAYS)                  -->
+    <!-- =================================================================== -->
+    <g id="calendar-grid-rows" transform="translate(20, 86)">
+      <!-- ROW 1 (Standard Sprint Days) -->
+      <!-- Mon -->
+      <g transform="translate(0, 0)">
+        <rect width="75" height="88" rx="6" fill="url(#cellBgGrad)" stroke="#163252" stroke-width="1"/>
+        <circle cx="16" cy="16" r="3.5" fill="#2a5c8c"/>
+        <path d="M 16 38 L 40 38 L 56 56" fill="none" stroke="#254d75" stroke-width="1.8"/>
+        <circle cx="16" cy="38" r="3" fill="#254d75"/>
+        <circle cx="56" cy="56" r="3" fill="#254d75"/>
+      </g>
+      <!-- Tue -->
+      <g transform="translate(82, 0)">
+        <rect width="75" height="88" rx="6" fill="url(#cellBgGrad)" stroke="#163252" stroke-width="1"/>
+        <circle cx="16" cy="16" r="3.5" fill="#2a5c8c"/>
+        <path d="M 16 48 L 60 48" fill="none" stroke="#00b4d8" stroke-width="1.8" opacity="0.6"/>
+        <circle cx="16" cy="48" r="3" fill="#00b4d8" opacity="0.6"/>
+        <circle cx="45" cy="48" r="3" fill="#00b4d8" opacity="0.8"/>
+      </g>
+      <!-- Wed -->
+      <g transform="translate(164, 0)">
+        <rect width="75" height="88" rx="6" fill="url(#cellBgGrad)" stroke="#163252" stroke-width="1"/>
+        <circle cx="16" cy="16" r="3.5" fill="#2a5c8c"/>
+        <path d="M 16 36 L 36 36 L 56 60" fill="none" stroke="#2a5c8c" stroke-width="1.8"/>
+        <circle cx="16" cy="36" r="3" fill="#2a5c8c"/>
+        <circle cx="56" cy="60" r="3" fill="#2a5c8c"/>
+      </g>
+      <!-- Thu -->
+      <g transform="translate(246, 0)">
+        <rect width="75" height="88" rx="6" fill="url(#cellBgGrad)" stroke="#163252" stroke-width="1"/>
+        <circle cx="16" cy="16" r="3.5" fill="#2a5c8c"/>
+        <path d="M 16 52 L 58 52" fill="none" stroke="#2a5c8c" stroke-width="1.8"/>
+        <circle cx="38" cy="52" r="3" fill="#2a5c8c"/>
+      </g>
+      <!-- Fri - ROW 1 ACTIVE RITUAL SLOT (BEING SWEPT / CLEANED) -->
+      <g transform="translate(328, 0)">
+        <rect width="75" height="88" rx="6" fill="url(#highlightCellGrad)" stroke="#00f2fe" stroke-width="1.8" filter="url(#neonGlow)"/>
+        <!-- Active Badge Icon -->
+        <circle cx="16" cy="16" r="4.5" fill="#00f2fe" filter="url(#strongGlow)"/>
+        <circle cx="16" cy="16" r="2" fill="#ffffff"/>
+        <rect x="26" y="13" width="38" height="6" rx="2" fill="#00f2fe"/>
+        <!-- Git Worktree Cleaned Tree inside ritual cell -->
+        <path d="M 16 42 L 38 42 L 56 28" fill="none" stroke="#00f2fe" stroke-width="2"/>
+        <path d="M 16 42 L 58 42" fill="none" stroke="#00e5a3" stroke-width="2"/>
+        <circle cx="16" cy="42" r="3.5" fill="#00e5a3"/>
+        <circle cx="38" cy="42" r="3" fill="#00f2fe"/>
+        <circle cx="56" cy="28" r="3.5" fill="#ffffff" filter="url(#neonGlow)"/>
+        <!-- Clean status bar -->
+        <rect x="14" y="68" width="48" height="6" rx="3" fill="#00e5a3" opacity="0.9"/>
+      </g>
+      <!-- Sat -->
+      <g transform="translate(410, 0)">
+        <rect width="75" height="88" rx="6" fill="#071424" stroke="#122a44" stroke-width="1"/>
+        <circle cx="16" cy="16" r="3" fill="#1b3d60"/>
+      </g>
+      <!-- Sun -->
+      <g transform="translate(492, 0)">
+        <rect width="75" height="88" rx="6" fill="#071424" stroke="#122a44" stroke-width="1"/>
+        <circle cx="16" cy="16" r="3" fill="#1b3d60"/>
+      </g>
+
+      <!-- ROW 2 (CURRENT ACTIVE RITUAL WEEK) -->
+      <g transform="translate(0, 98)">
+        <!-- Mon -->
+        <g transform="translate(0, 0)">
+          <rect width="75" height="92" rx="6" fill="url(#cellBgGrad)" stroke="#163252" stroke-width="1"/>
+          <circle cx="16" cy="16" r="3.5" fill="#2a5c8c"/>
+          <path d="M 16 48 L 56 48" fill="none" stroke="#1a4269" stroke-width="1.8"/>
+          <circle cx="16" cy="48" r="3" fill="#1a4269"/>
+          <circle cx="42" cy="48" r="3" fill="#1a4269"/>
+        </g>
+        <!-- Tue -->
+        <g transform="translate(82, 0)">
+          <rect width="75" height="92" rx="6" fill="url(#cellBgGrad)" stroke="#163252" stroke-width="1"/>
+          <circle cx="16" cy="16" r="3.5" fill="#2a5c8c"/>
+          <path d="M 16 38 L 38 38 L 56 60" fill="none" stroke="#254d75" stroke-width="1.8"/>
+          <circle cx="16" cy="38" r="3" fill="#254d75"/>
+          <circle cx="56" cy="60" r="3" fill="#254d75"/>
+        </g>
+        <!-- Wed -->
+        <g transform="translate(164, 0)">
+          <rect width="75" height="92" rx="6" fill="url(#cellBgGrad)" stroke="#163252" stroke-width="1"/>
+          <circle cx="16" cy="16" r="3.5" fill="#2a5c8c"/>
+          <path d="M 16 50 L 58 50" fill="none" stroke="#00b4d8" stroke-width="1.8" opacity="0.7"/>
+          <circle cx="36" cy="50" r="3" fill="#00b4d8" opacity="0.8"/>
+        </g>
+        <!-- Thu -->
+        <g transform="translate(246, 0)">
+          <rect width="75" height="92" rx="6" fill="url(#cellBgGrad)" stroke="#163252" stroke-width="1"/>
+          <circle cx="16" cy="16" r="3.5" fill="#2a5c8c"/>
+          <path d="M 16 36 L 40 36 L 56 56" fill="none" stroke="#254d75" stroke-width="1.8"/>
+          <circle cx="16" cy="36" r="3" fill="#254d75"/>
+          <circle cx="56" cy="56" r="3" fill="#254d75"/>
+        </g>
+        <!-- Fri - THE PRIMARY REPO HYGIENE FOCUS SLOT -->
+        <g transform="translate(328, 0)">
+          <rect width="75" height="92" rx="6" fill="url(#highlightCellGrad)" stroke="#00e5a3" stroke-width="2" filter="url(#neonGlow)"/>
+          <circle cx="16" cy="16" r="5" fill="#00e5a3" filter="url(#strongGlow)"/>
+          <circle cx="16" cy="16" r="2" fill="#ffffff"/>
+          <rect x="28" y="13" width="36" height="6" rx="2" fill="#00e5a3"/>
+          <!-- Worktree Pruning Action Indicator -->
+          <g transform="translate(12, 36)">
+            <rect width="52" height="18" rx="4" fill="#061c2e" stroke="#00f2fe" stroke-width="1"/>
+            <path d="M 10 9 L 42 9" stroke="#00f2fe" stroke-width="1.5"/>
+            <circle cx="10" cy="9" r="2.5" fill="#00e5a3"/>
+            <circle cx="42" cy="9" r="2.5" fill="#00f2fe"/>
+          </g>
+          <g transform="translate(12, 62)">
+            <rect width="52" height="18" rx="4" fill="#061c2e" stroke="#00e5a3" stroke-width="1"/>
+            <rect x="8" y="6" width="36" height="6" rx="2" fill="#00e5a3"/>
+          </g>
+        </g>
+        <!-- Sat -->
+        <g transform="translate(410, 0)">
+          <rect width="75" height="92" rx="6" fill="#071424" stroke="#122a44" stroke-width="1"/>
+          <circle cx="16" cy="16" r="3" fill="#1b3d60"/>
+        </g>
+        <!-- Sun -->
+        <g transform="translate(492, 0)">
+          <rect width="75" height="92" rx="6" fill="#071424" stroke="#122a44" stroke-width="1"/>
+          <circle cx="16" cy="16" r="3" fill="#1b3d60"/>
+        </g>
+      </g>
+
+      <!-- ROW 3 (NEXT CYCLE PREVIEW) -->
+      <g transform="translate(0, 198)">
+        <g transform="translate(0, 0)">
+          <rect width="75" height="84" rx="6" fill="#071424" stroke="#122a44" stroke-width="1"/>
+          <circle cx="16" cy="16" r="3" fill="#183658"/>
+          <path d="M 16 46 L 56 46" fill="none" stroke="#163252" stroke-width="1.5"/>
+        </g>
+        <g transform="translate(82, 0)">
+          <rect width="75" height="84" rx="6" fill="#071424" stroke="#122a44" stroke-width="1"/>
+          <circle cx="16" cy="16" r="3" fill="#183658"/>
+        </g>
+        <g transform="translate(164, 0)">
+          <rect width="75" height="84" rx="6" fill="#071424" stroke="#122a44" stroke-width="1"/>
+          <circle cx="16" cy="16" r="3" fill="#183658"/>
+        </g>
+        <g transform="translate(246, 0)">
+          <rect width="75" height="84" rx="6" fill="#071424" stroke="#122a44" stroke-width="1"/>
+          <circle cx="16" cy="16" r="3" fill="#183658"/>
+        </g>
+        <!-- Fri Scheduled Ritual Slot -->
+        <g transform="translate(328, 0)">
+          <rect width="75" height="84" rx="6" fill="url(#cellBgGrad)" stroke="#1a4670" stroke-width="1.5"/>
+          <circle cx="16" cy="16" r="4" fill="#00b4d8" opacity="0.8"/>
+          <rect x="26" y="13" width="38" height="6" rx="2" fill="#1a4670"/>
+          <rect x="14" y="44" width="48" height="6" rx="3" fill="#00b4d8" opacity="0.5"/>
+        </g>
+        <g transform="translate(410, 0)">
+          <rect width="75" height="84" rx="6" fill="#071424" stroke="#122a44" stroke-width="1"/>
+          <circle cx="16" cy="16" r="3" fill="#183658"/>
+        </g>
+        <g transform="translate(492, 0)">
+          <rect width="75" height="84" rx="6" fill="#071424" stroke="#122a44" stroke-width="1"/>
+          <circle cx="16" cy="16" r="3" fill="#183658"/>
+        </g>
+      </g>
+    </g>
+  </g>
+
+  <!-- ===================================================================== -->
+  <!-- RIGHT: MANAGED WORKTREE DRAWER (PRUNED VS CLEAN WORKTREES)            -->
+  <!-- ===================================================================== -->
+  <g id="worktree-drawer" transform="translate(735, 68)" filter="url(#cardShadow)">
+    <rect width="365" height="395" rx="12" fill="url(#cardBgGrad)" stroke="#1a3d66" stroke-width="1.8"/>
+
+    <!-- Drawer Header Bar -->
+    <path d="M 0 12 C 0 5.37 5.37 0 12 0 L 353 0 C 359.63 0 365 5.37 365 12 L 365 38 L 0 38 Z" fill="#0c1e34"/>
+    <line x1="0" y1="38" x2="365" y2="38" stroke="#16385d" stroke-width="1.2"/>
+
+    <!-- Drawer Title Pill -->
+    <rect x="18" y="11" width="125" height="16" rx="4" fill="#071324" stroke="#1a3d66" stroke-width="1"/>
+    <circle cx="28" cy="19" r="3.5" fill="#00e5a3" filter="url(#neonGlow)"/>
+    <rect x="38" y="16" width="90" height="6" rx="2" fill="#00e5a3" opacity="0.85"/>
+
+    <!-- Counter Badge -->
+    <rect x="300" y="11" width="48" height="16" rx="8" fill="#102e48" stroke="#00f2fe" stroke-width="1"/>
+    <circle cx="312" cy="19" r="3" fill="#00f2fe" filter="url(#neonGlow)"/>
+    <rect x="320" y="16" width="20" height="6" rx="2" fill="#ffffff"/>
+
+    <!-- =================================================================== -->
+    <!-- WORKTREE SLOTS (STACKED WORKTREES)                                  -->
+    <!-- =================================================================== -->
+    <g id="worktree-cards" transform="translate(18, 52)">
+
+      <!-- WORKTREE 1: CLEAN MAIN WORKTREE -->
+      <g transform="translate(0, 0)">
+        <rect width="329" height="74" rx="8" fill="#0b223c" stroke="#00e5a3" stroke-width="1.8" filter="url(#neonGlow)"/>
+        <!-- Status dot -->
+        <circle cx="20" cy="22" r="5" fill="#00e5a3" filter="url(#strongGlow)"/>
+        <circle cx="20" cy="22" r="2" fill="#ffffff"/>
+        <!-- Branch Tag -->
+        <rect x="34" y="18" width="95" height="8" rx="2" fill="#00e5a3"/>
+        <rect x="250" y="16" width="62" height="14" rx="4" fill="#062d2a" stroke="#00e5a3" stroke-width="1"/>
+        <rect x="260" y="21" width="42" height="4" rx="1.5" fill="#00e5a3"/>
+        <!-- Git Branch Tree Graphic -->
+        <path d="M 20 48 L 70 48 L 95 48 L 220 48" fill="none" stroke="#00e5a3" stroke-width="2"/>
+        <circle cx="20" cy="48" r="3.5" fill="#00e5a3"/>
+        <circle cx="70" cy="48" r="3.5" fill="#ffffff"/>
+        <circle cx="150" cy="48" r="3.5" fill="#00e5a3"/>
+        <circle cx="220" cy="48" r="3.5" fill="#00f2fe" filter="url(#neonGlow)"/>
+      </g>
+
+      <!-- WORKTREE 2: STALE BRANCH CURRENTLY BEING SWEPT & PRUNED -->
+      <g transform="translate(0, 86)">
+        <rect width="329" height="74" rx="8" fill="#0a1b30" stroke="#00f2fe" stroke-width="1.8" stroke-dasharray="6 4"/>
+        <circle cx="20" cy="22" r="4.5" fill="#00f2fe" filter="url(#strongGlow)"/>
+        <!-- Branch Tag (Fading / Purging) -->
+        <rect x="34" y="18" width="115" height="8" rx="2" fill="#00f2fe" opacity="0.9"/>
+        <!-- Pruned Status Pill -->
+        <rect x="245" y="16" width="68" height="14" rx="4" fill="#082236" stroke="#00f2fe" stroke-width="1"/>
+        <rect x="254" y="21" width="50" height="4" rx="1.5" fill="#00f2fe"/>
+        <!-- Branch Tree dissolving / pruned -->
+        <path d="M 20 48 L 65 48 L 90 34 L 140 34" fill="none" stroke="#00f2fe" stroke-width="1.8" stroke-dasharray="4 3"/>
+        <path d="M 65 48 L 130 48" fill="none" stroke="#1d4875" stroke-width="1.5"/>
+        <circle cx="20" cy="48" r="3" fill="#00f2fe"/>
+        <circle cx="65" cy="48" r="3" fill="#00f2fe"/>
+        <circle cx="90" cy="34" r="3" fill="#ffffff" filter="url(#neonGlow)"/>
+        <!-- Sweeping Sparkles / Disintegration Nodes -->
+        <circle cx="160" cy="34" r="2.5" fill="#00f2fe" opacity="0.8"/>
+        <circle cx="180" cy="38" r="2" fill="#00e5a3" opacity="0.6"/>
+        <circle cx="205" cy="32" r="1.5" fill="#ffffff"/>
+      </g>
+
+      <!-- WORKTREE 3: PRUNED / RECYCLED WORKTREE SLOT -->
+      <g transform="translate(0, 172)">
+        <rect width="329" height="74" rx="8" fill="#081628" stroke="#183658" stroke-width="1.2"/>
+        <circle cx="20" cy="22" r="3.5" fill="#1b4670"/>
+        <rect x="34" y="18" width="80" height="8" rx="2" fill="#1b4670"/>
+        <!-- Recycled Badge -->
+        <rect x="255" y="16" width="58" height="14" rx="4" fill="#091b2e" stroke="#1b4670" stroke-width="1"/>
+        <rect x="264" y="21" width="40" height="4" rx="1.5" fill="#2d689e"/>
+        <!-- Empty / Cleaned Branch Slot -->
+        <path d="M 20 48 L 180 48" fill="none" stroke="#163454" stroke-width="1.5" stroke-dasharray="3 3"/>
+        <circle cx="20" cy="48" r="3" fill="#163454"/>
+        <circle cx="80" cy="48" r="2.5" fill="#163454"/>
+      </g>
+
+      <!-- SUMMARY STATUS BAR AT BOTTOM OF DRAWER -->
+      <g transform="translate(0, 258)">
+        <rect width="329" height="58" rx="8" fill="#0c233d" stroke="#1a4670" stroke-width="1.2"/>
+        <!-- Mini Metrics / Hygiene Health -->
+        <circle cx="24" cy="29" r="6" fill="#00e5a3" filter="url(#strongGlow)"/>
+        <circle cx="24" cy="29" r="2.5" fill="#ffffff"/>
+        <!-- Metrics Bars -->
+        <rect x="42" y="20" width="80" height="7" rx="2" fill="#00e5a3"/>
+        <rect x="42" y="32" width="130" height="5" rx="1.5" fill="#2a6090"/>
+        <!-- Right side Progress Ring / Gauge -->
+        <g transform="translate(285, 29)">
+          <circle cx="0" cy="0" r="16" fill="none" stroke="#102e48" stroke-width="3"/>
+          <path d="M 0 -16 A 16 16 0 1 1 -15 6" fill="none" stroke="#00f2fe" stroke-width="3" filter="url(#neonGlow)"/>
+          <circle cx="0" cy="0" r="4" fill="#00e5a3" filter="url(#strongGlow)"/>
+        </g>
+      </g>
+    </g>
+  </g>
+
+  <!-- ===================================================================== -->
+  <!-- CENTERPIECE: HIGH-TECH VECTOR BROOM & DIGITAL SWEEPING DYNAMICS       -->
+  <!-- ===================================================================== -->
+  <!-- Sweeper is dynamically angled at ~42 degrees sweeping between calendar and worktrees -->
+  <g id="cyber-broom-system" transform="translate(560, 40)">
+
+    <!-- SWEEP ENERGY AURA / TRAIL OF PRUNED LIGHT -->
+    <g id="sweep-particles" opacity="0.95">
+      <!-- Broad Sweeping Arc Waves -->
+      <path d="M 40 330 C -20 370 -90 350 -180 320" 
+            fill="none" stroke="url(#cyanTealGrad)" stroke-width="3" stroke-linecap="round" opacity="0.8" filter="url(#neonGlow)"/>
+      <path d="M 70 345 C 10 395 -60 380 -160 350" 
+            fill="none" stroke="url(#cyanBlueGrad)" stroke-width="2" stroke-linecap="round" opacity="0.6"/>
+      <path d="M 10 315 C -50 340 -120 320 -200 290" 
+            fill="none" stroke="#00e5a3" stroke-width="1.8" stroke-dasharray="8 6" opacity="0.75" filter="url(#neonGlow)"/>
+
+      <!-- Digital Debris / Pruned Stale Commits Dissolving Into Sparkles -->
+      <g filter="url(#strongGlow)">
+        <circle cx="-30" cy="340" r="4" fill="#ffffff"/>
+        <circle cx="-75" cy="355" r="3" fill="#00f2fe"/>
+        <circle cx="-120" cy="335" r="3.5" fill="#00e5a3"/>
+        <circle cx="-150" cy="360" r="2.5" fill="#00f2fe"/>
+        <circle cx="-190" cy="310" r="2" fill="#ffffff"/>
+        <circle cx="-60" cy="380" r="2" fill="#00e5a3"/>
+        <circle cx="-100" cy="390" r="2.5" fill="#00f2fe"/>
+        <circle cx="20" cy="360" r="3" fill="#00f2fe"/>
+      </g>
+
+      <!-- Geometry Diamond Sparkles -->
+      <g fill="#00f2fe" opacity="0.9" filter="url(#neonGlow)">
+        <polygon points="-45,310 -41,315 -45,320 -49,315"/>
+        <polygon points="-110,365 -106,370 -110,375 -114,370"/>
+        <polygon points="-165,330 -161,335 -165,340 -169,335"/>
+        <polygon points="5,330 9,335 5,340 1,335"/>
+      </g>
+    </g>
+
+    <!-- BROOM APPARATUS (ANGLED TRANSFORM) -->
+    <g transform="rotate(40, 130, 240)">
+
+      <!-- 1. Sleek Handle Shaft (Neon Cyan & Obsidian Cyber Staff) -->
+      <g id="broom-handle">
+        <!-- Glow Backing -->
+        <line x1="130" y1="-30" x2="130" y2="240" stroke="#00f2fe" stroke-width="10" opacity="0.25" filter="url(#strongGlow)"/>
+        <!-- Outer Carbon / Navy Rod -->
+        <line x1="130" y1="-30" x2="130" y2="240" stroke="#081c34" stroke-width="7" stroke-linecap="round"/>
+        <!-- Glowing Cyan Energy Core -->
+        <line x1="130" y1="-25" x2="130" y2="235" stroke="url(#cyanTealGrad)" stroke-width="3.5" stroke-linecap="round" filter="url(#neonGlow)"/>
+        <line x1="130" y1="-20" x2="130" y2="230" stroke="#ffffff" stroke-width="1.2" opacity="0.8"/>
+
+        <!-- Top Cap / Terminal Finial -->
+        <circle cx="130" cy="-30" r="6" fill="#0c233d" stroke="#00f2fe" stroke-width="2"/>
+        <circle cx="130" cy="-30" r="2.5" fill="#00e5a3" filter="url(#strongGlow)"/>
+
+        <!-- Cybernetic Grip Rings -->
+        <rect x="124" y="20" width="12" height="6" rx="2" fill="#00f2fe" opacity="0.8"/>
+        <rect x="124" y="32" width="12" height="6" rx="2" fill="#00f2fe" opacity="0.8"/>
+        <rect x="124" y="44" width="12" height="6" rx="2" fill="#00f2fe" opacity="0.8"/>
+
+        <!-- Mid-Shaft Coupler Node -->
+        <g transform="translate(130, 110)">
+          <rect x="-10" y="-8" width="20" height="16" rx="4" fill="#0b2440" stroke="#00f2fe" stroke-width="1.8"/>
+          <circle cx="0" cy="0" r="3.5" fill="#00e5a3" filter="url(#strongGlow)"/>
+          <circle cx="0" cy="0" r="1.5" fill="#ffffff"/>
+        </g>
+
+        <!-- Lower Grip Ring -->
+        <rect x="124" y="170" width="12" height="6" rx="2" fill="#00f2fe" opacity="0.7"/>
+        <rect x="124" y="182" width="12" height="6" rx="2" fill="#00f2fe" opacity="0.7"/>
+      </g>
+
+      <!-- 2. Broom Head Ferrule / Block (High-Tech Developer Tool Collar) -->
+      <g id="broom-collar" transform="translate(130, 240)">
+        <!-- Ferrule Body -->
+        <path d="M -48 0 L 48 0 L 62 38 L -62 38 Z" fill="#0c233d" stroke="#00f2fe" stroke-width="2" filter="url(#cardShadow)"/>
+        <!-- Accent Stripe -->
+        <polygon points="-44,4 44,4 46,12 -46,12" fill="#071324"/>
+        <line x1="-38" y1="8" x2="38" y2="8" stroke="#00e5a3" stroke-width="2" filter="url(#neonGlow)"/>
+
+        <!-- Circuit Tech Detailing on Collar -->
+        <path d="M -30 20 L -10 20 L -5 28 L 5 28 L 10 20 L 30 20" fill="none" stroke="#00f2fe" stroke-width="1.5"/>
+        <circle cx="-30" cy="20" r="2.5" fill="#00e5a3"/>
+        <circle cx="30" cy="20" r="2.5" fill="#00f2fe"/>
+        <circle cx="0" cy="28" r="3" fill="#ffffff" filter="url(#neonGlow)"/>
+
+        <!-- Lower Collar Guard -->
+        <rect x="-64" y="36" width="128" height="6" rx="2" fill="#0e2f50" stroke="#00e5a3" stroke-width="1.5"/>
+      </g>
+
+      <!-- 3. Broom Bristles (Digital Luminous Sweeper Fiber Array) -->
+      <g id="broom-bristles" transform="translate(130, 282)">
+        <!-- Underlying Glow Field -->
+        <path d="M -64 0 L 64 0 L 88 85 L -88 85 Z" fill="url(#broomSweepAura)" opacity="0.6"/>
+
+        <!-- Individual Precision Energy Bristles -->
+        <!-- Center Cluster (Longest, Sharpest) -->
+        <line x1="0" y1="0" x2="0" y2="92" stroke="url(#broomBristleGrad)" stroke-width="3" stroke-linecap="round"/>
+        <line x1="-6" y1="0" x2="-8" y2="90" stroke="url(#broomBristleGrad)" stroke-width="2.5" stroke-linecap="round"/>
+        <line x1="6" y1="0" x2="8" y2="90" stroke="url(#broomBristleGrad)" stroke-width="2.5" stroke-linecap="round"/>
+
+        <line x1="-14" y1="0" x2="-18" y2="88" stroke="url(#broomBristleGrad)" stroke-width="2.2" stroke-linecap="round"/>
+        <line x1="14" y1="0" x2="18" y2="88" stroke="url(#broomBristleGrad)" stroke-width="2.2" stroke-linecap="round"/>
+
+        <line x1="-22" y1="0" x2="-28" y2="86" stroke="url(#broomBristleGrad)" stroke-width="2" stroke-linecap="round"/>
+        <line x1="22" y1="0" x2="28" y2="86" stroke="url(#broomBristleGrad)" stroke-width="2" stroke-linecap="round"/>
+
+        <line x1="-30" y1="0" x2="-40" y2="84" stroke="url(#broomBristleGrad)" stroke-width="2" stroke-linecap="round"/>
+        <line x1="30" y1="0" x2="40" y2="84" stroke="url(#broomBristleGrad)" stroke-width="2" stroke-linecap="round"/>
+
+        <line x1="-38" y1="0" x2="-52" y2="82" stroke="url(#broomBristleGrad)" stroke-width="1.8" stroke-linecap="round"/>
+        <line x1="38" y1="0" x2="52" y2="82" stroke="url(#broomBristleGrad)" stroke-width="1.8" stroke-linecap="round"/>
+
+        <line x1="-46" y1="0" x2="-64" y2="78" stroke="url(#broomBristleGrad)" stroke-width="1.8" stroke-linecap="round"/>
+        <line x1="46" y1="0" x2="64" y2="78" stroke="url(#broomBristleGrad)" stroke-width="1.8" stroke-linecap="round"/>
+
+        <line x1="-54" y1="0" x2="-76" y2="74" stroke="url(#broomBristleGrad)" stroke-width="1.5" stroke-linecap="round"/>
+        <line x1="54" y1="0" x2="76" y2="74" stroke="url(#broomBristleGrad)" stroke-width="1.5" stroke-linecap="round"/>
+
+        <line x1="-62" y1="0" x2="-88" y2="70" stroke="url(#broomBristleGrad)" stroke-width="1.5" stroke-linecap="round"/>
+        <line x1="62" y1="0" x2="88" y2="70" stroke="url(#broomBristleGrad)" stroke-width="1.5" stroke-linecap="round"/>
+
+        <!-- Sweeping Contact Points / Sparking Tips -->
+        <g filter="url(#strongGlow)">
+          <circle cx="0" cy="92" r="3" fill="#ffffff"/>
+          <circle cx="-8" cy="90" r="2.5" fill="#00e5a3"/>
+          <circle cx="8" cy="90" r="2.5" fill="#00f2fe"/>
+          <circle cx="-28" cy="86" r="2" fill="#00f2fe"/>
+          <circle cx="28" cy="86" r="2" fill="#00e5a3"/>
+          <circle cx="-52" cy="82" r="2" fill="#ffffff"/>
+          <circle cx="52" cy="82" r="2" fill="#00f2fe"/>
+          <circle cx="-76" cy="74" r="1.8" fill="#00e5a3"/>
+          <circle cx="76" cy="74" r="1.8" fill="#00e5a3"/>
+        </g>
+      </g>
+    </g>
+  </g>
+
+  <!-- ===================================================================== -->
+  <!-- BOTTOM SECTION: EXACTLY 3 WORDS OF TEXT & TECHNICAL ANCHORS           -->
+  <!-- ===================================================================== -->
+  <g id="title-section" transform="translate(600, 536)" text-anchor="middle">
+    <!-- Glow Backdrop for Title -->
+    <text font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'JetBrains Mono', sans-serif" 
+          font-size="44" font-weight="900" letter-spacing="3.5" fill="#00f2fe" opacity="0.35" filter="url(#textGlow)">
+      WEEKLY REPO HYGIENE
+    </text>
+
+    <!-- Crisp Primary Title: EXACTLY 3 WORDS -->
+    <text font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'JetBrains Mono', sans-serif" 
+          font-size="44" font-weight="900" letter-spacing="3.5">
+      <tspan fill="#ffffff">WEEKLY </tspan>
+      <tspan fill="#ffffff">REPO </tspan>
+      <tspan fill="#00f2fe">HYGIENE</tspan>
+    </text>
+
+    <!-- Technical Neon Divider Line -->
+    <line x1="-360" y1="24" x2="360" y2="24" stroke="url(#cyanTealGrad)" stroke-width="2.5" filter="url(#neonGlow)"/>
+    <circle cx="-360" cy="24" r="4.5" fill="#00f2fe" filter="url(#strongGlow)"/>
+    <circle cx="360" cy="24" r="4.5" fill="#00e5a3" filter="url(#strongGlow)"/>
+    <circle cx="0" cy="24" r="3" fill="#ffffff"/>
+
+    <!-- Subtle Abstract Alignment Reticles (Zero Extra Words) -->
+    <line x1="-360" y1="36" x2="-290" y2="36" stroke="#1d4a75" stroke-width="1.5"/>
+    <circle cx="-290" cy="36" r="2.5" fill="#00f2fe" opacity="0.8"/>
+    <line x1="-210" y1="36" x2="-140" y2="36" stroke="#1d4a75" stroke-width="1"/>
+    
+    <line x1="360" y1="36" x2="290" y2="36" stroke="#1d4a75" stroke-width="1.5"/>
+    <circle cx="290" cy="36" r="2.5" fill="#00e5a3" opacity="0.8"/>
+    <line x1="210" y1="36" x2="140" y2="36" stroke="#1d4a75" stroke-width="1"/>
+
+    <circle cx="-50" cy="36" r="2" fill="#1b4168"/>
+    <circle cx="0" cy="36" r="2.5" fill="#00f2fe" opacity="0.6"/>
+    <circle cx="50" cy="36" r="2" fill="#1b4168"/>
+  </g>
+</svg>

@@ -1,0 +1,407 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <defs>
+    <!-- Background Gradients -->
+    <radialGradient id="bgGrad" cx="50%" cy="45%" r="75%">
+      <stop offset="0%" stop-color="#0c2340" stop-opacity="1"/>
+      <stop offset="40%" stop-color="#071426" stop-opacity="1"/>
+      <stop offset="80%" stop-color="#040913" stop-opacity="1"/>
+      <stop offset="100%" stop-color="#02050a" stop-opacity="1"/>
+    </radialGradient>
+
+    <!-- Morning Dawn Horizon Glow -->
+    <radialGradient id="morningGlow" cx="50%" cy="58%" r="50%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.22"/>
+      <stop offset="35%" stop-color="#0284c7" stop-opacity="0.14"/>
+      <stop offset="70%" stop-color="#0369a1" stop-opacity="0.05"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="sunRiseAura" cx="50%" cy="50%" r="48%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.3"/>
+      <stop offset="50%" stop-color="#0ea5e9" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Glow Filters -->
+    <filter id="cyanGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="7" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <filter id="softGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <filter id="strongGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="15" result="blur1"/>
+      <feGaussianBlur stdDeviation="6" result="blur2"/>
+      <feMerge>
+        <feMergeNode in="blur1"/>
+        <feMergeNode in="blur2"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Linear Gradients for UI Panes -->
+    <linearGradient id="panelBgCenter" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0f2238" stop-opacity="0.88"/>
+      <stop offset="100%" stop-color="#081424" stop-opacity="0.94"/>
+    </linearGradient>
+
+    <linearGradient id="panelBgSide" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0a1a2e" stop-opacity="0.82"/>
+      <stop offset="100%" stop-color="#050d18" stop-opacity="0.90"/>
+    </linearGradient>
+
+    <linearGradient id="cyanBorder" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.9"/>
+      <stop offset="50%" stop-color="#38bdf8" stop-opacity="0.4"/>
+      <stop offset="100%" stop-color="#0284c7" stop-opacity="0.7"/>
+    </linearGradient>
+
+    <linearGradient id="blueBorder" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="#1e3a8a" stop-opacity="0.3"/>
+    </linearGradient>
+
+    <linearGradient id="headerGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#132a45"/>
+      <stop offset="100%" stop-color="#0a1728"/>
+    </linearGradient>
+
+    <linearGradient id="waveGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0.4"/>
+      <stop offset="100%" stop-color="#00f2fe" stop-opacity="0.0"/>
+    </linearGradient>
+
+    <linearGradient id="lineAccentGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00f2fe" stop-opacity="0"/>
+      <stop offset="25%" stop-color="#00f2fe" stop-opacity="0.8"/>
+      <stop offset="50%" stop-color="#38bdf8" stop-opacity="1"/>
+      <stop offset="75%" stop-color="#00f2fe" stop-opacity="0.8"/>
+      <stop offset="100%" stop-color="#00f2fe" stop-opacity="0"/>
+    </linearGradient>
+
+    <!-- Grid Pattern -->
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#172e4c" stroke-width="0.8" opacity="0.4"/>
+      <circle cx="0" cy="0" r="1" fill="#38bdf8" opacity="0.35"/>
+    </pattern>
+  </defs>
+
+  <!-- ==================== BASE BACKGROUND ==================== -->
+  <rect width="1200" height="630" fill="url(#bgGrad)"/>
+  <rect width="1200" height="630" fill="url(#grid)"/>
+
+  <!-- Morning Sunrise Glow across Horizon -->
+  <ellipse cx="600" cy="310" rx="480" ry="260" fill="url(#morningGlow)"/>
+  <circle cx="600" cy="270" r="190" fill="url(#sunRiseAura)"/>
+
+  <!-- Abstract Morning Sun Arc (Dawn Geometry) -->
+  <g transform="translate(600, 270)">
+    <!-- Concentric Halo Rings -->
+    <circle cx="0" cy="0" r="230" fill="none" stroke="#00f2fe" stroke-width="1" stroke-dasharray="3 9" opacity="0.25"/>
+    <circle cx="0" cy="0" r="180" fill="none" stroke="#38bdf8" stroke-width="1.2" stroke-dasharray="12 16" opacity="0.3"/>
+    <circle cx="0" cy="0" r="130" fill="none" stroke="#0284c7" stroke-width="1.5" stroke-dasharray="8 8" opacity="0.35"/>
+    <circle cx="0" cy="0" r="70" fill="none" stroke="#00f2fe" stroke-width="1.8" opacity="0.5" filter="url(#softGlow)"/>
+
+    <!-- Rising Sun Meridian Rays -->
+    <line x1="-280" y1="0" x2="280" y2="0" stroke="#00f2fe" stroke-width="1" stroke-dasharray="8 6" opacity="0.3"/>
+    <line x1="-198" y1="-198" x2="198" y2="198" stroke="#38bdf8" stroke-width="0.8" stroke-dasharray="4 8" opacity="0.2"/>
+    <line x1="198" y1="-198" x2="-198" y2="198" stroke="#38bdf8" stroke-width="0.8" stroke-dasharray="4 8" opacity="0.2"/>
+    <line x1="0" y1="-260" x2="0" y2="260" stroke="#00f2fe" stroke-width="0.8" stroke-dasharray="4 6" opacity="0.25"/>
+  </g>
+
+  <!-- ==================== CIRCUIT & BUS LINES ==================== -->
+  <g opacity="0.6">
+    <!-- Connecting traces between panes -->
+    <path d="M 280 230 L 400 230 L 440 200 L 760 200 L 800 230 L 920 230" fill="none" stroke="#0ea5e9" stroke-width="1.2" stroke-dasharray="6 6"/>
+    <path d="M 330 350 L 420 350 L 450 380 L 750 380 L 780 350 L 870 350" fill="none" stroke="#00f2fe" stroke-width="1" opacity="0.4"/>
+    
+    <!-- Data points -->
+    <circle cx="440" cy="200" r="3" fill="#00f2fe" filter="url(#softGlow)"/>
+    <circle cx="760" cy="200" r="3" fill="#00f2fe" filter="url(#softGlow)"/>
+    <circle cx="450" cy="380" r="2.5" fill="#38bdf8"/>
+    <circle cx="750" cy="380" r="2.5" fill="#38bdf8"/>
+  </g>
+
+  <!-- ==================== LEFT AGENT STATUS PANE ==================== -->
+  <g transform="translate(100, 160)">
+    <!-- Shadow & Glow -->
+    <rect x="0" y="0" width="310" height="230" rx="8" fill="#030812" opacity="0.6" filter="url(#softGlow)"/>
+    <!-- Body -->
+    <rect x="0" y="0" width="310" height="230" rx="8" fill="url(#panelBgSide)" stroke="url(#blueBorder)" stroke-width="1.5"/>
+    
+    <!-- Window Titlebar -->
+    <rect x="0" y="0" width="310" height="28" rx="8" fill="url(#headerGrad)"/>
+    <rect x="0" y="20" width="310" height="8" fill="url(#headerGrad)"/>
+    <line x1="0" y1="28" x2="310" y2="28" stroke="#1d3859" stroke-width="1"/>
+    
+    <!-- Window Dots -->
+    <circle cx="16" cy="14" r="4" fill="#f43f5e" opacity="0.8"/>
+    <circle cx="30" cy="14" r="4" fill="#fbbf24" opacity="0.8"/>
+    <circle cx="44" cy="14" r="4" fill="#10b981" opacity="0.8"/>
+
+    <!-- Pane Tab Indicator -->
+    <rect x="64" y="8" width="60" height="12" rx="3" fill="#173152"/>
+    <rect x="132" y="8" width="45" height="12" rx="3" fill="#0d1f35"/>
+
+    <!-- Split Pane Division (Terminal Layout) -->
+    <line x1="150" y1="28" x2="150" y2="230" stroke="#172e4c" stroke-width="1.2"/>
+    
+    <!-- Left Subpane Content (Session A) -->
+    <!-- Status Dot & Pill -->
+    <circle cx="22" cy="46" r="3.5" fill="#10b981" filter="url(#softGlow)"/>
+    <rect x="32" y="42" width="55" height="8" rx="2" fill="#10b981" opacity="0.3"/>
+    
+    <!-- Abstract CLI Activity lines -->
+    <rect x="18" y="62" width="90" height="5" rx="2" fill="#38bdf8" opacity="0.6"/>
+    <rect x="18" y="74" width="115" height="5" rx="2" fill="#1e3a5f"/>
+    <rect x="18" y="86" width="75" height="5" rx="2" fill="#1e3a5f"/>
+    <rect x="18" y="98" width="105" height="5" rx="2" fill="#00f2fe" opacity="0.5"/>
+    <rect x="18" y="110" width="60" height="5" rx="2" fill="#1e3a5f"/>
+
+    <!-- Progress / Worktree bar -->
+    <rect x="18" y="132" width="115" height="4" rx="2" fill="#0c1d30"/>
+    <rect x="18" y="132" width="85" height="4" rx="2" fill="#00f2fe"/>
+    
+    <rect x="18" y="150" width="100" height="5" rx="2" fill="#1e3a5f"/>
+    <rect x="18" y="162" width="80" height="5" rx="2" fill="#1e3a5f"/>
+    <rect x="18" y="174" width="110" height="5" rx="2" fill="#38bdf8" opacity="0.4"/>
+    <rect x="18" y="196" width="45" height="14" rx="3" fill="#00f2fe" opacity="0.2" stroke="#00f2fe" stroke-width="0.8"/>
+    <circle cx="26" cy="203" r="2.5" fill="#00f2fe"/>
+
+    <!-- Right Subpane Content (Session B) -->
+    <circle cx="168" cy="46" r="3.5" fill="#00f2fe" filter="url(#softGlow)"/>
+    <rect x="178" y="42" width="50" height="8" rx="2" fill="#00f2fe" opacity="0.3"/>
+
+    <rect x="165" y="62" width="125" height="5" rx="2" fill="#1e3a5f"/>
+    <rect x="165" y="74" width="95" height="5" rx="2" fill="#1e3a5f"/>
+    <rect x="165" y="86" width="110" height="5" rx="2" fill="#38bdf8" opacity="0.5"/>
+    <rect x="165" y="98" width="70" height="5" rx="2" fill="#1e3a5f"/>
+
+    <!-- Mini chart / sparkline in Right Subpane -->
+    <path d="M 165 140 L 185 130 L 205 135 L 225 120 L 245 128 L 265 112 L 285 118" fill="none" stroke="#00f2fe" stroke-width="1.5" filter="url(#softGlow)"/>
+    <circle cx="285" cy="118" r="3" fill="#00f2fe"/>
+
+    <rect x="165" y="160" width="120" height="5" rx="2" fill="#1e3a5f"/>
+    <rect x="165" y="172" width="85" height="5" rx="2" fill="#1e3a5f"/>
+    <rect x="165" y="196" width="45" height="14" rx="3" fill="#38bdf8" opacity="0.2" stroke="#38bdf8" stroke-width="0.8"/>
+    <circle cx="173" cy="203" r="2.5" fill="#38bdf8"/>
+  </g>
+
+  <!-- ==================== RIGHT AGENT STATUS PANE ==================== -->
+  <g transform="translate(790, 160)">
+    <!-- Shadow & Glow -->
+    <rect x="0" y="0" width="310" height="230" rx="8" fill="#030812" opacity="0.6" filter="url(#softGlow)"/>
+    <!-- Body -->
+    <rect x="0" y="0" width="310" height="230" rx="8" fill="url(#panelBgSide)" stroke="url(#blueBorder)" stroke-width="1.5"/>
+    
+    <!-- Window Titlebar -->
+    <rect x="0" y="0" width="310" height="28" rx="8" fill="url(#headerGrad)"/>
+    <rect x="0" y="20" width="310" height="8" fill="url(#headerGrad)"/>
+    <line x1="0" y1="28" x2="310" y2="28" stroke="#1d3859" stroke-width="1"/>
+    
+    <!-- Window Dots -->
+    <circle cx="16" cy="14" r="4" fill="#f43f5e" opacity="0.8"/>
+    <circle cx="30" cy="14" r="4" fill="#fbbf24" opacity="0.8"/>
+    <circle cx="44" cy="14" r="4" fill="#10b981" opacity="0.8"/>
+
+    <!-- Attention Badge / Notification counter -->
+    <rect x="250" y="7" width="45" height="14" rx="7" fill="#0284c7" stroke="#38bdf8" stroke-width="1"/>
+    <circle cx="260" cy="14" r="3" fill="#00f2fe" filter="url(#softGlow)"/>
+    <line x1="268" y1="14" x2="285" y2="14" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/>
+
+    <!-- Pane Content: Agent Standup Metrics & Checks -->
+    <g transform="translate(20, 42)">
+      <!-- Item 1: Checked / Passed -->
+      <circle cx="10" cy="10" r="7" fill="#10b981" opacity="0.2" stroke="#10b981" stroke-width="1.5"/>
+      <path d="M 7 10 L 9 12 L 13 8" fill="none" stroke="#10b981" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      <rect x="26" y="7" width="140" height="6" rx="2" fill="#38bdf8" opacity="0.8"/>
+      <rect x="210" y="6" width="50" height="8" rx="2" fill="#10b981" opacity="0.3"/>
+
+      <!-- Item 2: Active Task -->
+      <circle cx="10" cy="36" r="7" fill="#00f2fe" opacity="0.2" stroke="#00f2fe" stroke-width="1.5"/>
+      <circle cx="10" cy="36" r="2.5" fill="#00f2fe" filter="url(#softGlow)"/>
+      <rect x="26" y="33" width="160" height="6" rx="2" fill="#e2e8f0" opacity="0.8"/>
+      <rect x="210" y="32" width="50" height="8" rx="2" fill="#00f2fe" opacity="0.3"/>
+
+      <!-- Item 3: In Review -->
+      <circle cx="10" cy="62" r="7" fill="#38bdf8" opacity="0.2" stroke="#38bdf8" stroke-width="1.5"/>
+      <path d="M 7 62 L 13 62" fill="none" stroke="#38bdf8" stroke-width="1.5" stroke-linecap="round"/>
+      <rect x="26" y="59" width="110" height="6" rx="2" fill="#64748b"/>
+      <rect x="210" y="58" width="50" height="8" rx="2" fill="#38bdf8" opacity="0.2"/>
+
+      <!-- Item 4: Queued -->
+      <circle cx="10" cy="88" r="7" fill="#64748b" opacity="0.2" stroke="#64748b" stroke-width="1.5"/>
+      <circle cx="10" cy="88" r="2" fill="#64748b"/>
+      <rect x="26" y="85" width="130" height="6" rx="2" fill="#475569"/>
+      <rect x="210" y="84" width="50" height="8" rx="2" fill="#475569" opacity="0.3"/>
+    </g>
+
+    <!-- Mini Telemetry Bar Chart at Bottom of Right Pane -->
+    <g transform="translate(20, 155)">
+      <line x1="0" y1="45" x2="270" y2="45" stroke="#1e3a5f" stroke-width="1"/>
+      <!-- Bars -->
+      <rect x="15" y="25" width="12" height="20" rx="2" fill="#1e3a5f"/>
+      <rect x="40" y="15" width="12" height="30" rx="2" fill="#0284c7"/>
+      <rect x="65" y="10" width="12" height="35" rx="2" fill="#38bdf8"/>
+      <rect x="90" y="5" width="12" height="40" rx="2" fill="#00f2fe" filter="url(#softGlow)"/>
+      <rect x="115" y="18" width="12" height="27" rx="2" fill="#38bdf8"/>
+      <rect x="140" y="12" width="12" height="33" rx="2" fill="#0284c7"/>
+      <rect x="165" y="22" width="12" height="23" rx="2" fill="#1e3a5f"/>
+      <rect x="190" y="8" width="12" height="37" rx="2" fill="#00f2fe"/>
+      <rect x="215" y="14" width="12" height="31" rx="2" fill="#38bdf8"/>
+      <rect x="240" y="28" width="12" height="17" rx="2" fill="#1e3a5f"/>
+    </g>
+  </g>
+
+  <!-- ==================== CENTER MASTER STANDUP BOARD ==================== -->
+  <g transform="translate(370, 110)">
+    <!-- Back Outer Glow -->
+    <rect x="-6" y="-6" width="472" height="312" rx="14" fill="#00f2fe" opacity="0.15" filter="url(#strongGlow)"/>
+    
+    <!-- Main Board Chassis -->
+    <rect x="0" y="0" width="460" height="300" rx="10" fill="url(#panelBgCenter)" stroke="url(#cyanBorder)" stroke-width="2"/>
+    <rect x="2" y="2" width="456" height="296" rx="8" fill="none" stroke="#00f2fe" stroke-width="0.8" opacity="0.4"/>
+
+    <!-- Title Bar -->
+    <rect x="0" y="0" width="460" height="36" rx="10" fill="url(#headerGrad)"/>
+    <rect x="0" y="26" width="460" height="10" fill="url(#headerGrad)"/>
+    <line x1="0" y1="36" x2="460" y2="36" stroke="#00f2fe" stroke-width="1.2" opacity="0.6"/>
+
+    <!-- Window Dots -->
+    <circle cx="20" cy="18" r="4.5" fill="#f43f5e"/>
+    <circle cx="36" cy="18" r="4.5" fill="#fbbf24"/>
+    <circle cx="52" cy="18" r="4.5" fill="#10b981"/>
+
+    <!-- Morning Standup Master Indicator (Pill + Pulse) -->
+    <rect x="80" y="10" width="110" height="16" rx="8" fill="#082f49" stroke="#00f2fe" stroke-width="1"/>
+    <circle cx="92" cy="18" r="3.5" fill="#00f2fe" filter="url(#cyanGlow)"/>
+    <line x1="102" y1="18" x2="175" y2="18" stroke="#38bdf8" stroke-width="2" stroke-linecap="round"/>
+
+    <!-- Header Right Icons / Controls -->
+    <rect x="360" y="11" width="38" height="14" rx="3" fill="#173152"/>
+    <rect x="406" y="11" width="38" height="14" rx="3" fill="#00f2fe" opacity="0.25" stroke="#00f2fe" stroke-width="0.8"/>
+    <circle cx="425" cy="18" r="3" fill="#00f2fe"/>
+
+    <!-- Center Dashboard Body -->
+    <!-- Top 3 Standup Status Cards (Agent Panes Summary) -->
+    <g transform="translate(18, 52)">
+      <!-- Card 1 -->
+      <rect x="0" y="0" width="132" height="66" rx="6" fill="#091b30" stroke="#1d4ed8" stroke-width="1"/>
+      <circle cx="16" cy="18" r="4" fill="#10b981" filter="url(#softGlow)"/>
+      <rect x="28" y="15" width="55" height="6" rx="2" fill="#38bdf8"/>
+      <rect x="14" y="32" width="104" height="4" rx="2" fill="#1e3a5f"/>
+      <rect x="14" y="44" width="70" height="4" rx="2" fill="#00f2fe" opacity="0.6"/>
+      <rect x="95" y="42" width="22" height="12" rx="3" fill="#10b981" opacity="0.25"/>
+      <circle cx="106" cy="48" r="2.5" fill="#10b981"/>
+
+      <!-- Card 2 (Active Focus) -->
+      <rect x="146" y="0" width="132" height="66" rx="6" fill="#0c2340" stroke="#00f2fe" stroke-width="1.5" filter="url(#softGlow)"/>
+      <circle cx="162" cy="18" r="4" fill="#00f2fe" filter="url(#cyanGlow)"/>
+      <rect x="174" y="15" width="60" height="6" rx="2" fill="#ffffff"/>
+      <rect x="160" y="32" width="104" height="4" rx="2" fill="#173152"/>
+      <rect x="160" y="32" width="78" height="4" rx="2" fill="#00f2fe"/>
+      <rect x="160" y="44" width="50" height="4" rx="2" fill="#38bdf8"/>
+      <rect x="241" y="42" width="22" height="12" rx="3" fill="#00f2fe" opacity="0.3"/>
+      <circle cx="252" cy="48" r="2.5" fill="#00f2fe"/>
+
+      <!-- Card 3 -->
+      <rect x="292" y="0" width="132" height="66" rx="6" fill="#091b30" stroke="#1e3a8a" stroke-width="1"/>
+      <circle cx="308" cy="18" r="4" fill="#38bdf8"/>
+      <rect x="320" y="15" width="50" height="6" rx="2" fill="#94a3b8"/>
+      <rect x="306" y="32" width="104" height="4" rx="2" fill="#1e3a5f"/>
+      <rect x="306" y="44" width="65" height="4" rx="2" fill="#38bdf8" opacity="0.5"/>
+      <rect x="387" y="42" width="22" height="12" rx="3" fill="#38bdf8" opacity="0.25"/>
+      <circle cx="398" cy="48" r="2.5" fill="#38bdf8"/>
+    </g>
+
+    <!-- Morning Activity Waveform Section (Telemetry Rollup) -->
+    <g transform="translate(18, 134)">
+      <!-- Backdrop Frame -->
+      <rect x="0" y="0" width="424" height="96" rx="6" fill="#061324" stroke="#172e4c" stroke-width="1"/>
+      
+      <!-- Grid lines inside wave section -->
+      <line x1="0" y1="24" x2="424" y2="24" stroke="#0e233d" stroke-width="0.8" stroke-dasharray="4 4"/>
+      <line x1="0" y1="48" x2="424" y2="48" stroke="#0e233d" stroke-width="0.8" stroke-dasharray="4 4"/>
+      <line x1="0" y1="72" x2="424" y2="72" stroke="#0e233d" stroke-width="0.8" stroke-dasharray="4 4"/>
+      <line x1="106" y1="0" x2="106" y2="96" stroke="#0e233d" stroke-width="0.8" stroke-dasharray="4 4"/>
+      <line x1="212" y1="0" x2="212" y2="96" stroke="#0e233d" stroke-width="0.8" stroke-dasharray="4 4"/>
+      <line x1="318" y1="0" x2="318" y2="96" stroke="#0e233d" stroke-width="0.8" stroke-dasharray="4 4"/>
+
+      <!-- Shaded Area Under Curve -->
+      <path d="M 12 76 Q 45 74 70 56 T 130 52 T 180 32 T 230 45 T 280 20 T 340 38 T 390 14 T 412 18 L 412 88 L 12 88 Z" fill="url(#waveGrad)"/>
+
+      <!-- Main Glowing Wave Line -->
+      <path d="M 12 76 Q 45 74 70 56 T 130 52 T 180 32 T 230 45 T 280 20 T 340 38 T 390 14 T 412 18" fill="none" stroke="#00f2fe" stroke-width="2.5" filter="url(#cyanGlow)"/>
+
+      <!-- Peak Nodes on Wave -->
+      <circle cx="180" cy="32" r="3.5" fill="#ffffff" filter="url(#softGlow)"/>
+      <circle cx="280" cy="20" r="3.5" fill="#ffffff" filter="url(#softGlow)"/>
+      <circle cx="390" cy="14" r="4.5" fill="#00f2fe" filter="url(#strongGlow)"/>
+      <circle cx="390" cy="14" r="2" fill="#ffffff"/>
+    </g>
+
+    <!-- Bottom Status Strip (Panes Synced & Ready) -->
+    <g transform="translate(18, 244)">
+      <rect x="0" y="0" width="424" height="40" rx="6" fill="#091b30" stroke="#1d4ed8" stroke-width="1"/>
+      
+      <!-- Status Badges -->
+      <rect x="12" y="11" width="70" height="18" rx="4" fill="#00f2fe" opacity="0.15" stroke="#00f2fe" stroke-width="1"/>
+      <circle cx="24" cy="20" r="3.5" fill="#00f2fe" filter="url(#softGlow)"/>
+      <line x1="34" y1="20" x2="72" y2="20" stroke="#38bdf8" stroke-width="2" stroke-linecap="round"/>
+
+      <rect x="94" y="11" width="70" height="18" rx="4" fill="#10b981" opacity="0.15" stroke="#10b981" stroke-width="1"/>
+      <circle cx="106" cy="20" r="3.5" fill="#10b981" filter="url(#softGlow)"/>
+      <line x1="116" y1="20" x2="154" y2="20" stroke="#34d399" stroke-width="2" stroke-linecap="round"/>
+
+      <rect x="176" y="11" width="70" height="18" rx="4" fill="#38bdf8" opacity="0.15" stroke="#38bdf8" stroke-width="1"/>
+      <circle cx="188" cy="20" r="3.5" fill="#38bdf8"/>
+      <line x1="198" y1="20" x2="236" y2="20" stroke="#38bdf8" stroke-width="2" stroke-linecap="round"/>
+
+      <!-- Session Progress Indicator -->
+      <line x1="270" y1="20" x2="410" y2="20" stroke="#172e4c" stroke-width="4" stroke-linecap="round"/>
+      <line x1="270" y1="20" x2="385" y2="20" stroke="#00f2fe" stroke-width="4" stroke-linecap="round" filter="url(#softGlow)"/>
+    </g>
+  </g>
+
+  <!-- ==================== ABSTRACT CORNER BRACKETS ==================== -->
+  <g stroke="#00f2fe" stroke-width="1.5" opacity="0.4" fill="none">
+    <!-- Top-Left -->
+    <path d="M 40 60 L 40 40 L 60 40"/>
+    <!-- Top-Right -->
+    <path d="M 1140 40 L 1160 40 L 1160 60"/>
+    <!-- Bottom-Left -->
+    <path d="M 40 570 L 40 590 L 60 590"/>
+    <!-- Bottom-Right -->
+    <path d="M 1140 590 L 1160 590 L 1160 570"/>
+  </g>
+
+  <!-- ==================== TYPOGRAPHY: EXACTLY 2 WORDS ==================== -->
+  <!-- Strict constraint: Max 3 words of text, clean developer aesthetic   -->
+  <!-- Text: "MORNING STANDUP" (2 words)                                     -->
+  <!-- ===================================================================== -->
+  <g transform="translate(600, 526)" text-anchor="middle">
+    <!-- Diffuse Text Backlight Glow -->
+    <ellipse cx="0" cy="-6" rx="280" ry="28" fill="#00f2fe" fill-opacity="0.12" filter="url(#strongGlow)"/>
+
+    <!-- Main Title -->
+    <text x="0" y="8" font-family="Helvetica Neue, Helvetica, Arial, -apple-system, sans-serif" font-size="46" font-weight="900" letter-spacing="4" fill="#ffffff">
+      MORNING <tspan fill="#00f2fe" filter="url(#cyanGlow)">STANDUP</tspan>
+    </text>
+
+    <!-- Technical Baseline Accent Beam -->
+    <line x1="-220" y1="28" x2="220" y2="28" stroke="url(#lineAccentGrad)" stroke-width="2"/>
+    <circle cx="-220" cy="28" r="3" fill="#00f2fe"/>
+    <circle cx="220" cy="28" r="3" fill="#00f2fe"/>
+    <circle cx="0" cy="28" r="4" fill="#ffffff" filter="url(#cyanGlow)"/>
+  </g>
+</svg>
