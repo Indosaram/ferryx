@@ -5,6 +5,7 @@ pub mod path_select;
 pub mod inventory;
 pub mod projects;
 pub mod service;
+pub mod upload;
 
 #[cfg(test)]
 mod proxy_tests;

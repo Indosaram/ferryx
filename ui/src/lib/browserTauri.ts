@@ -146,8 +146,8 @@ export type BrowserDesignSnapshot = {
   dom_elements: BrowserDesignDomElement[];
 };
 export type DesignFeedbackDelivery = { pngPath: string; prompt: string; bytesWritten: number };
-export type DesignFeedbackTarget = { sessionId: string; label: string };
-export async function deliverDesignFeedback(request: { sessionId: string; memo: string; snapshot: BrowserDesignSnapshot }): Promise<DesignFeedbackDelivery> {
+export type DesignFeedbackTarget = { sessionId: string; label: string; workspaceId: string };
+export async function deliverDesignFeedback(request: { sessionId: string; memo: string; snapshot: BrowserDesignSnapshot; workspaceId?: string }): Promise<DesignFeedbackDelivery> {
   return invoke<DesignFeedbackDelivery>("cmd_design_feedback_deliver", request);
 }
 

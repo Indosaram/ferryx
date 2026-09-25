@@ -12,8 +12,8 @@ describe("BrowserDesignFeedbackPopover", () => {
     dom_elements: [{ id: "el-1", tag: "button", bounds: [1, 2, 100, 40] as [number, number, number, number] }],
   };
   const targets = [
-    { sessionId: "term-1", label: "Terminal 1" },
-    { sessionId: "term-2", label: "Terminal 2" },
+    { sessionId: "term-1", workspaceId: "ws-1", label: "Terminal 1" },
+    { sessionId: "term-2", workspaceId: "ws-1", label: "Terminal 2" },
   ];
 
   it("renders the thumbnail with a data:image/png;base64 src and shows the element summary text", () => {
@@ -57,7 +57,7 @@ describe("BrowserDesignFeedbackPopover", () => {
 
     fireEvent.click(sendBtn);
     expect(onSend).toHaveBeenCalledTimes(1);
-    expect(onSend).toHaveBeenCalledWith({ sessionId: "term-1", memo: "add 8px margin" });
+    expect(onSend).toHaveBeenCalledWith({ sessionId: "term-1", workspaceId: "ws-1", memo: "add 8px margin" });
   });
 
   it("choosing another option in the select and sending passes that sessionId instead", () => {
@@ -83,7 +83,7 @@ describe("BrowserDesignFeedbackPopover", () => {
     fireEvent.click(sendBtn);
 
     expect(onSend).toHaveBeenCalledTimes(1);
-    expect(onSend).toHaveBeenCalledWith({ sessionId: "term-2", memo: "fix padding" });
+    expect(onSend).toHaveBeenCalledWith({ sessionId: "term-2", workspaceId: "ws-1", memo: "fix padding" });
   });
 
   it("a non-null error prop renders inside role='alert' and onCancel fires when Cancel is clicked", () => {
@@ -123,7 +123,7 @@ describe("BrowserDesignFeedbackPopover", () => {
     const status = screen.getByRole("status");
     expect(status).toBeDefined();
     expect(status.textContent).toBe(
-      "No local terminal session in this workspace can receive the feedback.",
+      "No terminal session in this workspace can receive the feedback.",
     );
 
     const sendBtn = screen.getByRole("button", { name: "Send" });

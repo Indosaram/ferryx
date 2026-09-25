@@ -475,7 +475,7 @@ export function BrowserToolbar({
             if (!snapshot) return;
             setDesignSending(true);
             setDesignError(null);
-            void deliverDesignFeedback({ sessionId: request.sessionId, memo: request.memo, snapshot })
+            void deliverDesignFeedback({ sessionId: request.sessionId, memo: request.memo, snapshot, workspaceId: request.workspaceId })
               .then(() => { setDesignSnapshot(null); setDesignSending(false); })
               .catch((error) => {
                 setDesignError(error instanceof Error ? error.message : String(error));

@@ -6,6 +6,7 @@ use std::time::{Duration, SystemTime};
 use tauri::Manager;
 
 use crate::daemon::client::DaemonClient;
+use crate::daemon::protocol::DaemonResponse;
 use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
 use crate::remote::design_mode::DesignModeSnapshot;
 
@@ -145,12 +146,129 @@ fn write_capture(dir: &Path, timestamp_ms: u64, nonce: u64, bytes: &[u8]) -> Res
     ))
 }
 
+/// Where the capture lives for the target session: a file on this machine, or a path on the
+/// session's host.
+enum CaptureTarget {
+    Local(PathBuf),
+    Remote(String),
+}
+
+impl CaptureTarget {
+    fn prompt_path(&self) -> String {
+        match self {
+            CaptureTarget::Local(path) => path.to_string_lossy().into_owned(),
+            CaptureTarget::Remote(path) => path.clone(),
+        }
+    }
+}
+
+/// Which host the capture must be readable from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureRoute {
+    Local,
+    Ssh,
+    PairedDaemon,
+}
+
+/// The workspace id decides where the capture has to live: a remote session reads files on its own
+/// host, so only a local workspace can use the file written on this machine.
+fn capture_route(workspace_id: Option<&str>) -> CaptureRoute {
+    match workspace_id {
+        Some(id) if id.starts_with("ssh:") => CaptureRoute::Ssh,
+        Some(id) if id.starts_with("daemon:") => CaptureRoute::PairedDaemon,
+        _ => CaptureRoute::Local,
+    }
+}
+
+/// A remote session reads files on its own host, so the bytes are uploaded there first; a local
+/// session reads the file written on this machine.
+async fn stage_capture<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    daemon: &Arc<DaemonClient>,
+    workspace_id: Option<&str>,
+    timestamp_ms: u64,
+    nonce: u64,
+    bytes: Vec<u8>,
+) -> Result<CaptureTarget, IpcError> {
+    let file_name = format!("design-feedback-{timestamp_ms}-{nonce:016x}.png");
+    match capture_route(workspace_id) {
+        CaptureRoute::Ssh => {
+            let id = workspace_id.unwrap_or_default().to_string();
+            let store = crate::ipc::ssh::get_ssh_store_path(app)?;
+            let (_, host) =
+                run_blocking(move || crate::ssh::projects::resolve(&store, &id)).await?;
+            let remote_path =
+                crate::ssh::direct::upload_temp_file(&host, &file_name, bytes).await?;
+            Ok(CaptureTarget::Remote(remote_path))
+        }
+        CaptureRoute::PairedDaemon => {
+            let data_dir = app
+                .path()
+                .app_data_dir()
+                .map_err(|error| IpcError::internal(error.to_string()))?;
+            let remote_path = crate::paired_host::upload::upload_temp_bytes(
+                daemon,
+                &data_dir,
+                workspace_id.unwrap_or_default(),
+                &file_name,
+                bytes,
+            )
+            .await?;
+            Ok(CaptureTarget::Remote(remote_path))
+        }
+        CaptureRoute::Local => {
+            let dir = app
+                .path()
+                .app_data_dir()
+                .map_err(|error| {
+                    IpcError::internal(format!("Failed to resolve app data dir: {error}"))
+                })?
+                .join("design-feedback");
+            let path =
+                run_blocking(move || write_capture(&dir, timestamp_ms, nonce, &bytes)).await?;
+            Ok(CaptureTarget::Local(path))
+        }
+    }
+}
+
+/// A remote session accepts input only when the write carries the generation observed at input
+/// time; a local session takes a plain write.
+async fn write_prompt(
+    daemon: &Arc<DaemonClient>,
+    session_id: &str,
+    prompt: &str,
+) -> Result<(), IpcError> {
+    match daemon.remote_session_status(session_id).await? {
+        DaemonResponse::RemoteSessionDetailsOk {
+            details: Some(details),
+            ..
+        } => {
+            daemon
+                .write_terminal_at_generation(
+                    session_id,
+                    Some(details.generation),
+                    prompt.as_bytes().to_vec(),
+                )
+                .await
+        }
+        DaemonResponse::RemoteSessionDetailsOk { details: None, .. } => {
+            daemon
+                .write_terminal(session_id, prompt.as_bytes().to_vec())
+                .await
+        }
+        other => Err(IpcError::internal(format!(
+            "Unexpected session classification for input: {other:?}"
+        ))),
+    }
+}
+
 #[tauri::command]
 pub async fn cmd_design_feedback_deliver<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     session_id: String,
     memo: String,
     snapshot: DesignModeSnapshot,
+    workspace_id: Option<String>,
 ) -> Result<DesignFeedbackDelivery, IpcError> {
     if memo.trim().is_empty() {
         return Err(IpcError::new(
@@ -186,28 +304,29 @@ pub async fn cmd_design_feedback_deliver<R: tauri::Runtime>(
         ));
     }
 
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| IpcError::internal(format!("Failed to resolve app data dir: {e}")))?;
-    let dir = app_data_dir.join("design-feedback");
     let timestamp_ms = snapshot.timestamp_ms;
     let nonce: u64 = rand::random();
 
-    let png_path = run_blocking(move || write_capture(&dir, timestamp_ms, nonce, &png_bytes)).await?;
-
-    let png_path_str = png_path.to_string_lossy().to_string();
-    let prompt = build_design_feedback_prompt(&snapshot, &png_path_str, &memo);
-
     let daemon_client = app.state::<Arc<DaemonClient>>().inner().clone();
-    daemon_client
-        .write_terminal(&session_id, prompt.clone().into_bytes())
-        .await?;
+    let capture = stage_capture(
+        &app,
+        &daemon_client,
+        workspace_id.as_deref(),
+        timestamp_ms,
+        nonce,
+        png_bytes,
+    )
+    .await?;
+
+    let prompt_path = capture.prompt_path();
+    let prompt = build_design_feedback_prompt(&snapshot, &prompt_path, &memo);
+
+    write_prompt(&daemon_client, &session_id, &prompt).await?;
 
     let bytes_written = prompt.len();
 
     Ok(DesignFeedbackDelivery {
-        png_path: png_path_str,
+        png_path: prompt_path,
         prompt,
         bytes_written,
     })
@@ -314,6 +433,25 @@ mod tests {
         let file_name = path.file_name().unwrap().to_str().unwrap();
         assert!(file_name.starts_with(&format!("{timestamp}-")));
         assert!(file_name.ends_with(".png"));
+    }
+
+    #[test]
+    fn capture_route_follows_the_workspace_id_prefix() {
+        assert_eq!(capture_route(None), CaptureRoute::Local);
+        assert_eq!(capture_route(Some("project-1")), CaptureRoute::Local);
+        assert_eq!(capture_route(Some("ssh:host-1")), CaptureRoute::Ssh);
+        assert_eq!(capture_route(Some("daemon:host-2")), CaptureRoute::PairedDaemon);
+    }
+
+    #[test]
+    fn remote_prompt_carries_the_host_path_verbatim() {
+        let prompt = build_design_feedback_prompt(
+            &snapshot_with(vec![]),
+            "/tmp/ferryx-paste/abc.png",
+            "align this",
+        );
+
+        assert!(prompt.contains("Screenshot: /tmp/ferryx-paste/abc.png"));
     }
 
     #[test]

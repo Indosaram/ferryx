@@ -6,7 +6,7 @@ export interface BrowserDesignFeedbackPopoverProps {
   targets: DesignFeedbackTarget[];
   sending: boolean;
   error: string | null;
-  onSend: (request: { sessionId: string; memo: string }) => void;
+  onSend: (request: { sessionId: string; workspaceId: string; memo: string }) => void;
   onCancel: () => void;
 }
 
@@ -46,7 +46,7 @@ export function BrowserDesignFeedbackPopover({
           </label>
           {targets.length === 0 ? (
             <p role="status" className="text-muted-foreground">
-              No local terminal session in this workspace can receive the feedback.
+              No terminal session in this workspace can receive the feedback.
             </p>
           ) : (
             <select
@@ -98,7 +98,13 @@ export function BrowserDesignFeedbackPopover({
             type="button"
             className="rounded border border-border bg-primary px-2 py-1 text-xs text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
             disabled={!canSend}
-            onClick={() => onSend({ sessionId: targetSessionId, memo: memo.trim() })}
+            onClick={() =>
+              onSend({
+                sessionId: targetSessionId,
+                workspaceId: targets.find((target) => target.sessionId === targetSessionId)?.workspaceId ?? "",
+                memo: memo.trim(),
+              })
+            }
           >
             Send
           </button>
