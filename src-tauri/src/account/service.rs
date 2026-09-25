@@ -274,6 +274,17 @@ pub async fn get_public_key(
     }))
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountHealthResponse {
+    pub ok: bool,
+}
+
+/// Cheap, side-effect-free probe so a client can tell whether this origin serves the account API.
+pub async fn health_check() -> Json<AccountHealthResponse> {
+    Json(AccountHealthResponse { ok: true })
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LoginRequestBody {
@@ -1027,8 +1038,9 @@ pub async fn issue_grant(
     }
 
     let body_text = delivery_response.text().await.unwrap_or_default();
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body_text) {
-        if value.get("accepted").and_then(|v| v.as_bool()) == Some(false) {
+    let value: serde_json::Value = match serde_json::from_str(&body_text) {
+        Ok(v) => v,
+        Err(_) => {
             let _ = state.mutate(|store| {
                 store.grants.remove(&grant.grant_id);
                 Ok(())
@@ -1036,23 +1048,51 @@ pub async fn issue_grant(
             return Err(ApiError::new(
                 StatusCode::BAD_GATEWAY,
                 "GRANT_DELIVERY_FAILED",
-                "relay refused grant delivery",
+                "relay returned invalid grant delivery response",
             ));
         }
-        if let Some(delivered) = value.get("delivered") {
-            if let Some(status) = delivered.get("status").and_then(|s| s.as_str()) {
-                if status != "ready" {
-                    let _ = state.mutate(|store| {
-                        store.grants.remove(&grant.grant_id);
-                        Ok(())
-                    });
-                    return Err(ApiError::new(
-                        StatusCode::BAD_GATEWAY,
-                        "GRANT_DELIVERY_FAILED",
-                        format!("machine refused grant delivery: {status}"),
-                    ));
-                }
-            }
+    };
+
+    if value.get("accepted").and_then(|v| v.as_bool()) == Some(false) {
+        let _ = state.mutate(|store| {
+            store.grants.remove(&grant.grant_id);
+            Ok(())
+        });
+        return Err(ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "GRANT_DELIVERY_FAILED",
+            "relay refused grant delivery",
+        ));
+    }
+
+    let status = value
+        .get("delivered")
+        .and_then(|delivered| delivered.get("status"))
+        .and_then(|s| s.as_str());
+
+    match status {
+        Some("ready") => {}
+        Some(other) => {
+            let _ = state.mutate(|store| {
+                store.grants.remove(&grant.grant_id);
+                Ok(())
+            });
+            return Err(ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                "GRANT_DELIVERY_FAILED",
+                format!("machine refused grant delivery: {other}"),
+            ));
+        }
+        None => {
+            let _ = state.mutate(|store| {
+                store.grants.remove(&grant.grant_id);
+                Ok(())
+            });
+            return Err(ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                "GRANT_DELIVERY_FAILED",
+                "relay grant delivery response missing delivered status",
+            ));
         }
     }
 
@@ -1073,6 +1113,7 @@ pub fn router(state: Arc<AccountState>) -> Router {
     Router::new()
         .route("/api/account/v1/public-key", get(get_public_key))
         .route("/api/account/v1/login/request", post(login_request))
+        .route("/api/account/v1/health", get(health_check))
         .route("/api/account/v1/login/consume", post(login_consume))
         .route("/api/account/v1/device/request", post(device_request))
         .route("/api/account/v1/device/poll", post(device_poll))
@@ -1283,6 +1324,42 @@ mod tests {
         assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(err.code, "INTERNAL_ERROR");
         assert!(err.message.contains("signing key unavailable"));
+    }
+
+    #[tokio::test]
+    async fn health_endpoint_reports_ok_and_unknown_path_is_404() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(tmp.path().join("mail")));
+        let state = Arc::new(AccountState::new(tmp.path(), "https://account.test", mailer));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let served_state = state.clone();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router(served_state)).await;
+        });
+
+        let health = state
+            .http_client
+            .get(format!("{origin}/api/account/v1/health"))
+            .send()
+            .await
+            .expect("health probe must be served");
+        assert_eq!(health.status(), StatusCode::OK);
+        let body = health.text().await.expect("health body must be readable");
+        assert!(
+            body.contains("\"ok\":true"),
+            "health body must carry the ok:true marker: {body}"
+        );
+
+        // An unknown path under the same prefix must stay a 404, the signal the client keys off.
+        let missing = state
+            .http_client
+            .get(format!("{origin}/api/account/v1/nope"))
+            .send()
+            .await
+            .expect("unknown account path must still answer");
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
     }
 
     fn setup_test_user_and_machine(
@@ -1592,7 +1669,7 @@ mod tests {
             device_label: "iPhone".into(),
             installation_id: "inst-test-3".into(),
             grant_scope: AccountGrantScope::Machine,
-            attach_public_key: device_attach_key,
+            attach_public_key: device_attach_key.clone(),
         })
         .unwrap();
 
@@ -1617,6 +1694,105 @@ mod tests {
         assert_eq!(
             grants_after_refusal, 0,
             "refused delivery must not leave orphan grant in store"
+        );
+
+        // Case D: Relay returns 200 with non-JSON body (e.g. captive portal or HTML)
+        let stub_relay_html = Router::new().route(
+            "/api/v1/attach/grant",
+            post(|| async { (StatusCode::OK, "<html><body>Captive Portal</body></html>") }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_origin_html = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, stub_relay_html).await;
+        });
+
+        let (session_token4, machine_html) =
+            setup_test_user_and_machine(&state, &relay_origin_html);
+        let mut headers4 = HeaderMap::new();
+        headers4.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {session_token4}").parse().unwrap(),
+        );
+        let req_body4 = serde_json::to_vec(&AccountGrantRequest {
+            machine_record_id: machine_html.machine_record_id.clone(),
+            enrollment_epoch: "1".into(),
+            device_label: "iPhone".into(),
+            installation_id: "inst-test-4".into(),
+            grant_scope: AccountGrantScope::Machine,
+            attach_public_key: device_attach_key.clone(),
+        })
+        .unwrap();
+
+        let err_html = issue_grant(
+            State(state.clone()),
+            axum::extract::Path(machine_html.machine_record_id.clone()),
+            headers4,
+            Bytes::from(req_body4),
+        )
+        .await
+        .expect_err("non-JSON 200 body must fail grant issuance");
+
+        assert_eq!(err_html.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(err_html.code, "GRANT_DELIVERY_FAILED");
+
+        let grants_after_html = state.read(|s| Ok(s.grants.len())).unwrap();
+        assert_eq!(
+            grants_after_html, 0,
+            "non-JSON response must not leave orphan grant in store"
+        );
+
+        // Case E: Relay returns 200 with JSON but delivered is absent
+        let stub_relay_no_delivered = Router::new().route(
+            "/api/v1/attach/grant",
+            post(|| async {
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "accepted": true
+                    })),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_origin_no_delivered = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, stub_relay_no_delivered).await;
+        });
+
+        let (session_token5, machine_no_delivered) =
+            setup_test_user_and_machine(&state, &relay_origin_no_delivered);
+        let mut headers5 = HeaderMap::new();
+        headers5.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {session_token5}").parse().unwrap(),
+        );
+        let req_body5 = serde_json::to_vec(&AccountGrantRequest {
+            machine_record_id: machine_no_delivered.machine_record_id.clone(),
+            enrollment_epoch: "1".into(),
+            device_label: "iPhone".into(),
+            installation_id: "inst-test-5".into(),
+            grant_scope: AccountGrantScope::Machine,
+            attach_public_key: device_attach_key,
+        })
+        .unwrap();
+
+        let err_no_delivered = issue_grant(
+            State(state.clone()),
+            axum::extract::Path(machine_no_delivered.machine_record_id.clone()),
+            headers5,
+            Bytes::from(req_body5),
+        )
+        .await
+        .expect_err("absent delivered field must fail grant issuance");
+
+        assert_eq!(err_no_delivered.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(err_no_delivered.code, "GRANT_DELIVERY_FAILED");
+
+        let grants_after_no_delivered = state.read(|s| Ok(s.grants.len())).unwrap();
+        assert_eq!(
+            grants_after_no_delivered, 0,
+            "absent delivered response must not leave orphan grant in store"
         );
     }
 }

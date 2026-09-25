@@ -12,9 +12,17 @@ import {
   AccountSessionError,
   getStoredAccountSessionToken,
   clearStoredAccountSessionToken,
+  getStoredAccountOrigin,
+  storeAccountOrigin,
+  clearStoredAccountOrigin,
+  getConfiguredAccountOrigin,
+  resolveAccountOrigin,
+  DEFAULT_ACCOUNT_ORIGIN,
+  ACCOUNT_ORIGIN_PROBE_STORAGE_KEY,
   type AccountMachineView,
 } from "./accountSession";
 import * as attachTunnelModule from "./attachTunnel";
+import { DEFAULT_RELAY_ORIGIN } from "../lib/pairedHostInventory";
 
 describe("accountSession client module", () => {
   const origin = "https://relay.example.com";
@@ -22,9 +30,18 @@ describe("accountSession client module", () => {
   const pairingToken = "pairing-token-secret-9944";
   let fetchCalls: Array<{ url: string; init?: RequestInit }> = [];
 
+  function clearAccountOriginProbeCache() {
+    for (const key of Array.from(Object.keys(window.sessionStorage))) {
+      if (key.startsWith(ACCOUNT_ORIGIN_PROBE_STORAGE_KEY)) {
+        window.sessionStorage.removeItem(key);
+      }
+    }
+  }
+
   beforeEach(() => {
     fetchCalls = [];
     clearStoredAccountSessionToken();
+    clearAccountOriginProbeCache();
 
     globalThis.fetch = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.toString();
@@ -122,6 +139,7 @@ describe("accountSession client module", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     clearStoredAccountSessionToken();
+    clearAccountOriginProbeCache();
   });
 
   it("requestLogin sends POST to /api/account/v1/login/request with email body", async () => {
@@ -407,6 +425,78 @@ describe("accountSession client module", () => {
     }
   });
 
+  it("resolveAccountOrigin keeps the page origin when its account health probe succeeds", async () => {
+    const pageOrigin = "https://app-origin-probe.example.com";
+    globalThis.fetch = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      fetchCalls.push({ url, init });
+      return Promise.resolve(new Response(JSON.stringify({ status: "ok" }), { status: 200 }));
+    });
+
+    const resolved = await resolveAccountOrigin(pageOrigin);
+    expect(resolved).toBe(pageOrigin);
+
+    // Cached per origin: the second call must not probe again.
+    const cached = await resolveAccountOrigin(pageOrigin);
+    expect(cached).toBe(pageOrigin);
+
+    expect(fetchCalls).toHaveLength(1);
+    expect(fetchCalls[0].url).toBe("https://app-origin-probe.example.com/api/account/v1/health");
+  });
+
+  it("resolveAccountOrigin falls back to DEFAULT_ACCOUNT_ORIGIN when the health probe is 404", async () => {
+    const pageOrigin = "http://127.0.0.1:43821";
+    globalThis.fetch = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      fetchCalls.push({ url, init });
+      return Promise.resolve(
+        new Response(JSON.stringify({ code: "NOT_FOUND" }), { status: 404 }),
+      );
+    });
+
+    const resolved = await resolveAccountOrigin(pageOrigin);
+    expect(resolved).toBe(DEFAULT_ACCOUNT_ORIGIN);
+    expect(fetchCalls).toHaveLength(1);
+    expect(fetchCalls[0].url).toBe("http://127.0.0.1:43821/api/account/v1/health");
+  });
+
+  it("resolveAccountOrigin falls back to DEFAULT_ACCOUNT_ORIGIN when the health probe fails on the network", async () => {
+    const pageOrigin = "https://app-origin-network-fail.example.com";
+    globalThis.fetch = vi.fn().mockImplementation(() => Promise.reject(new Error("ECONNREFUSED")));
+
+    await expect(resolveAccountOrigin(pageOrigin)).resolves.toBe(DEFAULT_ACCOUNT_ORIGIN);
+    expect(fetchCalls).toHaveLength(0);
+  });
+
+  it("requestLogin targets the origin resolved for the page instead of the raw page origin", async () => {
+    const pageOrigin = "http://127.0.0.1:43999";
+    globalThis.fetch = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      fetchCalls.push({ url, init });
+      if (url.endsWith("/api/account/v1/health")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ code: "NOT_FOUND" }), { status: 404 }),
+        );
+      }
+      if (url.endsWith("/api/account/v1/login/request")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ status: "accepted" }), { status: 202 }),
+        );
+      }
+      return Promise.resolve(new Response("Not Found", { status: 404 }));
+    });
+
+    const origin = await resolveAccountOrigin(pageOrigin);
+    expect(origin).toBe(DEFAULT_ACCOUNT_ORIGIN);
+
+    await requestLogin(origin, "user@example.com");
+
+    const loginCall = fetchCalls.find((call) => call.url.endsWith("/api/account/v1/login/request"));
+    expect(loginCall).toBeDefined();
+    expect(loginCall!.url.startsWith(`${origin}/`)).toBe(true);
+    expect(loginCall!.url).toBe(`${DEFAULT_ACCOUNT_ORIGIN}/api/account/v1/login/request`);
+  });
+
   it("opens an events socket and a terminal socket on the same connection and asserts BOTH stay usable", async () => {
     let sessionCount = 0;
     const allocatedSessions: string[] = [];
@@ -682,5 +772,30 @@ describe("accountSession client module", () => {
 
     ws.close();
     expect(tunnelCloseSpy).toHaveBeenCalledTimes(1);
+  });
+
+  describe("account origin configuration", () => {
+    beforeEach(() => {
+      clearStoredAccountOrigin();
+    });
+
+    afterEach(() => {
+      clearStoredAccountOrigin();
+    });
+
+    it("defaults to DEFAULT_RELAY_ORIGIN when no origin is configured", () => {
+      expect(getStoredAccountOrigin()).toBeNull();
+      expect(getConfiguredAccountOrigin()).toBe(DEFAULT_RELAY_ORIGIN);
+    });
+
+    it("stores, retrieves, and clears configured account origin", () => {
+      storeAccountOrigin("https://account.custom-origin.dev");
+      expect(getStoredAccountOrigin()).toBe("https://account.custom-origin.dev");
+      expect(getConfiguredAccountOrigin()).toBe("https://account.custom-origin.dev");
+
+      clearStoredAccountOrigin();
+      expect(getStoredAccountOrigin()).toBeNull();
+      expect(getConfiguredAccountOrigin()).toBe(DEFAULT_RELAY_ORIGIN);
+    });
   });
 });

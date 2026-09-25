@@ -9,13 +9,15 @@ import {
   type TunnelWebSocket,
   type TunnelCloseEvent,
 } from "./attachTunnel";
-import { getOrCreateInstallationId } from "../lib/storageKeys";
+import { getMigratedItem, getOrCreateInstallationId } from "../lib/storageKeys";
 import { suggestDeviceName } from "./deviceIdentity";
 import {
   clearRemoteAuthToken,
   getRemoteAuthToken,
   setRemoteAuthToken,
 } from "../lib/remoteClient";
+import { DEFAULT_RELAY_ORIGIN } from "../lib/pairedHostInventory";
+import { remoteHostStore, selectActiveHost } from "../state/remoteHostStore";
 
 export const ACCOUNT_TOKEN_HOST_ID = "account";
 
@@ -117,6 +119,119 @@ export function storeAccountSessionToken(token: string): void {
 
 export function clearStoredAccountSessionToken(): void {
   clearRemoteAuthToken(ACCOUNT_TOKEN_HOST_ID);
+}
+
+export const ACCOUNT_ORIGIN_STORAGE_KEY = "ferryx.account.origin";
+
+export function getStoredAccountOrigin(
+  storage: (Pick<Storage, "getItem" | "setItem"> & Partial<Pick<Storage, "removeItem">>) | null = typeof window !== "undefined" && window.localStorage ? window.localStorage : null,
+): string | null {
+  const fromStorage = getMigratedItem(ACCOUNT_ORIGIN_STORAGE_KEY, storage);
+  if (fromStorage && fromStorage.trim().length > 0) {
+    return fromStorage.trim();
+  }
+  return null;
+}
+
+export function storeAccountOrigin(
+  origin: string,
+  storage: Pick<Storage, "setItem"> | null = typeof window !== "undefined" && window.localStorage ? window.localStorage : null,
+): void {
+  storage?.setItem(ACCOUNT_ORIGIN_STORAGE_KEY, origin.trim());
+}
+
+export function clearStoredAccountOrigin(
+  storage: Pick<Storage, "removeItem"> | null = typeof window !== "undefined" && window.localStorage ? window.localStorage : null,
+): void {
+  storage?.removeItem(ACCOUNT_ORIGIN_STORAGE_KEY);
+}
+
+export function getConfiguredAccountOrigin(
+  storage: (Pick<Storage, "getItem" | "setItem"> & Partial<Pick<Storage, "removeItem">>) | null = typeof window !== "undefined" && window.localStorage ? window.localStorage : null,
+): string {
+  const stored = getStoredAccountOrigin(storage);
+  if (stored) return stored;
+  try {
+    const active = selectActiveHost(remoteHostStore.getState());
+    if (active?.relayOrigin && active.relayOrigin.trim().length > 0) {
+      return active.relayOrigin.trim();
+    }
+  } catch {
+    // fallback below
+  }
+  return DEFAULT_RELAY_ORIGIN;
+}
+
+/**
+ * The account API is served by the relay deployment, not by whatever origin
+ * happens to host this client: the desktop app serves the remote client from
+ * its own embedded server, which mounts no account router, so posting login to
+ * the page origin answers 404 and no magic link can ever be requested. The
+ * default is the product default relay origin (single source of truth).
+ */
+export const DEFAULT_ACCOUNT_ORIGIN = DEFAULT_RELAY_ORIGIN;
+
+export const ACCOUNT_ORIGIN_PROBE_STORAGE_KEY = "ferryx.account.origin.probe";
+
+const ACCOUNT_ORIGIN_HEALTH_PATH = "/api/account/v1/health";
+
+/** In-flight probes: concurrent callers share one probe per origin per session. */
+const accountOriginProbes = new Map<string, Promise<string>>();
+
+function accountOriginProbeStorage(): Storage | null {
+  try {
+    if (typeof window === "undefined") return null;
+    return window.sessionStorage ?? null;
+  } catch {
+    // Blocked or disabled session storage must not fail origin resolution.
+    return null;
+  }
+}
+
+/**
+ * Resolves the origin that serves the account API for a page loaded from
+ * `pageOrigin`. A 2xx health probe keeps `cleanOrigin(pageOrigin)`; anything
+ * else -- non-2xx, network failure, blank input -- falls back to
+ * {@link DEFAULT_ACCOUNT_ORIGIN}. Never throws, and caches its decision per
+ * origin in sessionStorage so the probe runs at most once per session.
+ */
+export async function resolveAccountOrigin(pageOrigin: string): Promise<string> {
+  const requested = typeof pageOrigin === "string" ? pageOrigin.trim() : "";
+  if (!requested) return DEFAULT_ACCOUNT_ORIGIN;
+
+  const candidate = cleanOrigin(requested);
+  if (!candidate) return DEFAULT_ACCOUNT_ORIGIN;
+
+  const cacheKey = `${ACCOUNT_ORIGIN_PROBE_STORAGE_KEY}:${candidate}`;
+  const storage = accountOriginProbeStorage();
+  try {
+    const cached = storage?.getItem(cacheKey);
+    if (cached && cached.trim().length > 0) return cached.trim();
+  } catch {
+    // Unreadable storage: fall through to the probe.
+  }
+
+  const inFlight = accountOriginProbes.get(candidate);
+  if (inFlight) return inFlight;
+
+  const probe = (async (): Promise<string> => {
+    let resolved = DEFAULT_ACCOUNT_ORIGIN;
+    try {
+      const res = await fetch(`${candidate}${ACCOUNT_ORIGIN_HEALTH_PATH}`);
+      if (res.ok) resolved = candidate;
+    } catch {
+      // Unreachable or blocked probe: keep the product default.
+    }
+    try {
+      storage?.setItem(cacheKey, resolved);
+    } catch {
+      // A full or blocked sessionStorage must not change the resolved origin.
+    }
+    accountOriginProbes.delete(candidate);
+    return resolved;
+  })();
+  accountOriginProbes.set(candidate, probe);
+  return probe;
 }
 
 export async function requestLogin(origin: string, email: string): Promise<void> {

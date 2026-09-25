@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import {
   consumeLogin,
   requestLogin,
+  resolveAccountOrigin,
 } from "./accountSession";
 
 interface AccountLoginPageProps {
@@ -43,7 +44,10 @@ export const AccountLoginPage: React.FC<AccountLoginPageProps> = ({
       const trimmedCode = code.trim();
       setLoading(true);
       setError(null);
-      consumeLogin(relayUrl, trimmedCode)
+      // The account API is not necessarily on the page origin (the desktop app
+      // serves this client without an account router), so resolve it first.
+      resolveAccountOrigin(relayUrl)
+        .then((origin) => consumeLogin(origin, trimmedCode))
         .then((res) => {
           if (window.history && typeof window.history.replaceState === "function") {
             window.history.replaceState(null, "", window.location.pathname);
@@ -71,7 +75,8 @@ export const AccountLoginPage: React.FC<AccountLoginPageProps> = ({
     setLoading(true);
     setError(null);
     try {
-      await requestLogin(relayUrl, email.trim());
+      const origin = await resolveAccountOrigin(relayUrl);
+      await requestLogin(origin, email.trim());
       setCodeRequested(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to request login link");
@@ -87,7 +92,8 @@ export const AccountLoginPage: React.FC<AccountLoginPageProps> = ({
     setLoading(true);
     setError(null);
     try {
-      const res = await consumeLogin(relayUrl, tokenInput.trim());
+      const origin = await resolveAccountOrigin(relayUrl);
+      const res = await consumeLogin(origin, tokenInput.trim());
       onLoginSuccess(res.token, res.email);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Invalid or expired login code");

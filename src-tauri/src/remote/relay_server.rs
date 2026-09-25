@@ -2221,6 +2221,7 @@ pub fn relay_router_with_account(
         .route("/tunnel/client/{session_id}", get(client_handler))
         .route("/tunnel/opaque/{session_id}", get(opaque_handler))
         .route("/install.sh", get(install_script_handler))
+        .route("/install.ps1", get(install_ps1_handler))
         .route("/download/ferryx-cli", get(download_cli_handler))
         .route("/download/{artifact}", get(download_cli_artifact_handler))
         .fallback(axum::routing::get(
@@ -2257,6 +2258,14 @@ async fn install_script_handler() -> impl axum::response::IntoResponse {
     let script = include_str!("../../../scripts/install.sh");
     (
         [(axum::http::header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")],
+        script,
+    )
+}
+
+async fn install_ps1_handler() -> impl axum::response::IntoResponse {
+    let script = include_str!("../../../scripts/install.ps1");
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
         script,
     )
 }
@@ -6380,6 +6389,14 @@ mod tests {
         assert!(
             script.contains("Ferryx CLI Installer"),
             "install.sh must be the ferryx installer script, got: {script}"
+        );
+
+        let ps1_res = client.get(format!("{http_url}/install.ps1")).send().await.unwrap();
+        assert_eq!(ps1_res.status(), reqwest::StatusCode::OK);
+        let ps1_script = ps1_res.text().await.unwrap();
+        assert!(
+            ps1_script.contains("ferryx-cli-windows-amd64.exe"),
+            "install.ps1 must reference the windows artifact, got: {ps1_script}"
         );
 
         // Stage an artifact so the download route must serve bytes rather than redirect.

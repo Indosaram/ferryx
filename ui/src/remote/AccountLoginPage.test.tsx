@@ -29,6 +29,7 @@ describe("AccountLoginPage", () => {
       pathname: "/login",
     } as any;
 
+    const resolveSpy = vi.spyOn(accountSessionModule, "resolveAccountOrigin").mockResolvedValue(relayUrl);
     const consumeSpy = vi.spyOn(accountSessionModule, "consumeLogin").mockResolvedValue({
       token: "jwt-session-token-123",
       accountId: "acc-1",
@@ -47,6 +48,7 @@ describe("AccountLoginPage", () => {
     );
 
     await waitFor(() => {
+      expect(resolveSpy).toHaveBeenCalledWith(relayUrl);
       expect(consumeSpy).toHaveBeenCalledWith(relayUrl, hexCode);
       expect(onLoginSuccess).toHaveBeenCalledWith("jwt-session-token-123", "alice@example.com");
     });
@@ -62,6 +64,7 @@ describe("AccountLoginPage", () => {
       pathname: "/login",
     } as any;
 
+    const resolveSpy = vi.spyOn(accountSessionModule, "resolveAccountOrigin").mockResolvedValue(relayUrl);
     const consumeSpy = vi.spyOn(accountSessionModule, "consumeLogin").mockResolvedValue({
       token: "jwt-session-token-456",
       accountId: "acc-2",
@@ -80,6 +83,7 @@ describe("AccountLoginPage", () => {
     );
 
     await waitFor(() => {
+      expect(resolveSpy).toHaveBeenCalledWith(relayUrl);
       expect(consumeSpy).toHaveBeenCalledWith(relayUrl, hexCode);
       expect(onLoginSuccess).toHaveBeenCalledWith("jwt-session-token-456", "bob@example.com");
     });
@@ -95,6 +99,7 @@ describe("AccountLoginPage", () => {
       pathname: "/login",
     } as any;
 
+    const resolveSpy = vi.spyOn(accountSessionModule, "resolveAccountOrigin").mockResolvedValue(relayUrl);
     const consumeSpy = vi.spyOn(accountSessionModule, "consumeLogin").mockResolvedValue({
       token: "jwt-session-token-789",
       accountId: "acc-3",
@@ -113,6 +118,7 @@ describe("AccountLoginPage", () => {
     );
 
     await waitFor(() => {
+      expect(resolveSpy).toHaveBeenCalledWith(relayUrl);
       expect(consumeSpy).toHaveBeenCalledWith(relayUrl, legacyCode);
       expect(onLoginSuccess).toHaveBeenCalledWith("jwt-session-token-789", "charlie@example.com");
     });
@@ -128,6 +134,7 @@ describe("AccountLoginPage", () => {
       pathname: "/login",
     } as any;
 
+    const resolveSpy = vi.spyOn(accountSessionModule, "resolveAccountOrigin").mockResolvedValue(relayUrl);
     const consumeSpy = vi.spyOn(accountSessionModule, "consumeLogin").mockResolvedValue({
       token: "jwt-session-token-000",
       accountId: "acc-4",
@@ -146,6 +153,7 @@ describe("AccountLoginPage", () => {
     );
 
     await waitFor(() => {
+      expect(resolveSpy).toHaveBeenCalledWith(relayUrl);
       expect(consumeSpy).toHaveBeenCalledWith(relayUrl, legacyToken);
       expect(onLoginSuccess).toHaveBeenCalledWith("jwt-session-token-000", "dave@example.com");
     });
